@@ -69,6 +69,16 @@ fn production_validator() -> ProcessValidator {
         .with_bounds(Duration::from_secs(30), Duration::from_secs(30))
 }
 
+async fn prewarm_fake_engine_process_start() {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        probe_engine_version_bounded(&fake_engine("ok"), Duration::from_secs(5)),
+    )
+    .await
+    .expect("fake-engine prewarm must stay bounded")
+    .expect("fake-engine prewarm must report a version");
+}
+
 // ── DISCRIMINATING: a fake engine whose probe AND serverInfo agree on a
 //    supported stable version VALIDATES for the --lsp requirement. ───────────
 #[tokio::test]
@@ -259,6 +269,7 @@ impl Drop for GrandchildGuard {
 //    within the bound. And the tree kill must leave NO live descendant. ────────
 #[tokio::test]
 async fn version_probe_is_bounded_when_a_descendant_holds_the_pipes() {
+    prewarm_fake_engine_process_start().await;
     let engine = fake_engine("hold-pipe");
     let guard = GrandchildGuard {
         pid_file: hold_pipe_pid_file(&engine),
@@ -269,11 +280,12 @@ async fn version_probe_is_bounded_when_a_descendant_holds_the_pipes() {
     // not just its steady-state cost: the bound expiring also tears down the
     // process tree, so a bound that fires before the fake has run at all kills
     // it before it can spawn the pipe holder and record its pid — which is
-    // what a 3s bound did on a machine at load 50. The discrimination here is
+    // what an un-warmed short bound did on a machine at load 50. The explicit
+    // prewarm above removes process-start cost from this timeout assertion. The discrimination here is
     // "bounded return" versus the old FOREVER hang on the reader joins, so a
     // long bound costs wall time and nothing else.
-    let probe = probe_engine_version_bounded(&engine, Duration::from_secs(15));
-    let outcome = tokio::time::timeout(Duration::from_secs(90), probe)
+    let probe = probe_engine_version_bounded(&engine, Duration::from_secs(1));
+    let outcome = tokio::time::timeout(Duration::from_secs(5), probe)
         .await
         .expect(
             "the probe must RETURN within its bound even when a descendant \
@@ -295,7 +307,7 @@ async fn version_probe_is_bounded_when_a_descendant_holds_the_pipes() {
     // Reaping is the OS's, not ours: there is no receipt for "this process is
     // gone", so this polls `kill(pid, 0)` — permitted external-liveness
     // polling — under one generous watchdog whose expiry IS the failure.
-    let reaped = tokio::time::timeout(Duration::from_secs(60), async {
+    let reaped = tokio::time::timeout(Duration::from_secs(5), async {
         while process_alive(pid) {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -312,10 +324,11 @@ async fn version_probe_is_bounded_when_a_descendant_holds_the_pipes() {
 //    cannot regress it). ──────────────────────────────────────────────────────
 #[tokio::test]
 async fn version_probe_times_out_on_a_hanging_engine() {
+    prewarm_fake_engine_process_start().await;
     let engine = fake_engine("hang-version");
     let err = tokio::time::timeout(
-        Duration::from_secs(90),
-        probe_engine_version_bounded(&engine, Duration::from_secs(15)),
+        Duration::from_secs(5),
+        probe_engine_version_bounded(&engine, Duration::from_secs(1)),
     )
     .await
     .expect("the bounded probe must RETURN on a hanging engine (outer watchdog)")
@@ -331,6 +344,7 @@ async fn version_probe_times_out_on_a_hanging_engine() {
 //    validation). ─────────────────────────────────────────────────────────────
 #[tokio::test]
 async fn lsp_smoke_times_out_on_a_hanging_engine() {
+    prewarm_fake_engine_process_start().await;
     // Both legs must clear the fake's COLD START, which on a loaded machine is
     // seconds, not milliseconds; the hang lives at the handshake, so the smoke
     // bound is what fires. The discrimination (bounded LspHandshakeFailed vs a
@@ -338,9 +352,9 @@ async fn lsp_smoke_times_out_on_a_hanging_engine() {
     // around them would only add a margin that collapses under load — the
     // outer timeout below is a hang watchdog, and its expiry is the failure.
     let validator = ProcessValidator::with_policy(VersionPolicy::production())
-        .with_bounds(Duration::from_secs(20), Duration::from_secs(15));
+        .with_bounds(Duration::from_secs(2), Duration::from_secs(1));
     let err = tokio::time::timeout(
-        Duration::from_secs(120),
+        Duration::from_secs(5),
         validator.validate(&fake_engine("hang-lsp"), Capability::Lsp),
     )
     .await
@@ -405,7 +419,7 @@ async fn a_hung_standalone_api_request_times_out_and_kills_the_engine() {
     // never returns and the timeout expires. An additional elapsed ceiling
     // between the deadline and the guard is a load-sensitive margin, not a
     // discriminator.
-    let outcome = tokio::time::timeout(Duration::from_secs(60), client.initialize()).await;
+    let outcome = tokio::time::timeout(Duration::from_secs(5), client.initialize()).await;
     let err = outcome
         .expect("a hung engine must fail the request within its deadline (the wait is bounded)")
         .expect_err("a hung engine cannot answer initialize");
@@ -423,7 +437,7 @@ async fn a_hung_standalone_api_request_times_out_and_kills_the_engine() {
     let pid = guard
         .pid()
         .expect("the hang-api engine registered its pid before serving");
-    let reaped = tokio::time::timeout(Duration::from_secs(60), async {
+    let reaped = tokio::time::timeout(Duration::from_secs(5), async {
         while process_alive(pid) {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

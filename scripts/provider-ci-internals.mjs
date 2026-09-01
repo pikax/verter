@@ -1,11 +1,13 @@
-// Provider-aware CI partitioning for the one standard Rust nextest archive.
+// Provider-aware CI partitioning. The standard nextest surface excludes these
+// tests; provider jobs execute them serially with libtest so each third-party
+// engine has one explicitly initialized and managed CI lane.
 //
 // Keep broad ownership structural: provider-specific modules and packages move
 // as a unit. Exact names are reserved for real-engine tests embedded in mixed
 // provider-neutral modules that cannot move without dragging the whole module
 // into one provider lane.
 
-import { buildCanonicalSurface1FilterExpr, TRYBUILD_EXCLUDED_SUITES } from "./gate-internals.mjs";
+import { buildCanonicalSurface1FilterExpr } from "./gate-internals.mjs";
 
 export const PROVIDER_CI_LANES = Object.freeze(["core", "tsserver", "tsgo"]);
 
@@ -208,10 +210,13 @@ function selectorMatches(selector, packageName, testName) {
 }
 
 function isCanonicalSurfaceTest(packageName, testName) {
-  if (packageName === "verter_shipped_cfg_contract") return false;
-  return !TRYBUILD_EXCLUDED_SUITES.some(
-    (suite) => suite.package === packageName && testName.startsWith(suite.modulePrefix),
-  );
+  if (
+    packageName === "verter_shipped_cfg_contract" ||
+    packageName === "verter_svelte_conformance"
+  ) {
+    return false;
+  }
+  return true;
 }
 
 export function verifyProviderCiPartition(listJson) {

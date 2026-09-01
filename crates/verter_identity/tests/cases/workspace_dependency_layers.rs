@@ -96,9 +96,14 @@ const LAYER_7_HARNESSES: &[&str] = &[
     "verter_shipped_cfg_contract",
 ];
 
-/// Build tooling, not a layer. Checked by
-/// `xtask_is_never_a_production_dependency_of_a_layered_crate`.
-const REPOSITORY_TOOLING_NOT_IN_THE_LAYER_MATRIX: &[&str] = &["xtask"];
+/// Build/test tooling, not a production layer. Checked by
+/// `repository_tooling_is_never_a_production_dependency_of_a_layered_crate`.
+const REPOSITORY_TOOLING_NOT_IN_THE_LAYER_MATRIX: &[&str] = &[
+    "xtask",
+    "verter_compile_contracts",
+    "verter_compile_contracts_bench",
+    "verter_compile_contracts_session_variants",
+];
 
 fn layer_map() -> HashMap<&'static str, u8> {
     let mut m = HashMap::new();
@@ -487,12 +492,12 @@ fn the_ratified_exception_records_its_target_condition_precisely() {
     );
 }
 
-/// `xtask` is repository tooling, never a production dependency of any
+/// Repository tooling is never a production dependency of any
 /// layered crate — it has no row in the layer matrix at all, so a silent
 /// new edge into it would otherwise pass the main assertion vacuously
 /// (nothing in `layers` would ever flag it as "upward").
 #[test]
-fn xtask_is_never_a_production_dependency_of_a_layered_crate() {
+fn repository_tooling_is_never_a_production_dependency_of_a_layered_crate() {
     let metadata = workspace_metadata();
     let graph = ResolveGraph::from_metadata(&metadata);
     let layers = layer_map();

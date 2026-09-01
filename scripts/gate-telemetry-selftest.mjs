@@ -307,26 +307,23 @@ test("cargo timing snapshots reject stale and missing reports without throwing",
 });
 
 test("version probes obey the parent deadline, hard-kill a trapping child, and leave no survivor", () => {
-  const root = mkdtempSync(join(tmpdir(), "verter-gate-version-probe-"));
-  const pidFile = join(root, "child.pid");
   let childPid = null;
   try {
     const trappingChild = [
-      'const { writeFileSync } = require("node:fs");',
-      "writeFileSync(process.argv[1], String(process.pid));",
       'process.on("SIGTERM", () => {});',
       "setTimeout(() => process.exit(0), 1_500);",
       "setInterval(() => {}, 1_000);",
     ].join("");
     const startedAtMs = Date.now();
-    const trapped = runBoundedVersionProbe(process.execPath, ["-e", trappingChild, pidFile], {
+    const trapped = runBoundedVersionProbe(process.execPath, ["-e", trappingChild], {
       timeoutMs: 150,
     });
     const elapsedMs = Date.now() - startedAtMs;
-    childPid = Number.parseInt(readFileSync(pidFile, "utf8"), 10);
+    childPid = trapped.pid;
 
     assert.equal(trapped.available, false);
     assert.equal(trapped.error, "timeout");
+    assert.ok(Number.isInteger(childPid), "the timed-out spawn must report its direct child PID");
     assert.ok(elapsedMs < 1_000, `trapping child exceeded the hard wall bound (${elapsedMs}ms)`);
     assert.throws(
       () => process.kill(childPid, 0),
@@ -369,7 +366,6 @@ test("version probes obey the parent deadline, hard-kill a trapping child, and l
         // Expected after the probe reaps its direct child.
       }
     }
-    rmSync(root, { recursive: true, force: true });
   }
 });
 

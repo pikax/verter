@@ -16,7 +16,7 @@ function yamlJob(source, name) {
   return next === -1 ? source.slice(start) : source.slice(start, start + 1 + next);
 }
 
-test("compiler trybuild cache belongs to the required job that executes the grouped driver", () => {
+test("compile-contract cache belongs to the required standalone runner job", () => {
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const rustJob = yamlJob(workflow, "rust-test");
   const compilerJob = yamlJob(workflow, "compiler-contracts");
@@ -25,10 +25,11 @@ test("compiler trybuild cache belongs to the required job that executes the grou
   assert.match(compilerJob, /needs:\s*detect-changes/);
   assert.match(compilerJob, /needs\.detect-changes\.outputs\.rust\s*==\s*'true'/);
   assert.match(compilerJob, /target\/tests\/trybuild/);
-  assert.match(compilerJob, /default_compiler_compile_fail_contracts_are_enforced/);
+  assert.match(compilerJob, /node scripts\/compile-contracts\.mjs/);
   assert.match(compilerJob, /generated_svelte_artifacts_match_their_authoritative_inputs/);
   assert.match(compilerJob, /cargo build -p verter_compiler/);
   assert.match(compilerJob, /cargo test -p verter_compiler --lib/);
+  assert.doesNotMatch(compilerJob, /cargo nextest|install-action@nextest/);
   assert.doesNotMatch(compilerJob, /max-threads|test-threads|--jobs|-j\s*\d/);
   assert.doesNotMatch(rustJob, /target\/tests\/trybuild/);
   assert.match(successJob, /^\s*- compiler-contracts\s*$/m);

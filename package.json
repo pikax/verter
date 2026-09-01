@@ -71,6 +71,7 @@
     "profile:hotpath:full:alloc": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc",
     "prepare": "husky",
     "proto:gen": "buf generate && oxfmt packages/proto/src/gen",
+    "proto:check": "node scripts/check-proto-generated.mjs",
     "test:coverage": "vitest run --coverage",
     "compare:vue-behavior": "node scripts/vue-behavior-compare/run.mjs",
     "gen:vue-macro-oracle": "node scripts/gen-vue-macro-runtime-oracle.mjs",
@@ -101,6 +102,8 @@
   },
   "lint-staged": {
     "*.rs": "cargo fmt --check --",
+    "crates/verter_protocol/proto/**/*.proto": "node scripts/check-proto-generated.mjs",
+    "packages/proto/src/gen/**/*.ts": "node scripts/check-proto-generated.mjs",
     "*.{ts,js,mjs,cjs}": "oxfmt --check --no-error-on-unmatched-pattern"
   },
   "packageManager": "pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c"

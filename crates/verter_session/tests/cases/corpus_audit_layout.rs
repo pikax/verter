@@ -13,7 +13,7 @@ use std::sync::Arc;
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::WorkspaceRead;
 
-const CHUNK_SIZE: usize = 16;
+const CHUNK_SIZE: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GeneratedRow {

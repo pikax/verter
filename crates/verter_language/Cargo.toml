@@ -17,4 +17,3 @@ verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
 
 [dev-dependencies]
 serde.workspace = true
-trybuild = "1.0"

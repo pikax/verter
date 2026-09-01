@@ -1,11 +1,11 @@
 error[E0603]: enum `PendingNavRequest` is private
-  --> tests/cases/compile-fail/pending_nav_request_unreachable.rs:21:63
-   |
-21 |     let _request: verter_compiler::template::code_gen::vapor::PendingNavRequest = todo!();
-   |                                                               ^^^^^^^^^^^^^^^^^ private enum
-   |
+ --> $WORKSPACE/crates/verter_compiler/tests/cases/compile-fail/pending_nav_request_unreachable.rs
+  |
+  |     let _request: verter_compiler::template::code_gen::vapor::PendingNavRequest = todo!();
+  |                                                               ^^^^^^^^^^^^^^^^^ private enum
+  |
 note: the enum `PendingNavRequest` is defined here
-  --> src/template/code_gen/vapor/mod.rs
-   |
-   | use nav_request::PendingNavRequest;
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ --> $WORKSPACE/crates/verter_compiler/src/template/code_gen/vapor/mod.rs
+  |
+  | use nav_request::PendingNavRequest;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

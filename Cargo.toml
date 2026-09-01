@@ -11,8 +11,9 @@ edition = "2021"
 # DELIBERATELY looser than `rust-toolchain.toml`, and a separate claim. That
 # file pins the DEVELOPMENT toolchain this repo is built and tested with; this
 # is the oldest rustc a downstream can compile the published library code on.
-# The pin is driven by the trybuild `.stderr` fixtures, which are dev-only and
-# never compiled by a consumer, so it does not drag this floor up with it.
+# The development pin is driven in part by the standalone compile-contract
+# `.stderr` fixtures, which are never compiled by a consumer, so it does not
+# drag this floor up with it.
 # Bumping the pin does NOT imply bumping this value.
 rust-version = "1.92"
 license = "MIT"

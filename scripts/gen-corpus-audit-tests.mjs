@@ -72,7 +72,10 @@ const OVERRIDES_SUBDIR = "overrides";
 // deterministic source-byte LPT partition rather than lexical slices: source
 // bytes strongly predict this corpus's semantic-analysis cost, while the cap
 // retains failure locality and bounds per-process work.
-const CORPUS_CHUNK_SIZE = 16;
+// Keep the complete fixture inventory while bounding concurrent host/scheduler
+// shells under nextest. At 179 rows this produces six processes instead of
+// twelve; every row still receives a fresh AuditedRequest inside its process.
+const CORPUS_CHUNK_SIZE = 32;
 
 // ---------------------------------------------------------------------------
 // Corpus configuration table

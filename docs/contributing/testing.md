@@ -46,15 +46,16 @@ const map = s.generateMap({ source: "test.vue" });
 ## Rust Tests
 
 ```bash
-cargo nextest run --workspace                   # Every workspace test target
-cargo test -p verter_session --tests            # Shared-process session surface
+node scripts/gate.mjs                           # Canonical provider-free core Rust gate
+node scripts/compile-contracts.mjs              # Standalone compile-fail contracts
+pnpm proto:check                                # Generated proto freshness
 cargo test -p verter_compiler test_name         # Specific test by name
 cargo test -p verter_compiler -- --nocapture    # With stdout output
 ```
 
-Run both of the first two Rust commands for the canonical gate. A bare
-`cargo test --workspace --tests` is not a substitute: workspace feature
-unification omits the `verter_session` integration binaries.
+Real tsserver/tsgo provider suites and Svelte conformance run in dedicated CI
+jobs, outside the canonical nextest surface. Provider jobs use serial libtest
+execution so each third-party engine has one managed lifecycle.
 
 ### Test File Organization
 

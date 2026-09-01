@@ -7,7 +7,9 @@ bundle was retired.
 ## Local and exhaustive execution policies
 
 `node scripts/gate.mjs` is the local fail-fast policy. Surface 1 omits `--no-fail-fast`. After the one
-archive/list and all post-list preconditions, Surface 1 is the gate verdict.
+archive/list and all post-list preconditions, the provider-free core Surface 1 is the gate verdict.
+Real provider suites, Svelte conformance, compile contracts, and proto regeneration freshness have
+dedicated CI lanes and are deliberately outside this nextest run.
 
 TODO: re-enable the shipped-cfg lane (`SHIPPED_CFG_LANE_ENABLED` in `scripts/gate-internals.mjs`)
 before the program closes. Until then the gate does not execute tests with `debug_assertions` /
@@ -36,8 +38,8 @@ This choice is argv-only; no ambient CI environment variable changes it.
 
 ## Post-list overlap and isolation
 
-The overlap boundary is deliberately narrow. Build-prerequisite, oracle, harness, freshness, Vue-macro,
-the single dev archive, its one list, sidecar restoration, suite inventory, and trybuild coverage all settle
+The overlap boundary is deliberately narrow. Oracle, harness, Vue-macro,
+the single dev archive, its one list, sidecar restoration, suite inventory, and provider partition all settle
 before fan-out. Surface 1 then reads that immutable archive using
 `<runnerTarget>/lanes/surface-1/target` and `gate-work/lanes/surface-1/{work,extract,output.log}`. The shipped
 check and contract use `<runnerTarget>/lanes/shipped-cfg/target` and
@@ -97,10 +99,9 @@ portable on the documented 24-GiB host: its default ceiling is 12 GiB, only
 eight jobs (9.90-GiB measured peak, 2.10-GiB headroom); twelve remains available
 as an explicit override, or by default once the effective ceiling reaches 16
 GiB. The test-thread axis remains twelve because its measured peak is only 3.84
-GiB. Windows does not get a reduced-capacity exception: `shared-provider-live`
-and `lsp-server-unit` use the same full nextest concurrency as every other
-platform. Their longer hang protection and the compiler trybuild timeout
-overrides remain scoped by exact selectors; neither is a worker cap.
+GiB. Windows does not get a reduced-capacity exception for the provider-free
+core surface. Real-provider suites use their own serial libtest jobs; compile
+contracts no longer appear in nextest and need no nextest timeout override.
 
 On Windows, the three listed `kind: "proc-macro"`, `build-platform: "host"`
 suites contain 41 real tests and remain in the full warm loop. Their standalone
@@ -165,8 +166,7 @@ After acquiring the single-flight mutex, the gate starts a report-only `GateTele
 gives all startup reporting probes one separate hard aggregate deadline. The canonical build/test deadline
 is established only after startup collection settles, so telemetry consumes none of that budget. Its
 whole elapsed time ends only after the oversize-source advisory and teardown. Stable gate phase IDs are
-`build-prerequisite`, `harness-smoke-typescript`,
-`freshness-tooling`, `vue-macro-oracle-check`, `vue-macro-oracle-tests`, `dev-archive`, `dev-list`,
+`harness-smoke-typescript`, `vue-macro-oracle-check`, `vue-macro-oracle-tests`, `dev-archive`, `dev-list`,
 `surface-1`, `shipped-check`, `shipped-contract`, `advisory`, and `teardown`. A failed command remains in
 the table; an unreached or watchdog-aborted phase makes measurement completeness `partial`. A fully
 executed red test run can still have complete measurement, because completeness describes observations,
@@ -222,8 +222,7 @@ test subprocess.
 ## Canonical conformance-harness preflight
 
 The core gate detects the workspace TypeScript harness incompatibility before
-the expensive Rust archive build. After the build-prerequisite load and before
-freshness tooling or Cargo, it runs
+the expensive Rust archive build. Before Cargo, it runs
 `packages/framework-conformance-harness/bin/gate-smoke.mjs typescript`. The
 oracle-dependent `vapor` smoke lives in the parallel required BF2 lane, after
 offline oracle realization and before BF2 inventory listing:

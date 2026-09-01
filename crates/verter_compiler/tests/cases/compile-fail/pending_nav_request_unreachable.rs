@@ -1,11 +1,8 @@
 // Negative control for `PendingNavRequest`'s Vapor-private visibility.
 //
-// This fixture belongs to the bench-feature group in
-// `compiler_compile_fail.rs`. Run that group through a live
-// `cargo test --features bench` invocation so trybuild can recover the parent
-// feature set from Cargo's fingerprint metadata. The canonical archive gate
-// excludes the complete trybuild class and does not execute this fixture.
-// Under the supported live bench run,
+// This fixture belongs to the bench-feature standalone compile-contract
+// runner invoked by `node scripts/compile-contracts.mjs`. It never enters
+// the Rust test inventory. Under that bench contract run,
 // `template::code_gen::vapor` is NAMEABLE (module-level `pub` all the way
 // down) and the wall is `PendingNavRequest`'s own item-level `pub(in
 // crate::template::code_gen::vapor)` restriction (and, before that,

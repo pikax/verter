@@ -12,6 +12,7 @@ import {
   buildProviderLaneFilterExpr,
   verifyProviderCiPartition,
 } from "./provider-ci-internals.mjs";
+import { providerCargoInvocations } from "./provider-ci.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
@@ -64,7 +65,22 @@ test("provider filters form one non-empty, disjoint canonical partition", () => 
   assert.match(missingVerdict.errors.join("\n"), /exact provider test .* matched 0 times/);
 });
 
-test("CI builds one archive and fans out four core shards plus provider consumers", () => {
+test("provider runners use serial libtest commands instead of nextest", () => {
+  for (const lane of ["tsserver", "tsgo"]) {
+    const invocations = providerCargoInvocations(lane);
+    assert.ok(invocations.length > 0);
+    for (const invocation of invocations) {
+      assert.equal(invocation.args[0], "test");
+      assert.ok(invocation.args.includes("--locked"));
+      assert.ok(invocation.args.includes("--no-fail-fast"));
+      assert.ok(invocation.args.includes("--test-threads=1"));
+      assert.ok(invocation.args.includes("-p"));
+      assert.doesNotMatch(invocation.args.join(" "), /nextest|--(?:build-)?jobs\b|-j\s*\d/);
+    }
+  }
+});
+
+test("CI builds one provider-free archive and runs providers independently", () => {
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const build = yamlJob(workflow, "rust-test-build");
   const core = yamlJob(workflow, "rust-test");
@@ -82,28 +98,23 @@ test("CI builds one archive and fans out four core shards plus provider consumer
   assert.match(core, /name:\s*Rust Test \(Core \$\{\{ matrix\.shard \}\}\/4\)/);
   assert.match(core, /--partition "hash:\$\{\{ matrix\.shard \}\}\/4"/);
   assert.match(core, /name:\s*Rust Core Test Results \(\$\{\{ matrix\.shard \}\}\/4\)/);
-  assert.match(
-    core,
-    /name:\s*Fetch dependencies for runtime compile tests[\s\S]*cargo fetch --locked/,
-  );
-  assert.doesNotMatch(tsserver, /cargo fetch\b/);
-  assert.doesNotMatch(tsgo, /cargo fetch\b/);
+  assert.match(core, /needs:\s*\[detect-changes, rust-test-build\]/);
+  assert.match(core, /name:\s*rust-nextest-archive/);
+  assert.match(core, /provider-ci\.mjs filter core/);
+  assert.match(core, /cargo nextest run --archive-file/);
+  assert.match(success, /^\s*- rust-test\s*$/m);
   for (const [lane, job] of [
-    ["core", core],
     ["tsserver", tsserver],
     ["tsgo", tsgo],
   ]) {
-    assert.match(job, /needs:\s*\[detect-changes, rust-test-build\]/);
-    assert.match(job, /name:\s*rust-nextest-archive/);
-    assert.match(job, new RegExp(`provider-ci\\.mjs filter ${lane}`));
-    assert.match(job, /mkdir -p target\/rust-nextest-archive/);
-    assert.match(job, /cargo nextest run --archive-file/);
-    assert.doesNotMatch(job, /cargo (?:build|test|check|nextest archive)/);
-    assert.doesNotMatch(job, /--(?:build-)?jobs\b|-j\s*\d|--test-threads\b|max-threads/);
-    assert.match(
-      success,
-      new RegExp(`^\\s*- ${lane === "core" ? "rust-test" : `rust-${lane}-live`}\\s*$`, "m"),
+    assert.match(job, /needs:\s*detect-changes/);
+    assert.match(job, /Swatinem\/rust-cache/);
+    assert.match(job, new RegExp(`provider-ci\\.mjs run ${lane}`));
+    assert.doesNotMatch(
+      job,
+      /cargo nextest|install-action@nextest|name:\s*rust-nextest-archive|actions\/download-artifact/,
     );
+    assert.match(success, new RegExp(`^\\s*- rust-${lane}-live\\s*$`, "m"));
   }
   assert.match(tsserver, /VERTER_REQUIRE_TSSERVER:\s*"1"/);
   assert.match(tsserver, /packages\/typescript-plugin\/src/);

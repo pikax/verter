@@ -43,8 +43,8 @@ pnpm --filter @verter/typescript-plugin test  # One package
 pnpm exec vitest run path/to/test.ts           # One test file
 
 # Rust
-cargo nextest run --workspace              # Every workspace test target
-cargo test -p verter_session --tests       # Shared-process session surface
+node scripts/gate.mjs                      # Provider-free core Rust gate
+node scripts/compile-contracts.mjs         # Standalone compile contracts
 cargo test -p verter_compiler test_name    # Targeted iteration
 ```
 

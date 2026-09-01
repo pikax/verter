@@ -7,5 +7,5 @@ mod component_meta_flags_audit;
 mod proto_audit;
 mod synthetic_slot_binding_graph;
 mod typeinfo_proto_roundtrip;
-mod typeinfo_proto_ts_freshness;
+mod typeinfo_proto_ts_contract;
 mod unknown_graph_wire;

@@ -1,0 +1,22 @@
+[package]
+name = "verter_compile_contracts_session_variants"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Feature-profile compile contracts for verter_session"
+publish = false
+
+[[bin]]
+name = "verter_compile_contracts_session_variants"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+trybuild = "1.0"
+verter_compiler = { path = "../verter_compiler" }
+verter_session = { path = "../verter_session", features = ["test-support"] }
+verter_type_expr = { workspace = true }

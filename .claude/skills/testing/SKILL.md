@@ -172,10 +172,9 @@ jobs below that, always capped by available CPUs. This keeps the documented
 24-GiB host at 8 build jobs under its unchanged 12-GiB default ceiling; the
 measured 12-job peak was 11.60 GiB and is too close to call portable there.
 Explicit positive overrides remain exact. Windows uses full nextest capacity;
-there are no `max-threads = 1` exceptions for `shared-provider-live` or
-`lsp-server-unit`. The cargo-free gate self-test rejects those serialized group
-assignments while pinning the shared-provider hang protection and both
-platform-neutral trybuild timeout override pairs.
+the provider-free core has no provider-specific `max-threads = 1` groups.
+Real-provider tests run through dedicated serial libtest jobs, while compile-fail
+fixtures run through standalone Cargo binaries rather than nextest test targets.
 
 On Windows, `--prepare` still warm-lists every archived suite and accepts only
 an exact status 0. Proc-macro suites are real test suites, not filterable
@@ -186,12 +185,16 @@ libdir metadata fails setup; no suite is skipped or tolerated.
 
 The canonical full verification pass:
 
-1. `node scripts/gate.mjs` — CANONICAL local Rust gate. It builds/lists the SINGLE TEST UNIVERSE once, settles every post-list precondition, then runs archive-backed Surface 1. The shipped-cfg lane is currently SKIPPED (temporary; `SHIPPED_CFG_LANE_ENABLED` in `scripts/gate-internals.mjs`) — a PASS is Surface 1 only and is disclosed on every run. The lane stays implemented in pairwise-disjoint runner-owned target/work/extract roots; flip the flag to restore concurrent/serial overlap, local fail-fast cancellation of a live shipped step, and a PASS that also requires successful shipped check, complete contract analysis, and expected-count parity. Use `node scripts/gate.mjs --exhaustive` for CI, release, complete failure diagnostics, and comparable benchmarks: Surface 1 receives `--no-fail-fast` (the skipped lane is skipped in this mode too). Surface 1 remains the one archive-backed workspace run with per-test process isolation, including `verter_session/tests/cases/shared_process_contract.rs`. The shipped lane remains the exact `cargo check --workspace --all-targets --profile no-debug-assertions` followed only on success by package-scoped `cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions`, with its independent expected-test-count check; it is never a second whole-workspace archive. One supervisor owns the absolute deadline, aggregate stall vector, same-snapshot aggregate RSS ceiling, cancellation, and teardown for both lanes. Raw output is buffered and replayed once in Surface/check/contract order. The freshness-tooling preflight and its verdict-gated `cases::typeinfo_proto_ts_freshness::*` tolerance are unchanged: present/installed buf+oxfmt makes freshness failures hard, neither pnpm nor buf resolving makes the Rust pair skip, oxfmt absence alone never grants tolerance, and deterministic install failure is a loud setup failure. Run with `node_modules` present. See `docs/contributing/gate-performance.md`.
-2. `cargo clippy --workspace --all-targets -- -D warnings`
-3. `cargo check --workspace --release` — the only thing in the loop that compiles the REAL release profile (opt-level 3 + fat LTO); surface 1 is debug, and the shipped-cfg lane (cheap `no-debug-assertions` profile) is currently skipped. `debug_assert!` gates on `cfg!`, a RUNTIME constant, so its body still name-resolves in release: a `#[cfg(debug_assertions)]` helper called inside one is an E0425 in every release build (napi and wasm artifacts included) while compiling clean in debug. It is a CHECK and RUNS NO TESTS, so it cannot observe the runtime half of that class — a state mutation written inside a `debug_assert!` argument compiles fine and silently never executes in a shipped build. `verter_shipped_cfg_contract` under `no-debug-assertions` is what covers that half — the ONLY tests in the repo that execute with `debug_assertions` off — and the gate currently skips that lane. Mirrored in CI by the `rust-build-configs` job.
-4. `cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings` — host clippy cannot see target-gated code, and the `wasm32-wasip1`/`wasip2` clippy jobs cover the SEPARATE `extensions/lapce` + `extensions/zed` manifests, not this one. Same `rust-build-configs` job in CI.
-5. `cargo fmt --all --check`
-6. `pnpm test` for TypeScript changes
+1. `node scripts/gate.mjs` — CANONICAL provider-free local Rust gate. It builds/lists the SINGLE TEST UNIVERSE once, verifies that core/tsserver/tsgo form a complete disjoint partition, then runs archive-backed Surface 1 without real-provider packages/tests or `verter_svelte_conformance`. The shipped-cfg lane is currently SKIPPED (temporary; `SHIPPED_CFG_LANE_ENABLED` in `scripts/gate-internals.mjs`) — a PASS is Surface 1 only and is disclosed on every run. Use `node scripts/gate.mjs --exhaustive` for CI, release, complete failure diagnostics, and comparable benchmarks. See `docs/contributing/gate-performance.md`.
+2. `node scripts/provider-ci.mjs run tsserver` and `node scripts/provider-ci.mjs run tsgo` — dedicated serial real-provider lanes. The tsserver lane requires the language-shared and TypeScript-plugin build outputs; the tsgo lane requires the pinned local engine installed by pnpm. CI owns that setup explicitly.
+3. `node scripts/compile-contracts.mjs` — every compile-fail/pass fixture, including feature-specific variants, through standalone non-test Cargo binaries. These builds are absent from nextest discovery.
+4. `cargo test --no-fail-fast -p verter_svelte_conformance --features conformance-tests --lib --bin verter_svelte_conformance --test main -- --test-threads=4` — the dedicated Svelte conformance lane.
+5. `pnpm proto:check` — proto regeneration/format freshness in the lint-style lane, never as a Rust test.
+6. `cargo clippy --workspace --all-targets -- -D warnings`
+7. `cargo check --workspace --release` — the only thing in the loop that compiles the REAL release profile (opt-level 3 + fat LTO); surface 1 is debug, and the shipped-cfg lane (cheap `no-debug-assertions` profile) is currently skipped. `debug_assert!` gates on `cfg!`, a RUNTIME constant, so its body still name-resolves in release: a `#[cfg(debug_assertions)]` helper called inside one is an E0425 in every release build (napi and wasm artifacts included) while compiling clean in debug. It is a CHECK and RUNS NO TESTS, so it cannot observe the runtime half of that class — a state mutation written inside a `debug_assert!` argument compiles fine and silently never executes in a shipped build. `verter_shipped_cfg_contract` under `no-debug-assertions` is what covers that half — the ONLY tests in the repo that execute with `debug_assertions` off — and the gate currently skips that lane. Mirrored in CI by the `rust-build-configs` job.
+8. `cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings` — host clippy cannot see target-gated code, and the `wasm32-wasip1`/`wasip2` clippy jobs cover the SEPARATE `extensions/lapce` + `extensions/zed` manifests, not this one. Same `rust-build-configs` job in CI.
+9. `cargo fmt --all --check`
+10. `pnpm test` for TypeScript changes
 
 Confirm `cargo clippy --version` reports the `rust-toolchain.toml`-pinned version before trusting
 2–4. Clippy output from a different toolchain is not evidence about the one CI runs.
@@ -224,90 +227,16 @@ final process identities separately from parseable timing identities at total/pa
 levels; legacy `count` remains the timed-count alias. See `docs/contributing/gate-performance.md` for phase IDs,
 fingerprint fields, schema, and artifact names.
 
-**Build-prerequisite preflight — fail-closed, and the FIRST step of gate mode.** Parts of the Rust suite
-load artifacts cargo does not build. The real-provider suites spawn the pinned tsserver with
-`--globalPlugins @verter/typescript-plugin --pluginProbeLocations packages/vue-vscode/node_modules`; that
-probe dir is a pnpm symlink to `packages/typescript-plugin`, whose `main` is `dist/index.js` — a `tsc -b`
-OUTPUT that `pnpm install` does NOT produce. With the symlink present and the dist absent, tsserver loads
-no plugin, cannot resolve `.vue`/`.svelte` carriers, and ~64 `*_tsserver` tests fail with `TS2307: Cannot
-find module './Comp.vue' or its corresponding type declarations.` — sixty-four opaque failures that read
-exactly like a compiler regression. So before the freshness preflight, before cargo, and before any test,
-the gate **loads** that plugin entry in a child process and, on any load failure, exits 127 with the marker
-`BUILD-PREREQUISITE MISSING`, naming the probe target, the load error, the producing packages, and the
-producer command.
+**Provider prerequisites belong to provider jobs.** The core gate neither builds nor probes third-party
+provider state. The tsserver job installs the workspace and builds exactly
+`@verter/language-shared` plus `@verter/typescript-plugin` before running
+`node scripts/provider-ci.mjs run tsserver` with `VERTER_REQUIRE_TSSERVER=1`.
+The tsgo job installs the pinned local engine before running its serial lane with
+`VERTER_REQUIRE_TSGO=1`. Provider runner failures are hard failures; there is no
+skip or freshness tolerance in the core gate.
 
-- **The oracle is a real load, not a file list.** `require()` of the probe directory — the same resolution
-  tsserver performs — in a child process (`runBuildPrerequisiteLoadProbe`), fail-closed on every non-zero
-  shape (structured load error, spawn error, signal, timeout, unparseable output). A stat list would be a
-  mirror of the emit graph and would drift: the plugin entry eagerly requires its emitted helpers
-  (`dist/helpers/carrierStore.js` among them) and `@verter/language-shared`'s entry re-exports a dozen
-  emitted siblings, so a tree with **both `index.js` present and one helper missing** satisfies every stat
-  and still throws inside tsserver. The load also covers the half-built case the plugin's tsconfig allows:
-  `noEmitOnError` is off, so `tsc -b` on the plugin alone emits a dist while failing with `TS2307: Cannot
-  find module '@verter/language-shared'`.
-- **The probe runs under tsserver's environment, not the gate's.** `TsserverTypeProvider::spawn` strips
-  `CHILD_PROCESS_ENV_DENYLIST` (`crates/verter_type_runtime/src/tsserver/ipc.rs` — `NODE_OPTIONS`,
-  `VSCODE_INSPECTOR_OPTIONS`, `ELECTRON_RUN_AS_NODE`) before launching node, so an inheriting probe would
-  have strictly more influence than the process it speaks for. That gap is exploitable, not theoretical:
-  measured, `NODE_OPTIONS=--require=<preload>` with a preload patching `Module._load` to return a dummy for
-  `process.argv[1]` made the probe exit 0 and report loaded while tsserver still failed on a missing
-  helper. The probe reads that denylist **out of the Rust call site** (`parseTsserverEnvDenylist`) rather
-  than restating it, so the two cannot drift; a generated mirror was rejected because its freshness test
-  lives in the Rust suite the probe runs *before*. If the const cannot be found or parsed the probe fails
-  closed as `environment-unknown`. It strips exactly that denylist and nothing more — equivalence, not
-  maximal hardening: a var tsserver also inherits influences the real load identically.
-- **The timeout is a HARD bound, sized by the gate's deadline.** `spawnSync`'s default `killSignal` is
-  SIGTERM, which a child can trap — measured, a child trapping SIGTERM with an open handle left the parent
-  blocked for its full 25s lifetime and then returned status 0, i.e. a hang *and* a false positive. The
-  probe kills with `SIGKILL` (no graceful phase: the child's whole job is one `require()`, so there is
-  nothing to flush — unlike `runContainedStep`, which escalates because it reaps whole build trees), and its
-  budget is `probeBudgetMs(deadline, now)` — the smaller of a 60s cap and the gate's own remaining
-  wallclock, so it cannot outlive the `--timeout` it sits inside while holding the single-flight mutex.
-  Honest limit: this kills the direct child only; a module that spawns a detached grandchild on require
-  would leak it, the same limitation the contained-step runner carries.
-- **Failure classes are typed, not string-matched.** The probe returns a `reason`
-  (`module-not-found` / `load-error` / `timeout` / `spawn-error` / `signalled` / `unknown-exit` /
-  `environment-unknown`). Only `module-not-found` means "this tree was never built"; every other class means
-  the probe could not *answer*. Callers that gate behavior on the prerequisite must branch on `reason` —
-  see `(xix)` below, where skipping on any failure would green-skip a scenario whose artifacts are present.
-- **What it does not prove: freshness.** A dist that loads but was emitted from an older commit passes.
-  That is a separate problem and is deliberately out of scope — not an oversight.
-- **Two packages produce the closure**, and they are the producer command's scope: the plugin, plus
-  `@verter/language-shared`. `@verter/native` is deliberately excluded — the plugin's
-  `"files": ["src/index.ts"]` leaves out `src/tsc/`, its only consumer, and no Rust test loads a `.node`.
-- **Produce them** with `pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build`
-  (pnpm orders multi-filter recursive scripts topologically). NOT `pnpm build` (native + LSP + wasm + every
-  TS package) and NOT `--filter @verter/typescript-plugin...` — the trailing ellipsis selects the package
-  AND ITS DEPENDENCIES, dragging in `@verter/native`'s `napi build --release`. This is also the step
-  `ci.yml`'s `rust-tsserver-live` and `release.yml`'s `test` job run before the
-  tsserver-bearing test selection.
-- **It never builds for you and never skips.** Building implicitly would make the verdict depend on a
-  mutation the gate performed; skipping would restore the silent pass — with no install at all the affected
-  tests SKIP and the gate goes green having proven nothing, the "unexpected prerequisite skips" half of
-  Verification Must Prove Execution. `--prepare` is exempt: it builds the archive and runs no test.
-- **Discrimination** is proven by `(GB9)` in `scripts/gate-selftest.mjs`, which drives the REAL production
-  CLI (a byte-copy rooted in a synthetic git repo holding a miniature of the package graph, so the gate
-  keeps its zero test seams and no developer tree is mutated) in six directions: nothing built / plugin
-  entry missing / language-shared missing / **a transitively-required helper missing while both entries are
-  present** ⇒ 127 before the freshness preflight and before cargo, with the refusal reporting
-  `MODULE_NOT_FOUND` rather than a probe that could not answer; everything built ⇒ SATISFIED and the run
-  proceeds. Every plant is stat-proven applied and re-stated after the run. Three properties are exercised
-  with real subprocesses rather than injected result shapes, because they are the ways a bad tree could
-  still pass: `(GB9.1b)` runs a **real SIGTERM-trapping child** and asserts the bound holds, the reason is
-  `timeout`, and no process survives; `(GB9.1c)` runs a **real forged `NODE_OPTIONS` preload** and asserts
-  it cannot fake a load, with a helper-present control proving the env was sanitized rather than broken, and
-  a launcher-deleted leg proving `environment-unknown` fails closed; `(GB9.1d)`/`(GB9.1e)` pin the denylist
-  parser's fail-closed shapes and the deadline clamp.
-- **`(xix)` declares its precondition, narrowly.** That scenario drives the real gate against the real repo
-  expecting it to reach cargo, so on a tree without the prerequisites it would hit this 127 and report a
-  meaningless failure — and its verdict would depend on the very state under test. It now measures the state
-  and emits a TRUE skip (counted in SKIP, never PASS) **only** when `reason === "module-not-found"`. Any
-  other class — EPERM, timeout, an unrelated plugin throw, an unreadable launcher — FAILS, because
-  `finish()` exits 0 whenever FAIL is zero, so skipping on an infrastructure failure would silently retire a
-  scenario whose artifacts are present.
-
-**Conformance-harness preflight — real work, before Cargo.** After the build-prerequisite load, but before
-freshness tooling or the archive build, the core gate runs only the harness-owned
+**Conformance-harness preflight — real work, before Cargo.** Before the archive
+build, the core gate runs only the harness-owned
 `packages/framework-conformance-harness/bin/gate-smoke.mjs typescript`. The separate required BF2 lane
 realizes its pinned oracle offline and then runs `gate-smoke.mjs vapor` before exact inventory listing.
 Vapor calls the real exported `ensureVaporRuntimePreloaded()` path; TypeScript calls the real exported
@@ -319,12 +248,8 @@ canonical gate's deadline/stall/RSS enforcement and telemetry. BF2 Vapor uses th
 90-minute absolute deadline and teardown without adding a stall, memory, build-job, or test-thread limit.
 Non-zero exit, applicable supervisor abort, signal, spawn failure, or a missing/invalid/mismatched/extra-key
 receipt is setup failure 127 with exact `HARNESS-SMOKE FAILED [<mode>]` attribution;
-there is no skip, warning, or tolerance. GB15's real-production-CLI self-test leg makes `pnpm` unresolvable,
-provides temporary executable `buf`/`oxfmt` shims, refuses to launch without that proof, and requires the
-production freshness preflight to report a non-installing outcome, so it cannot install or lock the developer
-checkout. Its smoke-omission mutation must continue past strict constructor refusal and prove the mutated real
-CLI omitted the mode while improperly reaching Cargo. A successful oracle-cache load therefore does not claim
-that DOM bootstrap or virtual TypeScript observation works.
+there is no skip, warning, or tolerance. A successful oracle-cache load does not
+claim that DOM bootstrap or virtual TypeScript observation works.
 
 **Shipped-cfg guard — currently skipped, what it covers, and what it does not.**
 
@@ -375,19 +300,14 @@ are structurally eliminated repo-wide.)
   artifact is shared with the dev archive) plus one small package build+run — not a second whole-workspace
   archive+run.
 
-Without Node, or to debug surface 1 in isolation, run `cargo nextest run --workspace` directly. It does not
-cover the shipped-cfg class; the closest manual equivalent is `cargo check --workspace --all-targets
---profile no-debug-assertions` followed by `cargo nextest run -p verter_shipped_cfg_contract --cargo-profile
-no-debug-assertions`. Run the gate with `node_modules` present (e.g. `pnpm install --frozen-lockfile` first
-in a fresh worktree) so the freshness-tooling preflight is a no-op and the `cases::typeinfo_proto_ts_freshness::*`
-byte-pin runs genuinely — with the tooling present a freshness failure is a HARD gate failure (exit 1, a real
-stale-binding regression to regenerate + commit), not tolerated. On a buf-less runner (pnpm not resolvable AND
-`buf` not resolvable) the Rust byte-pin SKIPS and PASSES, so the gate reports an ordinary PASS; the
-verdict-gated tolerance flips ON there only as a latent safety net (PASS-WITH-TOLERATED appears solely if the
-pair somehow emitted a tolerated FAIL despite `buf` being absent, which the skip does not). `oxfmt` absence
-never grants tolerance (with `buf` present a missing `oxfmt` is a LOUD setup failure).
+The exact provider-free Surface 1 filter is generated by
+`node scripts/provider-ci.mjs filter core`; running bare
+`cargo nextest run --workspace` is useful only for debugging and is not evidence
+for the canonical lane partition. The gate requires `node_modules` for its
+TypeScript conformance-harness smoke. Proto freshness is independently enforced
+by `pnpm proto:check`; it never skips or participates in the Rust gate verdict.
 
-Bare `cargo test --workspace --tests` historically silently SKIPPED the verter_session integration suite (~4404 tests): a `session_metrics` Cargo feature unified differently standalone vs in the workspace, dropping those binaries from the workspace test set, so the run reported green while never compiling them. That feature has since been replaced by a runtime `HostConfig.metrics_enabled` toggle, and the skip no longer reproduces — confirmed by diffing the built executable sets of `cargo test --workspace --tests --no-run -v` against `cargo test -p verter_session --tests --no-run -v` (same verter_session executables in both). Still, `cargo test --workspace --tests` must NOT be used as the sole Rust gate — run `node scripts/gate.mjs` (Surface 1; the shipped-cfg guard is currently skipped) or `cargo nextest run --workspace` directly.
+Bare `cargo test --workspace --tests` historically silently SKIPPED the verter_session integration suite (~4404 tests): a `session_metrics` Cargo feature unified differently standalone vs in the workspace, dropping those binaries from the workspace test set, so the run reported green while never compiling them. That feature has since been replaced by a runtime `HostConfig.metrics_enabled` toggle, and the skip no longer reproduces — confirmed by diffing the built executable sets of `cargo test --workspace --tests --no-run -v` against `cargo test -p verter_session --tests --no-run -v` (same verter_session executables in both). Still, neither that command nor plain `cargo nextest run --workspace` is the sole Rust gate; use `node scripts/gate.mjs` so the provider-free partition is verified and applied.
 
 Do not run bare `cargo test --workspace` (no `--tests`) by default — it also runs doctests and example builds, substantially slower. Run doctests (`cargo test --workspace --doc`) only when rustdoc examples changed or explicitly requested.
 
