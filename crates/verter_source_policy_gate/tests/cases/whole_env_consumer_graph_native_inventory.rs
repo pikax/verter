@@ -114,63 +114,17 @@
 //! gate), and the eventual producer flip carries its own behavioural gate.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use syn::visit::Visit;
 use syn::{
     visit::visit_file as syn_visit_file, Attribute, ImplItemFn, ItemFn, ItemImpl, ItemMod, Meta,
     Type,
 };
-use walkdir::WalkDir;
 
-// Relocated from `verter_session` (gate-performance step 2): this guard scans
-// verter_session's OWN production `src/`, so — unlike a same-crate test where
-// `CARGO_MANIFEST_DIR` IS the scanned crate — `crate_root()` must explicitly
-// re-anchor to `crates/verter_session` rather than to this crate's own
-// manifest dir.
-fn crate_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("crate is <ws>/crates/verter_source_policy_gate")
-        .join("crates/verter_session")
-}
-
-fn is_test_file(rel: &str) -> bool {
-    rel.ends_with("_tests.rs")
-        || rel.ends_with("/tests.rs")
-        || rel.contains("/tests/")
-        || rel.contains("/tests_")
-}
-
-/// Production `.rs` files under `crates/verter_session/src`, relative to
-/// the crate root, with their source — test fixtures excluded.
-fn production_src_files() -> Vec<(String, String)> {
-    let src_root = crate_root().join("src");
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for entry in WalkDir::new(&src_root) {
-        let entry = entry.expect("walkdir entry");
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(crate_root())
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        if is_test_file(&rel) || !seen.insert(rel.clone()) {
-            continue;
-        }
-        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-        out.push((rel, src));
-    }
-    out
-}
+use super::source_corpus::{
+    session_production_source, session_production_src_files as production_src_files,
+};
 
 // ════════════════════════════════════════════════════════════════════
 // `syn` STRUCTURAL INVENTORY
@@ -707,6 +661,13 @@ fn inventory_for(files: &[(String, String)]) -> Vec<FnDef> {
     build_fn_inventory(files)
 }
 
+fn production_inventory() -> &'static [FnDef] {
+    static INVENTORY: OnceLock<Vec<FnDef>> = OnceLock::new();
+    INVENTORY
+        .get_or_init(|| build_fn_inventory(production_src_files()))
+        .as_slice()
+}
+
 // ════════════════════════════════════════════════════════════════════
 // ANCHOR TABLES
 // ════════════════════════════════════════════════════════════════════
@@ -946,10 +907,8 @@ fn all_named_bodies<'a>(inv: &'a [FnDef], name: &str) -> Vec<&'a FnDef> {
 // PRESENCE + BOUNDED-BODY (Invariants 1, 2, 3)
 // ════════════════════════════════════════════════════════════════════
 
-#[test]
 fn every_whole_env_consumer_has_a_graph_native_reader_in_production() {
-    let files = production_src_files();
-    let inv = build_fn_inventory(&files);
+    let inv = production_inventory();
     let mut missing = Vec::new();
     for row in WHOLE_ENV_CONSUMER_INVENTORY {
         assert!(
@@ -958,7 +917,7 @@ fn every_whole_env_consumer_has_a_graph_native_reader_in_production() {
             row.consumer
         );
         // The legacy oracle must STILL exist at its anchor (non-breaking).
-        if !anchored_definition_present(&inv, row.oracle_file, row.oracle_impl, row.oracle_fn) {
+        if !anchored_definition_present(inv, row.oracle_file, row.oracle_impl, row.oracle_fn) {
             missing.push(format!(
                 "consumer `{}`: legacy oracle `{}` is MISSING at its anchor ({} :: {}) — the \
                  oracle must be retained (non-breaking)",
@@ -969,7 +928,7 @@ fn every_whole_env_consumer_has_a_graph_native_reader_in_production() {
         // file+impl before the eventual producer flip (Finding #1: a
         // same-named body in a non-anchored file does NOT satisfy presence).
         if !anchored_definition_present(
-            &inv,
+            inv,
             row.graph_native_file,
             row.graph_native_impl,
             row.graph_native_fn,
@@ -995,10 +954,8 @@ fn every_whole_env_consumer_has_a_graph_native_reader_in_production() {
 /// or an anchor that becomes ambiguous after an edit — reddens the guard. The
 /// anchor set is every oracle anchor + every graph-native anchor + every
 /// accessor/producer anchor.
-#[test]
 fn anchored_definitions_are_unique() {
-    let files = production_src_files();
-    let inv = build_fn_inventory(&files);
+    let inv = production_inventory();
 
     // Build the union of every anchor this guard relies on.
     let mut anchors: Vec<(String, String, String)> = Vec::new();
@@ -1024,7 +981,7 @@ fn anchored_definitions_are_unique() {
 
     let mut violations = Vec::new();
     for (file, impl_path, name) in &anchors {
-        let count = anchored_defs(&inv, file, impl_path, name).len();
+        let count = anchored_defs(inv, file, impl_path, name).len();
         if count != 1 {
             violations.push(format!(
                 "anchor `{file} :: {impl_path} :: fn {name}` resolves to {count} non-test \
@@ -1062,14 +1019,12 @@ fn oracle_call_ban_idents() -> HashSet<String> {
 /// `resolve_value_export_target`, a `_graph_native`-suffixed sibling reader call
 /// does NOT match the bare oracle name, and tokens inside comments/strings are
 /// invisible.
-#[test]
 fn graph_native_reader_bodies_do_not_route_through_whole_env() {
-    let files = production_src_files();
-    let inv = build_fn_inventory(&files);
+    let inv = production_inventory();
     let oracle_ban = oracle_call_ban_idents();
     let mut violations = Vec::new();
     for row in WHOLE_ENV_CONSUMER_INVENTORY {
-        let bodies = all_named_bodies(&inv, row.graph_native_fn);
+        let bodies = all_named_bodies(inv, row.graph_native_fn);
         if bodies.is_empty() {
             violations.push(format!(
                 "consumer `{}`: graph-native reader `{}` BODY not found — cannot prove it is \
@@ -1185,13 +1140,11 @@ fn whole_env_reach_hits(
 /// review, NOT by this token-scan. What this scan adds is a cheap, SOUND
 /// tripwire on the load-bearing direct shape: a new materialization site cannot
 /// appear unnoticed, and every existing direct root reach is reviewed.
-#[test]
 fn no_unanchored_direct_whole_env_reach_in_production() {
-    let files = production_src_files();
-    let inv = build_fn_inventory(&files);
+    let inv = production_inventory();
     let anchors = whole_env_anchors();
     let mut violations = Vec::new();
-    for hit in whole_env_reach_hits(&inv, &anchors) {
+    for hit in whole_env_reach_hits(inv, &anchors) {
         violations.push(format!(
             "{} :: {} :: fn `{}` DIRECTLY names whole-env materialization-root token `{}` but \
              `({}, {}, {})` is NOT an allowlisted whole-env anchor — a NEW production fn introduces \
@@ -1341,8 +1294,9 @@ fn graph_native_reader_files_introduce_no_materialize_type_expr_bridge() {
     let files: Vec<(String, String)> = reader_files
         .iter()
         .map(|rel| {
-            let src = std::fs::read_to_string(crate_root().join(rel))
-                .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            let src = session_production_source(rel)
+                .unwrap_or_else(|| panic!("production source missing from shared corpus: {rel}"))
+                .to_string();
             (rel.to_string(), src)
         })
         .collect();
@@ -1374,10 +1328,8 @@ fn graph_native_reader_files_introduce_no_materialize_type_expr_bridge() {
 
 /// Resolved-anchor report + non-vacuity: the real tree has each anchored
 /// definition present and unique, and the inventory enumerates four consumers.
-#[test]
 fn resolved_anchors_are_present_unique_and_enumerated() {
-    let files = production_src_files();
-    let inv = build_fn_inventory(&files);
+    let inv = production_inventory();
 
     assert_eq!(
         WHOLE_ENV_CONSUMER_INVENTORY.len(),
@@ -1388,7 +1340,7 @@ fn resolved_anchors_are_present_unique_and_enumerated() {
     for row in WHOLE_ENV_CONSUMER_INVENTORY {
         assert_eq!(
             anchored_defs(
-                &inv,
+                inv,
                 row.graph_native_file,
                 row.graph_native_impl,
                 row.graph_native_fn
@@ -1402,7 +1354,7 @@ fn resolved_anchors_are_present_unique_and_enumerated() {
             row.graph_native_impl
         );
         assert_eq!(
-            anchored_defs(&inv, row.oracle_file, row.oracle_impl, row.oracle_fn).len(),
+            anchored_defs(inv, row.oracle_file, row.oracle_impl, row.oracle_fn).len(),
             1,
             "self-test: the oracle `{}` must be present AND unique at its anchor ({} :: {})",
             row.oracle_fn,
@@ -1414,7 +1366,7 @@ fn resolved_anchors_are_present_unique_and_enumerated() {
     // A deliberately-absent reader name reports NOT present (non-vacuity).
     assert!(
         !anchored_definition_present(
-            &inv,
+            inv,
             "src/host_manage/eval_env.rs",
             "impl VerterHost",
             "this_graph_native_reader_does_not_exist_xyzzy"
@@ -2163,7 +2115,6 @@ fn impl_path_normalizes_only_lifetimes() {
 /// appears in a comment/string (invisible to the AST), (iii) does NOT confuse
 /// `resolve_value_export_target_graph_native` for the banned bare
 /// `resolve_value_export_target`, and (iv) the real tree passes.
-#[test]
 fn bounded_body_guard_discriminates_violation_from_clean() {
     // (i) A real call is surfaced.
     let violating = vec![(
@@ -2224,10 +2175,9 @@ fn bounded_body_guard_discriminates_violation_from_clean() {
 
     // (iv) The real tree passes — every real reader body (and any trait
     // default / delegate of the same name) is clean.
-    let files = production_src_files();
-    let real_inv = build_fn_inventory(&files);
+    let real_inv = production_inventory();
     for row in WHOLE_ENV_CONSUMER_INVENTORY {
-        let bodies = all_named_bodies(&real_inv, row.graph_native_fn);
+        let bodies = all_named_bodies(real_inv, row.graph_native_fn);
         assert!(
             !bodies.is_empty(),
             "real reader body for `{}` must exist",
@@ -2245,6 +2195,45 @@ fn bounded_body_guard_discriminates_violation_from_clean() {
             }
         }
     }
+}
+
+pub(super) const PRODUCTION_GUARDS: &[(&str, fn())] = &[
+    (
+        "every_whole_env_consumer_has_a_graph_native_reader_in_production",
+        every_whole_env_consumer_has_a_graph_native_reader_in_production,
+    ),
+    (
+        "anchored_definitions_are_unique",
+        anchored_definitions_are_unique,
+    ),
+    (
+        "graph_native_reader_bodies_do_not_route_through_whole_env",
+        graph_native_reader_bodies_do_not_route_through_whole_env,
+    ),
+    (
+        "no_unanchored_direct_whole_env_reach_in_production",
+        no_unanchored_direct_whole_env_reach_in_production,
+    ),
+    (
+        "resolved_anchors_are_present_unique_and_enumerated",
+        resolved_anchors_are_present_unique_and_enumerated,
+    ),
+    (
+        "bounded_body_guard_discriminates_violation_from_clean",
+        bounded_body_guard_discriminates_violation_from_clean,
+    ),
+    (
+        "structural_inventory_is_non_vacuous_and_anchors_resolve",
+        structural_inventory_is_non_vacuous_and_anchors_resolve,
+    ),
+];
+
+pub(super) fn run_production_guards() {
+    std::thread::scope(|scope| {
+        for (_, guard) in PRODUCTION_GUARDS {
+            scope.spawn(guard);
+        }
+    });
 }
 
 /// The `impl`-path renderer normalizes lifetimes away so trait impls anchor
@@ -2280,10 +2269,8 @@ fn impl_path_renderer_normalizes_lifetimes() {
 /// the gate is not always-false on the real tree). Also asserts each row's
 /// graph-native + oracle anchors are unambiguous, building the resolved-anchor
 /// report.
-#[test]
 fn structural_inventory_is_non_vacuous_and_anchors_resolve() {
-    let files = production_src_files();
-    let inv = build_fn_inventory(&files);
+    let inv = production_inventory();
     assert!(
         inv.len() > 100,
         "self-test: the structural inventory must contain many fn definitions — got {}",
@@ -2300,12 +2287,12 @@ fn structural_inventory_is_non_vacuous_and_anchors_resolve() {
     let mut report: BTreeMap<&str, String> = BTreeMap::new();
     for row in WHOLE_ENV_CONSUMER_INVENTORY {
         let gn = anchored_defs(
-            &inv,
+            inv,
             row.graph_native_file,
             row.graph_native_impl,
             row.graph_native_fn,
         );
-        let oracle = anchored_defs(&inv, row.oracle_file, row.oracle_impl, row.oracle_fn);
+        let oracle = anchored_defs(inv, row.oracle_file, row.oracle_impl, row.oracle_fn);
         report.insert(
             row.consumer,
             format!(
@@ -2336,7 +2323,7 @@ fn structural_inventory_is_non_vacuous_and_anchors_resolve() {
                 row.graph_native_fn.to_string(),
             ))
             .or_insert(0) += anchored_defs(
-            &inv,
+            inv,
             row.graph_native_file,
             row.graph_native_impl,
             row.graph_native_fn,

@@ -4,7 +4,7 @@ module = "rev11-core"
 [[node]]
 id = "G1"
 name = "Hermetic query facts and result contracts"
-predecessors = ["C4","D8","F2"]
+predecessors = ["C4","D8","F2","PGF0"]
 phase = "rev11"
 train = "rev11.core"
 product = "rev11"
@@ -19,6 +19,7 @@ review_profile = "architecture-3"
 dispatchable = true
 optional = false
 release_gating = "none"
+gh_milestone = "0.0.2"
 external_requirements = []
 charter = "charters/rev11-core/G1.md"
 implementation_effort_min = "high"

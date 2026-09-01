@@ -40,9 +40,25 @@ use verter_session as host;
 use verter_type_expr::TypeExpr;
 
 mod audit;
+mod host_compile_request;
+#[cfg(test)]
+mod host_compile_request_tests;
+pub mod host_compile_request_ts;
+mod js_value_graph;
 mod memory_audit;
 mod meta;
 mod typeinfo;
+
+pub use host_compile_request::{
+    decode_host_compile_request, napi_host_compile_request_to_ffi, NapiHostCompileRequest,
+    NapiRequestedProduct,
+};
+// Reachable so the boundary suites can drive materialisation over a
+// modelled graph. Not part of the addon's JS surface.
+#[doc(hidden)]
+pub use js_value_graph::{
+    materialize_js_value, JsValueClass, JsValueGraph, MAX_ARRAY_ELEMENTS, MAX_NESTING_DEPTH,
+};
 
 // Re-imports for code actions and diagnostics (parity with verter_wasm)
 use verter_actions::{ActionContext, ActionEngine};
@@ -419,6 +435,14 @@ pub struct NapiHostConfig {
     /// construction and reused across every batch call — to
     /// change the pool size, construct a new host.
     pub hostCpuThreads: Option<u32>,
+    /// Worker count for the scheduler-owned CPU stage pool. `None` or
+    /// `Some(0)` keeps the scheduler default; a positive value fixes the
+    /// pool size for this host.
+    pub schedulerCpuThreads: Option<u32>,
+    /// Worker count for the scheduler-owned I/O stage pool. `None` or
+    /// `Some(0)` keeps the scheduler default; a positive value fixes the
+    /// pool size for this host.
+    pub schedulerIoThreads: Option<u32>,
     /// Enable host performance-metrics collection. `None`/absent keeps
     /// the default `false` (counters stay zero; `getMetrics()` returns
     /// `null`). Replaces the retired `session_metrics` Cargo feature as
@@ -443,6 +467,19 @@ impl From<NapiHostConfig> for FfiHostConfig {
             metrics_enabled: n.metricsEnabled,
         }
     }
+}
+
+fn scheduler_config_from_napi(
+    config: &NapiHostConfig,
+) -> verter_scheduler::scheduler::SchedulerConfig {
+    let mut scheduler = verter_scheduler::scheduler::SchedulerConfig::default();
+    if let Some(threads) = config.schedulerCpuThreads.filter(|&threads| threads > 0) {
+        scheduler.cpu_threads = threads as usize;
+    }
+    if let Some(threads) = config.schedulerIoThreads.filter(|&threads| threads > 0) {
+        scheduler.io_threads = threads as usize;
+    }
+    scheduler
 }
 
 #[napi(object)]
@@ -1255,8 +1292,8 @@ fn ffi_hmr_strategy_to_host(s: &str) -> std::result::Result<host::HmrStrategy, S
 }
 
 /// Convert a single host [`host::HostDiagnostic`] into its NAPI wire
-/// shape. Used to surface the RuntimeRender soft-macro warnings on
-/// [`NapiCompileBatchEntry::diagnostics`].
+/// shape. Used to surface the private Vue render worker's soft-macro warnings
+/// on [`NapiCompileBatchEntry::diagnostics`].
 fn napi_diagnostic_from_host(d: &host::HostDiagnostic) -> NapiDiagnostic {
     NapiDiagnostic {
         severity: match d.severity {
@@ -1863,10 +1900,13 @@ impl NapiVerterHost {
     /// unrecognised `compileErrorPolicy` string).
     #[napi(constructor)]
     pub fn new(config: Option<NapiHostConfig>) -> Result<Self> {
-        let ffi_config: FfiHostConfig = config.unwrap_or_default().into();
+        let config = config.unwrap_or_default();
+        let scheduler_config = scheduler_config_from_napi(&config);
+        let ffi_config: FfiHostConfig = config.into();
         Ok(Self {
-            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone_with_scheduler_config(
                 ffi_config_to_host(ffi_config).map_err(ffi_err)?,
+                scheduler_config,
             )),
         })
     }
@@ -1881,10 +1921,16 @@ impl NapiVerterHost {
         config: Option<NapiHostConfig>,
         workspace: &NapiWorkspace,
     ) -> Result<Self> {
-        let ffi_config: FfiHostConfig = config.unwrap_or_default().into();
+        let config = config.unwrap_or_default();
+        let scheduler_config = scheduler_config_from_napi(&config);
+        let ffi_config: FfiHostConfig = config.into();
         let host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
         Ok(Self {
-            inner: std::sync::Arc::new(host::VerterHost::new(host_config, workspace.inner.clone())),
+            inner: std::sync::Arc::new(host::VerterHost::new_with_scheduler_config(
+                host_config,
+                workspace.inner.clone(),
+                scheduler_config,
+            )),
         })
     }
 
@@ -2685,6 +2731,9 @@ impl NapiVerterHost {
     /// only that input's entry receives a `compiler panic: ...`
     /// error message; the rest of the batch completes normally.
     ///
+    /// This entry point never runs lint rules. Lint remains an explicit,
+    /// independent [`Self::lint`] operation.
+    ///
     /// `options.priority` is `"interactive"` or `"background"`;
     /// invalid strings return a NAPI error. Default is `"background"`.
     #[napi(js_name = "compileMany")]
@@ -2753,8 +2802,22 @@ impl NapiVerterHost {
                                 .to_string(),
                         )),
                     };
+                let style_processing = match p.styleProcessing.as_deref() {
+                    None | Some("complete") => {
+                        verter_compiler::compile_request::RuntimeStyleProcessing::Complete
+                    }
+                    Some("authored-only") => {
+                        verter_compiler::compile_request::RuntimeStyleProcessing::AuthoredOnly
+                    }
+                    Some(other) => {
+                        return Err(ffi_err(format!(
+                            "invalid compileProfile.styleProcessing '{other}', expected 'complete' or 'authored-only'"
+                        )));
+                    }
+                };
                 host_compile::CompileManyTarget::RuntimeRender {
                     profile: host_compile::CompileBatchRenderProfile {
+                        style_processing,
                         filename: p.filename,
                         is_production: p.isProduction,
                         custom_element: p.customElement,
@@ -3524,19 +3587,25 @@ pub struct NapiCompileBatchInput {
     /// "session"). `None` inherits the batch `defaultMode`.
     pub requestedMode: Option<String>,
     /// Explicit per-component scoped-style / HMR id. Threaded into this
-    /// input's compile profile ONLY on the RuntimeRender lane (scoped-style
-    /// / HMR identity is per-component, not per-build). `None` lets codegen
-    /// auto-generate the id.
+    /// input's compile profile ONLY for a public RuntimeRender request
+    /// (scoped-style / HMR identity is per-component, not per-build). Vue uses
+    /// it in the private render worker; Svelte uses it on the effective
+    /// host-backed route. `None` lets codegen auto-generate the id.
     pub componentId: Option<String>,
 }
 
-/// The batch-level render profile for the RuntimeRender lane (JS mirror of
-/// [`host_compile::CompileBatchRenderProfile`]). Every field is
+/// The batch-level render profile for a public RuntimeRender request (JS
+/// mirror of [`host_compile::CompileBatchRenderProfile`]). Every field is
 /// output-affecting and uniform across a single bundler build. This carries
-/// the full output-affecting projection of the JS `HostCompileProfile` so
-/// the render lane reproduces the `getVirtualFile` path byte-for-byte.
+/// the full output-affecting projection of the JS `HostCompileProfile`: Vue's
+/// private render worker reproduces the `getVirtualFile` output byte-for-byte,
+/// while Svelte keeps the effective host-backed path.
 #[napi(object)]
 pub struct NapiCompileBatchRenderProfile {
+    /// Style stages owned by this render: `"complete"` (default) or
+    /// `"authored-only"` when the bundler's separate style-module lane owns
+    /// preprocessing and every plain-CSS-only continuation.
+    pub styleProcessing: Option<String>,
     /// Codegen filename override (component-name extraction, scope-id
     /// derivation, source-map `source`/`file`). Absent falls back to the
     /// canonical id — same semantics as `HostCompileProfile.filename`.
@@ -3584,9 +3653,10 @@ pub struct NapiCompileBatchOptions {
     /// Default compile cache mode for inputs whose `requestedMode` is
     /// unset. `None` resolves to "session" (the host default).
     pub defaultMode: Option<String>,
-    /// The compile lane: `"host-backed"` (default) runs the full session
-    /// wrapper; `"runtime-render"` runs the render-only bundler lane. The
-    /// render lane REQUIRES `compileProfile` (fail-closed).
+    /// The compile request: `"host-backed"` (default) runs the full session
+    /// wrapper; `"runtime-render"` uses Vue's private render-only worker or a
+    /// non-Vue carrier's effective host-backed route. RuntimeRender REQUIRES
+    /// `compileProfile` (fail-closed).
     pub target: Option<String>,
     /// The batch-level render profile for the `"runtime-render"` lane. It
     /// is REQUIRED for that lane (the NAPI conversion fails closed when it
@@ -3609,10 +3679,11 @@ pub struct NapiCompileBatchEntry {
     /// All compilation errors for this file. Empty on success.
     pub errors: Vec<String>,
     /// Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
-    /// compile, separate from the fatal `errors`. Populated by the
-    /// RuntimeRender lane's soft-macro contract (an unresolved imported
-    /// macro type renders successfully and reports a warning here). Always
-    /// empty on the HostBacked lane and on any fatal outcome.
+    /// compile, separate from the fatal `errors`. Populated by the private Vue
+    /// render worker's soft-macro contract (an unresolved imported macro type
+    /// renders successfully and reports a warning here). Always empty on the
+    /// HostBacked lane, the effective Svelte host-backed route, and any fatal
+    /// outcome.
     pub diagnostics: Vec<NapiDiagnostic>,
     pub durationMs: f64,
     /// `true` iff this input was served from a warm cache entry under its
@@ -3633,6 +3704,31 @@ pub struct NapiCompileBatchEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compile_many_boundary_delegates_directly_without_linting() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("pub fn compile_many(")
+            .expect("compileMany NAPI entry point must exist");
+        let end = source[start..]
+            .find("// Typed audit entry-points")
+            .map(|offset| start + offset)
+            .expect("compileMany must end before the typed audit entry points");
+        let body = &source[start..end];
+
+        assert_eq!(
+            body.matches("self.inner.compile_many(").count(),
+            1,
+            "the native boundary must delegate exactly once to the host batch compiler"
+        );
+        for forbidden in ["Linter::", "lint_with_source(", ".lint("] {
+            assert!(
+                !body.contains(forbidden),
+                "compileMany must never enter the lint subsystem; found `{forbidden}`"
+            );
+        }
+    }
 
     /// The per-file `ssrModuleId` used to have no channel on
     /// `NapiCompileProfile` at all — honored on the batch `runtime-render`

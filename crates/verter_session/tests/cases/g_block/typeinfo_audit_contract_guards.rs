@@ -5,7 +5,7 @@
 //!   on `TypeInfoGraphPayload`. No other `RequestKindPayload` arm carries
 //!   the graph degradation fields.
 //! - The `AuditedResult<T, E>` carrier lives in `verter_audit` (NOT
-//!   `verter_protocol`, which is protobuf-authoritative and ts-rs-banned)
+//!   `verter_protocol`, whose typeinfo wire surface is protobuf-authoritative)
 //!   and exports through `audit.generated.ts` via ts-rs.
 
 use std::path::PathBuf;
@@ -107,8 +107,9 @@ pub(crate) fn diagnostics_only_on_typeinfo_graph_payload() {
 #[test]
 fn audited_result_lives_in_audit_and_exports_through_generated_ts() {
     // The AuditedResult<T, E> carrier MUST live in verter_audit (the
-    // crate that owns ts-rs + audit.generated.ts) and MUST NOT live in
-    // verter_protocol (which is protobuf-authoritative and ts-rs-banned).
+    // crate that owns audit.generated.ts) and MUST NOT live in
+    // verter_protocol, whose typeinfo wire surface is
+    // protobuf-authoritative and carries no ts-rs projection.
     // It exports through audit.generated.ts as a generic TS type.
     //
     // Discriminating: move the carrier to verter_protocol, or drop it from

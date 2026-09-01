@@ -767,7 +767,17 @@ impl TsserverTransport {
                     .load(Ordering::Acquire)
                     != epoch
             {
-                continue;
+                if retry_after_preemption {
+                    continue;
+                }
+                // A one-shot background caller (carrier refresh) owns an outer
+                // retry loop that can promote newly-urgent work to the
+                // interactive lane. Report admission-time preemption just like
+                // in-flight preemption; spinning here would hide that priority
+                // upgrade forever under a polling cadence equal to the grace.
+                return Err(TypeProviderError::new(
+                    "tsserver background transaction preempted",
+                ));
             }
             let mut responses = Vec::with_capacity(requests.len());
             let mut preempted = false;
@@ -1567,20 +1577,30 @@ const TSSERVER_SOURCE_FILE_NOT_IN_PROGRAM: &str = "Could not find source file";
 /// projects from their on-disk tsconfigs).
 const TSSERVER_NO_PROJECT: &str = "No Project";
 
+/// TS 6's `IOSession.getPosition` failure when the requested virtual companion
+/// has no `ScriptInfo`. This is the same cold configured-project state as
+/// `getValidSourceFile`'s explicit error above; `reloadProjects` recreates the
+/// plugin-owned external-file membership before the bounded query retry.
+const TSSERVER_SCRIPT_INFO_NOT_READY: &str =
+    "Cannot read properties of undefined (reading 'lineOffsetToPosition')";
+
 /// Does this transport-error message signal the diagnostics companion is not yet
 /// in the program (a transient COLD condition), rather than a terminal failure or
 /// a genuine module-not-found the user must see?
 ///
-/// NARROW by construction: matches the two cold-membership throws —
+/// NARROW by construction: matches the cold-membership throws —
 /// `getValidSourceFile` ("Could not find source file": the configured project
 /// exists but the companion is not yet a `getExternalFiles` member) and
 /// `ThrowNoProject` ("No Project": the carrier's owning configured project is not
-/// loaded at all). Both recover via `reloadProjects`. A genuine `TS2307` arrives
+/// loaded at all), plus TS 6's `getPosition` dereference when the virtual file has
+/// no `ScriptInfo` yet. All recover via `reloadProjects`. A genuine `TS2307` arrives
 /// as a SUCCESS-body diagnostic, so its text never reaches here; transport
 /// timeouts and closed channels are distinct terminal strings that must NOT be
 /// treated as cold.
 fn tsserver_diag_error_is_companion_not_ready(message: &str) -> bool {
-    message.contains(TSSERVER_SOURCE_FILE_NOT_IN_PROGRAM) || message.contains(TSSERVER_NO_PROJECT)
+    message.contains(TSSERVER_SOURCE_FILE_NOT_IN_PROGRAM)
+        || message.contains(TSSERVER_NO_PROJECT)
+        || message.contains(TSSERVER_SCRIPT_INFO_NOT_READY)
 }
 
 /// tsserver's genuine no-hover answer: the engine ANSWERED `quickinfo` with
@@ -1612,7 +1632,7 @@ fn tsserver_error_is_no_content(error: &TypeProviderError) -> bool {
 /// project is still settling, never on a warm pull. Best-effort: a failure is
 /// swallowed so a mid-restart provider never turns a cold-recovery touch into a
 /// hard error.
-async fn recover_companion_membership(transport: &TsserverTransport) {
+async fn recover_companion_membership(transport: &TsserverTransport) -> bool {
     // Singleflight + cooldown: under a hover/diagnostics storm dozens of concurrent
     // cold-miss retries reach here together. Without a gate each would fire its own
     // `reloadProjects` (a full all-projects rebuild), stampeding tsserver. Stamp the
@@ -1623,14 +1643,43 @@ async fn recover_companion_membership(transport: &TsserverTransport) {
         let mut last = transport.membership_recovery.lock().await;
         if let Some(last_fired) = *last {
             if last_fired.elapsed() < MEMBERSHIP_RECOVERY_COOLDOWN {
-                return;
+                return false;
             }
         }
         *last = Some(std::time::Instant::now());
     }
-    let _ = transport
+    transport
         .command_no_response("reloadProjects", serde_json::json!({}))
-        .await;
+        .await
+        .is_ok()
+}
+
+/// Reconcile the plugin-owned managed root as part of cold membership recovery.
+/// `reloadProjects` alone can leave a virtual carrier absent when tsserver has
+/// dropped its `ScriptInfo` but the active working set and store version are
+/// unchanged. Advancing the existing plugin refresh token makes the plugin's
+/// managed-root actor recreate that missing root; the refresh scheduler keeps the
+/// transition singleflight and uses the normal interactive provider lane.
+async fn recover_companion_managed_root(
+    transport: Arc<TsserverTransport>,
+    active_sources: Arc<parking_lot::RwLock<BTreeSet<String>>>,
+    refresh: Arc<TsserverCarrierRefresh>,
+    refresh_generation: &AtomicU64,
+    changed_file: String,
+) {
+    if !recover_companion_membership(&transport).await {
+        return;
+    }
+    let generation = refresh_generation.fetch_add(1, Ordering::Relaxed) + 1;
+    schedule_carrier_refresh(
+        transport,
+        active_sources,
+        Arc::clone(&refresh),
+        generation,
+        changed_file,
+        CarrierRefreshPriority::Interactive,
+    );
+    let _ = wait_for_carrier_refresh(&refresh, generation).await;
 }
 
 /// Parse a `*DiagnosticsSync` response body into a `TypeDiagnostic` vec.
@@ -3494,6 +3543,9 @@ impl TypeProvider for TsserverTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         let project_file_name = self.project_file_name_for(&query_file);
+        let active_sources = Arc::clone(&self.active_carrier_sources);
+        let carrier_refresh = Arc::clone(&self.carrier_refresh);
+        let carrier_refresh_generation = &self.carrier_store_refresh_generation;
         let witness = self.provider_wire_witness();
         Box::pin(async move {
             let (line, col, cache_hit) = {
@@ -3541,7 +3593,14 @@ impl TypeProvider for TsserverTypeProvider {
                                     && recovery_attempts < 2 =>
                             {
                                 recovery_attempts += 1;
-                                recover_companion_membership(&transport).await;
+                                recover_companion_managed_root(
+                                    Arc::clone(&transport),
+                                    Arc::clone(&active_sources),
+                                    Arc::clone(&carrier_refresh),
+                                    carrier_refresh_generation,
+                                    file.clone(),
+                                )
+                                .await;
                                 tokio::task::yield_now().await;
                             }
                             other => break other,
@@ -3842,6 +3901,9 @@ impl TypeProvider for TsserverTypeProvider {
         let content_generations = Arc::clone(&self.content_generations);
         let carrier_companions = Arc::clone(&self.carrier_companions);
         let normalize_response_paths = self.normalize_response_paths_to_companions;
+        let active_sources = Arc::clone(&self.active_carrier_sources);
+        let carrier_refresh = Arc::clone(&self.carrier_refresh);
+        let carrier_refresh_generation = &self.carrier_store_refresh_generation;
         // Route a carrier companion's diagnostic passes to its OWNING configured
         // project (so `semanticDiagnosticsSync` type-checks it where
         // `getExternalFiles` admitted it, not a fresh inferred project that returns
@@ -3919,7 +3981,14 @@ impl TypeProvider for TsserverTypeProvider {
                             && recovery_attempts < 2 =>
                     {
                         recovery_attempts += 1;
-                        recover_companion_membership(&transport).await;
+                        recover_companion_managed_root(
+                            Arc::clone(&transport),
+                            Arc::clone(&active_sources),
+                            Arc::clone(&carrier_refresh),
+                            carrier_refresh_generation,
+                            file.clone(),
+                        )
+                        .await;
                         tokio::task::yield_now().await;
                     }
                     _ => break (semantic, syntactic, suggestion),

@@ -117,6 +117,19 @@ pub struct ComponentMetaResultEntry<P> {
     pub validated_at_generation: u64,
 }
 
+/// Evidence carrier for the exact final-result entry admitted by one cold
+/// component-meta computation.
+///
+/// This remains crate-private: downstream consumers may retain a projection
+/// witness derived from it, but may not inspect or substitute the admitted
+/// entry's fact signature.
+#[derive(Clone)]
+pub(crate) struct AdmittedComponentMetaResult<P> {
+    pub(crate) key: ComponentMetaResultKey,
+    pub(crate) owner_whole_hash: Hash16,
+    pub(crate) entry: Arc<ComponentMetaResultEntry<P>>,
+}
+
 /// Caller-supplied, value-side portion of a component-meta admission
 /// decision. It deliberately carries no fact signature: only
 /// [`ComponentMetaResultDb::compute_and_admit`] can attach the evidence
@@ -638,9 +651,29 @@ impl<P> ComponentMetaResultDb<P> {
         Compute: FnOnce() -> R,
         Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
     {
+        self.compute_and_admit_with_entry(host, canonical, path_label, compute, decide)
+            .0
+    }
+
+    /// Variant of [`Self::compute_and_admit`] that also returns the exact
+    /// entry admitted by this invocation. A refused or non-cacheable result
+    /// returns no carrier even though its fresh value remains caller-visible.
+    pub(crate) fn compute_and_admit_with_entry<R, Compute, Decide>(
+        &self,
+        host: &crate::VerterHost,
+        canonical: &str,
+        path_label: &str,
+        compute: Compute,
+        decide: Decide,
+    ) -> (R, Option<AdmittedComponentMetaResult<P>>)
+    where
+        Compute: FnOnce() -> R,
+        Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
+    {
         let (value, read_set) =
             host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, compute);
         let finalise = read_set.finalise();
+        let mut admitted = None;
         match finalise {
             crate::resolver_core::FactReadSetFinalise::Ok(facts) => match decide(&value) {
                 ComponentMetaPublishDecision::Publish {
@@ -650,18 +683,19 @@ impl<P> ComponentMetaResultDb<P> {
                     validated_at_generation,
                 } => {
                     let admitted_facts = strip_owner_route_fact(&key.owner_canonical, &facts);
-                    self.insert_owned(
+                    let entry = Arc::new(ComponentMetaResultEntry {
+                        payload,
+                        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
+                            admitted_facts,
+                        ),
+                        validated_at_generation,
+                    });
+                    self.insert_owned(key.clone(), owner_whole_hash, entry.as_ref().clone());
+                    admitted = Some(AdmittedComponentMetaResult {
                         key,
                         owner_whole_hash,
-                        ComponentMetaResultEntry {
-                            payload,
-                            read_set_signature:
-                                crate::fact_signature_helpers::ReadSetSignature::new(
-                                    admitted_facts,
-                                ),
-                            validated_at_generation,
-                        },
-                    );
+                        entry,
+                    });
                 }
                 ComponentMetaPublishDecision::ReturnOnly(reason) => {
                     crate::cache_runtime::admission::propagate_non_admission(reason);
@@ -707,7 +741,7 @@ impl<P> ComponentMetaResultDb<P> {
                 );
             }
         }
-        value
+        (value, admitted)
     }
 
     /// Insert a final result entry for the given owner content version.

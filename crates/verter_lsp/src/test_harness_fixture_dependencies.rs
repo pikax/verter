@@ -261,7 +261,14 @@ fn reap_unowned_stage_areas(root: &std::path::Path, pending_cutoff: std::time::S
 /// removed anyway is leaseless, so kept forever. Keeping the lease keeps the
 /// pair reclaimable on the next pass instead.
 fn reclaim_stage_area(area: &std::path::Path) {
-    let _ = std::fs::remove_dir_all(area);
+    reclaim_stage_area_with(area, |path| std::fs::remove_dir_all(path));
+}
+
+fn reclaim_stage_area_with(
+    area: &std::path::Path,
+    remove_area: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
+) {
+    let _ = remove_area(area);
     if area.exists() {
         return;
     }
@@ -1304,40 +1311,22 @@ mod tests {
         let root = temporary.path().join("verter-fixture-stage");
         std::fs::create_dir_all(&root).expect("create staging root");
 
-        // An unowned area with a removal blocker inside it, and the unheld
-        // sibling lease its dead owner left behind.
+        // An unowned area and the unheld sibling lease its dead owner left
+        // behind. Inject the removal failure at the syscall seam: filesystem
+        // permissions do not discriminate when the test runner is root (as it
+        // is under act/Docker), while the production wrapper still passes the
+        // real `remove_dir_all` function through this exact path.
         let area = root.join(format!("{STAGE_PUBLISHED}stuck-reclaim"));
-        let blocker_dir = area.join("blocker");
-        std::fs::create_dir_all(&blocker_dir).expect("plant blocker dir");
-        let pinned = blocker_dir.join("pinned.txt");
-        std::fs::write(&pinned, b"pinned").expect("plant pinned file");
-        // Windows blocker: a handle opened WITHOUT `FILE_SHARE_DELETE`. Rust's
-        // default open grants all three share flags, and `remove_dir_all` sets
-        // `IGNORE_READONLY_ATTRIBUTE`, so neither a plain handle nor a readonly
-        // attribute blocks removal — a no-share-delete handle is the one thing
-        // its POSIX-semantics deletion cannot override.
-        #[cfg(windows)]
-        let pin_handle = {
-            use std::os::windows::fs::OpenOptionsExt;
-            const FILE_SHARE_READ_WRITE_ONLY: u32 = 0x1 | 0x2;
-            std::fs::OpenOptions::new()
-                .read(true)
-                .share_mode(FILE_SHARE_READ_WRITE_ONLY)
-                .open(&pinned)
-                .expect("pin the file with a no-share-delete handle")
-        };
-        // POSIX blocker: a read-only DIRECTORY refuses unlinking its children
-        // (open handles do not gate unlink there; the parent's mode does).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&blocker_dir, std::fs::Permissions::from_mode(0o555))
-                .expect("pin the blocker dir read-only");
-        }
+        std::fs::create_dir_all(&area).expect("plant reclaimable area");
         let lease = root.join(format!("{STAGE_LEASE_PREFIX}stuck-reclaim"));
         drop(std::fs::File::create(&lease).expect("create unheld sibling lease"));
 
-        reap_unowned_stage_areas(&root, std::time::UNIX_EPOCH);
+        reclaim_stage_area_with(&area, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected removal refusal",
+            ))
+        });
 
         assert!(
             area.exists(),
@@ -1357,16 +1346,7 @@ mod tests {
             area.display()
         );
 
-        // Clear the blockers: the next pass must heal the debris completely.
-        #[cfg(windows)]
-        drop(pin_handle);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&blocker_dir, std::fs::Permissions::from_mode(0o755))
-                .expect("unpin the blocker dir");
-        }
-
+        // The next real removal must heal the debris completely.
         reap_unowned_stage_areas(&root, std::time::UNIX_EPOCH);
         assert!(
             !area.exists() && !lease.exists(),

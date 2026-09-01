@@ -298,6 +298,10 @@ pub mod host_lsp_audit;
 pub mod host_manage;
 pub mod host_mcp_audit;
 mod host_resolve;
+pub use host_resolve::native_host_binding::{
+    BoundNativeHostRequest, BoundSourceSnapshotIdentity, BoundSvelteNativeHost, BoundVueNativeHost,
+    NativeHostBindingUnavailable, NativeHostRequestAttribution,
+};
 pub mod host_resolve_type_audit;
 mod host_semantic;
 #[cfg(test)]
@@ -319,6 +323,8 @@ pub(crate) mod mapper_binder_registry;
 pub mod meta;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod runtime_render_lane_tests;
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+mod test_worker_pools;
 
 #[cfg(test)]
 mod artifact_root_retention_tests;
@@ -444,6 +450,10 @@ use rustc_hash::FxHashMap;
 #[cfg(test)]
 use shared::default_shared;
 use shared::Shared;
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+pub use test_worker_pools::{
+    TestHostWorkerPoolIds, TestHostWorkerPools, TestHostWorkerPoolsReceipt,
+};
 
 /// Central file store and compile cache for Vue SFC compilation.
 ///
@@ -549,44 +559,6 @@ pub struct VerterHost {
     /// `Arc<AuditRecordsStore>`, so writes through either surface land in
     /// the same map.
     pub(crate) host_audit_runtime: Arc<crate::host_audit_runtime::HostAuditRuntime>,
-    /// Cumulative host-level test audit state — accessible via
-    /// [`Self::audit`] (test-only). Counters increment from
-    /// `#[cfg(test)]` hooks at the production read / shallow-process
-    /// sites; the lowering count is read from the graph store's
-    /// existing `stats_snapshot`.
-    #[cfg(test)]
-    pub(crate) test_audit: Arc<crate::host_test_audit::HostTestAuditState>,
-    /// Test-only observable: records the most recent priority
-    /// passed to [`VerterHost::upsert_with_priority`]. Read by
-    /// `compile_many_propagates_interactive_priority` and
-    /// `compile_many_priority_default_is_background` to confirm that
-    /// `compile_many` propagates the caller-configured priority into
-    /// the scheduler submit site. **Compiled out in production builds.**
-    #[cfg(test)]
-    pub(crate) last_upsert_priority: parking_lot::Mutex<Option<verter_scheduler::stage::Priority>>,
-    /// Test-only observable: incremented at the very top of
-    /// `host_compile::compile_one_in_batch` (BEFORE the precomputed-error
-    /// short-circuit so every invocation is counted). Read by
-    /// `compile_many_compiles_each_canonical_once` to discriminate the
-    /// "compile each unique canonical group exactly once" invariant.
-    /// **Compiled out in production builds.**
-    #[cfg(test)]
-    pub(crate) compile_one_call_count: std::sync::atomic::AtomicUsize,
-    /// Test-only observable: records the `CallerKind` reported by
-    /// `CallerKind::current()` on each `compile_one_in_batch` worker.
-    /// Stored as a `u8` tag so the field is lock-free and the discrete
-    /// caller-kind discriminator is exposed without a `CallerKind`
-    /// import in non-test code. Encoding: `0 = unobserved`, `1 = External`,
-    /// `2 = Driver`, `3 = CpuWorker`, `4 = IoWorker`, `5 = Inline`.
-    /// Read by `compile_many_workers_carry_host_cpu_pool_id`
-    /// (secondary caller-kind canary, alongside the primary
-    /// pool-id-token assertion read from
-    /// `compile_one_host_cpu_pool_token`) to confirm the dual-pool
-    /// isolation invariant: workers running `compile_one_in_batch`
-    /// MUST report `External` (host pool) rather than `CpuWorker`
-    /// (scheduler pool). **Compiled out in production builds.**
-    #[cfg(test)]
-    pub(crate) compile_one_caller_kind_tag: std::sync::atomic::AtomicU8,
     /// Test-only host-CPU-pool identity token observed by
     /// `compile_one_in_batch`. `usize::MAX` means unobserved/not on a
     /// host pool; otherwise it must equal `host_cpu_pool().pool_id()`.
@@ -844,6 +816,11 @@ pub struct VerterHost {
     /// Per-host so an overflow forced on one host's tracer never bumps
     /// the counter a different host's delta assertion reads.
     pub(crate) signature_overflow_at_install: std::sync::atomic::AtomicU64,
+    /// Exclusive ownership token for a shared test worker substrate. Declared
+    /// last so it is released only after every production host field (including
+    /// the scheduler/driver) has been dropped.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub(crate) _test_worker_pool_lease: Option<crate::test_worker_pools::TestHostWorkerPoolLease>,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.

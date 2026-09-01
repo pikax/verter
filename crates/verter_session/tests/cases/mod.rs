@@ -1,8 +1,6 @@
 //! Private sorted manifest of the consolidated integration-test
-//! entries. One `mod <entry>;` per former top-level
-//! `tests/<entry>.rs` target (and the former
-//! `tests/component_meta_audit_corpus/` directory target). Each
-//! entry is its own module so per-entry helpers stay in disjoint
+//! entries. One `mod <entry>;` per consolidated top-level test entry.
+//! Each entry is its own module so per-entry helpers stay in disjoint
 //! scopes — do NOT centralise shared helpers here, and keep this
 //! list sorted. Support-only includes (e.g.
 //! `support/audit_hot_loop_denylist.rs`) are reached via `#[path]`
@@ -12,12 +10,13 @@
 mod architecture_guards;
 mod capability_matrix_css_family_rows_ratified;
 mod carrier_byte_parity;
+mod carrier_compile_routing_gate;
 mod carrier_coordinator_route_guard;
 mod carrier_encapsulation_guards;
 mod carrier_routing_no_vue_gate;
 mod client_framework_manifest_ts_freshness;
 mod component_meta_audit;
-mod component_meta_audit_corpus;
+mod corpus_audit_layout;
 mod corpus_audit_tests;
 mod css_attribution_chargeable;
 mod defect_b_corpus_prevention_gate;
@@ -44,6 +43,7 @@ mod g_resolved;
 mod g_route;
 mod g_session;
 mod g_type;
+mod host_backend_routing_guards;
 mod host_preset_policy;
 mod integration_test_layout_guard;
 mod native_content_handoff;
@@ -58,8 +58,6 @@ mod runtime_constructor_matrix;
 mod shared_process_contract;
 mod style_dialect_admission;
 mod style_native_analysis_preprocessor_boundary;
-mod svelte_compiler_block1;
-mod svelte_compiler_block1_guards;
 mod svelte_jsx_shim_freshness;
 mod svelte_rune_module_guards;
 mod svelte_typecheck_gate;

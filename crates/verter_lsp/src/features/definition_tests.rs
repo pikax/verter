@@ -16,6 +16,18 @@ fn make_analysis(
     }
 }
 
+fn exact_svelte_snippet_role() -> verter_type_expr::PropCallableRole {
+    verter_type_expr::PropCallableRole::SvelteSnippet {
+        symbol: verter_type_expr::ResolvedSymbolIdentity {
+            canonical_id: std::sync::Arc::from("/node_modules/svelte/index.d.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: std::sync::Arc::from("Snippet"),
+        },
+        exactness: verter_type_expr::ResolutionExactness::ExactSymbolic,
+        provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,
+    }
+}
+
 #[test]
 fn test_go_to_definition_from_template_to_script_via_span() {
     let source =
@@ -67,6 +79,635 @@ fn test_go_to_definition_from_template_to_script_via_span() {
         assert_eq!(loc.range.start.character, 6); // after "const "
     } else {
         panic!("expected scalar location");
+    }
+}
+
+/// Script member access can be incomplete while the provider projection is
+/// between updates.  A same-file authored binding remains source-authoritative
+/// after import resolution, for every carrier/framework script flavour.
+#[test]
+fn incomplete_script_member_access_resolves_same_file_binding() {
+    for (open, close, uri_hint) in [
+        ("<script setup lang=\"ts\">", "</script>", "vue-ts"),
+        ("<script setup>", "</script>", "vue-js"),
+        ("<script lang=\"ts\">", "</script>", "svelte-ts"),
+        ("<script>", "</script>", "svelte-js"),
+    ] {
+        let source = format!("{open}\nconst localState = {{}};\nlocalState.\n{close}");
+        let source = source.as_str();
+        let blocks = test_carrier_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+        let declaration = source.find("localState").expect("declaration");
+        let use_offset = source.rfind("localState.").expect("member use");
+        let analysis = make_analysis(
+            vec![AnalyzedBinding {
+                name: "localState".to_string(),
+                kind: AnalyzedBindingKind::Const,
+                is_reactive: false,
+                reactivity_kind: ReactivityKind::None,
+                type_annotation: None,
+                initializer: None,
+                span: verter_span::Span::new(
+                    declaration as u32,
+                    (declaration + "localState".len()) as u32,
+                ),
+                used_in_script: true,
+                used_in_style: false,
+            }],
+            vec![],
+            vec![],
+        );
+        let position = line_index
+            .offset_to_position(use_offset as u32)
+            .expect("usage position");
+        let result = definition_at_position(
+            &position,
+            source,
+            &blocks,
+            Some(&analysis),
+            &line_index,
+            None,
+            None,
+            None,
+        )
+        .unwrap_or_else(|| panic!("{uri_hint}: same-file binding must resolve"));
+        let location = match result {
+            GotoDefinitionResponse::Scalar(location) => location,
+            other => panic!("{uri_hint}: expected scalar definition, got {other:?}"),
+        };
+        assert_eq!(
+            location.range.start,
+            line_index
+                .offset_to_position(declaration as u32)
+                .expect("declaration position"),
+            "{uri_hint}: member root must target the authored declaration"
+        );
+
+        let unknown_offset = source.rfind("localState.").unwrap();
+        let unknown_source = source.replacen("localState.", "unknownState.", 1);
+        let unknown_index = LineIndex::new_utf16(&unknown_source);
+        let unknown_position = unknown_index
+            .offset_to_position(unknown_offset as u32)
+            .expect("unknown position");
+        assert!(
+            definition_at_position(
+                &unknown_position,
+                &unknown_source,
+                &test_carrier_blocks(&unknown_source),
+                Some(&analysis),
+                &unknown_index,
+                None,
+                None,
+                None,
+            )
+            .is_none(),
+            "{uri_hint}: an unbound member root must stay unresolved"
+        );
+    }
+}
+
+#[test]
+fn svelte_render_callee_definitions_are_authored_source_spans() {
+    for script_open in ["<script lang=\"ts\">", "<script>"] {
+        let local_source = format!(
+            "{script_open}\n</script>\n{{#snippet localRow(item)}}{{/snippet}}\n{{@render localRow()}}"
+        );
+        let local_source = local_source.as_str();
+        let local_declaration = local_source.find("localRow").unwrap();
+        let local_use = local_source.rfind("localRow").unwrap();
+        let local_analysis = FileAnalysisSnapshot {
+            template: Some(
+                TemplateAnalysisSnapshot {
+                    snippet_definitions: vec![SnippetDefinition {
+                        name: "localRow".to_string(),
+                        span: verter_span::Span::new(
+                            local_declaration as u32,
+                            (local_declaration + "localRow".len()) as u32,
+                        ),
+                        params_text: Some("item".to_string()),
+                    }],
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        };
+        assert_render_definition_targets_authored_span(
+            local_source,
+            &local_analysis,
+            local_use,
+            local_declaration,
+        );
+
+        let prop_source = format!(
+            "{script_open}\nlet {{ incomingRow }}: {{ incomingRow: Snippet }} = $props();\n</script>\n{{@render incomingRow()}}"
+        );
+        let prop_source = prop_source.as_str();
+        let prop_declaration = prop_source.find("incomingRow").unwrap();
+        let prop_use = prop_source.rfind("incomingRow").unwrap();
+        let prop_analysis = FileAnalysisSnapshot {
+            template: Some(
+                TemplateAnalysisSnapshot {
+                    prop_definitions: vec![AnalyzedPropDefinition {
+                        name: "incomingRow".to_string(),
+                        callable_role: exact_svelte_snippet_role(),
+                        type_annotation: Some("Snippet".to_string()),
+                        has_default: false,
+                        is_required: true,
+                        is_boolean: false,
+                        used_in_template: true,
+                        used_in_script: false,
+                        span: verter_span::Span::new(
+                            prop_declaration as u32,
+                            (prop_declaration + "incomingRow".len()) as u32,
+                        ),
+                    }],
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        };
+        assert_render_definition_targets_authored_span(
+            prop_source,
+            &prop_analysis,
+            prop_use,
+            prop_declaration,
+        );
+    }
+}
+
+#[test]
+fn svelte_local_render_definition_uses_registered_structure_without_template_analysis() {
+    let source =
+        "<script>\nlet unrelated = 1;\n</script>\n{#snippet localRow(item)}{/snippet}\n{@render localRow(unrelated)}";
+    let structure = crate::documents::carrier_structure::test_structure(source, true);
+    let blocks = crate::documents::carrier_structure::project_carrier_blocks(&structure);
+    let line_index = LineIndex::new_utf16(source);
+    let declaration = source.find("localRow").expect("snippet declaration");
+    let usage = source.rfind("localRow").expect("render callee");
+    let position = line_index
+        .offset_to_position(usage as u32)
+        .expect("render position");
+
+    for analysis in [None, Some(&FileAnalysisSnapshot::default())] {
+        let result = definition_at_position(
+            &position,
+            source,
+            &blocks,
+            analysis,
+            &line_index,
+            None,
+            None,
+            Some(&structure),
+        )
+        .expect("registered parser structure owns the local snippet definition");
+        let GotoDefinitionResponse::Scalar(location) = result else {
+            panic!("expected scalar local definition, got {result:?}");
+        };
+        assert_eq!(location.uri.as_str(), SAME_FILE_URI_STR);
+        assert_eq!(
+            location.range,
+            Range::new(
+                line_index
+                    .offset_to_position(declaration as u32)
+                    .expect("declaration start"),
+                line_index
+                    .offset_to_position((declaration + "localRow".len()) as u32)
+                    .expect("declaration end"),
+            )
+        );
+    }
+}
+
+#[test]
+fn svelte_local_render_definition_uses_nearest_visible_lexical_snippet() {
+    let source = "{#snippet row()}{/snippet}\n{#if true}\n  {#snippet row()}{/snippet}\n  {@render row()}\n{/if}\n{@render row()}";
+    let structure = crate::documents::carrier_structure::test_structure(source, true);
+    let top_declaration = source.find("row").expect("top declaration") as u32;
+    let nested_declaration = source[top_declaration as usize + 1..]
+        .find("row")
+        .map(|offset| offset as u32 + top_declaration + 1)
+        .expect("nested declaration");
+    let nested_use = source.find("{@render row").expect("nested use") + "{@render ".len();
+    let top_use = source.rfind("{@render row").expect("top use") + "{@render ".len();
+
+    assert_eq!(
+        crate::documents::carrier_structure::svelte_local_render_snippet_definition_at(
+            &structure,
+            nested_use as u32,
+        )
+        .map(|span| span.start),
+        Some(nested_declaration),
+    );
+    assert_eq!(
+        crate::documents::carrier_structure::svelte_local_render_snippet_definition_at(
+            &structure,
+            top_use as u32,
+        )
+        .map(|span| span.start),
+        Some(top_declaration),
+    );
+
+    let ambiguous = "{#snippet row()}{/snippet}\n{#snippet row()}{/snippet}\n{@render row()}";
+    let ambiguous_structure = crate::documents::carrier_structure::test_structure(ambiguous, true);
+    let use_offset = ambiguous.rfind("row").expect("ambiguous render use");
+    assert!(
+        crate::documents::carrier_structure::svelte_local_render_snippet_definition_at(
+            &ambiguous_structure,
+            use_offset as u32,
+        )
+        .is_none(),
+        "duplicate declarations in one lexical scope must fail closed"
+    );
+}
+
+fn parser_local_render_definition_start(source: &str) -> Option<u32> {
+    let structure = crate::documents::carrier_structure::test_structure(source, true);
+    let render = source
+        .rfind("{@render row")
+        .expect("fixture must contain a row render")
+        + "{@render ".len();
+    crate::documents::carrier_structure::svelte_local_render_snippet_definition_at(
+        &structure,
+        render as u32,
+    )
+    .map(|span| span.start)
+}
+
+fn parser_local_snippet_start(source: &str, needle: &str) -> u32 {
+    (source.find(needle).expect("fixture snippet declaration") + "{#snippet ".len()) as u32
+}
+
+#[test]
+fn svelte_local_render_definition_respects_clause_branch_scopes() {
+    for (label, source) in [
+        (
+            "if main is hidden from else",
+            "{#if true}{#snippet row()}{/snippet}{:else}{@render row()}{/if}",
+        ),
+        (
+            "each main is hidden from else",
+            "{#each [] as item}{#snippet row()}{/snippet}{:else}{@render row()}{/each}",
+        ),
+        (
+            "await main is hidden from then",
+            "{#await promise}{#snippet row()}{/snippet}{:then value}{@render row()}{/await}",
+        ),
+        (
+            "await main is hidden from catch",
+            "{#await promise}{#snippet row()}{/snippet}{:catch error}{@render row()}{/await}",
+        ),
+    ] {
+        assert_eq!(
+            parser_local_render_definition_start(source),
+            None,
+            "{label}"
+        );
+    }
+
+    for (label, source, declaration) in [
+        (
+            "else-local snippet is visible",
+            "{#if true}{:else}{#snippet row()}{/snippet}{@render row()}{/if}",
+            "{#snippet row",
+        ),
+        (
+            "then-local snippet is visible",
+            "{#await promise}{:then value}{#snippet row()}{/snippet}{@render row()}{/await}",
+            "{#snippet row",
+        ),
+        (
+            "catch-local snippet is visible",
+            "{#await promise}{:catch error}{#snippet row()}{/snippet}{@render row()}{/await}",
+            "{#snippet row",
+        ),
+        (
+            "root snippet is visible from else",
+            "{#snippet row()}{/snippet}{#if true}{:else}{@render row()}{/if}",
+            "{#snippet row",
+        ),
+        (
+            "root snippet is visible from each else",
+            "{#snippet row()}{/snippet}{#each [] as item}{:else}{@render row()}{/each}",
+            "{#snippet row",
+        ),
+    ] {
+        assert_eq!(
+            parser_local_render_definition_start(source),
+            Some(parser_local_snippet_start(source, declaration)),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn svelte_local_render_definition_stops_at_opaque_binding_scopes() {
+    for (label, source) in [
+        (
+            "each item shadows outer snippet",
+            "{#snippet row()}{/snippet}{#each [] as row}{@render row()}{/each}",
+        ),
+        (
+            "each index shadows outer snippet",
+            "{#snippet row()}{/snippet}{#each [] as item, row}{@render row()}{/each}",
+        ),
+        (
+            "inline then binding shadows outer snippet",
+            "{#snippet row()}{/snippet}{#await promise then row}{@render row()}{/await}",
+        ),
+        (
+            "inline catch binding shadows outer snippet",
+            "{#snippet row()}{/snippet}{#await promise catch row}{@render row()}{/await}",
+        ),
+        (
+            "then clause binding shadows outer snippet",
+            "{#snippet row()}{/snippet}{#await promise}{:then row}{@render row()}{/await}",
+        ),
+        (
+            "catch clause binding shadows outer snippet",
+            "{#snippet row()}{/snippet}{#await promise}{:catch row}{@render row()}{/await}",
+        ),
+        (
+            "snippet parameters shadow outer snippet",
+            "{#snippet row()}{/snippet}{#snippet wrapper(row)}{@render row()}{/snippet}",
+        ),
+    ] {
+        assert_eq!(
+            parser_local_render_definition_start(source),
+            None,
+            "{label}"
+        );
+    }
+
+    let parameterless = "{#snippet row()}{/snippet}{#snippet wrapper()}{@render row()}{/snippet}";
+    assert_eq!(
+        parser_local_render_definition_start(parameterless),
+        Some(parser_local_snippet_start(parameterless, "{#snippet row")),
+        "an empty snippet parameter span must not block the outer declaration"
+    );
+}
+
+#[test]
+fn svelte_render_lexical_visibility_fences_script_root_bindings() {
+    use crate::documents::carrier_structure::{
+        svelte_render_lexical_visibility_at, SvelteRenderLexicalVisibility,
+    };
+
+    for (label, source) in [
+        ("each binding", "{#each [] as row}{@render row()}{/each}"),
+        (
+            "await binding",
+            "{#await promise then row}{@render row()}{/await}",
+        ),
+        (
+            "snippet parameter",
+            "{#snippet wrapper(row)}{@render row()}{/snippet}",
+        ),
+    ] {
+        let structure = crate::documents::carrier_structure::test_structure(source, true);
+        let offset = source.rfind("row").expect("render callee") as u32;
+        assert_eq!(
+            svelte_render_lexical_visibility_at(&structure, offset),
+            Some(SvelteRenderLexicalVisibility::Blocked),
+            "{label} must hide script-root identities"
+        );
+    }
+
+    let script_root = "{@render row()}";
+    let structure = crate::documents::carrier_structure::test_structure(script_root, true);
+    assert_eq!(
+        svelte_render_lexical_visibility_at(&structure, script_root.rfind("row").unwrap() as u32),
+        Some(SvelteRenderLexicalVisibility::ScriptRootVisible)
+    );
+
+    let local = "{#snippet row()}{/snippet}{@render row()}";
+    let structure = crate::documents::carrier_structure::test_structure(local, true);
+    assert!(matches!(
+        svelte_render_lexical_visibility_at(&structure, local.rfind("row").unwrap() as u32),
+        Some(SvelteRenderLexicalVisibility::LocalSnippet(_))
+    ));
+
+    let ambiguous = "{#snippet row()}{/snippet}{#snippet row()}{/snippet}{@render row()}";
+    let structure = crate::documents::carrier_structure::test_structure(ambiguous, true);
+    assert_eq!(
+        svelte_render_lexical_visibility_at(&structure, ambiguous.rfind("row").unwrap() as u32),
+        Some(SvelteRenderLexicalVisibility::Ambiguous)
+    );
+}
+
+#[test]
+fn svelte_local_render_nested_clause_skips_only_its_own_controller_scope() {
+    let source =
+        "{#if true}{#snippet row()}{/snippet}{#if true}inner{:else}{@render row()}{/if}{/if}";
+    assert_eq!(
+        parser_local_render_definition_start(source),
+        Some(parser_local_snippet_start(source, "{#snippet row")),
+        "the inner clause must skip its controller but retain the genuine outer clause scope"
+    );
+}
+
+fn assert_render_definition_targets_authored_span(
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+    use_offset: usize,
+    declaration_offset: usize,
+) {
+    let structure = crate::documents::carrier_structure::test_structure(source, true);
+    let blocks = crate::documents::carrier_structure::project_carrier_blocks(&structure);
+    let line_index = LineIndex::new_utf16(source);
+    let position = line_index
+        .offset_to_position(use_offset as u32)
+        .expect("render use position");
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(analysis),
+        &line_index,
+        None,
+        None,
+        Some(&structure),
+    )
+    .expect("render callee must resolve natively");
+    let location = match result {
+        GotoDefinitionResponse::Scalar(location) => location,
+        other => panic!("expected scalar authored definition, got {other:?}"),
+    };
+    assert_eq!(location.uri.as_str(), SAME_FILE_URI_STR);
+    assert_eq!(
+        location.range.start,
+        line_index
+            .offset_to_position(declaration_offset as u32)
+            .expect("declaration position")
+    );
+    assert!(
+        !location.uri.as_str().contains("node_modules"),
+        "Svelte render definitions must never expose package declarations: {location:?}"
+    );
+}
+
+#[test]
+fn svelte_render_callee_without_snippet_identity_uses_normal_navigation() {
+    let source = "<script lang=\"ts\">\nimport { remoteRow } from './rows';\nconst dynamicRow = makeCallable();\n</script>\n{@render remoteRow()}\n{@render dynamicRow()}";
+    let structure = crate::documents::carrier_structure::test_structure(source, true);
+    let blocks = crate::documents::carrier_structure::project_carrier_blocks(&structure);
+    let line_index = LineIndex::new_utf16(source);
+    let import_declaration = source.find("remoteRow").unwrap();
+    let dynamic_declaration = source.find("dynamicRow").unwrap();
+    let analysis = make_analysis(
+        vec![AnalyzedBinding {
+            name: "dynamicRow".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: false,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(
+                dynamic_declaration as u32,
+                (dynamic_declaration + "dynamicRow".len()) as u32,
+            ),
+            used_in_script: false,
+            used_in_style: false,
+        }],
+        vec![AnalyzedImport {
+            source: "./rows".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "remoteRow".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
+                is_type_only: false,
+                vue_api: None,
+                span: verter_span::Span::new(
+                    import_declaration as u32,
+                    (import_declaration + "remoteRow".len()) as u32,
+                ),
+            }],
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: Some("/ws/rows.ts".to_string()),
+        }],
+        vec![],
+    );
+
+    let target_uri: Uri = "file:///ws/rows.ts".parse().unwrap();
+    let target_uri_for_resolver = target_uri.clone();
+    let resolve_export = move |canonical: &str, binding: &str| {
+        (canonical == "/ws/rows.ts" && binding == "remoteRow").then(|| Location {
+            uri: target_uri_for_resolver.clone(),
+            range: Range::default(),
+        })
+    };
+    let remote_use = source.rfind("remoteRow").unwrap();
+    let remote_position = line_index.offset_to_position(remote_use as u32).unwrap();
+    let remote = definition_at_position(
+        &remote_position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        Some(&resolve_export),
+        Some(&structure),
+    )
+    .expect("an imported ordinary callable keeps normal cross-file navigation");
+    match remote {
+        GotoDefinitionResponse::Scalar(location) => assert_eq!(location.uri, target_uri),
+        other => panic!("expected imported scalar definition, got {other:?}"),
+    }
+
+    let dynamic_use = source.rfind("dynamicRow").unwrap();
+    let dynamic_position = line_index.offset_to_position(dynamic_use as u32).unwrap();
+    let dynamic = definition_at_position(
+        &dynamic_position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        Some(&structure),
+    );
+    assert!(
+        dynamic.is_none(),
+        "an ordinary dynamic Svelte render callable remains provider-owned"
+    );
+    assert!(
+        !source_authoritative_svelte_render_offset(
+            dynamic_use as u32,
+            source,
+            &analysis,
+            Some(&structure),
+        ),
+        "ordinary dynamic callables must not suppress the provider definition path"
+    );
+}
+
+#[test]
+fn svelte_render_source_authority_is_limited_to_the_static_callee_token() {
+    let source =
+        "{#snippet row()}{/snippet}\n{@render row()}\n{@render other(row)}\n{@render obj.row()}";
+    let structure = crate::documents::carrier_structure::test_structure(source, true);
+    let blocks = crate::documents::carrier_structure::project_carrier_blocks(&structure);
+    let declaration = source.find("row").unwrap();
+    let analysis = FileAnalysisSnapshot {
+        template: Some(
+            TemplateAnalysisSnapshot {
+                snippet_definitions: vec![SnippetDefinition {
+                    name: "row".to_string(),
+                    span: verter_span::Span::new(
+                        declaration as u32,
+                        (declaration + "row".len()) as u32,
+                    ),
+                    params_text: None,
+                }],
+                ..Default::default()
+            }
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let direct = source.find("{@render row").unwrap() + "{@render ".len();
+    assert!(source_authoritative_svelte_render_offset(
+        direct as u32,
+        source,
+        &analysis,
+        Some(&structure),
+    ));
+
+    for (label, collision) in [
+        (
+            "argument",
+            source.find("other(row)").unwrap() + "other(".len(),
+        ),
+        ("member", source.find("obj.row").unwrap() + "obj.".len()),
+    ] {
+        assert!(
+            !source_authoritative_svelte_render_offset(
+                collision as u32,
+                source,
+                &analysis,
+                Some(&structure),
+            ),
+            "a colliding snippet name in the {label} position must remain provider-owned"
+        );
+        let line_index = LineIndex::new_utf16(source);
+        let position = line_index.offset_to_position(collision as u32).unwrap();
+        assert!(
+            definition_at_position(
+                &position,
+                source,
+                &blocks,
+                Some(&analysis),
+                &line_index,
+                None,
+                None,
+                Some(&structure),
+            )
+            .is_none(),
+            "native definition authority must not capture the {label} collision"
+        );
     }
 }
 

@@ -1,0 +1,17 @@
+error[E0599]: no method named `template_data` found for reference `&C` in the current scope
+  --> tests/cases/compile-fail/carrier_compiler_template_data_unnameable.rs:10:22
+   |
+10 |     let _ = compiler.template_data(source, artifact);
+   |                      ^^^^^^^^^^^^^ method not found in `&C`
+
+error[E0599]: no method named `template_data` found for struct `VueCarrierCompiler` in the current scope
+  --> tests/cases/compile-fail/carrier_compiler_template_data_unnameable.rs:14:32
+   |
+14 |     let _ = VueCarrierCompiler.template_data(source, artifact);
+   |                                ^^^^^^^^^^^^^ method not found in `VueCarrierCompiler`
+
+error[E0599]: no method named `template_data` found for struct `SvelteCarrierCompiler` in the current scope
+  --> tests/cases/compile-fail/carrier_compiler_template_data_unnameable.rs:18:35
+   |
+18 |     let _ = SvelteCarrierCompiler.template_data(source, artifact);
+   |                                   ^^^^^^^^^^^^^ method not found in `SvelteCarrierCompiler`

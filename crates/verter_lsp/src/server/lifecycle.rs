@@ -649,13 +649,13 @@ pub(super) async fn handle_did_open(
     {
         if let Ok(import_ids) = &imported_carrier_priority_ids {
             for import_id in import_ids {
-                let should_sync =
-                    !server.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
-                if should_sync {
-                    let _ = server
-                        .sync_imported_carrier_api_lightweight(import_id)
-                        .await;
-                }
+                // The common imported-child wrapper owns TWO publications:
+                // provider bytes and the LSP-only component contract. An
+                // already-loaded API companion may still be missing/stale in
+                // the contract cache, so never bypass the wrapper here.
+                let _ = server
+                    .sync_imported_carrier_api_lightweight(import_id)
+                    .await;
             }
         }
     }

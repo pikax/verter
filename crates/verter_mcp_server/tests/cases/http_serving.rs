@@ -18,5 +18,6 @@ use http_serving_contract::assert_http_launcher_binds_announces_and_serves;
 
 #[test]
 fn http_transport_emits_bound_port_record_first_and_serves_mcp_at_announced_url() {
-    assert_http_launcher_binds_announces_and_serves(env!("CARGO_BIN_EXE_verter-mcp-server"));
+    let binary = verter_test_support::cargo_test_binary_path!("verter-mcp-server");
+    assert_http_launcher_binds_announces_and_serves(binary.to_string_lossy().as_ref());
 }

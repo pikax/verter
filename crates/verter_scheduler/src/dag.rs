@@ -653,6 +653,14 @@ pub struct SchedulerDag {
     /// mutation outside the typed API is intentionally not
     /// exposed.
     pub(in crate::dag) artifact_blocker_deps: FxHashMap<(Arc<str>, u64), PendingBlockerSet>,
+    /// Reverse demand refcount for live blocker deps. A dep can be named by
+    /// many owner generations, so values are counts rather than booleans.
+    /// Every mutation is owned by the typed blocker-registry funnel.
+    pub(in crate::dag) analysis_blocker_demand: FxHashMap<DepKey, usize>,
+    #[cfg(test)]
+    analysis_demand_probe_count: std::cell::Cell<usize>,
+    #[cfg(test)]
+    highest_priority_node_visit_count: std::cell::Cell<usize>,
     /// Persistent record of terminal producer failures, keyed by the
     /// failed prerequisite's [`DepKey`]. A waiter admission consulting
     /// the dead-producer matrix BEFORE the matching producer
@@ -977,6 +985,11 @@ impl SchedulerDag {
             waiters: FxHashMap::default(),
             file_waiters: FxHashMap::default(),
             artifact_blocker_deps: FxHashMap::default(),
+            analysis_blocker_demand: FxHashMap::default(),
+            #[cfg(test)]
+            analysis_demand_probe_count: std::cell::Cell::new(0),
+            #[cfg(test)]
+            highest_priority_node_visit_count: std::cell::Cell::new(0),
             terminal_dep_failures: FxHashMap::default(),
             canonical_index: CanonicalReverseIndex::default(),
             retirement_floor: FxHashMap::default(),
@@ -1633,9 +1646,7 @@ impl SchedulerDag {
             .canonical_index
             .blocker_owner_gens_below(canonical, floor)
         {
-            let key = (Arc::clone(canonical), gen);
-            self.artifact_blocker_deps.remove(&key);
-            self.canonical_index.remove_blocker_owner(canonical, gen);
+            self.clear_artifact_blockers(canonical, gen);
         }
 
         // 5. Stale terminal-dep-failure records, which would otherwise
@@ -2359,6 +2370,9 @@ impl SchedulerDag {
             }
         }
         self.artifact_blocker_deps.clear();
+        self.analysis_blocker_demand.clear();
+        #[cfg(test)]
+        self.analysis_demand_probe_count.set(0);
         self.terminal_dep_failures.clear();
         self.canonical_index.clear();
         // Drop every ready-lane entry and reset the credit
@@ -2642,8 +2656,15 @@ impl SchedulerDag {
         // generation)` — pending or dispatched alike — so a fresh
         // stage transition inherits the urgency of any outstanding
         // request at this generation.
+        let tokens = self.canonical_index.node_tokens.get(canonical.as_ref())?;
         let mut best: Option<Priority> = None;
-        for node in self.nodes.values() {
+        for token in tokens {
+            #[cfg(test)]
+            self.highest_priority_node_visit_count
+                .set(self.highest_priority_node_visit_count.get() + 1);
+            let Some(node) = self.nodes.get(token) else {
+                continue;
+            };
             if node.cancelled {
                 continue;
             }
@@ -2656,6 +2677,16 @@ impl SchedulerDag {
             }
         }
         best
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reset_highest_priority_node_visit_count(&self) {
+        self.highest_priority_node_visit_count.set(0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_highest_priority_node_visit_count(&self) -> usize {
+        self.highest_priority_node_visit_count.get()
     }
 
     /// Profile hashes and priorities for every pending Artifact waiter
@@ -2712,6 +2743,62 @@ impl SchedulerDag {
             generation,
         };
         self.file_waiters.contains_key(&key)
+    }
+
+    /// Whether any live consumer requires Analysis for
+    /// `(canonical, generation)`.
+    ///
+    /// Demand can be represented in three places: a direct Analysis/Artifact
+    /// request group, an admitted DAG node gated on this Analysis identity, or
+    /// the pre-admission Artifact blocker registry. Source completion must
+    /// consult all three or an auto-ingested blocker can stop at Source before
+    /// its owner's Artifact node has been admitted.
+    pub fn has_analysis_demand(&self, canonical: &Arc<str>, generation: u64) -> bool {
+        let key = FileGenKey {
+            canonical: Arc::clone(canonical),
+            generation,
+        };
+        let direct_request = self.file_waiters.get(&key).is_some_and(|state| {
+            state.groups.iter().any(|group| {
+                matches!(
+                    group.target,
+                    TargetStage::Analysis | TargetStage::Artifact { .. }
+                )
+            })
+        });
+        if direct_request {
+            return true;
+        }
+
+        let dep = DepKey::FileStage {
+            canonical: Arc::clone(canonical),
+            generation,
+            stage: FileStageKey::Analysis,
+        };
+        let admitted_consumer = self.waiters.get(&dep).is_some_and(|tokens| {
+            tokens.iter().any(|token| {
+                self.nodes
+                    .get(token)
+                    .is_some_and(|node| !node.cancelled && node.deps_remaining.contains(&dep))
+            })
+        });
+        if admitted_consumer {
+            return true;
+        }
+        #[cfg(test)]
+        self.analysis_demand_probe_count
+            .set(self.analysis_demand_probe_count.get() + 1);
+        self.analysis_blocker_demand.contains_key(&dep)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reset_analysis_demand_probe_count(&self) {
+        self.analysis_demand_probe_count.set(0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_analysis_demand_probe_count(&self) -> usize {
+        self.analysis_demand_probe_count.get()
     }
 
     // The Artifact blocker-dep registry's typed API lives in the

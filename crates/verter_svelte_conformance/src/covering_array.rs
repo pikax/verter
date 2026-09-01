@@ -778,6 +778,6 @@ fn build_proof<const N: usize>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "conformance-tests"))]
 #[path = "covering_array_tests.rs"]
 mod covering_array_tests;

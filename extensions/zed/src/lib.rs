@@ -36,7 +36,7 @@ use std::fmt;
 
 use serde_json::Value;
 use verter_editor_client::{
-    DiscoveryError, DiscoveryInputs, ServerSource, build_server_args, resolve_server,
+    build_server_args, resolve_server, DiscoveryError, DiscoveryInputs, ServerSource,
 };
 
 /// The exact, fully-resolved instruction the extension hands Zed: which binary to
@@ -254,7 +254,7 @@ pub fn merge_binary_arguments_into_settings(
 #[cfg(target_os = "wasi")]
 mod wasi_extension {
     use verter_editor_client::build_initialization_options;
-    use zed_extension_api::{self as zed, LanguageServerId, Result, settings::LspSettings};
+    use zed_extension_api::{self as zed, settings::LspSettings, LanguageServerId, Result};
 
     /// The Zed extension. Holds no caches: discovery is cheap and Zed calls
     /// `language_server_command` rarely (once per server launch), so a per-launch

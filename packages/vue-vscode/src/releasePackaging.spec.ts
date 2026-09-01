@@ -15,6 +15,42 @@ const repoRoot = path.resolve(extensionRoot, "..", "..");
 
 const read = (rel: string) => readFileSync(path.join(repoRoot, rel), "utf8");
 
+const workflowJobs = (yaml: string): Map<string, string> =>
+  new Map(
+    [...yaml.matchAll(/^ {2}([\w.-]+):\n([\s\S]*?)(?=^ {2}\S|(?![\s\S]))/gm)].map((match) => [
+      match[1],
+      match[2],
+    ]),
+  );
+
+const workflowRunCommands = (job: string): string[] => {
+  const lines = job.split("\n");
+  const commands: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/^(\s*)(?:-\s+)?run:\s*(.*?)\s*$/);
+    if (!match) continue;
+
+    const indentation = match[1].length;
+    const scalar = match[2];
+    if (scalar !== "" && !/^[|>][+-]?$/.test(scalar)) {
+      commands.push(scalar);
+      continue;
+    }
+
+    const block: string[] = [];
+    while (i + 1 < lines.length) {
+      const next = lines[i + 1];
+      if (next.trim() !== "" && next.length - next.trimStart().length <= indentation) break;
+      i += 1;
+      block.push(next.trim());
+    }
+    commands.push(block.join("\n"));
+  }
+
+  return commands;
+};
+
 /**
  * The packaged VSIX must actually carry the engine it advertises.
  *
@@ -52,6 +88,17 @@ describe("VSIX engine payload", () => {
     // The whitelist must stay a whitelist — a wildcard would let arbitrary
     // artifacts into the published VSIX.
     expect(stageBin).toMatch(/if\s*\(!allowedBinEntries\.includes\(entry\)\)/);
+  });
+});
+
+describe("playground deploy build", () => {
+  const netlify = read("netlify.toml");
+  const viteConfig = read("packages/playground/vite.config.ts");
+
+  it("uses the artifact-free Vue shell transform only on Netlify", () => {
+    expect(netlify).toMatch(/VERTER_PLAYGROUND_SHELL_COMPILER\s*=\s*"vue"/);
+    expect(viteConfig).toContain('process.env.VERTER_PLAYGROUND_SHELL_COMPILER ?? "verter"');
+    expect(viteConfig).toContain('shellCompiler === "vue" ? vue() : verter()');
   });
 });
 
@@ -176,9 +223,36 @@ const chainTo = (graph: Map<string, string[]>, from: string, target: string): st
  */
 describe("release gating", () => {
   const release = read(".github/workflows/release.yml");
+  const releaseCheck = read(".github/workflows/release-check.yml");
   const graph = parseNeedsGraph(release);
 
   const publishJobs = ["publish-crates", "publish-npm", "publish-vscode"];
+
+  it("keeps PR release validation read-only and reserves the full rehearsal for dispatch", () => {
+    expect(releaseCheck).toMatch(/permissions:\n  contents: read/);
+
+    const jobs = workflowJobs(releaseCheck);
+    const pullRequest = jobs.get("pull-request-contract") ?? "";
+    expect(pullRequest).toContain("if: github.event_name == 'pull_request'");
+    expect(pullRequest).toContain("pnpm --filter verter-vscode exec vitest run");
+    expect(pullRequest).toContain("src/releasePackaging.spec.ts");
+    expect(pullRequest).toContain("node --test scripts/githubctl/tests/release-plan.test.mjs");
+
+    const dispatched = jobs.get("dry-run") ?? "";
+    expect(dispatched).toContain("if: github.event_name == 'workflow_dispatch'");
+    expect(dispatched).toContain("uses: ./.github/workflows/release.yml");
+    expect(dispatched).toContain("dry_run: true");
+    for (const permission of [
+      "contents: write",
+      "deployments: write",
+      "id-token: write",
+      "checks: write",
+      "issues: write",
+      "pull-requests: write",
+    ]) {
+      expect(dispatched).toContain(permission);
+    }
+  });
 
   it.each(publishJobs)("%s transitively depends on a job that runs tests", (job) => {
     expect(graph.has(job), `release.yml must define a \`${job}:\` job`).toBe(true);
@@ -300,9 +374,27 @@ describe("release gating", () => {
     expect(chainTo(parsed, "c", "a")).toBeNull();
   });
 
+  // @ai-generated - Discriminates the workflow parser's final-job EOF boundary.
+  it("parses the final workflow job when the file ends inside that job", () => {
+    const parsed = workflowJobs(
+      [
+        "jobs:",
+        "  first:",
+        "    steps:",
+        "      - run: first-command",
+        "  final:",
+        "    steps:",
+        "      - run: final-command",
+      ].join("\n"),
+    );
+
+    expect(parsed.get("first")).toContain("first-command");
+    expect(parsed.get("final")).toContain("final-command");
+  });
+
   it("defines a test job that runs the canonical Rust gate and the JS suite", () => {
     expect(release, "release.yml must define a `test:` job").toMatch(/^ {2}test:$/m);
-    const body = release.match(/^ {2}test:\n([\s\S]*?)(?=^ {2}\S|\Z)/m)?.[1] ?? "";
+    const body = workflowJobs(release).get("test") ?? "";
     expect(body, "the release test job must run the exhaustive canonical Rust gate").toContain(
       "node scripts/gate.mjs --exhaustive",
     );
@@ -311,6 +403,138 @@ describe("release gating", () => {
     );
     expect(body, "the test job must check formatting").toContain("cargo fmt");
     expect(body, "the test job must run the JS suite").toMatch(/pnpm (run )?test/);
+  });
+
+  // @ai-generated - Release shares the dedicated 16 GiB runner policy with CI.
+  it("gives the release Rust gate a dedicated-runner memory ceiling", () => {
+    const body = workflowJobs(release).get("test") ?? "";
+    expect(body, "the release gate must retain 4 GiB of runner headroom").toContain(
+      "node scripts/gate.mjs --exhaustive --memory-limit 12GiB",
+    );
+  });
+
+  // @ai-generated - Every hermetic gate invocation needs an explicitly provisioned oracle cache.
+  it("provisions the offline oracle cache before every release workflow gate invocation", () => {
+    const provision =
+      "node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs";
+    const gate = "node scripts/gate.mjs";
+    let gateInvocations = 0;
+
+    for (const [job, body] of workflowJobs(release)) {
+      let availableProvisions = 0;
+      for (const command of workflowRunCommands(body)) {
+        if (command.includes(provision)) availableProvisions += 1;
+        if (!command.includes(gate)) continue;
+
+        gateInvocations += 1;
+        expect(
+          availableProvisions,
+          `release.yml job \`${job}\` invokes \`${command}\` without a preceding unused oracle-cache provisioning step`,
+        ).toBeGreaterThan(0);
+        availableProvisions -= 1;
+      }
+    }
+
+    expect(
+      gateInvocations,
+      "release.yml must invoke the canonical gate at least once",
+    ).toBeGreaterThan(0);
+  });
+});
+
+describe("CI Rust path eligibility", () => {
+  const ci = read(".github/workflows/ci.yml");
+
+  // @ai-generated - Pins the single-build archive split and its measured cache owner.
+  it("builds the shared Rust test archive through the measured GitHub sccache lane", () => {
+    const build = workflowJobs(ci).get("rust-test-build") ?? "";
+    expect(build, "rust-test-build must install the reviewed sccache action").toContain(
+      "mozilla-actions/sccache-action@v0.0.11",
+    );
+    expect(build, "rust-test-build must pin the measured sccache binary").toContain(
+      "version: v0.17.0",
+    );
+    expect(build, "rust-test-build must enable the GitHub Actions cache backend").toContain(
+      'SCCACHE_GHA_ENABLED: "true"',
+    );
+    expect(build, "rust-test-build must namespace its shared cache generation").toContain(
+      'SCCACHE_GHA_VERSION: "verter-rust-test-v1"',
+    );
+    expect(build, "the archive build must use the repository's telemetry wrapper").toContain(
+      "node scripts/run-cached.mjs -- 'cargo nextest archive --workspace",
+    );
+    expect(build, "act must bypass the unavailable GHA cache service").toMatch(
+      /if \[ "\$\{ACT:-\}" = "true" \]; then[\s\S]*cargo nextest archive --workspace/,
+    );
+    expect(build, "the archive must be verified before it is uploaded").toContain(
+      "node scripts/provider-ci.mjs verify --archive-file",
+    );
+    expect(
+      build,
+      "the archive producer must install pnpm before setup-node enables its cache",
+    ).toMatch(/pnpm\/action-setup@v6[\s\S]*actions\/setup-node@v5/);
+
+    const core = workflowJobs(ci).get("rust-test") ?? "";
+    expect(core, "the core lane must consume the shared archive").toContain(
+      "cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst",
+    );
+    expect(core, "the core lane must not pay for another workspace compile").not.toContain(
+      "cargo nextest archive",
+    );
+  });
+
+  it("pins Rust for the JS lane's semantic-comment extractor", () => {
+    const body = workflowJobs(ci).get("js-build-test") ?? "";
+    expect(body, "the JS lane invokes cargo while checking Svelte goldens").toContain(
+      "dtolnay/rust-toolchain@1.97.1",
+    );
+    expect(body).toContain("node scripts/gen-svelte-goldens.mjs --check");
+  });
+
+  it("pins the required VS Code matrix to a reviewed editor release", () => {
+    const body = workflowJobs(ci).get("vscode-e2e") ?? "";
+    expect(body, "the required matrix must not resolve a moving stable editor").toContain(
+      'E2E_VSCODE_VERSION: "1.135.0"',
+    );
+  });
+
+  it("keeps unbaselined endurance probes out of required CI and retains editor diagnostics", () => {
+    expect(
+      workflowJobs(ci).has("endurance-lsp"),
+      "endurance semantic probes exercise unfinished features and must not masquerade as PR regressions",
+    ).toBe(false);
+    const vscode = workflowJobs(ci).get("vscode-e2e") ?? "";
+    expect(vscode, "failed E2E runs must retain the extension/LSP log").toContain(
+      "/tmp/verter-e2e-*.log",
+    );
+    expect(vscode, "failed E2E runs must retain the exact run-summary oracle").toContain(
+      "/tmp/verter-e2e-*.log.runsummary",
+    );
+  });
+
+  // @ai-generated - Pins every non-Rust input consumed by the canonical Rust gate job.
+  it("runs the Rust job when gate, harness, provider, or install-graph inputs change", () => {
+    const rustFilter = ci.match(/^ {12}rust:\n([\s\S]*?)(?=^ {12}[\w-]+:\n)/m)?.[1] ?? "";
+    const requiredInputs = [
+      "packages/framework-conformance-harness/**",
+      "packages/language-shared/**",
+      "packages/svelte-jsx/**",
+      "packages/typescript-plugin/**",
+      "scripts/gate*.mjs",
+      ".npmrc",
+      ".nvmrc",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+    ];
+
+    expect(rustFilter, "detect-changes must define a rust path filter").not.toBe("");
+    for (const input of requiredInputs) {
+      expect(
+        rustFilter,
+        `the Rust gate consumes \`${input}\`; changing it must make detect-changes.rust true`,
+      ).toContain(`'${input}'`);
+    }
   });
 });
 
@@ -355,7 +579,7 @@ describe("VSIX MCP engine payload", () => {
   });
 
   it("stages the per-target MCP artifact fail-closed before packaging", () => {
-    const body = release.match(/^ {2}build-vsix:\n([\s\S]*?)(?=^ {2}\S|\Z)/m)?.[1] ?? "";
+    const body = workflowJobs(release).get("build-vsix") ?? "";
     expect(body, "build-vsix must download the mcp-* artifacts").toContain("pattern: mcp-*");
     expect(body, "build-vsix must stage the per-target verter-mcp binary").toContain(
       "/tmp/mcp-artifacts/mcp-${lsp_pkg}/${MCP_BIN}",

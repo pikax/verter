@@ -1,0 +1,35 @@
+# A Node addon that exists only so the host compile request can be driven
+# from real JS. It is never published, never linked into the shipped
+# addon, and its entry never appears in `@verter/native`'s declarations:
+# it is a separate package with its own cdylib, built alongside the
+# boundary suite that drives it.
+[package]
+name = "verter_napi_request_fixture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Test-only Node addon exposing the native host compile request to real JS values"
+publish = false
+
+[lib]
+# The `cdylib` is what Node loads. The `rlib` is what makes cargo emit the
+# `cdylib` at all: a package built only as a dependency has its crate types
+# narrowed to what its dependent links, and `verter_napi`'s `[dev-dependencies]`
+# edge — the thing that gets this addon built with the suite that loads it —
+# links the `rlib`. Declaring both means one rustc invocation emits both.
+crate-type = ["cdylib", "rlib"]
+# A Node addon has no Rust-side tests; the suite that drives it lives in
+# `verter_napi`, so this package contributes no test binary of its own.
+test = false
+doctest = false
+
+[dependencies]
+verter_napi = { path = "../.." }
+napi = { version = "3", default-features = false, features = ["napi8"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2.3"

@@ -238,7 +238,7 @@ impl VerterHost {
                 macros: &script_analysis.macros,
                 bindings: &script_analysis.bindings,
             },
-            &raw,
+            &raw.data,
             // This builder's only caller is the content-override lane
             // (`compute_override_template_analysis`): the bytes are a
             // compile-profile override layer the store never published.
@@ -258,7 +258,7 @@ impl VerterHost {
             &script_analysis.style_vbind_roots,
         );
         Some(Arc::new(crate::template_convert::convert_raw_to_analysis(
-            &raw,
+            (&raw).into(),
             &imports,
             &class_domains,
             Some(&unused_ctx),
@@ -380,7 +380,7 @@ impl VerterHost {
                     macros: &snapshot.macros,
                     bindings: &snapshot.bindings,
                 },
-                &raw,
+                &raw.data,
                 // The lane's own bytes attestation, threaded in by the caller
                 // that captured them: a live scheduler/workspace read at one
                 // generation is store-published; the session-overlay entry
@@ -408,7 +408,7 @@ impl VerterHost {
                 &snapshot.style_vbind_roots,
             );
             let tpl = crate::template_convert::convert_raw_to_analysis(
-                &raw,
+                (&raw).into(),
                 &imports,
                 &class_domains,
                 Some(&unused_ctx),
@@ -479,7 +479,7 @@ impl VerterHost {
     /// 2. **Lock discipline.** Fact validation may enter broader host/cache
     ///    paths. No `derived_raw_cache` shard guard may cross that boundary or
     ///    overlap a writer such as `persist_raw_template_analysis`.
-    fn validated_raw_template_analysis(
+    pub(crate) fn validated_raw_template_analysis(
         &self,
         canonical: &str,
         source_generation: u64,
@@ -644,7 +644,7 @@ impl VerterHost {
                         framework_parse.as_deref(),
                         &source,
                         &self.provenance,
-                    );
+                    )?;
                     // Producer-side locator absolutization for the narrowed-scope
                     // rebuild lane (the artifact-facing builder is canonical-free;
                     // the stored-snapshot branch was absolutized at snapshot build).
@@ -809,7 +809,7 @@ impl VerterHost {
                     view,
                 )?;
                 let parsed = Arc::clone(structure.artifact());
-                let parse = crate::parse::carrier_snapshot_from_artifact(
+                let (parse, _) = crate::parse::carrier_snapshot_from_artifact(
                     canonical.as_str(),
                     &source,
                     self.config.effective_scope(),
@@ -1471,6 +1471,35 @@ impl VerterHost {
         .then_some(artifacts)
     }
 
+    /// Build the parse-owned authored-route-interface fact from the exact
+    /// `FileFacts` payload paired with `indexed` in the current artifact
+    /// store. A separately-read current registry is not sufficient: an edit
+    /// between the indexed serve and fact lookup could otherwise sign old
+    /// routing bytes with a new fact.
+    #[must_use]
+    pub(crate) fn syntactic_route_interface_fact_for_indexed(
+        &self,
+        canonical: &str,
+        indexed: &Arc<crate::project_type_store::IndexedReady>,
+    ) -> Option<crate::resolver_core::ParseFactRef> {
+        if !indexed.shallow_state.has_resolvable_surface() {
+            return None;
+        }
+        let artifacts = self.current_content_pinned_artifacts(canonical)?;
+        if !Arc::ptr_eq(&artifacts.indexed, indexed) {
+            return None;
+        }
+        let fact = artifacts
+            .facts
+            .lookup(&verter_semantic::facts::FactKey::SyntacticRouteInterface)?;
+        Some(crate::resolver_core::ParseFactRef {
+            canonical_id: canonical.to_string(),
+            key: verter_semantic::facts::FactKey::SyntacticRouteInterface,
+            lane: verter_semantic::facts::FactLane::Semantic,
+            expected_hash: fact.semantic_hash,
+        })
+    }
+
     /// Establish ONE tear-free
     /// [`crate::resolver_core::MaterializeScopeObservation`] for a
     /// materialize-memo scope canonical (base-host path).
@@ -1542,10 +1571,12 @@ impl VerterHost {
     /// canonical file, or `None` if the canonical has not been processed by the
     /// scheduler (WASM / unloaded / pre-parse routing).
     ///
-    /// Used by cache-key sites that need a stable `source_type` for the same
-    /// `(canonical_id, whole_hash)` pair regardless of whether the caller
-    /// currently holds the parsed SFC. See [`crate::host_executor::imported_eval_source_type`]
+    /// Cold IndexedReady materialization reads `source_type` from the same
+    /// held [`crate::host_executor::HostSourceData`] as parse facts and
+    /// eval-source — not through this reread. Tests still use it to pin
+    /// the stored scheduler value. See [`crate::host_executor::imported_eval_source_type`]
     /// for the pure function the scheduler invokes once at parse time.
+    #[cfg(test)]
     pub(crate) fn authoritative_source_type_for(
         &self,
         canonical: &str,
@@ -2449,35 +2480,15 @@ impl VerterHost {
             // no fence dimension.
             return;
         }
-        // `set_import_dependencies` is a route-resolution mutation: the
-        // per-canonical route table (`DerivedRawState.import_routes`,
-        // mutated above) and the workspace exact-resolution table both
-        // changed while `content_generation` stays put. Bump
-        // `project_generation` so the mutation is FENCE-VISIBLE — an
-        // in-flight materialise that captured the pre-mutation stamp must
-        // trip the pre-publish fence (ReturnOnly) instead of publishing a
-        // stale route surface that afterwards passes
-        // `indexed_surface_is_current`. MUTATE-FIRST ordering (the bump
-        // strictly follows every route-affecting write above) — see
-        // `VerterHost::set_exact_resolutions` for why bump-before-mutate
-        // is a fence-defeating order.
-        //
-        // STAMP-ONLY bump (not `bump_project_generation_and_evict`): the
-        // wide evict variant clears `derived_raw_cache_db` wholesale,
-        // which would destroy the very `import_routes` /
-        // known-miss-generation state this method just admitted (and
-        // every other canonical's bundler-preloaded routes). The stamp
-        // move alone is what the fence and the
-        // `indexed_surface_is_current` read gate consume; per-canonical
-        // derived layers are drained right below, and OTHER canonicals'
-        // cross-edge surfaces refresh lazily through the stamp gate
-        // (edge refresh — no re-parse).
-        self.project_type_store.bump_project_generation();
+        // Route publication is not a project-shape reset. Its currency and
+        // torn-publication fences are the exact-resolution facts installed
+        // above plus the store-view epoch advanced below. Moving the project
+        // generation here would invalidate every project-shaped result when a
+        // caller merely restores or retargets one owner's route table.
         // Soft-invalidate: file content didn't change, only import routes.
         // The content-addressed `IndexedReady` payload is RETAINED — the
-        // project-stamp read gate routes the next read through the
-        // edge-refresh materialise (route surface rebuilt, no re-parse),
-        // the same shape as the `set_exact_resolutions` wrapper cascade.
+        // exact-resolution facts route the next semantic read through the
+        // current route surface without re-parsing the retained artifact.
         self.resolver.runtime.invalidate_canonical(&canonical);
         self.project_type_store
             .evict_canonical_for_route_mutation(&canonical);

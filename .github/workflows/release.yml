@@ -4,9 +4,10 @@ on:
   push:
     tags:
       - "v*"
-  # Callable so a release REHEARSAL runs this exact job graph with publishing
-  # switched off, rather than a parallel copy that drifts. See
-  # release-check.yml, which is a thin caller passing dry_run: true.
+  # Callable so an explicitly dispatched release REHEARSAL runs this exact job
+  # graph with publishing switched off, rather than a parallel copy that
+  # drifts. Pull requests cannot safely inherit this workflow's publishing
+  # permissions, so release-check.yml runs its read-only contract lane there.
   workflow_call:
     inputs:
       dry_run:
@@ -115,38 +116,186 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt
+          # REQUIRED by the gate's wasm JavaScript-boundary lane — this job runs
+          # the same canonical gate exhaustively, and its prerequisite preflight
+          # fails loudly on a missing target rather than skipping those tests.
+          targets: wasm32-unknown-unknown
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # REQUIRED for a non-vacuous gate — the same prerequisite ci.yml's rust-test job builds, and the same
-      # one gate.mjs's BUILD-PREREQUISITE PREFLIGHT refuses to run without. The real-provider suites spawn
-      # the pinned tsserver with `--globalPlugins @verter/typescript-plugin`, whose entry is a `tsc -b`
-      # output `pnpm install` does not produce; without it ~64 `*_tsserver` tests fail with `TS2307: Cannot
-      # find module './Comp.vue'`. Narrowest sufficient scope (the plugin entry plus the
-      # `@verter/language-shared` it requires at load time) — deliberately NOT `pnpm build` and NOT the
-      # `@verter/typescript-plugin...` ellipsis, which would drag in `@verter/native`'s release build.
-      - name: Build the Rust gate's TypeScript prerequisites
-        run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
+      - name: Build TypeScript package entrypoints
+        run: pnpm run build:ts
+      - name: Provision the Rust gate's offline oracle npm cache
+        run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+      # REQUIRED by the gate's wasm JavaScript-boundary lane. The runner and the
+      # `wasm-bindgen` library are ONE ABI, so the gate derives the required
+      # version from the tree and refuses a mismatched runner; keep this pin
+      # equal to the `wasm-bindgen` dependency in `crates/verter_wasm/Cargo.toml`.
+      - name: Install wasm-bindgen CLI (test runner for the gate's wasm lane)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.122
       # One dev archive/list feeds archive-backed Surface 1. After listing,
       # Surface 1 overlaps an isolated shipped-cfg lane: workspace/all-targets
       # compile check followed serially by the small verter_shipped_cfg_contract
       # run under `no-debug-assertions`. `--exhaustive` changes failure
       # collection only; commands, filters, profiles, and coverage stay fixed.
+      # GitHub's dedicated 16 GiB runner grants the contained build forest 12
+      # GiB, retaining 4 GiB for the OS and runner services. The shared-machine
+      # gate default intentionally stays at 50% of physical memory.
       - name: Rust gate
-        env:
-          VERTER_REQUIRE_TSGO: "1"
-        run: node scripts/gate.mjs --exhaustive
+        run: node scripts/gate.mjs --exhaustive --memory-limit 12GiB
+      - name: Proto generated sources
+        run: pnpm proto:check
+      - name: Svelte conformance
+        run: >-
+          cargo test --no-fail-fast -p verter_svelte_conformance
+          --features conformance-tests --lib --bin verter_svelte_conformance
+          --test main -- --test-threads=4
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Format
         run: cargo fmt --all -- --check
       - name: JS tests
         run: pnpm test
+
+  # Real providers own their process lifecycle and run serially outside the
+  # archive-backed nextest gate. Keep the release proof aligned with CI.
+  provider-tsserver:
+    name: Provider (tsserver)
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-release-provider-tsserver-v1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-provider-tsserver
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build the tsserver plugin prerequisites
+        run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
+      - name: Run serial tsserver provider tests
+        env:
+          VERTER_REQUIRE_TSSERVER: "1"
+        run: node scripts/provider-ci.mjs run tsserver
+
+  provider-tsgo:
+    name: Provider (tsgo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-release-provider-tsgo-v1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-provider-tsgo
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Run serial tsgo provider tests
+        env:
+          VERTER_REQUIRE_TSGO: "1"
+        run: node scripts/provider-ci.mjs run tsgo
+
+  compiler-contracts:
+    name: Compiler Contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-release-compiler-contracts-v1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-compiler-contracts
+          cache-directories: target/tests/trybuild
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify compiler contracts lane and cache ownership
+        run: node --test scripts/compiler-ci-lane-selftest.mjs
+      - name: Run workspace compile contracts
+        run: node scripts/compile-contracts.mjs
+      - name: Verify generated Svelte artifacts
+        run: >-
+          cargo test --package verter_compiler --test main
+          cases::svelte_generated_artifacts_freshness::generated_svelte_artifacts_match_their_authoritative_inputs
+          -- --exact
+      - name: verter_compiler default feature-off build + lib tests (isolated)
+        run: |
+          cargo build -p verter_compiler
+          cargo test -p verter_compiler --lib
+
+  # Required release prerequisite, parallel with the core test job. BF2 owns
+  # its pinned oracle setup and exact source/list coverage outside gate.mjs so
+  # removing the feature from the core archive cannot weaken a release.
+  bf2-authoritative:
+    name: BF2 Authoritative
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-release-bf2-authoritative-v1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-bf2-authoritative
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build BF2 TypeScript declaration prerequisites
+        run: pnpm run build:ts
+      - name: Provision BF2's offline oracle npm cache
+        run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Verify BF2 release lane contract
+        run: node --test scripts/bf2-ci-lane-selftest.mjs
+      - name: Run exact BF2 authoritative inventory
+        env:
+          NEXTEST_PROFILE: ci
+        run: node scripts/bf2-authoritative.mjs
 
   # ---------------------------------------------------------------------------
   # Build native binaries (matrix — for npm platform packages)
@@ -585,12 +734,12 @@ jobs:
         # binaries users receive still come from build-native / build-tsc /
         # build-lsp / build-mcp, which are untouched. Uncomment to
         # restore cross-OS verification.
-          # - os: macos-latest
-          #   slug: macos
-          #   binary: verter-lsp
-          # - os: windows-latest
-          #   slug: windows
-          #   binary: verter-lsp.exe
+        # - os: macos-latest
+        #   slug: macos
+        #   binary: verter-lsp
+        # - os: windows-latest
+        #   slug: windows
+        #   binary: verter-lsp.exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     steps:
@@ -945,12 +1094,12 @@ jobs:
         # binaries users receive still come from build-native / build-tsc /
         # build-lsp / build-mcp, which are untouched. Uncomment to
         # restore cross-OS verification.
-          # - os: macos-latest
-          #   slug: macos
-          #   binary: verter-lsp
-          # - os: windows-latest
-          #   slug: windows
-          #   binary: verter-lsp.exe
+        # - os: macos-latest
+        #   slug: macos
+        #   binary: verter-lsp
+        # - os: windows-latest
+        #   slug: windows
+        #   binary: verter-lsp.exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:
@@ -1062,7 +1211,19 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-crates:
     name: Publish Crates
-    needs: [validate, test, editor-helix, editor-lapce, editor-zed, editor-neovim]
+    needs:
+      [
+        validate,
+        test,
+        provider-tsserver,
+        provider-tsgo,
+        compiler-contracts,
+        bf2-authoritative,
+        editor-helix,
+        editor-lapce,
+        editor-zed,
+        editor-neovim,
+      ]
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -1115,6 +1276,10 @@ jobs:
       [
         validate,
         test,
+        provider-tsserver,
+        provider-tsgo,
+        compiler-contracts,
+        bf2-authoritative,
         editor-helix,
         editor-lapce,
         editor-zed,
@@ -1491,7 +1656,18 @@ jobs:
   # ---------------------------------------------------------------------------
   build-vsix:
     name: Package VS Code Extension
-    needs: [validate, test, build-lsp, build-native, build-mcp]
+    needs:
+      [
+        validate,
+        test,
+        provider-tsserver,
+        provider-tsgo,
+        compiler-contracts,
+        bf2-authoritative,
+        build-lsp,
+        build-native,
+        build-mcp,
+      ]
     # Skipped in a rehearsal, as the publish job it feeds always has been —
     # packaging five platform VSIXes is cost the dry run does not pay today.
     if: needs.validate.outputs.dry-run != 'true'
@@ -1705,7 +1881,7 @@ jobs:
   # ---------------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs: [validate, build-native, build-lsp, build-mcp, build-wasm, build-vsix]
+    needs: [validate, bf2-authoritative, build-native, build-lsp, build-mcp, build-wasm, build-vsix]
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25

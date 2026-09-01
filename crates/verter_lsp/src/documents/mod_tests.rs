@@ -3,6 +3,45 @@
 
 use super::*;
 
+// @ai-generated
+#[test]
+fn progressive_span_rejects_a_byte_offset_inside_a_utf8_code_point() {
+    let source = "aé";
+    let split_code_point = verter_span::Span::new(0, 2);
+
+    assert!(
+        !progressive_span_is_current(source, source, split_code_point),
+        "two invalid UTF-8 slices must not compare as a current authored prefix"
+    );
+    assert!(
+        progressive_span_is_current(source, source, verter_span::Span::new(0, 3)),
+        "a valid UTF-8 boundary remains comparable"
+    );
+}
+
+#[test]
+fn progressive_prop_definition_requires_its_ownership_call_to_remain_authored() {
+    let prior_source = "<script>let { staleProp } = $props();</script>";
+    let current_source = prior_source.replace("$props()", "source()");
+    let start = prior_source.find("staleProp").expect("prop binding") as u32;
+    let call_start = prior_source.find("$props()").expect("props call") as u32;
+    let witness = ProgressivePropOwnerWitness {
+        name: "staleProp".to_string(),
+        binding_span: verter_span::Span::new(start, start + "staleProp".len() as u32),
+        call_span: verter_span::Span::new(call_start, call_start + "$props()".len() as u32),
+    };
+
+    assert!(
+        progressive_prop_owner_witness_is_current(prior_source, prior_source, &witness),
+        "the exact authored binding plus `$props()` call is a valid carry witness"
+    );
+    assert!(
+        !progressive_prop_owner_witness_is_current(prior_source, &current_source, &witness),
+        "an unchanged binding prefix must not preserve prop ownership after `$props()` is \
+         replaced by an ordinary call"
+    );
+}
+
 #[test]
 fn did_open_rune_module_builds_self_file_projection_with_prelude_offset() {
     use provider_projection::DocumentProviderProjection;
@@ -535,6 +574,199 @@ async fn optional_semantic_analysis_is_isolated_and_published_asynchronously() {
             semantic.semantic_host_revision().host_instance,
             feature.projection_host_revision().host_instance,
             "projection and semantic hosts retain distinct identity domains"
+        );
+    }
+}
+
+/// A native feature read must follow the document-revision-stamped snapshot,
+/// not depend exclusively on the secondary canonical-id lookup. Dependency
+/// publication can invalidate/rebuild that lookup while an unchanged parent
+/// document still owns a fully committed semantic envelope.
+#[tokio::test(flavor = "multi_thread")]
+async fn committed_feature_snapshot_survives_semantic_index_churn() {
+    let projection_host = Arc::new(verter_session::VerterHost::new_standalone(
+        verter_session::HostConfig {
+            analysis_scope: Some(verter_semantic::analysis::AnalysisScope::IMPORTS),
+            ..verter_session::HostConfig::default()
+        },
+    ));
+    let registry = Arc::new(DocumentRegistry::new(projection_host));
+    let uri: Uri = "file:///workspace/Parent.vue".parse().unwrap();
+    let source = "<script setup lang=\"ts\">\nconst parentLocal = 'ok'\n</script>\n<template>{{ parentLocal }}</template>";
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    registry.set_semantic_analysis_enabled(true);
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task")
+        .await
+        .expect("semantic task joins");
+
+    let feature = registry.feature_snapshot(&uri).expect("feature snapshot");
+    assert!(
+        feature.analysis().is_some(),
+        "precondition: the document owns a committed semantic envelope"
+    );
+    let canonical = uri_to_canonical_id(&uri);
+    registry.semantic_snapshots.remove(&canonical);
+    assert!(
+        registry.cached_semantic_analysis(&canonical).is_none(),
+        "precondition: the secondary semantic index is between publications"
+    );
+
+    let recovered = registry
+        .get_analysis(&uri)
+        .expect("the committed feature snapshot remains readable during index churn");
+    assert!(
+        recovered
+            .bindings
+            .iter()
+            .any(|binding| binding.name == "parentLocal"),
+        "native hover must retain the unchanged parent's committed binding surface"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn disabling_semantic_analysis_invalidates_feature_enrichment_until_republished() {
+    let registry = semantic_test_registry();
+    let uri: Uri = "file:///workspace/Disable.vue".parse().unwrap();
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SEMANTIC_REVISION_A.to_string(),
+    });
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task")
+        .await
+        .expect("semantic task joins");
+    let published = registry.feature_snapshot(&uri).expect("feature snapshot");
+    assert!(
+        published.analysis().is_some(),
+        "precondition: enrichment published"
+    );
+    let structure_id = published.structure().artifact_id();
+
+    registry.set_semantic_analysis_enabled(false);
+    assert!(
+        registry.get_analysis(&uri).is_none(),
+        "disabled semantic analysis must not serve the retained feature envelope"
+    );
+    let disabled = registry
+        .feature_snapshot(&uri)
+        .expect("structure remains available");
+    assert_eq!(disabled.structure().artifact_id(), structure_id);
+    assert!(
+        disabled.analysis().is_none(),
+        "disable preserves structure but removes semantic enrichment"
+    );
+
+    registry.set_semantic_analysis_enabled(true);
+    assert!(
+        registry.get_analysis(&uri).is_none(),
+        "re-enabling does not revive an envelope from the prior semantic generation"
+    );
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("re-enabled semantic task")
+        .await
+        .expect("semantic task joins");
+    assert!(
+        registry.get_analysis(&uri).is_some(),
+        "the current semantic generation may publish again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_change_invalidates_feature_enrichment_but_preserves_structure() {
+    let registry = semantic_test_registry();
+    let uri: Uri = "file:///workspace/Workspace.vue".parse().unwrap();
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SEMANTIC_REVISION_A.to_string(),
+    });
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task")
+        .await
+        .expect("semantic task joins");
+    let published = registry.feature_snapshot(&uri).expect("feature snapshot");
+    assert!(
+        published.analysis().is_some(),
+        "precondition: enrichment published"
+    );
+    let structure_id = published.structure().artifact_id();
+
+    registry.set_workspace(Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    )));
+
+    assert!(
+        registry.get_analysis(&uri).is_none(),
+        "a prior-workspace semantic envelope must not survive the workspace change"
+    );
+    let changed = registry
+        .feature_snapshot(&uri)
+        .expect("structure remains available");
+    assert_eq!(changed.structure().artifact_id(), structure_id);
+    assert!(
+        changed.analysis().is_none(),
+        "workspace changes preserve structure but remove semantic enrichment"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn semantic_generation_fences_inflight_disable_and_workspace_change() {
+    for transition in ["disable-re-enable", "workspace-change"] {
+        let registry = semantic_test_registry();
+        let uri: Uri = format!("file:///workspace/{transition}.vue")
+            .parse()
+            .unwrap();
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: SEMANTIC_REVISION_A.to_string(),
+        });
+        let armed = registry.semantic_task_armed.notified();
+        tokio::pin!(armed);
+        armed.as_mut().enable();
+        let task = registry
+            .schedule_semantic_analysis_for_test(&uri)
+            .expect("semantic task");
+        armed.await;
+
+        match transition {
+            "disable-re-enable" => {
+                registry.set_semantic_analysis_enabled(false);
+                registry.set_semantic_analysis_enabled(true);
+            }
+            "workspace-change" => {
+                registry.set_workspace(Arc::new(verter_workspace::FilesystemWorkspace::new(
+                    verter_workspace::FilesystemOptions::default(),
+                )))
+            }
+            _ => unreachable!(),
+        }
+        tokio::time::advance(SEMANTIC_ANALYSIS_QUIET_WINDOW).await;
+        task.await.expect("semantic task joins");
+
+        assert!(
+            registry.get_analysis(&uri).is_none(),
+            "{transition}: work captured before the semantic-generation transition must not publish"
+        );
+        assert!(
+            registry
+                .feature_snapshot(&uri)
+                .is_some_and(|feature| feature.analysis().is_none()),
+            "{transition}: the structure remains but the old generation has no feature enrichment"
         );
     }
 }

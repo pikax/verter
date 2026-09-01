@@ -300,6 +300,10 @@ pub(crate) struct ResolvedVueCompileOptions {
     /// the instance proxy (`_ctx.*`); it does not set `__ssrInlineRender`
     /// (that flag is only for setup-returned render functions).
     pub ssr: bool,
+    /// Which style stages this runtime compile owns. An authored-only bundler lane
+    /// still runs authored `v-bind()` handling but defers plain-CSS-only
+    /// modules/scoping until after preprocessing.
+    pub style_processing: crate::compile_request::RuntimeStyleProcessing,
     /// Props known to be const across all call sites (from cross-file analysis).
     /// These are treated as `Static` for reactivity purposes while keeping
     /// `$props.`/`__props.` prefix for correct runtime access.
@@ -386,6 +390,12 @@ pub struct VerterCompileResult {
     pub tsc: Option<VerterTsxBlock>,
     /// Raw template data for cross-file analysis. Present when `extract_template_data` is true.
     pub template_data: Option<super::template_data::RawTemplateData>,
+    /// Diagnostics attributable to the template-data extraction pass itself
+    /// (template expression parse errors). A subset of `errors`, carried
+    /// separately so the template-facts consumer can republish them with the
+    /// facts — no template codegen target parses these expressions, so
+    /// dropping this slice erases the file's template expression errors.
+    pub template_data_diagnostics: Vec<CompileDiagnostic>,
     /// Whether the render function was inlined into `setup()` (official
     /// production topology, `compileScript({ inlineTemplate: true })`). When
     /// true, `script` contains the complete component (render closure inside

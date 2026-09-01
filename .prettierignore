@@ -1,3 +1,10 @@
+# Generated TypeScript projection of the native host compile-request
+# schema — source of truth is the Rust declarations that decode it
+# (`crates/verter_napi/src/host_compile_request_ts.rs` renders them).
+# Formatting this file would break the `host_compile_request_ts_freshness`
+# byte-pin.
+packages/native/host-compile-request.generated.ts
+
 # Generated TypeScript bindings from ts-rs — source of truth is the
 # Rust derive annotations in verter_session's component_meta_audit
 # module. Formatting this file would diverge from ts-rs output and

@@ -69,15 +69,26 @@ fn nested_package_source_binds_to_the_package_project_not_the_workspace_folder()
 }
 
 #[test]
-fn generated_companion_binds_to_its_sources_project() {
+fn carrier_sources_and_javascript_companions_bind_to_their_exact_nested_project() {
     let authority = monorepo_authority();
-    // The IDE projection (`App.vue.tsx`) is what the extension provider actually
-    // opens. It is not a program file of any tsconfig, so it must reverse-map to
-    // its carrier source before ownership is decided.
-    assert_eq!(
-        owned_root(&authority.configured_owner("/ws/packages/app/src/App.vue.tsx")),
-        Some("/ws/packages/app"),
-    );
+    for path in [
+        "/ws/packages/app/src/App.vue",
+        "/ws/packages/app/src/App.vue.jsx",
+        "/ws/packages/app/src/App.svelte",
+        "/ws/packages/app/src/App.svelte.jsx",
+    ] {
+        let ownership = authority.configured_owner(path);
+        assert_eq!(
+            owned_root(&ownership),
+            Some("/ws/packages/app"),
+            "{path} must bind through its authored source to the nested project root"
+        );
+        assert_eq!(
+            owned_config(&ownership),
+            Some("/ws/packages/app/tsconfig.json"),
+            "{path} must retain the exact nested project config"
+        );
+    }
 }
 
 #[test]
@@ -132,6 +143,18 @@ fn a_project_configured_by_jsconfig_is_identified_by_that_file() {
         owned_config(&authority.configured_owner("/ws/packages/legacy/src/main.js")),
         Some("/ws/packages/legacy/jsconfig.json"),
     );
+    for path in [
+        "/ws/packages/legacy/src/App.vue",
+        "/ws/packages/legacy/src/App.vue.jsx",
+        "/ws/packages/legacy/src/App.svelte",
+        "/ws/packages/legacy/src/App.svelte.jsx",
+    ] {
+        assert_eq!(
+            owned_config(&authority.configured_owner(path)),
+            Some("/ws/packages/legacy/jsconfig.json"),
+            "{path} must bind through its authored source to jsconfig.json"
+        );
+    }
 }
 
 #[test]

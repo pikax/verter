@@ -20,11 +20,11 @@
 //! owns no correction.
 //!
 //! `cargo test -p verter_session --lib --features bf2-authoritative
-//! svelte_official_conformance_gate -- --test-threads=1 --nocapture`
+//! svelte_official_conformance_gate -- --nocapture`
 //!
 //! Without the feature this module is not compiled. Read the
-//! `running N tests` line, never the exit code. One request at a time
-//! so the harness's shared scratch is never concurrent.
+//! `running N tests` line, never the exit code. Harness scratch is
+//! process-scoped, so no test-thread restriction is required.
 
 use std::collections::BTreeSet;
 
@@ -1491,6 +1491,7 @@ fn check_candidate_envelope(golden_name: &str, envelope: &str) -> CellReport {
                     .collect()
             })
             .unwrap_or_default(),
+        raw: report,
     }
 }
 
@@ -1504,6 +1505,37 @@ fn check_candidate_envelope(golden_name: &str, envelope: &str) -> CellReport {
 /// generated against, and the observed outcome. It records no correction owner,
 /// no acceptance identifier and no disposition — those are decided elsewhere.
 const COMMITTED_CELL_RECORD: &str = include_str!("../../svelte_conformance_cell_record.json");
+
+/// The bound host-backed route these cells exercise, with the registered
+/// catalog identity read from the LIVE host-integration catalog row —
+/// never a hand-spelled identity — so the committed record's route string
+/// is derived from the same structured facts the execution selects by
+/// (adapter, carrier language, framework epoch, host epoch) and drifts
+/// with them.
+fn bound_host_route() -> String {
+    use verter_compiler::framework_common::{built_in_host_integration_catalog, CatalogCapability};
+    let identity = built_in_host_integration_catalog()
+        .iter()
+        .map(|row| row.identity())
+        .find(|identity| {
+            identity.capability() == CatalogCapability::HostIntegration
+                && identity.adapter_id() == &verter_language::FrameworkAdapterId::svelte()
+        })
+        .expect("the Svelte host-integration row is registered");
+    format!(
+        "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request \
+         [adapter={} carrier-language={} framework-epoch={} host-epoch={}] -> \
+         SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> \
+         svelte::runtime::compile_client",
+        identity.adapter_id().as_str(),
+        identity.carrier_language_id().as_str(),
+        identity.epoch().as_str(),
+        identity
+            .host_epoch()
+            .expect("a host-integration row carries a host epoch")
+            .as_str(),
+    )
+}
 
 /// Build the record from what the suite ACTUALLY observes, right now.
 fn observed_cell_record() -> Value {
@@ -1554,9 +1586,7 @@ fn observed_cell_record() -> Value {
                     "dev": cell.dev,
                 },
                 "reachability": reachability_label(&cell.reachability()),
-                "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> \
-                          CarrierCompilerRegistry::compile_bundle -> \
-                          svelte::runtime::compile_client",
+                "route": bound_host_route(),
                 "profile": {
                     "ssr": profile.ssr,
                     "sourceMap": profile.source_map,

@@ -35,13 +35,15 @@ export const PROJECT_VIEWS = Object.freeze([
 const PROJECT_LOOKUP_QUERY =
   "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){owner{... on Organization{projectV2(number:$number){id number viewerCanUpdate}}... on User{projectV2(number:$number){id number viewerCanUpdate}}}}}";
 const ISSUE_ID_QUERY =
-  "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id projectsV2(first:100){totalCount nodes{id number}}} pullRequest(number:$number){id}}}";
+  "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id projectItems(first:100){totalCount nodes{id project{id number}}}}}}";
 const ADD_ITEM_MUTATION =
   "mutation($projectId:ID!,$contentId:ID!){addProjectV2ItemById(input:{projectId:$projectId,contentId:$contentId}){item{id}}}";
 const PROJECT_STATUS_FIELD_QUERY =
   "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){owner{... on Organization{projectV2(number:$number){id number viewerCanUpdate fields(first:100){totalCount nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}... on User{projectV2(number:$number){id number viewerCanUpdate fields(first:100){totalCount nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}}}";
 const ISSUE_PROJECT_STATE_QUERY =
   'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id number parent{id number repository{name owner{login}}} projectItems(first:100){totalCount nodes{id project{id number} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name optionId}}}} subIssues(first:100){totalCount nodes{id number repository{name owner{login}} projectItems(first:100){totalCount nodes{id project{id number} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name optionId}}}}}}}}}';
+const ADD_SUB_ISSUE_MUTATION =
+  "mutation($issueId:ID!,$subIssueId:ID!,$replaceParent:Boolean!){addSubIssue(input:{issueId:$issueId,subIssueId:$subIssueId,replaceParent:$replaceParent}){issue{id number repository{name owner{login}}} subIssue{id number repository{name owner{login}} parent{id number repository{name owner{login}}}}}}";
 const SET_PROJECT_STATUS_MUTATION =
   "mutation($projectId:ID!,$itemId:ID!,$fieldId:ID!,$optionId:String!){updateProjectV2ItemFieldValue(input:{projectId:$projectId,itemId:$itemId,fieldId:$fieldId,value:{singleSelectOptionId:$optionId}}){projectV2Item{id}}}";
 
@@ -652,8 +654,10 @@ export function mappingPolicy(mapping, number) {
   if (!mapping || typeof mapping !== "object") {
     throw new MappingMismatchError("issue update requires a GitHubIssueMapping");
   }
-  if (typeof mapping.node_id !== "string" || mapping.node_id.length === 0) {
-    throw new MappingMismatchError("mapping.node_id is required");
+  const hasNodeId = typeof mapping.node_id === "string" && mapping.node_id.length > 0;
+  const hasTrain = typeof mapping.train === "string" && mapping.train.length > 0;
+  if (!hasNodeId && !hasTrain) {
+    throw new MappingMismatchError("mapping.node_id or mapping.train is required");
   }
   assertIssueNumber(mapping.gh_issue, "mapping.gh_issue");
   if (typeof mapping.sync_to_github !== "boolean") {
@@ -665,6 +669,14 @@ export function mappingPolicy(mapping, number) {
     );
   }
   return mapping.sync_to_github ? "opt-in" : "protected";
+}
+
+function mappingIdentity(mapping) {
+  if (typeof mapping?.node_id === "string" && mapping.node_id.length > 0) {
+    return mapping.node_id;
+  }
+  if (typeof mapping?.train === "string" && mapping.train.length > 0) return mapping.train;
+  return "unknown mapping";
 }
 
 export function prepareCreateIssue(adapter, request) {
@@ -888,7 +900,7 @@ function issueIdFromGraphql(data, issueNumber) {
 }
 
 function projectMembership(issue, project) {
-  const connection = issue?.projectsV2;
+  const connection = issue?.projectItems;
   const nodes = connection?.nodes;
   if (
     !Array.isArray(nodes) ||
@@ -898,7 +910,14 @@ function projectMembership(issue, project) {
     throw new UnstructuredGitHubOutputError("GitHub issue Project membership is incomplete");
   }
   return nodes.some(
-    (row) => row && typeof row === "object" && !Array.isArray(row) && row.id === project.id,
+    (row) =>
+      row &&
+      typeof row === "object" &&
+      !Array.isArray(row) &&
+      row.project &&
+      typeof row.project === "object" &&
+      !Array.isArray(row.project) &&
+      row.project.id === project.id,
   );
 }
 
@@ -967,6 +986,183 @@ function prepareIssueDependencyMutation(adapter, request) {
 
 export function planAddIssueDependency(number, blockingNumber, blockingId) {
   return { kind: "add-issue-dependency", number, blockingNumber, blockingId, applied: false };
+}
+
+export function planAddIssueSubIssue(parentIssueNumber, subIssueNumber) {
+  return {
+    kind: "add-issue-sub-issue",
+    parentIssueNumber,
+    subIssueNumber,
+    applied: false,
+  };
+}
+
+export function prepareAddIssueSubIssue(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  const parentIssueNumber = assertIssueNumber(request.parentIssueNumber, "parent issue number");
+  const subIssueNumber = assertIssueNumber(request.subIssueNumber, "sub-issue number");
+  if (parentIssueNumber === subIssueNumber) {
+    throw new GitHubAdapterError("an issue cannot be its own sub-issue");
+  }
+  if (mappingPolicy(request.parentMapping, parentIssueNumber) === "protected") {
+    throw new ProtectedMappingError(
+      `refusing sub-issue update of protected parent issue #${parentIssueNumber} (${mappingIdentity(request.parentMapping)})`,
+    );
+  }
+  if (mappingPolicy(request.subIssueMapping, subIssueNumber) === "protected") {
+    throw new ProtectedMappingError(
+      `refusing sub-issue update of protected issue #${subIssueNumber} (${mappingIdentity(request.subIssueMapping)})`,
+    );
+  }
+  assertApplyClearance(mode, request.clearance, "issues", adapter);
+  return { mode, parentIssueNumber, subIssueNumber };
+}
+
+function assertBoundIssueState(snapshot, expectedNumber, repository, label) {
+  if (
+    snapshot == null ||
+    typeof snapshot !== "object" ||
+    snapshot.number !== expectedNumber ||
+    typeof snapshot.id !== "string" ||
+    snapshot.id.length === 0
+  ) {
+    throw new UnstructuredGitHubOutputError(`${label} #${expectedNumber} identity is invalid`);
+  }
+  if (!sameRepository(snapshot, repository)) {
+    throw new WrongRepositoryError(
+      `${label} #${expectedNumber} is outside ${repository.owner}/${repository.repo}`,
+    );
+  }
+  return snapshot;
+}
+
+function sameRepository(left, right) {
+  return (
+    typeof left?.owner === "string" &&
+    typeof left?.repo === "string" &&
+    typeof right?.owner === "string" &&
+    typeof right?.repo === "string" &&
+    left.owner.toLowerCase() === right.owner.toLowerCase() &&
+    left.repo.toLowerCase() === right.repo.toLowerCase()
+  );
+}
+
+function assertRelationRepository(relation, repository, label) {
+  if (!sameRepository(relation, repository)) {
+    throw new WrongRepositoryError(`${label} is outside ${repository.owner}/${repository.repo}`);
+  }
+}
+
+export function classifyIssueSubIssueState(
+  parentSnapshot,
+  subIssueSnapshot,
+  parentIssueNumber,
+  subIssueNumber,
+  repository,
+) {
+  const parent = assertBoundIssueState(
+    parentSnapshot,
+    parentIssueNumber,
+    repository,
+    "parent issue",
+  );
+  const subIssue = assertBoundIssueState(subIssueSnapshot, subIssueNumber, repository, "sub-issue");
+  if (!Array.isArray(parent.subIssues)) {
+    throw new UnstructuredGitHubOutputError(
+      `parent issue #${parentIssueNumber} sub-issue list is invalid`,
+    );
+  }
+  const listed = parent.subIssues.filter((row) => row?.number === subIssueNumber);
+  for (const row of listed) {
+    assertRelationRepository(row, repository, `sub-issue #${subIssueNumber}`);
+    if (row.id !== subIssue.id) {
+      throw new UnstructuredGitHubOutputError(
+        `sub-issue #${subIssueNumber} node id does not match its issue identity`,
+      );
+    }
+  }
+  if (listed.length > 1) {
+    throw new UnstructuredGitHubOutputError(
+      `parent issue #${parentIssueNumber} contains duplicate sub-issue #${subIssueNumber}`,
+    );
+  }
+  if (subIssue.parent == null) {
+    if (listed.length !== 0) {
+      throw new UnstructuredGitHubOutputError(
+        `sub-issue #${subIssueNumber} has no parent but is listed by issue #${parentIssueNumber}`,
+      );
+    }
+    return "attach";
+  }
+  assertRelationRepository(subIssue.parent, repository, `parent of sub-issue #${subIssueNumber}`);
+  if (subIssue.parent.number !== parentIssueNumber || subIssue.parent.id !== parent.id) {
+    throw new GitHubAdapterError(
+      `refusing to replace parent of sub-issue #${subIssueNumber}; it already has parent issue #${subIssue.parent.number}`,
+    );
+  }
+  if (listed.length !== 1) {
+    throw new UnstructuredGitHubOutputError(
+      `sub-issue #${subIssueNumber} names parent issue #${parentIssueNumber} but is absent from its sub-issue list`,
+    );
+  }
+  return "unchanged";
+}
+
+function parseAddedIssueIdentity(row, expected, expectedId, repository, label) {
+  if (row == null || typeof row !== "object" || Array.isArray(row)) {
+    throw new UnstructuredGitHubOutputError(`${label} #${expected} identity is missing`);
+  }
+  if (!Number.isSafeInteger(row.number) || row.number < 1) {
+    throw new UnstructuredGitHubOutputError(`${label} #${expected} number is invalid`);
+  }
+  if (typeof row.id !== "string" || row.id.length === 0) {
+    throw new UnstructuredGitHubOutputError(`${label} #${expected} id is missing`);
+  }
+  const identity = {
+    id: row.id,
+    number: row.number,
+    owner: row.repository?.owner?.login,
+    repo: row.repository?.name,
+  };
+  if (
+    identity.number !== expected ||
+    identity.id !== expectedId ||
+    !sameRepository(identity, repository)
+  ) {
+    throw new UnstructuredGitHubOutputError(`${label} #${expected} identity did not match`);
+  }
+  return identity;
+}
+
+export function parseAddIssueSubIssueResult(payload, parentSnapshot, subIssueSnapshot, repository) {
+  const data = parseGraphqlResult(payload, () => new GitHubAdapterError("addSubIssue failed"));
+  const result = data.addSubIssue;
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    throw new UnstructuredGitHubOutputError("addSubIssue did not return issue identities");
+  }
+  const parent = parseAddedIssueIdentity(
+    result.issue,
+    parentSnapshot.number,
+    parentSnapshot.id,
+    repository,
+    "parent issue",
+  );
+  const subIssue = parseAddedIssueIdentity(
+    result.subIssue,
+    subIssueSnapshot.number,
+    subIssueSnapshot.id,
+    repository,
+    "sub-issue",
+  );
+  const returnedParent = parseAddedIssueIdentity(
+    result.subIssue?.parent,
+    parent.number,
+    parent.id,
+    repository,
+    "returned sub-issue parent",
+  );
+  return { parent, subIssue: { ...subIssue, parent: returnedParent } };
 }
 
 export function prepareAddIssueDependency(adapter, request) {
@@ -1336,6 +1532,9 @@ export function createGhApiTransport({ spawn = spawnSync } = {}) {
 
 export class GitHubAdapter {
   #transport;
+  #project;
+  #projectStatusField;
+  #repositoryMilestones;
 
   constructor(options = {}) {
     bindOwnerRepo(this, options, "GitHubAdapter");
@@ -1693,11 +1892,14 @@ export class GitHubAdapter {
   }
 
   getRepositoryMilestones() {
-    return this.#getCompleteList(
-      `/repos/${this.owner}/${this.repo}/milestones?state=all`,
-      parseMilestoneListPayload,
-      "GitHub repository milestone list is incomplete",
-    );
+    if (this.#repositoryMilestones === undefined) {
+      this.#repositoryMilestones = this.#getCompleteList(
+        `/repos/${this.owner}/${this.repo}/milestones?state=all`,
+        parseMilestoneListPayload,
+        "GitHub repository milestone list is incomplete",
+      );
+    }
+    return this.#repositoryMilestones;
   }
 
   createRepositoryMilestone(request) {
@@ -1709,6 +1911,7 @@ export class GitHubAdapter {
       body: milestone,
     });
     const [created] = parseMilestoneListPayload([payload]);
+    this.#repositoryMilestones = undefined;
     return { kind: "create-repository-milestone", milestone: created, applied: true };
   }
 
@@ -1726,6 +1929,7 @@ export class GitHubAdapter {
         `GitHub milestone update returned number ${updated.number}, expected ${number}`,
       );
     }
+    this.#repositoryMilestones = undefined;
     return { kind: "update-repository-milestone", milestone: updated, applied: true };
   }
 
@@ -1799,6 +2003,46 @@ export class GitHubAdapter {
     };
   }
 
+  addIssueSubIssue(request) {
+    const { mode, parentIssueNumber, subIssueNumber } = prepareAddIssueSubIssue(this, request);
+    if (mode === "check") return planAddIssueSubIssue(parentIssueNumber, subIssueNumber);
+    const repository = { owner: this.owner, repo: this.repo };
+    const parentSnapshot = this.getIssueProjectState(parentIssueNumber);
+    const subIssueSnapshot = this.getIssueProjectState(subIssueNumber);
+    const state = classifyIssueSubIssueState(
+      parentSnapshot,
+      subIssueSnapshot,
+      parentIssueNumber,
+      subIssueNumber,
+      repository,
+    );
+    if (state === "unchanged") {
+      return {
+        kind: "add-issue-sub-issue",
+        parentIssueNumber,
+        subIssueNumber,
+        applied: true,
+        unchanged: true,
+      };
+    }
+    const mutation = this.#graphql(
+      ADD_SUB_ISSUE_MUTATION,
+      {
+        issueId: parentSnapshot.id,
+        subIssueId: subIssueSnapshot.id,
+        replaceParent: false,
+      },
+      () => new GitHubAdapterError("addSubIssue failed"),
+    );
+    parseAddIssueSubIssueResult({ data: mutation }, parentSnapshot, subIssueSnapshot, repository);
+    return {
+      kind: "add-issue-sub-issue",
+      parentIssueNumber,
+      subIssueNumber,
+      applied: true,
+    };
+  }
+
   setAiResultLabel(request) {
     const { mode, number, label } = prepareSetAiResultLabel(this, request);
     if (mode === "check") return planSetAiResultLabel(number, label);
@@ -1847,26 +2091,32 @@ export class GitHubAdapter {
 
   getProject(number = PROJECT_NUMBER) {
     assertProjectNumber(number);
-    return projectFromGraphqlData(
-      this.#graphql(
-        PROJECT_LOOKUP_QUERY,
-        { owner: this.owner, name: this.repo, number },
-        missingProjectError(number),
-      ),
-      number,
-    );
+    if (this.#project === undefined) {
+      this.#project = projectFromGraphqlData(
+        this.#graphql(
+          PROJECT_LOOKUP_QUERY,
+          { owner: this.owner, name: this.repo, number },
+          missingProjectError(number),
+        ),
+        number,
+      );
+    }
+    return this.#project;
   }
 
   getProjectStatusField(number = PROJECT_NUMBER) {
     assertProjectNumber(number);
-    return projectStatusFieldFromGraphqlData(
-      this.#graphql(
-        PROJECT_STATUS_FIELD_QUERY,
-        { owner: this.owner, name: this.repo, number },
-        missingProjectError(number),
-      ),
-      number,
-    );
+    if (this.#projectStatusField === undefined) {
+      this.#projectStatusField = projectStatusFieldFromGraphqlData(
+        this.#graphql(
+          PROJECT_STATUS_FIELD_QUERY,
+          { owner: this.owner, name: this.repo, number },
+          missingProjectError(number),
+        ),
+        number,
+      );
+    }
+    return this.#projectStatusField;
   }
 
   getIssueProjectState(issueNumber) {
@@ -2028,6 +2278,7 @@ export class GitHubAdapter {
       path: `/repos/${this.owner}/${this.repo}/milestones/${found.number}`,
       body: { state: "closed" },
     });
+    this.#repositoryMilestones = undefined;
     return { kind: "close-milestone", title, applied: true };
   }
 

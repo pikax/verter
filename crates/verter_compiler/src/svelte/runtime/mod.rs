@@ -135,8 +135,8 @@ mod diff_oracle_tests;
 use oxc_allocator::Allocator;
 
 use crate::svelte::parser::{
-    forced_runes_option, ParsedSvelte, SvelteBlock, SvelteBlockKind, SvelteClauseKind,
-    SvelteElement, SvelteElementKind, SvelteNode, SvelteTag, SvelteTagKind,
+    forced_runes_option, CustomElementDescriptor, ParsedSvelte, SvelteBlock, SvelteBlockKind,
+    SvelteClauseKind, SvelteElement, SvelteElementKind, SvelteNode, SvelteTag, SvelteTagKind,
 };
 use verter_span::Span;
 
@@ -241,7 +241,9 @@ pub struct SvelteRuntimeOptions {
     /// `customElements.define` is left to the user — there is no tag). An in-source
     /// `<svelte:options customElement>` value WINS over this option (the official
     /// `customElementOptions ?? customElement` precedence); a
-    /// `customElement={null}` options value falls back to it.
+    /// `customElement={null}` options value falls back to it. A present
+    /// [`custom_element_descriptor`](Self::custom_element_descriptor) overrides
+    /// this boolean selector (including `false` / omitted).
     pub custom_element: bool,
     /// The RESOLVED `cssHash` scope-class override — the official user `cssHash`
     /// callback's already-computed result string, preserved BYTE-EXACT (no
@@ -284,6 +286,14 @@ pub struct SvelteRuntimeOptions {
     /// refusal, and every other value (`0`, `6`, …) is an official
     /// `options_invalid_value` error. The default `5` (or absent) is supported.
     pub compatibility_component_api: Option<u32>,
+    /// Requested css output mode. Folded with custom-element activity and
+    /// inline `<svelte:options css="injected">`: any of those selects
+    /// injected; otherwise external.
+    pub css: Option<crate::compile_request::svelte::SvelteCssRequest>,
+    /// Validated compile-request custom-element descriptor. Presence means an
+    /// active custom element even when empty (untagged); `None` falls through
+    /// to [`custom_element`](Self::custom_element).
+    pub custom_element_descriptor: Option<crate::svelte::parser::CustomElementDescriptor>,
     /// Host-retained parsed style IRs in inventory order.
     pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
 }
@@ -581,6 +591,16 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     opts: &SvelteRuntimeOptions,
     alloc: &'a Allocator,
 ) -> Result<SvelteRuntimeIr<'a>, RuntimeLoweringErrors> {
+    lower_parsed_svelte_to_ir_resolved(source, parsed, opts, alloc, None)
+}
+
+pub(super) fn lower_parsed_svelte_to_ir_resolved<'a>(
+    source: &'a str,
+    parsed: &ParsedSvelte,
+    opts: &SvelteRuntimeOptions,
+    alloc: &'a Allocator,
+    resolved_custom_element: Option<Option<CustomElementDescriptor>>,
+) -> Result<SvelteRuntimeIr<'a>, RuntimeLoweringErrors> {
     // --- Mode inference: an explicit in-source `<svelte:options runes={…}>`
     // override wins (Svelte's own forced-mode switch, shared with the IDE
     // projector via `forced_runes_option` — official lets it override the
@@ -835,16 +855,24 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     ops::populate_runtime_ops(&ctx.nodes, &mut ctx.template_scopes, &mut ctx.ops);
 
     // Resolve the custom-element descriptor (the `<svelte:options customElement>`
-    // value, falling back to the `customElement: true` compile option). Runs after
-    // the official-reject gate, so the value is official-ACCEPTED; a shape the gate
-    // should have rejected is a loud lowering diagnostic, never a silent
-    // plain-component downgrade.
-    let custom_element = match custom_element::resolve_custom_element(parsed, opts.custom_element) {
-        Ok(descriptor) => descriptor,
-        Err(diagnostic) => {
-            ctx.errors
-                .push(diagnostic.code, diagnostic.message, diagnostic.span);
-            None
+    // value, falling back to the compile-side selection). `compile_client`
+    // resolves once and threads the same value in; other callers resolve here.
+    // A shape the official-reject gate should have rejected is a loud lowering
+    // diagnostic, never a silent plain-component downgrade.
+    let custom_element = match resolved_custom_element {
+        Some(descriptor) => descriptor,
+        None => {
+            match custom_element::resolve_custom_element(
+                parsed,
+                custom_element::CustomElementCompileSelection::from_opts(opts),
+            ) {
+                Ok(descriptor) => descriptor,
+                Err(diagnostic) => {
+                    ctx.errors
+                        .push(diagnostic.code, diagnostic.message, diagnostic.span);
+                    None
+                }
+            }
         }
     };
 

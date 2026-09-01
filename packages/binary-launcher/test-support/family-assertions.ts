@@ -198,7 +198,11 @@ export function describeBinaryFamily(family: BinaryFamily): void {
         .map((c) => c.path);
 
       expect(devPaths).toEqual([
+        join(repoRoot, "target", row.rustTarget, "artifact-dev", row.binaryName),
+        join(repoRoot, "target", "artifact-dev", row.binaryName),
+        join(repoRoot, "target", row.rustTarget, "debug", row.binaryName),
         join(repoRoot, "target", "debug", row.binaryName),
+        join(repoRoot, "target", row.rustTarget, "release", row.binaryName),
         join(repoRoot, "target", "release", row.binaryName),
       ]);
 

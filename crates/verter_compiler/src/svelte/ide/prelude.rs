@@ -156,10 +156,13 @@ pub(crate) fn render_component_prelude(
     namespace: SvelteJsxNamespace,
     legacy_mode: bool,
     dialect: SvelteIdeDialect,
+    authored_check_directives: &[&str],
 ) -> String {
     match dialect {
         SvelteIdeDialect::TypeScript => render_prelude(namespace, legacy_mode),
-        SvelteIdeDialect::JavaScript => render_js_component_prelude(namespace, legacy_mode),
+        SvelteIdeDialect::JavaScript => {
+            render_js_component_prelude(namespace, legacy_mode, authored_check_directives)
+        }
     }
 }
 
@@ -448,7 +451,11 @@ $inspect.trace = function (name) {};
 /// Render the JavaScript component prelude. The function bodies are inert IDE
 /// witnesses; all framework contracts live in JSDoc so the carrier remains
 /// valid JavaScript and TypeScript can still infer/check every generated call.
-fn render_js_component_prelude(namespace: SvelteJsxNamespace, legacy_mode: bool) -> String {
+fn render_js_component_prelude(
+    namespace: SvelteJsxNamespace,
+    legacy_mode: bool,
+    authored_check_directives: &[&str],
+) -> String {
     let legacy = if legacy_mode {
         JS_LEGACY_MAGIC_PRELUDE
     } else {
@@ -463,6 +470,11 @@ fn render_js_component_prelude(namespace: SvelteJsxNamespace, legacy_mode: bool)
             + JS_COMPONENT_PROJECTION_CHECKERS.len()
             + legacy.len(),
     );
+    for directive in authored_check_directives {
+        out.push_str("// ");
+        out.push_str(directive);
+        out.push('\n');
+    }
     out.push_str(namespace.pragma_line());
     out.push_str(JS_COMPONENT_HEADER);
     out.push_str(JS_COMPONENT_ONLY_RUNES_PROPS_BINDABLE);
@@ -473,8 +485,7 @@ fn render_js_component_prelude(namespace: SvelteJsxNamespace, legacy_mode: bool)
     out
 }
 
-const JS_COMPONENT_HEADER: &str = r#"// @ts-check
-// --- Svelte 5 runes (JSDoc-typed; call sites stay verbatim) ---
+const JS_COMPONENT_HEADER: &str = r#"// --- Svelte 5 runes (JSDoc-typed; call sites stay verbatim) ---
 "#;
 
 const JS_COMPONENT_ONLY_RUNES_PROPS_BINDABLE: &str = r#"/**
@@ -659,7 +670,7 @@ function __verter_store_lvalue(store) { return /** @type {{ value: T }} */ ({ va
 function __verter_store_update(current) { return current; }
 "#;
 
-const JS_LEGACY_MAGIC_PRELUDE: &str = r#"// --- F12 legacy magic objects (legacy-mode only; JSDoc-typed).
+const JS_LEGACY_MAGIC_PRELUDE: &str = r#"// --- legacy magic objects (legacy-mode only; JSDoc-typed).
 const $$props = /** @type {Record<string, any>} */ ({});
 const $$restProps = /** @type {Record<string, any>} */ ({});
 const $$slots = /** @type {Record<string, boolean>} */ ({});
@@ -672,7 +683,7 @@ const COMPONENT_PROJECTION_CHECKERS: &str = r#"// --- Verter projection checkers
 declare function __verter_attach<E extends EventTarget>(attachment: __VerterAttachment<E>): void;
 declare function __verter_snippet<Params extends unknown[]>(render: (...args: Params) => unknown): __VerterSnippet<Params>;
 declare function __verter_void(...values: unknown[]): void;
-// F6 experimental await-EXPRESSION projection (`{await e}` in markup / inside a
+// experimental await-EXPRESSION projection (`{await e}` in markup / inside a
 // rune). `__verter_render` STAYS SYNC — a markup `await e` is rewritten to
 // `__verter_await_expr(e)` so the resolved value type flows to the use site
 // (`Awaited<T>` is resolved by TS/the shared type path, NO Svelte promise
@@ -707,7 +718,7 @@ declare function __verter_transition(config: import("svelte/transition").Transit
 // function on the host node + from/to rects + params and asserts the result is
 // an `AnimationConfig` (or a deferred factory of one).
 declare function __verter_animate(config: import("svelte/animate").AnimationConfig | ((options?: { direction: "in" | "out" }) => import("svelte/animate").AnimationConfig)): void;
-// --- F4 wide `bind:` family value-type checkers (the bind-contract table is the
+// --- wide `bind:` family value-type checkers (the bind-contract table is the
 // AUTHORITY; these are implementation helpers). The projector emits an
 // assignment through one of these so the bound LOCAL is checked against the
 // binding's value type `V` from the table, in the binding's DIRECTION:
@@ -719,7 +730,7 @@ declare function __verter_animate(config: import("svelte/animate").AnimationConf
 //     readonly fixture pins).
 declare function __verter_bind_rw<V>(local: V): V;
 declare function __verter_bind_read<V>(): V;
-// `bind:this={el}` invariance (F4). The local is commonly declared WITHOUT an
+// `bind:this={el}` invariance. The local is commonly declared WITHOUT an
 // initializer (`let el: HTMLInputElement`), so the check must NOT read its
 // value. The projector emits `(LOCAL = (null! as Host))` (writes Host into the
 // local — the `Host extends typeof LOCAL` direction + definite assignment) paired
@@ -740,7 +751,7 @@ declare function __verter_bind_this_assignable<Host, To extends Host>(): void;
 // round-trip (group is read-write), so a `const` target also fails.
 declare function __verter_bind_group_checkbox<L extends readonly unknown[]>(local: L): L;
 declare function __verter_bind_group_radio<L>(local: L extends readonly unknown[] ? never : L): L;
-// --- F5 function bindings `bind:x={get, set}` (and write-only `{null, set}`).
+// --- function bindings `bind:x={get, set}` (and write-only `{null, set}`).
 // The checker enforces get/set mutual consistency against the bind-target type
 // `V`: `get` returns `V` (or `null` for write-only), `set` consumes `V`. For an
 // element bind the projector passes `V` from the bind-contract table; for a
@@ -770,7 +781,7 @@ declare function __verter_component<C>(component: C):
   C extends abstract new (...args: never[]) => { $props: infer P extends Record<string, any> }
     ? import("svelte").Component<P, __VerterComponentExports<C> & Record<string, any>, "">
     : never;
-// --- F8 `<svelte:component this={C}>` / `<svelte:self>` dynamic component.
+// --- `<svelte:component this={C}>` / `<svelte:self>` dynamic component.
 // The `this` value may be a native callable Svelte 5 Component or the private
 // class-shaped foreign-component adapter. Props are extracted through
 // `__VerterComponentProps<C>`, and the helper returns a JSX function component
@@ -782,7 +793,7 @@ declare function __verter_component<C>(component: C):
 declare function __verter_dynamic_component<
   C extends import("svelte").Component<any, any, any> | (abstract new (...args: never[]) => { $props: any })
 >(component: C): (props: __VerterComponentProps<C> & { children?: unknown }) => ReturnType<__VerterSnippet>;
-// --- F13 component `on:event={handler}` payload checking. A COMPONENT element's
+// --- component `on:event={handler}` payload checking. A COMPONENT element's
 // `on:select={h}` projects to `{...(__verter_event(Child, "select", h), {})}` —
 // the helper resolves native Svelte 5 `on${event}` callback props. A private
 // `$events` fallback remains only for class-shaped foreign components. Unknown
@@ -802,7 +813,7 @@ declare function __verter_event<C, K extends __VerterEventNames<C>>(
   name: K,
   handler: __VerterEventHandler<C, K>,
 ): void;
-// --- F11 store auto-subscription (`$store`) helpers. The projector rewrites
+// --- store auto-subscription (`$store`) helpers. The projector rewrites
 // ONLY the `$` byte / `=` operator spans of a classified store-sub, preserving
 // the original `store` identifier / RHS bytes (sourcemap accuracy). A READ
 // `$store` becomes `__verter_store_get(store)` — typed `T` from the store's
@@ -846,7 +857,7 @@ declare function __verter_store_update<T extends number | bigint>(current: T): T
 /// surface stays precisely typed. `$$slots` is `Record<string, boolean>`
 /// (`$$slots.foo` is `boolean`: whether the `foo` slot was filled), which is a
 /// precise type, not the `any` exception.
-const LEGACY_MAGIC_PRELUDE: &str = r#"// --- F12 legacy magic objects (legacy-mode only; ambient `declare const`).
+const LEGACY_MAGIC_PRELUDE: &str = r#"// --- legacy magic objects (legacy-mode only; ambient `declare const`).
 // ANTI-`any`-GATE EXCEPTION (owner-approved): `$$props`/`$$restProps` are the
 // legacy forwarded-attribute bag, intrinsically untyped — the deliberate `any`
 // is scoped to THESE TWO declarations ONLY. `$$slots` is precisely typed.

@@ -136,7 +136,7 @@ trains = ["governance.release-control", "rev11.finalization", "rev11.publication
 
 [[problem_train_rule]]
 label = "problem:performance"
-trains = ["compiler.compiler-perf"]
+trains = ["compiler.compiler-optimization", "compiler.compiler-perf"]
 
 [[problem_train_rule]]
 label = "problem:compatibility"

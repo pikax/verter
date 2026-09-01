@@ -1,32 +1,56 @@
 /**
- * Capture WASM-produced carrier fixtures for the in-context LanguageService
- * guards.
+ * Capture — and verify — the WASM-produced carrier fixtures the in-context
+ * LanguageService guards consume.
  *
  * Runs the REAL WASM host (packages/wasm/wasm — the same binary the playground
  * ships) over a small set of committed carrier sources and snapshots the three
  * generated surfaces per source:
  *
- *   - IDE carrier      — `getIde(id, profile)`        → `Comp.vue.tsx`
+ *   - IDE carrier      — `getIde(id, profile)`             → `Comp.vue.tsx`
  *   - declaration      — `getPublicApi(id, "declaration")` → `Comp.d.vue.ts`
- *   - API carrier      — `getPublicApi(id)`           → `Comp.vue.verter.ts`
+ *   - API carrier      — `getPublicApi(id)`                → `Comp.vue.verter.ts`
  *
  * The snapshot is committed at `src/editor/__fixtures__/wasm-carriers.json` so
- * the guards stay hermetic (no live WASM host load per test). Regenerate after
- * a compiler-output change with:
+ * the guards stay hermetic (no live WASM host load per test). A hermetic
+ * snapshot of live output only stays truthful while something compares the two,
+ * so ONE renderer serves both modes:
  *
- *   node scripts/capture-wasm-carrier-fixtures.mjs
+ *   node scripts/capture-wasm-carrier-fixtures.mjs           # render + write
+ *   node scripts/capture-wasm-carrier-fixtures.mjs --check   # render + compare
+ *
+ * `--check` writes nothing and exits non-zero on any difference, so a
+ * compiler-output change that is not accompanied by a regenerated fixture
+ * fails instead of leaving every consuming guard green against stale bytes.
+ * It renders from the artifact present on disk; whoever invokes it is
+ * responsible for that artifact being current (CI runs it in the same job that
+ * just built it). A missing artifact is a hard failure, never a skip — a check
+ * that can pass without reaching the host proves nothing.
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { resolve, dirname, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const thisDir = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(thisDir, "../../..");
 const wasmJs = resolve(thisDir, "../../wasm/wasm/verter_wasm.js");
 const wasmBin = resolve(thisDir, "../../wasm/wasm/verter_wasm_bg.wasm");
 const outFile = resolve(thisDir, "../src/editor/__fixtures__/wasm-carriers.json");
 
-const wasmModule = await import(pathToFileURL(wasmJs).href);
-await wasmModule.default({ module_or_path: readFileSync(wasmBin) });
+const USAGE = `usage: node scripts/capture-wasm-carrier-fixtures.mjs [--check]
+
+  (no flag)  render from the built WASM artifact and write the fixture
+  --check    render from the built WASM artifact and compare it against the
+             committed fixture; writes nothing, exits 1 on any difference`;
+
+const argv = process.argv.slice(2);
+const unknownArgs = argv.filter((arg) => arg !== "--check");
+if (unknownArgs.length > 0) {
+  console.error(`unknown argument(s): ${unknownArgs.join(" ")}\n\n${USAGE}`);
+  process.exit(2);
+}
+const checkMode = argv.includes("--check");
+
+const rel = (p) => relative(repoRoot, p);
 
 /** The committed fixture sources. Key = fixture id in the JSON. */
 const FIXTURES = [
@@ -85,6 +109,29 @@ defineExpose({ count })
   },
 ];
 
+const FIXTURE_COMMENT =
+  "Committed snapshot of REAL WASM-host carrier output (getIde / getPublicApi). " +
+  "Captured by scripts/capture-wasm-carrier-fixtures.mjs so guards run hermetically. " +
+  "Regenerate with: node scripts/capture-wasm-carrier-fixtures.mjs — " +
+  "verify against the built artifact with: node scripts/capture-wasm-carrier-fixtures.mjs --check";
+
+function requireBuiltArtifact() {
+  const missing = [wasmJs, wasmBin].filter((path) => !existsSync(path));
+  if (missing.length === 0) return;
+  console.error(
+    `WASM artifact missing — cannot ${checkMode ? "verify" : "capture"} carrier fixtures:\n` +
+      `${missing.map((path) => `  ${rel(path)}`).join("\n")}\n` +
+      `Build it first: pnpm --filter @verter/wasm build\n` +
+      `That is the publication lane (wasm-bindgen + wasm-opt) and the one CI ` +
+      `compares against. The root \`pnpm run build:wasm\` is the developer ` +
+      `lane (bindgen only, no wasm-opt); nothing here proves the two lanes ` +
+      `render identical carrier bytes, so a fixture captured from one and ` +
+      `checked against the other can report a difference that is only the ` +
+      `optimizer's.`,
+  );
+  process.exit(1);
+}
+
 function surface(response) {
   if (!response || typeof response.code !== "string") return null;
   return {
@@ -104,7 +151,7 @@ function publicApiSurface(result) {
   return surface(result.value);
 }
 
-function capture({ filename, fileKind, source }) {
+function capture(wasmModule, { filename, fileKind, source }) {
   // A fresh host per fixture keeps every entry independent of capture order.
   const host = new wasmModule.VerterHost({
     devMode: true,
@@ -112,7 +159,9 @@ function capture({ filename, fileKind, source }) {
     maxProfilesPerFile: 8,
   });
   const profile = { filename, sourceMap: true, target: "ide", forceJs: true };
-  host.upsert({ inputId: filename, source, fileKind, aliases: [], compileProfile: profile });
+  // Registration carries source only. Compile demand is stated on the compile
+  // calls below, which is the only place the host reads a profile from.
+  host.upsert({ inputId: filename, source, fileKind, aliases: [] });
 
   let ide = null;
   let ideUnavailable = null;
@@ -133,22 +182,152 @@ function capture({ filename, fileKind, source }) {
   return { filename, source, ide, ideUnavailable, decl, api };
 }
 
-const out = {
-  $comment:
-    "Committed snapshot of REAL WASM-host carrier output (getIde / getPublicApi). " +
-    "Captured once by scripts/capture-wasm-carrier-fixtures.mjs so guards run hermetically. " +
-    "Regenerate with: node scripts/capture-wasm-carrier-fixtures.mjs",
-};
-for (const fixture of FIXTURES) {
-  out[fixture.key] = capture(fixture);
-  const entry = out[fixture.key];
-  console.log(
-    `${fixture.key}: ide=${entry.ide ? `${entry.ide.code.length}b` : `UNAVAILABLE (${entry.ideUnavailable})`}` +
-      ` decl=${entry.decl ? `${entry.decl.code.length}b` : "MISSING"}` +
-      ` api=${entry.api ? `${entry.api.code.length}b` : "MISSING"}`,
+/**
+ * The single rendering path. Both writing and comparison call this, so the two
+ * modes can never disagree about formatting, key order, or what a surface is.
+ * Insertion order is fixed by `FIXTURES` and the literal field order above, so
+ * repeated renders over the same artifact produce identical bytes.
+ */
+async function render() {
+  const wasmModule = await import(pathToFileURL(wasmJs).href);
+  await wasmModule.default({ module_or_path: readFileSync(wasmBin) });
+  const snapshot = { $comment: FIXTURE_COMMENT };
+  for (const fixture of FIXTURES) {
+    snapshot[fixture.key] = capture(wasmModule, fixture);
+  }
+  return { snapshot, text: `${JSON.stringify(snapshot, null, 2)}\n` };
+}
+
+function summarize(key, entry) {
+  const ide = entry.ide
+    ? `${entry.ide.code.length} chars`
+    : `UNAVAILABLE (${entry.ideUnavailable})`;
+  return (
+    `${key}: ide=${ide}` +
+    ` decl=${entry.decl ? `${entry.decl.code.length} chars` : "MISSING"}` +
+    ` api=${entry.api ? `${entry.api.code.length} chars` : "MISSING"}`
   );
 }
 
-mkdirSync(dirname(outFile), { recursive: true });
-writeFileSync(outFile, `${JSON.stringify(out, null, 2)}\n`);
-console.log(`wrote ${outFile}`);
+const ABSENT = Symbol("absent");
+const MAX_REPORTED_DIFFS = 20;
+
+function collectDiffs(committed, rendered, path, out) {
+  if (out.length >= MAX_REPORTED_DIFFS) return;
+  if (committed === rendered) return;
+  const comparable =
+    committed !== null &&
+    rendered !== null &&
+    typeof committed === "object" &&
+    typeof rendered === "object" &&
+    Array.isArray(committed) === Array.isArray(rendered);
+  if (!comparable) {
+    out.push({ path, committed, rendered });
+    return;
+  }
+  const keys = [...new Set([...Object.keys(committed), ...Object.keys(rendered)])];
+  for (const key of keys) {
+    if (out.length >= MAX_REPORTED_DIFFS) return;
+    const childPath = path ? `${path}.${key}` : key;
+    const left = key in committed ? committed[key] : ABSENT;
+    const right = key in rendered ? rendered[key] : ABSENT;
+    if (left === ABSENT || right === ABSENT) {
+      out.push({ path: childPath, committed: left, rendered: right });
+      continue;
+    }
+    collectDiffs(left, right, childPath, out);
+  }
+}
+
+function describeValue(value) {
+  if (value === ABSENT) return "<key absent>";
+  if (typeof value === "string") return `string (${value.length} chars)`;
+  return JSON.stringify(value) ?? String(value);
+}
+
+function describeDiff({ path, committed, rendered }) {
+  const head = `  ${path}: committed ${describeValue(committed)} vs rendered ${describeValue(rendered)}`;
+  if (typeof committed !== "string" || typeof rendered !== "string") return head;
+  let i = 0;
+  while (i < committed.length && i < rendered.length && committed[i] === rendered[i]) i += 1;
+  const window = (text) => JSON.stringify(text.slice(Math.max(0, i - 40), i + 60));
+  return (
+    `${head}\n` +
+    `    first difference at index ${i}\n` +
+    `      committed: ${window(committed)}\n` +
+    `      rendered:  ${window(rendered)}`
+  );
+}
+
+async function main() {
+  requireBuiltArtifact();
+
+  const { snapshot, text } = await render();
+  for (const fixture of FIXTURES) {
+    console.log(summarize(fixture.key, snapshot[fixture.key]));
+  }
+
+  if (!checkMode) {
+    mkdirSync(dirname(outFile), { recursive: true });
+    writeFileSync(outFile, text);
+    console.log(`wrote ${rel(outFile)}`);
+    return;
+  }
+
+  if (!existsSync(outFile)) {
+    console.error(
+      `committed fixture missing: ${rel(outFile)}\n` +
+        `Regenerate it: pnpm --filter @verter/playground run capture:wasm-fixtures`,
+    );
+    process.exit(1);
+  }
+
+  const committedText = readFileSync(outFile, "utf8");
+  if (committedText === text) {
+    console.log(
+      `OK: ${rel(outFile)} is byte-identical to what the built WASM artifact renders ` +
+        `(${text.length} chars).`,
+    );
+    return;
+  }
+
+  let committedSnapshot;
+  try {
+    committedSnapshot = JSON.parse(committedText);
+  } catch (err) {
+    console.error(
+      `committed fixture ${rel(outFile)} is not valid JSON (${err.message}); ` +
+        `it differs from the rendered snapshot.`,
+    );
+    process.exit(1);
+  }
+
+  const diffs = [];
+  collectDiffs(committedSnapshot, snapshot, "", diffs);
+  console.error(
+    `STALE FIXTURE: ${rel(outFile)} does not match what the built WASM artifact renders.\n` +
+      `  committed: ${committedText.length} chars\n` +
+      `  rendered:  ${text.length} chars`,
+  );
+  if (diffs.length === 0) {
+    // Same parsed value, different bytes: formatting or key order drifted.
+    console.error(
+      "  the parsed snapshots are equal, so the committed bytes differ only in " +
+        "formatting or key order — they were not produced by this renderer.",
+    );
+  } else {
+    // The walk stops AT the cap, so a run that collected exactly the cap may or
+    // may not have more — never report that count as exact.
+    console.error(
+      `differences (${diffs.length >= MAX_REPORTED_DIFFS ? `first ${MAX_REPORTED_DIFFS}, possibly more` : diffs.length}):`,
+    );
+    for (const diff of diffs) console.error(describeDiff(diff));
+  }
+  console.error(
+    `\nRegenerate from the built artifact and commit the result:\n` +
+      `  pnpm --filter @verter/playground run capture:wasm-fixtures`,
+  );
+  process.exit(1);
+}
+
+await main();

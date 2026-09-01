@@ -6,6 +6,7 @@
     "./src/e2eEnv.ts",
     "./src/e2eProviderAttestation.ts",
     "./src/sharedTsgoLaunch.ts",
+    "./src/rustHostTriple.ts",
     "./src/runSummaryOracle.ts"
   ],
   "exclude": [

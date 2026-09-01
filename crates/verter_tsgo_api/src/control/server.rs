@@ -65,7 +65,10 @@ const ERROR_METHOD_NOT_FOUND: i64 = -32601;
 /// broken / detached engine), so the handler must never block the control dispatch
 /// indefinitely — it awaits the in-band witness under this timeout AND races the
 /// relay-stop signal, returning the FIRST of {witness, relay-stop, timeout}.
+#[cfg(not(test))]
 const WAIT_INITIALIZED_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const WAIT_INITIALIZED_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The shim-side control server for ONE control connection. Holds per-connection
 /// state (hello completion, the carriers this session opened) plus the shared

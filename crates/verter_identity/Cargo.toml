@@ -26,4 +26,3 @@ blake3 = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-trybuild = "1.0"

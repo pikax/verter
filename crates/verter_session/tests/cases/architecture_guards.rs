@@ -2941,19 +2941,6 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "workspace",
             "phase-06b-report.md §6b.2.F6.bypass: single-cell workspace handle (Arc<RwLock<Arc<dyn WorkspaceAccess>>>) shared with the scheduler's SourceLoader so the lock always reads through the latest workspace after set_workspace(). NOT a cache; a re-pointable handle.",
         ),
-        // (c) Phase 9b test-only observable. `#[cfg(test)] last_upsert_priority`
-        //     is a single-cell `Mutex<Option<Priority>>` test mailbox written
-        //     by `upsert_with_priority` and read by the
-        //     `compile_many_propagates_*_priority` tests on `VerterHost::compile_many`.
-        //     Production builds compile this field out completely; allow-listed
-        //     here because the guard parses `lib.rs` whose `#[cfg(test)]`-gated
-        //     declaration is structurally a `Mutex<...>` field that the cache
-        //     shape detector flags. NOT a cache; a per-host single-cell test
-        //     observable.
-        (
-            "last_upsert_priority",
-            "phase-09b-report.md §0 row \"Test-only observables on VerterHost\": Mutex<Option<Priority>> test mailbox written by upsert_with_priority and read by compile_many_propagates_*_priority. Compiled out in production builds. NOT a cache.",
-        ),
         // (c2) Test-only concurrency seams for mid-flight mutation tests.
         //     `#[cfg(test)] materialize_seam_hook` is a single-cell
         //     `Mutex<Option<Arc<dyn Fn()>>>` hook slot fired inside the
@@ -3059,6 +3046,18 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
         (
             "compile_blockers_serve_seam_hook",
             "Compile-blockers single-generation snapshot regression pin (source_move_inside_the_compile_blockers_window_never_serves_a_generation_mix): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired in the source-capture→products-assembly window for deterministic mid-flight mutation choreography. Compiled out in production builds. NOT a cache.",
+        ),
+        // - `indexed_source_capture_seam_hook` (NOT a cache):
+        //     `#[cfg(test)] indexed_source_capture_seam_hook` is the
+        //     sibling single-cell hook slot fired inside the base
+        //     `IndexedReady` materialise flight (after the source
+        //     snapshot is held, before remaining IndexedReady products
+        //     are assembled from that object) so fence tests can land a
+        //     content upsert deterministically in that window. Compiled
+        //     out in production builds.
+        (
+            "indexed_source_capture_seam_hook",
+            "IndexedReady snapshot-coherence regression pin (source_move_between_parse_facts_and_eval_source_never_serves_torn_identity): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired after the source snapshot is held so every content-addressed IndexedReady product stays one snapshot object. Compiled out in production builds. NOT a cache.",
         ),
         // - `parse_env_override` (NOT a cache):
         //     `#[cfg(test)] parse_env_override` is a single-cell
@@ -5175,6 +5174,11 @@ pub(crate) mod foundations_guards {
     pub fn guard2_allowlist() -> BTreeSet<String> {
         let mut set: BTreeSet<String> = [
             "crates/verter_workspace/src/native_fs.rs",
+            // Declaration generator behind `required-features`, absent from
+            // every default build: its one write rewrites a committed
+            // declaration whose bytes a freshness guard pins. Build-time
+            // source-tree output, not workspace/semantic/overlay state.
+            "crates/verter_napi/src/bin/generate_host_compile_request_ts.rs",
             "crates/verter_workspace/src/config.rs",
             "crates/verter_workspace/src/snapshot_builder.rs",
             "crates/verter_workspace/src/vite_config.rs",
@@ -5194,6 +5198,12 @@ pub(crate) mod foundations_guards {
             // `verter_type_runtime` IPC entries).
             "crates/verter_tsgo_api/src/toolchain/discovery.rs",
             "crates/verter_tsgo_api/src/toolchain/validation.rs",
+            // Linux process-liveness probe — `/proc/<pid>/stat` is volatile
+            // kernel process metadata used to distinguish an exited zombie
+            // from a live engine/client. It is not workspace/semantic input
+            // and must not be cached by NativeFs. D14 carries the full
+            // per-callsite rationale.
+            "crates/verter_tsgo_api/src/process.rs",
             // Relay-shim rendezvous advertisement — the IPC file a shim
             // writes on startup so a `verter_lsp` control client can DISCOVER
             // it (create_dir_all / write / read / read_dir / remove). An IPC
@@ -5664,6 +5674,14 @@ pub(crate) mod foundations_guards {
         // assembler's own signature, so a caller outside this crate cannot
         // name its return type without them.
         "pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment}",
+        // Sealed request-scoped native host binding substrate
+        // (`BoundNativeHostRequest` + its typed unavailable outcomes).
+        // Public so the out-of-crate seal is provable: the trybuild
+        // fixture `tests/cases/compile-fail/native_host_binding_sealed.rs`
+        // must NAME the type to prove it is not Clone/Copy/serializable
+        // and that the framework-specific host binding is unreachable
+        // outside the single by-value consumption seam.
+        "pub use host_resolve::native_host_binding::",
         // The exhaustive uncomposable-input-map taxonomy carried by
         // `AssembleMapFailure`, so a caller can discriminate the exact sub-code
         // and its family rather than matching on a rendered message. Also
@@ -6035,6 +6053,11 @@ pub(crate) mod foundations_guards {
         // crate root so `benches/projection_safety_bench.rs` keeps a
         // stable `verter_session::projection_bench_support` path).
         "pub use for_tests::projection_bench_support",
+        // Test-support-only shared execution substrate used by the generated
+        // component-meta corpus chunks. The public re-export exists only under
+        // `cfg(any(test, feature = "test-support"))`; ordinary production builds
+        // do not expose the pool identities or constructors.
+        "pub use test_worker_pools::",
         // Test-only probe substrate for the content-addressed
         // `MapperFingerprint` primitive. Consumed by
         // `tests/cases/g_misc3/mapper_fingerprint_content_addressed.rs`. The
@@ -9194,6 +9217,10 @@ pub(crate) mod foundations_guards {
     /// `WorkspaceAccess` (or a deletion of the callsite).
     pub const D14_ALLOW_LIST: &[(&str, &str)] = &[
         (
+            "crates/verter_napi/src/bin/generate_host_compile_request_ts.rs",
+            "Declaration generator, not a runtime path. It is a `[[bin]]` behind `required-features = [\"generate-host-request-ts\"]`, so it is absent from every default build including the published addon; a developer runs it to rewrite one committed file whose bytes a freshness guard then pins. The SOLE `std::fs::` call writes that generated declaration to a path derived from the manifest directory. It touches no workspace, semantic, overlay or VFS state, and routing a build-time source-tree write through the disk boundary would give a generator a session it has no other use for.",
+        ),
+        (
             "crates/verter_bench/src/css_gate.rs",
             "Measurement-runner provenance probe (dev/CI-only bench crate, never published). The SOLE `std::fs::` call reads `/proc/loadavg` on Linux to stamp system load into a captured measurement record, mirroring the macOS branch that shells out to `sysctl -n vm.loadavg`. A kernel-synthesised pseudo-file describing the MACHINE, not workspace, semantic, overlay or VFS state — and routing it through the disk boundary would key a path cache on a file whose contents differ on every read. The runner's own artifact I/O (reading a committed baseline, writing a captured record) routes through `NativeFs` and is deliberately NOT covered by this entry.",
         ),
@@ -9305,6 +9332,10 @@ pub(crate) mod foundations_guards {
         (
             "crates/verter_tsgo_api/src/fake_engine.rs",
             "fake `--api` engine test double — writes a process-id rendezvous file and manages the local IPC pipe lifecycle (`std::fs::File::from_raw_handle` over a Windows named pipe, `std::fs::remove_file` on the pipe path) so the test harness can drive the API protocol off real IPC. Real-FS IPC by nature; same category as `control/advertisement.rs` + `control/transport.rs`. Not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
+        ),
+        (
+            "crates/verter_tsgo_api/src/process.rs",
+            "Linux process-liveness probe — reads the kernel-synthesised `/proc/<pid>/stat` state so an exited zombie is not mistaken for a live engine/client merely because `kill(pid, 0)` still finds its unreaped pid. Process lifecycle metadata, not workspace, semantic, overlay, or VFS state; routing it through NativeFs would incorrectly cache a per-process state transition.",
         ),
         (
             "crates/verter_type_runtime/src/discovery.rs",
@@ -17809,485 +17840,6 @@ fn no_production_route_owned_shallow_system() {
         "route-owned shallow system references re-introduced in production \
          source (the IndexedReady materialise closure is the single \
          per-file cold build): {hits:#?}"
-    );
-}
-
-/// Source-order route-mutation / generation-bump event for one fn body.
-#[derive(Debug, PartialEq, Eq)]
-enum RouteMutationEvent {
-    Mutation(String),
-    Bump,
-}
-
-/// Per-fn body event collector for the mutate-without-bump guard.
-/// Records, in source (visit) order, every route-resolution mutation —
-/// the workspace route-table writers (`set_exact_resolutions`,
-/// `configure_resolver`, `record_parsed_edges_with_exact_resolutions`)
-/// and the workspace-authority swap (`*self.workspace.write() = …`) —
-/// plus every `bump_project_generation*` call. Operating on the syn AST
-/// makes the guard comment-proof: a `bump_project_generation` in a
-/// comment or string can never satisfy it, and a mutation in a comment
-/// can never false-flag.
-struct RouteMutationVisitor {
-    events: Vec<RouteMutationEvent>,
-}
-
-impl RouteMutationVisitor {
-    /// Classify one identifier name as a mutation marker, a bump, or
-    /// neither — the single marker table shared by method calls, UFCS
-    /// path calls, and macro-body ident scans.
-    fn classify(name: &str) -> Option<RouteMutationEvent> {
-        match name {
-            "set_exact_resolutions"
-            | "configure_resolver"
-            | "record_parsed_edges"
-            | "record_parsed_edges_with_exact_resolutions" => {
-                Some(RouteMutationEvent::Mutation(name.to_string()))
-            }
-            "bump_project_generation" | "bump_project_generation_and_evict" => {
-                Some(RouteMutationEvent::Bump)
-            }
-            _ => None,
-        }
-    }
-
-    /// Scan a macro invocation's token stream for marker IDENTS —
-    /// `syn::visit` does not descend into macro bodies, so a mutation
-    /// buried in `with_lock!({ … })` would otherwise be invisible.
-    /// Ident tokens only: a marker name inside a string literal (a log
-    /// message) never flags.
-    fn scan_token_stream(&mut self, tokens: proc_macro2::TokenStream) {
-        for tree in tokens {
-            match tree {
-                proc_macro2::TokenTree::Group(group) => self.scan_token_stream(group.stream()),
-                proc_macro2::TokenTree::Ident(ident) => {
-                    if let Some(event) = Self::classify(&ident.to_string()) {
-                        self.events.push(event);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-impl<'ast> syn::visit::Visit<'ast> for RouteMutationVisitor {
-    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
-        if let Some(event) = Self::classify(&mc.method.to_string()) {
-            self.events.push(event);
-        }
-        syn::visit::visit_expr_method_call(self, mc);
-    }
-
-    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        // UFCS / fully-qualified calls (`VerterHost::set_exact_resolutions(
-        // self, …)`) — the method-call visitor never sees these.
-        if let syn::Expr::Path(path) = &*call.func {
-            if let Some(segment) = path.path.segments.last() {
-                if let Some(event) = Self::classify(&segment.ident.to_string()) {
-                    self.events.push(event);
-                }
-            }
-        }
-        syn::visit::visit_expr_call(self, call);
-    }
-
-    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        self.scan_token_stream(mac.tokens.clone());
-        syn::visit::visit_macro(self, mac);
-    }
-
-    fn visit_expr_assign(&mut self, assign: &'ast syn::ExprAssign) {
-        // The workspace-authority swap: `*self.workspace.write() = …`.
-        if let syn::Expr::Unary(unary) = &*assign.left {
-            if matches!(unary.op, syn::UnOp::Deref(_)) {
-                if let syn::Expr::MethodCall(mc) = &*unary.expr {
-                    if mc.method == "write" {
-                        if let syn::Expr::Field(field) = &*mc.receiver {
-                            if let syn::Member::Named(name) = &field.member {
-                                if name == "workspace" {
-                                    self.events.push(RouteMutationEvent::Mutation(
-                                        "workspace authority swap".to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        syn::visit::visit_expr_assign(self, assign);
-    }
-}
-
-/// Discover every fn in `src` that performs a route-resolution mutation
-/// and lacks a `project_generation` bump strictly AFTER its last
-/// mutation. Returns `(fn_name, violation)` pairs; fns named in
-/// `allowlist` are skipped.
-fn route_mutator_violations_in_source(src: &str, allowlist: &[&str]) -> Vec<(String, String)> {
-    route_mutator_violations_in_labeled_source(src, allowlist, "inline source")
-}
-
-/// [`route_mutator_violations_in_source`] with a source label for the
-/// unparseable-input panic — the real walk passes the file path so a
-/// stripper regression names the file it broke.
-fn route_mutator_violations_in_labeled_source(
-    src: &str,
-    allowlist: &[&str],
-    source_label: &str,
-) -> Vec<(String, String)> {
-    // HARD failure on unparseable input. The sources this guard walks
-    // compile (cargo proves them parseable), so the only way to get
-    // here with broken syntax is a mis-stripped `#[cfg(test)]` extent —
-    // exactly the case that previously skipped whole files into silent
-    // green. A guard that cannot read its scope must fail, not pass.
-    let file = syn::parse_file(src).unwrap_or_else(|err| {
-        panic!(
-            "route-mutator guard could not parse {source_label} (a silent \
-             skip here hollows the guard's per-fn claim — fix the cfg(test) \
-             stripper or the source): {err}"
-        )
-    });
-    route_mutator_violations_in_file(&file, allowlist)
-}
-
-/// The per-fn violation pass over an ALREADY-PARSED file. Split out so
-/// the real walk parses each production file exactly ONCE (this pass and
-/// the discovery counter both consume the single parsed AST) instead of
-/// re-running `syn::parse_file` per pass.
-fn route_mutator_violations_in_file(file: &syn::File, allowlist: &[&str]) -> Vec<(String, String)> {
-    use syn::visit::Visit;
-
-    struct FnCollector<'a> {
-        allowlist: &'a [&'a str],
-        violations: Vec<(String, String)>,
-    }
-    impl FnCollector<'_> {
-        fn check_fn(&mut self, name: &str, block: &syn::Block) {
-            if self.allowlist.contains(&name) {
-                return;
-            }
-            let mut visitor = RouteMutationVisitor { events: Vec::new() };
-            syn::visit::visit_block(&mut visitor, block);
-            let Some(last_mutation) = visitor
-                .events
-                .iter()
-                .rposition(|e| matches!(e, RouteMutationEvent::Mutation(_)))
-            else {
-                return;
-            };
-            let bump_after = visitor.events[last_mutation + 1..]
-                .iter()
-                .any(|e| matches!(e, RouteMutationEvent::Bump));
-            if !bump_after {
-                let RouteMutationEvent::Mutation(kind) = &visitor.events[last_mutation] else {
-                    unreachable!();
-                };
-                let had_premature_bump = visitor.events[..last_mutation]
-                    .iter()
-                    .any(|e| matches!(e, RouteMutationEvent::Bump));
-                self.violations.push((
-                    name.to_string(),
-                    if had_premature_bump {
-                        format!(
-                            "route mutation (`{kind}`) with the generation bump BEFORE it \
-                             (bump-before-mutate lets a flight capture the new stamp over \
-                             the old table and pass the pre-publish fence)"
-                        )
-                    } else {
-                        format!(
-                            "route mutation (`{kind}`) with NO `bump_project_generation*` after it"
-                        )
-                    },
-                ));
-            }
-        }
-    }
-    impl<'ast> syn::visit::Visit<'ast> for FnCollector<'_> {
-        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-            self.check_fn(&item.sig.ident.to_string(), &item.block);
-            syn::visit::visit_item_fn(self, item);
-        }
-        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-            self.check_fn(&item.sig.ident.to_string(), &item.block);
-            syn::visit::visit_impl_item_fn(self, item);
-        }
-    }
-
-    let mut collector = FnCollector {
-        allowlist,
-        violations: Vec::new(),
-    };
-    collector.visit_file(file);
-    collector.violations
-}
-
-/// Fns that perform a route-affecting workspace write WITHOUT a
-/// `project_generation` bump, each with its standing justification.
-/// Additions require the same class of argument. Entries are
-/// `(file-path suffix, fn name)` — a bare fn name would exempt ANY fn
-/// of that name anywhere in the crate.
-const ROUTE_MUTATOR_NO_BUMP_ALLOWLIST: &[(&str, &str)] = &[
-    // The scheduler-snapshot integrate re-syncs bundler routes through
-    // ONE atomic edge-store mutation
-    // (`record_parsed_edges_with_exact_resolutions`). Its fence
-    // dimension is CONTENT, not the project stamp: a byte-identical
-    // reload is a value no-op on both stores (R22 + the exact-table
-    // idempotency gate), a content-changed reload is content-addressed
-    // (new whole_hash → new artifact identity), and the torn
-    // exacts-cleared window the bump would otherwise have to announce
-    // no longer exists (the mutation is atomic). Pinned by
-    // `integrate_re_syncs_bundler_routes_via_one_atomic_workspace_mutation`.
-    (
-        "crates/verter_session/src/host_lifecycle.rs",
-        "integrate_scheduler_snapshot",
-    ),
-    // The upsert lane's parsed-edge sync (`record_parsed_edges`, which
-    // clears the OWNER's workspace exacts). Same CONTENT fence dimension
-    // as the integrate row above: the caller (`upsert`) runs
-    // `ws().notify_upsert` strictly AFTER this sync — a per-canonical
-    // content-generation bump + transition-ledger record that stales
-    // every cross-file-edge surface through the edge-currency oracle —
-    // and bumps `store_view_epoch` before returning. A byte-identical
-    // re-upsert is a value no-op on both stores (R22), and the cleared
-    // exacts belong to the owner whose content identity just moved
-    // (new whole_hash → new artifact identity), so the project stamp
-    // announces nothing the content rails do not already announce.
-    (
-        "crates/verter_session/src/host_upsert.rs",
-        "record_parsed_edges_to_vfs",
-    ),
-];
-
-/// Mutate-without-bump structural guard over the `project_generation`
-/// stamp discipline: every host route-resolution mutator must advance
-/// `project_generation` AFTER the route-affecting mutation it announces
-/// — the pre-publish fence compares a flight's start-of-flight stamp
-/// against the live stamp at publish, so a bump that PRECEDES the
-/// mutation lets a flight capture the new stamp over the old table and
-/// pass the fence (the `set_exact_resolutions` ordering defect).
-///
-/// AUTO-DISCOVERY (syn AST, not a closed case table): every production
-/// fn under `crates/verter_session/src` whose body performs a
-/// route-resolution mutation is discovered and checked; fns on the
-/// documented [`ROUTE_MUTATOR_NO_BUMP_ALLOWLIST`] are exempt with a
-/// standing justification. The behavioral twin
-/// (`set_exact_resolutions_bumps_project_generation_after_the_workspace_mutation`)
-/// pins the live ordering for the wrapper; this structural guard pins
-/// every discovered mutator.
-#[test]
-fn route_mutators_bump_project_generation_after_the_mutation() {
-    let crate_root = workspace_path("crates/verter_session/src");
-    let mut all_violations: Vec<(String, String, String)> = Vec::new();
-    let mut discovered_mutators = 0usize;
-    let mut scanned_files = 0usize;
-    for entry in walkdir::WalkDir::new(&crate_root)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.path().is_file())
-    {
-        let path = entry.path();
-        let path_str = path.to_string_lossy().replace('\\', "/");
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        if path_str.ends_with("_tests.rs")
-            || path_str.ends_with("/tests.rs")
-            || path_str.contains("/typeinfo_tests/")
-        {
-            continue;
-        }
-        let body = std::fs::read_to_string(path)
-            .unwrap_or_else(|err| panic!("guard scanner could not read {path_str}: {err}"));
-        scanned_files += 1;
-        // Production scope only: strip `#[cfg(test)]`-gated items before
-        // parsing (test-only helpers may legitimately skip the bump).
-        let production_body = strip_cfg_test_gated_source(&body);
-        // Parse the production body exactly ONCE; both the violation pass
-        // and the discovery counter consume the single parsed AST (a
-        // second `syn::parse_file` per file was the guard's dominant cost).
-        // HARD failure on unparseable input — a silent skip here would
-        // hollow the guard's per-fn claim exactly where a cfg(test)
-        // stripper regression breaks a file.
-        let file = syn::parse_file(&production_body).unwrap_or_else(|err| {
-            panic!(
-                "route-mutator guard could not parse {path_str} (a silent \
-                 skip here hollows the guard's per-fn claim — fix the \
-                 cfg(test) stripper or the source): {err}"
-            )
-        });
-        // File-scoped allowlist: only rows whose path suffix matches THIS
-        // file exempt fn names in it.
-        let file_allowlist: Vec<&str> = ROUTE_MUTATOR_NO_BUMP_ALLOWLIST
-            .iter()
-            .filter(|(f, _)| path_str.ends_with(f))
-            .map(|(_, name)| *name)
-            .collect();
-        for (fn_name, violation) in route_mutator_violations_in_file(&file, &file_allowlist) {
-            all_violations.push((path_str.clone(), fn_name, violation));
-        }
-        // Track discovery coverage (anti-vacuity floor below) from the
-        // SAME parsed AST.
-        let mut counter = RouteMutationVisitor { events: Vec::new() };
-        {
-            use syn::visit::Visit;
-            counter.visit_file(&file);
-        }
-        if counter
-            .events
-            .iter()
-            .any(|e| matches!(e, RouteMutationEvent::Mutation(_)))
-        {
-            discovered_mutators += 1;
-        }
-    }
-    assert!(
-        scanned_files > 100,
-        "route-mutator guard scanned only {scanned_files} files — the walk \
-         is broken"
-    );
-    // Anti-vacuity: the known mutator homes must be discovered.
-    assert!(
-        discovered_mutators >= 2,
-        "route-mutator discovery found mutations in only \
-         {discovered_mutators} production files — discovery is broken \
-         (host_lifecycle.rs and host_manage/analysis_io.rs both carry \
-         route mutators)"
-    );
-    assert!(
-        all_violations.is_empty(),
-        "route-resolution mutators without a strictly-following \
-         `project_generation` bump (fence-blind mutation windows): \
-         {all_violations:#?}"
-    );
-}
-
-/// Discriminator self-test for the route-mutator guard: each shape the
-/// guard exists to catch must flag, and the comment-foolable mode of the
-/// retired string-offset implementation must be impossible.
-#[test]
-fn route_mutators_guard_discriminator_self_test() {
-    // Clean: bump strictly after the mutation.
-    let clean = "impl H { pub fn set_exact(&self) { self.ws().set_exact_resolutions(c, r); self.store.bump_project_generation(); } }";
-    assert!(
-        route_mutator_violations_in_source(clean, &[]).is_empty(),
-        "bump-after-mutate must pass"
-    );
-
-    // Missing bump: flagged.
-    let missing = "impl H { pub fn set_exact(&self) { self.ws().set_exact_resolutions(c, r); } }";
-    let violations = route_mutator_violations_in_source(missing, &[]);
-    assert_eq!(
-        violations.len(),
-        1,
-        "a mutation with no bump must flag: {violations:#?}"
-    );
-
-    // Bump BEFORE the mutation: flagged (the fence-defeating order).
-    let premature = "impl H { pub fn set_exact(&self) { self.store.bump_project_generation(); self.ws().set_exact_resolutions(c, r); } }";
-    let violations = route_mutator_violations_in_source(premature, &[]);
-    assert_eq!(
-        violations.len(),
-        1,
-        "bump-before-mutate must flag: {violations:#?}"
-    );
-    assert!(
-        violations[0].1.contains("BEFORE"),
-        "the violation must name the premature-bump order: {violations:#?}"
-    );
-
-    // COMMENT-PROOF (the retired implementation's silent-green): a
-    // `bump_project_generation` inside a comment must NOT satisfy the
-    // guard.
-    let comment_fooled = "impl H { pub fn set_exact(&self) { self.ws().set_exact_resolutions(c, r); /* self.store.bump_project_generation(); */ } }";
-    assert_eq!(
-        route_mutator_violations_in_source(comment_fooled, &[]).len(),
-        1,
-        "a commented-out bump must not satisfy the guard"
-    );
-
-    // Workspace-authority swap discovery (`set_workspace`'s shape).
-    let swap_missing =
-        "impl H { pub fn set_workspace(&self, w: W) { *self.workspace.write() = w; } }";
-    assert_eq!(
-        route_mutator_violations_in_source(swap_missing, &[]).len(),
-        1,
-        "the workspace-authority swap must be discovered as a mutation"
-    );
-    let swap_clean = "impl H { pub fn set_workspace(&self, w: W) { *self.workspace.write() = w; self.store.bump_project_generation_and_evict(); } }";
-    assert!(
-        route_mutator_violations_in_source(swap_clean, &[]).is_empty(),
-        "swap followed by the evicting bump must pass"
-    );
-
-    // The atomic combined re-sync is discovered too (allowlist-gated in
-    // the real walk).
-    let combined = "impl H { fn integrate(&self) { self.ws().record_parsed_edges_with_exact_resolutions(c, e, r); } }";
-    assert_eq!(
-        route_mutator_violations_in_source(combined, &[]).len(),
-        1,
-        "the combined atomic mutator must be discovered"
-    );
-    assert!(
-        route_mutator_violations_in_source(combined, &["integrate"]).is_empty(),
-        "the allowlist must exempt by fn name"
-    );
-
-    // Plain `record_parsed_edges` CLEARS the workspace's exact-resolved
-    // set (a route-resolution mutation in its own right) — it must be a
-    // tracked marker so its no-bump callers are discovered and forced
-    // onto the documented allowlist.
-    let plain_record =
-        "impl H { fn integrate(&self) { self.ws().record_parsed_edges(c, &edges); } }";
-    assert_eq!(
-        route_mutator_violations_in_source(plain_record, &[]).len(),
-        1,
-        "plain record_parsed_edges (clears workspace exacts) must be \
-         discovered as a route mutation"
-    );
-
-    // UFCS / fully-qualified calls must be visible to the visitor — a
-    // mutator written as a path call must not evade discovery, and a
-    // path-call bump must satisfy the guard.
-    let ufcs_mutation =
-        "impl H { fn set(&self) { VerterHost::set_exact_resolutions(self, c, r); } }";
-    assert_eq!(
-        route_mutator_violations_in_source(ufcs_mutation, &[]).len(),
-        1,
-        "a fully-qualified mutator call must be discovered"
-    );
-    let ufcs_clean = "impl H { fn set(&self) { VerterHost::set_exact_resolutions(self, c, r); ProjectTypeStore::bump_project_generation(&self.store); } }";
-    assert!(
-        route_mutator_violations_in_source(ufcs_clean, &[]).is_empty(),
-        "a fully-qualified bump after a fully-qualified mutation must pass"
-    );
-
-    // Macro bodies must be visible: a mutation buried in a macro
-    // invocation's token stream must be discovered (idents only — a
-    // marker name inside a string literal must NOT flag).
-    let in_macro =
-        "impl H { fn set(&self) { with_lock!({ self.ws().set_exact_resolutions(c, r); }); } }";
-    assert_eq!(
-        route_mutator_violations_in_source(in_macro, &[]).len(),
-        1,
-        "a mutation inside a macro body must be discovered"
-    );
-    let in_macro_string = "impl H { fn log(&self) { trace!(\"set_exact_resolutions skipped\"); } }";
-    assert!(
-        route_mutator_violations_in_source(in_macro_string, &[]).is_empty(),
-        "a marker name inside a macro STRING LITERAL must not flag (ident \
-         tokens only)"
-    );
-
-    // Per-file syn parse failure is a HARD guard failure — a silent
-    // `Vec::new()` skip turns an unparseable (e.g. mis-stripped) file
-    // into silent green exactly where the guard's claim must hold.
-    let parse_failure =
-        std::panic::catch_unwind(|| route_mutator_violations_in_source("fn broken( {", &[]));
-    assert!(
-        parse_failure.is_err(),
-        "an unparseable source must PANIC the route-mutator guard, not \
-         silently report no findings"
     );
 }
 

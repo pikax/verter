@@ -32,6 +32,7 @@ import {
 } from "../core/startupGate.js";
 import { extractQuiescenceCounters, pollUntilQuiesced } from "../core/quiescence.js";
 import { resolvePlatformBinary } from "../core/rustHostTriple.js";
+import { repositoryTypescriptPluginProbe } from "../core/typescriptPluginProbe.js";
 import { editorNeutralServerEnvironment } from "../editor-neutral/rawLspDriver.js";
 import type { CorpusGateRoute, CorpusRouteStartup } from "./types.js";
 
@@ -154,10 +155,8 @@ export async function spawnCorpusGateLsp(
   if (route === "tsserver" && !existsSync(path.join(tsdk, "tsserver.js"))) {
     throw new Error(`tsserver SDK is missing tsserver.js: ${tsdk}`);
   }
-  const pluginPath = path.join(repoRoot, "packages", "typescript-plugin", "dist");
-  if (route === "tsserver" && !existsSync(path.join(pluginPath, "index.js"))) {
-    throw new Error(`TypeScript plugin build is missing index.js: ${pluginPath}`);
-  }
+  const pluginPath =
+    route === "tsserver" ? repositoryTypescriptPluginProbe(repoRoot).probeLocation : undefined;
 
   const rootUri = pathToFileURL(root).href;
   let relay: LspClient | undefined;
@@ -220,7 +219,7 @@ export async function spawnCorpusGateLsp(
 
   const args = [root, `--type-provider=${route}`];
   if (route === "tsserver") {
-    args.push(`--tsdk=${tsdk}`, `--plugin-path=${pluginPath}`);
+    args.push(`--tsdk=${tsdk}`, `--plugin-path=${pluginPath!}`);
   }
   if (route === "shared-tsgo") {
     args.push(`--shared-control-dir=${controlDir}`, `--shared-session-key=${sessionKey}`);

@@ -1,0 +1,31 @@
+error[E0624]: associated function `new` is private
+  --> tests/cases/compile-fail/host_epoch_forbidden_on_frontend.rs:31:22
+   |
+31 |         HostEpochId::new("session-v1"),
+   |                      ^^^ private associated function
+   |
+  ::: src/framework_common/capability.rs
+   |
+   |     pub(crate) fn new(id: &str) -> Self {
+   |     ----------------------------------- private associated function defined here
+
+error[E0061]: this function takes 3 arguments but 4 arguments were supplied
+  --> tests/cases/compile-fail/host_epoch_forbidden_on_frontend.rs:28:13
+   |
+28 |     let _ = TypedCapabilityRegistration::register_frontend::<HtmlEpoch, _>(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+31 |         HostEpochId::new("session-v1"),
+   |         ------------------------------ unexpected argument #3 of type `HostEpochId`
+   |
+note: associated function defined here
+  --> src/framework_common/catalog.rs
+   |
+   |     pub fn register_frontend<E: FrameworkEpoch, F: CarrierFrontend>(
+   |            ^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+   |
+30 -         LanguageId::new("html"),
+31 -         HostEpochId::new("session-v1"),
+30 +         LanguageId::new("html"),
+   |

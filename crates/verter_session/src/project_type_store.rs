@@ -1162,22 +1162,22 @@ impl ProjectTypeStore {
         self.project_generation.load(Ordering::Acquire)
     }
 
-    /// Alias — equivalent to [`Self::project_generation`] with
-    /// a clearer name for the route-only shallow materialiser's tier-3
-    /// staleness gate (sub-). The materialiser captures
-    /// this value before reading + parsing, then re-checks it inside the
-    /// pre-publish fence to detect mid-flight `bump_project_generation`
-    /// mutations (`configure_projects`, `set_exact_resolutions`,
-    /// `configure_resolver`).
+    /// Alias — equivalent to [`Self::project_generation`] with a clearer
+    /// name for readers that fence project-shape identity. The materialiser
+    /// captures this value before reading + parsing, then re-checks it inside
+    /// the pre-publish fence to detect configuration, environment, project
+    /// identity, or workspace-authority resets. Route-table publication has
+    /// its own resolution facts and store-view epoch and does not move this
+    /// project-shape identity.
     #[must_use]
     pub fn current_project_generation(&self) -> u64 {
         self.project_generation()
     }
 
     /// Bump the project generation. Invoked exclusively by the host /
-    /// workspace layer on `tsconfig`, path-alias, active-TS-SDK,
-    /// workspace-folder, package export-target, and explicit project-graph
-    /// changes — never on file-content edits.
+    /// workspace layer when configuration, environment, project identity, or
+    /// workspace authority is reset — never for a file-content edit or for
+    /// publication/restoration of an exact route table.
     pub fn bump_project_generation(&self) -> u64 {
         self.project_generation.fetch_add(1, Ordering::AcqRel) + 1
     }
@@ -1673,11 +1673,11 @@ impl ProjectTypeStore {
     /// Reserved for content-authority swaps and full teardowns
     /// (`set_workspace`, `close`): the wide per-canonical clears orphan
     /// retained state against an authority that no longer exists.
-    /// Route-resolution mutations (`set_exact_resolutions`,
-    /// `configure_projects`, `set_import_dependencies`) MUST NOT call
-    /// this — they use the stamp-only `bump_project_generation` (stale
-    /// entries miss by validation; route surfaces edge-refresh on
-    /// demand) plus owner-scoped route-mirror repair. Wholesale-clearing
+    /// Route-resolution publication (`set_exact_resolutions`,
+    /// `set_import_dependencies`) MUST NOT call this or the stamp-only
+    /// bump: route currency is carried by exact-resolution facts and the
+    /// store-view epoch. `configure_projects` remains a project-shape reset
+    /// and uses the stamp-only bump. Wholesale-clearing
     /// `derived_raw_cache_db` for a route mutation flips every
     /// scheduler-tracked canonical's derived state away while its
     /// scheduler source lives on — the exact accreted-patchwork seam the

@@ -550,10 +550,26 @@ pub async fn reap_child_bounded(child: &mut tokio::process::Child, bound: Durati
     matches!(tokio::time::timeout(bound, child.wait()).await, Ok(Ok(_)))
 }
 
-/// Whether `pid` currently names a live process (zombie-free check: a reaped
-/// pid reads dead).
+#[cfg(target_os = "linux")]
+fn linux_proc_stat_is_zombie(stat: &str) -> bool {
+    stat.rsplit_once(") ")
+        .and_then(|(_, suffix)| suffix.as_bytes().first())
+        .is_some_and(|state| *state == b'Z')
+}
+
+/// Whether `pid` currently names a live process. Linux zombies are dead for
+/// liveness purposes even though `kill(pid, 0)` continues to find their pid
+/// until an init process reaps them (which container PID 1 implementations do
+/// not always do promptly).
 #[cfg(unix)]
 pub fn process_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    if std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .is_ok_and(|stat| linux_proc_stat_is_zombie(&stat))
+    {
+        return false;
+    }
+
     // kill(pid, 0): 0 = live; EPERM = live but owned by another user; ESRCH = dead.
     let rc = unsafe { libc::kill(pid as i32, 0) };
     if rc == 0 {
@@ -878,6 +894,34 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(!process_alive(pid), "a reaped child must read dead");
+    }
+
+    // A container init may leave an orphaned zombie present indefinitely.
+    // Signal 0 still succeeds for that pid, but the process can no longer run
+    // or hold a pipe, so the shared liveness oracle must classify it as dead.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_alive_reports_an_unreaped_zombie_dead() {
+        let mut child = std::process::Command::new("/bin/true")
+            .spawn()
+            .expect("spawn immediate child");
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .expect("the unreaped child must retain a proc entry");
+            if linux_proc_stat_is_zombie(&stat) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the immediate child never entered the zombie state"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(!process_alive(pid), "a zombie cannot make progress");
+        child.wait().expect("reap fixture child");
     }
 
     // ── DISCRIMINATING: pid 0 arms a NO-OP kill — `kill(-0, SIGKILL)` would

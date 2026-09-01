@@ -335,6 +335,11 @@ Never use `sleep()` to wait for:
 7. The Mocha runner auto-discovers `**/*.test.js` files
 8. Do NOT add `this.timeout(60_000)` unless the suite genuinely needs more than 15s (mutation/benchmark tests)
 
+Known product gaps are the sole exception to the no-skip rule: add the exact test ID and
+`ISSUE-*` classification to the route-specific manifest. The root harness skips that row
+before its body executes and reports the route as `DEGRADED`. Test bodies and suite hooks
+must never call `this.skip()` to classify themselves, and infrastructure is never skippable.
+
 ## Key Files
 
 - `packages/vue-vscode/e2e/helpers.ts` — Test utilities, LSP readiness checks, warm-session API

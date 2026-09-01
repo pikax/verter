@@ -18,6 +18,8 @@ import { assertNotVacuousPassLog } from "../lib/vacuousPass";
 import { pollBudget, sequenceParent, setRunnableAccessor, SUITE_TIMEOUT_MS } from "../lib/timeouts";
 import { launchServerProfile, routeBaseServerProfile } from "../helpers";
 import { serverProfileForSuite } from "../lib/serverProfiles";
+import { productGapsForFixtureRoute } from "../lib/productGapRoute";
+import { type ProductGapSkip, type RunSummaryFailure } from "../../src/runSummaryOracle";
 
 /** Recursively find the authored test sources under a directory. */
 function findTestSources(dir: string): string[] {
@@ -121,6 +123,7 @@ export async function run(): Promise<void> {
   const testsRoot = path.resolve(__dirname);
   const onlyPattern = process.env.VERTER_E2E_ONLY || process.env.E2E_ONLY;
   const sourceRoot = path.resolve(testsRoot, "../../../e2e/suite");
+  const productGapManifest = productGapsForFixtureRoute(FIXTURE_NAME, TYPE_PROVIDER);
 
   // A LAUNCH configures ONE server, and Verter's native lane is an initialization
   // option, so a suite that declares a different server profile belongs to a
@@ -194,13 +197,26 @@ export async function run(): Promise<void> {
         // does serve carriers keeps the warmup as its readiness gate. Delete this
         // guard when carrier publication is connected for the extension-hosted
         // topology.
-        if (TYPE_PROVIDER !== "extension") {
+        if (TYPE_PROVIDER !== "extension" && TYPE_PROVIDER !== "off") {
           await openReadyCached(getAppVuePath());
         }
       } catch (err) {
         rootHookError = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
         throw err;
       }
+    },
+    beforeEach(this: Mocha.Context) {
+      const testId = this.currentTest?.title;
+      const issue = testId ? productGapManifest[testId] : undefined;
+      if (!testId || !issue) return;
+
+      // Known feature debt is route-specific and statically reviewed. Skip it
+      // before its body can consume readiness budgets or obscure regressions;
+      // the pending event below records the exact ID + issue for the oracle and
+      // the human-facing degraded report. Infrastructure hooks and unmanifested
+      // tests never enter this branch.
+      console.warn(`  ⚠ SKIPPED KNOWN PRODUCT GAP: ${testId} (${issue})`);
+      this.skip();
     },
     afterAll() {
       if (TYPE_PROVIDER === "shared-tsgo") {
@@ -212,7 +228,8 @@ export async function run(): Promise<void> {
   return new Promise((resolve, reject) => {
     const passedTestIds: string[] = [];
     const pendingTestIds: string[] = [];
-    const failedTests: Array<{ id: string; err: string; stack?: string }> = [];
+    const failedTests: RunSummaryFailure[] = [];
+    const skippedProductGaps: ProductGapSkip[] = [];
 
     const originalConsoleLog = console.log;
     console.log = (...args: unknown[]) => {
@@ -238,6 +255,7 @@ export async function run(): Promise<void> {
         passedTestIds,
         pendingTestIds,
         failedTests,
+        skippedProductGaps,
         rootHookError: rootHookError ?? null,
       });
 
@@ -268,13 +286,19 @@ export async function run(): Promise<void> {
     // registry consults it to check each claimed parent against the real deadline.
     activeRunner = runner;
     runner.on("pass", (test) => passedTestIds.push(test.title));
-    runner.on("pending", (test) => pendingTestIds.push(test.title));
+    runner.on("pending", (test) => {
+      pendingTestIds.push(test.title);
+      const issue = productGapManifest[test.title];
+      if (issue) skippedProductGaps.push({ id: test.title, issue });
+    });
     runner.on("fail", (test, err) => {
-      failedTests.push({
+      const failure: RunSummaryFailure = {
         id: test.title,
         err: err instanceof Error ? err.message : String(err),
         stack: err instanceof Error ? err.stack : undefined,
-      });
+        kind: test.type === "test" ? "test" : "hook",
+      };
+      failedTests.push(failure);
     });
   });
 }

@@ -9,19 +9,44 @@ use std::sync::Arc;
 use crate::instant::Instant;
 
 use verter_language::FileLanguage;
-use verter_scheduler::executor::{ExtractedDeps, StageError, StageExecutor};
+use verter_scheduler::executor::{ExtractedDeps, StageError, StageErrorKind, StageExecutor};
 use verter_scheduler::node::{
     AnalysisSnapshot, ArtifactSnapshot, EmptyData, SnapshotData, SourceSnapshot,
 };
 
 use crate::types::{HostConfig, ParseSnapshot};
 
+#[cfg(test)]
+fn scheduler_dep_resolution_counts(
+) -> &'static parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>> {
+    static COUNTS: std::sync::OnceLock<parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    COUNTS.get_or_init(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()))
+}
+
+#[cfg(test)]
+pub(crate) fn reset_scheduler_dep_resolution_count_for_test(canonical_id: &str) {
+    scheduler_dep_resolution_counts()
+        .lock()
+        .remove(canonical_id);
+}
+
+#[cfg(test)]
+pub(crate) fn scheduler_dep_resolution_count_for_test(canonical_id: &str) -> u64 {
+    scheduler_dep_resolution_counts()
+        .lock()
+        .get(canonical_id)
+        .copied()
+        .unwrap_or(0)
+}
+
 /// Host-specific data stored in a [`SourceSnapshot`].
 ///
 /// Wraps a `ParseSnapshot` — the result of SFC tokenization, hashing, and analysis.
 /// Also carries the framework-neutral parse artifact (for carrier files), the
 /// file's language row, the authoritative `source_type` computed once at parse
-/// time, and the measured parse duration for performance tracking.
+/// time, the catalog eval-source `Arc<str>` for this source revision, and the
+/// measured parse duration for performance tracking.
 #[derive(Debug)]
 #[allow(dead_code)] // Fields read progressively during 3 migration
 pub struct HostSourceData {
@@ -42,6 +67,11 @@ pub struct HostSourceData {
     /// source + `framework_parse` (which is unstable when `framework_parse`
     /// is dropped).
     pub(crate) source_type: oxc_span::SourceType,
+    /// Catalog eval-source for this source revision. Carriers store the
+    /// backend `Arc<str>` from the retained source-stage catalog row
+    /// invoked once after publication; non-carriers clone the raw source
+    /// Arc. IndexedReady clones this handle — it does not recatalog.
+    pub(crate) eval_source: Arc<str>,
     /// Wall-clock parse duration in milliseconds.
     pub(crate) parse_duration_ms: f64,
 }
@@ -202,10 +232,9 @@ impl StageExecutor for HostStageExecutor {
         content: Arc<str>,
         generation: u64,
     ) -> Result<SourceSnapshot, StageError> {
-        // Carrier dispatch: a framework CARRIER file whose carrier language
-        // the registry serves routes its parse through the compiler-side
-        // carrier registry — the SINGLE carrier parse path, with Vue served
-        // by its bridge. EVERY OTHER framework row (a framework TEMPLATE, an
+        // Carrier dispatch: a framework CARRIER file whose catalog frontend
+        // is installed routes source-stage parse through the publication
+        // store. EVERY OTHER framework row (a framework TEMPLATE, an
         // unregistered carrier adapter, a same-adapter NON-carrier language)
         // is the typed unsupported-language state — never a silent empty,
         // never a panic. Plain scripts take the script parse path. The
@@ -215,14 +244,18 @@ impl StageExecutor for HostStageExecutor {
             file_language.adapter_id(),
             file_language.carrier_language_id(),
         ) {
-            (Some(adapter_id), Some(carrier_language_id)) => {
-                crate::parse::carrier_compiler_registry()
-                    .compiler_for_carrier_language(adapter_id, carrier_language_id)
-                    .is_some()
+            (Some(adapter_id), Some(carrier_language_id))
+                if verter_compiler::framework_common::registered_carrier_projection::registered_frontend_for(
+                    adapter_id,
+                    carrier_language_id,
+                )
+                .is_some() =>
+            {
+                Some((adapter_id, carrier_language_id))
             }
-            _ => false,
+            _ => None,
         };
-        if let (false, Some(adapter_id)) = (dispatchable_carrier, file_language.adapter_id()) {
+        if let (None, Some(adapter_id)) = (dispatchable_carrier, file_language.adapter_id()) {
             // A framework row that is NOT a dispatchable carrier (template,
             // unregistered carrier, same-adapter non-carrier) is unsupported.
             return Err(StageError::unsupported_language(adapter_id.clone()));
@@ -235,89 +268,114 @@ impl StageExecutor for HostStageExecutor {
         // request context is installed.
         let timing_on = verter_scheduler::request_context::current_timing_enabled();
 
+        #[cfg(test)]
+        let _catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.host_instance.get());
+
         let parse_start = Instant::now();
 
-        let snapshot = if dispatchable_carrier {
-            use verter_language::carrier_grammar::CarrierGrammarConfig;
+        let snapshot = if let Some((adapter_id, carrier_language_id)) = dispatchable_carrier {
             use verter_language::registered_source_authority::{
                 CanonicalFileId, FileIncarnation, SourceGeneration,
             };
+            // Retain the identity-bound semantic row (adapter × registered
+            // frontend epoch × Semantic) before any parse or publication.
+            let semantic =
+                crate::parse::retained_semantic_for_source_stage(adapter_id, carrier_language_id)
+                    .ok_or_else(|| StageError::new("semantic catalog miss for carrier identity"))?;
             let ingested = self.registered_envelope_ingest.lock().remove(canonical_id);
-            let (framework_parse, structure, file_incarnation, source_generation) =
-                if let Some(structure) = ingested {
-                    let registered = structure.envelope().source();
-                    if registered.canonical().as_str() != canonical_id
-                        || registered.bytes() != content.as_ref()
-                        || registered.resolved_file_language() != &file_language
-                    {
-                        return Err(StageError::new(
-                            "registered envelope/source identity mismatch",
-                        ));
-                    }
-                    let file_incarnation = registered.file_incarnation();
-                    let source_generation = registered.generation();
-                    (
-                        Arc::clone(structure.artifact()),
-                        structure,
-                        file_incarnation,
-                        source_generation,
+            let (framework_parse, structure, file_incarnation, source_generation) = if let Some(
+                structure,
+            ) = ingested
+            {
+                let registered = structure.envelope().source();
+                if registered.canonical().as_str() != canonical_id
+                    || registered.bytes() != content.as_ref()
+                    || registered.resolved_file_language() != &file_language
+                {
+                    return Err(StageError::new(
+                        "registered envelope/source identity mismatch",
+                    ));
+                }
+                let file_incarnation = registered.file_incarnation();
+                let source_generation = registered.generation();
+                (
+                    Arc::clone(structure.artifact()),
+                    structure,
+                    file_incarnation,
+                    source_generation,
+                )
+            } else {
+                let registered = self
+                    .source_authority
+                    .register_source(
+                        CanonicalFileId::new(canonical_id),
+                        FileIncarnation::new(self.host_instance.get()),
+                        SourceGeneration::new(generation),
+                        file_language.clone(),
+                        Arc::clone(&content),
                     )
-                } else {
-                    let registered = self
-                        .source_authority
-                        .register_source(
-                            CanonicalFileId::new(canonical_id),
-                            FileIncarnation::new(self.host_instance.get()),
-                            SourceGeneration::new(generation),
-                            file_language.clone(),
-                            Arc::clone(&content),
+                    .map_err(|_| StageError::new("registered source authority rejected source"))?;
+                // Registered-identity fact read: the grammar comes from
+                // the file's frontend catalog row, keyed adapter ×
+                // carrier language. A miss (unregistered carrier, or a
+                // row without a grammar fact) fails closed — never
+                // another framework's grammar.
+                let grammar_config =
+                    verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+                            adapter_id,
+                            carrier_language_id,
                         )
-                        .map_err(|_| {
-                            StageError::new("registered source authority rejected source")
+                        .ok_or_else(|| StageError {
+                            message: format!(
+                                "registered frontend for framework language adapter \
+                                 '{adapter_id}' carries no registered grammar fact"
+                            ),
+                            kind: StageErrorKind::UnsupportedLanguage {
+                                adapter_id: adapter_id.clone(),
+                            },
                         })?;
-                    let grammar_config = if file_language.adapter_id().is_some_and(|id| id.is_vue())
-                    {
-                        CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>())
-                            .expect("default Vue grammar")
-                    } else {
-                        CarrierGrammarConfig::Svelte
-                    };
-                    let accepted = self
-                        .grammar_authority
-                        .accept_registered_source(
-                            &self.source_authority,
-                            &registered,
-                            &grammar_config,
-                        )
-                        .map_err(|_| StageError::new("registered grammar rejected source"))?;
-                    let request = crate::carrier_publication_store::PublicationRequestContext::new(
-                        crate::carrier_publication_store::AuditRequestId::new(generation),
-                        crate::carrier_publication_store::PublicationSurface::ProjectionHost,
-                        verter_scheduler::cancellation::current_job_cancellation_token()
-                            .unwrap_or_default(),
-                        registered.snapshot_id().clone(),
-                    );
-                    let envelope = self
-                        .publication_store
-                        .publish_or_get(&accepted, request)
-                        .into_envelope()
-                        .ok_or_else(|| StageError::new("carrier publication did not admit"))?;
-                    (
-                        Arc::clone(envelope.artifact()),
-                        crate::carrier_publication_store::RegisteredFileStructure::new(envelope),
-                        registered.file_incarnation(),
-                        registered.generation(),
-                    )
-                };
-            let mut parse_snapshot = crate::parse::carrier_snapshot_from_artifact(
+                let accepted = self
+                    .grammar_authority
+                    .accept_registered_source(&self.source_authority, &registered, grammar_config)
+                    .map_err(|err| {
+                        StageError::new(format!("registered grammar rejected source: {err:?}"))
+                    })?;
+                let request = crate::carrier_publication_store::PublicationRequestContext::new(
+                    crate::carrier_publication_store::AuditRequestId::new(generation),
+                    crate::carrier_publication_store::PublicationSurface::ProjectionHost,
+                    verter_scheduler::cancellation::current_job_cancellation_token()
+                        .unwrap_or_default(),
+                    registered.snapshot_id().clone(),
+                );
+                let envelope = self
+                    .publication_store
+                    .publish_or_get(&accepted, request)
+                    .into_envelope()
+                    .ok_or_else(|| StageError::new("carrier publication did not admit"))?;
+                (
+                    Arc::clone(envelope.artifact()),
+                    crate::carrier_publication_store::RegisteredFileStructure::new(envelope),
+                    registered.file_incarnation(),
+                    registered.generation(),
+                )
+            };
+            let eval_source = crate::parse::invoke_retained_semantic_eval_source(
+                semantic,
+                content.as_ref(),
+                framework_parse.as_ref(),
+            );
+            let mut parse_snapshot = crate::parse::carrier_snapshot_from_eval_source(
                 canonical_id,
                 &content,
                 self.config.effective_scope(),
                 &file_language,
                 &self.provenance,
                 &framework_parse,
+                eval_source.as_ref(),
             )
-            .expect("published carrier artifact matches its registered language");
+            .ok_or_else(|| {
+                StageError::new("published carrier artifact does not match its registered language")
+            })?;
             // Sealed-identity wire tokens attach ONCE at record build, so
             // every serve reuses the stored styles Arc unchanged.
             crate::parse::attach_style_block_tokens(&structure, &mut parse_snapshot.style_analyses);
@@ -346,6 +404,7 @@ impl StageExecutor for HostStageExecutor {
                     revision_token,
                     file_language,
                     source_type,
+                    eval_source,
                     parse_duration_ms,
                 }),
             }
@@ -359,7 +418,7 @@ impl StageExecutor for HostStageExecutor {
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type = imported_eval_source_type(&file_language, None);
             SourceSnapshot {
-                source: content,
+                source: Arc::clone(&content),
                 whole_hash: parse_snapshot.whole_hash,
                 semantic_hash: parse_snapshot.semantic_hash,
                 generation,
@@ -380,6 +439,7 @@ impl StageExecutor for HostStageExecutor {
                     },
                     file_language,
                     source_type,
+                    eval_source: content,
                     parse_duration_ms,
                 }),
             }
@@ -427,49 +487,33 @@ impl StageExecutor for HostStageExecutor {
         };
         let parse = &host_data.parse;
         let workspace = self.workspace.read().clone();
-        let resolve_dep = |specifier: &str, kind| match workspace
-            .resolve_import_outcome(
-                canonical_id,
-                specifier,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind,
-                },
-            )
-            .into_publication()
-        {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
-                .into_result()
-                .map(|resolution| resolution.source_id),
-            verter_workspace::ResolutionPublication::Refused(_) => None,
+        let resolve_dep = |specifier: &str, kind| {
+            #[cfg(test)]
+            {
+                *scheduler_dep_resolution_counts()
+                    .lock()
+                    .entry(canonical_id.to_string())
+                    .or_default() += 1;
+            }
+            match workspace
+                .resolve_import_outcome(
+                    canonical_id,
+                    specifier,
+                    verter_semantic::resolver_core::ResolutionContext {
+                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                        kind,
+                    },
+                )
+                .into_publication()
+            {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
+                    .into_result()
+                    .map(|resolution| resolution.source_id),
+                verter_workspace::ResolutionPublication::Refused(_) => None,
+            }
         };
 
-        let mut forward_deps = Vec::new();
         let mut blocker_ids = Vec::new();
-
-        // Forward deps from external src blocks (e.g. <script src="./setup.ts">).
-        for req in &parse.external_requests {
-            let Some(resolved) = resolve_dep(
-                &req.specifier,
-                verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
-            ) else {
-                return ExtractedDeps::default();
-            };
-            forward_deps.push(resolved);
-        }
-
-        // Forward deps from relative imports.
-        for imp in &parse.script_analysis.imports {
-            if imp.source.starts_with('.') || imp.source.starts_with("../") {
-                let Some(resolved) = resolve_dep(
-                    &imp.source,
-                    verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
-                ) else {
-                    return ExtractedDeps::default();
-                };
-                forward_deps.push(resolved);
-            }
-        }
 
         // Blocker IDs from macro type deps (defineProps<ExternalType>(), etc.).
         // These files must reach Analysis before this file's Artifact can proceed,
@@ -489,7 +533,7 @@ impl StageExecutor for HostStageExecutor {
         }
 
         ExtractedDeps {
-            forward_deps,
+            forward_deps: Vec::new(),
             blocker_ids,
         }
     }
@@ -500,6 +544,13 @@ impl StageExecutor for HostStageExecutor {
         source: &SourceSnapshot,
         generation: u64,
     ) -> Result<AnalysisSnapshot, StageError> {
+        // `AnalysisScope::NONE` deliberately carries no analysis payload.
+        // Avoid materialising the Arc-wrapped read views for the empty
+        // snapshot: bundler/stateless hosts still cross the scheduler's
+        // Analysis commit fence, but have no analysis facts to publish.
+        if self.config.effective_scope().is_empty() {
+            return Ok(AnalysisSnapshot::new_empty(generation));
+        }
         // In the current host architecture, analysis is computed during parse.
         // Extract the real data from HostSourceData and commit it in the
         // AnalysisSnapshot so read-side consumers get real payloads.

@@ -110,6 +110,18 @@ export interface HostConfig {
    */
   hostCpuThreads?: number;
   /**
+   * Worker count for the scheduler-owned CPU stage pool. `undefined` or
+   * `0` keeps the scheduler default; a positive value fixes the pool size
+   * for this host.
+   */
+  schedulerCpuThreads?: number;
+  /**
+   * Worker count for the scheduler-owned I/O stage pool. `undefined` or
+   * `0` keeps the scheduler default; a positive value fixes the pool size
+   * for this host.
+   */
+  schedulerIoThreads?: number;
+  /**
    * Enable host performance-metrics collection. `undefined` (default)
    * keeps the default `false` (counters stay zero; `getMetrics()`
    * returns `null`). A runtime per-host construction choice — not a
@@ -437,3 +449,15 @@ export interface HostSelectorMatchResult {
   selectorEnd: number;
   matches: HostElementMatch[];
 }
+
+// =============================================================================
+// Host compile request
+// =============================================================================
+//
+// The tag-discriminated request the native host compile adapter decodes.
+// Its declarations are GENERATED from the Rust schema that decodes them
+// and byte-pinned, so a field, variant, optionality or closed vocabulary
+// cannot drift between the two. Everything above is unrelated hand-written
+// host and session API: it is neither generated nor pinned.
+
+export * from "./host-compile-request.generated";

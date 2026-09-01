@@ -16,8 +16,12 @@ import path from "node:path";
 
 import { compareArtifacts, cleanupLinkScratch } from "../src/compare.mjs";
 import { checkCandidate } from "../src/check-candidate.mjs";
-import { cleanupScratch as cleanupVueScratch } from "../src/execute-vue-runtime.mjs";
+import { cleanupScratch as cleanupVueScratch, executeVueSsr } from "../src/execute-vue-runtime.mjs";
 import { cleanupScratch as cleanupVaporScratch } from "../src/execute-vue-vapor.mjs";
+import {
+  cleanupScratch as cleanupSvelteScratch,
+  executeSvelteSsr,
+} from "../src/execute-svelte-runtime.mjs";
 import { oracleLinkBaseDir } from "../src/oracle-install.mjs";
 import { readGoldenManifest, readGoldenByName } from "../src/golden-store.mjs";
 import { MAPPING_PROFILES } from "../src/mapping-oracle.mjs";
@@ -44,6 +48,7 @@ const SCRATCH = mkdtempSync(path.join(tmpdir(), "bf2-authoritative-"));
 afterAll(() => {
   cleanupVueScratch();
   cleanupVaporScratch();
+  cleanupSvelteScratch();
   cleanupLinkScratch(oracleLinkBaseDir("vue"));
   rmSync(SCRATCH, { recursive: true, force: true });
 });
@@ -232,6 +237,149 @@ describe("check-candidate CLI — exit codes", () => {
       env: { ...process.env, ...env },
     });
   }
+
+  function runBatch(cases, { authoritative = false, env = {} } = {}) {
+    const batchPath = path.join(SCRATCH, `batch-${Math.random().toString(36).slice(2)}.json`);
+    writeFileSync(batchPath, JSON.stringify({ cases }));
+    const args = ["bin/check-candidate.mjs", "--batch", batchPath];
+    if (authoritative) args.push("--authoritative");
+    return spawnSync(process.execPath, args, {
+      cwd: HARNESS_ROOT,
+      encoding: "utf8",
+      env: { ...process.env, ...env },
+    });
+  }
+
+  it("batch mode preserves order and resets repeated cases across opposite traversals", () => {
+    const names = [
+      goldenNameWhere((name) => name.includes("__vdom__map0__prod0")),
+      goldenNameWhere((name) => name.includes("__ssr__map0__prod0")),
+    ];
+    const byName = Object.fromEntries(
+      names.map((name) => {
+        const golden = readGoldenByName(GOLDENS_ROOT, name);
+        return [name, { code: golden.code, map: golden.map, diagnostics: golden.diagnostics }];
+      }),
+    );
+    const makeCases = (order) =>
+      order.map((name, index) => ({
+        caseId: `${index}:${name}`,
+        goldenName: name,
+        candidate: byName[name],
+      }));
+
+    for (const order of [
+      [names[0], names[1], names[0]],
+      [names[1], names[0], names[1]],
+    ]) {
+      const execution = runBatch(makeCases(order), { authoritative: true });
+      expect(execution.status, execution.stderr).toBe(0);
+      const envelope = JSON.parse(execution.stdout);
+      expect(Object.keys(envelope).sort()).toEqual(["reports", "schema", "verdict"]);
+      expect(envelope.schema).toBe("verter-check-candidate-batch/v1");
+      expect(envelope.verdict).toBe("reported");
+      expect(envelope.reports).toHaveLength(order.length);
+      for (const [index, report] of envelope.reports.entries()) {
+        expect(Object.keys(report).sort()).toEqual([
+          "caseId",
+          "exitCode",
+          "goldenName",
+          "index",
+          "result",
+          "status",
+        ]);
+        expect(report).toMatchObject({
+          index,
+          caseId: `${index}:${order[index]}`,
+          goldenName: order[index],
+          status: "reported",
+          exitCode: 0,
+          result: { goldenName: order[index], authoritative: true, verdict: "pass" },
+        });
+      }
+      expect(envelope.reports[0].result).toEqual(envelope.reports[2].result);
+    }
+  });
+
+  it("batch mode reports typed per-case failures without losing later results", () => {
+    const name = goldenNameWhere((entry) => entry.includes("__vdom__map0__prod0"));
+    const golden = readGoldenByName(GOLDENS_ROOT, name);
+    const execution = runBatch(
+      [
+        { caseId: "malformed", goldenName: name, candidate: null },
+        {
+          caseId: "following-pass",
+          goldenName: name,
+          candidate: { code: golden.code, map: golden.map, diagnostics: golden.diagnostics },
+        },
+      ],
+      { authoritative: true },
+    );
+    expect(execution.status).toBe(3);
+    const envelope = JSON.parse(execution.stdout);
+    expect(envelope.verdict).toBe("error");
+    expect(envelope.reports).toHaveLength(2);
+    expect(Object.keys(envelope.reports[0]).sort()).toEqual([
+      "caseId",
+      "failure",
+      "goldenName",
+      "index",
+      "status",
+    ]);
+    expect(envelope.reports[0]).toMatchObject({
+      index: 0,
+      caseId: "malformed",
+      goldenName: name,
+      status: "error",
+      failure: {
+        kind: "exception",
+        name: "TypeError",
+        message: "case 0.candidate must be an object",
+      },
+    });
+    expect(envelope.reports[1]).toMatchObject({
+      index: 1,
+      caseId: "following-pass",
+      goldenName: name,
+      status: "reported",
+      exitCode: 0,
+      result: { verdict: "pass" },
+    });
+  });
+
+  it("repeated SSR cases receive fresh candidate module state", async () => {
+    const statefulModule = `
+      import { h } from "vue";
+      let renders = 0;
+      export default {
+        render() {
+          renders += 1;
+          return h("p", String(renders));
+        },
+      };
+    `;
+    const first = await executeVueSsr(statefulModule);
+    const repeated = await executeVueSsr(statefulModule);
+    expect(first).toEqual({ ok: true, html: "<p>1</p>", error: null });
+    expect(repeated).toEqual(first);
+  });
+
+  it("repeated Svelte SSR cases receive fresh candidate module state", async () => {
+    const statefulModule = `
+      import * as $ from "svelte/internal/server";
+      let renders = 0;
+      function Probe($$renderer) {
+        renders += 1;
+        $$renderer.push(\`<p>\${renders}</p>\`);
+      }
+      export default Probe;
+    `;
+    const first = await executeSvelteSsr(statefulModule);
+    const repeated = await executeSvelteSsr(statefulModule);
+    expect(first).toMatchObject({ ok: true, error: null });
+    expect(first.html).toContain("<p>1</p>");
+    expect(repeated).toEqual(first);
+  });
 
   it("exit 0 on a passing candidate", () => {
     const name = goldenNameWhere((n) => n.includes("__vdom__map0__prod0"));

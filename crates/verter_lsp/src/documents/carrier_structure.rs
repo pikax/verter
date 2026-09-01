@@ -4,8 +4,10 @@
 //! is sliced only through validated spans. No carrier delimiter is searched.
 
 use verter_language::parse_artifact::carrier_inventory::{
-    AttributeValue, CarrierAttribute, CarrierBlock, MarkupElementSyntax, MarkupNodeKind,
-    SectionRole, SvelteControlBlockHead, SvelteStandaloneTagFamily, TaggedSyntax,
+    AttributeValue, CarrierAttribute, CarrierBlock, DirectiveArgument, MarkupElementKind,
+    MarkupElementSyntax, MarkupNodeKind, MarkupSyntaxNode, SectionRole, SourceSpan,
+    SvelteAwaitInlineBranch, SvelteClauseHead, SvelteControlBlockHead, SvelteStandaloneTagFamily,
+    SyntaxTermination, TaggedSyntax,
 };
 use verter_session::carrier_publication_store::{
     ArtifactAttributeRef, FrameworkBlockRef, RegisteredFileStructure,
@@ -201,6 +203,46 @@ pub fn markup_element_at(facts: &[MarkupOpenTagFact], offset: u32) -> Option<usi
         .map(|(index, _)| index)
 }
 
+/// Nearest parser-owned component element containing `offset`.
+///
+/// The walk starts from the innermost markup arena node whose full span owns
+/// the cursor and follows only parser parent links. Recovered/unknown nodes and
+/// native elements never mint a tag identity; an authored component name is
+/// returned only from a real [`MarkupNodeKind::Element`] classified as a
+/// component. No carrier source text is searched.
+pub fn nearest_component_ancestor_tag(
+    structure: &RegisteredFileStructure,
+    offset: u32,
+) -> Option<String> {
+    let inventory = structure.inventory();
+    let nodes = inventory.markup().nodes();
+    let mut current = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            let span = node.kind().full_span();
+            offset >= span.start && offset < span.end
+        })
+        .min_by_key(|(_, node)| {
+            let span = node.kind().full_span();
+            span.end.saturating_sub(span.start)
+        })
+        .map(|(index, _)| index)?;
+
+    loop {
+        let node = nodes.get(current)?;
+        if let MarkupNodeKind::Element(element) = node.kind() {
+            if element.kind == MarkupElementKind::Component {
+                return inventory
+                    .slice(element.authored_name)
+                    .ok()
+                    .map(str::to_string);
+            }
+        }
+        current = node.parent?.get() as usize;
+    }
+}
+
 /// One parser-identified markup comment interior from the registered arena.
 /// `interior_start` is the end of the `<!--` opener; `end` is the parser-owned
 /// node end. An `open_ended` comment (no closer retained) extends through the
@@ -246,7 +288,166 @@ pub fn offset_in_markup_comment(facts: &[MarkupCommentFact], offset: u32) -> boo
     })
 }
 
+/// Parser-owned component attribute-name context at `offset`.
+///
+/// This is deliberately stricter than the general cursor classifier. Only a
+/// real component [`MarkupNodeKind::Element`] can establish the authored tag
+/// identity, and the cursor must be in the opening tag after its name, at an
+/// attribute head/name, or in a parser-owned gap before the insertion anchor.
+/// Value bodies, directive arguments/modifiers, spreads, attaches, and their
+/// inclusive end positions are rejected so value typing cannot accidentally
+/// capture component-contract authority. Recovered/unknown nodes fail closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthoredComponentAttributeNameContext {
+    ExactAttribute { tag: String },
+    InexactUnclosedOpening { tag: String },
+}
+
+impl AuthoredComponentAttributeNameContext {
+    pub fn tag(&self) -> &str {
+        match self {
+            Self::ExactAttribute { tag } | Self::InexactUnclosedOpening { tag } => tag,
+        }
+    }
+}
+
+pub fn authored_component_attribute_name_context(
+    structure: &RegisteredFileStructure,
+    offset: u32,
+) -> Option<AuthoredComponentAttributeNameContext> {
+    fn contains_inclusive(span: SourceSpan, offset: u32) -> bool {
+        offset >= span.start && offset <= span.end
+    }
+
+    fn value_contains_inclusive(value: &AttributeValue, offset: u32) -> bool {
+        match value {
+            AttributeValue::Missing => false,
+            AttributeValue::Static { value_span, .. }
+            | AttributeValue::Expression {
+                full_span: value_span,
+                ..
+            }
+            | AttributeValue::Mixed {
+                full_span: value_span,
+                ..
+            } => contains_inclusive(*value_span, offset),
+        }
+    }
+
+    fn directive_argument_contains_inclusive(argument: &DirectiveArgument, offset: u32) -> bool {
+        match argument {
+            DirectiveArgument::None => false,
+            DirectiveArgument::Static { name } => {
+                name.name_span.start < name.name_span.end
+                    && contains_inclusive(name.name_span, offset)
+            }
+            DirectiveArgument::Dynamic { full_span, .. } => {
+                full_span.start < full_span.end && contains_inclusive(*full_span, offset)
+            }
+        }
+    }
+
+    let inventory = structure.inventory();
+    inventory
+        .markup()
+        .nodes()
+        .iter()
+        .filter_map(|node| {
+            let (opening_start, context) = match node.kind() {
+                MarkupNodeKind::Element(element) => {
+                    let authored_tag = inventory.slice(element.authored_name).ok()?;
+                    // Vue and Svelte both reserve an authored ASCII-uppercase
+                    // opening name for component syntax.  The parser's HTML
+                    // classification is case-insensitive, so a component such
+                    // as `<Button />` can otherwise be recorded as the native
+                    // `button` element and lose its attribute-name authority.
+                    if element.kind != MarkupElementKind::Component
+                        && !authored_tag
+                            .chars()
+                            .next()
+                            .is_some_and(|character| character.is_ascii_uppercase())
+                    {
+                        return None;
+                    }
+                    let unclosed_attribute_name = element.attributes.iter().any(|attribute| {
+                        matches!(
+                            attribute,
+                            CarrierAttribute::Named {
+                                name,
+                                value: AttributeValue::Missing,
+                                ..
+                            } if offset >= name.authored.span.start
+                                && offset <= name.authored.span.end
+                        )
+                    });
+                    let unclosed_eof_gap = offset == structure.source().bytes().len() as u32
+                        && offset == element.full_span.end
+                        && offset > element.opening_name_span.end
+                        && element.attributes.is_empty();
+                    if matches!(element.termination, SyntaxTermination::UnclosedEof)
+                        && (unclosed_attribute_name || unclosed_eof_gap)
+                    {
+                        return Some((
+                            element.opening_name_span.start.saturating_sub(1),
+                            AuthoredComponentAttributeNameContext::InexactUnclosedOpening {
+                                tag: authored_tag.to_string(),
+                            },
+                        ));
+                    }
+                    if offset < element.opening_name_span.end
+                        || offset > element.attribute_insertion_anchor.start
+                    {
+                        return None;
+                    }
+                    for attribute in element.attributes.iter() {
+                        match attribute {
+                            CarrierAttribute::Named { value, .. }
+                                if value_contains_inclusive(value, offset) =>
+                            {
+                                return None;
+                            }
+                            CarrierAttribute::Directive {
+                                argument,
+                                modifiers,
+                                value,
+                                ..
+                            } if directive_argument_contains_inclusive(argument, offset)
+                                || modifiers.iter().any(|modifier| {
+                                    contains_inclusive(modifier.full_span, offset)
+                                })
+                                || value_contains_inclusive(value, offset) =>
+                            {
+                                return None;
+                            }
+                            CarrierAttribute::Spread { full_span, .. }
+                            | CarrierAttribute::Attach { full_span, .. }
+                                if contains_inclusive(*full_span, offset) =>
+                            {
+                                return None;
+                            }
+                            _ => {}
+                        }
+                    }
+                    (
+                        element.opening_span.start,
+                        AuthoredComponentAttributeNameContext::ExactAttribute {
+                            tag: authored_tag.to_string(),
+                        },
+                    )
+                }
+                _ => return None,
+            };
+            Some((opening_start, context))
+        })
+        .max_by_key(|(opening_start, _)| *opening_start)
+        .map(|(_, context)| context)
+}
+
 /// Parser-owned Svelte head position at the edit cursor.
+///
+/// `RenderCallee` intentionally covers the whole in-progress expression for
+/// completion recovery. It is not an authored-definition identity; navigation
+/// authority must use [`svelte_static_render_callee_span_at`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SvelteHeadCursorFact {
     SnippetName,
@@ -283,6 +484,201 @@ pub fn svelte_head_cursor_fact(
                 Some(SvelteHeadCursorFact::RenderCallee)
             }
             _ => None,
+        })
+}
+
+/// Exact authored token for a direct static `{@render name(...)}` callee.
+///
+/// The registered expression span proves the Svelte render family and bounds
+/// all slicing. Admission is deliberately fail-closed: member/dynamic callees,
+/// argument identifiers, and syntax requiring a second parser retain provider
+/// navigation rather than minting native source authority.
+pub fn svelte_static_render_callee_span_at(
+    structure: &RegisteredFileStructure,
+    offset: u32,
+) -> Option<SourceSpan> {
+    svelte_static_render_callee_at(structure, offset).map(|(_, span)| span)
+}
+
+/// Exact parser-owned declaration for a direct static local snippet render.
+///
+/// The inward-to-outward walk follows Svelte's branch topology: a clause sees
+/// declarations in that clause and genuinely outer scopes, never declarations
+/// in its controller's main branch. Parser-owned bindings stop outer lookup;
+/// duplicate declarations in one admitted scope fail closed instead of
+/// inventing an identity. This lookup deliberately does not consult template
+/// analysis, so it remains available in the post-edit window where registered
+/// structure is current but BUILD/template analysis has not been republished.
+pub fn svelte_local_render_snippet_definition_at(
+    structure: &RegisteredFileStructure,
+    offset: u32,
+) -> Option<SourceSpan> {
+    match svelte_render_lexical_visibility_at(structure, offset)? {
+        SvelteRenderLexicalVisibility::LocalSnippet(span) => Some(span),
+        SvelteRenderLexicalVisibility::ScriptRootVisible
+        | SvelteRenderLexicalVisibility::Blocked
+        | SvelteRenderLexicalVisibility::Ambiguous => None,
+    }
+}
+
+/// Parser-owned lexical admission for a direct static Svelte render callee.
+///
+/// `ScriptRootVisible` is the only state in which a script-level `$props`
+/// binding may own navigation. A nearer local snippet wins; bindings introduced
+/// by control/snippet scopes block the script root; malformed topology and
+/// duplicate declarations never mint source authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvelteRenderLexicalVisibility {
+    LocalSnippet(SourceSpan),
+    ScriptRootVisible,
+    Blocked,
+    Ambiguous,
+}
+
+pub fn svelte_render_lexical_visibility_at(
+    structure: &RegisteredFileStructure,
+    offset: u32,
+) -> Option<SvelteRenderLexicalVisibility> {
+    let (render, callee) = svelte_static_render_callee_at(structure, offset)?;
+    let inventory = structure.inventory();
+    let callee_name = inventory.slice_span(callee).ok()?;
+    let nodes = inventory.markup().nodes();
+
+    let mut scope = render.parent;
+    loop {
+        let mut matching_declaration = None;
+        for node in nodes.iter().filter(|node| node.parent == scope) {
+            let MarkupNodeKind::SvelteControlBlock(block) = node.kind() else {
+                continue;
+            };
+            let SvelteControlBlockHead::Snippet {
+                authored_name,
+                name_span,
+                ..
+            } = &block.head
+            else {
+                continue;
+            };
+            if inventory.slice(*authored_name).ok()? != callee_name {
+                continue;
+            }
+            if matching_declaration.replace(*name_span).is_some() {
+                return Some(SvelteRenderLexicalVisibility::Ambiguous);
+            }
+        }
+        if let Some(declaration) = matching_declaration {
+            return Some(SvelteRenderLexicalVisibility::LocalSnippet(declaration));
+        }
+
+        let Some(scope_id) = scope else {
+            return Some(SvelteRenderLexicalVisibility::ScriptRootVisible);
+        };
+        let Some(scope_node) = nodes.iter().find(|node| node.id == scope_id) else {
+            return Some(SvelteRenderLexicalVisibility::Blocked);
+        };
+        match scope_node.kind() {
+            MarkupNodeKind::SvelteClause(clause) => {
+                if matches!(
+                    clause.head,
+                    SvelteClauseHead::Then { binding: Some(_) }
+                        | SvelteClauseHead::Catch { binding: Some(_) }
+                ) {
+                    return Some(SvelteRenderLexicalVisibility::Blocked);
+                }
+                let Some(controller_id) = scope_node.parent else {
+                    return Some(SvelteRenderLexicalVisibility::Blocked);
+                };
+                let Some(controller) = nodes.iter().find(|node| node.id == controller_id) else {
+                    return Some(SvelteRenderLexicalVisibility::Blocked);
+                };
+                if !matches!(controller.kind(), MarkupNodeKind::SvelteControlBlock(_)) {
+                    return Some(SvelteRenderLexicalVisibility::Blocked);
+                }
+                scope = controller.parent;
+            }
+            MarkupNodeKind::SvelteControlBlock(block) => {
+                let binding_barrier = match &block.head {
+                    SvelteControlBlockHead::Each { item, index, .. } => {
+                        item.is_some() || index.is_some()
+                    }
+                    SvelteControlBlockHead::Await { inline_branch, .. } => matches!(
+                        inline_branch,
+                        SvelteAwaitInlineBranch::Then {
+                            binding: Some(_),
+                            ..
+                        } | SvelteAwaitInlineBranch::Catch {
+                            binding: Some(_),
+                            ..
+                        }
+                    ),
+                    SvelteControlBlockHead::Snippet {
+                        params_span: Some(params),
+                        ..
+                    } => params.start < params.end,
+                    _ => false,
+                };
+                if binding_barrier {
+                    return Some(SvelteRenderLexicalVisibility::Blocked);
+                }
+                scope = scope_node.parent;
+            }
+            _ => scope = scope_node.parent,
+        }
+    }
+}
+
+fn svelte_static_render_callee_at(
+    structure: &RegisteredFileStructure,
+    offset: u32,
+) -> Option<(&MarkupSyntaxNode, SourceSpan)> {
+    let source = structure.source().bytes().as_bytes();
+    structure
+        .inventory()
+        .markup()
+        .nodes()
+        .iter()
+        .find_map(|node| {
+            let MarkupNodeKind::SvelteStandaloneTag(tag) = node.kind() else {
+                return None;
+            };
+            if tag.family != SvelteStandaloneTagFamily::Render {
+                return None;
+            }
+            let expression = tag.expression_span?;
+            let bytes = source.get(expression.start as usize..expression.end as usize)?;
+            let mut cursor = 0usize;
+            while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                cursor += 1;
+            }
+            let token_start = cursor;
+            let first = *bytes.get(cursor)?;
+            if !(first.is_ascii_alphabetic() || first == b'_' || first == b'$') {
+                return None;
+            }
+            cursor += 1;
+            while bytes
+                .get(cursor)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$')
+            {
+                cursor += 1;
+            }
+            let token_end = cursor;
+            while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                cursor += 1;
+            }
+            let direct_call = bytes.get(cursor) == Some(&b'(')
+                || bytes
+                    .get(cursor..cursor.saturating_add(3))
+                    .is_some_and(|suffix| suffix == b"?.(");
+            if !direct_call {
+                return None;
+            }
+            let span = SourceSpan::new(
+                expression.source_space,
+                expression.start + token_start as u32,
+                expression.start + token_end as u32,
+            );
+            (offset >= span.start && offset < span.end).then_some((node, span))
         })
 }
 
@@ -829,5 +1225,173 @@ mod tests {
         assert_eq!(template.close_tag_start, boundary);
         assert!(source.find("<div >").unwrap() as u32 >= template.open_tag_end);
         assert!((source.find("<div >").unwrap() as u32) < template.close_tag_start);
+    }
+
+    #[test]
+    fn authored_component_attribute_context_admits_only_heads_names_and_gaps() {
+        let source = "<template><DirectComp first second /></template>";
+        let structure = test_structure(source, false);
+        for offset in [
+            source.find("<DirectComp").unwrap() + "<DirectComp".len(),
+            source.find("first").unwrap() + 2,
+            source.find(" second").unwrap(),
+            source.find("second").unwrap() + "second".len(),
+        ] {
+            assert_eq!(
+                authored_component_attribute_name_context(&structure, offset as u32),
+                Some(AuthoredComponentAttributeNameContext::ExactAttribute {
+                    tag: "DirectComp".to_string(),
+                }),
+                "offset {offset} must retain the parser-owned component tag"
+            );
+        }
+
+        let native = test_structure("<template><div class /></template>", false);
+        let native_offset = "<template><div ".len() as u32;
+        assert_eq!(
+            authored_component_attribute_name_context(&native, native_offset),
+            None,
+            "native elements do not mint component-contract authority"
+        );
+
+        let directive_head = "<template><DirectComp :></template>";
+        let directive_head_offset = directive_head.find(":>").unwrap() + 1;
+        assert_eq!(
+            authored_component_attribute_name_context(
+                &test_structure(directive_head, false),
+                directive_head_offset as u32,
+            ),
+            Some(AuthoredComponentAttributeNameContext::ExactAttribute {
+                tag: "DirectComp".to_string(),
+            }),
+            "a zero-length directive argument is still the authored attribute-name head"
+        );
+
+        let incomplete = "<script setup>\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n<DirectComp un";
+        let incomplete_structure = test_structure(incomplete, false);
+        assert_eq!(
+            authored_component_attribute_name_context(
+                &incomplete_structure,
+                incomplete.len() as u32,
+            ),
+            Some(
+                AuthoredComponentAttributeNameContext::InexactUnclosedOpening {
+                    tag: "DirectComp".to_string(),
+                }
+            ),
+            "a parser-recovered opening keeps only its authored component identity"
+        );
+
+        let gap = "<script setup>\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n<DirectComp ";
+        let gap_structure = test_structure(gap, false);
+        assert_eq!(
+            authored_component_attribute_name_context(&gap_structure, gap.len() as u32),
+            Some(
+                AuthoredComponentAttributeNameContext::InexactUnclosedOpening {
+                    tag: "DirectComp".to_string(),
+                }
+            ),
+            "an unclosed parser-owned EOF gap after the component name is inexact"
+        );
+        let bare = "<script setup>\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n<DirectComp";
+        assert_eq!(
+            authored_component_attribute_name_context(
+                &test_structure(bare, false),
+                bare.len() as u32,
+            ),
+            None,
+            "the bare tag-name end is not an attribute context"
+        );
+
+        for post_attribute in [
+            "<template><DirectComp foo=",
+            "<template><DirectComp foo= ",
+            "<template><DirectComp foo ",
+        ] {
+            let post_structure = test_structure(post_attribute, false);
+            assert_eq!(
+                authored_component_attribute_name_context(
+                    &post_structure,
+                    post_attribute.len() as u32,
+                ),
+                None,
+                "an unclosed post-attribute gap cannot prove whether the cursor is still in a name: {post_attribute}"
+            );
+        }
+    }
+
+    #[test]
+    fn authored_component_attribute_context_rejects_values_directives_and_spreads() {
+        for (source, marker, cursor_delta, svelte) in [
+            (
+                "<template><DirectComp plain=\"value\" /></template>",
+                "value\"",
+                "value\"".len(),
+                false,
+            ),
+            (
+                "<template><DirectComp :bound=\"value\" /></template>",
+                "bound",
+                2,
+                false,
+            ),
+            (
+                "<template><DirectComp :bound=\"value\" /></template>",
+                "value\"",
+                "value\"".len(),
+                false,
+            ),
+            (
+                "<DirectComp mixed=\"left{value}right\" />",
+                "value",
+                2,
+                true,
+            ),
+            ("<DirectComp onPick={on} />", "on}", 2, true),
+            ("<DirectComp {...spread} />", "spread", 2, true),
+            ("<DirectComp {@attach behavior} />", "behavior", 2, true),
+            (
+                "<template><DirectComp plain=\"unterminated",
+                "unterminated",
+                4,
+                false,
+            ),
+            (
+                "<template><DirectComp :bound=\"unterminated",
+                "unterminated",
+                4,
+                false,
+            ),
+            ("<DirectComp {...spread", "spread", 3, true),
+            ("<DirectComp {@attach behavior", "behavior", 3, true),
+        ] {
+            let structure = test_structure(source, svelte);
+            let offset = source.find(marker).expect("marker") + cursor_delta;
+            assert_eq!(
+                authored_component_attribute_name_context(&structure, offset as u32),
+                None,
+                "value/directive/spread offset must fail closed: {source} @ {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn nearest_component_ancestor_uses_only_parser_parent_topology() {
+        let source = "<script>import Imported from './Imported.svelte';</script>\n<Imported><div>{#snippet header()}body{/snippet}</div></Imported>";
+        let structure = test_structure(source, true);
+        let cursor = source.find("body").expect("snippet body") as u32;
+        assert_eq!(
+            nearest_component_ancestor_tag(&structure, cursor),
+            Some("Imported".to_string())
+        );
+
+        let native = "<main><div>{#snippet header()}body{/snippet}</div></main>";
+        let native_structure = test_structure(native, true);
+        let native_cursor = native.find("body").expect("native snippet body") as u32;
+        assert_eq!(
+            nearest_component_ancestor_tag(&native_structure, native_cursor),
+            None,
+            "native ancestors must not fabricate component identity"
+        );
     }
 }

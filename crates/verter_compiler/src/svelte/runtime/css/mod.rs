@@ -77,7 +77,9 @@ pub(super) fn seed_admitted_from_prepared(
         let Some(css) = source.get(content.start as usize..content.end as usize) else {
             continue;
         };
-        if prepared.ir().source().text() != css || prepared.ir().source().origin() != content.start
+        if prepared.ir().source().text() != css
+            || prepared.ir().source().origin() != content.start
+            || prepared.ir().dialect() != CssDialect::Css
         {
             continue;
         }
@@ -177,6 +179,7 @@ pub struct AnalyzedStyleBody {
 /// (absolute offsets into `source`) ONCE and run the scoping analysis. Runs
 /// BEFORE template lowering, so a css parse/analysis failure is the FIRST
 /// diagnostic a style component reports.
+#[cfg(any(test, feature = "test-support"))]
 pub fn analyze_style_body(
     source: &str,
     content: Span,

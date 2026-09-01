@@ -3,12 +3,13 @@ export type E2eTypeProviderRoute =
   | "tsgo"
   | "shared-tsgo"
   | "editor-tsserver"
-  | "extension";
+  | "extension"
+  | "off";
 
 export interface E2eTypeProviderAttestation {
-  publicKind: "tsgo" | "tsserver" | "editor-tsserver";
+  publicKind: "tsgo" | "tsserver" | "editor-tsserver" | "none";
   reason?: string;
-  route: "tsserver" | "managed-tsgo" | "shared-tsgo" | "editor-tsserver" | "extension";
+  route: "tsserver" | "managed-tsgo" | "shared-tsgo" | "editor-tsserver" | "extension" | "off";
 }
 
 const STATUS_PATTERN =
@@ -59,6 +60,12 @@ export function attestE2eTypeProviderLog(
 
   const publicKind = last[1];
   const reason = last[2];
+  if (requested === "off") {
+    if (publicKind !== "none") {
+      throw new Error(`Requested off, but the public provider status reported ${publicKind}`);
+    }
+    return { publicKind, reason, route: "off" };
+  }
   if (publicKind === "none") {
     const label = requested === "tsgo" ? "managed tsgo" : requested;
     throw new Error(

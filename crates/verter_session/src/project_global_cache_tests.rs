@@ -658,13 +658,13 @@ fn owner_import_surface_picks_up_barrel_retargeting() {
 /// inside `owner_import_surface` must record every barrel-chain
 /// participant in `fact_dep_signature` — not only the owner +
 /// final-target `FileWholeHash`. Without the barrel's
-/// `DerivedFactHash::Route` fact, a retarget that leaves the final
+/// parse-owned `SyntacticRouteInterface` fact, a retarget that leaves the final
 /// target unchanged (e.g. barrel toggles between two re-exports of
 /// the same name from the same file) would silently validate
 /// against a stale cached surface.
 #[test]
 fn owner_import_surface_fact_signature_includes_barrel_route() {
-    use crate::resolver_core::{DerivedFactKind, FactVersionRef};
+    use crate::resolver_core::FactVersionRef;
     let host = host();
     upsert_ts(&host, "/w/a.ts", "export type Foo = { a: number }");
     upsert_ts(&host, "/w/barrel.ts", "export { Foo } from './a'");
@@ -693,17 +693,15 @@ fn owner_import_surface_fact_signature_includes_barrel_route() {
     let barrel_route_fact = surface.read_set_signature.facts.iter().find(|fact| {
         matches!(
             fact,
-            FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: DerivedFactKind::Route,
-                ..
-            } if canonical_id == "/w/barrel.ts"
+            FactVersionRef::Parse(parse)
+                if parse.canonical_id == "/w/barrel.ts"
+                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
         )
     });
     assert!(
         barrel_route_fact.is_some(),
         "OwnerImportSurface.fact_dep_signature MUST include the barrel's \
-         DerivedFactHash::Route fact. Recorded facts: {:?}",
+         parse-owned SyntacticRouteInterface fact. Recorded facts: {:?}",
         surface.read_set_signature.facts
     );
 
@@ -721,13 +719,13 @@ fn owner_import_surface_fact_signature_includes_barrel_route() {
 
 /// Companion to `owner_import_surface_fact_signature_includes_barrel_route`:
 /// retargeting the barrel between two distinct providers must produce
-/// a different barrel-route hash in the recorded
+/// a different parse-owned route-interface hash in the recorded
 /// `fact_dep_signature`. This is the structural prerequisite for
 /// the lazy-invalidation oracle (R3) to detect barrel retargets
 /// without `evict_canonical`.
 #[test]
 fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
-    use crate::resolver_core::{DerivedFactKind, FactVersionRef};
+    use crate::resolver_core::FactVersionRef;
     let host = host();
     upsert_ts(&host, "/w/a.ts", "export type Foo = { a: number }");
     upsert_ts(&host, "/w/b.ts", "export type Foo = { b: number }");
@@ -755,14 +753,18 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
         .facts
         .iter()
         .find_map(|fact| match fact {
-            FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: DerivedFactKind::Route,
-                hash,
-            } if canonical_id == "/w/barrel.ts" => Some(*hash),
+            FactVersionRef::Parse(parse)
+                if parse.canonical_id == "/w/barrel.ts"
+                    && matches!(
+                        parse.key,
+                        verter_semantic::facts::FactKey::SyntacticRouteInterface
+                    ) =>
+            {
+                Some(parse.expected_hash)
+            }
             _ => None,
         })
-        .expect("pre-retarget signature contains the barrel-route fact");
+        .expect("pre-retarget signature contains the barrel route-interface fact");
 
     upsert_ts(&host, "/w/barrel.ts", "export { Foo } from './b'");
     let refreshed = host
@@ -780,19 +782,23 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
         .facts
         .iter()
         .find_map(|fact| match fact {
-            FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: DerivedFactKind::Route,
-                hash,
-            } if canonical_id == "/w/barrel.ts" => Some(*hash),
+            FactVersionRef::Parse(parse)
+                if parse.canonical_id == "/w/barrel.ts"
+                    && matches!(
+                        parse.key,
+                        verter_semantic::facts::FactKey::SyntacticRouteInterface
+                    ) =>
+            {
+                Some(parse.expected_hash)
+            }
             _ => None,
         })
-        .expect("post-retarget signature must still include the barrel-route fact");
+        .expect("post-retarget signature must still include the barrel route-interface fact");
 
     assert_ne!(
         pre_route_hash, post_route_hash,
-        "barrel retargeting must change the recorded DerivedFactHash::Route \
-         hash so the fact-validation oracle detects the chain shift"
+        "an authored barrel target change must move the parse-owned route interface \
+         so the fact-validation oracle detects the chain shift"
     );
 }
 

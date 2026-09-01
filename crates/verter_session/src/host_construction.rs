@@ -50,6 +50,17 @@ pub(crate) struct RelationHostKnobs {
     pub(crate) strict_family_relax_bits: std::sync::atomic::AtomicU8,
 }
 
+/// Construction-time source for the host's execution-only worker pools.
+///
+/// `Fresh` is every production constructor. The shared variant is compiled
+/// only for the explicit test-support seam and still builds a fresh scheduler,
+/// driver, host state, and declaration-lowering service.
+enum HostWorkerPoolSource {
+    Fresh,
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    Shared(Arc<crate::TestHostWorkerPools>),
+}
+
 pub(crate) fn next_host_instance_id() -> u64 {
     static NEXT_HOST_INSTANCE_ID: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(1);
@@ -232,17 +243,61 @@ impl VerterHost {
 
     /// Create a new host with an explicit [`SchedulerConfig`].
     ///
-    /// Test harnesses construct hosts with
-    /// `SchedulerConfig { cpu_threads: 1, ..SchedulerConfig::default() }`
-    /// to avoid CPU oversubscription when many parallel test threads each
-    /// spin up their own scheduler thread pools.
+    /// Each call constructs worker pools at the configured production sizes.
+    /// Corpus harnesses that need process-local reuse inject an explicit shared
+    /// test worker substrate instead of changing those sizes.
     pub fn new_with_scheduler_config(
         config: HostConfig,
         workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
     ) -> Self {
+        Self::new_with_scheduler_config_and_worker_pool_source(
+            config,
+            workspace,
+            scheduler_config,
+            HostWorkerPoolSource::Fresh,
+        )
+    }
+
+    /// Create a fresh host shell using an explicitly shared test worker
+    /// substrate.
+    ///
+    /// Only the three execution pools are shared. The workspace, scheduler and
+    /// driver, semantic caches, audit/request state, and declaration-lowering
+    /// service are reconstructed for every call.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub fn new_with_test_worker_pools(
+        config: HostConfig,
+        workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
+        worker_pools: Arc<crate::TestHostWorkerPools>,
+    ) -> Self {
+        worker_pools.assert_compatible(&config);
+        let scheduler_config = worker_pools.scheduler_config.clone();
+        Self::new_with_scheduler_config_and_worker_pool_source(
+            config,
+            workspace,
+            scheduler_config,
+            HostWorkerPoolSource::Shared(worker_pools),
+        )
+    }
+
+    fn new_with_scheduler_config_and_worker_pool_source(
+        config: HostConfig,
+        workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
+        scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
+        worker_pool_source: HostWorkerPoolSource,
+    ) -> Self {
         #[cfg(test)]
         configure_workspace_test_projects(workspace.as_ref());
+        #[cfg(target_arch = "wasm32")]
+        let _ = &worker_pool_source;
+        #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+        let test_worker_pool_lease = match &worker_pool_source {
+            HostWorkerPoolSource::Fresh => None,
+            HostWorkerPoolSource::Shared(worker_pools) => {
+                Some(worker_pools.acquire_scheduler_shell())
+            }
+        };
 
         // Register the session-side "clear all install_tls slots"
         // hook with the scheduler's substrate registry. Idempotent
@@ -272,25 +327,48 @@ impl VerterHost {
                 .expect("carrier grammar authority"),
         );
         use verter_language::carrier_grammar::{
-            CarrierGrammarConfig, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
+            CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
         };
-        carrier_grammar_authority
-            .register_carrier_grammar(
-                verter_language::FileLanguage::vue(),
-                FrameworkAdapterSemanticVersion::new(1).expect("adapter version"),
-                CarrierParserGrammarVersion::new(1).expect("grammar version"),
-                CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>())
-                    .expect("default Vue grammar"),
+        // Seed the live grammar registry from the compiler's frontend
+        // catalog rows: the catalog `CarrierFrontend` registration is the
+        // SOLE grammar authority, so the host registers the catalog fact
+        // itself rather than an independently spelled copy. The version
+        // pairs below are host registration metadata (adapter semantic
+        // version × parser grammar version), not grammar content. A
+        // catalog row without a registered grammar fact fails host
+        // construction loudly — never a silently skipped registration.
+        for (language, adapter_version, grammar_version) in [
+            (verter_language::FileLanguage::vue(), 1, 1),
+            (verter_language::FileLanguage::svelte(), 1, 1),
+        ] {
+            let adapter_id = language
+                .adapter_id()
+                .expect("built-in carrier language carries a framework adapter id");
+            let carrier_language_id = language
+                .carrier_language_id()
+                .expect("built-in carrier language carries a carrier language id");
+            let grammar = verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+                adapter_id,
+                carrier_language_id,
             )
-            .expect("register Vue grammar");
-        carrier_grammar_authority
-            .register_carrier_grammar(
-                verter_language::FileLanguage::svelte(),
-                FrameworkAdapterSemanticVersion::new(1).expect("adapter version"),
-                CarrierParserGrammarVersion::new(1).expect("grammar version"),
-                CarrierGrammarConfig::Svelte,
-            )
-            .expect("register Svelte grammar");
+            .unwrap_or_else(|| {
+                panic!(
+                    "frontend catalog row for adapter '{adapter_id}' × language \
+                     '{carrier_language_id}' carries no registered grammar fact"
+                )
+            })
+            .clone();
+            carrier_grammar_authority
+                .register_carrier_grammar(
+                    language.clone(),
+                    FrameworkAdapterSemanticVersion::new(adapter_version).expect("adapter version"),
+                    CarrierParserGrammarVersion::new(grammar_version).expect("grammar version"),
+                    grammar,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("register catalog grammar for adapter '{adapter_id}': {error:?}")
+                });
+        }
         let carrier_publication_store = Arc::new(
             crate::carrier_publication_store::CarrierPublicationStore::with_provenance(
                 Arc::clone(&registered_source_authority),
@@ -345,19 +423,32 @@ impl VerterHost {
                 // SAME resolved DAG budget the scheduler admits against
                 // (`resolved_dag_budget().io`) so the IO channel never
                 // becomes a second admission authority.
-                let scheduler_cpu_pool =
-                    verter_scheduler::SchedulerCpuPool::new(scheduler_config.cpu_threads);
-                let scheduler_io_pool = verter_scheduler::SchedulerIoPool::new(
-                    scheduler_config.io_threads,
-                    scheduler_config.resolved_dag_budget().io as usize,
-                );
-                verter_scheduler::scheduler::Scheduler::with_executor(
+                let (scheduler_cpu_pool, scheduler_io_pool) = match &worker_pool_source {
+                    HostWorkerPoolSource::Fresh => (
+                        verter_scheduler::SchedulerCpuPool::new(scheduler_config.cpu_threads),
+                        verter_scheduler::SchedulerIoPool::new(
+                            scheduler_config.io_threads,
+                            scheduler_config.resolved_dag_budget().io as usize,
+                        ),
+                    ),
+                    #[cfg(any(test, feature = "test-support"))]
+                    HostWorkerPoolSource::Shared(worker_pools) => (
+                        Arc::clone(&worker_pools.scheduler_cpu_pool),
+                        Arc::clone(&worker_pools.scheduler_io_pool),
+                    ),
+                };
+                let scheduler = verter_scheduler::scheduler::Scheduler::with_executor(
                     scheduler_config,
                     loader,
                     executor,
                     scheduler_cpu_pool,
                     scheduler_io_pool,
-                )
+                );
+                #[cfg(any(test, feature = "test-support"))]
+                if let HostWorkerPoolSource::Shared(worker_pools) = &worker_pool_source {
+                    worker_pools.record_scheduler_shell_created();
+                }
+                scheduler
             }
             #[cfg(target_arch = "wasm32")]
             {
@@ -386,11 +477,11 @@ impl VerterHost {
         // cumulatively across requests on this host. Test-only;
         // production builds compile without this block.
         #[cfg(test)]
-        let test_audit = Arc::new(crate::host_test_audit::HostTestAuditState::new());
+        let test_force = crate::host_test_force::TestForceKnobs::default();
         #[cfg(test)]
         project_type_store
             .indexed()
-            .install_test_audit_hook(Arc::clone(&test_audit));
+            .install_test_audit_hook(Arc::clone(&test_force.audit));
         // Build the audit records store ONCE and share its `Arc` between
         // the legacy `audit_records` field and the new `host_audit_runtime`
         // so writes through either surface land in the same map. The
@@ -421,17 +512,21 @@ impl VerterHost {
         // worker count is guaranteed by `PoolSize::resolve`, so
         // `HostCpuPool::new`'s positive-thread assertion never fires.
         #[cfg(not(target_arch = "wasm32"))]
-        let host_cpu_pool = {
-            let policy = config.resolved_host_cpu_pool_policy();
-            let threads = policy.size.resolve();
-            match policy.spawn {
-                crate::types::PoolSpawn::Eager => verter_scheduler::HostCpuPool::new(threads),
-                crate::types::PoolSpawn::LazyOnFirstUse => {
-                    verter_scheduler::HostCpuPool::new_lazy(threads)
+        let host_cpu_pool = match &worker_pool_source {
+            HostWorkerPoolSource::Fresh => {
+                let policy = config.resolved_host_cpu_pool_policy();
+                let threads = policy.size.resolve();
+                match policy.spawn {
+                    crate::types::PoolSpawn::Eager => verter_scheduler::HostCpuPool::new(threads),
+                    crate::types::PoolSpawn::LazyOnFirstUse => {
+                        verter_scheduler::HostCpuPool::new_lazy(threads)
+                    }
                 }
             }
+            #[cfg(any(test, feature = "test-support"))]
+            HostWorkerPoolSource::Shared(worker_pools) => Arc::clone(&worker_pools.host_cpu_pool),
         };
-        Self {
+        let host = Self {
             instance_id,
             config,
             carrier_publication: crate::carrier_publication_store::CarrierPublicationHostHandles {
@@ -461,14 +556,6 @@ impl VerterHost {
                 audit_config,
                 Arc::clone(&audit_records_init),
             )),
-            #[cfg(test)]
-            test_audit,
-            #[cfg(test)]
-            last_upsert_priority: parking_lot::Mutex::new(None),
-            #[cfg(test)]
-            compile_one_call_count: std::sync::atomic::AtomicUsize::new(0),
-            #[cfg(test)]
-            compile_one_caller_kind_tag: std::sync::atomic::AtomicU8::new(0),
             // `usize::MAX` is the "unobserved" sentinel. A real worker
             // overwrites this with either its host-pool id or `usize::MAX`
             // again if no token is installed (the regression case).
@@ -521,13 +608,20 @@ impl VerterHost {
             flow_fault_injection:
                 crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs::default(),
             #[cfg(test)]
-            test_force: crate::host_test_force::TestForceKnobs::default(),
+            test_force,
             #[cfg(test)]
             macro_hot_lowering_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize::new(0),
             signature_overflow_at_install: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            _test_worker_pool_lease: test_worker_pool_lease,
+        };
+        #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+        if let HostWorkerPoolSource::Shared(worker_pools) = &worker_pool_source {
+            worker_pools.record_host_shell_created();
         }
+        host
     }
 
     /// Create a standalone host with an internal memory workspace.
@@ -605,7 +699,7 @@ impl VerterHost {
     #[must_use]
     pub fn audit(&self) -> crate::host_test_audit::HostTestAudit<'_> {
         crate::host_test_audit::HostTestAudit::new(
-            &self.test_audit,
+            &self.test_force.audit,
             self.project_type_store.semantic_graph(),
         )
     }
@@ -725,6 +819,26 @@ impl VerterHost {
     #[must_use]
     pub(crate) fn host_cpu_pool(&self) -> &Arc<verter_scheduler::HostCpuPool> {
         &self.host_cpu_pool
+    }
+
+    /// Process-unique identity of this fresh host shell.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[must_use]
+    pub fn test_instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
+    /// Identities of the scheduler CPU, scheduler I/O, and host coordinator
+    /// pools used by this host.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[must_use]
+    pub fn test_worker_pool_ids(&self) -> crate::TestHostWorkerPoolIds {
+        let (scheduler_cpu, scheduler_io) = self.scheduler.test_worker_pool_ids();
+        crate::TestHostWorkerPoolIds {
+            scheduler_cpu,
+            scheduler_io,
+            host_cpu: self.host_cpu_pool.pool_id(),
+        }
     }
 
     /// The host's batch-coordinator primitive, bound to the host-owned
@@ -1318,6 +1432,69 @@ mod resource_policy_lazy_tests {
                 host.decl_lowering.workers_spawned(),
                 "default()/lsp_interactive() host must spawn decl-lowering workers eagerly \
                  at construction"
+            );
+        }
+    }
+
+    /// The grammar the host's `CarrierGrammarAuthority` holds for each
+    /// built-in carrier language IS the compiler frontend catalog's
+    /// registered grammar fact: accepting a source against the host
+    /// authority with the catalog fact must succeed, and the accepted
+    /// canonical config must equal that fact's canonicalization. Any
+    /// second host-side grammar spelling that drifts from the catalog
+    /// row turns this into a `GrammarConfigMismatch`.
+    #[test]
+    fn host_grammar_registrations_are_the_catalog_grammar_facts() {
+        use verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for;
+        use verter_language::registered_source_authority::{
+            CanonicalFileId, FileIncarnation, SourceGeneration,
+        };
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        for (language, source) in [
+            (
+                verter_language::FileLanguage::vue(),
+                "<template><div>{{ x }}</div></template>",
+            ),
+            (
+                verter_language::FileLanguage::svelte(),
+                "<script>let x = 1</script><div>{x}</div>",
+            ),
+        ] {
+            let adapter_id = language.adapter_id().expect("framework adapter id");
+            let carrier_language_id = language.carrier_language_id().expect("carrier language id");
+            let catalog_fact = registered_grammar_for(adapter_id, carrier_language_id)
+                .expect("built-in frontend catalog row carries a registered grammar fact");
+            let snapshot = host
+                .carrier_publication
+                .source_authority
+                .register_source(
+                    CanonicalFileId::new(format!("/grammar-pin/{adapter_id}")),
+                    FileIncarnation::new(1),
+                    SourceGeneration::new(1),
+                    language.clone(),
+                    Arc::from(source),
+                )
+                .expect("register source");
+            let accepted = host
+                .carrier_publication
+                .grammar_authority
+                .accept_registered_source(
+                    &host.carrier_publication.source_authority,
+                    &snapshot,
+                    catalog_fact,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "the host authority's registered grammar for adapter \
+                         '{adapter_id}' must be the catalog fact: {error:?}"
+                    )
+                });
+            assert_eq!(
+                accepted.grammar().canonical_config(),
+                catalog_fact,
+                "host-held canonical grammar for adapter '{adapter_id}' must equal the \
+                 catalog fact"
             );
         }
     }

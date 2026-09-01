@@ -224,7 +224,8 @@ fn decl_reorder_does_not_change_emitted_fact_set() {
     // the same file rewritten with decls in reverse declaration
     // order produces a byte-identical fact set — EXCEPT the
     // deliberately ORDER-SENSITIVE binder rails
-    // (`DeclContributionOrder` / `AugmentationContributionOrder`),
+    // (`DeclContributionOrder` / `AugmentationContributionOrder`), and the
+    // parser-order-sensitive authored `SyntacticRouteInterface`,
     // whose entire function is to move when the AUTHORED
     // declaration order changes (the family-A binder-identity
     // overload / declaration-order provenance rail: a swap must
@@ -250,7 +251,9 @@ fn decl_reorder_does_not_change_emitted_fact_set() {
     for (key, fact_a) in reg_a.iter() {
         if matches!(
             key,
-            FactKey::DeclContributionOrder { .. } | FactKey::AugmentationContributionOrder { .. }
+            FactKey::DeclContributionOrder { .. }
+                | FactKey::AugmentationContributionOrder { .. }
+                | FactKey::SyntacticRouteInterface
         ) {
             continue;
         }

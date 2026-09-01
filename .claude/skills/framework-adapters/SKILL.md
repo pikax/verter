@@ -328,19 +328,31 @@ structurally for it.
 
 ## Host RUNTIME-compile routing + the IDE-ensure path
 
-The host's RUNTIME compile (`virtual_file_pipeline::compile_entry`) is routed
-through the registry the SAME way as parse/template-data: it resolves the
-carrier from `snapshot.framework_parse`'s `(adapter_id, language_id)`, KEEPS
-the cached-parse validity decision (`can_use_cache` — src-merge + custom
-delimiters/elements force a fresh carrier parse through the COUNTED chokepoint
-`parse::parse_carrier_counted`), and calls `CarrierCompiler::compile_bundle`.
-There is NO hardcoded `compile_sfc` / `compile_from_parsed` / `vue_parse` in
-`compile_entry` and NO `is_vue` branch — pinned by the AST/`syn` guard
-`compile_entry_routes_through_carrier_registry_not_hardcoded_vue` (catches
-imports / aliases / renames / globs / calls of the forbidden producers, with a
-negative self-test). Vue's runtime + IDE virtual-file outputs stay
-byte-identical (golden-pinned by `svelte_compiler_block1::vue_*_byte_identical_*`,
-`include_str!` goldens).
+The host's RUNTIME compile (`virtual_file_pipeline::compile_entry`) executes
+through the request-scoped BOUND framework host-integration backend, the same
+topology as the runtime-render lane: the request's `BoundNativeHostRequest`
+(catalog-selected from the registered artifact identity, one binding per
+compile attempt) is consumed by value; its catalog arm yields the backend,
+which issues the demand-specific multi-product admission
+(`admit_host_products` over the session-built demand — requested products +
+typed option attempt, `host_resolve::compile_request_build`) and executes it
+by value (`compile_host_products`) — one request, one backend call, one
+admitted parse/semantic/projection/plan/emit population, publication gated
+per product on the admitted set. There is NO registry `compile_bundle`
+dispatch, NO hardcoded `compile_sfc` / `compile_from_parsed` / `vue_parse`,
+and NO `is_vue` branch — pinned by the AST/`syn` guard
+`compile_entry_routes_through_registered_host_backend_not_hardcoded_vue`
+(catches imports / aliases / renames / globs / calls of the forbidden
+producers AND a reintroduced registry bundle route, and positively requires
+the bound-backend seams, with negative self-tests), plus the bound-lane tests
+in `host_backed_lane_tests.rs` (attribution injection, admitted-demand-set
+execution with per-product byte oracles). Vue's runtime + IDE virtual-file
+outputs stay byte-identical (golden-pinned by
+`carrier_compile_routing_gate::vue_*_byte_identical_*`, `include_str!`
+goldens). Svelte profile axes the bundle execution cannot route
+(`svelte_css`, a request-level custom-element descriptor, `compatibility`)
+refuse TYPED at admission (`HOST_COMPILE_ADMISSION_REFUSED`) — never a
+silent drop.
 
 `get_virtual_file` is a thin projector over `ensure_compile_artifacts(canonical,
 profile, demand: CompileDemand)` (`CompileDemand::{VirtualNode(kind), Ide}`):

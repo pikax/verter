@@ -1002,12 +1002,10 @@ fn real_transaction_holds_completed_output_through_final_fence_then_releases_on_
         .resolve_import_outcome_for_published_in_operation(
             &workspace,
             crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
-            &published,
             "/proj/src/main.ts",
             "./published",
             CONTEXT,
-            &mut published_ledger,
-            &|| true,
+            crate::engine::ResolutionOperation::pinned(&published, &mut published_ledger, &|| true),
         );
     assert!(outcome.is_cacheable());
     assert!(outcome.trace().published());
@@ -1033,12 +1031,12 @@ fn real_transaction_holds_completed_output_through_final_fence_then_releases_on_
         .resolve_import_outcome_for_published_in_operation(
             &workspace,
             crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
-            &published,
             "/proj/src/main.ts",
             "./abandoned",
             CONTEXT,
-            &mut abandoned_ledger,
-            &|| false,
+            crate::engine::ResolutionOperation::pinned(&published, &mut abandoned_ledger, &|| {
+                false
+            }),
         );
     assert_eq!(
         abandoned.non_admission_reason(),

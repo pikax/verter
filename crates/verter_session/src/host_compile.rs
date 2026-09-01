@@ -1,4 +1,4 @@
-//! Host-backed parallel SFC compilation.
+//! Parallel SFC runtime compilation.
 //!
 //! Bundler/runtime output only: assembled Main (script + template
 //! render). IDE TSX / TSC extract would be separate `ide_many` /
@@ -12,12 +12,15 @@
 //!    id; skip upsert only when the scheduler already holds that
 //!    registration (a byte-identical relabel is still a change: the
 //!    language row re-routes parse dispatch). Submit as one
-//!    [`VerterHost::upsert_many_with_priority`] atomic batch. Stage B
-//!    does not fan out through the batch coordinator.
-//! 3. Compile each unique canonical+profile once via
-//!    [`VerterHost::get_virtual_file`] for `Main`. Panic isolation is
-//!    the coordinator catch boundary (`compile_panic_entry`). Stage C
-//!    alone fans out through
+//!    [`VerterHost::upsert_many_for_compile`] status-only atomic batch. It
+//!    shares the ordinary upsert engine but does not construct discarded
+//!    public update payloads. Stage B does not fan out through the batch
+//!    coordinator.
+//! 3. Compile each unique canonical+profile once. HostBacked requests use
+//!    [`VerterHost::get_virtual_file`] for `Main`; every RuntimeRender request
+//!    uses the render worker, whichever carrier it names. Panic isolation is
+//!    the coordinator catch boundary (`compile_panic_entry`). Stage C alone
+//!    fans out through
 //!    [`crate::host_batch_coordinator::HostBatchCoordinator::run_batch`]
 //!    on the host-owned [`verter_scheduler::HostCpuPool`] (8 MiB stack;
 //!    no Rayon global 1 MiB Windows default).
@@ -38,8 +41,9 @@ use verter_scheduler::stage::Priority;
 
 use crate::hash::hash_16;
 use crate::types::{
-    CompileCacheMode, CompileProfile, DowngradeReason, HostDiagnostic, HostError, HostSeverity,
-    UpsertRequest, VirtualNodeKind, VirtualQuery,
+    CompileCacheMode, CompileProfile, CompileRequestFailure, CompileRequestResponse,
+    DiagnosticsSnapshot, DowngradeReason, HostDiagnostic, HostError, HostSeverity, UpsertRequest,
+    VirtualNodeKind, VirtualQuery,
 };
 use crate::VerterHost;
 
@@ -113,7 +117,7 @@ pub enum CompileBatchOutcome {
         lang: Option<String>,
         source_map: Option<Arc<str>>,
         /// Non-fatal WARNING-severity diagnostics of a SUCCESSFUL compile.
-        /// RuntimeRender uses this for closed row-local degradation (for
+        /// The Vue render-only path uses this for closed row-local degradation (for
         /// example, an unavailable member type rendered as `null`). An
         /// unavailable authoritative macro root stays fatal and never produces
         /// partial code, so it cannot appear here. Always empty on the
@@ -249,6 +253,10 @@ impl CompileBatchEntry {
 /// do not affect the runtime `Main` and default identically on both lanes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompileBatchRenderProfile {
+    /// Style stages owned by this render. `AuthoredOnly` is used when the
+    /// bundler's separate style-module lane owns preprocessing and every
+    /// plain-CSS-only continuation.
+    pub style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
     /// Codegen filename override (component-name extraction, scope-id
     /// derivation, source-map `source`/`file`). `None` falls back to the
     /// canonical id, exactly like an absent `CompileProfile::filename`.
@@ -307,21 +315,26 @@ pub struct CompileBatchOptions {
 /// Compile lane for [`VerterHost::compile_many`]. Always explicit —
 /// never inferred from node kind, file, or caller.
 ///
-/// One shared substrate (`compile_bundle` + `assemble_vue_main_module`):
-///
 /// - [`CompileManyTarget::HostBacked`] — full `compile_entry` wrapper
 ///   (cache-mode, fact tracer, warm-hit, publish). IDE / analysis path.
-/// - [`CompileManyTarget::RuntimeRender`] — same `Main` bytes without
-///   per-file wrapper overhead. Cross-file macros still go through
-///   TypeInfo dispatch. Authoritative macro-root failures stay fatal.
+/// - [`CompileManyTarget::RuntimeRender`] — the render request, for EVERY
+///   registered carrier, without the per-file session-wrapper overhead. Each
+///   entry is its own host compile request with its own request-scoped bound
+///   host request; the bound framework host backend issues the render
+///   admission and the matching runtime backend executes it, then the host
+///   assembles `Main` (`assemble_vue_main_module` for Vue). The carrier is
+///   chosen by that binding, never by a language predicate at the
+///   coordinator. Cross-file macros still go through TypeInfo dispatch.
+///   Authoritative failures stay fatal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileManyTarget {
     /// The full session-wrapper path (`compile_entry`). Byte-for-byte
     /// unchanged; used by every IDE / analysis / TSC / type-resolution
     /// consumer.
     HostBacked,
-    /// The render-only bundler lane. Same substrate + same host-side
-    /// `Main` assembly, without the per-file session-wrapper overhead. The
+    /// The public runtime-render request. Vue uses the same substrate +
+    /// host-side `Main` assembly without per-file wrapper overhead; other
+    /// registered carriers use their effective host-backed route. The
     /// [`CompileBatchRenderProfile`] is REQUIRED — carried on the variant so
     /// the lane is fail-closed by construction: you cannot request a runtime
     /// render without supplying the output-affecting build profile, and the
@@ -382,33 +395,52 @@ impl VerterHost {
     /// project capability snapshot — is its only authority. Registering a
     /// `.svelte` source under the Vue carrier is what made the batch route
     /// publish Vue-assembled bytes and swallow the Svelte runtime refusals,
-    /// because the carrier registry dispatches its compiler by the language
-    /// row recorded here.
+    /// because the compile lane binds its framework host backend from the
+    /// registered carrier identity this language row produces.
     ///
     /// This function takes no language argument, so a batch call site has
     /// nothing to get wrong. Re-introducing a fixed carrier means editing the
     /// one function whose entire purpose is that derivation, not slipping a
     /// literal into a request built somewhere else.
     pub(crate) fn batch_upsert_request(&self, input: &CompileBatchInput) -> UpsertRequest {
+        self.source_registration_request(&input.canonical_id, &input.source)
+    }
+
+    /// The ONE source-registration request every batch route builds.
+    ///
+    /// See [`Self::batch_upsert_request`] for why the language is derived
+    /// here and is not a caller argument: every batch route shares this
+    /// derivation, so a new route cannot introduce a fixed carrier.
+    pub(crate) fn source_registration_request(
+        &self,
+        canonical_id: &str,
+        source: &Arc<str>,
+    ) -> UpsertRequest {
         UpsertRequest {
-            canonical_id: Some(input.canonical_id.clone()),
-            input_id: input.canonical_id.clone(),
-            source: Arc::clone(&input.source),
-            file_language: self.language_classifier().classify(&input.canonical_id),
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: Arc::clone(source),
+            file_language: self.language_classifier().classify(canonical_id),
             aliases: Vec::new(),
         }
     }
 
-    /// Host-backed parallel SFC batch compile.
+    /// Parallel SFC runtime batch compile.
     ///
     /// See module-level docs for the four-stage algorithm. Returns
     /// one [`CompileBatchEntry`] per input, in the original input
     /// order. Output ordering is fixed by Stage D, not by Stage B/C's
     /// (non-deterministic) HashMap iteration.
     ///
-    /// Per-input panic isolation: if `get_virtual_file` panics for one
-    /// input, only that input's entry receives a `compiler panic: ...`
-    /// error; the rest of the batch completes normally.
+    /// There is deliberately no lint stage: Stage B admits source and Stage C
+    /// compiles it. Lint is an independent public operation and must never be
+    /// folded into `compile_many` admission or compilation.
+    ///
+    /// Per-input panic isolation: if the selected compile worker panics for
+    /// one input (`get_virtual_file` for HostBacked or Svelte/other non-Vue
+    /// RuntimeRender, or `render_only_main` for RuntimeRender), only that
+    /// input's entry receives a `compiler panic: ...` error; the rest of the
+    /// batch completes normally.
     pub fn compile_many(
         &self,
         inputs: Vec<CompileBatchInput>,
@@ -428,9 +460,14 @@ impl VerterHost {
         // (reproducing the build's dev/prod/ssr/force_js/vapor/source-map/
         // comments/hmr/runtime-module/delimiters/custom-elements). Per-input
         // `component_id` is layered on later, on the RuntimeRender lane only.
-        let profile = match &target {
-            CompileManyTarget::HostBacked => compile_profile_for_bundler(),
-            CompileManyTarget::RuntimeRender { profile } => render_base_profile(profile),
+        let (profile, style_processing) = match &target {
+            CompileManyTarget::HostBacked => (
+                compile_profile_for_bundler(),
+                verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+            ),
+            CompileManyTarget::RuntimeRender { profile } => {
+                (render_base_profile(profile), profile.style_processing)
+            }
         };
 
         // Boundary canonicalization: pin every input's `canonical_id` to the
@@ -461,7 +498,6 @@ impl VerterHost {
         // Batch default cache mode; a per-input `requested_mode` overrides
         // it. `None` on both resolves to the host default `Session`.
         let default_mode = options.default_mode.unwrap_or(CompileCacheMode::Session);
-
         // ── group + selective upsert ──
         // HashMap iteration is non-deterministic, but we only iterate
         // it for parallel-independent upserts and probe-keys — never
@@ -559,7 +595,7 @@ impl VerterHost {
         // post-commit on this thread after the single wait. Upsert errors
         // fold into `group_errors`, surfaced to every original input
         // position for that canonical in Stage D.
-        for outcome in self.upsert_many_with_priority(upsert_requests, priority) {
+        for outcome in self.upsert_many_for_compile(upsert_requests, priority) {
             if let Err(e) = outcome.result {
                 group_errors
                     .entry(outcome.canonical_id)
@@ -568,9 +604,11 @@ impl VerterHost {
         }
 
         // ── compile each UNIQUE canonical group exactly once ──
-        // Stage C fans the parallel `get_virtual_file` calls out through
-        // the host batch coordinator — the single host-side coordination
-        // rule. The coordinator installs on the host-owned coordinator pool
+        // Stage C fans the per-input compile workers out through the host
+        // batch coordinator: `get_virtual_file` for HostBacked, the render
+        // worker for RuntimeRender. This is the single host-side coordination
+        // rule, and it reads the requested target only. The
+        // coordinator installs on the host-owned coordinator pool
         // (built once at host construction with an 8 MiB worker stack;
         // workers register as `CallerKind::External`, so the coordinator
         // never inline-executes scheduler CPU tasks while blocked on a
@@ -617,8 +655,14 @@ impl VerterHost {
             coordinator
                 .run_batch(&canonical_to_compile, &compile_policy, |input| {
                     let pre_err = group_errors.get(&input.canonical_id).cloned();
-                    let entry =
-                        self.compile_one_in_batch(input, &profile, default_mode, &target, pre_err);
+                    let entry = self.compile_one_in_batch(
+                        input,
+                        &profile,
+                        default_mode,
+                        style_processing,
+                        &target,
+                        pre_err,
+                    );
                     let effective_mode = input.requested_mode.unwrap_or(default_mode);
                     (
                         (
@@ -711,6 +755,7 @@ impl VerterHost {
         input: &CompileBatchInput,
         profile: &CompileProfile,
         default_mode: CompileCacheMode,
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
         target: &CompileManyTarget,
         precomputed_error: Option<String>,
     ) -> CompileBatchEntry {
@@ -720,7 +765,8 @@ impl VerterHost {
         // this branch out completely; see field doc on
         // `VerterHost::compile_one_call_count`.
         #[cfg(test)]
-        self.compile_one_call_count
+        self.test_force
+            .compile_one_call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Test-only: record the caller-kind tag of the worker
@@ -741,7 +787,8 @@ impl VerterHost {
                 verter_scheduler::caller_kind::CallerKind::IoWorker => 4,
                 verter_scheduler::caller_kind::CallerKind::Inline => 5,
             };
-            self.compile_one_caller_kind_tag
+            self.test_force
+                .compile_one_caller_kind_tag
                 .store(tag, std::sync::atomic::Ordering::Relaxed);
             // Record the host-CPU-pool identity token of this worker.
             // The discriminator: a worker running on *this host's*
@@ -803,15 +850,20 @@ impl VerterHost {
             panic!("synthetic panic for compile_many_isolates_panics test");
         }
 
-        // Route by the explicit lane. `RuntimeRender` runs the render-only
-        // lane (same shared substrate + host-side `Main` assembly, without
-        // the per-file session-wrapper overhead); `HostBacked` runs the
-        // full session wrapper via `get_virtual_file`.
+        // The render lane is selected by the REQUESTED TARGET alone. There is
+        // deliberately no framework predicate here: the worker binds a
+        // request-scoped host request whose catalog arm selects the framework
+        // backend, so dispatch happens inside the binding, not from a language
+        // classification at the coordinator. A `.is_vue()` branch here would
+        // give Vue the no-cache render lane and every other carrier the
+        // host-backed one — two execution contracts for one requested target,
+        // with different caching, wrapper and refusal semantics.
         if matches!(target, CompileManyTarget::RuntimeRender { .. }) {
             return self.compile_one_runtime_render(
                 input,
                 &per_input_profile,
                 requested_mode,
+                style_processing,
                 start,
             );
         }
@@ -844,8 +896,8 @@ impl VerterHost {
                         source_map: response.source_map,
                         // HostBacked warnings ride in the response diagnostics
                         // and are not re-surfaced as a distinct success-warning
-                        // list. RuntimeRender exposes successful row-local
-                        // degradation warnings through this field.
+                        // list. The Vue render-only path exposes successful
+                        // row-local degradation warnings through this field.
                         diagnostics: Vec::new(),
                     },
                     duration_ms,
@@ -906,16 +958,18 @@ impl VerterHost {
     /// The [`CompileManyTarget::RuntimeRender`] per-file worker: a
     /// render-only compile onto the shared runtime substrate that produces
     /// byte-identical `Main` output to the `HostBacked` wrapper without the
-    /// per-file session-wrapper overhead.
+    /// per-file session-wrapper overhead. Framework-neutral — the bound
+    /// host request selects the carrier's backend.
     fn compile_one_runtime_render(
         &self,
         input: &CompileBatchInput,
         per_input_profile: &CompileProfile,
         requested_mode: CompileCacheMode,
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
         start: Instant,
     ) -> CompileBatchEntry {
         let id_prefix = format!("[{}] ", input.canonical_id);
-        match self.render_only_main(&input.canonical_id, per_input_profile) {
+        match self.render_only_main(&input.canonical_id, per_input_profile, style_processing) {
             Ok(render) => CompileBatchEntry {
                 canonical_id: input.canonical_id.clone(),
                 outcome: CompileBatchOutcome::Produced {
@@ -992,5 +1046,164 @@ fn compile_panic_entry(
         requested_mode: effective_mode,
         actual_mode: effective_mode,
         downgrade_reason: None,
+    }
+}
+
+/// One input of a typed batch compile call.
+///
+/// The source carrier rides HERE, exactly once, beside the request. It is
+/// not part of the request and is never copied into it: the batch
+/// registers each canonical's source once, and every request for that
+/// canonical then executes against the one stored snapshot.
+pub struct CompileRequestBatchInput {
+    /// The canonical id this input registers and compiles.
+    pub canonical_id: String,
+    /// This input's source carrier bytes.
+    pub source: Arc<str>,
+    /// The canonical compile request to execute for it.
+    pub request: verter_compiler::compile_request::CompileRequest,
+}
+
+/// Caller-configurable options for a typed batch compile call.
+#[derive(Debug, Clone, Default)]
+pub struct CompileRequestBatchOptions {
+    /// Scheduler priority for the batch's single source-registration
+    /// submission. `None` defaults to [`Priority::Background`] (yields to
+    /// concurrent interactive work).
+    pub priority: Option<Priority>,
+}
+
+/// One entry of a typed batch compile result, at its original input
+/// position.
+pub struct CompileRequestBatchEntry {
+    /// The canonical id this entry's input resolved to.
+    pub canonical_id: String,
+    /// This input's own terminal result. A sum: an entry carries a
+    /// complete response OR a typed failure, never both and never a
+    /// partial mix.
+    pub outcome: Result<CompileRequestResponse, CompileRequestFailure>,
+}
+
+impl VerterHost {
+    /// Execute one canonical compile request per input, over sources this
+    /// call registers.
+    ///
+    /// Returns one entry per input, in the ORIGINAL input order. Each
+    /// canonical's source is registered exactly ONCE for the whole batch,
+    /// and a per-input failure isolates to that input's entry — a sibling
+    /// input compiles normally.
+    ///
+    /// Two inputs may name the same canonical with different requests:
+    /// that is one registration and two executions, not two registrations.
+    /// Two inputs naming the same canonical with DIFFERENT bytes is a
+    /// conflict, and both entries report it — the batch never picks a
+    /// winner.
+    ///
+    /// Each execution goes through [`Self::compile_request`], so the whole
+    /// per-input contract is that entry's: the request is the demand
+    /// document, no profile is built from it, and the result is
+    /// complete-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn compile_request_many(
+        &self,
+        inputs: Vec<CompileRequestBatchInput>,
+        options: CompileRequestBatchOptions,
+    ) -> Vec<CompileRequestBatchEntry> {
+        // No pool, no submission, no upsert for an empty batch.
+        if inputs.is_empty() {
+            return Vec::new();
+        }
+
+        // Boundary canonicalization, for the same reason `compile_many`
+        // does it: the registration key, the execution key, and the
+        // per-canonical error key must be ONE identity, or a caller's
+        // variant spelling desyncs them.
+        let inputs: Vec<CompileRequestBatchInput> = inputs
+            .into_iter()
+            .map(|mut input| {
+                input.canonical_id = self.resolve_alias_or_canonical(&input.canonical_id);
+                input
+            })
+            .collect();
+
+        // ── group + one registration per canonical ──
+        // Grouped in ONE pass. HashMap iteration order is
+        // non-deterministic, but nothing position-sensitive is read from
+        // it: the output order comes from `inputs` below.
+        let mut groups: HashMap<&str, Vec<&CompileRequestBatchInput>> =
+            HashMap::with_capacity(inputs.len());
+        for input in &inputs {
+            groups
+                .entry(input.canonical_id.as_str())
+                .or_default()
+                .push(input);
+        }
+
+        let mut group_errors: HashMap<String, String> = HashMap::new();
+        let mut upsert_requests: Vec<UpsertRequest> = Vec::new();
+        for (canonical_id, group) in &groups {
+            let input = group[0];
+            let conflict = group
+                .iter()
+                .skip(1)
+                .any(|other| other.source.as_bytes() != input.source.as_bytes());
+            if conflict {
+                group_errors.insert(
+                    (*canonical_id).to_string(),
+                    "duplicate canonical_id with conflicting source in batch".to_string(),
+                );
+                continue;
+            }
+            // The request is BUILT first and the skip decision reads the
+            // built request, so a canonical already holding these bytes
+            // under a DIFFERENT language is still re-registered.
+            let request = self.source_registration_request(&input.canonical_id, &input.source);
+            if self.scheduler_registration_differs_from(&request) {
+                upsert_requests.push(request);
+            }
+        }
+
+        // ONE atomic registration batch for the whole call.
+        for outcome in self.upsert_many_with_priority(
+            upsert_requests,
+            options.priority.unwrap_or(Priority::Background),
+        ) {
+            if let Err(error) = outcome.result {
+                group_errors
+                    .entry(outcome.canonical_id)
+                    .or_insert_with(|| format!("upsert failed: {error}"));
+            }
+        }
+
+        // ── execute each input's OWN request, in input order ──
+        // Distinct requests for one canonical are distinct compiles; this
+        // route consults and publishes no compile cache slot, so there is
+        // no result to share between them.
+        inputs
+            .into_iter()
+            .map(|input| {
+                let outcome = match group_errors.get(&input.canonical_id) {
+                    Some(error) => Err(CompileRequestFailure::Refused {
+                        canonical_id: input.canonical_id.clone(),
+                        diagnostics: DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                            severity: HostSeverity::Error,
+                            code: "HOST_BATCH_SOURCE_REGISTRATION_FAILED".to_string(),
+                            message: format!(
+                                "source registration failed for '{}': {error}",
+                                input.canonical_id
+                            ),
+                            arguments: Vec::new(),
+                            span: verter_span::Span::new(0, input.source.len() as u32),
+                        }]),
+                    }),
+                    None => self.compile_request(&input.canonical_id, input.request),
+                };
+                CompileRequestBatchEntry {
+                    canonical_id: input.canonical_id,
+                    outcome,
+                }
+            })
+            .collect()
     }
 }

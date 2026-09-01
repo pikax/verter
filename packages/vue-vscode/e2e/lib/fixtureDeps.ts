@@ -466,13 +466,12 @@ function treeFingerprintOrRefuse(nodeModules: string): string {
  * Refuse before touching anything when a declared `file:`/`link:` target is not
  * on this machine.
  *
- * `ecosystem-parity` declares `"verter": "file:../../../../../../verter-release-clean"`
- * — a sibling checkout that simply is not there on most machines. The launcher
- * used to catch npm's failure and warn, which meant the suite ran on against a
- * tree missing the package under test; failing closed is right, but "npm exited
- * 1" names neither what is missing nor what to do about it. Checking first also
- * means a fixture that cannot possibly install does not get its existing tree
- * displaced on the way to finding that out.
+ * A fixture may declare a local checkout that is absent on this machine. The
+ * launcher used to catch npm's failure and warn, which meant the suite ran
+ * against a tree missing a declared package; failing closed is right, but "npm
+ * exited 1" names neither what is missing nor what to do about it. Checking
+ * first also means a fixture that cannot possibly install does not get its
+ * existing tree displaced on the way to finding that out.
  */
 function assertLocalDepTargetsExist(fixtureDir: string): void {
   const manifestPath = path.join(fixtureDir, "package.json");

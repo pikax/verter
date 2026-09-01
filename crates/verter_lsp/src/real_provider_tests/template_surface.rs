@@ -48,6 +48,7 @@ import IdeSurfaceChild from './IdeSurfaceChild.vue'
                     ),
                 )
                 .await;
+            session.settle_import_dependencies(&uri).await;
             let position = session.find_position(&uri, marker, marker.len());
             let mut labels = Vec::new();
             for _ in 0..16 {

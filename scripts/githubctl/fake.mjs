@@ -5,6 +5,8 @@ import {
   assertRequiredText,
   bindOwnerRepo,
   capabilityRecord,
+  classifyIssueSubIssueState,
+  planAddIssueSubIssue,
   planAddIssueToProject,
   planAddIssueLabels,
   planCreateIssue,
@@ -40,6 +42,7 @@ import {
   prepareSetIssueProjectStatus,
   prepareSetIssueMilestone,
   prepareAddIssueDependency,
+  prepareAddIssueSubIssue,
   prepareRemoveIssueDependency,
   prepareUpdateIssue,
   prepareUpdateRepositoryLabel,
@@ -166,6 +169,7 @@ export class FakeGitHubAdapter {
     this.milestoneCloses = [];
     this.repositoryMilestoneWrites = [];
     this.dependencyWrites = [];
+    this.subIssueWrites = [];
     this.labelWrites = [];
     this.repositoryLabelWrites = [];
     this.projectStatusWrites = [];
@@ -703,6 +707,43 @@ export class FakeGitHubAdapter {
     };
   }
 
+  addIssueSubIssue(request) {
+    const { mode, parentIssueNumber, subIssueNumber } = prepareAddIssueSubIssue(this, request);
+    if (mode === "check") return planAddIssueSubIssue(parentIssueNumber, subIssueNumber);
+    const parentSnapshot = this.getIssueProjectState(parentIssueNumber);
+    const subIssueSnapshot = this.getIssueProjectState(subIssueNumber);
+    const state = classifyIssueSubIssueState(
+      parentSnapshot,
+      subIssueSnapshot,
+      parentIssueNumber,
+      subIssueNumber,
+      { owner: this.owner, repo: this.repo },
+    );
+    if (state === "unchanged") {
+      return {
+        kind: "add-issue-sub-issue",
+        parentIssueNumber,
+        subIssueNumber,
+        applied: true,
+        unchanged: true,
+      };
+    }
+    this.#beginApply();
+    if (!this.permissions.issues) throw new PermissionDeniedError("issues permission denied");
+    const parent = this.#issues.get(parentIssueNumber);
+    const subIssue = this.#issues.get(subIssueNumber);
+    subIssue.parent = parentIssueNumber;
+    parent.subIssues.push(subIssueNumber);
+    parent.subIssues.sort((left, right) => left - right);
+    this.subIssueWrites.push({ parentIssueNumber, subIssueNumber });
+    return {
+      kind: "add-issue-sub-issue",
+      parentIssueNumber,
+      subIssueNumber,
+      applied: true,
+    };
+  }
+
   setAiResultLabel(request) {
     const prepared = prepareSetAiResultLabel(this, request);
     if (prepared.mode === "check") return planSetAiResultLabel(prepared.number, prepared.label);
@@ -779,6 +820,7 @@ export class FakeGitHubAdapter {
       repositoryMilestones: this.getRepositoryMilestones(),
       repositoryMilestoneWrites: this.repositoryMilestoneWrites.map((row) => ({ ...row })),
       dependencyWrites: this.dependencyWrites.map((row) => ({ ...row })),
+      subIssueWrites: this.subIssueWrites.map((row) => ({ ...row })),
       labelWrites: this.labelWrites.map((row) => ({
         number: row.number,
         add: row.add,

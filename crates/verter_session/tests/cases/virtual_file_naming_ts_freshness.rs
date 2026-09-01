@@ -11,7 +11,7 @@
 //! (`render_virtual_file_naming_ts`) and byte-compares it against the
 //! committed file. A hand-edit to the generated file, or a descriptor-row
 //! change without a regen, fails this gate. Mirrors the
-//! `typeinfo_proto_ts_freshness` discipline (regenerate + byte-compare),
+//! `pnpm proto:check` discipline (regenerate + byte-compare),
 //! except the authority is the Rust descriptor table rather than the
 //! proto schema.
 //!

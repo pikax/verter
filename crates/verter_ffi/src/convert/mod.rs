@@ -30,6 +30,8 @@ mod string_helpers;
 mod typeinfo;
 
 #[cfg(test)]
+mod host_compile_request_tests;
+#[cfg(test)]
 mod tests;
 
 pub use actions::*;

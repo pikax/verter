@@ -667,12 +667,12 @@ impl VerterHost {
         }
         self.resolver.reset_all();
         self.semantic_invalidate_all();
-        // `configure_projects` is a route-resolution mutation: the
-        // project graph changes. STAMP-ONLY bump — retained payloads
+        // `configure_projects` changes project configuration and identity.
+        // STAMP-ONLY project-shape bump — retained payloads
         // (`IndexedReady`, the per-canonical compile/derived/dependency
         // entries beyond the explicit route-field loops above) survive;
         // stale entries miss BY VALIDATION (the project-stamp read gate
-        // routes route surfaces through the edge refresh — no re-parse;
+        // rejects values from the previous project shape;
         // query-identity caches reject on their `ProjectGeneration`
         // facts / `validated_at_generation` backstops). The wide
         // `bump_project_generation_and_evict` is reserved for content-
@@ -746,8 +746,8 @@ impl VerterHost {
         self.project_type_store.evict_canonical(analysis_canonical);
     }
 
-    /// Host wrapper for [`WorkspaceAccess::set_exact_resolutions`] —
-    /// STAMP-ONLY freshness with OWNER-SCOPED route-state repair.
+    /// Host wrapper for [`WorkspaceAccess::set_exact_resolutions`] with
+    /// owner-scoped route-state repair.
     ///
     /// `set_exact_resolutions` is a route-resolution mutation — the
     /// project graph changes but `content_generation` does NOT bump.
@@ -793,22 +793,15 @@ impl VerterHost {
                 }
             }
         }
-        // MUTATE-FIRST, then bump (the `configure_projects` /
-        // `set_workspace` ordering). The pre-publish fence compares the
-        // generation a flight captured at its start against the live
-        // generation at publish time, so the bump must STRICTLY FOLLOW
-        // the state it announces: bumping before the workspace mutator
-        // opens a window where a flight captures the NEW generation,
-        // resolves against the OLD resolution table, passes the fence,
-        // and is served as current indefinitely. With mutate-first, a
-        // flight born inside the window (post-mutation, pre-bump) reads
-        // the NEW table and is at worst redundantly refreshed by the
-        // stamp gate; a flight that read the OLD table is fenced.
+        // The workspace transaction publishes exact-resolution facts before
+        // returning. The store-view epoch advanced below fences request-local
+        // readers across the host-side repair; project generation is reserved
+        // for project-shape resets and therefore remains unchanged here.
         let result = self.ws().set_exact_resolutions(canonical, resolutions);
         if !result.changed {
             // Value-identical re-push (the duplicate-key-safe engine
             // gate): nothing moved, so the whole invalidation cascade —
-            // including the project-wide stamp bump — is skipped.
+            // is skipped.
             return;
         }
         // Owner-scoped route-mirror repair: the workspace exacts for
@@ -818,13 +811,11 @@ impl VerterHost {
         if let Some(mut entry) = self.derived_raw_cache().get_mut(canonical) {
             entry.import_routes.clear();
         }
-        self.project_type_store.bump_project_generation();
         self.resolver.runtime.invalidate_canonical(canonical);
         // Route mutation, content unchanged: drain the canonical's
         // derived layers but RETAIN its content-addressed `IndexedReady`
-        // payload — the project-stamp read gate routes the next read
-        // through the edge-refresh materialise (route surface rebuilt,
-        // no re-parse).
+        // payload — exact-resolution facts make the next semantic read
+        // observe the current route surface without a re-parse.
         self.project_type_store
             .evict_canonical_for_route_mutation(canonical);
         // R4 producer: rebuild parse-domain facts for the reloaded

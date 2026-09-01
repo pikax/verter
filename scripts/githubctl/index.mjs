@@ -22,6 +22,7 @@ export { lookupIssueMapping, selectNodes, syncIssues } from "./sync-issues.mjs";
 export {
   isManagedIssueLabel,
   labelsForNode,
+  labelsForTrain,
   loadIssueLabelCatalog,
   planIssueLabels,
   planRepositoryLabels,
@@ -31,6 +32,12 @@ export {
   milestoneForNode,
   planRepositoryMilestones,
 } from "./issue-milestones.mjs";
+export {
+  loadTrainIssueCatalog,
+  renderTrainIssueDescription,
+  trainIssueForTrain,
+  validateTrainIssueCatalog,
+} from "./train-issues.mjs";
 export { inspectIssue, FEEDBACK_REPORT_HEADINGS } from "./inspect.mjs";
 export {
   PROJECT_NUMBER,

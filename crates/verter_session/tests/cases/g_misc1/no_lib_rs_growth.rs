@@ -47,7 +47,14 @@ fn workspace_root() -> PathBuf {
 // STRUCT and every arming/reading site live in
 // `project_semantic_dispatch::flow_return`), and the fully-qualified
 // type does not fit the field line.
-const LIB_RS_LINE_CEILING: usize = 862;
+// +4 for the `pub use host_resolve::native_host_binding::{...}` re-export
+// (the sealed request-scoped `BoundNativeHostRequest` binding substrate).
+// The types must be nameable outside the crate so the trybuild seal
+// fixture can prove non-Clone/non-serializable discipline; six names do
+// not fit one 100-column line, and every payload type lives in the
+// `host_resolve::native_host_binding` submodule — only the re-export is
+// irreducibly here.
+const LIB_RS_LINE_CEILING: usize = 866;
 
 #[test]
 fn lib_rs_stays_under_line_ceiling() {

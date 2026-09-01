@@ -130,18 +130,18 @@ test("check prints the frozen composed-workflow inventory and keeps issue-sync a
 test("one fake adapter walks issue mapping through squash landing, feedback, and release rehearsal", () => {
   const adapter = fake();
   const clearance = clearanceFor(adapter);
-  const implemented = parseToml(fs.readFileSync(LIVE_LEDGER, "utf8"))
-    .implemented.map((row) => row.node_id)
-    .filter((nodeId) => nodeId !== "B4R0");
-  const ledgerPath = writeLedger({ implemented });
+  const ledgerPath = writeLedger({ implemented: ["sync-capability"] });
   const reportDir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-workflow-reports-"));
-  const implementedBefore = readLedger(ledgerPath).implemented.length;
 
   const missing = syncIssues({
     adapter,
     mode: "check",
     nodes: ["GH0", "B4R0"],
     ledgerPath,
+    projectIssues: false,
+    syncTrainParents: false,
+    syncPrerequisites: [],
+    ignoreBlockers: true,
   });
   assert.deepEqual(missing.missing.map((row) => row.node_id).sort(), ["B4R0", "GH0"]);
   assert.deepEqual(missing.protected, []);
@@ -152,6 +152,10 @@ test("one fake adapter walks issue mapping through squash landing, feedback, and
     nodes: ["GH0", "B4R0"],
     ledgerPath,
     clearance,
+    projectIssues: false,
+    syncTrainParents: false,
+    syncPrerequisites: [],
+    ignoreBlockers: true,
   });
   assert.equal(synced.ok, true);
   assert.equal(synced.created.length, 2);
@@ -187,10 +191,25 @@ test("one fake adapter walks issue mapping through squash landing, feedback, and
     mode: "check",
     nodes: ["GH0", "B4R0"],
     ledgerPath,
+    projectIssues: false,
+    syncTrainParents: false,
+    syncPrerequisites: [],
+    ignoreBlockers: true,
   });
   assert.deepEqual(current.current.map((row) => row.node_id).sort(), ["B4R0", "GH0"]);
   assert.deepEqual(current.missing, []);
   assert.deepEqual(current.drift, []);
+
+  const implementationNode = synced.created.find((row) => row.gh_issue === gh0Issue).node_id;
+  const readyNode = synced.created.find((row) => row.gh_issue === readyIssue).node_id;
+  fs.appendFileSync(ledgerPath, `\n${implementedBlock(implementationNode)}`);
+  const present = new Set(readLedger(ledgerPath).implemented.map((row) => row.node_id));
+  for (const row of parseToml(fs.readFileSync(LIVE_LEDGER, "utf8")).implemented) {
+    if (row.node_id === readyNode || present.has(row.node_id)) continue;
+    fs.appendFileSync(ledgerPath, `\n${implementedBlock(row.node_id)}`);
+    present.add(row.node_id);
+  }
+  const implementedBefore = readLedger(ledgerPath).implemented.length;
 
   const opened = createPr({
     adapter,
@@ -398,6 +417,7 @@ test("a protected mapping stays skipped and byte-for-byte untouched during issue
   });
   const clearance = clearanceFor(adapter, ["issues"]);
   const ledgerPath = writeLedger({
+    implemented: ["sync-capability"],
     issues: [{ node_id: "GH0", gh_issue: 7, sync_to_github: false }],
   });
   const report = syncIssues({
@@ -406,6 +426,10 @@ test("a protected mapping stays skipped and byte-for-byte untouched during issue
     nodes: ["GH0"],
     ledgerPath,
     clearance,
+    projectIssues: false,
+    syncTrainParents: false,
+    syncPrerequisites: [],
+    ignoreBlockers: true,
   });
   assert.deepEqual(report.protected, [{ node_id: "GH0", gh_issue: 7 }]);
   assert.deepEqual(report.created, []);

@@ -243,7 +243,7 @@ mod harness {
         engine: &GatedEngine,
         tsconfig: &str,
     ) -> GatedCommand {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_verter-tsc"));
+        let mut command = Command::new(verter_test_support::cargo_test_binary_path!("verter-tsc"));
         command
             .env("VERTER_TSGO_BIN", &engine.0)
             .arg("--noEmit")
@@ -265,7 +265,7 @@ mod harness {
         tsconfig: &str,
         declaration_dir: &Path,
     ) -> GatedCommand {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_verter-tsc"));
+        let mut command = Command::new(verter_test_support::cargo_test_binary_path!("verter-tsc"));
         command
             .env("VERTER_TSGO_BIN", &engine.0)
             .arg("--declaration")

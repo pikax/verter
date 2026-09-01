@@ -19,15 +19,16 @@
 //! that exact editor-owned Program. Only an observed attach/sync/decision failure or the
 //! bounded shared deadline admits the managed provider. With
 //! [`crate::type_provider::lazy_managed::LazyManagedTypeProvider`] this means a successful
-//! shared session never creates or queries a duplicate semantic engine. Diagnostics union
-//! the attached `--api` semantic channel with the strict LSP pull channel from that same
-//! process ([`compose_diagnostics`]); the managed provider is not part of that union.
+//! shared session never creates or queries a duplicate semantic engine. Carrier diagnostics
+//! are served only through the exact configured project's `--api` semantic + syntactic
+//! channels; a raw companion LSP pull is never mixed in because it can bind to a broader
+//! project with different JavaScript policy.
 //!
 //! Lifecycle/configuration calls still flow to the managed slot so a lazy fallback can
 //! cache the latest desired state without spawning; the shared overlay records carrier
 //! content independently and injects it only when a bound demand engages.
 
-use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,6 +40,7 @@ use verter_session::external_ts::{
 use verter_session::framework::descriptor::classify_carrier_companion;
 use verter_session::VerterHost;
 use verter_workspace::traits::WorkspaceRead;
+use verter_workspace::workspace_snapshot::ProjectPayload;
 
 use verter_tsgo_api::control::Advertisement;
 use verter_type_runtime::protocol::{
@@ -48,10 +50,12 @@ use verter_type_runtime::protocol::{
 };
 use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
 
-use crate::tsgo::overlay_core::{LazyOverlayCore, OverlayPriority, OverlayTransport};
+use crate::tsgo::overlay_core::{
+    LazyOverlayCore, OverlayPriority, OverlaySyncState, OverlayTransport,
+};
 use crate::tsgo::project_binding::{self, BoundCarrier, CarrierAdmissionCache};
 use crate::tsgo::shared::{EstablishSharedParams, TsgoSharedProvider};
-use crate::tsgo::transport_cell::EstablishedTransport;
+use crate::tsgo::transport_cell::{EstablishedTransport, TransportEpoch};
 
 /// The bound on the lazy SHARED-attach establishment: a slow or never-initializing
 /// editor tsgo cannot stall a carrier diagnostics query beyond this — on elapse the
@@ -108,6 +112,164 @@ pub struct SharedRendezvous {
 #[derive(Clone)]
 pub struct SharedTsgoOverlay {
     inner: Arc<OverlayInner>,
+}
+
+/// The typed terminal reason an armed SHARED route refused to engage. Every refusal
+/// carries the carrier/project witness used for the query; variants that crossed the
+/// transport boundary also carry the exact transport epoch and overlay sync state.
+/// This remains an internal routing result (not a wire error): the composite logs it and
+/// follows its existing fail-closed fallback policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SharedEngageFailure {
+    kind: SharedEngageFailureKind,
+    source: String,
+    config: String,
+    generation: u64,
+    transport_epoch: Option<TransportEpoch>,
+    sync_state: Option<OverlaySyncState>,
+}
+
+/// Exhaustive engagement refusal classes. These replace the former three-way `None`
+/// collapse and retain diagnostic-operation refusals at the same observable boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SharedEngageFailureKind {
+    TransportUnavailable,
+    QueriedCarrierNotSynced,
+    LiveDecisionNotShared { reason: String },
+    ProjectDiagnosticsUnavailable,
+    ProjectDiagnosticsFailed { error: String },
+}
+
+impl std::fmt::Display for SharedEngageFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "kind={:?} source={} config={} generation={} transport_epoch={:?} sync_state={:?}",
+            self.kind,
+            self.source,
+            self.config,
+            self.generation,
+            self.transport_epoch,
+            self.sync_state
+        )
+    }
+}
+
+/// A provider that passed the exact-epoch synchronization and live project-binding
+/// decision barriers, plus the witnesses needed if the following diagnostics operation
+/// itself refuses.
+struct EngagedSharedProvider {
+    provider: Arc<TsgoSharedProvider>,
+    source: String,
+    config: String,
+    generation: u64,
+    transport_epoch: TransportEpoch,
+    sync_state: OverlaySyncState,
+}
+
+/// A feature route selected after admission. SHARED retains the exact transport
+/// epoch and overlay core until the feature call finishes; returning only the
+/// provider Arc would discard that witness and reopen a select→invoke race.
+enum FeatureProviderSelection {
+    Managed(Arc<dyn TypeProvider>),
+    Shared {
+        provider: Arc<dyn TypeProvider>,
+        managed: Arc<dyn TypeProvider>,
+        core: Arc<OverlayInner>,
+        provider_path: String,
+        transport_epoch: TransportEpoch,
+    },
+}
+
+impl FeatureProviderSelection {
+    async fn invoke<R, F, Fut>(self, invoke: F) -> Result<R, TypeProviderError>
+    where
+        F: Fn(Arc<dyn TypeProvider>) -> Fut,
+        Fut: Future<Output = Result<R, TypeProviderError>>,
+    {
+        match self {
+            Self::Managed(provider) => invoke(provider).await,
+            Self::Shared {
+                provider,
+                managed,
+                core,
+                provider_path,
+                transport_epoch,
+            } => {
+                invoke_epoch_bound(
+                    &core.core,
+                    &provider_path,
+                    transport_epoch,
+                    || invoke(provider),
+                    || invoke(managed),
+                )
+                .await
+            }
+        }
+    }
+}
+
+/// Invoke one shared feature only while the selected transport epoch remains the
+/// active, content-synchronized epoch. The pre-call check closes reconnects that
+/// land after selection; the post-call check converts a stale success OR stale
+/// error into managed fallback when replacement happens during the shared await.
+async fn invoke_epoch_bound<T, R, SharedCall, SharedFuture, ManagedCall, ManagedFuture>(
+    core: &LazyOverlayCore<T>,
+    provider_path: &str,
+    transport_epoch: TransportEpoch,
+    shared_call: SharedCall,
+    managed_call: ManagedCall,
+) -> Result<R, TypeProviderError>
+where
+    T: OverlayTransport,
+    SharedCall: FnOnce() -> SharedFuture,
+    SharedFuture: Future<Output = Result<R, TypeProviderError>>,
+    ManagedCall: FnOnce() -> ManagedFuture,
+    ManagedFuture: Future<Output = Result<R, TypeProviderError>>,
+{
+    if !core
+        .sync_state_for_epoch(provider_path, transport_epoch)
+        .is_synced()
+    {
+        return managed_call().await;
+    }
+    let shared_result = shared_call().await;
+    if core
+        .sync_state_for_epoch(provider_path, transport_epoch)
+        .is_synced()
+    {
+        shared_result
+    } else {
+        managed_call().await
+    }
+}
+
+/// Run one shared operation only while its selected transport epoch remains the
+/// exact content-synchronized epoch. Unlike [`invoke_epoch_bound`], this helper
+/// returns the stale sync witness to callers that need to construct a typed
+/// refusal before activating their own fallback policy.
+async fn observe_epoch_bound<T, R, SharedCall, SharedFuture>(
+    core: &LazyOverlayCore<T>,
+    provider_path: &str,
+    transport_epoch: TransportEpoch,
+    shared_call: SharedCall,
+) -> Result<R, OverlaySyncState>
+where
+    T: OverlayTransport,
+    SharedCall: FnOnce() -> SharedFuture,
+    SharedFuture: Future<Output = R>,
+{
+    let before = core.sync_state_for_epoch(provider_path, transport_epoch);
+    if !before.is_synced() {
+        return Err(before);
+    }
+    let result = shared_call().await;
+    let after = core.sync_state_for_epoch(provider_path, transport_epoch);
+    if after.is_synced() {
+        Ok(result)
+    } else {
+        Err(after)
+    }
 }
 
 struct OverlayInner {
@@ -179,9 +341,9 @@ impl SharedTsgoOverlay {
     }
 
     /// Establish, synchronize, and revalidate the exact editor-owned provider for a
-    /// carrier already resolved to a configured project. `None` is an observed attach,
-    /// synchronization, or live-decision failure and is the only condition that admits
-    /// the managed fallback tier.
+    /// carrier already resolved to a configured project. A typed `Err` is an observed
+    /// attach, synchronization, or live-decision failure and is the only condition that
+    /// admits the managed fallback tier.
     ///
     /// The carrier binding is passed in PRE-RESOLVED (the composite gate resolved it
     /// ONCE via the shared [`project_binding`] helper): SHARED reuses the SAME binding
@@ -193,7 +355,18 @@ impl SharedTsgoOverlay {
         &self,
         provider_path: &str,
         carrier: &BoundCarrier,
-    ) -> Option<Arc<TsgoSharedProvider>> {
+    ) -> Result<EngagedSharedProvider, SharedEngageFailure> {
+        let source = carrier_source_of(provider_path).unwrap_or_else(|| provider_path.to_string());
+        let config = carrier.binding().tsconfig_uri().to_string();
+        let generation = carrier.generation();
+        let refusal = |kind, transport_epoch, sync_state| SharedEngageFailure {
+            kind,
+            source: source.clone(),
+            config: config.clone(),
+            generation,
+            transport_epoch,
+            sync_state,
+        };
         // Lazily establish (once) the SHARED relay-attach transport for the
         // ALREADY-resolved binding — at QUERY time, off the managed lifecycle critical
         // path (SHARED is never fabricated; the binding is the gate's resolved one). The
@@ -201,7 +374,8 @@ impl SharedTsgoOverlay {
         // instance's epoch (never a re-read of the overlay's current active epoch).
         let established = self
             .ensure_transport(carrier.binding().clone(), carrier.generation())
-            .await?;
+            .await
+            .ok_or_else(|| refusal(SharedEngageFailureKind::TransportUnavailable, None, None))?;
 
         // Inject the recorded content of EVERY open carrier into the established
         // transport (dirty-tracked — only what changed since the last injection) so the
@@ -251,46 +425,93 @@ impl SharedTsgoOverlay {
         // confirmed synced into the shared Program (its dirty injection failed) — never
         // serve SHARED diagnostics computed against stale/absent content (a prior synced
         // slot). Only a carrier whose current content is confirmed synced is served.
-        if !self.inner.core.is_synced(provider_path) {
-            return None;
+        let sync_state = self
+            .inner
+            .core
+            .sync_state_for_epoch(provider_path, established.identity.epoch);
+        if !sync_state.is_synced() {
+            return Err(refusal(
+                SharedEngageFailureKind::QueriedCarrierNotSynced,
+                Some(established.identity.epoch),
+                Some(sync_state),
+            ));
         }
 
         // Re-decide the serve mode through the live controller at the resolved
         // snapshot/config generation, reusing the SAME binding — a not-SHARED decision
         // admits managed.
-        if established
+        let decision = established
             .transport
-            .redecide_for_binding(carrier.binding(), carrier.generation())
-            .mode()
-            != ServeMode::Shared
-        {
-            return None;
+            .redecide_for_binding(carrier.binding(), carrier.generation());
+        if decision.mode() != ServeMode::Shared {
+            return Err(refusal(
+                SharedEngageFailureKind::LiveDecisionNotShared {
+                    reason: format!("{:?}", decision.decision().owned_reason()),
+                },
+                Some(established.identity.epoch),
+                Some(sync_state),
+            ));
         }
 
-        Some(established.transport)
+        Ok(EngagedSharedProvider {
+            provider: established.transport,
+            source,
+            config,
+            generation,
+            transport_epoch: established.identity.epoch,
+            sync_state,
+        })
     }
 
-    /// Full user-facing diagnostics from the exact editor-owned Program. The `--api`
-    /// query is the configured-project membership proof; after it succeeds, the relay's
-    /// strict pull-diagnostic request supplies the complete LSP surface (syntactic,
-    /// suggestion, tags/related information, and semantic diagnostics). Either channel
-    /// failing returns `None`, admitting the managed fallback instead of presenting a
-    /// fabricated empty result.
+    /// Project-bound diagnostics from the exact editor-owned Program. `Some([])` is an
+    /// authoritative clean result; `None` or an error admits only the managed provider's
+    /// project-bound capability, never a raw companion LSP pull.
     async fn engage_diagnostics(
         &self,
         provider_path: &str,
         carrier: &BoundCarrier,
-    ) -> Option<Vec<TypeDiagnostic>> {
-        let provider = self.engage_provider(provider_path, carrier).await?;
-        let semantic = provider
-            .overlay_diagnostics_in_project(provider_path, carrier.bound().project())
-            .await
-            .ok()??;
-        let full = provider
-            .full_diagnostics_for_carrier(provider_path)
-            .await
-            .ok()?;
-        Some(compose_diagnostics(semantic, full))
+    ) -> Result<Vec<TypeDiagnostic>, SharedEngageFailure> {
+        let engaged = self.engage_provider(provider_path, carrier).await?;
+        let diagnostics_result = observe_epoch_bound(
+            &self.inner.core,
+            provider_path,
+            engaged.transport_epoch,
+            || {
+                engaged
+                    .provider
+                    .overlay_diagnostics_in_project(provider_path, carrier.bound().project())
+            },
+        )
+        .await
+        .map_err(|sync_state| SharedEngageFailure {
+            kind: SharedEngageFailureKind::QueriedCarrierNotSynced,
+            source: engaged.source.clone(),
+            config: engaged.config.clone(),
+            generation: engaged.generation,
+            transport_epoch: Some(engaged.transport_epoch),
+            sync_state: Some(sync_state),
+        })?;
+        match diagnostics_result {
+            Ok(Some(diagnostics)) => Ok(diagnostics),
+            Ok(None) => Err(SharedEngageFailure {
+                kind: SharedEngageFailureKind::ProjectDiagnosticsUnavailable,
+                source: engaged.source,
+                config: engaged.config,
+                generation: engaged.generation,
+                transport_epoch: Some(engaged.transport_epoch),
+                sync_state: Some(engaged.sync_state),
+            }),
+            Err(error) => Err(SharedEngageFailure {
+                kind: SharedEngageFailureKind::ProjectDiagnosticsFailed {
+                    error: error.to_string(),
+                },
+                source: engaged.source,
+                config: engaged.config,
+                generation: engaged.generation,
+                transport_epoch: Some(engaged.transport_epoch),
+                sync_state: Some(engaged.sync_state),
+            }),
+        }
     }
 
     /// Whether injecting the recorded `companion_path` overlay is shadow-safe — i.e. no
@@ -509,69 +730,6 @@ fn compose_establishment_discriminant(nonce: &str, generation: u64) -> String {
     format!("{nonce}\u{1f}{generation}")
 }
 
-/// The dedup identity of a carrier diagnostic: its carrier byte span, code, and
-/// message. Two diagnostics with the same `(start, end, code, message)` are the SAME
-/// diagnostic — e.g. an identical carrier type error reported by both diagnostic
-/// channels of the SAME editor-owned session.
-type DiagnosticIdentity = (u32, u32, Option<String>, String);
-
-fn diagnostic_identity(d: &TypeDiagnostic) -> DiagnosticIdentity {
-    (d.start, d.end, d.code.clone(), d.message.clone())
-}
-
-/// Compose the two diagnostic channels of one editor-owned tsgo session.
-///
-/// The attached `--api` view proves configured-project membership and supplies semantic
-/// diagnostics. The relayed LSP pull channel can additionally supply syntactic,
-/// suggestion, tag, and related-information data. Both are views of the exact same
-/// editor process and Program. The result is their deduplicated union; this never queries
-/// or activates the managed fallback.
-///
-/// An identical diagnostic appears once. The `--api` copy's authoritative carrier span
-/// is retained, while tags and related information found only on the LSP copy are merged
-/// into it.
-fn compose_diagnostics(
-    semantic: Vec<TypeDiagnostic>,
-    full: Vec<TypeDiagnostic>,
-) -> Vec<TypeDiagnostic> {
-    let mut merged = semantic;
-    let mut index: HashMap<DiagnosticIdentity, usize> = merged
-        .iter()
-        .enumerate()
-        .map(|(i, d)| (diagnostic_identity(d), i))
-        .collect();
-    for diag in full {
-        match index.get(&diagnostic_identity(&diag)) {
-            // Collision: preserve the `--api` span and union LSP metadata.
-            Some(&i) => merge_diagnostic_metadata(&mut merged[i], diag),
-            // LSP-only: append it (and index it so a later duplicate merges).
-            None => {
-                index.insert(diagnostic_identity(&diag), merged.len());
-                merged.push(diag);
-            }
-        }
-    }
-    merged
-}
-
-/// Merge an LSP duplicate's metadata into the retained `--api` diagnostic on a
-/// `(span, code, message)` collision: UNION the `tags` and `related_information`
-/// (append each LSP entry the semantic copy does not already carry). The `--api` span,
-/// severity, and message win (its authoritative mapping is retained); only the
-/// metadata is unioned — never a silent LSP-metadata drop.
-fn merge_diagnostic_metadata(into: &mut TypeDiagnostic, from: TypeDiagnostic) {
-    for tag in from.tags {
-        if !into.tags.contains(&tag) {
-            into.tags.push(tag);
-        }
-    }
-    for info in from.related_information {
-        if !into.related_information.contains(&info) {
-            into.related_information.push(info);
-        }
-    }
-}
-
 /// Every carrier TS FEATURE provider call the composite GATES on a resolved
 /// `BoundProject` admission. Each variant maps 1:1 to exactly one gated `TypeProvider`
 /// feature method on [`TsgoCompositeProvider`]; the enum is the EXHAUSTIVE registry of
@@ -666,6 +824,38 @@ pub struct TsgoCompositeProvider {
     /// Generation-scoped carrier feature admission cache. It memoizes the one shared
     /// resolver per `(source, generation)`; it is not a second binding engine.
     admission: CarrierAdmissionCache,
+    /// Compiler-lifted file-check directive for each generated companion.
+    /// The configured-project diagnostics API is not available for every
+    /// generated JSX root, so the fallback must retain the authored override
+    /// without reaching into an opaque managed provider.
+    file_check_directives: dashmap::DashMap<String, FileCheckDirective>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileCheckDirective {
+    Check,
+    NoCheck,
+}
+
+fn leading_file_check_directive(content: &str) -> Option<FileCheckDirective> {
+    let first_line = content.split_once('\n').map_or(content, |(line, _)| line);
+    let first_line = first_line.strip_suffix('\r').unwrap_or(first_line);
+    match first_line {
+        "// @ts-check" => Some(FileCheckDirective::Check),
+        "// @ts-nocheck" => Some(FileCheckDirective::NoCheck),
+        _ => None,
+    }
+}
+
+fn effective_javascript_check_policy(
+    configured_check_js: Option<bool>,
+    directive: Option<FileCheckDirective>,
+) -> Option<bool> {
+    match directive {
+        Some(FileCheckDirective::Check) => Some(true),
+        Some(FileCheckDirective::NoCheck) => Some(false),
+        None => configured_check_js,
+    }
 }
 
 impl TsgoCompositeProvider {
@@ -682,7 +872,41 @@ impl TsgoCompositeProvider {
             host,
             shared,
             admission: CarrierAdmissionCache::new(),
+            file_check_directives: dashmap::DashMap::new(),
         }
+    }
+
+    fn record_file_check_directive(&self, path: &str, content: &str) {
+        let path = normalize_canonical_id(path);
+        match leading_file_check_directive(content) {
+            Some(directive) => {
+                self.file_check_directives.insert(path, directive);
+            }
+            None => {
+                self.file_check_directives.remove(&path);
+            }
+        }
+    }
+
+    fn clear_file_check_directive(&self, path: &str) {
+        self.file_check_directives
+            .remove(&normalize_canonical_id(path));
+    }
+
+    fn effective_javascript_check_policy(
+        &self,
+        path: &str,
+        configured_project: &str,
+    ) -> Option<bool> {
+        let path = normalize_canonical_id(path);
+        let directive = self
+            .file_check_directives
+            .get(&path)
+            .map(|entry| *entry.value());
+        effective_javascript_check_policy(
+            self.configured_project_check_js(configured_project),
+            directive,
+        )
     }
 
     /// Select the provider for a feature query while preserving the serving order.
@@ -699,11 +923,11 @@ impl TsgoCompositeProvider {
         &self,
         feature: ProviderFeature,
         path: &str,
-    ) -> Option<Arc<dyn TypeProvider>> {
+    ) -> Option<FeatureProviderSelection> {
         // NON-carrier path (plain `.ts`/`.tsx`): not gated. In a carrier-only LSP
         // client this is not normally queried; an explicit request uses managed.
         let Some(source) = carrier_source_of(path) else {
-            return Some(Arc::clone(&self.managed));
+            return Some(FeatureProviderSelection::Managed(Arc::clone(&self.managed)));
         };
 
         let admission = self.admission.admit(&self.host, &source);
@@ -724,7 +948,7 @@ impl TsgoCompositeProvider {
             )
             .await
             {
-                Ok(Some(provider)) => {
+                Ok(Ok(engaged)) => {
                     // Reports ONLY what this site observed. It cannot see the
                     // managed provider's session-long activation cell, so it must
                     // not claim the fallback stayed cold: managed may have
@@ -735,11 +959,24 @@ impl TsgoCompositeProvider {
                         source = %source,
                         "editor-owned tsgo served carrier feature"
                     );
-                    return Some(provider);
+                    let provider: Arc<dyn TypeProvider> = engaged.provider;
+                    return Some(FeatureProviderSelection::Shared {
+                        provider,
+                        managed: Arc::clone(&self.managed),
+                        core: Arc::clone(&shared.inner),
+                        provider_path: path.to_string(),
+                        transport_epoch: engaged.transport_epoch,
+                    });
                 }
-                Ok(None) => tracing::info!(
+                Ok(Err(refusal)) => tracing::info!(
                     feature = feature.name(),
                     source = %source,
+                    refusal = %refusal,
+                    refusal_kind = ?refusal.kind,
+                    config = %refusal.config,
+                    generation = refusal.generation,
+                    transport_epoch = ?refusal.transport_epoch,
+                    sync_state = ?refusal.sync_state,
                     "editor-owned tsgo attach did not engage; activating managed fallback"
                 ),
                 Err(_) => tracing::warn!(
@@ -750,7 +987,7 @@ impl TsgoCompositeProvider {
             }
         }
 
-        Some(Arc::clone(&self.managed))
+        Some(FeatureProviderSelection::Managed(Arc::clone(&self.managed)))
     }
 
     /// Shared-first diagnostics entry used by both foreground and background queries.
@@ -790,15 +1027,21 @@ impl TsgoCompositeProvider {
             )
             .await
             {
-                Ok(Some(diagnostics)) => {
+                Ok(Ok(diagnostics)) => {
                     tracing::info!(
                         source = %source,
                         "editor-owned tsgo served carrier diagnostics; managed fallback remained cold"
                     );
                     return Ok(diagnostics);
                 }
-                Ok(None) => tracing::info!(
+                Ok(Err(refusal)) => tracing::info!(
                     source = %source,
+                    refusal = %refusal,
+                    refusal_kind = ?refusal.kind,
+                    config = %refusal.config,
+                    generation = refusal.generation,
+                    transport_epoch = ?refusal.transport_epoch,
+                    sync_state = ?refusal.sync_state,
                     "editor-owned tsgo diagnostics did not engage; activating managed fallback"
                 ),
                 Err(_) => tracing::warn!(
@@ -808,7 +1051,77 @@ impl TsgoCompositeProvider {
             }
         }
 
+        // JavaScript carriers must preserve the bound project's checkJs/@ts-check
+        // policy. The rich `--lsp` pull treats the generated JSX as a standalone
+        // inferred file and can therefore report diagnostics that the configured
+        // project intentionally disables. A project-bound result (including an empty
+        // one) is authoritative for JSX; an unavailable/partial capability falls back
+        // to the rich route so valid diagnostics are not silently erased.
+        let javascript_carrier = path
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("jsx"));
+        if javascript_carrier {
+            match self
+                .managed
+                .get_diagnostics_in_project(path, carrier.bound().project())
+                .await
+            {
+                Ok(Some(diagnostics)) => return Ok(diagnostics),
+                Ok(None) => tracing::debug!(
+                    source = %source,
+                    project = %carrier.bound().project(),
+                    "configured-project JavaScript diagnostics unavailable; evaluating policy-safe fallback"
+                ),
+                Err(error) => tracing::warn!(
+                    source = %source,
+                    project = %carrier.bound().project(),
+                    error = %error,
+                    "configured-project JavaScript diagnostics failed; evaluating policy-safe fallback"
+                ),
+            }
+
+            // The pinned TSGO API cannot expose some generated companions as roots
+            // of nested configured projects. A raw LSP fallback would bind that JSX
+            // to an inferred project and re-enable semantic diagnostics even when
+            // the authoritative owning project has checking disabled. Preserve the
+            // effective per-file policy in that unavailable-capability case:
+            // compiler-lifted `@ts-check` overrides `checkJs: false`, while
+            // `@ts-nocheck` overrides `checkJs: true`.
+            if self.effective_javascript_check_policy(path, carrier.bound().project())
+                == Some(false)
+            {
+                return Ok(Vec::new());
+            }
+        }
+
+        // The BoundProject witness above remains the admission authority. Once
+        // admitted, use the same managed LSP surface that owns the didOpen/didChange
+        // overlay; never use it for an unbound carrier.
         self.managed_diagnostics(path, background).await
+    }
+
+    /// Read `checkJs` from the same immutable published snapshot that minted the
+    /// carrier's configured-project witness. `None` retains the conservative rich
+    /// fallback; only an observed configured project with checking disabled can
+    /// suppress the wrong inferred-project semantic result.
+    fn configured_project_check_js(&self, configured_project: &str) -> Option<bool> {
+        let workspace = self.host.workspace_read();
+        let published = workspace.published_root()?;
+        let configured_project = normalize_canonical_id(configured_project);
+        published
+            .snapshot
+            .projects
+            .iter()
+            .find_map(|project| match &project.payload {
+                ProjectPayload::Configured {
+                    tsconfig_path,
+                    compiler_options,
+                    ..
+                } if normalize_canonical_id(tsconfig_path.as_str()) == configured_project => {
+                    Some(compiler_options.check_js)
+                }
+                _ => None,
+            })
     }
 
     /// Managed diagnostics for `path` on the requested lane.
@@ -873,6 +1186,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.open_file(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Interactive);
             Ok(())
         })
@@ -883,6 +1197,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.load_file(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Interactive);
             Ok(())
         })
@@ -893,6 +1208,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.update_file(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Interactive);
             Ok(())
         })
@@ -902,6 +1218,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         Box::pin(async move {
             self.managed.close_file(&path).await?;
+            self.clear_file_check_directive(&path);
             self.shared_feed_close(&path).await;
             Ok(())
         })
@@ -912,6 +1229,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.open_file_background(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Background);
             Ok(())
         })
@@ -922,6 +1240,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.load_file_background(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Background);
             Ok(())
         })
@@ -932,6 +1251,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.update_file_background(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Background);
             Ok(())
         })
@@ -941,6 +1261,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         Box::pin(async move {
             self.managed.close_file_background(&path).await?;
+            self.clear_file_check_directive(&path);
             self.shared_feed_close(&path).await;
             Ok(())
         })
@@ -951,6 +1272,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.open_file_normal(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Normal);
             Ok(())
         })
@@ -961,6 +1283,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.load_file_normal(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Normal);
             Ok(())
         })
@@ -971,6 +1294,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.update_file_normal(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Normal);
             Ok(())
         })
@@ -980,6 +1304,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         Box::pin(async move {
             self.managed.close_file_normal(&path).await?;
+            self.clear_file_check_directive(&path);
             self.shared_feed_close(&path).await;
             Ok(())
         })
@@ -1013,12 +1338,20 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let trigger_character = trigger_character.map(str::to_string);
         Box::pin(async move {
-            if let Some(provider) = self
+            if let Some(selection) = self
                 .feature_provider(ProviderFeature::Completions, &path)
                 .await
             {
-                provider
-                    .get_completions(&path, offset, trigger_character.as_deref())
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        let trigger_character = trigger_character.clone();
+                        async move {
+                            provider
+                                .get_completions(&path, offset, trigger_character.as_deref())
+                                .await
+                        }
+                    })
                     .await
             } else {
                 Ok(CompletionResult {
@@ -1036,12 +1369,20 @@ impl TypeProvider for TsgoCompositeProvider {
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
         // MIXED: a denied carrier serves the empty external default.
+        let path = path.to_string();
+        let items = items.to_vec();
         Box::pin(async move {
-            if let Some(provider) = self
-                .feature_provider(ProviderFeature::CompletionDetails, path)
+            if let Some(selection) = self
+                .feature_provider(ProviderFeature::CompletionDetails, &path)
                 .await
             {
-                provider.get_completion_details(path, offset, items).await
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        let items = items.clone();
+                        async move { provider.get_completion_details(&path, offset, &items).await }
+                    })
+                    .await
             } else {
                 Ok(Vec::new())
             }
@@ -1057,11 +1398,17 @@ impl TypeProvider for TsgoCompositeProvider {
         // owned resolve call.
         let path = path.to_string();
         Box::pin(async move {
-            if let Some(provider) = self
+            if let Some(selection) = self
                 .feature_provider(ProviderFeature::ResolveCompletion, &path)
                 .await
             {
-                provider.resolve_completion(&path, data).await
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        let data = data.clone();
+                        async move { provider.resolve_completion(&path, data).await }
+                    })
+                    .await
             } else {
                 Ok(None)
             }
@@ -1073,8 +1420,13 @@ impl TypeProvider for TsgoCompositeProvider {
         // preserves any native sub-answer); a non-carrier path is ungated.
         let path = path.to_string();
         Box::pin(async move {
-            if let Some(provider) = self.feature_provider(ProviderFeature::Hover, &path).await {
-                provider.get_hover(&path, offset).await
+            if let Some(selection) = self.feature_provider(ProviderFeature::Hover, &path).await {
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        async move { provider.get_hover(&path, offset).await }
+                    })
+                    .await
             } else {
                 Ok(None)
             }
@@ -1086,11 +1438,16 @@ impl TypeProvider for TsgoCompositeProvider {
         // the handler merge).
         let path = path.to_string();
         Box::pin(async move {
-            if let Some(provider) = self
+            if let Some(selection) = self
                 .feature_provider(ProviderFeature::Definition, &path)
                 .await
             {
-                provider.get_definition(&path, offset).await
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        async move { provider.get_definition(&path, offset).await }
+                    })
+                    .await
             } else {
                 Ok(Vec::new())
             }
@@ -1107,11 +1464,16 @@ impl TypeProvider for TsgoCompositeProvider {
         // ungated.
         let path = path.to_string();
         Box::pin(async move {
-            if let Some(provider) = self
+            if let Some(selection) = self
                 .feature_provider(ProviderFeature::TypeDefinition, &path)
                 .await
             {
-                provider.get_type_definition(&path, offset).await
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        async move { provider.get_type_definition(&path, offset).await }
+                    })
+                    .await
             } else {
                 Ok(Vec::new())
             }
@@ -1123,11 +1485,16 @@ impl TypeProvider for TsgoCompositeProvider {
         // the handler merge).
         let path = path.to_string();
         Box::pin(async move {
-            if let Some(provider) = self
+            if let Some(selection) = self
                 .feature_provider(ProviderFeature::References, &path)
                 .await
             {
-                provider.get_references(&path, offset).await
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        async move { provider.get_references(&path, offset).await }
+                    })
+                    .await
             } else {
                 Ok(Vec::new())
             }
@@ -1145,11 +1512,16 @@ impl TypeProvider for TsgoCompositeProvider {
         // `--lsp` self-discovery fall-through after admission failure.
         let path = path.to_string();
         Box::pin(async move {
-            if let Some(provider) = self
+            if let Some(selection) = self
                 .feature_provider(ProviderFeature::RenameLocations, &path)
                 .await
             {
-                provider.get_rename_locations(&path, offset).await
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        async move { provider.get_rename_locations(&path, offset).await }
+                    })
+                    .await
             } else {
                 Ok(Vec::new())
             }
@@ -1164,11 +1536,16 @@ impl TypeProvider for TsgoCompositeProvider {
         // EXTERNAL-ONLY: a denied carrier serves `None` with NO owned delegation.
         let path = path.to_string();
         Box::pin(async move {
-            if let Some(provider) = self
+            if let Some(selection) = self
                 .feature_provider(ProviderFeature::SignatureHelp, &path)
                 .await
             {
-                provider.get_signature_help(&path, offset).await
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        async move { provider.get_signature_help(&path, offset).await }
+                    })
+                    .await
             } else {
                 Ok(None)
             }
@@ -1190,12 +1567,20 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         let diagnostics = diagnostics.to_vec();
         Box::pin(async move {
-            if let Some(provider) = self
+            if let Some(selection) = self
                 .feature_provider(ProviderFeature::CodeActions, &path)
                 .await
             {
-                provider
-                    .get_code_actions(&path, start_offset, end_offset, &diagnostics)
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        let diagnostics = diagnostics.clone();
+                        async move {
+                            provider
+                                .get_code_actions(&path, start_offset, end_offset, &diagnostics)
+                                .await
+                        }
+                    })
                     .await
             } else {
                 Ok(Vec::new())
@@ -1208,11 +1593,16 @@ impl TypeProvider for TsgoCompositeProvider {
         // delegation.
         let path = path.to_string();
         Box::pin(async move {
-            if let Some(provider) = self
+            if let Some(selection) = self
                 .feature_provider(ProviderFeature::SemanticTokens, &path)
                 .await
             {
-                provider.get_semantic_tokens(&path).await
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        async move { provider.get_semantic_tokens(&path).await }
+                    })
+                    .await
             } else {
                 Ok(Vec::new())
             }
@@ -1228,11 +1618,16 @@ impl TypeProvider for TsgoCompositeProvider {
         // the handler merge).
         let path = path.to_string();
         Box::pin(async move {
-            if let Some(provider) = self
+            if let Some(selection) = self
                 .feature_provider(ProviderFeature::DocumentHighlights, &path)
                 .await
             {
-                provider.get_document_highlights(&path, offset).await
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        async move { provider.get_document_highlights(&path, offset).await }
+                    })
+                    .await
             } else {
                 Ok(Vec::new())
             }
@@ -1249,12 +1644,19 @@ impl TypeProvider for TsgoCompositeProvider {
         // the handler merge).
         let path = path.to_string();
         Box::pin(async move {
-            if let Some(provider) = self
+            if let Some(selection) = self
                 .feature_provider(ProviderFeature::InlayHints, &path)
                 .await
             {
-                provider
-                    .get_inlay_hints(&path, start_offset, end_offset)
+                selection
+                    .invoke(|provider| {
+                        let path = path.clone();
+                        async move {
+                            provider
+                                .get_inlay_hints(&path, start_offset, end_offset)
+                                .await
+                        }
+                    })
                     .await
             } else {
                 Ok(Vec::new())

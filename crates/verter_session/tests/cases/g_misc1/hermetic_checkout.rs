@@ -4,15 +4,15 @@
 //! hermetic — every test must compile and execute without an external
 //! third-party clone (e.g., a vendored corpus repo) on disk. The
 //! `EXPECTED_CORPUS_MIN` constant below records the minimum number of
-//! corpus tests stitched into `corpus_audit_tests.rs`; this test
-//! asserts the stitched module count is at least that floor.
+//! logical corpus cases stitched into `corpus_audit_tests.rs`; this test
+//! asserts the generator's checked-in case-count receipt is at least that floor.
 //!
 //! ## Discriminating predicate
 //!
 //! Pre-change tree: the `corpus_audit_tests.rs` stitcher does not yet
 //! reach the documented count. Post-change tree: it does.
 //!
-//! A vacuous-pass regression — silently dropping corpus modules from
+//! A vacuous-pass regression — silently dropping corpus cases from
 //! the stitcher — is caught by the strict `>=` comparison below. The
 //! constant's recorded value is the *floor*; the test reports the
 //! actual count whenever the check fails so maintainers can refresh
@@ -42,6 +42,19 @@
 const EXPECTED_CORPUS_MIN: usize = 179;
 
 const STITCHER: &str = include_str!("../corpus_audit_tests.rs");
+const CASE_COUNT_PREFIX: &str = "//! Logical corpus cases: ";
+
+/// Parse the generator-owned logical-case receipt. Corpus cases are batched
+/// into a bounded number of test modules, so module count is not case count.
+/// Generator parity and layout tests independently prove that this receipt and
+/// the generated chunks are an exact rendering of the vendored fixtures.
+fn declared_corpus_case_count(src: &str) -> Option<usize> {
+    src.lines().find_map(|line| {
+        line.strip_prefix(CASE_COUNT_PREFIX)
+            .and_then(|count| count.strip_suffix('.'))
+            .and_then(|count| count.parse().ok())
+    })
+}
 
 /// Count `mod <ident>;` lines in the stitcher. Each `#[path = ...]
 /// mod <slug>;` pair declares one corpus test module; the `mod ...;`
@@ -68,20 +81,19 @@ const _: () = assert!(
 
 #[test]
 fn hermetic_workspace_test_runs_without_external_corpus() {
-    let actual = count_corpus_modules(STITCHER);
+    let actual = declared_corpus_case_count(STITCHER)
+        .expect("generated corpus stitcher must declare its logical case count");
     assert!(
         actual >= EXPECTED_CORPUS_MIN,
-        "hermetic-checkout floor: corpus_audit_tests.rs stitches {actual} modules, \
+        "hermetic-checkout floor: corpus_audit_tests.rs declares {actual} logical cases, \
          but the EXPECTED_CORPUS_MIN constant records a floor of {EXPECTED_CORPUS_MIN}. \
-         The corpus has shrunk below the documented floor. Either restore the missing modules \
+         The corpus has shrunk below the documented floor. Either restore the missing cases \
          or refresh the constant deliberately (after a corpus re-vendor)."
     );
 }
 
 /// The hermetic-checkout contract requires the stitcher and floor to
-/// agree on intent. A drift where the stitcher silently exceeds the floor by a
-/// large margin (e.g., 50+ modules added without refreshing the
-/// constant) is acceptable per the `>=` comparison above. But a
+/// agree on intent. The logical-case floor is checked above, while a
 /// `corpus_audit_tests.rs` that contains zero `mod` declarations is a
 /// structural regression — the stitcher generator has produced an
 /// empty file. The lower-bound here catches that case loudly.

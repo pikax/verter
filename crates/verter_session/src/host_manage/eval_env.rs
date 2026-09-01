@@ -590,7 +590,7 @@ impl VerterHost {
             let Some(parsed) = host_data.framework_parse.clone() else {
                 return (FileAnalysisSnapshot::default(), None);
             };
-            let Some(parse) = crate::parse::carrier_snapshot_from_artifact(
+            let Some((parse, _)) = crate::parse::carrier_snapshot_from_artifact(
                 canonical,
                 source,
                 self.config.effective_scope(),
@@ -921,6 +921,21 @@ impl VerterHost {
         candidates
     }
 
+    /// Clone the owner's stored eval-source Arc. A captured handle is
+    /// reused as-is; uncaptured compute clones `IndexedReady.eval_source`.
+    /// Catalog lookup stays on the IndexedReady producer.
+    pub(crate) fn clone_owner_eval_source_arc(
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        canonical: &str,
+        captured: Option<&Arc<str>>,
+    ) -> Option<Arc<str>> {
+        if let Some(eval) = captured {
+            return Some(Arc::clone(eval));
+        }
+        ctx.ensure_indexed_ready_serve(canonical)
+            .map(|serve| Arc::clone(&serve.indexed.eval_source))
+    }
+
     /// View-aware macro-argument-type expansion entry point.
     /// Routes the resolver-tier reads (query engine, dispatch
     /// lowering, prepared-decl bundle) through the supplied
@@ -934,17 +949,18 @@ impl VerterHost {
         owner_eval_source: Option<&str>,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
     ) -> Option<ComputedEvaluatedTypes> {
-        let eval_source = owner_eval_source.map(str::to_string).or_else(|| {
-            self.current_eval_state(canonical)
-                .map(|(source, framework_parse, _)| {
-                    Self::build_eval_script_source(canonical, &source, framework_parse.as_deref())
-                })
-        })?;
+        let stored;
+        let eval_source = if let Some(eval) = owner_eval_source {
+            eval
+        } else {
+            stored = Self::clone_owner_eval_source_arc(ctx, canonical, None)?;
+            stored.as_ref()
+        };
         self.compute_evaluated_types_from_owner_context_with_ctx(
             ctx,
             canonical,
             snapshot,
-            &eval_source,
+            eval_source,
             purpose,
         )
     }

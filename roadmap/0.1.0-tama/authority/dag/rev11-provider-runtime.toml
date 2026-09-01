@@ -19,6 +19,7 @@ review_profile = "architecture-3"
 dispatchable = true
 optional = false
 release_gating = "none"
+gh_milestone = "0.0.2"
 external_requirements = []
 charter = "charters/rev11-provider-runtime/H2.md"
 implementation_effort_min = "high"

@@ -51,9 +51,9 @@ graph TB
     ComponentMeta -.-> WASM
 ```
 
-## One Compiler Authority, Two Outputs
+## Compiler crate, two outputs
 
-The Rust compiler parses each carrier and produces purpose-specific outputs from the same compiler authority:
+The Rust compiler crate parses each carrier and produces purpose-specific outputs. Parsing, framework interpretation, IDE projection, runtime emission, and host integration are distinct authorities inside that crate (capability traits plus an immutable registration catalog); they are not one combined compiler identity:
 
 ```mermaid
 flowchart LR

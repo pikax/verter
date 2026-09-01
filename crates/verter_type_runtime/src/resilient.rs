@@ -285,6 +285,7 @@ const QUARANTINE_STRIKE_THRESHOLD: u32 = 2;
 struct QueryFingerprint {
     method: &'static str,
     path: String,
+    scope: Option<String>,
     offset: u64,
     extra: u64,
 }
@@ -294,9 +295,15 @@ impl QueryFingerprint {
         Self {
             method,
             path: path.to_string(),
+            scope: None,
             offset,
             extra,
         }
+    }
+
+    fn in_scope(mut self, scope: &str) -> Self {
+        self.scope = Some(scope.to_string());
+        self
     }
 }
 

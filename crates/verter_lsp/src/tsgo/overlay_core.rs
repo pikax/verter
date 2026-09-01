@@ -166,6 +166,43 @@ fn record_is_synced(rec: &ContentRecord, active_epoch: Option<TransportEpoch>) -
         })
 }
 
+/// The exact terminal synchronization state for a queried carrier and the transport
+/// instance an engagement is about to return. This is deliberately richer than a bool:
+/// a refusal must distinguish missing content, a failed/dirty injection, a shadow-safety
+/// veto, and a transport replacement that happened after the query captured its provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverlaySyncState {
+    /// No lifecycle lane recorded this companion.
+    Unrecorded,
+    /// The overlay has not observed any established transport yet.
+    NoActiveTransport,
+    /// The transport captured by this query is no longer the active transport.
+    TransportEpochMismatch {
+        expected: TransportEpoch,
+        active: TransportEpoch,
+    },
+    /// A real-file/shadow conflict vetoed this companion at the named content generation.
+    ShadowUnsafe { generation: u64 },
+    /// The companion was recorded but no injection has committed.
+    NeverInjected,
+    /// The last committed injection belongs to another transport instance.
+    InjectedIntoDifferentEpoch {
+        expected: TransportEpoch,
+        injected: TransportEpoch,
+    },
+    /// The recorded content advanced after the last committed injection.
+    ContentDirty,
+    /// Current content is barrier-confirmed in the exact transport requested by the query.
+    Synced,
+}
+
+impl OverlaySyncState {
+    #[must_use]
+    pub(crate) fn is_synced(self) -> bool {
+        self == Self::Synced
+    }
+}
+
 /// The lazy SHARED-overlay core: a per-carrier content cache (recorded by the OWNED
 /// lifecycle, off the establishment path) plus the lazily-established transport cell
 /// (established + injected at query time). Generic over the transport `T`.
@@ -738,6 +775,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// query rather than serve SHARED diagnostics computed against stale/absent content or
     /// overlay-shadow a real user file (`carrier_never_shadows_real_user_file`). An
     /// unrecorded carrier is not synced.
+    #[cfg(test)]
     pub(crate) fn is_synced(&self, path: &str) -> bool {
         let state = self.state.lock();
         let active = state.active_epoch;
@@ -745,6 +783,49 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
             .content
             .get(path)
             .is_some_and(|rec| record_is_synced(rec, active))
+    }
+
+    /// Classify synchronization against the EXACT transport epoch the caller intends to
+    /// serve from. Reading the global active epoch as a boolean is insufficient: a query
+    /// can retain transport A while another query observes replacement B. In that window,
+    /// B's marker makes the old `is_synced(path)` true even though returning A would cross
+    /// the barrier. This terminal check fails closed on that mismatch.
+    pub(crate) fn sync_state_for_epoch(
+        &self,
+        path: &str,
+        expected_epoch: TransportEpoch,
+    ) -> OverlaySyncState {
+        let state = self.state.lock();
+        let Some(rec) = state.content.get(path) else {
+            return OverlaySyncState::Unrecorded;
+        };
+        let Some(active_epoch) = state.active_epoch else {
+            return OverlaySyncState::NoActiveTransport;
+        };
+        if active_epoch != expected_epoch {
+            return OverlaySyncState::TransportEpochMismatch {
+                expected: expected_epoch,
+                active: active_epoch,
+            };
+        }
+        if let Some(shadow) = rec.shadow_safety.as_ref().filter(|shadow| !shadow.safe) {
+            return OverlaySyncState::ShadowUnsafe {
+                generation: shadow.generation,
+            };
+        }
+        let Some(injected) = rec.injected.as_ref() else {
+            return OverlaySyncState::NeverInjected;
+        };
+        if injected.epoch != expected_epoch {
+            return OverlaySyncState::InjectedIntoDifferentEpoch {
+                expected: expected_epoch,
+                injected: injected.epoch,
+            };
+        }
+        if injected.content.as_ref() != rec.content.as_ref() {
+            return OverlaySyncState::ContentDirty;
+        }
+        OverlaySyncState::Synced
     }
 
     /// Retract a carrier from the SHARED Program OFF the OWNED close critical path —

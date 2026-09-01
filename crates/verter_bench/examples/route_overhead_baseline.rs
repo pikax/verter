@@ -122,6 +122,7 @@ fn compile_item(item: &CorpusItem) -> DirectCompileOutput {
     let vue_macros = VueMacroSemanticInput::Unavailable;
     let svelte_exec = SvelteExecutionInputs {
         css_hash_override: None,
+        prepared_styles: Vec::new(),
     };
     let inputs = if item.vue {
         DirectExecutionInputs::Vue {

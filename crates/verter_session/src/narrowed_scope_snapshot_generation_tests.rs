@@ -195,3 +195,21 @@ fn quiescent_narrowed_scope_snapshot_still_serves_styles_and_export_signatures()
         "the quiescent read serves the A export signatures (got {exports:?})",
     );
 }
+
+/// Narrowed-scope `get_analysis` rebuilds script analysis through the
+/// catalog. A catalog miss must refuse the serve rather than publish an
+/// empty `ScriptAnalysisSnapshot::default()` as current analysis.
+#[test]
+fn narrowed_scope_catalog_miss_refuses_empty_analysis() {
+    let host = make_host();
+    upsert(&host, SOURCE_A);
+
+    let served =
+        crate::parse::with_forced_catalog_eval_source_miss(|| host.get_analysis(CANONICAL));
+    assert!(
+        served.is_none(),
+        "catalog miss must refuse analysis, not serve an empty snapshot as success (got imports={:?} bindings={:?})",
+        served.as_ref().map(|s| s.imports.len()),
+        served.as_ref().map(|s| s.bindings.len()),
+    );
+}

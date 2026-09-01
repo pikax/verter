@@ -87,6 +87,7 @@ windows-sys = { version = "0.61.2", features = [
 # tokio's `net` feature, NOT a sync-fd workaround.
 
 [dev-dependencies]
+verter_test_support = { path = "../verter_test_support" }
 # `test-util` is additive: unifies onto the main `tokio` dependency for test
 # builds only, activating `start_paused`/virtual-time control so deterministic
 # tests can prove "fires at exactly its own bound" as an exact virtual-clock

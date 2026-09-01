@@ -17,6 +17,134 @@ use crate::type_provider::protocol::{
 use crate::type_provider::traits::{ProviderFuture, TypeProvider};
 use crate::ProjectSyncMode;
 
+#[test]
+fn child_contract_completion_adapter_preserves_event_and_slot_order() {
+    use verter_session::framework::{
+        ComponentContractAvailability, ComponentPublicContract, ContractExactness,
+        ContractProvenance, FrameworkAdapterId, PublicDerivedHandlerShape, PublicEvent, PublicSlot,
+        PublicSlotBinding, PublicSlotInput, PublicTypeReference,
+    };
+
+    let slot_binding_type = PublicTypeReference {
+        publication: verter_session::meta_resolve::MaterializedTypePublication::for_test(
+            verter_type_expr::PublicationResult::Published {
+                selected_source: Arc::new(verter_type_expr::facts::SemanticTypeSource::Closed(
+                    verter_type_expr::facts::ClosedTypeFact::Leaf(
+                        verter_type_expr::facts::LeafTypeFact::Primitive(
+                            verter_type_expr::PrimitiveName::String,
+                        ),
+                    ),
+                )),
+                semantic_authority: verter_type_expr::SemanticAuthority::Resolved,
+                exactness: verter_type_expr::ResolutionExactness::ExactConcrete,
+                reason: Box::new(verter_type_expr::PublicationReason::ResolvedExactConcrete),
+                provenance: verter_type_expr::PublicationProvenance::Resolved {
+                    provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,
+                },
+            },
+            Some(verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::String,
+            )),
+            None,
+        ),
+    };
+
+    let contract = ComponentContractAvailability::Supported(Arc::new(ComponentPublicContract {
+        adapter_id: FrameworkAdapterId::vue(),
+        exactness: ContractExactness::Exact,
+        degradation: Arc::from([]),
+        provenance: ContractProvenance::ComponentMetaOutput,
+        props: Arc::from([]),
+        events: Arc::from([
+            PublicEvent {
+                name: Arc::from("pick"),
+                overloads: Arc::from([]),
+                derived_handler: PublicDerivedHandlerShape {
+                    overloads: Arc::from([]),
+                },
+                exactness: ContractExactness::Exact,
+                degradation: Arc::from([]),
+                provenance: ContractProvenance::ComponentMetaOutput,
+            },
+            PublicEvent {
+                name: Arc::from("close"),
+                overloads: Arc::from([]),
+                derived_handler: PublicDerivedHandlerShape {
+                    overloads: Arc::from([]),
+                },
+                exactness: ContractExactness::Exact,
+                degradation: Arc::from([]),
+                provenance: ContractProvenance::ComponentMetaOutput,
+            },
+        ]),
+        slots: Arc::from([
+            PublicSlot {
+                name: Arc::from("header"),
+                optional: true,
+                input: PublicSlotInput {
+                    bindings: Arc::from([PublicSlotBinding {
+                        name: Arc::from("item"),
+                        ty: slot_binding_type,
+                    }]),
+                },
+                return_type: None,
+                exactness: ContractExactness::Exact,
+                degradation: Arc::from([]),
+                provenance: ContractProvenance::ComponentMetaOutput,
+            },
+            PublicSlot {
+                name: Arc::from("default"),
+                optional: false,
+                input: PublicSlotInput {
+                    bindings: Arc::from([]),
+                },
+                return_type: None,
+                exactness: ContractExactness::Exact,
+                degradation: Arc::from([]),
+                provenance: ContractProvenance::ComponentMetaOutput,
+            },
+        ]),
+    }));
+
+    let analysis = super::nav_features::child_contract_completion_analysis(contract)
+        .expect("supported child contract must adapt");
+    let template = analysis.template.expect("template projection");
+    assert_eq!(
+        template
+            .emit_definitions
+            .iter()
+            .map(|event| event.event_name.as_str())
+            .collect::<Vec<_>>(),
+        ["pick", "close"]
+    );
+    assert!(template
+        .emit_definitions
+        .iter()
+        .all(|event| event.is_declared
+            && event.emit_locations.is_empty()
+            && event.span.is_empty()));
+    assert_eq!(
+        template
+            .defined_slots
+            .iter()
+            .map(|slot| slot.name.as_str())
+            .collect::<Vec<_>>(),
+        ["header", "default"]
+    );
+    assert!(template.defined_slots[0].has_bindings);
+    assert_eq!(template.defined_slots[0].binding_names, ["item"]);
+    assert_eq!(template.defined_slots[0].binding_expressions, [""]);
+    assert!(template.defined_slots[0]
+        .binding_value_spans
+        .iter()
+        .all(verter_span::Span::is_empty));
+    assert!(!template.defined_slots[1].has_bindings);
+    assert!(template
+        .defined_slots
+        .iter()
+        .all(|slot| { !slot.has_fallback_content && slot.span.is_empty() }));
+}
+
 // ── synthetic store-backed workspace roots ────────────────────────────────
 //
 // Several tests below drive the real `CarrierPublishCoordinator` over the on-disk
@@ -2208,6 +2336,22 @@ fn workspace_uri(workspace_id: &str, relative_path: &str) -> Uri {
     crate::uri::path_to_file_uri(&format!("{workspace_id}/{relative_path}")).expect("file uri")
 }
 
+async fn settle_child_contracts(
+    server: &VerterLanguageServer,
+    parent_uri: &Uri,
+    workspace_id: &str,
+    child_paths: &[&str],
+) {
+    server.publish_import_dependencies_settled(parent_uri).await;
+    for child_path in child_paths {
+        let child_id = format!("{workspace_id}/{child_path}");
+        assert!(
+            server.cached_child_public_contract(&child_id).is_some(),
+            "background import publication must commit `{child_path}` before the request boundary"
+        );
+    }
+}
+
 fn find_document_position(
     server: &VerterLanguageServer,
     uri: &Uri,
@@ -3348,11 +3492,11 @@ fn did_open_startup_policy_enables_sync_for_tsgo_and_tsserver() {
 }
 
 #[test]
-fn did_open_startup_policy_skips_sync_for_no_provider() {
+fn did_open_startup_policy_publishes_child_contracts_without_a_provider() {
     let none = did_open_startup_policy(crate::TypeProviderKind::None);
     assert!(
-        !none.sync_imported_carrier_apis,
-        "no type provider should not eagerly sync imported .vue files"
+        none.sync_imported_carrier_apis,
+        "provider-neutral child contracts must be published even without an external type provider"
     );
     assert!(
         !none.publish_diagnostics,
@@ -4514,9 +4658,9 @@ async fn provider_only_completion_mode_emits_no_verter_native_items() {
     install_test_resolver(server);
     server.set_provider_only_completions_for_test(true);
 
-    let source = "<script setup lang=\"ts\">\nconst localValue = 1\n</script>\n<template><div>{{  }}</div></template>\n";
+    let source = "<script setup lang=\"ts\">\nconst localValue = 1\n</script>\n<template><div>{{ local }}</div></template>\n";
     let uri = open_test_vue(server, "/workspace/src/ProviderOnly.vue", source);
-    let position = find_document_position(server, &uri, "{{  }}", "{{ ".len());
+    let position = find_document_position(server, &uri, "{{ local }}", "{{ local".len());
     set_type_completions_at_vue_position(
         server,
         &provider,
@@ -4530,6 +4674,10 @@ async fn provider_only_completion_mode_emits_no_verter_native_items() {
             mock_completion(
                 "AbortController",
                 crate::type_provider::protocol::CompletionKind::Class,
+            ),
+            mock_completion(
+                "localValueGenerated",
+                crate::type_provider::protocol::CompletionKind::Variable,
             ),
         ],
     );
@@ -5511,7 +5659,7 @@ async fn completion_resolves_barrel_reexport_props_via_index_file() {
             "<script setup lang=\"ts\">\ndefineProps<{ label: string; zIndex?: number }>()\n</script>\n";
     let barrel_source = "export { default as BarrelComp } from './BarrelComp.vue'\n";
     let parent_source = "<script setup lang=\"ts\">\nimport { BarrelComp } from './components'\n</script>\n<template>\n  <BarrelComp  />\n</template>\n";
-    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+    let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
         ("src/components/BarrelComp.vue", "vue", child_source),
         ("src/components/index.ts", "typescript", barrel_source),
         ("src/App.vue", "vue", parent_source),
@@ -5520,6 +5668,7 @@ async fn completion_resolves_barrel_reexport_props_via_index_file() {
 
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
     let server = service.inner();
+    server.publish_import_dependencies_settled(&app_uri).await;
 
     // Cursor at `<BarrelComp |/>` — in attribute position
     let cursor_pos = parent_source.find("<BarrelComp ").unwrap() + "<BarrelComp ".len();
@@ -5547,6 +5696,34 @@ async fn completion_resolves_barrel_reexport_props_via_index_file() {
     assert!(
         !labels.iter().any(|l| l.contains("___VERTER___")),
         "internal symbols must not leak: {labels:?}"
+    );
+
+    // The attribution-only E2E rail must still reach the already-synchronized
+    // provider when the optional native barrel-contract cache is cold. Normal
+    // product requests remain cache-only and fail closed on this miss.
+    server.evict_barrel_component_route_for_test(
+        &format!("{workspace_id}/src/App.vue"),
+        "BarrelComp",
+    );
+    server.set_provider_only_completions_for_test(true);
+    let provider_queries_before = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetCompletions { .. }))
+        .count();
+    let _ = server
+        .completion(completion_params(&app_uri, position, None))
+        .await
+        .expect("provider-only completion should remain queryable on a native cache miss");
+    let provider_queries_after = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetCompletions { .. }))
+        .count();
+    assert_eq!(
+        provider_queries_after,
+        provider_queries_before + 1,
+        "a native barrel-contract miss must not short-circuit the provider-attribution rail"
     );
 
     drain_handle.abort();
@@ -5638,6 +5815,7 @@ async fn completion_does_not_cold_load_children_for_native_enrichment() {
 
         let app_uri = workspace_uri(&workspace_id, &parent_path);
         let server = service.inner();
+        let app_canonical = format!("{workspace_id}/{parent_path}");
         let child_canonical = format!("{workspace_id}/{child_path}");
         let _ = server.documents.did_open(&TextDocumentItem {
             uri: app_uri.clone(),
@@ -5645,9 +5823,12 @@ async fn completion_does_not_cold_load_children_for_native_enrichment() {
             version: 1,
             text: case.incomplete_parent_source.to_string(),
         });
-        // Parent compilation may warm imports proactively. Evict the dependency
-        // after the parent is analyzed so completion itself must exercise the
-        // direct-import `ensure_loaded` branch from a genuine cold host state.
+        // Parent compilation may warm imports proactively. Hold the existing
+        // publication lane while evicting so the approved detached self-heal
+        // cannot win the post-request assertion; this test measures foreground
+        // request behavior, while dedicated publication tests cover recovery.
+        let publication_lane = server.import_sync.lock_for(&app_canonical);
+        let publication_guard = publication_lane.lock().await;
         server.documents.host().evict(&child_canonical);
         assert!(
             server
@@ -5688,6 +5869,7 @@ async fn completion_does_not_cold_load_children_for_native_enrichment() {
             case.name
         );
 
+        drop(publication_guard);
         drain_handle.abort();
         drop(service);
     }
@@ -5728,7 +5910,7 @@ async fn svelte_completion_uses_declared_public_prop_keys_not_local_bindings() {
         ),
     ];
     let parent_source =
-        "<script>\nimport DirectComp from './DirectComp.svelte';\n</script>\n<DirectComp ";
+        "<script>\nimport DirectComp from './DirectComp.svelte';\n</script>\n<DirectComp un />";
 
     for (name, child_source, expected, forbidden) in cases {
         let (_temp, service, drain_handle, _provider, workspace_id) =
@@ -5737,13 +5919,29 @@ async fn svelte_completion_uses_declared_public_prop_keys_not_local_bindings() {
                 ("src/App.svelte", "svelte", parent_source),
             ])
             .await;
+        let server = service.inner();
         let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+        settle_child_contracts(server, &app_uri, &workspace_id, &["src/DirectComp.svelte"]).await;
+        let child_id = format!("{workspace_id}/src/DirectComp.svelte");
+        let contract = server
+            .cached_child_public_contract(&child_id)
+            .expect("settled child contract");
+        assert!(
+            matches!(
+                contract,
+                verter_session::framework::ComponentContractAvailability::Supported(_)
+            ),
+            "{name}: settled child contract must be supported, got {contract:?}"
+        );
+        let cursor = parent_source
+            .find("<DirectComp un")
+            .expect("component attribute")
+            + "<DirectComp un".len();
         let position = LineIndex::new_utf16(parent_source)
-            .offset_to_position(parent_source.len() as u32)
+            .offset_to_position(cursor as u32)
             .expect("completion position");
         let labels = completion_labels(
-            service
-                .inner()
+            server
                 .completion(completion_params(&app_uri, position, None))
                 .await
                 .expect("completion request should succeed"),
@@ -5826,6 +6024,7 @@ async fn concurrent_stable_completions_do_not_cancel_each_other() {
     .await;
     let server = service.inner();
     let uri = workspace_uri(&workspace_id, "src/Corpus1.vue");
+    settle_child_contracts(server, &uri, &workspace_id, &["src/CorpusChild.vue"]).await;
     let cursor = parent_source.find("<CorpusChild ").unwrap() + "<CorpusChild ".len();
     let position = LineIndex::new_utf16(parent_source)
         .offset_to_position(cursor as u32)
@@ -5921,7 +6120,35 @@ async fn completion_holds_for_in_flight_open_vue_ts_legacy_lane() {
         Some(&format!("{workspace_id}/tsconfig.json")),
     );
 
+    let app_id = format!("{workspace_id}/src/App.vue");
+    host.upsert(UpsertRequest {
+        canonical_id: Some(app_id),
+        input_id: format!("{workspace_id}/src/App.vue"),
+        source: parent_source.into(),
+        file_language: FileLanguage::vue(),
+        aliases: Vec::new(),
+    })
+    .expect("seed parent host source without registering the document");
+    let warm_uri = workspace_uri(&workspace_id, "src/Warm.vue");
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: warm_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: parent_source.to_string(),
+    });
+    settle_child_contracts(server, &warm_uri, &workspace_id, &["src/DirectComp.vue"]).await;
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    assert!(
+        server.documents.get(&app_uri).is_none(),
+        "the registration-race fixture must start before parent registration"
+    );
+    assert!(
+        server
+            .cached_child_public_contract(&format!("{workspace_id}/src/DirectComp.vue"))
+            .is_some(),
+        "the registration-race fixture must settle its child contract before the latch"
+    );
+
     // The document is NOT open yet — the completion races the did_open.
     let cursor_pos = parent_source.find("<DirectComp ").unwrap() + "<DirectComp ".len();
     let line_index = LineIndex::new_utf16(parent_source);
@@ -6176,6 +6403,13 @@ async fn unrelated_document_completion_does_not_wait_for_blocked_provider_update
     let server = service.inner();
     let editing_uri = workspace_uri(&workspace_id, "src/Editing.vue");
     let independent_uri = workspace_uri(&workspace_id, "src/Independent.vue");
+    settle_child_contracts(
+        server,
+        &independent_uri,
+        &workspace_id,
+        &["src/IndependentChild.vue"],
+    )
+    .await;
     server.ensure_current_file_synced(&editing_uri).await;
     let editing_ide_path = server
         .active_ide_path_for_uri(&editing_uri)
@@ -6535,6 +6769,7 @@ async fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_u
     let blocker_v2 = "<script setup lang=\"ts\">const blocker = 2</script>\n";
     let target_v1 = "<script setup lang=\"ts\">\nimport OldChild from './OldChild.vue'\n</script>\n<template><OldChild  /></template>\n";
     let target_v2 = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild  /></template>\n";
+    let warm_source = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild /></template>\n";
     let (_temp, service, drain_handle, provider, workspace_id) =
         make_definition_test_server_with_kind(
             &[
@@ -6550,6 +6785,7 @@ async fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_u
                     "<script setup lang=\"ts\">defineProps<{ currentProp: string }>()</script>",
                 ),
                 ("src/Target.vue", "vue", target_v1),
+                ("src/Warm.vue", "vue", warm_source),
             ],
             crate::TypeProviderKind::Tsgo,
         )
@@ -6557,6 +6793,8 @@ async fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_u
     let server = service.inner();
     let blocker_uri = workspace_uri(&workspace_id, "src/Blocker.vue");
     let target_uri = workspace_uri(&workspace_id, "src/Target.vue");
+    let warm_uri = workspace_uri(&workspace_id, "src/Warm.vue");
+    settle_child_contracts(server, &warm_uri, &workspace_id, &["src/NewChild.vue"]).await;
     server.ensure_current_file_synced(&blocker_uri).await;
     let blocker_ide_path = server
         .active_ide_path_for_uri(&blocker_uri)
@@ -6605,6 +6843,8 @@ async fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_u
             .await
             .expect("unrelated target commit must not wait for blocker provider publication");
 
+            settle_child_contracts(server, &target_uri, &workspace_id, &["src/NewChild.vue"]).await;
+
             let cursor = target_v2.find("<NewChild ").unwrap() + "<NewChild ".len();
             let position = LineIndex::new_utf16(target_v2)
                 .offset_to_position(cursor as u32)
@@ -6644,18 +6884,28 @@ async fn completion_recomputes_native_props_when_document_version_advances_durin
         "<script setup lang=\"ts\">\ndefineProps<{ currentV2Prop: string }>()\n</script>\n";
     let v1_source = "<script setup lang=\"ts\">\nimport OldChild from './OldChild.vue'\n</script>\n<template><OldChild  /></template>\n";
     let v2_source = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild  /></template>\n";
+    let warm_source = "<script setup lang=\"ts\">\nimport OldChild from './OldChild.vue'\nimport NewChild from './NewChild.vue'\n</script>\n<template><OldChild /><NewChild /></template>\n";
     let (_temp, service, drain_handle, provider, workspace_id) =
         make_definition_test_server_with_kind(
             &[
                 ("src/OldChild.vue", "vue", old_child),
                 ("src/NewChild.vue", "vue", new_child),
                 ("src/App.vue", "vue", v1_source),
+                ("src/Warm.vue", "vue", warm_source),
             ],
             crate::TypeProviderKind::Tsgo,
         )
         .await;
     let server = service.inner();
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let warm_uri = workspace_uri(&workspace_id, "src/Warm.vue");
+    settle_child_contracts(
+        server,
+        &warm_uri,
+        &workspace_id,
+        &["src/OldChild.vue", "src/NewChild.vue"],
+    )
+    .await;
 
     server.ensure_current_file_synced(&app_uri).await;
     let ide_path = server
@@ -6675,6 +6925,7 @@ async fn completion_recomputes_native_props_when_document_version_advances_durin
             result.changed,
             "v2 must commit while the v1 query is suspended"
         );
+        settle_child_contracts(server, &app_uri, &workspace_id, &["src/NewChild.vue"]).await;
         query_release.notify_one();
     };
     let (completion_result, ()) = futures_util::future::join(completion, edit).await;
@@ -6706,6 +6957,7 @@ async fn completion_final_native_retry_waits_for_commit_fence_and_returns_curren
     let v2 = source("V2Child");
     let v3 = source("V3Child");
     let v4 = source("V4Child");
+    let warm_source = "<script setup lang=\"ts\">\nimport V1 from './V1Child.vue'\nimport V2 from './V2Child.vue'\nimport V3 from './V3Child.vue'\nimport V4 from './V4Child.vue'\n</script>\n<template><V1 /><V2 /><V3 /><V4 /></template>\n";
     let v1_child = child("vOneProp");
     let v2_child = child("vTwoProp");
     let v3_child = child("vThreeProp");
@@ -6718,12 +6970,26 @@ async fn completion_final_native_retry_waits_for_commit_fence_and_returns_curren
                 ("src/V3Child.vue", "vue", &v3_child),
                 ("src/V4Child.vue", "vue", &v4_child),
                 ("src/App.vue", "vue", &v1),
+                ("src/Warm.vue", "vue", warm_source),
             ],
             crate::TypeProviderKind::Tsgo,
         )
         .await;
     let server = service.inner();
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let warm_uri = workspace_uri(&workspace_id, "src/Warm.vue");
+    settle_child_contracts(
+        server,
+        &warm_uri,
+        &workspace_id,
+        &[
+            "src/V1Child.vue",
+            "src/V2Child.vue",
+            "src/V3Child.vue",
+            "src/V4Child.vue",
+        ],
+    )
+    .await;
     let (first_arrived, first_release) = server.pause_next_completion_after_snapshot();
     let (second_arrived, second_release) = server.pause_next_completion_after_snapshot();
     let (final_arrived, final_release) = server.pause_completion_before_final_native();
@@ -6736,10 +7002,12 @@ async fn completion_final_native_retry_waits_for_commit_fence_and_returns_curren
     let advance = async {
         first_arrived.notified().await;
         assert!(server.documents.did_change(&app_uri, 2, &v2).changed);
+        settle_child_contracts(server, &app_uri, &workspace_id, &["src/V2Child.vue"]).await;
         first_release.notify_one();
 
         second_arrived.notified().await;
         assert!(server.documents.did_change(&app_uri, 3, &v3).changed);
+        settle_child_contracts(server, &app_uri, &workspace_id, &["src/V3Child.vue"]).await;
         second_release.notify_one();
 
         final_arrived.notified().await;
@@ -6747,6 +7015,7 @@ async fn completion_final_native_retry_waits_for_commit_fence_and_returns_curren
         final_release.notify_one();
         tokio::task::yield_now().await;
         assert!(server.documents.did_change(&app_uri, 4, &v4).changed);
+        settle_child_contracts(server, &app_uri, &workspace_id, &["src/V4Child.vue"]).await;
         drop(final_fence);
     };
     let (completion_result, ()) = futures_util::future::join(completion, advance).await;
@@ -6780,6 +7049,7 @@ async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
     let v2 = source("V2Child");
     let v3 = source("V3Child");
     let reopened = source("ReChild");
+    let warm_source = "<script setup lang=\"ts\">\nimport V1 from './V1Child.vue'\nimport V2 from './V2Child.vue'\nimport V3 from './V3Child.vue'\nimport Re from './ReChild.vue'\n</script>\n<template><V1 /><V2 /><V3 /><Re /></template>\n";
     let v1_child = child("vOneProp");
     let v2_child = child("vTwoProp");
     let v3_child = child("beforeCloseProp");
@@ -6792,12 +7062,26 @@ async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
                 ("src/V3Child.vue", "vue", &v3_child),
                 ("src/ReChild.vue", "vue", &reopened_child),
                 ("src/App.vue", "vue", &v1),
+                ("src/Warm.vue", "vue", warm_source),
             ],
             crate::TypeProviderKind::Tsgo,
         )
         .await;
     let server = service.inner();
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let warm_uri = workspace_uri(&workspace_id, "src/Warm.vue");
+    settle_child_contracts(
+        server,
+        &warm_uri,
+        &workspace_id,
+        &[
+            "src/V1Child.vue",
+            "src/V2Child.vue",
+            "src/V3Child.vue",
+            "src/ReChild.vue",
+        ],
+    )
+    .await;
     server.ensure_current_file_synced(&app_uri).await;
     let ide_path = server
         .active_ide_path_for_uri(&app_uri)
@@ -6816,10 +7100,12 @@ async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
     let replace_document = async {
         first_arrived.notified().await;
         assert!(server.documents.did_change(&app_uri, 2, &v2).changed);
+        settle_child_contracts(server, &app_uri, &workspace_id, &["src/V2Child.vue"]).await;
         first_release.notify_one();
 
         second_arrived.notified().await;
         assert!(server.documents.did_change(&app_uri, 3, &v3).changed);
+        settle_child_contracts(server, &app_uri, &workspace_id, &["src/V3Child.vue"]).await;
         second_release.notify_one();
 
         final_snapshot_arrived.notified().await;
@@ -6868,6 +7154,7 @@ async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
             },
         )
         .await;
+        settle_child_contracts(server, &app_uri, &workspace_id, &["src/ReChild.vue"]).await;
     };
     let (completion_result, ()) = futures_util::future::join(completion, replace_document).await;
     let before_close_labels =
@@ -6907,18 +7194,28 @@ async fn completion_retries_when_same_uri_reopens_with_reused_document_version()
     let new_child = "<script setup lang=\"ts\">defineProps<{ newOpenProp: string }>()</script>";
     let old_source = "<script setup lang=\"ts\">\nimport Child from './OldChild.vue'\n</script>\n<template><Child  /></template>\n";
     let new_source = "<script setup lang=\"ts\">\nimport Child from './NewChild.vue'\n</script>\n<template><Child  /></template>\n";
+    let warm_source = "<script setup lang=\"ts\">\nimport OldChild from './OldChild.vue'\nimport NewChild from './NewChild.vue'\n</script>\n<template><OldChild /><NewChild /></template>\n";
     let (_temp, service, drain_handle, provider, workspace_id) =
         make_definition_test_server_with_kind(
             &[
                 ("src/OldChild.vue", "vue", old_child),
                 ("src/NewChild.vue", "vue", new_child),
                 ("src/App.vue", "vue", old_source),
+                ("src/Warm.vue", "vue", warm_source),
             ],
             crate::TypeProviderKind::Tsgo,
         )
         .await;
     let server = service.inner();
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let warm_uri = workspace_uri(&workspace_id, "src/Warm.vue");
+    settle_child_contracts(
+        server,
+        &warm_uri,
+        &workspace_id,
+        &["src/OldChild.vue", "src/NewChild.vue"],
+    )
+    .await;
     server.ensure_current_file_synced(&app_uri).await;
     let ide_path = server
         .active_ide_path_for_uri(&app_uri)
@@ -6939,6 +7236,7 @@ async fn completion_retries_when_same_uri_reopens_with_reused_document_version()
             version: 1,
             text: new_source.to_string(),
         });
+        settle_child_contracts(server, &app_uri, &workspace_id, &["src/NewChild.vue"]).await;
         query_release.notify_one();
     };
     let (completion_result, ()) = futures_util::future::join(completion, reopen).await;
@@ -6969,6 +7267,7 @@ async fn paired_svelte_component_attribute_completion_returns_child_props() {
     .await;
     let server = service.inner();
     let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    settle_child_contracts(server, &app_uri, &workspace_id, &["src/Child.svelte"]).await;
     let cursor = parent_source.find("<Child ").unwrap() + "<Child ".len();
     let position = LineIndex::new_utf16(parent_source)
         .offset_to_position(cursor as u32)
@@ -7003,6 +7302,7 @@ async fn d5_complete_labels(files: &[(&str, &str, &str)], doc: &str, needle: &st
         make_definition_test_server(files).await;
     let server = service.inner();
     let uri = workspace_uri(&workspace_id, doc);
+    server.publish_import_dependencies_settled(&uri).await;
     let source = files
         .iter()
         .find(|(path, _, _)| path == &doc)
@@ -7066,6 +7366,7 @@ async fn contract_slot_name_completion_filters_already_used_slots() {
     .await;
     let server = service.inner();
     let uri = workspace_uri(&workspace_id, "src/App.vue");
+    settle_child_contracts(server, &uri, &workspace_id, &["src/MyComp.vue"]).await;
     let cursor = parent_source.rfind("<template #").unwrap() + "<template #".len();
     let position = LineIndex::new_utf16(parent_source)
         .offset_to_position(cursor as u32)
@@ -7092,18 +7393,90 @@ async fn contract_slot_name_completion_filters_already_used_slots() {
 
 #[tokio::test]
 async fn contract_svelte_snippet_slot_completion_offers_child_snippet_props() {
-    let child_source = "<script lang=\"ts\">\n  let { label, header, children }: {\n    label: string;\n    header?: import(\"svelte\").Snippet<[{ title: string }]>;\n    children?: import(\"svelte\").Snippet<[{ body: string }]>;\n  } = $props();\n</script>\n<span>{label}</span>\n{#if header}<header>{@render header({ title: \"t\" })}</header>{/if}\n{#if children}<main>{@render children({ body: \"b\" })}</main>{/if}\n";
+    let child_source = "<script setup lang=\"ts\">\ndefineProps<{ label: string }>()\ndefineSlots<{ header(props: { title: string }): any; default(): any }>()\n</script>\n<template><slot name=\"header\" title=\"t\" /><slot /></template>\n";
     let parent_source = "<script lang=\"ts\">\n  import IdeSurfaceChild from './IdeSurfaceChild.svelte';\n</script>\n<IdeSurfaceChild>\n  {#snippet \n</IdeSurfaceChild>\n";
-    let labels = d5_complete_labels(
-        &[
-            ("src/IdeSurfaceChild.svelte", "svelte", child_source),
-            ("src/App.svelte", "svelte", parent_source),
-        ],
-        "src/App.svelte",
-        "{#snippet ",
-    )
-    .await;
-    for expected in ["header", "children"] {
+    let parent_source = parent_source.replace("./IdeSurfaceChild.svelte", "./IdeSurfaceChild.vue");
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &[
+                ("src/IdeSurfaceChild.vue", "vue", child_source),
+                ("src/App.svelte", "svelte", parent_source.as_str()),
+            ],
+            crate::TypeProviderKind::None,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                metrics_enabled: true,
+                ..HostConfig::default()
+            },
+            false,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let child_uri = workspace_uri(&workspace_id, "src/IdeSurfaceChild.vue");
+    let child_id = format!("{workspace_id}/src/IdeSurfaceChild.vue");
+    server.documents.did_close(&child_uri);
+    server.publish_import_dependencies_settled(&app_uri).await;
+    let contract = server
+        .cached_child_public_contract(&child_id)
+        .expect("background child contract");
+    let verter_session::framework::ComponentContractAvailability::Supported(contract) = &contract
+    else {
+        panic!("Svelte fixture must publish a supported contract: {contract:?}")
+    };
+    assert!(
+        contract
+            .slots
+            .iter()
+            .any(|slot| slot.name.as_ref() == "header"),
+        "the public contract must own the header slot: {contract:?}"
+    );
+    assert!(server
+        .documents
+        .cached_semantic_analysis(&child_id)
+        .is_none());
+    let parent_analysis = server
+        .documents
+        .source_feature_analysis(&app_uri)
+        .expect("parent source-feature analysis");
+    assert!(
+        parent_analysis.imports.iter().any(|import| {
+            import.source == "./IdeSurfaceChild.vue"
+                && import
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.name == "IdeSurfaceChild")
+        }),
+        "parent imports: {:?}",
+        parent_analysis.imports
+    );
+    assert!(
+        parent_analysis.template.is_none(),
+        "the regression requires parser-owned ancestry without a parent template snapshot: {:?}",
+        parent_analysis.template
+    );
+
+    let cursor = parent_source.find("{#snippet ").unwrap() + "{#snippet ".len();
+    let position = LineIndex::new_utf16(&parent_source)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+    let metrics_before = server.documents.host().metrics_snapshot();
+    let provenance_before = server.documents.host().provenance_snapshot();
+    let projections_before = server.child_public_contract_projection_count_for_test();
+    let provider_calls_before = provider.file_sync_calls().len();
+    let workspace = server
+        .vfs_workspace
+        .read()
+        .clone()
+        .expect("published workspace");
+    let reads_before = workspace.vfs_provenance_snapshot();
+    let labels = completion_labels(
+        server
+            .completion(completion_params(&app_uri, position, None))
+            .await
+            .expect("completion succeeds"),
+    );
+    for expected in ["header", "default"] {
         assert!(
             labels.contains(&expected.to_string()),
             "`{{#snippet |` must offer the child's snippet prop {expected}, got: {labels:?}"
@@ -7113,6 +7486,36 @@ async fn contract_svelte_snippet_slot_completion_offers_child_snippet_props() {
         !labels.contains(&"label".to_string()),
         "non-snippet props must not be offered, got: {labels:?}"
     );
+    let metrics_after = server.documents.host().metrics_snapshot();
+    let provenance_after = server.documents.host().provenance_snapshot();
+    let reads_after = workspace.vfs_provenance_snapshot();
+    assert_eq!(
+        provenance_after.get_analysis_calls,
+        provenance_before.get_analysis_calls
+    );
+    assert_eq!(
+        metrics_after.compile_requests,
+        metrics_before.compile_requests
+    );
+    assert_eq!(
+        server.child_public_contract_projection_count_for_test(),
+        projections_before
+    );
+    assert_eq!(provider.file_sync_calls().len(), provider_calls_before);
+    assert_eq!(
+        (
+            reads_after.native_fs_read_file_miss_count,
+            reads_after.native_fs_read_dir_count,
+            reads_after.resolution_evidence_live_read_count,
+        ),
+        (
+            reads_before.native_fs_read_file_miss_count,
+            reads_before.native_fs_read_dir_count,
+            reads_before.resolution_evidence_live_read_count,
+        )
+    );
+    drain_handle.abort();
+    drop(service);
 }
 
 #[tokio::test]
@@ -8907,6 +9310,10 @@ async fn contract_kebab_prop_rename_refuses_when_a_second_parent_is_unproven() {
 /// rename leg must still classify as the current carrier and re-anchor to the
 /// AUTHORED request URI — never echo the provider's folded path as a second
 /// URI (clients key edits case-sensitively and silently drop them).
+// A fully case-folded path is the same file only on a case-insensitive host.
+// On Linux it may name a distinct real file, so accepting it there would make
+// rename fail open and edit the wrong source.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 #[tokio::test]
 async fn contract_rename_provider_case_folded_carrier_path_reanchors_to_authored_uri() {
     let app_source = "<script setup lang=\"ts\">\nconst vueTsTitle: string = \"x\"\n</script>\n<template><section>{{ vueTsTitle }}</section></template>\n";
@@ -9257,6 +9664,1924 @@ async fn svelte_js_render_call_name_navigates_to_snippet_name_range_exact() {
         "rowSnippet",
     )
     .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_render_cross_clause_and_shadow_bindings_preserve_provider_definition() {
+    for (_label, source) in [
+        (
+            "an else branch cannot capture a snippet declared in the main branch",
+            "<script>const providerTarget = 1;</script>{#if true}{#snippet row()}{/snippet}{:else}{@render row()}{/if}",
+        ),
+        (
+            "an each binding shadows an outer snippet",
+            "<script>const providerTarget = 1;</script>{#snippet row()}{/snippet}{#each [] as row}{@render row()}{/each}",
+        ),
+    ] {
+        let (_temp, service, drain_handle, provider, workspace_id) =
+            make_svelte_definition_server(&[("src/App.svelte", source)]).await;
+        let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+        assert_svelte_same_file_definition(
+            service.inner(),
+            &provider,
+            &app_uri,
+            ("@render row", 8),
+            "providerTarget",
+        )
+        .await;
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+#[tokio::test]
+async fn svelte_ambiguous_local_render_snippets_preserve_provider_definition() {
+    let source = "<script>const providerTarget = 1;</script>{#snippet row()}{/snippet}{#snippet row()}{/snippet}{@render row()}";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", source)]).await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let document = server
+        .documents
+        .get(&app_uri)
+        .expect("open Svelte document");
+    let offset = document
+        .line_index
+        .position_to_offset(&find_document_position(server, &app_uri, "@render row", 8))
+        .expect("render callee offset");
+    let visibility = document.feature_snapshot.as_ref().and_then(|snapshot| {
+        crate::documents::carrier_structure::svelte_render_lexical_visibility_at(
+            snapshot.structure(),
+            offset,
+        )
+    });
+    assert_eq!(
+        visibility,
+        Some(crate::documents::carrier_structure::SvelteRenderLexicalVisibility::Ambiguous),
+        "the planted-provider control must exercise a genuinely ambiguous authored scope"
+    );
+    drop(document);
+
+    assert_svelte_same_file_definition(
+        server,
+        &provider,
+        &app_uri,
+        ("@render row", 8),
+        "providerTarget",
+    )
+    .await;
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_non_direct_prop_render_tokens_preserve_provider_definition() {
+    for (_label, source, query) in [
+        (
+            "member callee",
+            "<script>\nconst providerTarget = 1;\n/** @type {{ children?: () => void }} */\nlet { children } = $props();\nconst obj = { children };\n</script>\n{@render obj.children()}",
+            ("obj.children", 5),
+        ),
+        (
+            "render argument",
+            "<script>\nconst providerTarget = 1;\n/** @type {{ children?: () => void }} */\nlet { children } = $props();\nconst other = (value) => value;\n</script>\n{@render other(children)}",
+            ("other(children)", 7),
+        ),
+    ] {
+        let (_temp, service, drain_handle, provider, workspace_id) =
+            make_svelte_definition_server(&[("src/App.svelte", source)]).await;
+        let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+        assert_svelte_same_file_definition(
+            service.inner(),
+            &provider,
+            &app_uri,
+            query,
+            "providerTarget",
+        )
+        .await;
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+#[tokio::test]
+async fn svelte_shadowed_script_prop_render_preserves_provider_definition() {
+    for (_label, source) in [
+        (
+            "each item",
+            "<script lang=\"ts\">\nimport type { Snippet } from 'svelte';\nconst providerTarget = 1;\ninterface Props { row?: Snippet }\nlet { row }: Props = $props();\n</script>\n{#each [] as row}{@render row()}{/each}",
+        ),
+        (
+            "await binding",
+            "<script>\nconst providerTarget = 1;\n/** @type {{ row?: () => void }} */\nlet { row } = $props();\nconst promise = Promise.resolve(() => {});\n</script>\n{#await promise then row}{@render row()}{/await}",
+        ),
+        (
+            "snippet parameter",
+            "<script>\nconst providerTarget = 1;\n/** @type {{ row?: () => void }} */\nlet { row } = $props();\n</script>\n{#snippet wrapper(row)}{@render row()}{/snippet}",
+        ),
+    ] {
+        let (_temp, service, drain_handle, provider, workspace_id) =
+            make_svelte_definition_server(&[("src/App.svelte", source)]).await;
+        let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+        assert_svelte_same_file_definition(
+            service.inner(),
+            &provider,
+            &app_uri,
+            ("@render row", 8),
+            "providerTarget",
+        )
+        .await;
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+#[tokio::test]
+async fn svelte_recovered_script_prop_facts_fail_closed_to_provider() {
+    let initial = "<script lang=\"ts\">\nconst providerTarget = 1;\nlet { row } = $props();\nvoid 0;\n</script>\n{@render row()}";
+    let changed = initial.replace("void 0;", "return;");
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_default_profile_definition_test_server(&[("src/App.svelte", "svelte", initial)]).await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let canonical_id = server
+        .documents
+        .get_canonical_id(&app_uri)
+        .expect("open canonical id");
+    let profile = server.documents.tsx_profile.read().clone();
+    let initial_ide = server
+        .documents
+        .host()
+        .get_ide(&canonical_id, &profile)
+        .expect("initial IDE surface");
+    assert!(server.documents.did_change(&app_uri, 2, &changed).changed);
+    let evidence = server
+        .documents
+        .host()
+        .resolve_svelte_script_facts(&canonical_id);
+    let verter_session::framework::script_facts::ScriptFactEvidence::Partial(partial) = evidence
+    else {
+        panic!("recoverable script must expose partial facts");
+    };
+    assert!(
+        partial.exact_syntax().is_none(),
+        "recovered syntax must not mint absence-sensitive `$props` authority"
+    );
+
+    let position = find_document_position(server, &app_uri, "@render row", 8);
+    let mut state = server
+        .provider_sync_state_for_source(&canonical_id)
+        .unwrap_or_else(|| ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ..Default::default()
+        });
+    let ide_path = server
+        .target_ide_path_for_uri(&app_uri)
+        .expect("Svelte IDE path");
+    state.ide_path = Some(ide_path.clone());
+    state.ide_background_loaded = true;
+    server.commit_provider_sync_state(&canonical_id, state);
+    let revision = server
+        .documents
+        .snapshot_identity(&app_uri)
+        .expect("current edited identity");
+    server.record_carrier_ide_snapshot_with_pin(
+        Some((&app_uri, &revision)),
+        &canonical_id,
+        &ide_path,
+        &initial_ide.code,
+        initial_ide.source_map.as_deref(),
+    );
+    let ctx = server
+        .type_provider_context(&app_uri)
+        .expect("current provider surface without foreground compile");
+    let query_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("render callee must map into the retained provider surface");
+    let target_range = range_for_authored_snippet(server, &app_uri, "providerTarget");
+    let target_offset = merge::carrier_position_to_tsx_offset_validated(
+        &target_range.start,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("provider target must map into the retained provider surface");
+    provider.set_definitions(
+        &ctx.tsx_path,
+        query_offset,
+        vec![TypeLocation {
+            path: ctx.tsx_path.clone(),
+            start: target_offset,
+            end: target_offset + "providerTarget".len() as u32,
+        }],
+    );
+
+    let response = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await
+        .expect("goto definition request")
+        .expect("provider definition");
+    let locations = definition_locations(response);
+    assert!(
+        locations
+            .iter()
+            .any(|location| location.uri == app_uri && location.range == target_range),
+        "recovered facts must preserve the planted provider target: {locations:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_js_render_definition_survives_change_before_template_analysis_rebuild() {
+    let initial = "<script>\n  let item = 'x';\n  /** @type {{ rowSnippet?: () => void }} */\n  let { rowSnippet } = $props();\n</script>\n{#snippet rowSnippet(thing)}\n  <li>{thing}</li>\n{/snippet}\n<ul>{@render rowSnippet(item)}</ul>\n";
+    let changed = "<script>\n  let item = 'y';\n  /** @type {{ rowSnippet?: () => void }} */\n  let { rowSnippet } = $props();\n</script>\n{#snippet rowSnippet(thing)}\n  <li>{thing}</li>\n{/snippet}\n<ul>{@render rowSnippet(item)}</ul>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_default_profile_definition_test_server(&[("src/App.svelte", "svelte", initial)]).await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let canonical_id = server
+        .documents
+        .get_canonical_id(&app_uri)
+        .expect("open canonical id");
+    let profile = server.documents.tsx_profile.read().clone();
+    let initial_ide = server
+        .documents
+        .host()
+        .get_ide(&canonical_id, &profile)
+        .expect("initial IDE surface");
+
+    assert!(server.documents.did_change(&app_uri, 2, changed).changed);
+    assert!(
+        server
+            .documents
+            .get_analysis(&app_uri)
+            .and_then(|analysis| analysis.template)
+            .is_none(),
+        "the regression boundary is the current parser structure before template analysis rebuild"
+    );
+
+    let position = find_document_position(server, &app_uri, "@render rowSnippet", 8);
+    // Model the provider's already-open current surface without invoking the
+    // foreground IDE compile: the unrelated equal-width edit leaves this
+    // projection/mapping byte geometry intact, while BUILD/template analysis
+    // remains absent exactly as it does in the production startup window.
+    let mut state = server
+        .provider_sync_state_for_source(&canonical_id)
+        .unwrap_or_else(|| ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ..Default::default()
+        });
+    let ide_path = server
+        .target_ide_path_for_uri(&app_uri)
+        .expect("Svelte JS IDE path");
+    state.ide_path = Some(ide_path.clone());
+    state.ide_background_loaded = true;
+    server.commit_provider_sync_state(&canonical_id, state);
+    let revision = server
+        .documents
+        .snapshot_identity(&app_uri)
+        .expect("current edited identity");
+    server.record_carrier_ide_snapshot_with_pin(
+        Some((&app_uri, &revision)),
+        &canonical_id,
+        &ide_path,
+        &initial_ide.code,
+        initial_ide.source_map.as_deref(),
+    );
+    let ctx = server
+        .type_provider_context(&app_uri)
+        .expect("current provider surface without a foreground compile");
+    let query_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("render callee must map into the repaired JSX surface");
+    provider.set_definitions(
+        &ctx.tsx_path,
+        query_offset,
+        vec![TypeLocation {
+            path: format!("{workspace_id}/node_modules/svelte/index.d.ts"),
+            start: 0,
+            end: 1,
+        }],
+    );
+
+    let response = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await
+        .expect("goto definition request")
+        .expect("local snippet definition");
+    let locations = definition_locations(response);
+    let snippet_start = changed.find("{#snippet rowSnippet").unwrap() + "{#snippet ".len();
+    let changed_index = LineIndex::new_utf16(changed);
+    let expected = Range::new(
+        changed_index
+            .offset_to_position(snippet_start as u32)
+            .expect("local snippet start"),
+        changed_index
+            .offset_to_position((snippet_start + "rowSnippet".len()) as u32)
+            .expect("local snippet end"),
+    );
+    assert_eq!(
+        locations,
+        vec![Location {
+            uri: app_uri,
+            range: expected,
+        }],
+        "parser-owned local snippet authority must exclude the provider's package declaration"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_progressive_script_bindings_survive_incomplete_member_edits() {
+    for (label, language, declaration) in [
+        ("ts", " lang=\"ts\"", "  let draftLabel: string = 'x';"),
+        ("js", "", "  let draftLabel = 'x';"),
+    ] {
+        let initial =
+            format!("<script{language}>\n{declaration}\n</script>\n<p>{{draftLabel}}</p>\n");
+        let changed = initial.replace(
+            "\n</script>",
+            "\n  const childMemberCheckpoint = draftLabel.\n</script>",
+        );
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_default_profile_definition_test_server(&[(
+                "src/App.svelte",
+                "svelte",
+                initial.as_str(),
+            )])
+            .await;
+        let server = service.inner();
+        let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+
+        assert!(server.documents.did_change(&app_uri, 2, &changed).changed);
+        let position = find_document_position(
+            server,
+            &app_uri,
+            "childMemberCheckpoint = draftLabel.",
+            "childMemberCheckpoint = ".len() + 1,
+        );
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition request")
+            .unwrap_or_else(|| panic!("{label}: unchanged local binding must remain addressable"));
+        let locations = definition_locations(response);
+        assert_eq!(locations.len(), 1, "{label}: expected one authored target");
+        assert_eq!(
+            locations[0].uri, app_uri,
+            "{label}: target must stay authored"
+        );
+        assert_eq!(
+            locations[0].range.start.line,
+            line_for_snippet(&changed, "let draftLabel"),
+            "{label}: target must be the unchanged declaration"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn component_completion_cold_parent_import_converges_without_test_prewarm() {
+    // This is a convergence deadline, not a latency assertion. The canonical
+    // nextest surface runs thousands of tests concurrently, so a two-second
+    // wall-clock deadline can expire before the background publication task is
+    // scheduled even though the exact witness arrives immediately afterwards.
+    const CONVERGENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    const CHILD: &str = "<script setup lang=\"ts\">\ninterface DraftProps { title: string; unusedOnly?: boolean }\ndefineProps<DraftProps>()\n</script>\n";
+    const PARENT: &str = "<script setup lang=\"ts\">\nimport DraftCard from './DraftCard.vue'\n</script>\n<template><DraftCard :title=\"heading\" /></template>\n";
+    const PARENT_PARTIAL: &str = "<script setup lang=\"ts\">\nimport DraftCard from './DraftCard.vue'\n</script>\n<template><DraftCard :></template>\n";
+
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &[
+                ("src/DraftCard.vue", "vue", CHILD),
+                ("src/App.vue", "vue", PARENT),
+            ],
+            crate::TypeProviderKind::Tsserver,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                metrics_enabled: true,
+                ..HostConfig::default()
+            },
+            false,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_uri = workspace_uri(&workspace_id, "src/DraftCard.vue");
+    let child_id = format!("{workspace_id}/src/DraftCard.vue");
+
+    // Exercise the same lifecycle path as an editor restoring and typing into
+    // empty buffers. Open both buffers before authoring the child, so its
+    // background publication is fenced by the final workspace/resolver
+    // snapshot and the later parent content edits are the only invalidation
+    // pressure under test.
+    server.documents.did_close(&app_uri);
+    super::lifecycle::handle_did_open(
+        server,
+        DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: app_uri.clone(),
+                language_id: "vue".to_string(),
+                version: 1,
+                text: String::new(),
+            },
+        },
+    )
+    .await;
+
+    // Do not call the test-only settled publication helper: the normal
+    // post-edit background lane must publish the child's own contract before
+    // its future parent imports it.
+    server.documents.did_close(&child_uri);
+    super::lifecycle::handle_did_open(
+        server,
+        DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: child_uri.clone(),
+                language_id: "vue".to_string(),
+                version: 1,
+                text: String::new(),
+            },
+        },
+    )
+    .await;
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: child_uri,
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: CHILD.to_string(),
+            }],
+        },
+    )
+    .await;
+    tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
+        while server.cached_child_public_contract(&child_id).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("normal child edit publication must commit its future import contract");
+
+    assert!(
+        server.cached_child_public_contract(&child_id).is_some(),
+        "the committed child contract must be warm before progressive parent typing"
+    );
+
+    let mut version = 1;
+    let component_head_end =
+        PARENT.find("<DraftCard ").expect("component head") + "<DraftCard ".len();
+    let mut edit_ends = (3..PARENT.len()).step_by(3).collect::<Vec<_>>();
+    edit_ends.extend([component_head_end, PARENT.len()]);
+    edit_ends.sort_unstable();
+    edit_ends.dedup();
+    for end in edit_ends {
+        version += 1;
+        super::lifecycle::handle_did_change(
+            server,
+            DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: app_uri.clone(),
+                    version,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: PARENT[..end].to_string(),
+                }],
+            },
+        )
+        .await;
+        if end == component_head_end {
+            let position = LineIndex::new_utf16(&PARENT[..end])
+                .offset_to_position(end as u32)
+                .expect("component-head completion position");
+            let labels = completion_labels(
+                server
+                    .completion(completion_params(&app_uri, position, None))
+                    .await
+                    .expect("component-head completion request"),
+            );
+            assert!(
+                labels.contains(&"unused-only".to_string()),
+                "the first `<DraftCard ` checkpoint must consume the already committed child contract: {labels:?}"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    version += 1;
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: app_uri.clone(),
+                version,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: PARENT_PARTIAL.to_string(),
+            }],
+        },
+    )
+    .await;
+
+    let cursor = PARENT_PARTIAL.find("<DraftCard :").expect("component") + "<DraftCard :".len();
+    let position = LineIndex::new_utf16(PARENT_PARTIAL)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+    tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
+        loop {
+            let labels = completion_labels(
+                server
+                    .completion(completion_params(&app_uri, position, None))
+                    .await
+                    .expect("completion request"),
+            );
+            if labels.contains(&"unused-only".to_string()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("zero-length `:` directive head must retain child prop completion authority");
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn svelte_progressive_component_completion_uses_committed_child_contract() {
+    for (provider_label, provider_kind) in [
+        ("none", crate::TypeProviderKind::None),
+        ("tsgo", crate::TypeProviderKind::Tsgo),
+        ("tsserver", crate::TypeProviderKind::Tsserver),
+        ("editor-tsserver", crate::TypeProviderKind::EditorTsserver),
+    ] {
+        for (label, child_source, script_language) in [
+        (
+            "ts",
+            "<script lang=\"ts\">\ninterface DraftProps { title: string; unusedOnly?: boolean }\nlet { title }: DraftProps = $props();\n</script>\n<p>{title}</p>\n",
+            " lang=\"ts\"",
+        ),
+        (
+            "js",
+            "<script>\n/** @type {{ title: string, unusedOnly?: boolean }} */\nlet { title } = $props();\n</script>\n<p>{title}</p>\n",
+            "",
+        ),
+    ] {
+        for (route, import_statement, barrel_source) in [
+            ("direct", "import DraftCard from './DraftCard.svelte';", None),
+            (
+                "barrel",
+                "import { DraftCard } from './components';",
+                Some("export { default as DraftCard } from './DraftCard.svelte';\n"),
+            ),
+        ] {
+            for (child_state, close_child) in [("loaded", false), ("cold", true)] {
+                let parent_initial = format!(
+                    "<script{script_language}>\n{import_statement}\n</script>\n<p>ready</p>\n"
+                );
+                let mut files = vec![
+                    ("src/DraftCard.svelte", "svelte", child_source),
+                    ("src/App.svelte", "svelte", parent_initial.as_str()),
+                ];
+                if let Some(barrel_source) = barrel_source {
+                    files.push(("src/components.ts", "typescript", barrel_source));
+                }
+            let (_temp, service, drain_handle, provider, workspace_id) =
+                make_definition_test_server_with_config(
+                    &files,
+                    provider_kind,
+                    HostConfig {
+                        analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                        metrics_enabled: true,
+                        ..HostConfig::default()
+                    },
+                    false,
+                )
+                .await;
+            let server = service.inner();
+            let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+            let child_uri = workspace_uri(&workspace_id, "src/DraftCard.svelte");
+            if close_child {
+                server.documents.did_close(&child_uri);
+            }
+            server.publish_import_dependencies_settled(&app_uri).await;
+            let child_id = format!("{workspace_id}/src/DraftCard.svelte");
+            assert!(
+                server.cached_child_public_contract(&child_id).is_some(),
+                "{provider_label}/{label}/{route}/{child_state}: initial background publication must commit the child contract"
+            );
+            let provider_calls_before_parent_edit = provider.file_sync_calls().len();
+            if matches!(provider_kind, crate::TypeProviderKind::None) {
+                assert_eq!(
+                    provider_calls_before_parent_edit,
+                    0,
+                    "{provider_label}/{label}/{route}/{child_state}: provider-neutral child publication must not open or update provider buffers"
+                );
+            }
+            let changed = parent_initial.replace("<p>ready</p>", "<DraftCard un />");
+            super::lifecycle::handle_did_change(
+                server,
+                DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier {
+                        uri: app_uri.clone(),
+                        version: 2,
+                    },
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: changed.clone(),
+                    }],
+                },
+            )
+            .await;
+            let cached = server
+                .cached_child_public_contract(&child_id)
+                .unwrap_or_else(|| panic!("{provider_label}/{label}/{route}/{child_state}: an unrelated parent edit must preserve the already-published child contract immediately"));
+            let verter_session::framework::ComponentContractAvailability::Supported(contract) =
+                cached
+            else {
+                panic!("{provider_label}/{label}/{route}/{child_state}: fixture contract must be supported")
+            };
+            assert!(
+                contract.props.iter().any(|prop| prop.name.as_ref() == "unusedOnly"),
+                "{provider_label}/{label}/{route}/{child_state}: published contract must retain an unused declared prop"
+            );
+
+            // `did_change` schedules import publication independently. The
+            // cached contract above must remain immediately readable, but the
+            // background lane can still be finishing a no-op/revalidation pass
+            // under a loaded runner. Settle that lane before attributing any
+            // later projection-count change to the foreground completion.
+            server.publish_import_dependencies_settled(&app_uri).await;
+
+            // Settle the independently-owned CURRENT-file provider surface
+            // before measuring the child-contract completion seam. The
+            // assertion below then discriminates child cache reads from either
+            // parent repair work or child projection work.
+            server.ensure_current_file_synced(&app_uri).await;
+
+            let provider_calls_for_completion = provider.file_sync_calls().len();
+            let projection_count = server.child_public_contract_projection_count_for_test();
+            let compile_requests = server.documents.host().metrics_snapshot().compile_requests;
+            let workspace = server
+                .vfs_workspace
+                .read()
+                .clone()
+                .expect("published test workspace");
+            let workspace_reads = workspace.vfs_provenance_snapshot();
+            let cursor = changed.find("<DraftCard un").expect("component")
+                + "<DraftCard un".len();
+            let position = LineIndex::new_utf16(&changed)
+                .offset_to_position(cursor as u32)
+                .expect("completion position");
+            let labels = completion_labels(
+                server
+                    .completion(completion_params(&app_uri, position, None))
+                    .await
+                    .expect("completion request"),
+            );
+            assert!(
+                labels.contains(&"unusedOnly".to_string()),
+                "{provider_label}/{label}/{route}/{child_state}: committed declared child prop must survive the incomplete \
+                 parent edit: {labels:?}"
+            );
+            assert_eq!(
+                server.child_public_contract_projection_count_for_test(),
+                projection_count,
+                "{provider_label}/{label}/{route}/{child_state}: completion must not invoke the contract projector"
+            );
+            assert_eq!(
+                server.documents.host().metrics_snapshot().compile_requests,
+                compile_requests,
+                "{provider_label}/{label}/{route}/{child_state}: completion must not start a host compile"
+            );
+            let workspace_reads_after = workspace.vfs_provenance_snapshot();
+            assert_eq!(
+                (
+                    workspace_reads_after.native_fs_read_file_miss_count,
+                    workspace_reads_after.native_fs_read_dir_count,
+                    workspace_reads_after.resolution_evidence_live_read_count,
+                ),
+                (
+                    workspace_reads.native_fs_read_file_miss_count,
+                    workspace_reads.native_fs_read_dir_count,
+                    workspace_reads.resolution_evidence_live_read_count,
+                ),
+                "{provider_label}/{label}/{route}/{child_state}: completion must not perform filesystem/evidence reads"
+            );
+            assert_eq!(
+                provider.file_sync_calls().len(),
+                provider_calls_for_completion,
+                "{provider_label}/{label}/{route}/{child_state}: native completion must not publish provider buffers"
+            );
+
+            drain_handle.abort();
+            drop(service);
+        }
+        }
+    }
+    }
+}
+
+#[tokio::test]
+async fn recognized_inexact_direct_component_contract_miss_is_request_cache_only() {
+    const CHILD: &str = "<script setup lang=\"ts\">\ndefineProps<{ title: string; unusedOnly?: boolean }>()\n</script>\n<p>{{ title }}</p>\n";
+    const PARENT_INITIAL: &str =
+        "<script setup lang=\"ts\">\nimport DraftCard from './DraftCard.vue';\n</script>\n<template><DraftCard /></template>";
+    const PARENT: &str =
+        "<script setup lang=\"ts\">\nimport DraftCard from './DraftCard.vue';\n</script>\n<template><DraftCard un";
+    for kind in [crate::TypeProviderKind::None, crate::TypeProviderKind::Tsgo] {
+        let (_temp, service, drain_handle, provider, workspace_id) =
+            make_definition_test_server_with_config(
+                &[
+                    ("src/DraftCard.vue", "vue", CHILD),
+                    ("src/App.vue", "vue", PARENT_INITIAL),
+                ],
+                kind,
+                HostConfig {
+                    analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                    metrics_enabled: true,
+                    ..HostConfig::default()
+                },
+                false,
+            )
+            .await;
+        let server = service.inner();
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let app_id = format!("{workspace_id}/src/App.vue");
+        let child_id = format!("{workspace_id}/src/DraftCard.vue");
+        let cursor = PARENT.find("<DraftCard un").expect("component") + "<DraftCard un".len();
+        let position = LineIndex::new_utf16(PARENT)
+            .offset_to_position(cursor as u32)
+            .expect("completion position");
+
+        server.publish_import_dependencies_settled(&app_uri).await;
+        assert!(server.cached_child_public_contract(&child_id).is_some());
+        assert!(server.documents.did_change(&app_uri, 2, PARENT).changed);
+
+        {
+            let document = server.documents.get(&app_uri).expect("open parent");
+            let structure = document
+                .feature_snapshot
+                .as_ref()
+                .expect("parent feature snapshot")
+                .structure();
+            let context =
+                crate::documents::carrier_structure::authored_component_attribute_name_context(
+                    structure,
+                    cursor as u32,
+                );
+            assert!(
+                matches!(
+                    context,
+                    Some(
+                        crate::documents::carrier_structure::AuthoredComponentAttributeNameContext::InexactUnclosedOpening {
+                            ref tag,
+                        }
+                    ) if tag == "DraftCard"
+                ),
+                "context={context:?}, nodes={:#?}",
+                structure.inventory().markup().nodes()
+            );
+        }
+        let ingress = server
+            .documents
+            .host()
+            .get_script_ingress(&app_id)
+            .expect("current progressive script ingress");
+        assert!(ingress.imports.iter().any(|import| {
+            !import.is_type_only
+                && import
+                    .bindings
+                    .iter()
+                    .any(|binding| !binding.is_type_only && binding.name == "DraftCard")
+        }));
+
+        server.evict_child_public_contract_for_test(&child_id);
+        let publication_lane = server.import_sync.lock_for(&app_id);
+        let publication_guard = publication_lane.lock().await;
+
+        let metrics_before = server.documents.host().metrics_snapshot();
+        let provenance_before = server.documents.host().provenance_snapshot();
+        let projection_count = server.child_public_contract_projection_count_for_test();
+        let provider_calls = provider.file_sync_calls().len();
+        let workspace = server
+            .vfs_workspace
+            .read()
+            .clone()
+            .expect("published test workspace");
+        let reads_before = workspace.vfs_provenance_snapshot();
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&app_uri, position, None))
+                .await
+                .expect("completion request"),
+        );
+        assert!(
+            !labels.contains(&"unused-only".to_string()),
+            "{kind:?}: a recognized authored direct carrier must fail closed when its committed child contract is absent: {labels:?}"
+        );
+        let metrics_after = server.documents.host().metrics_snapshot();
+        let provenance_after = server.documents.host().provenance_snapshot();
+        assert_eq!(
+            provenance_after.get_analysis_calls, provenance_before.get_analysis_calls,
+            "{kind:?}: completion must not consult child host analysis on a direct contract miss"
+        );
+        assert_eq!(
+            metrics_after.compile_requests, metrics_before.compile_requests,
+            "{kind:?}: completion must not compile on the foreground request"
+        );
+        assert_eq!(
+            server.child_public_contract_projection_count_for_test(),
+            projection_count,
+            "{kind:?}: completion must not compose the missing contract"
+        );
+        assert_eq!(provider.file_sync_calls().len(), provider_calls);
+        let reads_after = workspace.vfs_provenance_snapshot();
+        assert_eq!(
+            (
+                reads_after.native_fs_read_file_miss_count,
+                reads_after.native_fs_read_dir_count,
+                reads_after.resolution_evidence_live_read_count,
+            ),
+            (
+                reads_before.native_fs_read_file_miss_count,
+                reads_before.native_fs_read_dir_count,
+                reads_before.resolution_evidence_live_read_count,
+            ),
+            "{kind:?}: recognized direct contract miss must not perform live workspace/resolution reads"
+        );
+
+        drop(publication_guard);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while server.cached_child_public_contract(&child_id).is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recognized miss must enqueue bounded background contract repair");
+        let restored = completion_labels(
+            server
+                .completion(completion_params(&app_uri, position, None))
+                .await
+                .expect("completion after background repair"),
+        );
+        assert!(
+            restored.contains(&"unused-only".to_string()),
+            "{kind:?}: background child-contract publication must restore the direct prop: {restored:?}"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn module_augmentation_body_edit_invalidates_child_contract_until_background_republication() {
+    const TYPES: &str = "export interface DraftProps { title: string }\n";
+    const AUG_V1: &str = "import './types';\ndeclare module './types' { interface DraftProps { fromAug?: boolean } }\n";
+    const AUG_V2: &str = "import './types';\ndeclare module './types' { interface DraftProps { changedAug?: boolean } }\n";
+    const CHILD: &str = "<script lang=\"ts\">\nimport './aug';\nimport type { DraftProps } from './types';\nlet { title }: DraftProps = $props();\n</script>\n<p>{title}</p>\n";
+    const PARENT: &str =
+        "<script lang=\"ts\">\nimport DraftCard from './DraftCard.svelte';\n</script>\n<DraftCard un />";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &[
+                ("src/types.ts", "typescript", TYPES),
+                ("src/aug.ts", "typescript", AUG_V1),
+                ("src/DraftCard.svelte", "svelte", CHILD),
+                ("src/App.svelte", "svelte", PARENT),
+            ],
+            crate::TypeProviderKind::None,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                metrics_enabled: true,
+                ..HostConfig::default()
+            },
+            false,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let app_id = format!("{workspace_id}/src/App.svelte");
+    let aug_uri = workspace_uri(&workspace_id, "src/aug.ts");
+    let child_id = format!("{workspace_id}/src/DraftCard.svelte");
+    let cursor = PARENT.find("<DraftCard un").expect("component") + "<DraftCard un".len();
+    let position = LineIndex::new_utf16(PARENT)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+
+    server.publish_import_dependencies_settled(&app_uri).await;
+    let initial = completion_labels(
+        server
+            .completion(completion_params(&app_uri, position, None))
+            .await
+            .expect("initial completion"),
+    );
+    assert!(
+        initial.contains(&"fromAug".to_string()),
+        "fixture must prove the loaded child contract consumed the module augmentation: {initial:?}"
+    );
+
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: aug_uri,
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: AUG_V2.to_string(),
+            }],
+        },
+    )
+    .await;
+    assert!(
+        server.cached_child_public_contract(&child_id).is_none(),
+        "an augmentation contributor edit must invalidate the child contract witness"
+    );
+    let publication_lane = server.import_sync.lock_for(&app_id);
+    let publication_guard = publication_lane.lock().await;
+
+    let provenance_before = server.documents.host().provenance_snapshot();
+    let metrics_before = server.documents.host().metrics_snapshot();
+    let projection_before = server.child_public_contract_projection_count_for_test();
+    let provider_calls_before = provider.file_sync_calls().len();
+    let workspace = server
+        .vfs_workspace
+        .read()
+        .clone()
+        .expect("published workspace");
+    let reads_before = workspace.vfs_provenance_snapshot();
+    let cold = completion_labels(
+        server
+            .completion(completion_params(&app_uri, position, None))
+            .await
+            .expect("completion while dependency-backed contract is cold"),
+    );
+    assert!(!cold.contains(&"fromAug".to_string()));
+    assert!(!cold.contains(&"changedAug".to_string()));
+    assert_eq!(
+        server
+            .documents
+            .host()
+            .provenance_snapshot()
+            .get_analysis_calls,
+        provenance_before.get_analysis_calls
+    );
+    assert_eq!(
+        server.documents.host().metrics_snapshot().compile_requests,
+        metrics_before.compile_requests
+    );
+    assert_eq!(
+        server.child_public_contract_projection_count_for_test(),
+        projection_before
+    );
+    assert_eq!(provider.file_sync_calls().len(), provider_calls_before);
+    let reads_after = workspace.vfs_provenance_snapshot();
+    assert_eq!(
+        (
+            reads_after.native_fs_read_file_miss_count,
+            reads_after.native_fs_read_dir_count,
+            reads_after.resolution_evidence_live_read_count,
+        ),
+        (
+            reads_before.native_fs_read_file_miss_count,
+            reads_before.native_fs_read_dir_count,
+            reads_before.resolution_evidence_live_read_count,
+        )
+    );
+
+    drop(publication_guard);
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert!(server.cached_child_public_contract(&child_id).is_some());
+    let restored = completion_labels(
+        server
+            .completion(completion_params(&app_uri, position, None))
+            .await
+            .expect("completion after ambient republish"),
+    );
+    assert!(
+        restored.contains(&"changedAug".to_string()),
+        "background publication must restore the changed augmented contract: {restored:?}"
+    );
+    assert!(!restored.contains(&"fromAug".to_string()));
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn imported_child_contract_with_unchanged_dependency_stays_current_across_parent_edit() {
+    const CHILD: &str = "<script lang=\"ts\">\nimport type { Snippet } from 'svelte';\ninterface Props { title: string; unusedOnly?: boolean; children?: Snippet }\nlet { title }: Props = $props();\n</script>\n<p>{title}</p>\n";
+    const PARENT: &str = "<script lang=\"ts\">\nimport DraftCard from './DraftCard.svelte';\n</script>\n<p>ready</p>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &[
+                ("src/DraftCard.svelte", "svelte", CHILD),
+                ("src/App.svelte", "svelte", PARENT),
+            ],
+            crate::TypeProviderKind::None,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                metrics_enabled: true,
+                ..HostConfig::default()
+            },
+            false,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let child_id = format!("{workspace_id}/src/DraftCard.svelte");
+
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert!(server.cached_child_public_contract(&child_id).is_some());
+    let projection_count = server.child_public_contract_projection_count_for_test();
+    assert!(provider.file_sync_calls().is_empty());
+
+    let changed = PARENT.replace("<p>ready</p>", "<DraftCard ");
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: app_uri.clone(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: changed,
+            }],
+        },
+    )
+    .await;
+    assert!(server.cached_child_public_contract(&child_id).is_some());
+    assert!(provider.file_sync_calls().is_empty());
+    assert_eq!(
+        server.child_public_contract_projection_count_for_test(),
+        projection_count,
+        "an unrelated parent edit must promote the still-valid exact dependency witness"
+    );
+    assert!(provider.file_sync_calls().is_empty());
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn barrel_component_route_cache_is_binding_exact_and_provenance_fenced() {
+    const ALPHA: &str = "<script lang=\"ts\">\ninterface Props { alphaOnly?: boolean }\nlet {}: Props = $props();\n</script>\n";
+    const BETA: &str = "<script lang=\"ts\">\ninterface Props { betaOnly?: boolean }\nlet {}: Props = $props();\n</script>\n";
+    const BARREL: &str = "export { default as Alpha } from './Alpha.svelte';\nexport { default as Beta } from './Beta.svelte';\n";
+    const PARENT: &str = "<script lang=\"ts\">\nimport { Alpha as LocalAlpha, Beta as LocalBeta } from './components';\n</script>\n<LocalAlpha al />";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &[
+                ("src/Alpha.svelte", "svelte", ALPHA),
+                ("src/Beta.svelte", "svelte", BETA),
+                ("src/components.ts", "typescript", BARREL),
+                ("src/App.svelte", "svelte", PARENT),
+            ],
+            crate::TypeProviderKind::None,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                metrics_enabled: true,
+                ..HostConfig::default()
+            },
+            false,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let app_id = format!("{workspace_id}/src/App.svelte");
+    let barrel_uri = workspace_uri(&workspace_id, "src/components.ts");
+    let cursor = PARENT.find("<LocalAlpha al").expect("component") + "<LocalAlpha al".len();
+    let route_props = |local_binding: &str| {
+        let availability = server
+            .cached_barrel_component_contract(&app_id, "./components", local_binding)
+            .unwrap_or_else(|| panic!("published route for {local_binding}"));
+        let verter_session::framework::ComponentContractAvailability::Supported(contract) =
+            availability
+        else {
+            panic!("fixture contract for {local_binding} must be supported")
+        };
+        contract
+            .props
+            .iter()
+            .map(|prop| prop.name.to_string())
+            .collect::<Vec<_>>()
+    };
+
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert_eq!(route_props("LocalAlpha"), vec!["alphaOnly"]);
+    assert_eq!(route_props("LocalBeta"), vec!["betaOnly"]);
+    assert!(provider.file_sync_calls().is_empty());
+
+    // A cache miss on an already-authored barrel binding fails closed without
+    // re-entering live resolution/evidence reads from completion.
+    server.evict_barrel_component_route_for_test(&app_id, "LocalAlpha");
+    let publication_lane = server.import_sync.lock_for(&app_id);
+    let publication_guard = publication_lane.lock().await;
+    let workspace = server
+        .vfs_workspace
+        .read()
+        .clone()
+        .expect("published test workspace");
+    let provenance_before = server.documents.host().provenance_snapshot();
+    let metrics_before = server.documents.host().metrics_snapshot();
+    let projection_before = server.child_public_contract_projection_count_for_test();
+    let provider_calls_before = provider.file_sync_calls().len();
+    let reads_before = workspace.vfs_provenance_snapshot();
+    {
+        let doc = server
+            .documents
+            .get(&app_uri)
+            .expect("open parent document");
+        let structure = doc
+            .feature_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.structure().clone())
+            .expect("committed parent structure");
+        let blocks = crate::documents::carrier_structure::project_carrier_blocks(&structure);
+        let context = crate::features::cursor_context::classify_cursor_context_for_language(
+            cursor as u32,
+            PARENT,
+            &blocks,
+            None,
+            Some(crate::features::cursor_context::CarrierTemplateLanguage::Svelte),
+            Some(&structure),
+        );
+        assert!(
+            matches!(
+                context,
+                crate::features::cursor_context::CursorContext::Template(
+                    crate::features::cursor_context::TemplateCursorContext::AttributeName {
+                        ref tag_name,
+                        is_component: true,
+                        ..
+                    }
+                ) if tag_name == "LocalAlpha"
+            ),
+            "test must exercise the exact authored attribute ingress branch: {context:?}"
+        );
+        let ingress = server
+            .documents
+            .host()
+            .get_script_ingress(&app_id)
+            .expect("source-stage import ingress");
+        assert!(ingress.imports.iter().any(|import| {
+            import.source == "./components"
+                && import
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.name == "LocalAlpha")
+        }));
+    }
+    let position = LineIndex::new_utf16(PARENT)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+    let labels = completion_labels(
+        server
+            .completion(completion_params(&app_uri, position, None))
+            .await
+            .expect("completion request"),
+    );
+    assert!(!labels.contains(&"alphaOnly".to_string()));
+    assert_eq!(
+        server
+            .documents
+            .host()
+            .provenance_snapshot()
+            .get_analysis_calls,
+        provenance_before.get_analysis_calls
+    );
+    assert_eq!(
+        server.documents.host().metrics_snapshot().compile_requests,
+        metrics_before.compile_requests
+    );
+    assert_eq!(
+        server.child_public_contract_projection_count_for_test(),
+        projection_before
+    );
+    assert_eq!(provider.file_sync_calls().len(), provider_calls_before);
+    let reads_after = workspace.vfs_provenance_snapshot();
+    assert_eq!(
+        (
+            reads_after.native_fs_read_file_miss_count,
+            reads_after.native_fs_read_dir_count,
+            reads_after.resolution_evidence_live_read_count,
+        ),
+        (
+            reads_before.native_fs_read_file_miss_count,
+            reads_before.native_fs_read_dir_count,
+            reads_before.resolution_evidence_live_read_count,
+        ),
+        "a barrel-route cache miss must remain a pure committed-cache lookup"
+    );
+    drop(publication_guard);
+    server.ensure_barrel_imports_synced_for_test(&app_uri).await;
+    assert_eq!(route_props("LocalAlpha"), vec!["alphaOnly"]);
+
+    // A changed re-export invalidates the route until background publication
+    // recomposes it, then the same authored alias points to the new terminal.
+    let changed_barrel = BARREL.replace("'./Alpha.svelte'", "'./Beta.svelte'");
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: barrel_uri,
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: changed_barrel,
+            }],
+        },
+    )
+    .await;
+    assert!(server
+        .cached_barrel_component_contract(&app_id, "./components", "LocalAlpha")
+        .is_none());
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert_eq!(route_props("LocalAlpha"), vec!["betaOnly"]);
+
+    install_test_resolver_for_root(
+        server,
+        &workspace_id,
+        Some(&format!("{workspace_id}/tsconfig.json")),
+    );
+    assert!(server
+        .cached_barrel_component_contract(&app_id, "./components", "LocalAlpha")
+        .is_none());
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert_eq!(route_props("LocalAlpha"), vec!["betaOnly"]);
+
+    let renamed_parent = PARENT.replace("LocalAlpha", "RenamedAlpha");
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: app_uri.clone(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: renamed_parent,
+            }],
+        },
+    )
+    .await;
+    assert!(server
+        .cached_barrel_component_contract(&app_id, "./components", "LocalAlpha")
+        .is_none());
+    assert!(server
+        .cached_barrel_component_contract(&app_id, "./components", "RenamedAlpha")
+        .is_none());
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert_eq!(route_props("RenamedAlpha"), vec!["betaOnly"]);
+
+    drain_handle.abort();
+    drop(service);
+}
+
+// @ai-generated
+#[tokio::test(flavor = "multi_thread")]
+async fn permanent_child_projection_failure_settles_until_its_provenance_changes() {
+    const MALFORMED_CHILD: &str = r#"<script setup lang="ts" attrs="Attrs.">
+import type { Attrs } from './types'
+</script><template/>"#;
+    const REPAIRED_CHILD: &str = r#"<script setup lang="ts">
+defineProps<{ title?: string }>()
+</script><template/>"#;
+    const PARENT: &str = r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script><template><Child /></template>"#;
+
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &[
+                ("src/Child.vue", "vue", MALFORMED_CHILD),
+                ("src/App.vue", "vue", PARENT),
+            ],
+            crate::TypeProviderKind::None,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                ..HostConfig::default()
+            },
+            false,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_uri = workspace_uri(&workspace_id, "src/Child.vue");
+    let child_id = format!("{workspace_id}/src/Child.vue");
+
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert!(server.child_public_contract_is_settled(&child_id));
+    assert!(server.cached_child_public_contract(&child_id).is_none());
+    assert!(server.dependency_readiness_capture(&app_uri).is_ready());
+    let projection_count = server.child_public_contract_projection_count_for_test();
+
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert_eq!(
+        server.child_public_contract_projection_count_for_test(),
+        projection_count,
+        "a provenance-current permanent failure must not be projected again"
+    );
+
+    assert!(
+        server
+            .documents
+            .did_change(&child_uri, 2, REPAIRED_CHILD)
+            .changed
+    );
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert!(
+        server.cached_child_public_contract(&child_id).is_some(),
+        "editing the malformed child must invalidate the failure and allow recovery"
+    );
+    assert!(
+        server.child_public_contract_projection_count_for_test() > projection_count,
+        "the changed provenance must run a fresh projection"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn imported_child_contract_cache_is_provenance_fenced_and_republished() {
+    const CHILD_V1: &str = "<script lang=\"ts\">\ninterface Props { title: string; unusedOnly?: boolean }\nlet { title }: Props = $props();\n</script>\n<p>{title}</p>\n";
+    const CHILD_V2: &str = "<script lang=\"ts\">\ninterface Props { title: string; unusedOnly?: boolean; second?: string }\nlet { title }: Props = $props();\n</script>\n<p>{title}</p>\n";
+    const CHILD_V3: &str = "<script lang=\"ts\">\ninterface Props { title: string; unusedOnly?: boolean; third?: boolean }\nlet { title }: Props = $props();\n</script>\n<p>{title}</p>\n";
+    const PARENT: &str = "<script lang=\"ts\">\nimport DraftCard from './DraftCard.svelte';\n</script>\n<DraftCard />\n";
+
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &[
+                ("src/DraftCard.svelte", "svelte", CHILD_V1),
+                ("src/App.svelte", "svelte", PARENT),
+            ],
+            crate::TypeProviderKind::Tsserver,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                metrics_enabled: true,
+                ..HostConfig::default()
+            },
+            false,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let child_uri = workspace_uri(&workspace_id, "src/DraftCard.svelte");
+    let child_id = format!("{workspace_id}/src/DraftCard.svelte");
+
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert!(server.cached_child_public_contract(&child_id).is_some());
+
+    // Provider delivery and contract publication are independent. A missing
+    // contract under byte-current provider state runs only the projector.
+    let provider_state = server
+        .provider_sync_state_for_source(&child_id)
+        .expect("initial provider delivery");
+    let provider_call_count = provider.file_sync_calls().len();
+    let projection_count = server.child_public_contract_projection_count_for_test();
+    server.evict_child_public_contract_for_test(&child_id);
+    assert!(server
+        .sync_imported_carrier_api_lightweight(&child_id)
+        .await
+        .is_complete());
+    assert!(server.cached_child_public_contract(&child_id).is_some());
+    assert_eq!(provider.file_sync_calls().len(), provider_call_count);
+    assert_eq!(
+        server.provider_sync_state_for_source(&child_id),
+        Some(provider_state.clone()),
+        "contract-only repair must not advance provider state"
+    );
+    assert_eq!(
+        server.child_public_contract_projection_count_for_test(),
+        projection_count + 1
+    );
+
+    // An unrelated workspace-content mutation must not invalidate a child
+    // contract. The child revision, publication witness, resolver snapshot,
+    // and project generation are unchanged, so neither provider delivery nor
+    // contract projection should repeat.
+    let projection_count = server.child_public_contract_projection_count_for_test();
+    server.documents.host().notify_upsert(
+        &format!("{workspace_id}/src/unrelated.ts"),
+        Arc::<str>::from("export const unrelated = 1;"),
+    );
+    assert!(server.cached_child_public_contract(&child_id).is_some());
+    let provider_call_count = provider.file_sync_calls().len();
+    assert!(server
+        .sync_imported_carrier_api_lightweight(&child_id)
+        .await
+        .is_complete());
+    assert!(server.cached_child_public_contract(&child_id).is_some());
+    assert_eq!(provider.file_sync_calls().len(), provider_call_count);
+    assert_eq!(
+        server.child_public_contract_projection_count_for_test(),
+        projection_count
+    );
+
+    // Replacing the published resolver/config world evicts the prior key. The
+    // same background wrapper must establish a contract in the new world.
+    install_test_resolver_for_root(
+        server,
+        &workspace_id,
+        Some(&format!("{workspace_id}/tsconfig.json")),
+    );
+    assert!(server.cached_child_public_contract(&child_id).is_none());
+    assert!(server
+        .sync_imported_carrier_api_lightweight(&child_id)
+        .await
+        .is_complete());
+    assert!(server.cached_child_public_contract(&child_id).is_some());
+
+    // A source mutation inside composition must refuse the stale projection.
+    // The next settled pass publishes the new revision, and removal makes the
+    // pure cache capture fail closed again.
+    assert!(server.documents.did_change(&child_uri, 2, CHILD_V2).changed);
+    assert!(server.cached_child_public_contract(&child_id).is_none());
+    server.ensure_current_file_synced(&child_uri).await;
+    tokio::task::block_in_place(|| {
+        server
+            .documents
+            .host()
+            .get_public_api_projection(&child_id)
+            .expect("revision-two background projection")
+            .expect("revision-two component projection")
+    });
+    let _ = server
+        .sync_imported_carrier_api_lightweight(&child_id)
+        .await;
+    assert!(
+        server.cached_child_public_contract(&child_id).is_some(),
+        "revision-two background sync must publish its contract"
+    );
+    assert!(
+        server.imported_carrier_already_delivered(&child_id),
+        "revision-two provider publication must be current before isolating the contract fence: \
+         state={:?}, live={:?}",
+        server.provider_sync_state_for_source(&child_id),
+        server.documents.host().get_source(&child_id)
+    );
+    server.evict_child_public_contract_for_test(&child_id);
+    let documents = Arc::clone(server.test_documents());
+    let hook_uri = child_uri.clone();
+    server.set_child_contract_after_projection_hook_for_test(Box::new(move || {
+        assert!(documents.did_change(&hook_uri, 3, CHILD_V3).changed);
+    }));
+    assert!(
+        !server
+            .sync_imported_carrier_api_lightweight(&child_id)
+            .await
+            .is_complete(),
+        "a revision change during composition must refuse publication"
+    );
+    assert!(server.cached_child_public_contract(&child_id).is_none());
+    server.ensure_current_file_synced(&child_uri).await;
+    tokio::task::block_in_place(|| {
+        server
+            .documents
+            .host()
+            .get_public_api_projection(&child_id)
+            .expect("revision-three background projection")
+            .expect("revision-three component projection")
+    });
+    assert!(server
+        .sync_imported_carrier_api_lightweight(&child_id)
+        .await
+        .is_complete());
+    let current = server
+        .cached_child_public_contract(&child_id)
+        .expect("settled post-edit publication");
+    let verter_session::framework::ComponentContractAvailability::Supported(contract) = current
+    else {
+        panic!("edited fixture contract must remain supported")
+    };
+    assert!(contract
+        .props
+        .iter()
+        .any(|prop| prop.name.as_ref() == "third"));
+
+    server.documents.did_close(&child_uri);
+    assert!(server.documents.host().remove(&child_id).is_some());
+    assert!(
+        server.cached_child_public_contract(&child_id).is_none(),
+        "a removed child cannot retain a readable contract"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tsgo_imported_child_requires_the_committed_direct_ide_surface() {
+    const CHILD_V1: &str = "<script lang=\"ts\">\ninterface Props { title: string }\nlet { title }: Props = $props();\n</script>\n<p>{title}</p>\n";
+    const CHILD_V2: &str = "<script lang=\"ts\">\ninterface Props { title: string }\nlet { title }: Props = $props();\n</script>\n<section>{title}</section>\n";
+    const PARENT: &str = "<script lang=\"ts\">\nimport DraftCard from './DraftCard.svelte';\n</script>\n<DraftCard />\n";
+
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/DraftCard.svelte", "svelte", CHILD_V1),
+                ("src/App.svelte", "svelte", PARENT),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let child_uri = workspace_uri(&workspace_id, "src/DraftCard.svelte");
+    let child_id = format!("{workspace_id}/src/DraftCard.svelte");
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert!(
+        server.imported_carrier_already_delivered(&child_id),
+        "precondition: managed tsgo directly received the initial IDE and API buffers"
+    );
+    let committed = server
+        .provider_sync_state_for_source(&child_id)
+        .expect("initial direct-buffer state");
+    let ide_path = committed.ide_path.clone().expect("managed IDE path");
+
+    assert!(server.documents.did_change(&child_uri, 2, CHILD_V2).changed);
+    let edited_ide = server
+        .documents
+        .recompile_and_refresh_mapper(&child_uri)
+        .expect("edited IDE surface");
+    let revision = server
+        .documents
+        .snapshot_identity(&child_uri)
+        .expect("edited document identity");
+    server.record_carrier_ide_snapshot_with_pin(
+        Some((&child_uri, &revision)),
+        &child_id,
+        &ide_path,
+        &edited_ide.code,
+        edited_ide.source_map.as_deref(),
+    );
+
+    assert!(
+        !server.imported_carrier_already_delivered(&child_id),
+        "a current editor-store surface cannot witness the still-old managed tsgo IDE buffer"
+    );
+    provider.set_fail_sync_path(&ide_path);
+    let outcome = server
+        .sync_imported_carrier_api_lightweight(&child_id)
+        .await;
+    assert!(
+        !outcome.is_complete(),
+        "a failed direct IDE reopen must keep imported-child publication retryable"
+    );
+    let after = server
+        .provider_sync_state_for_source(&child_id)
+        .expect("failed reopen preserves the prior direct-buffer state");
+    assert_eq!(
+        after.committed_ide_surface, committed.committed_ide_surface,
+        "failed direct sync must not authorize the independently-recorded editor surface"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_progressive_prop_ownership_does_not_survive_props_call_replacement() {
+    let initial = "<script lang=\"ts\">\nconst providerTarget = 1;\nfunction source(): { staleProp?: () => void } { return {}; }\nlet { staleProp } = $props();\n</script>\n{@render staleProp?.()}\n";
+    let changed = initial.replace("$props()", "source()");
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server(&[("src/App.svelte", "svelte", initial)]).await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let initial_analysis = server
+        .documents
+        .source_feature_analysis(&app_uri)
+        .expect("initial BUILD analysis");
+    assert!(
+        initial_analysis
+            .template
+            .as_deref()
+            .is_some_and(|template| template
+                .prop_definitions
+                .iter()
+                .any(|prop| prop.name == "staleProp")),
+        "precondition: the initial `$props()` call owns the authored prop"
+    );
+
+    assert!(server.documents.did_change(&app_uri, 2, &changed).changed);
+    assert!(
+        server
+            .documents
+            .get_analysis(&app_uri)
+            .and_then(|analysis| analysis.template)
+            .is_none_or(|template| template
+                .prop_definitions
+                .iter()
+                .all(|prop| prop.name != "staleProp")),
+        "current analysis must not independently re-author the retired prop"
+    );
+    let current = server.documents.source_feature_analysis(&app_uri);
+    assert!(
+        current
+            .as_ref()
+            .and_then(|analysis| analysis.template.as_deref())
+            .is_none_or(|template| template
+                .prop_definitions
+                .iter()
+                .all(|prop| prop.name != "staleProp")),
+        "replacing the ownership-producing `$props()` call with an ordinary call must retire its \
+         progressive prop"
+    );
+
+    assert_svelte_same_file_definition(
+        server,
+        provider.as_ref(),
+        &app_uri,
+        ("@render staleProp", 8),
+        "providerTarget",
+    )
+    .await;
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_direct_render_prop_definition_does_not_require_template_analysis() {
+    for (label, language, declaration) in [
+        (
+            "ts",
+            " lang=\"ts\"",
+            "import type { Snippet } from 'svelte';\ninterface Props { children?: Snippet<[boolean]> }\nlet { children }: Props = $props();",
+        ),
+        (
+            "js",
+            "",
+            "/** @typedef {import('svelte').Snippet<[boolean]>} Children */\n/** @type {{ children?: Children }} */\nlet { children } = $props();",
+        ),
+        (
+            "js-ordinary-function-prop",
+            "",
+            "/** @type {{ children?: () => void }} */\nlet { children } = $props();",
+        ),
+    ] {
+        let source = format!(
+            "<script{language}>\n{declaration}\n</script>\n{{@render children?.(true)}}\n"
+        );
+        let (_temp, service, drain_handle, provider, workspace_id) =
+            make_default_profile_definition_test_server(&[(
+                "src/App.svelte",
+                "svelte",
+                source.as_str(),
+            )])
+            .await;
+        let server = service.inner();
+        let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+        let canonical_id = server
+            .documents
+            .get_canonical_id(&app_uri)
+            .expect("open canonical id");
+        let profile = server.documents.tsx_profile.read().clone();
+        let initial_ide = server
+            .documents
+            .host()
+            .get_ide(&canonical_id, &profile)
+            .expect("initial IDE surface");
+        let changed = source.replace("children?.(true)", "children?.(false)");
+        assert!(server.documents.did_change(&app_uri, 2, &changed).changed);
+        let evidence = server
+            .documents
+            .host()
+            .resolve_svelte_script_facts(&canonical_id);
+        let capture = server
+            .documents
+            .capture_source_feature_document(&app_uri)
+            .unwrap_or_else(|| panic!("{label}: current source-feature capture"));
+        assert!(
+            server
+                .documents
+                .source_feature_host_revision_is_current(&capture),
+            "{label}: captured host revision must be current"
+        );
+        assert!(
+            server
+                .documents
+                .source_feature_capture_is_current(&app_uri, &capture),
+            "{label}: captured document/host identity must be current"
+        );
+        let binding_span = match &evidence {
+            verter_session::framework::script_facts::ScriptFactEvidence::Exact(exact) => {
+                exact
+                    .facts()
+                    .syntax()
+                    .props_calls()
+                    .iter()
+                    .flat_map(|call| call.local_bindings.iter())
+                    .find(|binding| binding.name == "children")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{label}: test fixture must expose exact authored $props binding geometry"
+                        )
+                    })
+                    .span
+            }
+            other => panic!(
+                "{label}: test fixture must produce exact Svelte facts, got {}",
+                match other {
+                    verter_session::framework::script_facts::ScriptFactEvidence::Partial(_) =>
+                        "partial",
+                    verter_session::framework::script_facts::ScriptFactEvidence::Unavailable(_) =>
+                        "unavailable",
+                    verter_session::framework::script_facts::ScriptFactEvidence::NotApplicable(_) =>
+                        "not-applicable",
+                    verter_session::framework::script_facts::ScriptFactEvidence::Exact(_) =>
+                        unreachable!(),
+                }
+            ),
+        };
+        assert!(binding_span.end > binding_span.start);
+        assert!(
+            server
+                .documents
+                .get_analysis(&app_uri)
+                .and_then(|analysis| analysis.template)
+                .is_none(),
+            "{label}: regression requires parser facts without template analysis"
+        );
+        let position = find_document_position(server, &app_uri, "@render children", 8);
+        let mut state = server
+            .provider_sync_state_for_source(&canonical_id)
+            .unwrap_or_else(|| ProviderSyncState {
+                owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+                ..Default::default()
+            });
+        let ide_path = server
+            .target_ide_path_for_uri(&app_uri)
+            .expect("Svelte IDE path");
+        state.ide_path = Some(ide_path.clone());
+        state.ide_background_loaded = true;
+        server.commit_provider_sync_state(&canonical_id, state);
+        let revision = server
+            .documents
+            .snapshot_identity(&app_uri)
+            .expect("current edited identity");
+        server.record_carrier_ide_snapshot_with_pin(
+            Some((&app_uri, &revision)),
+            &canonical_id,
+            &ide_path,
+            &initial_ide.code,
+            initial_ide.source_map.as_deref(),
+        );
+        let ctx = server
+            .type_provider_context(&app_uri)
+            .expect("current provider surface without foreground compile");
+        let query_offset = merge::carrier_position_to_tsx_offset_validated(
+            &position,
+            &ctx.carrier_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        )
+        .unwrap_or_else(|| panic!("{label}: render callee must map into the provider surface"));
+        provider.set_definitions(
+            &ctx.tsx_path,
+            query_offset,
+            vec![TypeLocation {
+                path: format!("{workspace_id}/node_modules/svelte/index.d.ts"),
+                start: 0,
+                end: 1,
+            }],
+        );
+
+        let response = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await
+            .expect("goto definition request")
+            .unwrap_or_else(|| panic!("{label}: incoming snippet prop must resolve to source"));
+        let locations = definition_locations(response);
+        let changed_index = LineIndex::new_utf16(&changed);
+        let expected_range = Range::new(
+            changed_index
+                .offset_to_position(binding_span.start)
+                .unwrap_or_else(|| panic!("{label}: authored binding start")),
+            changed_index
+                .offset_to_position(binding_span.end)
+                .unwrap_or_else(|| panic!("{label}: authored binding end")),
+        );
+        assert_eq!(
+            locations,
+            vec![Location {
+                uri: app_uri,
+                range: expected_range,
+            }],
+            "{label}: source authority must exclude the planted package definition"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn svelte_render_definition_discards_a_torn_document_and_host_revision() {
+    const SOURCE_A: &str = "<script lang=\"ts\">\nimport type { Snippet } from 'svelte';\ninterface Props { children?: Snippet }\nlet { children }: Props = $props();\n</script>\n{@render children?.()}\n";
+    const SOURCE_B: &str = "<script lang=\"ts\">\n// revision B shifts every following host fact\nimport type { Snippet } from 'svelte';\ninterface Props { children?: Snippet }\nlet { children }: Props = $props();\n</script>\n{@render children?.()}\n";
+
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_default_profile_definition_test_server(&[("src/App.svelte", "svelte", SOURCE_A)])
+            .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let position = find_document_position(server, &app_uri, "@render children", 8);
+    let ctx = synced_type_provider_context(server, &app_uri).await;
+    let query_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("initial render callee maps to provider surface");
+    let provider_path = format!("{workspace_id}/node_modules/svelte/index.d.ts");
+    provider.set_definitions(
+        &ctx.tsx_path,
+        query_offset,
+        vec![TypeLocation {
+            path: provider_path.clone(),
+            start: 0,
+            end: 1,
+        }],
+    );
+
+    let (host_advanced_tx, host_advanced_rx) = std::sync::mpsc::channel();
+    let (release_edit_tx, release_edit_rx) = std::sync::mpsc::channel();
+    server
+        .documents
+        .set_before_change_document_reacquire_hook_for_test(Box::new(move |_, _| {
+            host_advanced_tx
+                .send(())
+                .expect("test observes host upsert before document commit");
+            release_edit_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("definition request releases the paused edit");
+        }));
+    let edit_documents = Arc::clone(server.test_documents());
+    let edit_uri = app_uri.clone();
+    let edit = std::thread::spawn(move || edit_documents.did_change(&edit_uri, 2, SOURCE_B));
+    host_advanced_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("edit reaches the host-upsert/document-commit boundary");
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        server.goto_definition(goto_definition_params(&app_uri, position)),
+    )
+    .await;
+    release_edit_tx
+        .send(())
+        .expect("release the document commit after the request finishes");
+    assert!(edit.join().expect("edit thread joins").changed);
+
+    let response = outcome
+        .expect("definition must not wait for document commit")
+        .expect("definition request succeeds");
+    assert!(
+        response.is_none(),
+        "a request must not combine revision-A source geometry with revision-B host facts; \
+         the independent provider-surface identity fence also rejects the stale projection"
+    );
+
     drain_handle.abort();
     drop(service);
 }
@@ -17287,8 +19612,9 @@ async fn tsgo_barrel_receipt_does_not_truncate_a_deep_reexport_chain() {
 async fn tsserver_barrel_resolution_skips_rewrites_when_ts_extensions_are_allowed() {
     // Official tsserver framework plugins keep ordinary TS/JS modules under
     // TypeScript's disk authority and resolve framework carriers through their
-    // already-published store membership. The import-publication lane therefore
-    // performs no barrel walk and sends no per-file provider operations.
+    // store membership. Background publication still walks the barrel to
+    // publish the terminal child contract, but must not send rewritten barrel
+    // buffers to the provider.
     let foo = "<script setup lang=\"ts\">\ndefineProps<{ foo: boolean }>()\n</script>\n";
     let mid_barrel = "export { default as Foo } from './Foo.vue'\n";
     let top_barrel = "export * from './Foo'\n";
@@ -17324,7 +19650,15 @@ async fn tsserver_barrel_resolution_skips_rewrites_when_ts_extensions_are_allowe
 
     let calls = provider.calls();
     assert!(
-        calls.is_empty(),
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::OpenFileBackground { path, .. }
+                | MockCall::LoadFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                if path.replace('\\', "/").ends_with("/src/components/index.ts")
+                    || path.replace('\\', "/").ends_with("/src/components/Foo/index.ts")
+        )),
         "a project that allows TS extension imports must keep authored carrier specifiers and publish no rewritten barrel buffers; calls={calls:?}"
     );
 
@@ -19686,6 +22020,47 @@ fn svelte_legacy_slot_produces_no_unused_declaration_diagnostic() {
             Some(NumberOrString::String(code)) if code.starts_with("verter/no-unused-")
         )),
         "legacy <slot> has no declaration site — nothing to flag, got: {diags:?}"
+    );
+}
+
+/// Svelte's `$props()` rune shares semantic macro/member facts with Vue's
+/// `defineProps`, but that reuse must never enable Vue-only unused-declaration
+/// diagnostics on the authored Svelte carrier. Provider-owned TS6133 remains
+/// independent and is covered by the real-provider diagnostic contract.
+#[test]
+fn svelte_props_rune_produces_no_vue_unused_declaration_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script lang=\"ts\">\n\
+                  import type { Snippet } from 'svelte';\n\
+                  interface Props { header?: Snippet; body?: Snippet }\n\
+                  let { header, body }: Props = $props();\n\
+                  </script>\n\
+                  \n\
+                  {@render body?.()}\n";
+    let file = dir.path().join("UnusedSnippetProp.svelte");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code.starts_with("verter/no-unused-")
+        )),
+        "Svelte rune facts must not enable Vue-only unused diagnostics, got: {diags:?}"
     );
 }
 
@@ -32526,6 +34901,84 @@ async fn rename_still_covers_the_full_authored_set_when_the_provider_answers() {
         rename_edit_ranges(&edit, &uri),
         authored_token_ranges(RENAME_COMPLETENESS_VUE, "jsValue"),
         "the rename must cover the exact authored occurrence set, got {edit:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Svelte's generated TypeScript surface can repeat a typed local in synthetic
+/// component scaffolding. The provider correctly includes that generated-only
+/// occurrence in its rename answer, but no source-map range exists for it. A
+/// conservative authored-token inventory must prove the real source transaction
+/// complete so this synthetic same-companion drop does not veto a valid rename.
+#[tokio::test(flavor = "multi_thread")]
+async fn svelte_typed_local_rename_ignores_only_generated_occurrence_after_full_source_coverage() {
+    const SOURCE: &str = "<script lang=\"ts\">\ninterface ContractValue { label: string; count: number }\nlet typedValue: ContractValue = { label: \"typed\", count: 1 };\nfunction renderTyped(): string { return `${typedValue.label}:${typedValue.count}`; }\n</script>\n<button onclick={renderTyped}>{typedValue.label}</button>\n";
+    let app_path = "src/App.svelte";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[(app_path, "svelte", SOURCE)],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, app_path);
+    server.ensure_current_file_synced(&uri).await;
+    server.publish_import_dependencies_settled(&uri).await;
+
+    let position = find_document_position(server, &uri, "typedValue", 0);
+    let ctx = synced_type_provider_context(server, &uri).await;
+    let query_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("the declaration maps into the Svelte IDE surface");
+    let mut provider_locations = authored_token_ranges(SOURCE, "typedValue")
+        .into_iter()
+        .map(|(start_line, start_character, _, _)| {
+            let start = merge::carrier_position_to_tsx_offset_validated(
+                &Position::new(start_line, start_character),
+                &ctx.carrier_line_index,
+                &ctx.mapper,
+                &ctx.tsx_line_index,
+            )
+            .expect("every authored typedValue occurrence maps into the Svelte IDE surface");
+            crate::type_provider::protocol::RenameLocation {
+                path: ctx.tsx_path.clone(),
+                start,
+                end: start + "typedValue".len() as u32,
+            }
+        })
+        .collect::<Vec<_>>();
+    provider_locations.push(crate::type_provider::protocol::RenameLocation {
+        path: ctx.tsx_path.clone(),
+        start: ctx.tsx_content.len() as u32 + 100,
+        end: ctx.tsx_content.len() as u32 + 100 + "typedValue".len() as u32,
+    });
+    provider.set_rename_locations(&ctx.tsx_path, query_offset, provider_locations);
+
+    let edit = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: "renamedValue".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("rename request should succeed")
+    .expect("full authored coverage must admit the rename despite generated-only scaffolding");
+
+    assert_eq!(
+        rename_edit_ranges(&edit, &uri),
+        authored_token_ranges(SOURCE, "typedValue"),
+        "the admitted rename must still cover exactly every authored occurrence"
     );
 
     drain_handle.abort();

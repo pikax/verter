@@ -1,19 +1,22 @@
-//! Tests for the [`crate::host_compile::CompileManyTarget::RuntimeRender`]
-//! render-only bundler compile lane.
+//! Tests for the public
+//! [`crate::host_compile::CompileManyTarget::RuntimeRender`] bundler request.
 //!
-//! The lane produces byte-identical `Main` output to the `HostBacked`
-//! session wrapper through the SAME shared substrate + host-side
-//! assembly, without the per-file wrapper overhead. Unavailable macro roots
-//! fail closed; only row-local runtime-type degradation remains a warning.
+//! Vue requests use a private render-only worker that produces byte-identical
+//! `Main` output to the `HostBacked` session wrapper through the SAME shared
+//! substrate + host-side assembly, without the per-file wrapper overhead.
+//! Svelte requests retain their effective host-backed route. Unavailable Vue
+//! macro roots fail closed; only row-local runtime-type degradation remains a
+//! warning.
 //!
 //! | Test | Discriminating assertion |
 //! | ---- | ------------------------ |
 //! | `rail_a_ide_carrier_is_distinct_from_render_output` | IDE TSX carrier is NOT the render lane's JS `Main` (a regression routing IDE through render would collapse them). |
 //! | `runtime_render_matches_host_backed_wrapper_output` | Byte-identical `Main` for simple / local-macro / cross-file-macro, prod+dev, sourcemap, CodeTransform cases. |
 //! | `runtime_render_unresolved_imported_macro_type_is_fatal` | An unavailable authoritative macro root remains fatal and emits no partial render. |
-//! | `runtime_render_local_type_error_is_fatal` | Local invalid macro usage stays fatal. |
+//! | `runtime_render_missing_external_src_is_fatal` | A missing external `<script src>` file stays fatal. |
 //! | `runtime_render_syntax_error_is_fatal` | Template/script syntax error stays fatal. |
-//! | `runtime_render_bypasses_stage_c_wrapper` | Zero wrapper-op counter hits on a simple render; >0 on HostBacked. |
+//! | `runtime_render_authored_only_style_processing_defers_scoped_scss` | The Vite-shaped lane keeps authored `v-bind()` work but defers plain-CSS-only scoping; the default lane remains fail-closed. |
+//! | `runtime_render_bypasses_stage_c_wrapper` | A Vue request records zero wrapper-op hits; Svelte RuntimeRender and Vue HostBacked controls record >0. |
 //! | `runtime_render_does_not_leave_stale_semantic_axis_for_host_backed` | (e)-skip safety: a later HostBacked read sees current, not stale, deps. |
 //! | `runtime_render_upper_drive_input_resolves_macro_types_wired_under_lower_drive_routes` | Drive-letter case parity: an upper-drive compile input converges on the lower-drive canonical whose alias routes were wired via `set_import_dependencies`. |
 //! | `runtime_render_upper_drive_input_single_hop_relative_import_control` | Single-hop relative control: resolves without the route table across the same case split. |
@@ -22,6 +25,14 @@
 //! | `runtime_render_consumes_supplied_style_lang_projection` | Supplied style content projects its processed lang (`lang.css`) into the `Main` style import, byte-parity with `get_virtual_file`. |
 //! | `runtime_render_omitted_comments_tristate_matches_compiler_default` | Absent `comments` stays tri-state `None` (dev preserves / prod strips), never collapsed to `false`; explicit `Some(true)` honored; parity in all three. |
 //! | `runtime_render_threads_profile_filename_into_output` | Profile `filename` distinct from the canonical id reaches codegen (scope-id derivation), parity with the same-filename oracle, divergence from the filename-less oracle. |
+//! | `runtime_render_svelte_carrier_selects_the_svelte_backend_by_artifact_identity` | A `.svelte` input on the render route executes through the bound Svelte host backend (catalog-arm dispatch), never Vue-assembled bytes. |
+//! | `runtime_render_request_shape_follows_the_bound_catalog_arm` | The render route's request shape follows the BINDING arm: a Svelte carrier refuses `svelte_generate_module` through Svelte-bound admission (like the framework-aware control), while a Vue carrier ignores the Svelte-only field — failing in either direction if the lane rebuilt a fixed-framework request. |
+//! | `runtime_render_honors_svelte_request_options_through_the_bound_request` | Request-borne Svelte options (`svelte_disclose_version`) are honored on the render route through the Svelte-bound request, byte-identically to the framework-aware control. |
+//! | `runtime_render_profile_borne_svelte_css_hash_override_survives` | The resolved `cssHash` override rides the bound Svelte backend's execution-input channel and reaches the scoped-style class byte-observably. |
+//! | `runtime_render_profile_borne_svelte_runes_survives_and_flips_the_mode` | `svelte_runes` rides the typed Svelte-bound option attempt and flips the compile mode: forced-runes output drops the legacy flags import (byte-diff), and `Some(false)` turns a `$state` render into a typed legacy-rune refusal. |
+//! | `runtime_render_refuses_a_malformed_profile_borne_svelte_token` | A malformed profile-borne Svelte token (`svelte_namespace: Some("bogus")`) refuses at the render route's Svelte-bound construction — the same typed decode refusal the framework-aware control reports; a valid default profile still renders. |
+//! | `runtime_render_executes_the_admitted_runtime_kind` | The demand admitted is the demand executed: `ssr` on the render profile produces the SERVER module (byte-matching the getVirtualFile SSR oracle) and differs from the client render — failing if the lane executed a demand other than the admitted one. |
+//! | `runtime_render_bound_attribution_must_name_the_executed_artifact` | Injecting a binding bound for a DIFFERENT file's identity into the render execution trips the lane's bound-attribution invariant — failing if the lane admitted/executed an artifact other than the bound one. |
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -47,9 +58,10 @@ fn input(canonical_id: &str, source: &str) -> CompileBatchInput {
     }
 }
 
-/// Upsert a non-`.vue` sibling (e.g. `types.ts`) so a cross-file macro
-/// type dependency resolves through the shared resolver. `compile_many`
-/// only upserts its inputs as `.vue`, so a sibling `.ts` must be seeded
+/// Upsert a sibling file (e.g. `types.ts`) so a cross-file macro type
+/// dependency resolves through the shared resolver. `compile_many` upserts
+/// only its own inputs (each classified by the host's language classifier —
+/// `.vue`, `.svelte`, …), so a file the inputs merely import must be seeded
 /// on the host first.
 fn upsert_sibling(host: &VerterHost, canonical_id: &str, source: &str) {
     let lang = host.language_classifier().classify(canonical_id);
@@ -109,6 +121,7 @@ fn render_profile(
     hmr: crate::types::HmrStrategy,
 ) -> crate::host_compile::CompileBatchRenderProfile {
     crate::host_compile::CompileBatchRenderProfile {
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
         is_production,
         custom_element: false,
         ssr,
@@ -524,6 +537,53 @@ fn runtime_render_syntax_error_is_fatal() {
     );
 }
 
+#[test]
+fn runtime_render_authored_only_style_processing_defers_scoped_scss() {
+    const SOURCE: &str = r#"<script setup>
+const tone = "red"
+</script>
+<template><div class="card">x</div></template>
+<style lang="scss" scoped>
+$pad: 1rem;
+.card { color: v-bind(tone); padding: $pad; &:hover { color: blue; } }
+</style>"#;
+
+    let host = new_host();
+    let complete = render_one(&host, "/src/ScopedScss.vue", SOURCE);
+    assert!(
+        complete
+            .errors()
+            .iter()
+            .any(|error| error.contains("StageRequiresPlainCss")),
+        "the normal complete-style runtime product must stay fail-closed: {:?}",
+        complete.errors()
+    );
+
+    let mut authored_only = host.compile_many(
+        vec![input("/src/ScopedScss.vue", SOURCE)],
+        CompileBatchOptions::default(),
+        CompileManyTarget::RuntimeRender {
+            profile: crate::host_compile::CompileBatchRenderProfile {
+                style_processing:
+                    verter_compiler::compile_request::RuntimeStyleProcessing::AuthoredOnly,
+                ..simple_render_profile()
+            },
+        },
+    );
+    let authored_only = authored_only
+        .pop()
+        .expect("one input must produce one entry");
+    assert!(
+        authored_only.errors().is_empty(),
+        "the authored-only style lane must defer scoping until Vite supplies CSS: {:?}",
+        authored_only.errors()
+    );
+    assert!(
+        authored_only.code().contains("_useCssVars"),
+        "deferring post-preprocessor stages must preserve authored v-bind runtime injection"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test 6b — SSR x Vapor stays a typed refusal on RuntimeRender, not wrong output
 // ---------------------------------------------------------------------------
@@ -531,12 +591,13 @@ fn runtime_render_syntax_error_is_fatal() {
 /// `compile_many`'s `RuntimeRender` lane — the shared substrate NAPI's
 /// `compileMany` and the unplugin's bundler render route both go through —
 /// must refuse an `ssr=true, force_vapor=true` batch render profile with a
-/// fatal typed error, not silently reach codegen. Regression coverage for
-/// the `compile_bundle` fail-closed gate: this lane calls
-/// `compiler.compile_bundle` directly (not `CompileRequest::new`), so
-/// without that gate this combination would have produced whatever the
-/// Vapor/SSR codegen paths happen to interact to on an unvalidated input,
-/// not a clean refusal.
+/// fatal typed error, not silently reach codegen. The lane admits the
+/// render demand through the bound framework host backend and issues a
+/// `CompileRequest` from it, so the unsupported backend x mode pair is
+/// caught at request construction, before any codegen leg runs. Without
+/// that construction-time refusal the combination would have produced
+/// whatever the Vapor and SSR codegen paths happen to interact to on an
+/// unvalidated input, not a clean refusal.
 #[test]
 fn runtime_render_refuses_ssr_and_force_vapor() {
     let src = "<template><div>{{ a }}</div></template>\n";
@@ -557,8 +618,8 @@ fn runtime_render_refuses_ssr_and_force_vapor() {
 
 /// The IMPLICIT half of the same rule, through the same real production
 /// route: no `force_vapor`, but the source's own `<template vapor>` marker
-/// resolves the backend to Vapor once parsed. `build_compile_request`
-/// cannot see this at construction time (parsing has not happened yet) —
+/// resolves the backend to Vapor once parsed. The compile-request
+/// constructors cannot see this at construction time (parsing has not happened yet) —
 /// this is `compile_bundle`'s own post-parse guard, proven reachable
 /// through the FULL session route `compile_many` -> `render_only_main` ->
 /// `compile_entry_runtime_render` (the exact chain NAPI's `compileMany`,
@@ -592,6 +653,59 @@ fn runtime_render_refuses_implicit_vapor_marker_with_ssr() {
         "an implicit <template vapor> marker combined with ssr=true must be a fatal \
          refusal reachable through the real production RuntimeRender route, got code: {:?}",
         render.code()
+    );
+}
+
+/// The PUBLIC route selects the render worker by REQUESTED TARGET, never by
+/// carrier.
+///
+/// The direct `render_only_main` tests below drive the worker's Svelte arm as
+/// unit evidence; on their own they cannot show a production caller ever
+/// reaches it. A coordinator that classified the language and sent every
+/// non-Vue input to the host-backed route instead would leave all of them
+/// green while the Svelte arm was dead code — which is exactly the state a
+/// `.is_vue()` predicate at the coordinator produced.
+///
+/// So this drives `compile_many(RuntimeRender)`, the same entry NAPI's
+/// `compileMany`, WASM and the unplugin ingress share, with a `.svelte` input,
+/// and asserts the render worker ran for it. The wrapper counters are the
+/// discriminator: the render worker touches none of them, the host-backed
+/// route touches them, so a reintroduced carrier predicate fails HERE rather
+/// than silently rerouting.
+#[test]
+fn the_public_render_route_uses_the_render_worker_for_a_svelte_carrier() {
+    let host = new_host();
+    let entry = render_with_profile(
+        &host,
+        "/proj/PublicRouteCarrier.svelte",
+        "<script>let value = 1;</script>\n<div>{value}</div>\n",
+        simple_render_profile(),
+        None,
+    );
+    assert!(
+        entry.errors().is_empty(),
+        "a .svelte input must render through the public RuntimeRender route: {:?}",
+        entry.errors()
+    );
+    assert!(
+        !entry.code().is_empty(),
+        "the render must publish Main bytes"
+    );
+    assert_eq!(
+        host.test_force
+            .wrapper_cache_mode_classification_count
+            .load(Ordering::Relaxed),
+        0,
+        "the render worker classifies no cache mode; a non-zero count means this \
+         input was rerouted to the host-backed wrapper by a carrier predicate"
+    );
+    assert_eq!(
+        host.test_force
+            .wrapper_source_clone_count
+            .load(Ordering::Relaxed),
+        0,
+        "the render worker re-clones no source; a non-zero count means this input \
+         was rerouted to the host-backed wrapper by a carrier predicate"
     );
 }
 
@@ -657,6 +771,46 @@ fn runtime_render_bypasses_stage_c_wrapper() {
         "RuntimeRender must NOT construct a resolver context for a simple file"
     );
 
+    // The SAME bypass holds for a non-Vue carrier: the render lane is chosen
+    // by requested target, not by language, so a `.svelte` render skips the
+    // wrapper exactly as the Vue render above does. (Which route it takes is
+    // asserted separately by
+    // `the_public_render_route_uses_the_render_worker_for_a_svelte_carrier`.)
+    let host_svelte = new_host();
+    let svelte = render_one(
+        &host_svelte,
+        "/proj/Bypass.svelte",
+        "<script>let value = 1;</script>\n<div>{value}</div>\n",
+    );
+    assert!(
+        svelte.errors().is_empty(),
+        "Svelte RuntimeRender errors: {:?}",
+        svelte.errors()
+    );
+    assert_eq!(
+        host_svelte
+            .test_force
+            .wrapper_source_clone_count
+            .load(Ordering::Relaxed),
+        0,
+        "a Svelte RuntimeRender must NOT re-clone the source either"
+    );
+    assert_eq!(
+        host_svelte
+            .test_force
+            .wrapper_cache_mode_classification_count
+            .load(Ordering::Relaxed),
+        0,
+        "a Svelte RuntimeRender must NOT classify a cache mode either"
+    );
+    assert_eq!(
+        host_svelte
+            .test_force
+            .wrapper_sync_transitive_count
+            .load(Ordering::Relaxed),
+        0,
+        "a Svelte RuntimeRender must NOT sync the transitive dependency axis either"
+    );
     // HostBacked: the SAME file touches the wrapper ops (counters fire).
     let host_h = new_host();
     let host_backed = host_backed_one(&host_h, "/proj/Bypass.vue", src);
@@ -1766,5 +1920,678 @@ fn runtime_render_threads_profile_filename_into_output() {
         hb_unnamed.as_ref(),
         "a render under a DISTINCT filename must not equal the \
          filename-less oracle — `filename` must actually reach codegen"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 20 — a Svelte carrier on the render route: backend selection
+// ---------------------------------------------------------------------------
+
+/// A minimal SUPPORTED Svelte runes component (mirrors the carrier-level
+/// runtime coverage in `svelte/carrier.rs`).
+const SVELTE_RUNES_SRC: &str =
+    "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
+
+/// A `.svelte` input admitted to the render lane executes through the
+/// SVELTE bound host backend, selected by the request-scoped binding's
+/// catalog arm (which derives from the registered parse-artifact identity)
+/// — never through the Vue backend. DISCRIMINATING: the `Main` is the
+/// Svelte client module (`svelte/internal/client`), carries no Vue runtime
+/// structure, and a lane that re-routed dispatch off anything other than
+/// the registered identity would emit Vue-assembled bytes here instead.
+#[test]
+fn runtime_render_svelte_carrier_selects_the_svelte_backend_by_artifact_identity() {
+    let host = new_host();
+    let render = render_one(&host, "/proj/Counter.svelte", SVELTE_RUNES_SRC);
+    assert!(
+        render.errors().is_empty(),
+        "a supported Svelte component must render: {:?}",
+        render.errors()
+    );
+    assert!(
+        render
+            .code()
+            .contains("import * as $ from 'svelte/internal/client';"),
+        "the render Main for a .svelte carrier must be the Svelte client \
+         module (artifact-identity dispatch):\n{}",
+        render.code()
+    );
+    assert!(
+        render.code().contains("$.state(0)"),
+        "the runes state must lower through the Svelte runtime:\n{}",
+        render.code()
+    );
+    assert!(
+        !render.code().contains("_sfc_main") && !render.code().contains("from \"vue\""),
+        "a .svelte carrier must never receive Vue-assembled runtime bytes:\n{}",
+        render.code()
+    );
+    assert_eq!(
+        render.lang(),
+        Some("js"),
+        "the Svelte client module Main is JS"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 21 — the render route's request shape follows the bound catalog arm
+// ---------------------------------------------------------------------------
+
+/// The render route builds its request through the BOUND framework host
+/// backend, so the request shape follows the binding's catalog arm in both
+/// directions: a `.svelte` carrier refuses a Svelte option that is
+/// refusal-grade under Svelte-bound admission (`svelte_generate_module`,
+/// typed `UnsupportedOption` naming the `SvelteModule` capability cell),
+/// exactly like the framework-aware `get_virtual_file(Main)` control; a
+/// `.vue` carrier under the SAME profile ignores the Svelte-only field
+/// entirely, because the Vue-bound demand carries no Svelte axis.
+///
+/// DISCRIMINATING in both directions against a fixed-framework request on
+/// the lane: a render route that rebuilt a fixed-Vue request would flip the
+/// Svelte leg from refusal to defaulted success; one that decoded Svelte
+/// options globally would flip the Vue leg from success to refusal.
+#[test]
+fn runtime_render_request_shape_follows_the_bound_catalog_arm() {
+    let host = new_host();
+    let canonical = "/proj/Shape.svelte";
+    upsert_sibling(&host, canonical, SVELTE_RUNES_SRC);
+
+    let mut profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        is_production: true,
+        ..CompileProfile::default()
+    };
+    profile.svelte_generate_module = Some(true);
+
+    // Leg 1 — the render route over the Svelte carrier: the Svelte-bound
+    // admission REFUSES the option with the same request-construction
+    // refusal code the framework-aware route reports.
+    let err = host
+        .render_only_main(
+            canonical,
+            &profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
+        .expect_err(
+            "the Svelte-bound render demand must refuse svelte_generate_module \
+         at admission — the option is refusal-grade under the carrier's own \
+         request shape",
+        );
+    let crate::HostError::CompileError(failure) = err else {
+        panic!("the render refusal must surface as a compile failure, got: {err:?}");
+    };
+    assert!(
+        failure
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"),
+        "the render refusal must carry the request-construction refusal \
+         diagnostic, got: {:?}",
+        failure.diagnostics.diagnostics
+    );
+
+    // Leg 2 (control) — the framework-aware compile route refuses the SAME
+    // profile with the SAME code.
+    let err = host
+        .get_virtual_file(crate::types::VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(crate::types::VirtualNodeKind::Main),
+            compile_profile: profile.clone(),
+        })
+        .expect_err(
+            "the framework-aware route must refuse svelte_generate_module at \
+             request construction",
+        );
+    let crate::HostError::CompileError(failure) = err else {
+        panic!("the control refusal must surface as a compile failure, got: {err:?}");
+    };
+    assert!(
+        failure
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"),
+        "the control refusal must carry the request-construction refusal \
+         diagnostic, got: {:?}",
+        failure.diagnostics.diagnostics
+    );
+
+    // Leg 3 — the SAME profile over a VUE carrier renders: the Vue-bound
+    // demand carries no Svelte axis, so the Svelte-only field cannot refuse
+    // (or otherwise affect) a Vue render.
+    let vue_canonical = "/proj/ShapeControl.vue";
+    upsert_sibling(
+        &host,
+        vue_canonical,
+        "<script setup lang=\"ts\">\nconst n = 1\n</script>\n<template><div>{{ n }}</div></template>\n",
+    );
+    let render = host
+        .render_only_main(
+            vue_canonical,
+            &profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
+        .expect("a Vue carrier ignores the Svelte-only field — the bound demand has no such axis");
+    assert!(
+        !render.code.is_empty(),
+        "the Vue render must produce the runtime Main"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 22 — Svelte request options are honored through the bound request
+// ---------------------------------------------------------------------------
+
+/// The render route's Svelte-bound request carries the profile's typed
+/// Svelte options, so a request-borne option (`svelte_disclose_version`
+/// here) is HONORED byte-observably: `Some(false)` drops the
+/// `svelte/internal/disclose-version` side-effect import, diverging from
+/// the option-unset render (whose default `discloseVersion: true` keeps
+/// it) and matching the framework-aware `get_virtual_file(Main)` control
+/// byte-for-byte. DISCRIMINATING: a render route that rebuilt a request
+/// without the carrier's own option shape would collapse the option to its
+/// compiler default and keep the import.
+#[test]
+fn runtime_render_honors_svelte_request_options_through_the_bound_request() {
+    let canonical = "/proj/Disclose.svelte";
+    let base_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        is_production: true,
+        ..CompileProfile::default()
+    };
+    let mut no_disclose_profile = base_profile.clone();
+    no_disclose_profile.svelte_disclose_version = Some(false);
+
+    // Leg 1 — render route, option SET: the disclose-version import is
+    // dropped (the option reached the bound Svelte request).
+    let host_a = new_host();
+    upsert_sibling(&host_a, canonical, SVELTE_RUNES_SRC);
+    let with_option = host_a
+        .render_only_main(
+            canonical,
+            &no_disclose_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
+        .expect("the render route must render the Svelte component");
+    assert!(
+        !with_option
+            .code
+            .contains("import 'svelte/internal/disclose-version';"),
+        "svelte_disclose_version=Some(false) must be honored on the render \
+         route — the side-effect import must be dropped:\n{}",
+        with_option.code
+    );
+
+    // Leg 2 — render route, option UNSET: the default keeps the import and
+    // the outputs genuinely diverge (the option is byte-affecting).
+    let host_b = new_host();
+    upsert_sibling(&host_b, canonical, SVELTE_RUNES_SRC);
+    let without_option = host_b
+        .render_only_main(
+            canonical,
+            &base_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
+        .expect("the render route must render the Svelte component");
+    assert!(
+        without_option
+            .code
+            .contains("import 'svelte/internal/disclose-version';"),
+        "with the option unset, the compiler default keeps the import:\n{}",
+        without_option.code
+    );
+    assert_ne!(
+        with_option.code, without_option.code,
+        "the request-borne Svelte option must be byte-affecting on the render route"
+    );
+
+    // Leg 3 (control) — the framework-aware route under the SAME profile
+    // produces the SAME honored bytes.
+    let host_c = new_host();
+    upsert_sibling(&host_c, canonical, SVELTE_RUNES_SRC);
+    let honored = host_c
+        .get_virtual_file(crate::types::VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(crate::types::VirtualNodeKind::Main),
+            compile_profile: no_disclose_profile,
+        })
+        .expect("the framework-aware route must honor the canonical option");
+    assert_eq!(
+        with_option.code, honored.code,
+        "the render route's honored output must byte-match the framework-aware control"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 23 — the resolved cssHash override rides the bound execution inputs
+// ---------------------------------------------------------------------------
+
+/// The resolved `cssHash` scope-class override (`svelte_css_hash_override`)
+/// is an EXECUTION INPUT, not a request-identity axis: it rides the bound
+/// Svelte backend's execution-input channel and reaches the scoped-style
+/// class byte-observably. Byte-observable: the override token is used
+/// verbatim as the scope class in the render `Main`. DISCRIMINATING: a
+/// render route that dropped the execution-input channel would fall back to
+/// the derived hash class and lose the caller's override token.
+#[test]
+fn runtime_render_profile_borne_svelte_css_hash_override_survives() {
+    let canonical = "/proj/Styled.svelte";
+    let styled_src = "<script>let count = $state(0);</script>\n<p class=\"x\">{count}</p>\n<style>.x { color: red; }</style>\n";
+
+    let mut profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        is_production: true,
+        ..CompileProfile::default()
+    };
+    profile.svelte_css_hash_override = Some("verteroverriddenhash".to_string());
+
+    let host = new_host();
+    upsert_sibling(&host, canonical, styled_src);
+    let render = host
+        .render_only_main(
+            canonical,
+            &profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
+        .expect("a styled Svelte component must render");
+    assert!(
+        render.code.contains("verteroverriddenhash"),
+        "the profile-borne cssHash override must reach the Svelte backend as \
+         the scope class on the render route:\n{}",
+        render.code
+    );
+
+    // Control on the same host state: without the override, the scope class
+    // is the derived hash — the override token must not appear.
+    let base_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        is_production: true,
+        ..CompileProfile::default()
+    };
+    let derived = host
+        .render_only_main(
+            canonical,
+            &base_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
+        .expect("the override-less render must also succeed");
+    assert!(
+        !derived.code.contains("verteroverriddenhash"),
+        "without the override the derived scope class applies:\n{}",
+        derived.code
+    );
+    assert_ne!(
+        render.code, derived.code,
+        "the override must be output-affecting on the render route"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 24 — profile-borne `svelte_runes` survives AND flips the compile mode
+// ---------------------------------------------------------------------------
+
+/// Companion to the css-hash pin, for the mode-selecting option:
+/// `svelte_runes` rides the TYPED Svelte option attempt on the bound
+/// render request and reaches the Svelte backend's mode inference.
+///
+/// Byte-observable on a MODE-NEUTRAL fixture (compiles in both modes): a
+/// forced `Some(true)` emits the runes module, while the unset control
+/// infers LEGACY mode and additionally imports
+/// `svelte/internal/flags/legacy` — the outputs differ. Outcome-observable
+/// on the `$state` fixture: `Some(false)` forces legacy interpretation,
+/// where a rune name is a store subscription, and the render flips from
+/// success to the typed legacy-rune refusal. DISCRIMINATING: a render route
+/// that dropped the runes axis from its bound request would read `None` for
+/// every leg — the forced-runes leg would emit the legacy flags import and
+/// the `Some(false)` leg would stop refusing.
+#[test]
+fn runtime_render_profile_borne_svelte_runes_survives_and_flips_the_mode() {
+    let base_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        is_production: true,
+        ..CompileProfile::default()
+    };
+
+    // Leg 1 — byte-observable survival on a mode-neutral fixture.
+    let neutral = "/proj/ModeNeutral.svelte";
+    let neutral_src = "<script>let count = 0;</script>\n<p>{count}</p>\n";
+    let mut runes_on = base_profile.clone();
+    runes_on.svelte_runes = Some(true);
+
+    let host_a = new_host();
+    upsert_sibling(&host_a, neutral, neutral_src);
+    let forced = host_a
+        .render_only_main(
+            neutral,
+            &runes_on,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
+        .expect("a mode-neutral component must render under forced runes");
+    assert!(
+        !forced.code.contains("svelte/internal/flags/legacy"),
+        "profile-borne svelte_runes=Some(true) must select RUNES mode on the \
+         render route — the legacy flags import must be absent:\n{}",
+        forced.code
+    );
+
+    let host_b = new_host();
+    upsert_sibling(&host_b, neutral, neutral_src);
+    let inferred = host_b
+        .render_only_main(
+            neutral,
+            &base_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
+        .expect("the runes-less render must also succeed");
+    assert!(
+        inferred
+            .code
+            .contains("import 'svelte/internal/flags/legacy';"),
+        "with svelte_runes unset the mode-neutral fixture infers LEGACY mode \
+         and imports the legacy flags module:\n{}",
+        inferred.code
+    );
+    assert_ne!(
+        forced.code, inferred.code,
+        "the runes flip must be output-affecting on the render route"
+    );
+
+    // Leg 2 — outcome-observable survival on the `$state` fixture:
+    // `Some(false)` forces legacy interpretation and the rune reference
+    // becomes a typed refusal instead of a successful runes render.
+    let runed = "/proj/RunedForcedLegacy.svelte";
+    let mut runes_off = base_profile.clone();
+    runes_off.svelte_runes = Some(false);
+    let host_c = new_host();
+    upsert_sibling(&host_c, runed, SVELTE_RUNES_SRC);
+    let diagnostic_code = match host_c.render_only_main(
+        runed,
+        &runes_off,
+        verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+    ) {
+        Ok(rendered) => panic!(
+            "svelte_runes=Some(false) must reach the backend and force legacy \
+             interpretation of the $state reference — the render must not \
+             succeed; got code:\n{}",
+            rendered.code
+        ),
+        Err(crate::HostError::RuntimeSurfaceRefused {
+            diagnostic_code, ..
+        }) => diagnostic_code,
+        Err(other) => panic!(
+            "the forced-legacy $state render must be a typed runtime-surface \
+             refusal, got: {other:?}"
+        ),
+    };
+    assert_eq!(
+        diagnostic_code, "svelte-runtime-unsupported-legacy-rune-reference",
+        "the refusal must be the legacy-rune-reference code — proves the \
+         profile-borne Some(false) reached the backend's mode inference"
+    );
+    // Control: the SAME fixture renders as a runes component when the
+    // profile leaves `svelte_runes` unset.
+    let host_d = new_host();
+    upsert_sibling(&host_d, runed, SVELTE_RUNES_SRC);
+    let unset = host_d
+        .render_only_main(
+            runed,
+            &base_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
+        .expect("the $state fixture renders when runes stays unset");
+    assert!(
+        unset.code.contains("$.state(0)"),
+        "the unset control lowers $state through the runes runtime:\n{}",
+        unset.code
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 25 — a malformed profile-borne Svelte token REFUSES on the render
+// route, exactly like the framework-aware route
+// ---------------------------------------------------------------------------
+
+/// The render route's Svelte-bound demand decodes the profile's Svelte
+/// tokens through the SAME typed admission the framework-aware constructor
+/// uses, so a malformed `svelte_namespace` token refuses at construction on
+/// BOTH routes with the same request-construction refusal code — never a
+/// silent default. A default (token-less) profile still renders, proving
+/// the refusal is the token's, not the route's.
+///
+/// DISCRIMINATING: a render route that skipped the typed Svelte decode (a
+/// fixed-framework request on the lane) would flip the first leg from
+/// refusal back to silently-defaulted success.
+#[test]
+fn runtime_render_refuses_a_malformed_profile_borne_svelte_token() {
+    let canonical = "/proj/BogusNamespace.svelte";
+    let base_profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        is_production: true,
+        ..CompileProfile::default()
+    };
+    let mut bogus_profile = base_profile.clone();
+    bogus_profile.svelte_namespace = Some("bogus".to_string());
+
+    // Leg 1 — render route: the malformed token refuses at the bound
+    // construction with the typed request-construction refusal.
+    let host_a = new_host();
+    upsert_sibling(&host_a, canonical, SVELTE_RUNES_SRC);
+    let err = host_a
+        .render_only_main(
+            canonical,
+            &bogus_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
+        .expect_err(
+            "the Svelte-bound render demand decodes svelte_namespace and \
+             must refuse an unrecognized token, never silently default it",
+        );
+    let crate::HostError::CompileError(failure) = err else {
+        panic!("the render refusal must surface as a compile failure, got: {err:?}");
+    };
+    assert!(
+        failure
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"),
+        "the render refusal must carry the request-construction refusal \
+         diagnostic, got: {:?}",
+        failure.diagnostics.diagnostics
+    );
+
+    // Leg 2 — render route, token UNSET: the default profile renders (the
+    // refusal above is the malformed token's, not the route's).
+    let host_b = new_host();
+    upsert_sibling(&host_b, canonical, SVELTE_RUNES_SRC);
+    let without = host_b
+        .render_only_main(
+            canonical,
+            &base_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
+        .expect("the token-less render must succeed");
+    assert!(
+        without
+            .code
+            .contains("import * as $ from 'svelte/internal/client';"),
+        "the default render still produces the Svelte client module:\n{}",
+        without.code
+    );
+
+    // Leg 3 (control) — the framework-aware route refuses the SAME token
+    // with the SAME code.
+    let host_c = new_host();
+    upsert_sibling(&host_c, canonical, SVELTE_RUNES_SRC);
+    let err = host_c
+        .get_virtual_file(crate::types::VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(crate::types::VirtualNodeKind::Main),
+            compile_profile: bogus_profile,
+        })
+        .expect_err(
+            "the framework-aware route must refuse the malformed \
+             svelte_namespace token at request construction",
+        );
+    let crate::HostError::CompileError(failure) = err else {
+        panic!("the control refusal must surface as a compile failure, got: {err:?}");
+    };
+    assert!(
+        failure
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"),
+        "the control refusal must carry the request-construction refusal \
+         diagnostic, got: {:?}",
+        failure.diagnostics.diagnostics
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 26 — the demand admitted is the demand executed (runtime kind)
+// ---------------------------------------------------------------------------
+
+/// The bound render execution runs EXACTLY the admitted demand: an `ssr`
+/// render profile admits the SERVER runtime product and the executed
+/// output is the SSR module (byte-matching the `get_virtual_file` SSR
+/// oracle), while the client profile's output is the client module — the
+/// two genuinely diverge. DISCRIMINATING: a lane that executed a demand
+/// other than the one its admission was issued for (e.g. always the
+/// client kind) would collapse the two outputs and mismatch the SSR
+/// oracle.
+#[test]
+fn runtime_render_executes_the_admitted_runtime_kind() {
+    let canonical = "/proj/RuntimeKind.vue";
+    let src = "<script setup lang=\"ts\">\nconst n = 1\n</script>\n<template><div>{{ n }}</div></template>\n";
+    let ssr_rp = render_profile(true, true, false, crate::types::HmrStrategy::None);
+    let client_rp = render_profile(true, false, false, crate::types::HmrStrategy::None);
+
+    let ssr = render_with_profile(&new_host(), canonical, src, ssr_rp.clone(), None);
+    assert!(
+        ssr.errors().is_empty(),
+        "ssr render errors: {:?}",
+        ssr.errors()
+    );
+    let client = render_with_profile(&new_host(), canonical, src, client_rp, None);
+    assert!(
+        client.errors().is_empty(),
+        "client render errors: {:?}",
+        client.errors()
+    );
+
+    assert!(
+        ssr.code().contains("ssrRender"),
+        "the admitted SERVER demand must execute the SSR module:\n{}",
+        ssr.code()
+    );
+    assert!(
+        !client.code().contains("ssrRender"),
+        "the admitted CLIENT demand must not execute the SSR module:\n{}",
+        client.code()
+    );
+    assert_ne!(
+        ssr.code(),
+        client.code(),
+        "the two admitted runtime kinds must produce divergent output"
+    );
+
+    // Oracle parity: the executed SSR bytes are the same SSR bytes the
+    // framework-aware route serves for the same profile.
+    let (hb_ssr, _, _) = host_backed_main_via_get_virtual_file(
+        &new_host(),
+        canonical,
+        src,
+        &get_virtual_file_profile(ssr_rp, None),
+    );
+    assert_eq!(
+        ssr.code(),
+        hb_ssr.as_ref(),
+        "the executed SSR demand must byte-match the getVirtualFile SSR oracle.\n--- RENDER ---\n{}\n--- GVF ---\n{}",
+        ssr.code(),
+        hb_ssr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 27 — the artifact admitted/executed must be the BOUND one
+// ---------------------------------------------------------------------------
+
+/// Injecting a binding bound for a DIFFERENT file's registered identity
+/// into the render execution trips the lane's bound-attribution invariant
+/// before any admission or execution: the bound catalog identity must name
+/// the executed artifact. DISCRIMINATING: a lane that admitted or executed
+/// an artifact other than the one its binding was created for would sail
+/// past this gate and this test would observe no panic.
+#[test]
+#[should_panic(expected = "runtime-render bound attribution must name the executed artifact")]
+fn runtime_render_bound_attribution_must_name_the_executed_artifact() {
+    let host = new_host();
+    let vue_canonical = "/proj/AttributionVue.vue";
+    let svelte_canonical = "/proj/AttributionSvelte.svelte";
+    upsert_sibling(&host, vue_canonical, "<template><div>x</div></template>\n");
+    upsert_sibling(&host, svelte_canonical, SVELTE_RUNES_SRC);
+
+    // The compile input — and the artifact presented for execution — of
+    // the VUE file.
+    let snap = host
+        .scheduler
+        .try_get_source(vue_canonical)
+        .expect("the Vue source is live");
+    let efs = host
+        .effective_file_state_from_snapshot(&snap, vue_canonical, None)
+        .expect("the Vue source carries host data");
+    let input = crate::types::CompileInput {
+        canonical_id: vue_canonical.to_string(),
+        source: efs.source,
+        whole_hash: efs.whole_hash,
+        meta: efs.meta,
+        parse_diagnostics: crate::types::DiagnosticsSnapshot::default(),
+        src_blocks: Vec::new(),
+        external_requests: Vec::new(),
+        has_supplied_block_content: false,
+        block_content_inputs: Default::default(),
+        macro_type_deps: Vec::new(),
+        script_imports: Vec::new(),
+        script_macros: Vec::new(),
+        script_bindings: Vec::new(),
+        script_macro_usage: None,
+        script_vue_api_calls: Vec::new(),
+        framework_parse: efs.framework_parse,
+        style_v_bind_vars: Vec::new(),
+        style_v_bind_usage_complete: true,
+        prepared_styles: Vec::new(),
+    };
+
+    // A binding bound for the SVELTE file's registered identity.
+    let svelte_snap = host
+        .scheduler
+        .try_get_source(svelte_canonical)
+        .expect("the Svelte source is live");
+    let svelte_efs = host
+        .effective_file_state_from_snapshot(&svelte_snap, svelte_canonical, None)
+        .expect("the Svelte source carries host data");
+    let foreign_binding = host
+        .bind_native_host_compile_attempt(
+            svelte_efs.framework_parse.as_deref(),
+            svelte_canonical,
+            svelte_snap.source.len() as u32,
+            &svelte_snap,
+            crate::types::CompileCacheMode::Session,
+        )
+        .expect("the registered Svelte identity binds")
+        .expect("a Svelte carrier registers a framework parse artifact");
+
+    // The lane must trip its bound-attribution invariant rather than admit
+    // or execute the mismatched pairing.
+    let _ = host.compile_entry_runtime_render(
+        &input,
+        &CompileProfile::default(),
+        Some(foreign_binding),
+        verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
     );
 }

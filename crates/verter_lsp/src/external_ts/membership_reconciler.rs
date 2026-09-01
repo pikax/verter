@@ -718,6 +718,34 @@ impl MembershipReconciler {
             != 0)
     }
 
+    /// Return sources whose current-session advertisement does not yet contain
+    /// an IDE companion. This is a non-blocking readiness probe: unlike activation,
+    /// it never joins an in-flight per-source membership transaction.
+    #[must_use]
+    pub fn missing_published_activations(
+        &self,
+        sources: &[CanonicalSource],
+    ) -> Vec<CanonicalSource> {
+        let current_session = self.ledger.current_session();
+        sources
+            .iter()
+            .filter(|source| {
+                !matches!(
+                    self.ledger.record_snapshot(source),
+                    Some(MembershipRecord::Advertised {
+                        companions,
+                        lease,
+                        ..
+                    }) if lease == current_session
+                        && companions
+                            .iter()
+                            .any(|companion| companion.role == SnapshotRole::CarrierIde)
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Promote a symbol-relevant carrier frontier with one provider admission
     /// transaction. Sources are locked in canonical order so their ledger
     /// advertisements cannot be replaced/retracted between snapshot and

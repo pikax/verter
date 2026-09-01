@@ -11,7 +11,6 @@
  *                 control-dir advertisement, then start verter-lsp with
  *                 `--type-provider=shared-tsgo --shared-control-dir=… --shared-session-key=…`.
  */
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -21,6 +20,7 @@ import { LspClient } from "@verter/lsp-test-client";
 
 import { awaitRawLspStartup } from "../core/startupGate.js";
 import { resolvePlatformBinary } from "../core/rustHostTriple.js";
+import { repositoryTypescriptPluginProbe } from "../core/typescriptPluginProbe.js";
 import type { EnduranceProviderRoute, ProviderRuntimeAttestation } from "./types.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -55,23 +55,6 @@ async function resolveTsgoBinary(repoRoot: string, explicit?: string): Promise<s
     throw new Error(`TypeScript executable resolver has no default function: ${resolver}`);
   }
   return requireFile("TypeScript 7 native executable", module.default());
-}
-
-/**
- * The tsserver route needs `@verter/typescript-plugin`'s dist. Build ONLY that
- * package when it is missing (the repo's verter-lsp binary itself is never
- * rebuilt by this harness).
- */
-function ensureTypescriptPluginBuilt(repoRoot: string, pluginPath: string): void {
-  if (existsSync(path.join(pluginPath, "index.js"))) return;
-  execFileSync(
-    process.platform === "win32" ? "pnpm.cmd" : "pnpm",
-    ["--filter", "@verter/typescript-plugin", "build"],
-    { cwd: repoRoot, stdio: "inherit" },
-  );
-  if (!existsSync(path.join(pluginPath, "index.js"))) {
-    throw new Error(`TypeScript plugin build did not produce index.js: ${pluginPath}`);
-  }
 }
 
 function waitForRelayAdvertisement(controlDir: string, timeoutMs: number): Promise<string> {
@@ -180,8 +163,8 @@ export async function spawnEnduranceLsp(
   if (route === "tsserver" && !existsSync(path.join(tsdk, "tsserver.js"))) {
     throw new Error(`tsserver SDK is missing tsserver.js: ${tsdk}`);
   }
-  const pluginPath = path.join(repoRoot, "packages", "typescript-plugin", "dist");
-  if (route === "tsserver") ensureTypescriptPluginBuilt(repoRoot, pluginPath);
+  const pluginPath =
+    route === "tsserver" ? repositoryTypescriptPluginProbe(repoRoot).probeLocation : undefined;
 
   const env: Record<string, string> = {
     VERTER_TSGO_BIN: tsgoBin,
@@ -258,7 +241,7 @@ export async function spawnEnduranceLsp(
 
   const args = [root, `--type-provider=${route}`];
   if (route === "tsserver") {
-    args.push(`--tsdk=${tsdk}`, `--plugin-path=${pluginPath}`);
+    args.push(`--tsdk=${tsdk}`, `--plugin-path=${pluginPath!}`);
   }
   if (route === "shared-tsgo") {
     args.push(`--shared-control-dir=${controlDir}`, `--shared-session-key=${sessionKey}`);

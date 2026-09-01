@@ -1,14 +1,18 @@
 /**
  * Find-all-references + rename exactness for TS and JS on both frameworks.
  */
+import * as vscode from "vscode";
+
 import { FIXTURE_NAME } from "../../../helpers";
 import {
   assertReferenceCountAtLeast,
   assertRenameCoversAndRestores,
   definitionsAt,
   ensureParityReady,
+  openRelative,
   referencesAt,
   failParityGap,
+  tokenPosition,
   VIRTUAL_CARRIER,
 } from "../../../lib/parityHarness";
 
@@ -16,6 +20,22 @@ function framework(): "vue" | "svelte" | null {
   if (FIXTURE_NAME === "vue-parity") return "vue";
   if (FIXTURE_NAME === "svelte-parity") return "svelte";
   return null;
+}
+
+async function warmReferenceProvider(fw: "vue" | "svelte"): Promise<void> {
+  const anchor = {
+    file: fw === "vue" ? "src/DailyBinding.vue" : "src/DailyBinding.svelte",
+    token: "renderDaily",
+    occurrence: 0,
+  } as const;
+  const doc = await openRelative(anchor.file);
+  // This is readiness work, not a product assertion. The exactness tests below
+  // decide whether empty or incomplete locations are route-specific gaps.
+  await vscode.commands.executeCommand<vscode.Location[]>(
+    "vscode.executeReferenceProvider",
+    doc.uri,
+    tokenPosition(doc, anchor),
+  );
 }
 
 suite(`Find and rename exactness [${FIXTURE_NAME}]`, function () {
@@ -26,6 +46,7 @@ suite(`Find and rename exactness [${FIXTURE_NAME}]`, function () {
       throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
     }
     await ensureParityReady(fw === "vue" ? "src/App.vue" : "src/App.svelte");
+    await warmReferenceProvider(fw);
   });
 
   test("shared.find.ts.exact-min-set", async function () {

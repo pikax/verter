@@ -317,6 +317,11 @@ impl VerterHost {
             ),
             resolved,
             analysis,
+            // The resolution-bearing lane publishes no output publication
+            // evidence: its admission is settled inside
+            // `publish_component_meta_cache_entry` above, and no admitted
+            // final result travels out for an output read to observe.
+            admitted: None,
         })
     }
 
@@ -427,6 +432,7 @@ impl VerterHost {
             resolved,
             analysis,
             completeness,
+            admitted: _,
         }) = self.component_meta_with_resolution_cold(
             canonical.as_str(),
             request_id,

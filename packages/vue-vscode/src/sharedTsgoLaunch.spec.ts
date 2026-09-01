@@ -49,12 +49,28 @@ describe("relayShimCandidates", () => {
       }),
     ).toEqual([explicit]);
   });
-  it("prefers dev target/{debug,release} over the packaged bin/ (freshest local build wins)", () => {
-    const c = relayShimCandidates({ extensionPath: "/ext", env: {}, platform: "win32" });
+  it("prefers target-triple dev builds, then legacy dev builds, over packaged bin/", () => {
+    // `arch` is stated, not inherited: a triple needs both halves, so a test
+    // that names only the platform asserts a Windows layout while silently
+    // taking the running machine's arch — green on x64, red on arm64.
+    const c = relayShimCandidates({
+      extensionPath: "/ext",
+      env: {},
+      platform: "win32",
+      arch: "x64",
+    });
+    const tripleDebug = join(
+      "/ext",
+      "target",
+      "x86_64-pc-windows-msvc",
+      "debug",
+      `${RELAY_SHIM_STEM}.exe`,
+    );
     const devDebug = join("/ext", "target", "debug", `${RELAY_SHIM_STEM}.exe`);
     const packaged = join("/ext", "bin", `${RELAY_SHIM_STEM}.exe`);
-    expect(c[0]).toBe(devDebug);
+    expect(c[0]).toBe(tripleDebug);
     expect(c).toContain(packaged);
+    expect(c.indexOf(tripleDebug)).toBeLessThan(c.indexOf(devDebug));
     expect(c.indexOf(devDebug)).toBeLessThan(c.indexOf(packaged));
   });
 });

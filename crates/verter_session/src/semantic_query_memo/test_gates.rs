@@ -158,6 +158,21 @@ impl SemanticGraphStore {
         }
     }
 
+    /// Park a cancelled cold owner after it wakes joiners and before it
+    /// retires the aborted flight. The two waits let a test require a live
+    /// follower to make progress while the original owner remains parked.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_cancellation_abort_pre_retire_gate(
+        &self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> TestInvalidateAllGateGuard<'_> {
+        *self.cancellation_abort_pre_retire_gate.lock() = Some(barrier);
+        TestInvalidateAllGateGuard {
+            gate: &self.cancellation_abort_pre_retire_gate,
+        }
+    }
+
     /// Test-only driver: arm the [`Self::invalidate_all`]
     /// pre-`canonical_to_entries`-clear injection point with `barrier`.
     /// The next `invalidate_all` on **this store** calls `barrier.wait()`

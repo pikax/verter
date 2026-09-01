@@ -8,6 +8,10 @@ import {
   TYPE_PROVIDER,
 } from "../helpers";
 import { getTimer } from "../timer";
+import {
+  attestE2eTypeProviderLog,
+  type E2eTypeProviderRoute,
+} from "../../src/e2eProviderAttestation";
 
 suite(`Startup Timing [${FIXTURE_NAME}]`, function () {
   suiteSetup(async function () {
@@ -51,12 +55,9 @@ suite(`Startup Timing [${FIXTURE_NAME}]`, function () {
     }
 
     if (TYPE_PROVIDER) {
+      const attestation = attestE2eTypeProviderLog(log, TYPE_PROVIDER as E2eTypeProviderRoute);
       const expectedProviderKind =
-        TYPE_PROVIDER === "tsserver"
-          ? "editor-tsserver"
-          : TYPE_PROVIDER === "shared-tsgo"
-            ? "tsgo"
-            : TYPE_PROVIDER;
+        attestation.publicKind === "none" ? "verter-only" : attestation.publicKind;
       expect(
         providerKind,
         `Requested ${TYPE_PROVIDER} but got ${providerKind}${timing.typeProviderReason ? ` (${timing.typeProviderReason})` : ""}`,

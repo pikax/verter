@@ -12,11 +12,16 @@ Verter uses GitHub Actions for continuous integration, testing, and releases.
 
 Runs on push to `main` and on pull requests. Uses [dorny/paths-filter](https://github.com/dorny/paths-filter) for change detection to only run relevant jobs:
 
-- **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-build-configs`, `rust-test`
+- **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-build-configs`, one provider-free `rust-test-build` archive consumed by `rust-test`, plus independent serial `rust-tsserver-live` and `rust-tsgo-live` provider jobs, the standalone `compiler-contracts` lane, and the Svelte conformance lane
+- **Proto changes** -- `proto-fmt` regenerates with the pinned `buf`/`oxfmt` tools and byte-compares the complete committed TypeScript binding tree
 - **JS changes** (`packages/**`, `package.json`, etc.) -- `js-build-test`
 - **WASM changes** (`crates/verter_compiler/**`, `crates/verter_wasm/**`) -- `wasm-build`
 
-All jobs run independently -- one failing does not block others.
+Most jobs run independently. Core nextest alone consumes the shared archive.
+Real tsserver/tsgo provider tests run serially with libtest in their own jobs so
+third-party engines have explicit initialization and lifecycle ownership.
+Compile-fail fixtures run through `node scripts/compile-contracts.mjs`, outside
+Rust test discovery; Svelte conformance is also a dedicated Cargo/libtest job.
 
 ### Benchmark (`benchmark.yml`)
 

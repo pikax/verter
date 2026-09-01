@@ -6,7 +6,7 @@
 //! it re-renders [`semantic_query_key_specs`] in memory and asserts THREE
 //! independent, discriminating properties (mirroring the
 //! generator-is-sole-writer / test-only-diffs split of
-//! `typeinfo_proto_ts_freshness.rs`):
+//! `scripts/check-proto-generated.mjs`):
 //!
 //! 1. **Freshness** — `render_spec_table(&semantic_query_key_specs())`
 //!    byte-equals the committed artifact. Fails on a hand-edit, a stale

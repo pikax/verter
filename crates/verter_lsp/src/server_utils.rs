@@ -1439,12 +1439,13 @@ pub(super) struct DidOpenProviderSyncPolicy {
     pub(super) background_api_sync: bool,
 }
 
-pub(super) fn did_open_startup_policy(kind: crate::TypeProviderKind) -> DidOpenStartupPolicy {
+pub(super) fn did_open_startup_policy(_kind: crate::TypeProviderKind) -> DidOpenStartupPolicy {
     DidOpenStartupPolicy {
-        // When a type provider is active, eagerly sync imported carrier APIs
-        // (any framework carrier — `.vue`, `.svelte`, …) so that
-        // hover/completions/go-to-definition work on <ChildComponent> immediately.
-        sync_imported_carrier_apis: !matches!(kind, crate::TypeProviderKind::None),
+        // Imported-child publication owns both provider buffers (when a
+        // provider exists) and provider-neutral component contracts. Run the
+        // common background lane for every topology so native completion has
+        // the child contract even when no external provider is configured.
+        sync_imported_carrier_apis: true,
         // Diagnostics are pushed by the sync coordinator after open/change settles.
         publish_diagnostics: false,
     }
@@ -1786,6 +1787,46 @@ fn compute_verter_diagnostics_for_with_views(
                         &doc.line_index,
                     ),
                 );
+            }
+
+            // Reassert the provider-ownership boundary at the final public
+            // diagnostic surface. The template inventory normally suppresses
+            // unused-prop facts as soon as it sees destructured `defineProps`,
+            // but semantic enrichment and diagnostic publication advance on
+            // independent generations. A publication that briefly combines a
+            // newer script snapshot with an older template inventory must fail
+            // open instead of double-reporting every destructured member next
+            // to the provider's precise TS6133 diagnostic.
+            if analysis
+                .macro_usage
+                .as_ref()
+                .is_some_and(|usage| usage.props_destructured)
+            {
+                diags.retain(|diagnostic| {
+                    !matches!(
+                        diagnostic.code.as_ref(),
+                        Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+                    )
+                });
+            }
+
+            // `$props()` is a Svelte rune, but its semantic carrier deliberately
+            // reuses the same macro/member facts that power Vue's
+            // `defineProps` surface. Those shared facts must not make the
+            // Vue-only unused-declaration rules appear on a Svelte document.
+            // Filter at the public diagnostic boundary, where the authored
+            // carrier language is authoritative, rather than weakening the
+            // shared semantic facts used by completion and navigation.
+            if carrier_language_for(&canonical_id).is_some_and(|language| language.is_svelte()) {
+                diags.retain(|diagnostic| {
+                    !matches!(
+                        diagnostic.code.as_ref(),
+                        Some(NumberOrString::String(code))
+                            if code == "verter/no-unused-props"
+                                || code == "verter/no-unused-emit-declarations"
+                                || code == "verter/no-unused-slots"
+                    )
+                });
             }
 
             // When lint is not explicitly configured, suppress lint diagnostics but

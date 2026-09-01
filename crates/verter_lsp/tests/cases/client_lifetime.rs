@@ -105,7 +105,7 @@ fn standard_lsp_client_death_terminates_the_lsp_with_open_stdio() {
     let client_pid = client.id();
     let mut client = ChildCleanup(Some(client));
 
-    let lsp = Command::new(env!("CARGO_BIN_EXE_verter-lsp"))
+    let lsp = Command::new(verter_test_support::cargo_test_binary_path!("verter-lsp"))
         .arg("--type-provider=off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -25,7 +25,7 @@ for (const lane of ENDURANCE_LANES) {
     const fixture = buildComponentFixture(lane);
 
     beforeAll(async () => {
-      rig = await materializeRig(fixture.files, config);
+      rig = await materializeRig(fixture.files, config, lane);
     });
     afterAll(async () => {
       await disposeRig(rig);

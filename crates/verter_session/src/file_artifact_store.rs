@@ -255,7 +255,8 @@ pub const BASE_PARSE_ENV_HASH: Hash16 = [0u8; 16];
 /// read parse-domain facts via [`FileFacts::registry`] / `lookup`.
 ///
 /// Parse-time emission populates ONLY header-derived facts:
-/// `MemberShape`, `MemberPresence`, `SyntacticExportSet`, `ImportRef`,
+/// `MemberShape`, `MemberPresence`, `SyntacticExportSet`,
+/// `SyntacticRouteInterface`, `ImportRef`,
 /// `SyntacticReexportRef`, `ExportAlias`, `ModuleAugmentation`. The
 /// body-sensitive `Export` / `LocalDecl` facts are NOT emitted here —
 /// publishing lowers zero declaration bodies, so they compute lazily on
@@ -509,7 +510,8 @@ impl FileArtifacts {
     /// **Parse-time fact emission runs here** — the constructed
     /// `FileFacts` is populated with the HEADER-derived parse-domain
     /// `FactRegistry` (`MemberShape`, `MemberPresence`,
-    /// `SyntacticExportSet`, `ImportRef`, `SyntacticReexportRef`,
+    /// `SyntacticExportSet`, `SyntacticRouteInterface`, `ImportRef`,
+    /// `SyntacticReexportRef`,
     /// `ExportAlias`, `ModuleAugmentation`) by
     /// [`crate::fact_emission::emit_parse_facts`]; publishing lowers
     /// zero declaration bodies, so the body-sensitive `Export` /
@@ -3926,6 +3928,7 @@ pub(crate) fn fact_key_kind_tag_for(key: &fact_registry::FactKey) -> verter_audi
         FactKey::Export { .. } => FactKeyKindTag::Export,
         FactKey::ExportAlias { .. } => FactKeyKindTag::ExportAlias,
         FactKey::SyntacticExportSet => FactKeyKindTag::SyntacticExportSet,
+        FactKey::SyntacticRouteInterface => FactKeyKindTag::SyntacticRouteInterface,
         FactKey::LocalDecl { .. } => FactKeyKindTag::LocalDecl,
         FactKey::Member { .. } => FactKeyKindTag::Member,
         FactKey::MemberPresence { .. } => FactKeyKindTag::MemberPresence,

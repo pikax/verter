@@ -37,6 +37,13 @@ pub const SCRIPT_SYNTAX_COMPATIBILITY_DOMAIN: CompatibilityDomainId =
     CompatibilityDomainId("verter.script.syntax");
 /// Initial compatibility epoch for script syntax construction.
 pub const SCRIPT_SYNTAX_COMPATIBILITY_EPOCH: CompatibilityEpoch = CompatibilityEpoch(0);
+/// Compatibility namespace for a requested framework row that is not the
+/// installed Vue or Svelte carrier. Catalog-miss identity uses this so an
+/// unknown adapter/language is never rewritten onto Vue/Svelte.
+pub const FRAMEWORK_SYNTAX_COMPATIBILITY_DOMAIN: CompatibilityDomainId =
+    CompatibilityDomainId("verter.framework.syntax");
+/// Initial compatibility epoch for a requested non-Vue/Svelte framework row.
+pub const FRAMEWORK_SYNTAX_COMPATIBILITY_EPOCH: CompatibilityEpoch = CompatibilityEpoch(0);
 
 /// Parse-affecting options for a carrier frontend.
 ///
@@ -100,6 +107,12 @@ enum FrameworkSyntaxProfile {
         source_type: ScriptSourceType,
         flavor: ScriptFlavor,
     },
+    Requested {
+        delimiter_open: String,
+        delimiter_close: String,
+        custom_elements: Vec<String>,
+        svelte_loose: bool,
+    },
 }
 
 /// Owner-side descriptor for [`SyntaxProfileId`].
@@ -162,7 +175,20 @@ impl SyntaxProfileDescriptor {
                 loose: options.svelte_loose,
             }
         } else {
-            return Err(ParseIdentityError::UnsupportedFrameworkCarrier);
+            let (delimiter_open, delimiter_close) = options.delimiters.clone();
+            let custom_elements = options
+                .custom_elements
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            FrameworkSyntaxProfile::Requested {
+                delimiter_open,
+                delimiter_close,
+                custom_elements,
+                svelte_loose: options.svelte_loose,
+            }
         };
 
         Ok(Self {
@@ -215,6 +241,19 @@ impl CanonicalEncode for SyntaxProfileDescriptor {
                             .field_str(11, language_id.as_str());
                     }
                 }
+            }
+            FrameworkSyntaxProfile::Requested {
+                delimiter_open,
+                delimiter_close,
+                custom_elements,
+                svelte_loose,
+            } => {
+                encoder
+                    .field_enum_discriminant(3, 4)
+                    .field_str(4, delimiter_open)
+                    .field_str(5, delimiter_close)
+                    .field_sorted_set(6, custom_elements.iter().map(String::as_bytes))
+                    .field_bool(8, *svelte_loose);
             }
         }
     }
@@ -281,14 +320,7 @@ pub fn parse_key_for(
     syntax_profile: &SyntaxProfileId,
 ) -> Result<ParseKey, ParseIdentityError> {
     let language_id = match language {
-        FileLanguage::Framework { language_id, .. }
-            if language.is_vue() || language.is_svelte() =>
-        {
-            language_id.clone()
-        }
-        FileLanguage::Framework { .. } => {
-            return Err(ParseIdentityError::UnsupportedFrameworkCarrier)
-        }
+        FileLanguage::Framework { language_id, .. } => language_id.clone(),
         FileLanguage::Script {
             source_type,
             flavor,
@@ -328,6 +360,42 @@ pub fn default_parse_identity_for(
         (
             SCRIPT_SYNTAX_COMPATIBILITY_DOMAIN,
             SCRIPT_SYNTAX_COMPATIBILITY_EPOCH,
+        )
+    } else {
+        return Err(ParseIdentityError::UnsupportedFileLanguage);
+    };
+    let parse_key = parse_key_for(content, language, domain, epoch, &syntax_profile)?;
+    Ok((syntax_profile, parse_key))
+}
+
+/// Syntax-profile and parse identities for a requested `(language, options)`
+/// pair. Unknown framework rows keep their requested adapter/language and
+/// options; they are never rewritten onto Vue or Svelte.
+pub fn parse_identity_for(
+    content: &str,
+    language: &FileLanguage,
+    options: &ParseOptions,
+) -> Result<(SyntaxProfileId, ParseKey), ParseIdentityError> {
+    let syntax_profile = syntax_profile_id_for(language, options)?;
+    let (domain, epoch) = if language.is_vue() {
+        (
+            VUE_SYNTAX_COMPATIBILITY_DOMAIN,
+            VUE_SYNTAX_COMPATIBILITY_EPOCH,
+        )
+    } else if language.is_svelte() {
+        (
+            SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
+            SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
+        )
+    } else if matches!(language, FileLanguage::Script { .. }) {
+        (
+            SCRIPT_SYNTAX_COMPATIBILITY_DOMAIN,
+            SCRIPT_SYNTAX_COMPATIBILITY_EPOCH,
+        )
+    } else if matches!(language, FileLanguage::Framework { .. }) {
+        (
+            FRAMEWORK_SYNTAX_COMPATIBILITY_DOMAIN,
+            FRAMEWORK_SYNTAX_COMPATIBILITY_EPOCH,
         )
     } else {
         return Err(ParseIdentityError::UnsupportedFileLanguage);

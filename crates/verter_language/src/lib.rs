@@ -53,10 +53,12 @@ pub use parse_artifact::{
     UnregisteredFrameworkParseArtifact, UnsupportedSyntaxProfileReason,
 };
 pub use parse_identity::{
-    default_parse_identity_for, parse_key_for, syntax_profile_id_for, ParseKey, ParseOptions,
-    SyntaxProfileId, SCRIPT_SYNTAX_COMPATIBILITY_DOMAIN, SCRIPT_SYNTAX_COMPATIBILITY_EPOCH,
-    SVELTE_SYNTAX_COMPATIBILITY_DOMAIN, SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
-    VUE_SYNTAX_COMPATIBILITY_DOMAIN, VUE_SYNTAX_COMPATIBILITY_EPOCH,
+    default_parse_identity_for, parse_identity_for, parse_key_for, syntax_profile_id_for, ParseKey,
+    ParseOptions, SyntaxProfileId, FRAMEWORK_SYNTAX_COMPATIBILITY_DOMAIN,
+    FRAMEWORK_SYNTAX_COMPATIBILITY_EPOCH, SCRIPT_SYNTAX_COMPATIBILITY_DOMAIN,
+    SCRIPT_SYNTAX_COMPATIBILITY_EPOCH, SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
+    SVELTE_SYNTAX_COMPATIBILITY_EPOCH, VUE_SYNTAX_COMPATIBILITY_DOMAIN,
+    VUE_SYNTAX_COMPATIBILITY_EPOCH,
 };
 pub use registry::{
     GatedCandidate, LanguageRegistry, LanguageRow, RowClassification, StaticClassification,

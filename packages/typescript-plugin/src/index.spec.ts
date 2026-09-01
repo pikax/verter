@@ -1287,6 +1287,55 @@ describe("getExternalFiles carrier working-set ownership", () => {
     expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual(["/ws/src/A.vue.tsx"]);
   });
 
+  it("recreates a missing active managed root when the recovery token advances", async () => {
+    const source = "/ws/src/A.vue";
+    const dir = track(
+      writeStore(vueAndSvelteManifest(), {
+        "blobs/A.vue.tsx": "export const active = true;",
+        "blobs/W.svelte.tsx": "export const warmed = true;",
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: {} });
+    info.config = {
+      carrierStoreDir: dir,
+      activeCarrierSources: [source],
+      carrierStoreRefreshToken: 1,
+    };
+
+    let scriptInfo: { fileName: string } | undefined = { fileName: source };
+    const roots = new Set<unknown>([scriptInfo]);
+    let added = 0;
+    info.project.projectService.getScriptInfo = (fileName: string) =>
+      fileName.replace(/\\/g, "/") === source ? scriptInfo : undefined;
+    info.project.projectService.getOrCreateScriptInfoForNormalizedPath = (fileName: string) => {
+      if (fileName.replace(/\\/g, "/") !== source) return undefined;
+      scriptInfo = { fileName: source };
+      return scriptInfo;
+    };
+    info.project.isRoot = (candidate: unknown) => roots.has(candidate);
+    info.project.addRoot = (candidate: unknown) => {
+      roots.add(candidate);
+      added += 1;
+    };
+
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    // Model tsserver dropping the virtual ScriptInfo while the durable store,
+    // active working set, and manifest version remain unchanged.
+    roots.clear();
+    scriptInfo = undefined;
+    plugin.onConfigurationChanged!({
+      ...info.config,
+      carrierStoreRefreshToken: 2,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(scriptInfo).toBeDefined();
+    expect(roots.has(scriptInfo)).toBe(true);
+    expect(added).toBe(1);
+  });
+
   it("rebinds an already-created editor project without refreshing inside the configure request", async () => {
     const dir = track(
       writeStore(vueAndSvelteManifest(), {

@@ -856,5 +856,5 @@ test("live Project status mutation resolves the configured field and option", ()
   assert.equal(result.current, "Todo");
   assert.equal(result.status, "In Progress");
   assert.equal(result.applied, true);
-  assert.equal(graphqlCalls.length, 4);
+  assert.equal(graphqlCalls.length, 3);
 });

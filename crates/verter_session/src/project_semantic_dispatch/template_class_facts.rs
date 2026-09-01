@@ -1061,6 +1061,7 @@ mod tests {
             &host.provenance,
         )
         .expect("raw template data");
+        let raw = raw.data;
         let script = TemplateClassScriptInputs {
             macros: &data.parse.script_analysis.macros,
             bindings: &data.parse.script_analysis.bindings,

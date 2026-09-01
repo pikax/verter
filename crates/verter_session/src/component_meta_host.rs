@@ -153,6 +153,23 @@ impl ComponentMetaHost {
         }
     }
 
+    /// Create a new component-meta host backed by an existing workspace and
+    /// an explicit [`SchedulerConfig`].
+    pub fn new_with_scheduler_config(
+        config: crate::types::HostConfig,
+        workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
+        scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
+    ) -> Self {
+        let host = VerterHost::new_with_scheduler_config(config, workspace, scheduler_config);
+        let project = crate::meta::MetaProject::new(host);
+        Self {
+            inner: Arc::new(ComponentMetaHostInner {
+                project,
+                generation: AtomicU64::new(0),
+            }),
+        }
+    }
+
     fn check_alive(&self) -> Result<(), ComponentMetaHostError> {
         if self.inner.project.is_shutdown() {
             return Err(ComponentMetaHostError::Shutdown);

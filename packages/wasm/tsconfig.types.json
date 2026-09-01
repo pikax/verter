@@ -7,5 +7,5 @@
     "noEmit": true,
     "skipLibCheck": false
   },
-  "files": ["src/handoff-types.ts", "src/index.test-d.ts"]
+  "files": ["src/handoff-types.ts", "src/request-types.ts", "src/index.test-d.ts"]
 }

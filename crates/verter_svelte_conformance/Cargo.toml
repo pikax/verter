@@ -11,6 +11,14 @@ description = "Deterministic constrained mixed-strength covering-array engine fo
 
 [lib]
 
+[features]
+conformance-tests = []
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
+required-features = ["conformance-tests"]
+
 [dependencies]
 verter_debug_assert = { workspace = true }
 serde = { workspace = true }

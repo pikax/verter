@@ -525,6 +525,7 @@ fn merge_completions_emits_neutral_resolve_envelope() {
         Some("/workspace/App.vue.tsx"),
         "tsserver",
         false,
+        None,
     );
 
     let item = items
@@ -616,6 +617,7 @@ fn merge_completions_omits_envelope_for_nonactionable_local_item() {
         Some("/workspace/App.vue.tsx"),
         "tsserver",
         false,
+        None,
     );
 
     let local_item = items
@@ -681,6 +683,7 @@ fn merge_completions_dedupe_preserves_import_capable_handle() {
         Some("/workspace/App.vue.tsx"),
         "tsserver",
         false,
+        None,
     );
 
     // Only one `computed` survives (deduped), and it carries the auto-import
@@ -733,6 +736,7 @@ fn merge_completions_dedupe_keeps_actionable_on_same_label_distinct_sources() {
         Some("/workspace/App.vue.tsx"),
         "tsserver",
         false,
+        None,
     );
 
     let refs: Vec<_> = items.iter().filter(|i| i.label == "ref").collect();
@@ -968,6 +972,7 @@ fn merge_completions_combines_both() {
         None,
         "tsgo",
         false,
+        None,
     );
     assert_eq!(result.len(), 3);
     assert!(!is_incomplete);
@@ -1010,6 +1015,7 @@ fn merge_completions_surviving_edit_commits_text_edit_new_text_not_insert_text()
         None,
         "tsgo",
         false,
+        None,
     );
     let item = result.iter().find(|i| i.label == "foo").expect("foo item");
     let new_text = match item.text_edit.as_ref().expect("a surviving text edit") {
@@ -1045,6 +1051,7 @@ fn merge_completions_deduplicates() {
         None,
         "tsgo",
         false,
+        None,
     );
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].label, "msg");
@@ -1072,6 +1079,7 @@ fn merge_completions_filters_verter_internal() {
         None,
         "tsgo",
         false,
+        None,
     );
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].label, "msg");
@@ -1096,6 +1104,7 @@ fn merge_completions_propagates_is_incomplete() {
         None,
         "tsgo",
         false,
+        None,
     );
     assert_eq!(result.len(), 2);
     assert!(
@@ -1126,6 +1135,7 @@ fn merge_completions_filters_dollar_v_prefix() {
         None,
         "tsgo",
         false,
+        None,
     );
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].label, "msg");
@@ -1153,6 +1163,7 @@ fn merge_completions_deduplicates_tsgo_internal() {
         None,
         "tsgo",
         false,
+        None,
     );
     let on_mounted_count = result.iter().filter(|i| i.label == "onMounted").count();
     assert_eq!(
@@ -1185,6 +1196,7 @@ fn merge_completions_deduplicates_across_all_sources() {
         None,
         "tsgo",
         false,
+        None,
     );
     let on_mounted_count = result.iter().filter(|i| i.label == "onMounted").count();
     assert_eq!(
@@ -1219,6 +1231,7 @@ fn merge_completions_filters_dunder_internal() {
         None,
         "tsgo",
         false,
+        None,
     );
     let labels: Vec<&str> = result.iter().map(|i| i.label.as_str()).collect();
     assert_eq!(
@@ -6887,6 +6900,7 @@ fn test_merge_completions_transforms_jsx_events() {
         None,
         "tsgo",
         true, // template_attr_context
+        Some(CarrierAttributeSyntax::Vue),
     );
 
     // onClick should be transformed to @click
@@ -6904,6 +6918,57 @@ fn test_merge_completions_transforms_jsx_events() {
     assert!(
         items.iter().any(|i| i.label == "model-value"),
         "modelValue should be transformed to model-value"
+    );
+}
+
+#[test]
+fn svelte_attribute_merge_preserves_camel_case_prop_spelling() {
+    let type_result = CompletionResult {
+        items: vec![Completion {
+            label: "carrierUnusedOnly?".to_string(),
+            kind: Some(CompletionKind::Property),
+            detail: None,
+            documentation: None,
+            sort_text: None,
+            insert_text: Some("carrierUnusedOnly?".to_string()),
+            edit_range_start: None,
+            edit_range_end: None,
+            text_edit_new_text: None,
+            insert_text_format: None,
+            commit_characters: None,
+            filter_text: None,
+            preselect: None,
+            label_details: None,
+            data: None,
+        }],
+        is_incomplete: false,
+    };
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    let (items, _) = merge_completions(
+        vec![],
+        type_result,
+        &mapper,
+        &tsx_li,
+        &carrier_li,
+        Some("/workspace/Parent.svelte.jsx"),
+        "tsserver",
+        true,
+        Some(CarrierAttributeSyntax::Svelte),
+    );
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        labels.contains(&"carrierUnusedOnly"),
+        "Svelte source syntax keeps camelCase while dropping provider optional metadata: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"carrier-unused-only") && !labels.contains(&"carrierUnusedOnly?"),
+        "Svelte labels must be neither Vue-kebabed nor decorated: {labels:?}"
+    );
+    assert_eq!(
+        items[0].insert_text.as_deref(),
+        Some("carrierUnusedOnly"),
+        "the insertion payload must drop the provider's optional marker too"
     );
 }
 
@@ -6979,6 +7044,7 @@ fn merge_expression_context_does_not_transform_jsx() {
         None,
         "tsgo",
         false, // NOT in template attr context — expression context
+        None,
     );
 
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
@@ -7048,6 +7114,7 @@ fn merge_enriches_verter_kind_from_type_provider() {
         None,
         "tsgo",
         false,
+        None,
     );
     assert_eq!(result.len(), 1, "duplicate should be deduped");
     assert_eq!(
@@ -7097,6 +7164,7 @@ fn merge_does_not_enrich_with_text_kind() {
         None,
         "tsgo",
         false,
+        None,
     );
     assert_eq!(result.len(), 1);
     assert_eq!(

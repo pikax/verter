@@ -20,6 +20,16 @@ verter_type_expr = { workspace = true }
 verter_no_typeexpr = { workspace = true }
 rustc-hash = { workspace = true }
 hashbrown = "0.15"
+# The host compile-request DTOs below carry `ts_rs::TS` derives so the
+# published TypeScript mirror of that request is RENDERED from these
+# declarations rather than hand-written beside them. Following the other
+# crates in this workspace that already derive it, ts-rs is a REGULAR
+# dependency so the derives compile into every build that owns the schema
+# — there is no build-time feature under which the schema exists but its
+# TS projection does not. The typeinfo wire surface in this crate is
+# protobuf-authoritative and carries no ts-rs derive; that separation is
+# what `ts_rs_not_applied_to_wire_dtos` pins.
+ts-rs = "12"
 
 [build-dependencies]
 prost-build = "0.14.3"
@@ -31,6 +41,3 @@ static_assertions = "1.1.0"
 # semantic crate to verify D123's `has_macro_failure` field shape.
 syn = { version = "2.0", features = ["full", "extra-traits", "visit", "parsing"] }
 quote = "1.0.45"
-# Used by `typeinfo_proto_ts_freshness.rs` to regenerate the TS
-# bindings into a tempdir for byte-equality comparison.
-tempfile = "3.27"

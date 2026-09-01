@@ -257,7 +257,6 @@ impl VerterHost {
         file_language: &verter_language::FileLanguage,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<crate::carrier_publication_store::RegisteredFileStructure> {
-        use verter_language::carrier_grammar::CarrierGrammarConfig;
         use verter_language::registered_source_authority::{
             CanonicalFileId, FileIncarnation, SourceGeneration,
         };
@@ -280,18 +279,22 @@ impl VerterHost {
                 source,
             )
             .ok()?;
-        let grammar = if file_language.adapter_id().is_some_and(|id| id.is_vue()) {
-            CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).ok()?
-        } else {
-            CarrierGrammarConfig::Svelte
-        };
+        // Registered-identity fact read: the grammar comes from the file's
+        // frontend catalog row, keyed adapter × carrier language. A miss
+        // (unregistered carrier, or a row without a grammar fact) fails
+        // closed as `None` — never another framework's grammar.
+        let grammar =
+            verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+                file_language.adapter_id()?,
+                file_language.carrier_language_id()?,
+            )?;
         let accepted = self
             .carrier_publication
             .grammar_authority
             .accept_registered_source(
                 &self.carrier_publication.source_authority,
                 &registered,
-                &grammar,
+                grammar,
             )
             .ok()?;
         let request = crate::carrier_publication_store::PublicationRequestContext::new(
@@ -627,6 +630,8 @@ impl VerterHost {
         // change leaves the surface edge-stale for the shared oracle).
         let flight_workspace_generation = self.ws().content_generation();
         let flight_project_generation = self.project_type_store.current_project_generation();
+        let flight_store_view_epoch = self.current_store_view_epoch();
+        let flight_resolution_fact_generation = self.ws().resolution_fact_generation();
         // The R21 parse dimension the overlay parse below runs under —
         // same value-side stamp contract as the base materialise.
         let flight_parse_env_hash = self
@@ -671,19 +676,18 @@ impl VerterHost {
         // predicate that lets the snapshot build below walk the
         // flight's single eval-program parse instead of re-parsing the
         // same script bytes.
-        let (eval_source_text, eval_is_extracted_script) =
+        let (eval_source, eval_is_extracted_script) =
             Self::build_eval_script_source_with_extraction(
                 canonical_id,
                 raw_source.as_ref(),
                 framework_parse.as_deref(),
-            );
-        let eval_source = Arc::<str>::from(eval_source_text);
+            )?;
         // Single source type + single eval-program parse — the arena
         // stays on this flight's stack. The source type derives from the
         // OVERLAY content (the pure derivation over `raw_source` +
         // `framework_parse`, the exact inputs the snapshot below is built
-        // from) — NEVER from the scheduler stamp
-        // (`imported_eval_source_type_for`), which covers BASE content:
+        // from) — NEVER from the scheduler-stored
+        // `HostSourceData::source_type`, which covers BASE content:
         // an overlay flipping the script lang would parse the overlay
         // eval source under the stale base type (fatal parse → empty
         // env) while the snapshot reports the overlay lang — an
@@ -717,6 +721,7 @@ impl VerterHost {
         }
         let job_canonical = analysis_canonical_id.to_string();
         let job_raw_source = Arc::clone(&raw_source);
+        let job_eval_source = Arc::clone(&eval_source);
         let job_framework_parse = framework_parse.clone();
         let job_scope = self.config.effective_scope();
         let job_provenance = Arc::clone(&self.provenance);
@@ -786,6 +791,7 @@ impl VerterHost {
                             .as_deref()
                             .expect("Vue parse came from this framework artifact"),
                         &job_provenance,
+                        job_eval_source.as_ref(),
                         VerterHost::vue_flight_script_program(eval_is_extracted_script, program),
                         Some(&owner_table),
                     );
@@ -801,6 +807,7 @@ impl VerterHost {
                             job_scope,
                             artifact,
                             &job_provenance,
+                            job_eval_source.as_ref(),
                             VerterHost::framework_flight_script_program(
                                 eval_is_extracted_script,
                                 program,
@@ -1011,6 +1018,8 @@ impl VerterHost {
         self.fire_materialize_seam();
         if self.ws().content_generation() != flight_workspace_generation
             || self.project_type_store.current_project_generation() != flight_project_generation
+            || self.current_store_view_epoch() != flight_store_view_epoch
+            || self.ws().resolution_fact_generation() != flight_resolution_fact_generation
         {
             return Some(crate::project_type_store::IndexedFlightOutcome {
                 indexed,

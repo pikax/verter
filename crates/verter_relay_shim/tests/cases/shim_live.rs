@@ -324,27 +324,12 @@ pub(super) fn resolve_bin_exe(
     under_nextest: bool,
     compile_time_path: &str,
 ) -> Result<PathBuf, String> {
-    let usable = runtime_path.filter(|path| !path.is_empty());
-    match (usable, under_nextest) {
-        // A runtime-supplied path always wins: it is the copy actually being executed.
-        (Some(path), _) => Ok(PathBuf::from(path)),
-        // Under nextest the runtime variable is the ONLY correct answer, so its absence is a setup
-        // failure — never a silent fall-back. The compile-time constant points into the BUILD
-        // machine's `target/` tree, which on a relocated archive is either gone or a pristine
-        // ORIGINAL sitting beside the extracted copy under test. Falling back there would let the
-        // fixture-freshness guard interrogate the original while the live tests ran the stale
-        // extracted binary: precisely the false-green that guard exists to prevent.
-        (None, true) => Err(format!(
-            "NEXTEST_BIN_EXE_{name} is not set (or is empty) while running under nextest \
-             (NEXTEST is present in the environment). nextest must supply the runtime path of the \
-             `{name}` binary it is actually running; falling back to the compile-time \
-             CARGO_BIN_EXE_{name} would silently launch the build-tree binary instead of the \
-             archived/extracted copy under test, so this fails loudly instead."
-        )),
-        // Outside nextest there is no remapping to do: a plain `cargo test` builds the sibling
-        // `[[bin]]` targets and bakes their paths into `CARGO_BIN_EXE_*`.
-        (None, false) => Ok(PathBuf::from(compile_time_path)),
-    }
+    verter_test_support::resolve_test_binary_path(
+        name,
+        runtime_path,
+        under_nextest,
+        compile_time_path,
+    )
 }
 
 /// A missing runtime variable UNDER NEXTEST must be a loud failure, never the build-tree binary.

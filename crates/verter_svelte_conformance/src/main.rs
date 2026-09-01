@@ -88,7 +88,7 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "conformance-tests"))]
 mod tests {
     use super::{parse_command, Command};
 

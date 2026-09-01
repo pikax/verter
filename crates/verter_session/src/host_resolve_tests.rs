@@ -3940,6 +3940,165 @@ fn diagnostics_generation_increments_on_successful_recompile() {
     );
 }
 
+/// Route-equivalence pin for template-expression parse diagnostics: the
+/// analysis route (lazy template computation on `get_analysis`) must carry
+/// the SAME `XInvalidExpression` set the compile/bundle route publishes on
+/// its diagnostics channel — diagnostic completeness must never depend on
+/// which consumer requested the template facts.
+#[test]
+fn template_expression_diagnostics_match_across_analysis_and_bundle_routes() {
+    /// Normalized diagnostic row: (severity, code, message, start, end).
+    /// A sorted `Vec` — a MULTISET, never a set — so a route that
+    /// duplicates or collapses entries fails the comparison, and severity
+    /// and message reclassification is caught alongside span drift.
+    type Row = (&'static str, String, String, u32, u32);
+    fn sorted(mut rows: Vec<Row>) -> Vec<Row> {
+        rows.sort();
+        rows
+    }
+    fn expression_rows(
+        diags: &[verter_semantic::analysis::template::TemplateExpressionDiagnostic],
+    ) -> Vec<Row> {
+        use verter_semantic::analysis::template::TemplateDiagnosticSeverity as S;
+        diags
+            .iter()
+            .filter(|d| d.code == "XInvalidExpression")
+            .map(|d| {
+                (
+                    match d.severity {
+                        S::Error => "error",
+                        S::Warning => "warning",
+                        S::Info => "info",
+                    },
+                    d.code.clone(),
+                    d.message.clone(),
+                    d.span.start,
+                    d.span.end,
+                )
+            })
+            .collect()
+    }
+
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n\
+                  <template><div v-if=\"count ===\">x</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+
+    // Analysis route FIRST (before any compile can persist a template into
+    // the shared slot): the lazily computed template snapshot carries the
+    // extraction's diagnostics.
+    let analysis = host
+        .get_analysis("/src/Comp.vue")
+        .expect("analysis snapshot");
+    let tpl = analysis
+        .template
+        .expect("template analysis computed on the analysis route");
+    let analysis_rows = sorted(expression_rows(&tpl.expression_diagnostics));
+    assert!(
+        !analysis_rows.is_empty(),
+        "the analysis route must surface the malformed v-if expression: {:?}",
+        tpl.expression_diagnostics
+    );
+
+    // Bundle route: the IDE compile (the LSP's diagnostics producer — its
+    // codegen recovers over the malformed expression), then read the
+    // published diagnostics channel.
+    let ide_profile = CompileProfile {
+        target: CompileTarget::TSX,
+        ..CompileProfile::default()
+    };
+    let _ = host.ensure_ide_compiled("/src/Comp.vue", &ide_profile);
+    let bundle_diags = host
+        .get_diagnostics("/src/Comp.vue", &ide_profile)
+        .expect("compile publishes latest_diagnostics");
+    let bundle_rows: Vec<Row> = sorted(
+        bundle_diags
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "XInvalidExpression")
+            .map(|d| {
+                (
+                    match d.severity {
+                        crate::HostSeverity::Error => "error",
+                        crate::HostSeverity::Warning => "warning",
+                        crate::HostSeverity::Info => "info",
+                    },
+                    d.code.clone(),
+                    d.message.clone(),
+                    d.span.start,
+                    d.span.end,
+                )
+            })
+            .collect(),
+    );
+    assert!(
+        !bundle_rows.is_empty(),
+        "the bundle route must publish the malformed v-if expression: {:?}",
+        bundle_diags.diagnostics
+    );
+
+    assert_eq!(
+        analysis_rows, bundle_rows,
+        "both routes must surface the identical XInvalidExpression multiset \
+         (severity + message + span included)"
+    );
+}
+
+/// The COMPILE route's OWN template-snapshot conversion carries the
+/// expression diagnostics: compiling FIRST persists the compile-produced
+/// template into the shared raw-template slot, and the analysis read then
+/// serves THAT conversion (proven by the lazy-compute seam never firing) —
+/// so a compile-route conversion that dropped the diagnostics half could
+/// not hide behind the lazy analysis route recomputing them.
+#[test]
+fn compile_route_template_snapshot_carries_expression_diagnostics() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n\
+                  <template><div v-if=\"count ===\">x</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+
+    // Compile FIRST — the compile route converts the template facts and
+    // persists the snapshot into the shared slot.
+    let ide_profile = CompileProfile {
+        target: CompileTarget::TSX,
+        ..CompileProfile::default()
+    };
+    let _ = host.ensure_ide_compiled("/src/Comp.vue", &ide_profile);
+
+    // The lazy analysis-route computation must NOT run: the served template
+    // is the compile route's own conversion.
+    let lazy_ran = Arc::new(AtomicBool::new(false));
+    {
+        let lazy_ran = Arc::clone(&lazy_ran);
+        *host.template_persist_seam_hook.lock() = Some(Arc::new(move || {
+            lazy_ran.store(true, Ordering::SeqCst);
+        }));
+    }
+    let analysis = host
+        .get_analysis("/src/Comp.vue")
+        .expect("analysis snapshot");
+    *host.template_persist_seam_hook.lock() = None;
+    assert!(
+        !lazy_ran.load(Ordering::SeqCst),
+        "the compile-persisted template must serve without a lazy recompute"
+    );
+
+    let tpl = analysis
+        .template
+        .expect("compile-route template snapshot served on the analysis read");
+    assert!(
+        tpl.expression_diagnostics
+            .iter()
+            .any(|d| d.code == "XInvalidExpression"),
+        "the compile route's snapshot conversion must carry the expression \
+         diagnostics: {:?}",
+        tpl.expression_diagnostics
+    );
+}
+
 #[test]
 fn diagnostics_generation_increments_on_source_change() {
     let host = strict_host();
@@ -4486,6 +4645,67 @@ fn upsert_syncs_relative_import_edges_to_workspace() {
     assert!(
         rev_deps.contains(&"/src/Comp.vue".to_string()),
         "workspace should have /src/Comp.vue as a reverse dep of /src/utils.ts; got: {rev_deps:?}"
+    );
+}
+
+#[test]
+fn scheduler_resolves_only_macro_type_blockers_during_source_admission() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.add_explicit_project(verter_workspace::VfsProjectConfig {
+        root: "/src".to_string(),
+        rank: verter_workspace::ProjectRank::Explicit,
+        tsconfig_path: None,
+        root_files: vec![],
+        extensions: vec![".vue".to_string(), ".ts".to_string(), ".html".to_string()],
+        workspace_root: "/src".to_string(),
+        workspace_aliases: vec![],
+        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        references: vec![],
+        membership: verter_workspace::configured_membership_match_all_under_root(
+            &verter_workspace::CanonicalPath::new("/src"),
+        ),
+    });
+    for (id, source) in [
+        ("/src/utils.ts", "export const helper = () => 1;"),
+        ("/src/view.html", "<div>external</div>"),
+        ("/src/types.ts", "export interface Props { value: string }"),
+    ] {
+        ws.inject_file(id.to_string(), Arc::from(source));
+    }
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    let ordinary = "/src/Ordinary.vue";
+    crate::host_executor::reset_scheduler_dep_resolution_count_for_test(ordinary);
+    upsert_vue(
+        &host,
+        ordinary,
+        "<script setup lang=\"ts\">import { helper } from './utils'; helper()</script><template src=\"./view.html\"></template>",
+    );
+    assert_eq!(
+        crate::host_executor::scheduler_dep_resolution_count_for_test(ordinary),
+        0,
+        "ordinary imports and external src edges are workspace-owned and must not be resolved again by the scheduler"
+    );
+    assert!(ws
+        .forward_deps_for(ordinary)
+        .contains(&"/src/utils.ts".to_string()));
+    assert!(ws
+        .forward_deps_for(ordinary)
+        .contains(&"/src/view.html".to_string()));
+
+    let macro_owner = "/src/Macro.vue";
+    crate::host_executor::reset_scheduler_dep_resolution_count_for_test(macro_owner);
+    upsert_vue(
+        &host,
+        macro_owner,
+        "<script setup lang=\"ts\">import type { Props } from './types'; defineProps<Props>()</script><template><div /></template>",
+    );
+    assert_eq!(
+        crate::host_executor::scheduler_dep_resolution_count_for_test(macro_owner),
+        1,
+        "macro type dependencies must retain their scheduler Artifact blocker resolution"
     );
 }
 
@@ -5664,6 +5884,11 @@ import type { Attrs } from './types'
     let error = host
         .get_public_api_with_mode("/src/MalformedAttrs.vue", PublicApiMode::Declaration, None)
         .expect_err("malformed attrs type syntax must fail closed");
+
+    assert!(
+        !error.is_retryable(),
+        "malformed authored syntax is stable until its provenance changes"
+    );
 
     assert_eq!(
         error.subject(),

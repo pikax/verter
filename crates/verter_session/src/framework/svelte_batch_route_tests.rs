@@ -4,6 +4,8 @@
 //! drives real Svelte inputs through the batch and compares each item
 //! to the single-file route. Language comes from each input's canonical
 //! id — not a caller field — so `.svelte` reaches the Svelte carrier.
+//! `RuntimeRender` is the public request spelling; for Svelte its effective
+//! route is the existing host-backed `get_virtual_file` path.
 //!
 //! Asserts input order, per-item independence, optional-product
 //! (source-map), and per-entry atomicity
@@ -90,6 +92,7 @@ fn batch_input(canonical: &str, source: &str) -> CompileBatchInput {
 /// are asked the SAME typed question.
 fn render_profile(ssr: bool, source_map: bool) -> CompileBatchRenderProfile {
     CompileBatchRenderProfile {
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
         filename: None,
         is_production: true,
         custom_element: false,
@@ -945,8 +948,8 @@ fn a_genuinely_failing_batch_entry_publishes_no_partial_product() {
 }
 
 /// A diagnostic is not a refusal. Ordinary success and warning-only compile
-/// both publish and report no errors. Render-lane warnings live on the
-/// entry; host-backed warnings live on the response for the same canonical.
+/// both publish and report no errors. Vue render-only warnings live on the
+/// entry; effective host-backed warnings live on the response.
 #[test]
 fn an_ordinary_success_and_a_warning_only_compile_are_never_read_as_failures() {
     for lane in [Lane::RuntimeRender, Lane::HostBacked] {

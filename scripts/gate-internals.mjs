@@ -71,6 +71,8 @@ export const EXIT_USAGE = 127;
 // owned executable in both modes without introducing a production test seam.
 export const HARNESS_SMOKE_MARKER = "HARNESS-SMOKE FAILED";
 export const HARNESS_SMOKE_MODES = Object.freeze(["vapor", "typescript"]);
+export const CORE_HARNESS_SMOKE_MODES = Object.freeze(["typescript"]);
+export const BF2_HARNESS_SMOKE_MODES = Object.freeze(["vapor"]);
 export const HARNESS_SMOKE_RECEIPT_SCHEMA = "verter-harness-smoke/v1";
 
 export function harnessSmokeCommand(repoRoot, mode, nodePath = process.execPath) {
@@ -247,7 +249,7 @@ export function deriveGateResourceLimits({
 // it does not cover this class.
 export const SHIPPED_CFG_LANE_ENABLED = false;
 export const SHIPPED_CFG_SKIP_SUMMARY =
-  "SHIPPED-CFG GUARD: SKIPPED (temporary). This verdict is Surface 1 only; " +
+  "SHIPPED-CFG GUARD: SKIPPED (temporary). This verdict covers Surface 1 and the wasm JS-boundary lane only; " +
   "cargo check --workspace --all-targets --profile no-debug-assertions and " +
   "cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions did not run. " +
   "Until re-enabled, a state mutation written inside a debug_assert! argument is uncovered " +
@@ -1415,11 +1417,11 @@ export function checkBuildPrerequisites(opts) {
 }
 
 // ----------------------------------------------------------------------------------------------------
-// ORACLE-CACHE PREREQUISITE PREFLIGHT (gate mode only; the gate's SECOND step — right after the
-// build-prerequisite preflight above, still before Cargo touches anything).
+// ORACLE-CACHE PREREQUISITE PREFLIGHT (the dedicated BF2 authoritative lane, before Cargo touches
+// anything).
 //
-// THE BUG IT GUARDS. `verter_session/bf2-authoritative` gates 45 tests that were absent from every
-// canonical gate run (see `ARCHIVE_FEATURES` below, which turns the feature on for the archived suite).
+// THE BUG IT GUARDS. `verter_session/bf2-authoritative` gates authoritative tests that used to be absent
+// from CI and now run in their own required lane (see `scripts/bf2-authoritative.mjs`).
 // Among them is the ENTIRE `compile::map_equality_tests::svelte_official_conformance_gate` /
 // `_matrix` suite — the tests that actually compare Verter's Svelte output against the pinned official
 // `svelte@5.56.10` oracle. Once the feature is on, those tests spawn `node bin/check-candidate.mjs`
@@ -1445,10 +1447,11 @@ export function checkBuildPrerequisites(opts) {
 // THIS IS REALIZATION, NOT PROVISIONING. `ensureOracleDomain` is OFFLINE (the cache is the sole package
 // source, `npm ci --offline`) and idempotent — it re-validates and reuses `.oracle-installs` on every
 // call, which is exactly what happens automatically the first time a `bf2-authoritative` test runs
-// regardless of whether this preflight exists. Running it here only makes the SAME automatic step happen
-// loudly, first, and before Cargo, instead of silently inside a test's divergence report. The ONE
+// regardless of whether this preflight exists. Running it in that lane only makes the SAME automatic step
+// happen loudly, first, and before Cargo, instead of silently inside a test's divergence report. The ONE
 // networked step, `packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs`, is never invoked here or anywhere else in the
-// gate — an absent or unusable cache fails setup and names that exact command; the gate does not run it.
+// checker — an absent or unusable cache fails setup and names that exact command; CI performs provisioning
+// explicitly before it enters the offline lane.
 // ----------------------------------------------------------------------------------------------------
 export const ORACLE_CACHE_PREREQUISITE_MARKER = "ORACLE-CACHE PREREQUISITE MISSING";
 
@@ -1504,8 +1507,8 @@ export const ORACLE_CACHE_PROBE_SOURCE =
 
 // SIGKILL: the child may itself have an `npm ci` grandchild in flight; a trappable SIGTERM (spawnSync's
 // default killSignal) can leave the parent blocked until that child chooses to exit — the same hazard
-// documented on `BUILD_PREREQUISITE_PROBE_KILL_SIGNAL` above, and for the same reason: this runs as the
-// gate's SECOND step, still holding the single-flight mutex.
+// documented on `BUILD_PREREQUISITE_PROBE_KILL_SIGNAL` above. The dedicated lane must not leave an npm
+// descendant behind if realization reaches its deadline.
 export const ORACLE_CACHE_PROBE_KILL_SIGNAL = "SIGKILL";
 
 // Upper bound on the probe. Larger than `BUILD_PREREQUISITE_PROBE_MAX_MS`: unlike the tsserver probe (one
@@ -1516,9 +1519,9 @@ export const ORACLE_CACHE_PROBE_KILL_SIGNAL = "SIGKILL";
 // realize from a freshly-provisioned cache.
 export const ORACLE_CACHE_PROBE_MAX_MS = 5 * 60_000;
 
-// The probe budget for a gate whose deadline is `deadlineMs` at wallclock `nowMsValue`: the remaining
+// The probe budget for a caller whose deadline is `deadlineMs` at wallclock `nowMsValue`: the remaining
 // time, capped at MAX. Deliberately no floor — see `probeBudgetMs` above for why a floor would let an
-// expired deadline buy the probe time past the gate's own wallclock limit.
+// expired deadline buy the probe time past the caller's own wallclock limit.
 export function oracleCacheProbeBudgetMs(deadlineMs, nowMsValue) {
   const remaining = deadlineMs - nowMsValue;
   if (!Number.isFinite(remaining)) return ORACLE_CACHE_PROBE_MAX_MS;
@@ -1676,17 +1679,17 @@ export function checkOracleCachePrerequisite(opts) {
       "output conformance tests need (`verter_session/bf2-authoritative`, including the ENTIRE " +
       "`svelte_official_conformance_gate` suite) is " +
       `${unprovisioned ? "not provisioned" : "provisioned but could not be realized (present but unusable)"}.` +
-      " Running the gate now would report divergences that are really an infrastructure absence, never a " +
-      "compiler regression — or, with the feature off, silently omit these 45 tests again.",
+      " Running the authoritative lane now would report divergences that are really an infrastructure " +
+      "absence, never a compiler regression.",
     `  probe target: ${probe.target}`,
     `  probe failure: ${probe.detail}`,
   ];
   if (probe.framework) lines.push(`  framework: ${probe.framework}`);
   lines.push(
-    "Produce it with (from the repo root — this is the ONLY sanctioned network step; the gate never runs " +
+    "Produce it with (from the repo root — this is the ONLY sanctioned network step; the checker never runs " +
       "it for you):",
     `    ${ORACLE_CACHE_PROVISION_COMMAND}`,
-    "The gate refuses to provision the cache for you (its verdict must not depend on a network mutation it " +
+    "The authoritative command refuses to provision the cache for you (its verdict must not depend on a network mutation it " +
       "performed) and refuses to silently skip or mis-report the tests that need it. This check performs " +
       "the SAME offline realization `bin/check-candidate.mjs` performs on every request — a " +
       "present-but-unusable cache (corrupt, torn, or drifted from the committed lockfile closure) fails " +
@@ -1697,14 +1700,223 @@ export function checkOracleCachePrerequisite(opts) {
 
 // ----------------------------------------------------------------------------------------------------
 // ARCHIVE-BUILD FEATURES — the features the ONE `cargo nextest archive --workspace` build (SURFACE 1's
-// archive, per SINGLE-TEST-UNIVERSE) is built with.
+// archive, per SINGLE-TEST-UNIVERSE) is built with. BF2 is deliberately absent: its authoritative tests
+// run in a separate required CI job so oracle work is not on the core Rust gate's critical path.
+export const ARCHIVE_FEATURES = Object.freeze([]);
+
+// ----------------------------------------------------------------------------------------------------
+// DEDICATED BF2 AUTHORITATIVE LANE.
 //
-// `ARCHIVE_FEATURES` turns `verter_session/bf2-authoritative` on for that archive build
-// (`archiveAndList` in gate.mjs), so the 45 tests that feature gates are PRESENT in the archived test
-// universe — not merely listed by a standalone `cargo test --features` invocation nobody runs. The
-// separate shipped-cfg lane (`runShippedCfgLane`) does not consume this archive at all — it is a
-// small package-scoped `cargo nextest run -p verter_shipped_cfg_contract`, built and run independently.
-export const ARCHIVE_FEATURES = Object.freeze(["verter_session/bf2-authoritative"]);
+// The exact feature-gated module set is pinned here and independently rediscovered from
+// `map_equality_tests.rs`. The lane lists through nextest before it runs and requires a per-module exact
+// match against the live `#[test]` source inventory. This makes a newly added gated module, a stale filter,
+// a missing source file, a zero-test inventory, and a partial nextest selection all fail closed.
+// ----------------------------------------------------------------------------------------------------
+export const BF2_AUTHORITATIVE_FEATURE = "bf2-authoritative";
+
+export const BF2_AUTHORITATIVE_MODULES = Object.freeze([
+  "bf2_full_axis_gate",
+  "bf2_seed_matrix",
+  "ide_surface_typescript_observation",
+  "nested_v_for_runtime_proof",
+  "public_api_typescript_observation",
+  "svelte_official_conformance_gate",
+  "svelte_official_conformance_matrix",
+]);
+
+// A feature-gated module may deliberately contribute contracts to a sibling's
+// single-process aggregate instead of owning a second `#[test]`. Keep that
+// exceptional topology explicit and checked: otherwise a zero-test module
+// would make the source/list inventory look exact while executing nothing.
+export const BF2_AUTHORITATIVE_AGGREGATIONS = Object.freeze({
+  bf2_full_axis_gate: Object.freeze({
+    ownerModule: "bf2_seed_matrix",
+    ownerTest: "authoritative_seed_matrix_contracts_share_one_verified_run",
+    requiredCalls: Object.freeze([
+      "super::bf2_full_axis_gate::full_axis_gate_passes_for_every_seed_matrix_cell",
+      "super::bf2_full_axis_gate::the_gate_detects_a_planted_defect_on_every_axis_family",
+    ]),
+  }),
+});
+
+const BF2_TEST_PREFIX = "compile::map_equality_tests::";
+
+export const BF2_AUTHORITATIVE_FILTER_EXPR =
+  "package(verter_session) and (" +
+  BF2_AUTHORITATIVE_MODULES.map((module) => `test(/^${BF2_TEST_PREFIX}${module}::/)`).join(" or ") +
+  ")";
+
+export function buildBf2NextestArgs(mode) {
+  if (mode !== "list" && mode !== "run") {
+    throw new Error(`unknown BF2 nextest mode ${JSON.stringify(mode)}`);
+  }
+  const args = [
+    "nextest",
+    mode,
+    "--package",
+    "verter_session",
+    "--lib",
+    "--features",
+    BF2_AUTHORITATIVE_FEATURE,
+    "-E",
+    BF2_AUTHORITATIVE_FILTER_EXPR,
+  ];
+  if (mode === "list") args.push("--message-format", "json");
+  else args.push("--no-fail-fast");
+  return args;
+}
+
+export function scanBf2AuthoritativeSourceInventory(repoRoot) {
+  const sourceRoot = join(
+    repoRoot,
+    "crates",
+    "verter_session",
+    "src",
+    "compile",
+    "map_equality_tests",
+  );
+  const parentSource = readFileSync(`${sourceRoot}.rs`, "utf8");
+  const declarationPattern = new RegExp(
+    String.raw`#\s*\[\s*cfg\s*\(\s*feature\s*=\s*["']${BF2_AUTHORITATIVE_FEATURE}["']\s*\)\s*\]\s*mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;`,
+    "g",
+  );
+  const modules = [...parentSource.matchAll(declarationPattern)].map((match) => match[1]).sort();
+  const countByModule = {};
+  let total = 0;
+  for (const module of modules) {
+    const source = readFileSync(join(sourceRoot, `${module}.rs`), "utf8");
+    const count = (source.match(/^\s*#\s*\[\s*test\s*\]\s*$/gm) || []).length;
+    countByModule[module] = count;
+    total += count;
+  }
+
+  const zeroTestModules = modules.filter((module) => countByModule[module] === 0);
+  const registeredAggregations = Object.keys(BF2_AUTHORITATIVE_AGGREGATIONS).sort();
+  if (JSON.stringify(zeroTestModules) !== JSON.stringify(registeredAggregations)) {
+    throw new Error(
+      "BF2 zero-test modules must exactly match the explicit aggregation registry: " +
+        `zero-test=${JSON.stringify(zeroTestModules)} registered=${JSON.stringify(registeredAggregations)}`,
+    );
+  }
+
+  const aggregationsByModule = {};
+  for (const module of registeredAggregations) {
+    const aggregation = BF2_AUTHORITATIVE_AGGREGATIONS[module];
+    if (
+      !modules.includes(aggregation.ownerModule) ||
+      !(countByModule[aggregation.ownerModule] > 0)
+    ) {
+      throw new Error(
+        `BF2 aggregate owner ${aggregation.ownerModule} for ${module} is absent or declares no #[test]`,
+      );
+    }
+    const ownerSource = readFileSync(join(sourceRoot, `${aggregation.ownerModule}.rs`), "utf8");
+    const ownerTestPattern = new RegExp(
+      String.raw`#\s*\[\s*test\s*\]\s*fn\s+${aggregation.ownerTest}\s*\(`,
+      "m",
+    );
+    if (!ownerTestPattern.test(ownerSource)) {
+      throw new Error(
+        `BF2 aggregate owner ${aggregation.ownerModule} does not declare #[test] fn ${aggregation.ownerTest}`,
+      );
+    }
+    for (const requiredCall of aggregation.requiredCalls) {
+      const occurrences = ownerSource.split(requiredCall).length - 1;
+      if (occurrences !== 1) {
+        throw new Error(
+          `BF2 aggregate ${aggregation.ownerTest} must reference ${requiredCall} exactly once; found ${occurrences}`,
+        );
+      }
+    }
+    aggregationsByModule[module] = {
+      ownerModule: aggregation.ownerModule,
+      ownerTest: aggregation.ownerTest,
+      requiredCalls: [...aggregation.requiredCalls],
+    };
+  }
+  return { modules, countByModule, aggregationsByModule, total };
+}
+
+export function countBf2AuthoritativeListTests(listJson) {
+  const countByModule = Object.fromEntries(BF2_AUTHORITATIVE_MODULES.map((module) => [module, 0]));
+  const unexpected = [];
+  let total = 0;
+  for (const suite of Object.values(
+    listJson && listJson["rust-suites"] ? listJson["rust-suites"] : {},
+  )) {
+    for (const [testName, testcase] of Object.entries(
+      suite && suite.testcases ? suite.testcases : {},
+    )) {
+      // Machine-readable `nextest list` deliberately retains the full built
+      // inventory and marks filterset mismatches instead of omitting them.
+      // Count only admitted tests, while rejecting unknown/missing status
+      // metadata so a format drift cannot silently weaken this receipt.
+      const filterStatus = testcase?.["filter-match"]?.status;
+      if (filterStatus === "mismatch") continue;
+      if (filterStatus !== "matches") {
+        unexpected.push(
+          `${testName} (invalid filter-match status ${JSON.stringify(filterStatus)})`,
+        );
+        continue;
+      }
+      total++;
+      const module = BF2_AUTHORITATIVE_MODULES.find((candidate) =>
+        testName.startsWith(`${BF2_TEST_PREFIX}${candidate}::`),
+      );
+      if (module) countByModule[module]++;
+      else unexpected.push(testName);
+    }
+  }
+  return { countByModule, total, unexpected };
+}
+
+export function decideBf2AuthoritativeInventoryMatch(listed, source) {
+  if (JSON.stringify(source.modules) !== JSON.stringify(BF2_AUTHORITATIVE_MODULES)) {
+    return (
+      "BF2 authoritative source modules drifted: expected " +
+      `${JSON.stringify(BF2_AUTHORITATIVE_MODULES)}, discovered ${JSON.stringify(source.modules)}`
+    );
+  }
+  if (!(source.total > 0)) {
+    return "BF2 authoritative source inventory declares zero #[test] functions";
+  }
+  const expectedAggregations = Object.fromEntries(
+    Object.entries(BF2_AUTHORITATIVE_AGGREGATIONS).map(([module, aggregation]) => [
+      module,
+      {
+        ownerModule: aggregation.ownerModule,
+        ownerTest: aggregation.ownerTest,
+        requiredCalls: [...aggregation.requiredCalls],
+      },
+    ]),
+  );
+  if (JSON.stringify(source.aggregationsByModule || {}) !== JSON.stringify(expectedAggregations)) {
+    return (
+      "BF2 authoritative aggregation registry drifted: expected " +
+      `${JSON.stringify(expectedAggregations)}, discovered ${JSON.stringify(source.aggregationsByModule || {})}`
+    );
+  }
+  for (const module of BF2_AUTHORITATIVE_MODULES) {
+    const declared = source.countByModule[module] || 0;
+    if (declared === 0 && !Object.hasOwn(expectedAggregations, module)) {
+      return `BF2 module ${module} declares zero tests and has no checked aggregate owner`;
+    }
+  }
+  if (listed.unexpected.length > 0) {
+    return `BF2 nextest listing contained unexpected tests: ${JSON.stringify(listed.unexpected)}`;
+  }
+  if (listed.total !== source.total) {
+    return `BF2 nextest selected ${listed.total} tests but the exact source inventory declares ${source.total}`;
+  }
+  for (const module of BF2_AUTHORITATIVE_MODULES) {
+    const selected = listed.countByModule[module] || 0;
+    const declared = source.countByModule[module] || 0;
+    if (selected !== declared) {
+      return `BF2 module ${module} selected ${selected} tests but its source declares ${declared}`;
+    }
+  }
+  return null;
+}
 
 // Pure builder for the `cargo nextest archive` argv — used by BOTH archive variants in gate.mjs, so a
 // feature dropped here is dropped from every surface at once (never a per-variant divergence) and is
@@ -1820,6 +2032,7 @@ export function deriveGateLaneLayout(runnerTarget, gateDir) {
 
   const surfaceGateRoot = join(gateRoot, "lanes", "surface-1");
   const shippedGateRoot = join(gateRoot, "lanes", "shipped-cfg");
+  const wasmGateRoot = join(gateRoot, "lanes", WASM_LANE_ID);
   const layout = {
     front: { targetDir: runnerRoot, gateDir: gateRoot },
     surface1: {
@@ -1835,6 +2048,14 @@ export function deriveGateLaneLayout(runnerTarget, gateDir) {
       workDir: join(shippedGateRoot, "work"),
       outputFile: join(shippedGateRoot, "output.log"),
     },
+    // The wasm lane compiles a different target triple entirely; giving it its own Cargo root keeps it off
+    // the host lanes' target locks and lets a cache layer retain it beside them under one runner root.
+    wasmJsBoundary: {
+      laneId: WASM_LANE_ID,
+      targetDir: join(runnerRoot, "lanes", WASM_LANE_ID, "target"),
+      workDir: join(wasmGateRoot, "work"),
+      outputFile: join(wasmGateRoot, "output.log"),
+    },
   };
   const mutableRoots = [
     layout.surface1.targetDir,
@@ -1844,6 +2065,9 @@ export function deriveGateLaneLayout(runnerTarget, gateDir) {
     layout.shippedCfg.targetDir,
     layout.shippedCfg.workDir,
     layout.shippedCfg.outputFile,
+    layout.wasmJsBoundary.targetDir,
+    layout.wasmJsBoundary.workDir,
+    layout.wasmJsBoundary.outputFile,
   ].map((root) => resolve(root));
   for (const candidate of mutableRoots) {
     if (!pathIsExactlyContained(runnerRoot, candidate)) {
@@ -2017,9 +2241,10 @@ function receiptExitCode(receipt) {
 export function reduceGateLaneReceipts({
   surface = null,
   shipped = null,
+  wasm = null,
   shippedCfgLaneEnabled = true,
 } = {}) {
-  const exits = [receiptExitCode(surface), receiptExitCode(shipped)].filter(
+  const exits = [receiptExitCode(surface), receiptExitCode(shipped), receiptExitCode(wasm)].filter(
     (code) => code !== null,
   );
   if (exits.length > 0) {
@@ -2039,24 +2264,43 @@ export function reduceGateLaneReceipts({
   const shippedComplete = shippedCfgLaneEnabled
     ? Boolean(
         shipped?.check?.status === "ok" &&
-          shipped?.contract?.status === "ok" &&
-          shipped?.contract?.parseable &&
-          shipped?.contract?.complete &&
-          shipped?.parity?.complete &&
-          shipped?.parity?.matches,
+        shipped?.contract?.status === "ok" &&
+        shipped?.contract?.parseable &&
+        shipped?.contract?.complete &&
+        shipped?.parity?.complete &&
+        shipped?.parity?.matches,
       )
     : true;
-  const coverageComplete = surfaceComplete && shippedComplete;
+  // The wasm JS-boundary lane has NO enable flag and NO skip disposition. Its whole reason to exist is
+  // that its tests were compiled but never executed; a lane that can be turned off, or that can report a
+  // green verdict without a complete receipt and a discovered-vs-executed parity, would reproduce exactly
+  // that defect one layer up.
+  const wasmComplete = Boolean(
+    wasm?.coverage?.parseable &&
+    wasm?.coverage?.complete &&
+    wasm?.parity?.complete &&
+    wasm?.parity?.matches,
+  );
+  const coverageComplete = surfaceComplete && shippedComplete && wasmComplete;
   const coverageDisposition = coverageComplete
     ? "complete"
-    : shippedCfgLaneEnabled &&
-        (shipped?.check?.status === "cancelled" || shipped?.contract?.status === "cancelled")
+    : wasm?.status === "cancelled" ||
+        (shippedCfgLaneEnabled &&
+          (shipped?.check?.status === "cancelled" || shipped?.contract?.status === "cancelled"))
       ? "cancelled-by-local-fail-fast"
-      : surface?.hardFailure || (shippedCfgLaneEnabled && shipped?.hardFailure)
+      : surface?.hardFailure || wasm?.hardFailure || (shippedCfgLaneEnabled && shipped?.hardFailure)
         ? "blocked-by-failure"
         : "incomplete";
   const failures = [];
   for (const failure of surface?.failures || []) failures.push({ ...failure });
+  for (const failure of wasm?.failures || []) {
+    failures.push({
+      ...failure,
+      surface: String(failure.surface || "unknown").startsWith(`${WASM_LANE_ID}/`)
+        ? failure.surface
+        : `${WASM_LANE_ID}/${failure.surface || "unknown"}`,
+    });
+  }
   if (shippedCfgLaneEnabled) {
     for (const failure of shipped?.failures || []) {
       failures.push({
@@ -2084,9 +2328,17 @@ export function reduceGateLaneReceipts({
         missing.push("shipped-cfg expected-count parity");
       }
     }
+    if (!wasmComplete) {
+      if (!wasm?.coverage?.parseable || !wasm?.coverage?.complete) {
+        missing.push("complete parseable wasm JS-boundary receipt");
+      }
+      if (!wasm?.parity?.complete || !wasm?.parity?.matches) {
+        missing.push("wasm JS-boundary discovered-vs-executed case parity");
+      }
+    }
     failures.push({
       surface: "gate/incomplete",
-      name: `<required ${shippedCfgLaneEnabled ? "parallel-lane" : "Surface 1"} coverage incomplete: ${missing.join("; ")}>`,
+      name: `<required ${shippedCfgLaneEnabled ? "parallel-lane" : "Surface 1 + wasm JS-boundary"} coverage incomplete: ${missing.join("; ")}>`,
     });
   }
   return {
@@ -2106,9 +2358,15 @@ export const GATE_LANE_TRANSCRIPT_HEADERS = Object.freeze({
     "SHIPPED-CFG GUARD: cargo check --workspace --all-targets --profile no-debug-assertions …",
   "shipped-contract":
     "SHIPPED-CFG GUARD: cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions …",
+  "wasm-js-boundary":
+    "WASM JS-BOUNDARY: cargo test --target wasm32-unknown-unknown --tests via wasm-bindgen-test-runner …",
 });
 
-export function canonicalGateLaneTranscriptSegments({ surface = null, shipped = null } = {}) {
+export function canonicalGateLaneTranscriptSegments({
+  surface = null,
+  shipped = null,
+  wasm = null,
+} = {}) {
   return [
     {
       phaseId: "surface-1",
@@ -2125,99 +2383,21 @@ export function canonicalGateLaneTranscriptSegments({ surface = null, shipped = 
       header: GATE_LANE_TRANSCRIPT_HEADERS["shipped-contract"],
       output: String(shipped?.contract?.output || ""),
     },
+    {
+      phaseId: "wasm-js-boundary",
+      header: GATE_LANE_TRANSCRIPT_HEADERS["wasm-js-boundary"],
+      output: String(wasm?.output || ""),
+    },
   ];
 }
 
 // ----------------------------------------------------------------------------------------------------
-// TRYBUILD EXCLUSION — INTERIM, pending maintainer disposition. Do not delete this section without a
-// ruling: their permanent disposition (drop them for good, keep this exclusion permanently, or restore
-// them once the trybuild target dir is cached) is an open decision, not settled by this exclusion.
-//
-// A `trybuild::TestCases::new()` harness SPAWNS a real `cargo` build against a generated crate and, cold,
-// compiles the crate's ENTIRE dependency closure before checking a single fixture — not a unit test.
-// Measured here: 98s cold, 0.8s warm. Two of them tripped the gate's own 360s budget in a real run while
-// passing 3/3 in isolation (already-raised once). `.config/nextest.toml` carries a `slow-timeout` override
-// for the same class (see the "trybuild compile-fail tests" comment there) — that override is UNCHANGED
-// and still applies to anyone running these tests directly; this exclusion removes them from canonical
-// archive-backed Surface 1. The shipped contract has an independent package-only inventory.
-//
-// One row per file that actually calls `trybuild::TestCases::new()` — verified against a real
-// `cargo nextest list --workspace --message-format json` listing, not guessed from filenames. A
-// substring match on "compile_fail" also catches two UNRELATED tests that must stay in the gate and are
-// deliberately NOT rows here: verter_lsp's
-// `external_ts::membership_reconciler::tests::absent_compile_failed_removes` and verter_session's
-// `types::tests::compile_failure_code_classification`. Each row's `modulePrefix` is the exact source-order
-// module path (no trailing test name) so it covers every test in that file, present or future, including
-// ones already marked `#[ignore]` (most of the verter_session rows are — they cost nothing today because
-// no surface passes `--run-ignored`, but a future un-ignore must not silently reintroduce the cost without
-// this exclusion already covering it).
+// The canonical nextest surface excludes only packages that have their own execution model. Compile-fail
+// Cargo work is absent from test discovery and runs through scripts/compile-contracts.mjs.
 // ----------------------------------------------------------------------------------------------------
-export const TRYBUILD_EXCLUDED_SUITES = Object.freeze([
-  { package: "verter_session", modulePrefix: "cases::g_compile::compile_fail::" },
-  { package: "verter_language", modulePrefix: "cases::compile_fail::" },
-  { package: "verter_identity", modulePrefix: "cases::compile_fail::" },
-  { package: "verter_compiler", modulePrefix: "cases::assembly::assemble_sequence_compile_fail::" },
-  { package: "verter_compiler", modulePrefix: "cases::pending_nav_request_compile_fail::" },
-  { package: "verter_compiler", modulePrefix: "cases::registered_geometry_compile_fail::" },
-  { package: "verter_compiler", modulePrefix: "cases::segmented_overwrite_compile_fail::" },
-  { package: "verter_audit", modulePrefix: "cases::attribution_compile_fail::" },
-  { package: "verter_type_runtime", modulePrefix: "cases::compile_fail::" },
-]);
-
-// Builds the nextest filterset expression (see https://nexte.st/docs/filtersets) that excludes every row
-// above. `test(/^prefix/)` anchors at the start of the fully-qualified test name so it never matches a
-// same-named module nested deeper, and pairing each `test()` arm with its own `package()` arm means a
-// module path that happens to collide across two packages cannot cross-exclude the wrong crate's tests.
-export function buildTrybuildExclusionFilterExpr(suites = TRYBUILD_EXCLUDED_SUITES) {
-  const arms = suites.map((s) => `(package(${s.package}) and test(/^${s.modulePrefix}/))`);
-  return `not (${arms.join(" or ")})`;
+export function buildCanonicalSurface1FilterExpr() {
+  return "not package(verter_shipped_cfg_contract) and not package(verter_svelte_conformance)";
 }
-
-export function buildCanonicalSurface1FilterExpr(suites = TRYBUILD_EXCLUDED_SUITES) {
-  return `(${buildTrybuildExclusionFilterExpr(suites)}) and not package(verter_shipped_cfg_contract)`;
-}
-
-// Legacy Surface-2 selftest fixture: per-row skip args for a directly executed libtest binary, which never
-// sees a nextest filterset. Production gate.mjs no longer calls this helper. `--skip <prefix>` remains a
-// plain (non-`--exact`) substring filter for the frozen regression classifier exercised in gate-selftest.mjs.
-export function trybuildSkipArgsForPackage(pkg, suites = TRYBUILD_EXCLUDED_SUITES) {
-  const args = [];
-  for (const s of suites) {
-    if (s.package !== pkg) continue;
-    args.push("--skip", s.modulePrefix);
-  }
-  return args;
-}
-
-// Counts, from a REAL (unfiltered) nextest list JSON's suites, how many testcases each registered row
-// actually matches in the archive under test. A row that matches ZERO tests means its file was renamed,
-// moved, or deleted without updating this registry — the exclusion has silently gone stale (either it now
-// excludes nothing for that file, letting the cargo-spawning cost back into the gate unnoticed, or worse,
-// a differently-named module drifted under the same prefix). The caller must treat `missing.length > 0` as
-// a hard setup failure, never a silent pass — the same "selectors matched non-zero work" contract the
-// shipped-cfg guard's independent expected-test-inventory scan (`countTestAttributesInDir`) enforces for
-// verter_shipped_cfg_contract, applied per-row here.
-export function countTrybuildExclusionMatches(allSuites, suites = TRYBUILD_EXCLUDED_SUITES) {
-  const perRow = suites.map(() => 0);
-  let total = 0;
-  for (const suite of allSuites || []) {
-    const pkg = suite["package-name"];
-    const testcases = suite.testcases || {};
-    for (let i = 0; i < suites.length; i++) {
-      if (suites[i].package !== pkg) continue;
-      for (const name of Object.keys(testcases)) {
-        if (name.startsWith(suites[i].modulePrefix)) {
-          perRow[i]++;
-          total++;
-        }
-      }
-    }
-  }
-  const missing = suites.filter((_, i) => perRow[i] === 0);
-  return { total, perRow, missing };
-}
-
-// ----------------------------------------------------------------------------------------------------
 // Tolerated-failure allowlist — EXACT nextest test names (the env-only typeinfo freshness pair). A test
 // whose EXACT name is in this set is tolerated ONLY when the freshness-tooling preflight ALLOWS it (the
 // tools are genuinely absent); when the tools are present or were installed, a FAIL of one of these names
@@ -2235,15 +2415,9 @@ export function countTrybuildExclusionMatches(allSuites, suites = TRYBUILD_EXCLU
 // at once, all tolerated together.
 export const TOLERATED_TEST_BINARY_ID = "verter_protocol::main";
 
+// Retained for parser regression fixtures only. Production gate wiring never
+// enables tolerance now that proto freshness is not a Rust test.
 export const TOLERATED_TEST_NAMES = new Set([
-  // Post-consolidation, both env-only freshness tests live in the single `verter_protocol::main`
-  // integration binary under the module path `cases::typeinfo_proto_ts_freshness::<fn>`. nextest renders
-  // a run line as "<STATUS> [   …s] (n/m) verter_protocol::main cases::typeinfo_proto_ts_freshness::<fn>"
-  // (the last whitespace token is the bare libtest path). The retained legacy direct-libtest classifier's
-  // fixture prints "test cases::typeinfo_proto_ts_freshness::<fn> ... FAILED", so the exact name in both
-  // active Surface 1 and that selftest-only fixture is the `cases::`-prefixed module path.
-  // (Pre-consolidation these were a standalone `typeinfo_proto_ts_freshness`
-  // binary; that bare/`typeinfo_proto_ts_freshness::`-qualified form no longer exists in the archive.)
   "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output",
   "cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide",
 ]);
@@ -4751,18 +4925,16 @@ export const GATE_TELEMETRY_SCHEMA = "verter-gate-telemetry/v1";
 export const GATE_TELEMETRY_SCHEMA_VERSION = 1;
 
 export const GATE_TELEMETRY_PHASE_IDS = Object.freeze([
-  "build-prerequisite",
-  "oracle-cache",
-  "harness-smoke-vapor",
   "harness-smoke-typescript",
-  "freshness-tooling",
   "vue-macro-oracle-check",
   "vue-macro-oracle-tests",
   "dev-archive",
   "dev-list",
+  "wasm-prerequisite",
   "surface-1",
   "shipped-check",
   "shipped-contract",
+  "wasm-js-boundary",
   "advisory",
   "teardown",
 ]);
@@ -5011,7 +5183,7 @@ export function runBoundedVersionProbe(
   // Node treats a non-positive spawnSync timeout as "no timeout". Once the parent deadline is spent,
   // refuse before spawning instead of converting the expired gate into an unbounded mutex-held probe.
   if (!(effectiveTimeoutMs > 0)) {
-    return { available: false, stdout: "", error: "timeout" };
+    return { available: false, stdout: "", error: "timeout", pid: null };
   }
   try {
     const result = spawnSyncFn(command, args, {
@@ -5029,18 +5201,25 @@ export function runBoundedVersionProbe(
         available: false,
         stdout: "",
         error: result.error.code === "ETIMEDOUT" ? "timeout" : "spawn-unavailable",
+        pid: Number.isInteger(result.pid) ? result.pid : null,
       };
     }
     if (result.status !== 0) {
-      return { available: false, stdout: "", error: `exit-${result.status ?? "unknown"}` };
+      return {
+        available: false,
+        stdout: "",
+        error: `exit-${result.status ?? "unknown"}`,
+        pid: Number.isInteger(result.pid) ? result.pid : null,
+      };
     }
     return {
       available: true,
       stdout: String(result.stdout || result.stderr || "").trim(),
       error: null,
+      pid: Number.isInteger(result.pid) ? result.pid : null,
     };
   } catch {
-    return { available: false, stdout: "", error: "probe-error" };
+    return { available: false, stdout: "", error: "probe-error", pid: null };
   }
 }
 
@@ -5827,6 +6006,13 @@ export function findFileByName(root, name, maxDepth) {
 const TEST_ATTRIBUTE_LINE = /^[ \t]*#\[test\][ \t]*$/gm;
 
 export function countTestAttributesInDir(root, maxDepth = 16) {
+  return countAttributeMatchesInDir(root, TEST_ATTRIBUTE_LINE, maxDepth);
+}
+
+// Shared recursive `.rs` scanner behind both independent inventories (the `#[test]` one the shipped-cfg
+// guard compares against, and the `#[wasm_bindgen_test]` one the wasm JS-boundary lane compares against),
+// so a walk fix reaches both and the two counts cannot diverge on directory handling.
+function countAttributeMatchesInDir(root, pattern, maxDepth = 16) {
   if (!existsSync(root)) return 0;
   let count = 0;
   const stack = [{ dir: root, depth: 0 }];
@@ -5851,7 +6037,7 @@ export function countTestAttributesInDir(root, maxDepth = 16) {
       } catch {
         continue;
       }
-      const matches = source.match(TEST_ATTRIBUTE_LINE);
+      const matches = source.match(pattern);
       if (matches) count += matches.length;
     }
   }
@@ -5897,6 +6083,696 @@ export function decideShippedCfgGuardExpectedCountMatch(runCount, expectedTestCo
     };
   }
   return null;
+}
+
+// ----------------------------------------------------------------------------------------------------
+// WASM JS-BOUNDARY LANE
+//
+// Some binding tests can only be proven at a real JavaScript boundary. A deserializer is free to visit
+// only the fields a schema declares and thereby never reach the closed-shape refusal at all, so an
+// unknown or cross-framework key must be refused where a browser caller meets it — driving a real JS
+// object graph, not a `serde_json::Value` fixture. Those tests are `#[cfg(target_arch = "wasm32")]`, so
+// the host-target archive cannot contain them and archive-backed Surface 1 can never execute them. This
+// lane compiles and runs them on the wasm target through `wasm-bindgen-test-runner`.
+//
+// EVERYTHING HERE IS FAIL-CLOSED. A missing target, a missing runner, a runner whose version does not
+// EQUAL the workspace's `wasm-bindgen` dependency, an empty discovered-case inventory, an absent terminal
+// harness result, or a selected-vs-discovered count mismatch each FAIL the run. A lane that reports
+// success while executing nothing proves less than nothing: it converts an unexecuted invariant into a
+// green check. The discovered-case inventory is derived from the tree (a source scan) and the executed
+// package set from a tool (`cargo metadata`); neither is a hand-maintained list of filenames, so a test
+// added to a file this lane has never seen is executed without editing anything here.
+// ----------------------------------------------------------------------------------------------------
+export const WASM_LANE_ID = "wasm-js-boundary";
+export const WASM_LANE_TARGET = "wasm32-unknown-unknown";
+export const WASM_LANE_RUNNER_TOOL = "wasm-bindgen-test-runner";
+// Cargo's per-target runner override. Setting it in the lane's child env keeps `.cargo/config.toml` free
+// of a repo-wide runner that every unrelated wasm invocation would inherit.
+export const WASM_LANE_RUNNER_ENV_KEY = "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER";
+export const WASM_LANE_TEST_DEP = "wasm-bindgen-test";
+export const WASM_LANE_BINDGEN_DEP = "wasm-bindgen";
+export const WASM_LANE_PREREQUISITE_MARKER = "WASM-LANE PREREQUISITE MISSING";
+// Bounded like every other pre-archive probe: `cargo metadata` on a cold registry is the slowest of the
+// three, `rustc --print` and `--version` return in milliseconds.
+export const WASM_LANE_PROBE_MAX_MS = 60_000;
+export const WASM_LANE_PROBE_KILL_SIGNAL = "SIGKILL";
+const WASM_LANE_PROBE_MAX_BUFFER = 64 * 1024 * 1024;
+
+// `#[wasm_bindgen_test]`, `#[wasm_bindgen_test::wasm_bindgen_test]`, `#[wasm_bindgen_test(async)]` — the
+// attribute is routinely written path-qualified, so a bare-name-only scan under-counts and would report a
+// parity mismatch on a correct tree. Anchored to a whole line, exactly as the `#[test]` scan is.
+const WASM_BINDGEN_TEST_ATTRIBUTE_LINE =
+  /^[ \t]*#\[[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*[ \t]*::[ \t]*)*wasm_bindgen_test[ \t]*(?:\([^\]]*\))?[ \t]*\][ \t]*$/gm;
+
+export function countWasmBindgenTestAttributesInDir(root, maxDepth = 16) {
+  return countAttributeMatchesInDir(root, WASM_BINDGEN_TEST_ATTRIBUTE_LINE, maxDepth);
+}
+
+/**
+ * Drop every scan root contained in another root of the same package.
+ *
+ * The roots are the directories of cargo's `test = true` targets, deduped by exact string, but the scanner
+ * walks them RECURSIVELY. A package whose targets sit at `src/lib.rs` and `src/bin/tool.rs` yields `src`
+ * and `src/bin`, and every attribute under the nested one is then counted twice — inflating the declared
+ * inventory against a correct executed count, so the lane fails loudly on a healthy tree.
+ */
+function pruneNestedScanRoots(roots) {
+  return roots.filter(
+    (root) => !roots.some((other) => other !== root && root.startsWith(`${other}${sep}`)),
+  );
+}
+
+/**
+ * Tool-derived lane scope from a `cargo metadata --format-version 1 --no-deps` document.
+ *
+ * A package is in scope when it dev-depends on `wasm-bindgen-test` — the only way a `#[wasm_bindgen_test]`
+ * can compile. Its scan roots are the directories of its `test = true` cargo targets, which is exactly
+ * cargo's own "runs under `cargo test`" flag, so the scanned inventory and the executed inventory describe
+ * the same targets. Returns `{ error }` rather than throwing for every malformed shape; a package that
+ * declares the dev-dependency but no `wasm-bindgen` requirement or no testable target is an ERROR, never a
+ * silent skip — it would otherwise contribute an unpinned or invisible lane member.
+ */
+export function discoverWasmBoundaryPackages(metadata) {
+  const list = Array.isArray(metadata?.packages) ? metadata.packages : null;
+  if (!list) {
+    return { error: "cargo metadata carried no `packages` array", packages: [] };
+  }
+  const packages = [];
+  for (const pkg of list) {
+    const deps = Array.isArray(pkg?.dependencies) ? pkg.dependencies : [];
+    if (!deps.some((dep) => dep?.name === WASM_LANE_TEST_DEP && dep?.kind === "dev")) continue;
+    const name = typeof pkg?.name === "string" ? pkg.name : "";
+    const manifestPath = typeof pkg?.manifest_path === "string" ? pkg.manifest_path : "";
+    if (!name || !manifestPath) {
+      return {
+        error: `a package dev-depending on \`${WASM_LANE_TEST_DEP}\` carries no name/manifest_path`,
+        packages: [],
+      };
+    }
+    const sourceRoots = [];
+    for (const target of Array.isArray(pkg?.targets) ? pkg.targets : []) {
+      if (target?.test !== true) continue;
+      const srcPath = typeof target?.src_path === "string" ? target.src_path : "";
+      if (!srcPath) continue;
+      const dir = dirname(srcPath);
+      if (!sourceRoots.includes(dir)) sourceRoots.push(dir);
+    }
+    if (sourceRoots.length === 0) {
+      return {
+        error:
+          `\`${name}\` dev-depends on \`${WASM_LANE_TEST_DEP}\` but declares no cargo target with ` +
+          "`test = true`, so nothing it contains can be executed by this lane",
+        packages: [],
+      };
+    }
+    const bindgenReqs = deps
+      .filter((dep) => dep?.name === WASM_LANE_BINDGEN_DEP)
+      .map((dep) => (typeof dep?.req === "string" ? dep.req : ""));
+    if (bindgenReqs.length === 0) {
+      return {
+        error:
+          `\`${name}\` dev-depends on \`${WASM_LANE_TEST_DEP}\` but declares no \`${WASM_LANE_BINDGEN_DEP}\` ` +
+          "dependency, so there is nothing to pin the test runner's version against",
+        packages: [],
+      };
+    }
+    sourceRoots.sort();
+    packages.push({
+      name,
+      manifestDir: dirname(manifestPath),
+      sourceRoots: pruneNestedScanRoots(sourceRoots),
+      bindgenReqs,
+    });
+  }
+  packages.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return { error: null, packages };
+}
+
+// `^X.Y.Z`, `=X.Y.Z` and a bare `X.Y.Z` all name ONE version. A true range (`>=0.2, <0.3`) does not, and
+// this lane cannot honour it: the runner and the library are one ABI and the runner is a single binary.
+const WASM_LANE_EXACT_VERSION_REQ = /^[ \t]*(?:\^|=)?[ \t]*(\d+\.\d+\.\d+)[ \t]*$/;
+
+/**
+ * The version the `wasm-bindgen-test-runner` binary must EQUAL, derived from the tree rather than pinned
+ * here. `wasm-bindgen`'s generated glue and its runner are one ABI: a skew does not fail at compile time,
+ * it fails at run time inside generated JavaScript — precisely the quiet failure this lane exists to
+ * remove — so a version this function cannot name exactly is an error, not a warning.
+ */
+export function deriveWasmBindgenPin(packages) {
+  const versions = new Set();
+  for (const pkg of packages || []) {
+    for (const req of pkg?.bindgenReqs || []) {
+      const match = WASM_LANE_EXACT_VERSION_REQ.exec(String(req));
+      if (!match) {
+        return {
+          version: null,
+          error:
+            `\`${pkg?.name}\` declares \`${WASM_LANE_BINDGEN_DEP} = "${req}"\`, which is not a single exact ` +
+            "version. The runner is one binary and shares an ABI with the library, so a range cannot name " +
+            "the version it must equal — pin the dependency to one `X.Y.Z`.",
+        };
+      }
+      versions.add(match[1]);
+    }
+  }
+  if (versions.size === 0) {
+    return {
+      version: null,
+      error: `no \`${WASM_LANE_BINDGEN_DEP}\` requirement was found on any lane package`,
+    };
+  }
+  if (versions.size > 1) {
+    return {
+      version: null,
+      error:
+        `the lane packages declare ${versions.size} different \`${WASM_LANE_BINDGEN_DEP}\` versions ` +
+        `(${[...versions].sort().join(", ")}); one runner binary cannot equal all of them`,
+    };
+  }
+  return { version: [...versions][0], error: null };
+}
+
+// `wasm-bindgen-test-runner 0.2.122`. Anchored to the tool name so a stray digit elsewhere in the capture
+// cannot be mistaken for a version, and `null` (rather than a guess) when the shape is unrecognised.
+export function parseWasmBindgenRunnerVersion(stdout) {
+  const match = /^[ \t]*wasm-bindgen-test-runner[ \t]+(\d+\.\d+\.\d+[^\s]*)[ \t]*$/m.exec(
+    String(stdout || ""),
+  );
+  return match ? match[1] : null;
+}
+
+export function decideWasmLaneRunnerPin({ runnerVersion, expectedVersion, runnerPath }) {
+  if (!runnerVersion) {
+    return {
+      message:
+        `\`${WASM_LANE_RUNNER_TOOL} --version\` (${runnerPath}) produced no recognisable version line, so ` +
+        `its ABI cannot be shown to match \`${WASM_LANE_BINDGEN_DEP} ${expectedVersion}\`.`,
+    };
+  }
+  if (runnerVersion !== expectedVersion) {
+    return {
+      message:
+        `\`${WASM_LANE_RUNNER_TOOL}\` on PATH is ${runnerVersion} (${runnerPath}) but this tree declares ` +
+        `\`${WASM_LANE_BINDGEN_DEP} ${expectedVersion}\`. The runner and the library are ONE ABI: a skew ` +
+        "compiles cleanly and then fails at run time inside the generated JavaScript glue, which reads as a " +
+        "product regression rather than a toolchain skew.",
+    };
+  }
+  return null;
+}
+
+/**
+ * Whether the wasm target's standard library is actually installed.
+ *
+ * `rustc --print target-libdir --target <triple>` prints a path for any triple rustc RECOGNISES, installed
+ * or not, so the path alone proves nothing. The discriminating evidence is that the directory exists and
+ * holds a compiled `core` rlib — the artifact a target-less toolchain is missing.
+ */
+export function decideWasmTargetInstalled(
+  libdir,
+  { existsFn = existsSync, readdirFn = readdirSync } = {},
+) {
+  const dir = String(libdir || "").trim();
+  if (!dir || !existsFn(dir)) return false;
+  let entries;
+  try {
+    entries = readdirFn(dir);
+  } catch {
+    return false;
+  }
+  return entries.some((entry) => /^libcore-.*\.rlib$/.test(String(entry)));
+}
+
+// One bounded, non-inheriting capture used by all three lane probes. Deliberately not
+// `runBoundedVersionProbe`: `cargo metadata` output is orders of magnitude larger than a version banner
+// and would silently truncate against that helper's 1 MiB buffer, turning a healthy tree into a parse
+// failure. SIGKILL for the same reason every other pre-archive probe uses it — the single-flight mutex is
+// held here, and a trappable SIGTERM lets a wedged child hold it past its own timeout.
+function runWasmLaneCapture(command, args, { env, cwd, timeoutMs, spawnSyncFn = spawnSync } = {}) {
+  if (!(timeoutMs > 0)) return { ok: false, stdout: "", detail: "probe budget already spent" };
+  try {
+    const result = spawnSyncFn(command, args, {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: timeoutMs,
+      killSignal: WASM_LANE_PROBE_KILL_SIGNAL,
+      maxBuffer: WASM_LANE_PROBE_MAX_BUFFER,
+      ...(env === undefined ? {} : { env }),
+      ...(cwd === undefined ? {} : { cwd }),
+    });
+    if (result.error) {
+      return {
+        ok: false,
+        stdout: "",
+        detail:
+          result.error.code === "ETIMEDOUT"
+            ? `\`${command}\` timed out after ${timeoutMs}ms`
+            : `\`${command}\` could not be launched (${result.error.code || result.error.message})`,
+      };
+    }
+    if (result.status !== 0) {
+      return {
+        ok: false,
+        stdout: String(result.stdout || ""),
+        detail:
+          `\`${command} ${args.join(" ")}\` exited ${result.status ?? "by signal"}: ` +
+          String(result.stderr || "")
+            .trim()
+            .slice(0, 400),
+      };
+    }
+    return { ok: true, stdout: String(result.stdout || ""), detail: "" };
+  } catch (error) {
+    return { ok: false, stdout: "", detail: String(error?.message || error) };
+  }
+}
+
+export function wasmLaneProbeBudgetMs(deadlineMs, nowMsValue) {
+  const remaining = deadlineMs - nowMsValue;
+  if (!Number.isFinite(remaining)) return WASM_LANE_PROBE_MAX_MS;
+  return Math.min(WASM_LANE_PROBE_MAX_MS, remaining);
+}
+
+/**
+ * The lane's fail-closed prerequisite check. It needs a working `cargo` and Rust toolchain, so it runs
+ * with the Cargo work — immediately before the one lane that consumes it — rather than among the
+ * deliberately node-only pre-archive preflights. Every probe is injectable so the self-test drives the
+ * real decision functions without a wasm toolchain on the host.
+ *
+ * Returns `{ ok: true, packages, expectedVersion, runnerPath, discoveredCases, perPackage }` or
+ * `{ ok: false, lines }` where `lines[0]` carries `WASM_LANE_PREREQUISITE_MARKER` and names the exact
+ * missing prerequisite plus the command that produces it.
+ */
+export function checkWasmLanePrerequisites(opts) {
+  const {
+    repoRoot,
+    env = process.env,
+    timeoutMs = WASM_LANE_PROBE_MAX_MS,
+    capture = runWasmLaneCapture,
+    resolveRunner = resolvePathShim,
+    countCases = countWasmBindgenTestAttributesInDir,
+    cargoPath = "cargo",
+    rustcPath = "rustc",
+  } = opts;
+  const fail = (headline, ...rest) => ({
+    ok: false,
+    lines: [`${WASM_LANE_PREREQUISITE_MARKER}: ${headline}`, ...rest],
+  });
+
+  const metadataRes = capture(
+    cargoPath,
+    [
+      "metadata",
+      "--format-version",
+      "1",
+      "--no-deps",
+      "--manifest-path",
+      join(repoRoot, "Cargo.toml"),
+    ],
+    { env, cwd: repoRoot, timeoutMs },
+  );
+  if (!metadataRes.ok) {
+    return fail(
+      "the lane scope could not be derived because `cargo metadata` did not complete.",
+      `  detail: ${metadataRes.detail}`,
+    );
+  }
+  let metadata;
+  try {
+    metadata = JSON.parse(metadataRes.stdout);
+  } catch (error) {
+    return fail(
+      "`cargo metadata` output was not parseable JSON, so the lane scope is unknown.",
+      `  detail: ${String(error?.message || error)}`,
+    );
+  }
+  const discovery = discoverWasmBoundaryPackages(metadata);
+  if (discovery.error) {
+    return fail(`the lane scope is malformed: ${discovery.error}.`);
+  }
+  if (discovery.packages.length === 0) {
+    return fail(
+      `no workspace package dev-depends on \`${WASM_LANE_TEST_DEP}\`, so this lane would execute NOTHING.`,
+      "A lane with an empty scope is indistinguishable from a lane that silently stopped running, so it is " +
+        "refused rather than reported green. If the JavaScript-boundary tests were genuinely retired, remove " +
+        "this lane deliberately instead of leaving it vacuous.",
+    );
+  }
+
+  const pin = deriveWasmBindgenPin(discovery.packages);
+  if (pin.error) {
+    return fail(`the runner version cannot be derived from the tree: ${pin.error}.`);
+  }
+
+  const rustcRes = capture(rustcPath, ["--print", "target-libdir", "--target", WASM_LANE_TARGET], {
+    env,
+    cwd: repoRoot,
+    timeoutMs,
+  });
+  if (!rustcRes.ok || !decideWasmTargetInstalled(rustcRes.stdout.trim())) {
+    return fail(
+      `the \`${WASM_LANE_TARGET}\` standard library is not installed for the active toolchain.`,
+      `  probe: ${rustcPath} --print target-libdir --target ${WASM_LANE_TARGET}`,
+      `  detail: ${rustcRes.ok ? `no compiled core rlib under ${rustcRes.stdout.trim()}` : rustcRes.detail}`,
+      "Install it with:",
+      `    rustup target add ${WASM_LANE_TARGET}`,
+      "The gate refuses to install it for you — its verdict must not depend on a mutation it performed — and " +
+        "refuses to skip the tests that need it.",
+    );
+  }
+
+  const runnerPath = resolveRunner(WASM_LANE_RUNNER_TOOL, env);
+  if (!runnerPath) {
+    return fail(
+      `\`${WASM_LANE_RUNNER_TOOL}\` is not on PATH, so the JavaScript-boundary tests cannot be executed.`,
+      "Install the matching runner with:",
+      `    cargo install wasm-bindgen-cli --version ${pin.version} --locked`,
+      `The version is not a constant here: it is read from this tree's \`${WASM_LANE_BINDGEN_DEP}\` ` +
+        "dependency, so bumping the dependency moves the required runner with it.",
+    );
+  }
+  const versionRes = capture(runnerPath, ["--version"], { env, cwd: repoRoot, timeoutMs });
+  if (!versionRes.ok) {
+    return fail(
+      `\`${WASM_LANE_RUNNER_TOOL} --version\` did not complete, so its ABI cannot be matched to the tree.`,
+      `  runner: ${runnerPath}`,
+      `  detail: ${versionRes.detail}`,
+    );
+  }
+  const runnerVersion = parseWasmBindgenRunnerVersion(versionRes.stdout || "");
+  const skew = decideWasmLaneRunnerPin({
+    runnerVersion,
+    expectedVersion: pin.version,
+    runnerPath,
+  });
+  if (skew) {
+    return fail(
+      skew.message,
+      "Install the matching runner with:",
+      `    cargo install wasm-bindgen-cli --version ${pin.version} --locked`,
+    );
+  }
+
+  const perPackage = {};
+  let discoveredCases = 0;
+  for (const pkg of discovery.packages) {
+    let count = 0;
+    for (const root of pkg.sourceRoots) count += countCases(root);
+    perPackage[pkg.name] = count;
+    discoveredCases += count;
+  }
+  if (discoveredCases === 0) {
+    return fail(
+      "an independent source scan of the lane packages found ZERO `#[wasm_bindgen_test]` attributes.",
+      `  scanned: ${discovery.packages.map((p) => `${p.name} (${p.sourceRoots.length} root(s))`).join(", ")}`,
+      "Either those tests were deleted or moved, or this scan is broken. Both make the lane vacuous, and a " +
+        "vacuous lane is refused rather than reported green.",
+    );
+  }
+
+  return {
+    ok: true,
+    lines: [],
+    packages: discovery.packages,
+    expectedVersion: pin.version,
+    runnerPath,
+    discoveredCases,
+    perPackage,
+  };
+}
+
+/**
+ * The lane's cargo argv. `--tests` selects every target cargo itself marks `test = true` — the same flag
+ * `discoverWasmBoundaryPackages` derives the scan roots from, so the executed set and the scanned set
+ * cannot drift apart — and excludes doctests, which do not run on this target.
+ */
+export function buildWasmLaneTestArgs({
+  packageName,
+  target = WASM_LANE_TARGET,
+  exhaustive = false,
+}) {
+  if (!packageName) throw new TypeError("packageName is required");
+  return [
+    "test",
+    "--target",
+    target,
+    "-p",
+    packageName,
+    "--tests",
+    ...(exhaustive ? ["--no-fail-fast"] : []),
+  ];
+}
+
+/**
+ * Parse the wasm-bindgen test harness transcript.
+ *
+ * Each executed test binary either announces `running N tests` and closes with a terminal
+ * `test result: …` line, or reports `no tests to run!` and closes nothing. `complete` therefore requires
+ * at least one terminal result AND one terminal result per announcement: a transcript that announced work
+ * and never closed it is a run that did not finish, which must never read as a pass.
+ */
+export function parseWasmLaneHarnessSummary(text) {
+  let binaries = 0;
+  let announced = 0;
+  let resultBlocks = 0;
+  let selected = 0;
+  let passed = 0;
+  let failed = 0;
+  let ignored = 0;
+  let filteredOut = 0;
+  let emptyBinaries = 0;
+  let ok = true;
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.trim();
+    if (/^Running\s+\S.*\(.+\)$/.test(line)) {
+      binaries++;
+      continue;
+    }
+    if (line === "no tests to run!") {
+      emptyBinaries++;
+      continue;
+    }
+    const running = /^running (\d+) tests?$/.exec(line);
+    if (running) {
+      announced++;
+      selected += parseInt(running[1], 10);
+      continue;
+    }
+    const result =
+      /^test result:\s+(ok|FAILED)\.\s+(\d+) passed;\s+(\d+) failed;\s+(\d+) ignored;(?:\s+(\d+) measured;)?\s+(\d+) filtered out/.exec(
+        line,
+      );
+    if (result) {
+      resultBlocks++;
+      if (result[1] !== "ok") ok = false;
+      passed += parseInt(result[2], 10);
+      failed += parseInt(result[3], 10);
+      ignored += parseInt(result[4], 10);
+      filteredOut += parseInt(result[6], 10);
+    }
+  }
+  return {
+    binaries,
+    announced,
+    resultBlocks,
+    selected,
+    passed,
+    failed,
+    ignored,
+    filteredOut,
+    emptyBinaries,
+    ok,
+    complete: resultBlocks > 0 && resultBlocks === announced,
+  };
+}
+
+/**
+ * Names of the cases the wasm harness reported as failing.
+ *
+ * Deliberately NOT `extractLibtestFailedNames`: the wasm-bindgen harness prints `... FAIL`, not libtest's
+ * `... FAILED`, so reading it with the libtest extractor names ZERO cases on a genuinely red run and the
+ * lane reports "the harness produced no terminal result" for a run that produced one and failed in it.
+ * `FAILED` is accepted too so a harness that adopts libtest's spelling does not silently stop naming cases.
+ * Lines are trimmed exactly as `parseWasmLaneHarnessSummary` trims them, so an indented transcript cannot
+ * make the summary count a failure this extractor then refuses to name.
+ */
+export function extractWasmLaneFailedNames(text) {
+  const names = [];
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.trim();
+    const match = /^test\s+(.+?)\s+\.\.\.\s+FAIL(?:ED)?$/.exec(line);
+    if (match) names.push(match[1]);
+  }
+  return names;
+}
+
+/**
+ * The three counts that must agree, compared in ONE place.
+ *
+ * SELECTED is what the harness announced (`running N tests`). EXECUTED is what it actually ran — the sum
+ * of its terminal `passed` and `failed`. They are NOT the same number: the harness prints its announcement
+ * BEFORE applying the ignore filter, so `#[ignore]` on a case leaves SELECTED untouched, and the source
+ * scan counts the `#[wasm_bindgen_test]` attribute either way because `#[ignore]` is a separate line. A
+ * lane that compared only SELECTED against DISCOVERED would therefore report full coverage while running
+ * nothing, which is precisely the unexecuted-boundary defect it exists to remove.
+ *
+ * There is deliberately NO tolerated-ignore disposition. A boundary refusal is proven by execution or it
+ * is not proven; a case that cannot run must be fixed or deleted, not annotated. If some case ever does
+ * need to be excluded, that exclusion has to be stated here, enumerated and named, never inferred from an
+ * attribute the gate cannot see.
+ */
+function decideWasmLaneCaseCounts({ scope, selectedCount, discoveredCount, executedCount }) {
+  if (!Number.isSafeInteger(executedCount)) {
+    return {
+      exit: EXIT_USAGE,
+      message:
+        `WASM JS-BOUNDARY LANE SETUP FAILURE: ${scope} recorded no executed-case count, so nothing proves ` +
+        "the selected cases ran rather than being skipped. A count this check cannot read is a failure, " +
+        "never an assumed pass.",
+    };
+  }
+  if (selectedCount !== discoveredCount) {
+    return {
+      exit: EXIT_USAGE,
+      message:
+        `WASM JS-BOUNDARY LANE SETUP FAILURE: ${scope} — the harness selected ${selectedCount} case(s) to ` +
+        `run, but an independent source scan found ${discoveredCount} \`#[wasm_bindgen_test]\` ` +
+        "attribute(s). A lane that silently runs fewer cases than its own sources declare proves less than " +
+        "it claims to. (A superset is equally untrusted: it means the scan missed a source file the lane " +
+        "did compile.)",
+    };
+  }
+  if (executedCount !== discoveredCount) {
+    return {
+      exit: EXIT_USAGE,
+      message:
+        `WASM JS-BOUNDARY LANE SETUP FAILURE: ${scope} — the harness selected all ${discoveredCount} ` +
+        `declared case(s) but ${executedCount} of them EXECUTED` +
+        (executedCount < discoveredCount
+          ? `; ${discoveredCount - executedCount} were skipped`
+          : `, more than the ${discoveredCount} declared`) +
+        ". `running N tests` is printed BEFORE the ignore filter is applied, so a selected " +
+        "count alone cannot tell an executed case from an `#[ignore]`d one — two tokens on a case would " +
+        "otherwise restore the unexecuted boundary this lane exists to remove. A boundary refusal is " +
+        "proven by execution or it is not proven: fix the case or delete it, never `#[ignore]` it.",
+    };
+  }
+  return null;
+}
+
+/**
+ * The lane's whole-run expected-vs-executed VERDICT, the sole place the comparison is made (`gate.mjs`
+ * calls this rather than inlining it, so a regression that weakens it back to "did anything run at all"
+ * has to revert this function and cannot leave an untouched copy behind). Returns `null` when the counts
+ * reconcile, else the exact exit code and message the lane records.
+ */
+export function decideWasmLaneCaseParity(selectedCount, discoveredCount, executedCount) {
+  if (discoveredCount === 0) {
+    return {
+      exit: EXIT_USAGE,
+      message:
+        "WASM JS-BOUNDARY LANE SETUP FAILURE: the independent source scan found ZERO " +
+        "`#[wasm_bindgen_test]` attributes, so this lane proves nothing. Refusing to trust a lane whose " +
+        "own expected-inventory check cannot count anything.",
+    };
+  }
+  return decideWasmLaneCaseCounts({
+    scope: "the lane",
+    selectedCount,
+    discoveredCount,
+    executedCount,
+  });
+}
+
+/**
+ * The same verdict applied to ONE package.
+ *
+ * The whole-run comparison is a SUM, and sums reconcile under compensating drift: with two lane packages,
+ * one selecting fewer cases than it declares and another selecting more cancel out and the totals agree
+ * while neither package does. The lane's scope comes from `cargo metadata`, so a second package enters it
+ * with no gate edit — the per-package comparison is what keeps that arrival honest.
+ *
+ * A package whose sources declare no cases is legitimate here; "the lane as a whole proves nothing" is the
+ * whole-run check's question. What such a package may not do is run cases the scan cannot see.
+ */
+export function decideWasmLanePackageCaseParity({
+  packageName,
+  selectedCount,
+  discoveredCount,
+  executedCount,
+}) {
+  const scope = `\`${packageName}\``;
+  if (discoveredCount === 0) {
+    if (selectedCount === 0 && executedCount === 0) return null;
+    return {
+      exit: EXIT_USAGE,
+      message:
+        `WASM JS-BOUNDARY LANE SETUP FAILURE: ${scope} announced ${selectedCount} case(s) and executed ` +
+        `${executedCount}, but the independent source scan of its cargo test roots found NO ` +
+        "`#[wasm_bindgen_test]` attributes. The scan missed sources the lane compiled, so its inventory " +
+        "cannot be trusted to notice a case that stops running.",
+    };
+  }
+  return decideWasmLaneCaseCounts({ scope, selectedCount, discoveredCount, executedCount });
+}
+
+/**
+ * One lane package's transcript reduced to the receipt fields the lane records.
+ *
+ * Lives here rather than inline in `gate.mjs` for the same reason the parity verdict does: weakening any
+ * of these conditions has to revert THIS function, and the self-test can drive every direction of it
+ * without a wasm toolchain installed.
+ *
+ * `parseable`/`complete` describe the TRANSCRIPT, never the verdict. A package that declares cases must
+ * announce them and close with a terminal `test result:` line; one whose sources declare none legitimately
+ * announces nothing. A red run is COMPLETE and FAILING, which is a different receipt from a run that never
+ * finished — conflating them reports "no terminal result" for a run that had one.
+ */
+export function evaluateWasmLanePackageRun({ packageName, expected, text, exitCode }) {
+  const surface = `wasm:${packageName}`;
+  const summary = parseWasmLaneHarnessSummary(text);
+  const failedNames = extractWasmLaneFailedNames(text);
+  const failures = failedNames.map((name) => ({ surface, name }));
+
+  if (summary.failed !== failedNames.length) {
+    // The count and the names must agree, or a failure exists that no name accounts for.
+    failures.push({
+      surface,
+      name: `<harness summary reports ${summary.failed} failed but ${failedNames.length} case name(s) were parsed — unaccounted failure(s)>`,
+    });
+  }
+  if (!summary.ok && summary.failed === 0) {
+    // The harness declared the run FAILED while counting no failing case. Whatever it refused is real and
+    // unnamed; a verdict derived from the count alone would read it as green.
+    failures.push({
+      surface,
+      name: "<harness reported `test result: FAILED` while counting zero failed case(s) — unaccounted refusal>",
+    });
+  }
+  if (exitCode !== 0 && summary.failed === 0) {
+    // A non-zero exit with no accounted failing case is a compile error, a harness abort, or a runner that
+    // never started. It must surface as a named failure, not vanish behind a green summary.
+    failures.push({
+      surface,
+      name: `<cargo exited ${exitCode} with no failing case parsed — compile error, harness abort, or runner failure>`,
+    });
+  }
+  const parity = decideWasmLanePackageCaseParity({
+    packageName,
+    selectedCount: summary.selected,
+    discoveredCount: expected,
+    executedCount: summary.passed + summary.failed,
+  });
+  if (parity) failures.push({ surface, name: parity.message });
+
+  return {
+    summary,
+    parseable: expected === 0 ? summary.announced === 0 : summary.resultBlocks > 0,
+    complete:
+      expected === 0 ? summary.announced === 0 && summary.resultBlocks === 0 : summary.complete,
+    parityMismatch: parity !== null,
+    failures,
+  };
 }
 
 // ----------------------------------------------------------------------------------------------------

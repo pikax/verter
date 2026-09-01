@@ -12,6 +12,11 @@
 [build.environment]
 PNPM_VERSION = "10.22.0"
 NODE_VERSION = "20"
+# The deployed shell runs Verter through the browser WASM package. Compiling
+# the shell's own SFCs with Vue avoids requiring a host-specific N-API artifact
+# that Netlify does not download. GitHub CI keeps the release-critical
+# `verter()` Vite build, backed by its native-node artifact.
+VERTER_PLAYGROUND_SHELL_COMPILER = "vue"
 
 # HTTP headers for SharedArrayBuffer and WASM support
 [[headers]]

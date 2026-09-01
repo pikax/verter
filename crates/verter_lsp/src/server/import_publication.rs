@@ -54,6 +54,16 @@ pub(super) enum PublicationUrgency {
     EditDebounced,
 }
 
+impl PublicationUrgency {
+    pub(super) fn merge(self, other: Self) -> Self {
+        if matches!(self, Self::Immediate) || matches!(other, Self::Immediate) {
+            Self::Immediate
+        } else {
+            Self::EditDebounced
+        }
+    }
+}
+
 /// Whether the import-dependency closure for a document is delivered at the
 /// live revision — the handler-facing readiness verdict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,7 +89,7 @@ pub(super) struct DependencyFrontierSignature {
 }
 
 impl DependencyFrontierSignature {
-    fn is_rootless(&self) -> bool {
+    pub(super) fn is_rootless(&self) -> bool {
         self.imports.is_empty() && self.module_references.is_empty()
     }
 }
@@ -147,30 +157,80 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return;
         };
-        let debounce_epoch = match urgency {
-            PublicationUrgency::Immediate => None,
-            PublicationUrgency::EditDebounced => {
-                Some(self.import_sync.bump_enqueue_epoch(&canonical_id))
-            }
+        let Some(driver) = self
+            .import_sync
+            .reserve_publication_driver(&canonical_id, urgency)
+        else {
+            return;
         };
         let server = self.clone();
         let uri = uri.clone();
         tokio::spawn(async move {
-            if let Some(epoch) = debounce_epoch {
-                // One publication per typing burst: the shared LSP quiet-window policy.
-                tokio::time::sleep(crate::edit_quiet_window::EDIT_QUIET_WINDOW).await;
-                if !server
-                    .import_sync
-                    .enqueue_epoch_is_current(&canonical_id, epoch)
-                {
-                    // A newer edit-triggered enqueue owns the burst.
-                    return;
-                }
-            }
             server
-                .publish_import_dependencies(&uri, &canonical_id)
+                .drive_import_dependency_publication(&uri, &canonical_id, driver)
                 .await;
         });
+    }
+
+    async fn drive_import_dependency_publication(
+        &self,
+        uri: &Uri,
+        canonical_id: &str,
+        mut driver: super::import_sync_state::ImportPublicationDriver,
+    ) {
+        let mut urgency = driver.initial_urgency();
+        let mut debounce_epoch = driver.initial_debounce_epoch();
+        loop {
+            if matches!(urgency, PublicationUrgency::EditDebounced) {
+                loop {
+                    tokio::select! {
+                        biased;
+                        () = driver.wait_for_trigger() => {
+                            match driver.take_pending_trigger() {
+                                Some(PublicationUrgency::Immediate) => {
+                                    break;
+                                }
+                                Some(PublicationUrgency::EditDebounced) | None => {
+                                    // The newest edit owns a fresh quiet window.
+                                    debounce_epoch = driver.latest_debounce_epoch();
+                                    continue;
+                                }
+                            }
+                        }
+                        () = tokio::time::sleep(crate::edit_quiet_window::EDIT_QUIET_WINDOW) => {
+                            if debounce_epoch == driver.latest_debounce_epoch() {
+                                break;
+                            }
+                            // An edit advanced the epoch at the quiet-window
+                            // boundary. Even if its wake coalesced, only the
+                            // newest epoch may own the pass.
+                            debounce_epoch = driver.latest_debounce_epoch();
+                        }
+                    }
+                }
+            }
+
+            self.publish_import_dependencies(uri, canonical_id).await;
+            let Some(next) = driver.trailing_pass_or_finish() else {
+                return;
+            };
+            urgency = next;
+            debounce_epoch = matches!(urgency, PublicationUrgency::EditDebounced)
+                .then(|| driver.latest_debounce_epoch())
+                .flatten();
+        }
+    }
+
+    /// Enqueue the existing detached immediate publication lane. The shared
+    /// synchronous reservation either starts one driver or records one
+    /// trailing pass on the already-active driver.
+    ///
+    /// Feature handlers use this tiny self-heal seam after a recognized
+    /// authored component contract misses the committed cache. It never reads
+    /// or waits for a DependencyReady receipt and never performs projection in
+    /// the request; the background publication remains the sole producer.
+    pub(super) fn enqueue_import_dependency_publication_if_idle(&self, uri: &Uri) {
+        self.spawn_import_dependency_publication(uri, PublicationUrgency::Immediate);
     }
 
     /// The BACKGROUND import-dependency publication pass for one document:
@@ -179,11 +239,11 @@ impl VerterLanguageServer {
     /// barrel delivery legs, and — only for a COMPLETE pass under a stable
     /// key — the DependencyReady receipt mint.
     ///
-    /// A pass with any failed or requeued leg does NOT publish the receipt: the
-    /// receipt records that the import set was successfully delivered at this
-    /// generation, and a partial pass has not delivered it. The failed state is
-    /// simply a cold memo — the next enqueue (readiness miss, edit, open)
-    /// retries, so a transient failure never poisons and never strands.
+    /// A pass with any retryable failed or requeued leg does NOT publish the
+    /// receipt: the receipt records that the import set reached a settled state
+    /// at this generation. A provenance-fenced permanent authored projection
+    /// refusal is settled (and invalidates on later content/config changes);
+    /// transient failure remains cold so the next enqueue retries.
     async fn publish_import_dependencies(&self, uri: &Uri, canonical_id: &str) {
         // Singleflight: coalesce concurrent enqueues onto ONE pass. A follower
         // that acquires the lock after the leader finished sees a fresh memo
@@ -193,7 +253,9 @@ impl VerterLanguageServer {
 
         let key = self.import_sync_freshness_key();
         if let Some(key) = key {
-            if self.import_sync.is_fresh_at(canonical_id, key) {
+            if self.import_sync.is_fresh_at(canonical_id, key)
+                && self.imported_child_contracts_current_for_parent(canonical_id)
+            {
                 return; // The import set was already delivered at this generation.
             }
         }
@@ -203,10 +265,20 @@ impl VerterLanguageServer {
         // write below — so a woken joiner re-reads a settled memo.
         let _in_flight = self.import_sync.begin_in_flight(canonical_id);
 
-        let outcome = self
+        let mut outcome = self
             .ensure_imported_carrier_apis_synced(uri)
             .await
             .and(self.ensure_barrel_imports_synced(uri).await);
+
+        // An open carrier is itself a future imported child. Publish its own
+        // contract on the same debounced background lane after its dependency
+        // closure settles, so a parent typed from an empty buffer can consume a
+        // committed contract on the first `<Child ` completion. Previously only
+        // an already-authored importer could start this projection, which made
+        // cold progressive editing miss until typing stopped.
+        if verter_semantic::resolver_core::path_is_carrier(canonical_id) {
+            outcome = outcome.and(self.publish_loaded_child_contract(canonical_id));
+        }
 
         // Publish the receipt only when the whole pass DELIVERED under a stable
         // key — never warm a torn generation, and never warm over a leg that has
@@ -248,9 +320,7 @@ impl VerterLanguageServer {
         if self.import_sync.is_fresh_at(&canonical_id, key) {
             return DependencyReadiness::Ready;
         }
-        if self.import_sync.in_flight_watch(&canonical_id).is_none() {
-            self.spawn_import_dependency_publication(uri, PublicationUrgency::Immediate);
-        }
+        self.spawn_import_dependency_publication(uri, PublicationUrgency::Immediate);
         DependencyReadiness::NotReady
     }
 
@@ -292,10 +362,6 @@ impl VerterLanguageServer {
     /// provider. PRIVATE to the background publication pass: handlers must
     /// never run this inline (a compile error here is the architectural guard).
     async fn ensure_imported_carrier_apis_synced(&self, uri: &Uri) -> ImportSyncOutcome {
-        if matches!(self.type_provider_kind, crate::TypeProviderKind::None) {
-            return ImportSyncOutcome::Complete;
-        }
-
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return ImportSyncOutcome::Complete;
         };
@@ -336,7 +402,10 @@ impl VerterLanguageServer {
 
         let mut outcome = ImportSyncOutcome::Complete;
         for import_id in import_ids {
-            if self.imported_carrier_already_delivered(&import_id) {
+            let provider_is_current =
+                matches!(self.type_provider_kind, crate::TypeProviderKind::None)
+                    || self.imported_carrier_already_delivered(&import_id);
+            if provider_is_current && self.child_public_contract_is_settled(&import_id) {
                 continue;
             }
             outcome = outcome.and(self.sync_imported_carrier_api_lightweight(&import_id).await);
@@ -355,7 +424,7 @@ impl VerterLanguageServer {
     /// already holds. Skip iff the committed state says both companion kinds are
     /// live AND current for the child's live bytes — an edited child always
     /// takes the full sync.
-    fn imported_carrier_already_delivered(&self, canonical_id: &str) -> bool {
+    pub(super) fn imported_carrier_already_delivered(&self, canonical_id: &str) -> bool {
         let Some(state) = self.provider_sync_state_for_source(canonical_id) else {
             return false;
         };
@@ -367,33 +436,42 @@ impl VerterLanguageServer {
         if !state.ide_background_loaded {
             return false;
         }
-        // The API companion's own delivery witness decides whether it is still
-        // current — NEVER a recorded provider surface. The store publication
-        // re-records BOTH companion surfaces whenever the carrier gateway
-        // advertises, including on the tsgo route where the direct API buffer
-        // was NOT reopened; a skip keyed on that recording would leave the
-        // provider holding the pre-edit declarations with nothing left to
-        // re-deliver them, and a fail-closed consumer would then wait forever.
-        if !state.api_companion_is_live_and_current() {
-            return false;
-        }
         let store = self.documents.provider_surfaces();
-        // The IDE half stays surface-keyed: it carries no separate witness, and
-        // its surface is recorded only after a successful direct sync.
-        let recorded = state
-            .ide_path
-            .as_deref()
-            .and_then(|path| store.current_snapshot(path));
-        let Some(snapshot) = recorded else {
-            return false;
-        };
-        if snapshot.source_canonical.as_ref() != canonical_id {
-            return false;
-        }
         let Some(live_source) = self.documents.host().get_source(canonical_id) else {
             return false;
         };
-        crate::provider_surface_store::ContentHash::of(&live_source) == snapshot.source_hash
+        let live_hash = crate::provider_surface_store::ContentHash::of(&live_source);
+        let current_surface = |path: Option<&str>| {
+            path.and_then(|path| store.current_snapshot(path))
+                .filter(|snapshot| {
+                    snapshot.source_canonical.as_ref() == canonical_id
+                        && snapshot.source_hash == live_hash
+                })
+        };
+        let Some(ide_snapshot) = current_surface(state.ide_path.as_deref()) else {
+            return false;
+        };
+
+        if matches!(
+            self.type_provider_kind,
+            crate::TypeProviderKind::Tsserver | crate::TypeProviderKind::EditorTsserver
+        ) {
+            // In both tsserver topologies the plugin serves the durable store
+            // itself. A current API store surface is therefore the delivery
+            // witness; re-running the gateway would only advance its receipt
+            // generation for identical bytes.
+            return state.api_background_loaded
+                && current_surface(state.api_path.as_deref()).is_some();
+        }
+
+        // Managed tsgo receives copied direct IDE and API buffers. Editor-store
+        // publication is independent: a new current store surface may coexist
+        // with an old or failed direct IDE reopen. Require the receipt-attested
+        // direct IDE identity in addition to the API delivery witness.
+        state.authorizes_carrier_ide_capture(
+            ide_snapshot.stamp.content_hash.to_hash16(),
+            ide_snapshot.stamp.map_hash,
+        ) && state.api_companion_is_live_and_current()
     }
 
     /// Sync barrel (non-carrier re-export) imports and their framework-carrier
@@ -411,9 +489,6 @@ impl VerterLanguageServer {
     /// differs from their on-disk bytes. Ordinary imports and unchanged compiled output remain
     /// provider-resolved from disk. PRIVATE to the background publication pass.
     async fn ensure_barrel_imports_synced(&self, uri: &Uri) -> ImportSyncOutcome {
-        let Some(sync) = &self.project_sync else {
-            return ImportSyncOutcome::Complete;
-        };
         let Some(snapshot) = self.published_resolver() else {
             return ImportSyncOutcome::Complete;
         };
@@ -443,9 +518,6 @@ impl VerterLanguageServer {
                             &canonical_id,
                         )
                     });
-        if tsserver_uses_authored_specifiers {
-            return ImportSyncOutcome::Complete;
-        }
         let Some(ingress) = self.documents.host().get_script_ingress(&canonical_id) else {
             return ImportSyncOutcome::Complete;
         };
@@ -453,6 +525,10 @@ impl VerterLanguageServer {
         let host = self.documents.host();
         let mut barrel_ids: Vec<String> = Vec::new();
         let mut barrel_carrier_deps: Vec<String> = Vec::new();
+        let mut barrel_component_candidates: Vec<(
+            String,
+            super::AuthoredBarrelComponentRouteIdentity,
+        )> = Vec::new();
         let mut seen_barrels = HashSet::new();
         let mut seen_barrel_carrier = HashSet::new();
 
@@ -481,7 +557,27 @@ impl VerterLanguageServer {
             }
             if seen_barrels.insert(resolved.clone()) {
                 frontier.push(resolved.clone());
-                barrel_ids.push(resolved);
+                barrel_ids.push(resolved.clone());
+            }
+            for binding in import
+                .bindings
+                .iter()
+                .filter(|binding| !binding.is_type_only)
+            {
+                let Some(imported_name) = binding.imported_name.clone() else {
+                    continue;
+                };
+                barrel_component_candidates.push((
+                    resolved.clone(),
+                    super::AuthoredBarrelComponentRouteIdentity {
+                        source: import.source.clone(),
+                        imported_name,
+                        local_binding: binding.name.clone(),
+                        kind: binding.kind,
+                        import_span: import.span,
+                        binding_span: binding.span,
+                    },
+                ));
             }
         }
 
@@ -550,11 +646,52 @@ impl VerterLanguageServer {
         // IDE targets). Already-delivered byte-fresh carriers are skipped —
         // the same steady-state quietness as the direct-import leg.
         for carrier_id in &barrel_carrier_deps {
-            if self.imported_carrier_already_delivered(carrier_id) {
+            let provider_is_current =
+                matches!(self.type_provider_kind, crate::TypeProviderKind::None)
+                    || self.imported_carrier_already_delivered(carrier_id);
+            if provider_is_current && self.child_public_contract_is_settled(carrier_id) {
                 continue;
             }
             outcome = outcome.and(self.sync_imported_carrier_api_lightweight(carrier_id).await);
         }
+
+        // Publish the exact authored component binding -> terminal carrier
+        // route after terminal contracts are current. Completion captures this
+        // map and never re-enters live resolution/re-export traversal.
+        for (barrel_id, identity) in barrel_component_candidates {
+            let Some((terminal_id, _, _)) = self
+                .documents
+                .host()
+                .get_export_span_follow_reexports(&barrel_id, &identity.imported_name)
+            else {
+                continue;
+            };
+            if !verter_semantic::resolver_core::path_is_carrier(&terminal_id) {
+                continue;
+            }
+            outcome = outcome.and(self.publish_barrel_component_route(
+                &canonical_id,
+                identity,
+                &terminal_id,
+            ));
+        }
+
+        // The tsserver plugin can resolve authored carrier specifiers without
+        // rewritten barrel buffers, but the graph walk above is still the
+        // background owner of terminal child-contract publication.
+        if tsserver_uses_authored_specifiers {
+            return outcome;
+        }
+
+        // Re-export discovery and terminal child-contract publication are
+        // provider-neutral. Only the rewritten barrel shadow below requires a
+        // project-sync transport.
+        if matches!(self.type_provider_kind, crate::TypeProviderKind::None) {
+            return outcome;
+        }
+        let Some(sync) = &self.project_sync else {
+            return outcome;
+        };
 
         // Publish only barrel files whose export-from specifiers need a provider
         // rewrite (or whose framework self-file projection changes their bytes).

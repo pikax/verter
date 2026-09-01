@@ -23,7 +23,7 @@
     "test:e2e:single": "pnpm --filter verter-vscode test:e2e",
     "test:lsp:neutral": "cargo build -p verter_lsp -p verter_relay_shim && pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm --filter @verter/dx-harness test:editor-neutral-lsp",
     "test:endurance": "pnpm --filter @verter/dx-harness run test:endurance",
-    "test:scripts": "vitest run scripts/sccache-env.test.mjs && vitest run scripts/wasm-opt-cache.test.mjs && node --test scripts/lib/publish-set.spec.mjs && node --test scripts/lib/crate-graph.spec.mjs && node --test scripts/editor-contracts/plenary-outcome-guard.test.mjs && node --test scripts/validate-performance-gates.test.mjs && node --test scripts/probe-bundler-route-isolation.test.mjs && node --test scripts/affected-tests.test.mjs && node --test scripts/gate-telemetry-selftest.mjs",
+    "test:scripts": "vitest run scripts/sccache-env.test.mjs && vitest run scripts/wasm-opt-cache.test.mjs && node --test scripts/lib/publish-set.spec.mjs && node --test scripts/lib/crate-graph.spec.mjs && node --test scripts/editor-contracts/plenary-outcome-guard.test.mjs && node --test scripts/validate-performance-gates.test.mjs && node --test scripts/probe-bundler-route-isolation.test.mjs && node --test scripts/affected-tests.test.mjs && node --test scripts/gate-telemetry-selftest.mjs && node --test scripts/bf2-ci-lane-selftest.mjs && node --test scripts/compiler-ci-lane-selftest.mjs && node --test scripts/provider-ci-lane-selftest.mjs && node --test scripts/gate-wasm-lane-selftest.mjs",
     "affected-tests": "node scripts/affected-tests.mjs",
     "bump": "node scripts/bump.mjs",
     "fmt": "oxfmt",
@@ -50,6 +50,7 @@
     "dev-extension": "pnpm run build:lsp && pnpm --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
     "update-all": "pnpm up -r -i -L",
     "clean": "pnpm -r exec npx shx rm -rf .turbo dist tsconfig.tsbuildinfo && npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
+    "gen:host-request-ts": "cargo run -p verter_napi --features generate-host-request-ts --bin generate_host_compile_request_ts",
     "gen:query-key-spec": "cargo run -p verter_session --bin gen-query-key-spec",
     "gen:oracle-snapshots": "cargo run -p verter_session --features oracle-gen --bin oracle_gen",
     "oracle:lift": "cargo run -p verter_session --features oracle-lift --bin oracle_lift --",
@@ -71,6 +72,7 @@
     "profile:hotpath:full:alloc": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc",
     "prepare": "husky",
     "proto:gen": "buf generate && oxfmt packages/proto/src/gen",
+    "proto:check": "node scripts/check-proto-generated.mjs",
     "test:coverage": "vitest run --coverage",
     "compare:vue-behavior": "node scripts/vue-behavior-compare/run.mjs",
     "gen:vue-macro-oracle": "node scripts/gen-vue-macro-runtime-oracle.mjs",
@@ -101,6 +103,8 @@
   },
   "lint-staged": {
     "*.rs": "cargo fmt --check --",
+    "crates/verter_protocol/proto/**/*.proto": "node scripts/check-proto-generated.mjs",
+    "packages/proto/src/gen/**/*.ts": "node scripts/check-proto-generated.mjs",
     "*.{ts,js,mjs,cjs}": "oxfmt --check --no-error-on-unmatched-pattern"
   },
   "packageManager": "pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c"

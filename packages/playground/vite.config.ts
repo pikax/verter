@@ -5,14 +5,23 @@ import { resolve } from "path";
 import { readFileSync } from "fs";
 
 const pkg = JSON.parse(readFileSync(resolve(__dirname, "../wasm/package.json"), "utf8"));
+const shellCompiler = process.env.VERTER_PLAYGROUND_SHELL_COMPILER ?? "verter";
+if (shellCompiler !== "verter" && shellCompiler !== "vue") {
+  throw new Error(
+    `VERTER_PLAYGROUND_SHELL_COMPILER must be "verter" or "vue", got ${JSON.stringify(shellCompiler)}`,
+  );
+}
 
 export default defineConfig({
   define: {
     __VERTER_VERSION__: JSON.stringify(pkg.version),
   },
   plugins: [
-    verter(),
-    // vue(),
+    // Netlify has no native-node artifact lane. Its static shell uses the
+    // official Vue transform while the shipped playground still executes
+    // Verter's browser WASM compiler. CI leaves this variable unset and keeps
+    // the native-backed `verter()` build as the product regression gate.
+    shellCompiler === "vue" ? vue() : verter(),
   ],
   resolve: {
     alias: {

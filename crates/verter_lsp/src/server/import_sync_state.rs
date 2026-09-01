@@ -187,6 +187,21 @@ mod delivered_receipts {
 
 use delivered_receipts::{DeliveredReceipts, Mutation as ReceiptMutation};
 
+use super::import_publication::PublicationUrgency;
+
+#[derive(Default)]
+struct PublicationReservationState {
+    active: bool,
+    rerun_requested: bool,
+    pending_urgency: Option<PublicationUrgency>,
+}
+
+#[derive(Default)]
+struct PublicationReservationLane {
+    state: std::sync::Mutex<PublicationReservationState>,
+    wake: tokio::sync::Notify,
+}
+
 #[derive(Default)]
 pub(crate) struct ImportSyncMemo {
     delivered: DeliveredReceipts,
@@ -196,9 +211,15 @@ pub(crate) struct ImportSyncMemo {
     /// Registered by the publisher AFTER it holds the singleflight lock, so at
     /// most one live entry exists per document.
     in_flight: DashMap<String, tokio::sync::watch::Receiver<bool>>,
-    /// Edit-debounce epochs: a debounced enqueue bumps its document's epoch and
-    /// only the LATEST enqueue survives its debounce sleep, so a typing burst
-    /// coalesces onto one publication after the silence window.
+    /// Synchronously reserved detached-publication drivers. Reservation is
+    /// installed before `tokio::spawn`, closing the window where many request
+    /// misses could all observe no post-lock `in_flight` receipt and each spawn
+    /// a follower. While a driver is active, later triggers request exactly one
+    /// trailing pass; Immediate work dominates a pending edit debounce.
+    publication_lanes: DashMap<String, Arc<PublicationReservationLane>>,
+    /// Existing edit-debounce generation fence. Every edit trigger advances
+    /// its document epoch; a driver may run only after the epoch it observed
+    /// survives a full quiet window.
     enqueue_epochs: DashMap<String, u64>,
     epoch_counter: std::sync::atomic::AtomicU64,
 }
@@ -273,6 +294,7 @@ impl ImportSyncMemo {
     /// The in-flight publication watch for `canonical_id`, if one is running.
     /// A joiner awaits `changed()` on the clone (value change or sender drop
     /// both resolve it) and then re-reads the receipt — it never starts work.
+    #[cfg(test)]
     pub(crate) fn in_flight_watch(
         &self,
         canonical_id: &str,
@@ -280,10 +302,50 @@ impl ImportSyncMemo {
         self.in_flight.get(canonical_id).map(|entry| entry.clone())
     }
 
-    /// Bump and return the edit-debounce epoch for `canonical_id`. A debounced
-    /// enqueue captures the returned value and abandons itself after its sleep
-    /// when a newer enqueue has bumped past it.
-    pub(crate) fn bump_enqueue_epoch(&self, canonical_id: &str) -> u64 {
+    /// Reserve the one detached driver for `canonical_id` synchronously. A
+    /// caller that loses the reservation still records a trailing pass before
+    /// returning, so a miss racing an incomplete/stale pass is never lost.
+    pub(super) fn reserve_publication_driver(
+        self: &Arc<Self>,
+        canonical_id: &str,
+        urgency: PublicationUrgency,
+    ) -> Option<ImportPublicationDriver> {
+        let debounce_epoch = matches!(urgency, PublicationUrgency::EditDebounced)
+            .then(|| self.bump_enqueue_epoch(canonical_id));
+        let lane = self
+            .publication_lanes
+            .entry(canonical_id.to_string())
+            .or_insert_with(|| Arc::new(PublicationReservationLane::default()))
+            .clone();
+        let mut state = lane
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.active {
+            state.rerun_requested = true;
+            state.pending_urgency = Some(match state.pending_urgency {
+                Some(existing) => existing.merge(urgency),
+                None => urgency,
+            });
+            drop(state);
+            lane.wake.notify_one();
+            return None;
+        }
+        state.active = true;
+        state.rerun_requested = false;
+        state.pending_urgency = None;
+        drop(state);
+        Some(ImportPublicationDriver {
+            memo: Arc::clone(self),
+            canonical_id: canonical_id.to_string(),
+            lane,
+            initial_urgency: urgency,
+            initial_debounce_epoch: debounce_epoch,
+            finished: false,
+        })
+    }
+
+    fn bump_enqueue_epoch(&self, canonical_id: &str) -> u64 {
         let epoch = self
             .epoch_counter
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
@@ -292,9 +354,8 @@ impl ImportSyncMemo {
         epoch
     }
 
-    /// Whether `epoch` is still the newest enqueue for `canonical_id`.
-    pub(crate) fn enqueue_epoch_is_current(&self, canonical_id: &str, epoch: u64) -> bool {
-        self.enqueue_epochs.get(canonical_id).map(|entry| *entry) == Some(epoch)
+    fn latest_enqueue_epoch(&self, canonical_id: &str) -> Option<u64> {
+        self.enqueue_epochs.get(canonical_id).map(|entry| *entry)
     }
 
     /// Drop every entry. Called whenever the workspace is replaced, because the
@@ -303,7 +364,11 @@ impl ImportSyncMemo {
         self.delivered.apply(ReceiptMutation::EvictAll);
         self.locks.clear();
         self.in_flight.clear();
-        self.enqueue_epochs.clear();
+        // Reservation lanes carry no workspace generation. Retain them so a
+        // driver spanning replacement remains the sole driver and re-reads
+        // the new live workspace; clearing here would allow an overlapping
+        // second driver for the same canonical identity. Debounce epochs are
+        // coordination-only too and remain monotonic across replacement.
     }
 
     /// Number of documents currently recorded as delivered (test observation).
@@ -336,6 +401,92 @@ impl ImportSyncMemo {
     }
 }
 
+/// Ownership token for one detached import-publication driver. The token is
+/// reserved before spawn and remains active across every trailing pass.
+pub(super) struct ImportPublicationDriver {
+    memo: Arc<ImportSyncMemo>,
+    canonical_id: String,
+    lane: Arc<PublicationReservationLane>,
+    initial_urgency: PublicationUrgency,
+    initial_debounce_epoch: Option<u64>,
+    finished: bool,
+}
+
+impl ImportPublicationDriver {
+    pub(super) fn initial_urgency(&self) -> PublicationUrgency {
+        self.initial_urgency
+    }
+
+    pub(super) fn initial_debounce_epoch(&self) -> Option<u64> {
+        self.initial_debounce_epoch
+    }
+
+    pub(super) fn latest_debounce_epoch(&self) -> Option<u64> {
+        self.memo.latest_enqueue_epoch(&self.canonical_id)
+    }
+
+    /// Wait for a trigger that can reset a debounce or upgrade it to Immediate.
+    pub(super) async fn wait_for_trigger(&self) {
+        self.lane.wake.notified().await;
+    }
+
+    /// Consume triggers accumulated while the driver is waiting to start a
+    /// debounced pass. The driver remains active.
+    pub(super) fn take_pending_trigger(&self) -> Option<PublicationUrgency> {
+        let mut state = self
+            .lane
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.rerun_requested {
+            return None;
+        }
+        state.rerun_requested = false;
+        state.pending_urgency.take()
+    }
+
+    /// Finish one pass atomically with either consuming a requested rerun or
+    /// clearing driver ownership. A trigger cannot land between the decision
+    /// and the clear: it takes the same state mutex and either becomes the
+    /// returned trailing pass or reserves the next driver after `active=false`.
+    pub(super) fn trailing_pass_or_finish(&mut self) -> Option<PublicationUrgency> {
+        let mut state = self
+            .lane
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.rerun_requested {
+            state.rerun_requested = false;
+            return state.pending_urgency.take();
+        }
+        state.active = false;
+        state.pending_urgency = None;
+        self.finished = true;
+        None
+    }
+}
+
+impl Drop for ImportPublicationDriver {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let mut state = self
+            .lane
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active = false;
+        state.rerun_requested = false;
+        state.pending_urgency = None;
+        self.memo
+            .publication_lanes
+            .remove_if(&self.canonical_id, |_, current| {
+                Arc::ptr_eq(current, &self.lane)
+            });
+    }
+}
+
 /// RAII registration of an in-flight background publication. Dropping it —
 /// normal completion or panic — removes the in-flight entry and resolves every
 /// joiner's watch. The receipt (if any) must be recorded BEFORE this drops so a
@@ -362,6 +513,104 @@ impl Drop for InFlightPublication {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reservation_precedes_in_flight_registration_and_coalesces_misses() {
+        let memo = Arc::new(ImportSyncMemo::default());
+        let canonical = "/workspace/src/App.vue";
+        let mut driver = memo
+            .reserve_publication_driver(canonical, PublicationUrgency::Immediate)
+            .expect("the first trigger reserves the sole driver");
+
+        assert!(
+            memo.in_flight_watch(canonical).is_none(),
+            "reservation must exist before the pass reaches begin_in_flight"
+        );
+        for _ in 0..64 {
+            assert!(
+                memo.reserve_publication_driver(canonical, PublicationUrgency::Immediate)
+                    .is_none(),
+                "a pre-pass request storm must not spawn a second driver"
+            );
+        }
+        assert_eq!(
+            driver.trailing_pass_or_finish(),
+            Some(PublicationUrgency::Immediate),
+            "the storm is retained as one trailing pass"
+        );
+        assert_eq!(driver.trailing_pass_or_finish(), None);
+    }
+
+    #[test]
+    fn retrying_pass_keeps_a_concurrent_miss_for_one_trailing_retry() {
+        let memo = Arc::new(ImportSyncMemo::default());
+        let canonical = "/workspace/src/App.vue";
+        let key = (7, 11);
+        let mut driver = memo
+            .reserve_publication_driver(canonical, PublicationUrgency::Immediate)
+            .expect("leader");
+
+        // The first pass is incomplete/stale and therefore records no receipt.
+        assert!(!memo.is_fresh_at(canonical, key));
+        assert!(
+            memo.reserve_publication_driver(canonical, PublicationUrgency::Immediate)
+                .is_none(),
+            "a miss during the failed pass joins the active driver"
+        );
+        assert_eq!(
+            driver.trailing_pass_or_finish(),
+            Some(PublicationUrgency::Immediate)
+        );
+
+        // The retained trailing pass completes and is the only writer.
+        memo.record_delivered(canonical.to_string(), key);
+        assert_eq!(driver.trailing_pass_or_finish(), None);
+        assert!(memo.is_fresh_at(canonical, key));
+    }
+
+    #[test]
+    fn completion_clear_race_cannot_lose_an_enqueue() {
+        let memo = Arc::new(ImportSyncMemo::default());
+        let canonical = "/workspace/src/App.vue";
+        let mut driver = memo
+            .reserve_publication_driver(canonical, PublicationUrgency::Immediate)
+            .expect("leader");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let follower_memo = Arc::clone(&memo);
+        let follower_barrier = Arc::clone(&barrier);
+        let follower = std::thread::spawn(move || {
+            follower_barrier.wait();
+            follower_memo.reserve_publication_driver(canonical, PublicationUrgency::Immediate)
+        });
+
+        barrier.wait();
+        let trailing = driver.trailing_pass_or_finish();
+        let next_driver = follower.join().expect("follower does not panic");
+        assert!(
+            matches!(trailing, Some(PublicationUrgency::Immediate)) ^ next_driver.is_some(),
+            "the racing trigger is either a trailing pass or a new reserved driver, never lost or duplicated"
+        );
+    }
+
+    #[test]
+    fn immediate_trigger_upgrades_a_pending_edit_debounce() {
+        let memo = Arc::new(ImportSyncMemo::default());
+        let canonical = "/workspace/src/App.vue";
+        let driver = memo
+            .reserve_publication_driver(canonical, PublicationUrgency::EditDebounced)
+            .expect("leader");
+        assert!(memo
+            .reserve_publication_driver(canonical, PublicationUrgency::EditDebounced)
+            .is_none());
+        assert!(memo
+            .reserve_publication_driver(canonical, PublicationUrgency::Immediate)
+            .is_none());
+        assert_eq!(
+            driver.take_pending_trigger(),
+            Some(PublicationUrgency::Immediate),
+            "an interactive miss must dominate a pending quiet-window pass"
+        );
+    }
 
     /// The promotion lands in the waiter's lost-wake window: the waiter has
     /// read the stale key, and the promotion runs before that read's answer is

@@ -16,7 +16,7 @@ pnpm add @verter/wasm
 
 ### `initialize()`
 
-Load the WASM module. Must be called before `compileSync()` or constructing a `Host`. Safe to call multiple times -- only initializes once. Subsequent calls return immediately.
+Load the WASM module. Must be called before constructing a `Host` (`createHost()` does it for you). Safe to call multiple times -- only initializes once. Subsequent calls return immediately.
 
 ```ts
 import { initialize } from "@verter/wasm";
@@ -36,47 +36,12 @@ if (!isInitialized()) {
 }
 ```
 
-### `compile(input, options?)`
+### Standalone `compile()` / `compileSync()` — removed
 
-Compile a Vue SFC to JavaScript. Auto-initializes the WASM module if needed.
-
-```ts
-import { compile } from "@verter/wasm";
-
-const result = await compile(source, { filename: "App.vue" });
-// result.code — compiled JavaScript
-// result.sourceMap — source map JSON string
-// result.codeWithSourceMap — code with inline source map appended
-// result.styles — compiled CSS blocks
-// result.errors — compilation diagnostics
-// result.durationMs — Rust pipeline timing
-```
-
-**Parameters:**
-
-- `input` (`string | Uint8Array`) -- Vue SFC source code
-- `options` (`CodegenOptions?`) -- Optional compilation options
-
-**Returns:** `Promise<CodegenResult>`
-
-### `compileSync(input, options?)`
-
-Synchronous compilation. Requires `initialize()` to have been called first. Throws if the WASM module has not been initialized.
-
-```ts
-import { initialize, compileSync } from "@verter/wasm";
-
-await initialize();
-
-const result = compileSync(source, { filename: "App.vue" });
-```
-
-**Parameters:**
-
-- `input` (`string | Uint8Array`) -- Vue SFC source code
-- `options` (`CodegenOptions?`) -- Optional compilation options
-
-**Returns:** `CodegenResult`
+`@verter/wasm` has no standalone compile function. The WASM artifact
+exports `VerterHost` and no free compile entry, so the wrappers that
+claimed to offer one always threw; they were removed rather than left
+in place. Compile through [`Host` / `VerterHost`](#host--verterhost).
 
 ### `Host` / `VerterHost`
 
@@ -205,114 +170,32 @@ For IDE/provider consumers, importing `App.vue` resolves through the public `.vu
 
 ## Types
 
-### `CodegenOptions`
-
-```ts
-interface CodegenOptions {
-  /** Filename for source map generation */
-  filename?: string;
-  /** Production mode — affects component ID and optimizations */
-  isProduction?: boolean;
-  /** Custom component ID (overrides auto-generation) */
-  componentId?: string;
-  /** Generate TSX output alongside JavaScript. Default: false */
-  includeTsx?: boolean;
-}
-```
-
-### `CodegenResult`
-
-```ts
-interface CodegenResult {
-  /** The compiled JavaScript code */
-  code: string;
-  /** Source map as JSON string */
-  sourceMap: string;
-  /** Code with inline source map appended */
-  codeWithSourceMap: string;
-  /** Compiled CSS blocks from <style> tags */
-  styles: CompiledStyleBlock[];
-  /** Scope ID for scoped styles (e.g., "data-v-a4f2eed6"). Empty if none */
-  scopeId: string;
-  /** Compilation diagnostics (errors, warnings) */
-  errors: WasmDiagnostic[];
-  /** Time taken for the Rust pipeline in milliseconds */
-  durationMs: number;
-  /** Generated TSX code (when includeTsx is true) */
-  tsx: string;
-  /** Compiled CSS (scoped selectors applied, v-bind replaced) */
-  css: string;
-  /** Time taken for TSX generation in milliseconds */
-  tsxDurationMs: number;
-}
-```
-
-### `CompiledStyleBlock`
-
-```ts
-interface CompiledStyleBlock {
-  /** Compiled CSS code */
-  code: string;
-  /** Whether this style block is scoped */
-  scoped: boolean;
-  /** Style language (css, scss, less, stylus) */
-  lang: string | null;
-  /** Whether this is a CSS module block */
-  isModule: boolean;
-  /** CSS module class mappings: [original, hashed][] */
-  moduleClasses: [string, string][];
-  /** CSS processing errors */
-  errors: string[];
-}
-```
-
-### `WasmDiagnostic`
-
-```ts
-interface WasmDiagnostic {
-  /** Severity level: "error", "warning", or "info" */
-  severity: string;
-  /** Vue-compatible error code (e.g., "XMissingEndTag") */
-  code: string;
-  /** Human-readable error message */
-  message: string;
-  /** Source span start (byte offset) */
-  spanStart?: number;
-  /** Source span end (byte offset) */
-  spanEnd?: number;
-}
-```
-
 ### Host Types
 
-The `Host` class accepts and returns the same `Host*` types as `@verter/native`. These types are re-exported from `@verter/native/host-types`:
+The `Host` class accepts and returns the same `Host*` types as `@verter/native`.
+
+`@verter/wasm` declares the compile profile and the two request shapes that carry it, so
+the browser binding owns its own compatibility contract for them. Their names and wire
+shapes are identical to the `@verter/native` ones, and `src/index.test-d.ts` type-checks
+that equivalence:
+
+- `HostCompileProfile`
+- `HostBlockOverrideRequest`
+- `HostVirtualQuery`
+
+The remaining types are re-exported from `@verter/native/host-types`:
 
 - `HostConfig`
-- `HostCompileProfile`
 - `HostIdeResponse`
 - `HostUpdateResult`
 - `HostUpsertRequest`
 - `HostVirtualFileResponse`
-- `HostVirtualQuery`
 - `HostResolvedId`
 - `HostRemoveResult`
 - `HostVirtualNodeKind`
 
-See the [@verter/native documentation](./native.md) for full type definitions.
-
-## Input Encoding
-
-The WASM `compile()` and `compileSync()` functions accept both `string` and `Uint8Array` input. When `Uint8Array` is provided and the WASM binary supports `compileBytes`, the bytes are passed directly without UTF-8 decode. Otherwise, the `Uint8Array` is decoded via `TextDecoder` before compilation.
-
-```ts
-// String input
-const result = await compile("<template><div>Hello</div></template>");
-
-// Uint8Array input (e.g., from fetch)
-const response = await fetch("/App.vue");
-const bytes = new Uint8Array(await response.arrayBuffer());
-const result = await compile(bytes, { filename: "App.vue" });
-```
+See the [@verter/native documentation](./native.md) for full definitions of the
+re-exported types.
 
 ## Differences from @verter/native
 
@@ -320,12 +203,11 @@ const result = await compile(bytes, { filename: "App.vue" });
 | ------------------------------- | -------------------------------- | -------------------------------- |
 | Environment                     | Node.js                          | Browser / Web Worker             |
 | Binary format                   | Platform-specific `.node`        | WebAssembly `.wasm`              |
-| `compile()`                     | Not available (use `VerterHost`) | Available (standalone)           |
-| `compileSync()`                 | Not available                    | Available (after `initialize()`) |
-| `processStyle()`                | Available                        | Not available (use `compile()`)  |
-| `transformVueStyle()`           | Available                        | Not available (use `compile()`)  |
-| `prepareStyleForPreprocessor()` | Available                        | Not available (use `compile()`)  |
-| `analyzeStyle()`                | Available                        | Not available (use `compile()`)  |
+| `compile()`                     | Not available (use `VerterHost`) | Not available (use `VerterHost`) |
+| `processStyle()`                | Available                        | Not available                    |
+| `transformVueStyle()`           | Available                        | Not available                    |
+| `prepareStyleForPreprocessor()` | Available                        | Not available                    |
+| `analyzeStyle()`                | Available                        | Not available                    |
 | `VerterHost`                    | Synchronous constructor          | Async via `createHost()`         |
 | `getAnalysis()` return          | JSON `string`                    | Native JS `object`               |
 | `source` accepts                | `string \| Buffer`               | `string`                         |

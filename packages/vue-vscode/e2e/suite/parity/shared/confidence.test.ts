@@ -9,7 +9,7 @@
  */
 import * as vscode from "vscode";
 import { pollBudget } from "../../../lib/timeouts";
-import { FIXTURE_NAME, sleep } from "../../../helpers";
+import { FIXTURE_NAME, sleep, waitForNoDiagnosticsMatching } from "../../../helpers";
 import {
   assertCleanErrors,
   assertDefinitionTargetsToken,
@@ -90,6 +90,11 @@ suite(`Confidence hardening [${FIXTURE_NAME}]`, function () {
       // Restore and require clean again
       await revertDoc();
       await sleep(200);
+      await waitForNoDiagnosticsMatching(editor.document.uri, {
+        timeoutMs: pollBudget("confidenceProbe"),
+        stableMs: 600,
+        predicate: (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,
+      });
       await assertCleanErrors(file);
     } catch (err) {
       await revertDoc();

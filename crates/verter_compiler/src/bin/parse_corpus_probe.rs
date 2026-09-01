@@ -2,12 +2,10 @@ use std::cmp::Ordering;
 use std::io::{self, BufRead, BufWriter, Write};
 
 use serde::{Deserialize, Serialize};
-use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-use verter_compiler::framework_common::CarrierCompiler;
-use verter_compiler::svelte::SvelteCarrierCompiler;
+use verter_compiler::framework_common::registered_carrier_projection;
 use verter_language::{
-    compare_language_diagnostics, DiagnosticArg, LanguageDiagnostic, LanguageDiagnosticSeverity,
-    ParseKey, ParseOptions, SyntaxReject,
+    compare_language_diagnostics, DiagnosticArg, FrameworkAdapterId, LanguageDiagnostic,
+    LanguageDiagnosticSeverity, LanguageId, ParseKey, ParseOptions, SyntaxReject,
 };
 
 #[derive(Deserialize)]
@@ -142,51 +140,49 @@ fn reject_response(id: String, source: &str, reject: SyntaxReject) -> Response {
 }
 
 fn handle(request: Request) -> Result<Response, String> {
-    if request.adapter == "vue" {
-        let compiler = VueCarrierCompiler;
-        // The corpus caller sends `None` for "use Vue's own standard
-        // delimiters" (this probe's callers never intend an actually-empty
-        // delimiter pair) — resolve that explicitly here rather than
-        // letting an absent value silently become an empty one.
-        let options = ParseOptions {
-            delimiters: request
-                .options
-                .delimiters
-                .unwrap_or_else(|| ParseOptions::vue_standard().delimiters),
-            custom_elements: request.options.custom_elements.unwrap_or_default(),
-            svelte_loose: false,
-        };
-        return match compiler.parse(&request.source, &options) {
-            Ok(artifact) => {
-                // The carrier's own mapped-diagnostic channel — the same
-                // channel Svelte reads below — not a rebuild from the raw
-                // parsed carrier.
-                let values = artifact.diagnostics.iter().collect::<Vec<_>>();
-                Ok(Response {
-                    id: request.id,
-                    outcome: "ok",
-                    reject_variant: None,
-                    diagnostics: values.iter().map(|value| diagnostic(value)).collect(),
-                    validation: Validation {
-                        spans_mapped: spans_mapped(&request.source, &values),
-                        diagnostics_sorted: diagnostics_sorted(&artifact.parse_key, &values),
-                    },
-                })
-            }
-            Err(reject) => Ok(reject_response(request.id, &request.source, reject)),
-        };
-    }
-    let parsed = match request.adapter.as_str() {
-        "svelte" => {
-            let options = ParseOptions {
+    let (adapter_id, language_id, options) = match request.adapter.as_str() {
+        "vue" => {
+            // The corpus caller sends `None` for "use Vue's own standard
+            // delimiters" (this probe's callers never intend an actually-empty
+            // delimiter pair) — resolve that explicitly here rather than
+            // letting an absent value silently become an empty one.
+            (
+                FrameworkAdapterId::vue(),
+                LanguageId::new("vue"),
+                ParseOptions {
+                    delimiters: request
+                        .options
+                        .delimiters
+                        .unwrap_or_else(|| ParseOptions::vue_standard().delimiters),
+                    custom_elements: request.options.custom_elements.unwrap_or_default(),
+                    svelte_loose: false,
+                },
+            )
+        }
+        "svelte" => (
+            FrameworkAdapterId::svelte(),
+            LanguageId::new("svelte"),
+            ParseOptions {
                 svelte_loose: request.options.svelte_loose,
                 ..ParseOptions::default()
-            };
-            SvelteCarrierCompiler.parse(&request.source, &options)
-        }
-        other => return Err(format!("unsupported adapter {other:?}")),
+            },
+        ),
+        other => (
+            FrameworkAdapterId::new(other),
+            LanguageId::new(other),
+            ParseOptions {
+                svelte_loose: request.options.svelte_loose,
+                custom_elements: request.options.custom_elements.unwrap_or_default(),
+                delimiters: request.options.delimiters.unwrap_or_default(),
+            },
+        ),
     };
-    match parsed {
+    match registered_carrier_projection::parse_registered_frontend(
+        &adapter_id,
+        &language_id,
+        &request.source,
+        &options,
+    ) {
         Ok(artifact) => {
             let values = artifact.diagnostics.iter().collect::<Vec<_>>();
             Ok(Response {

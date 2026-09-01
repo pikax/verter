@@ -55,10 +55,10 @@ const footer = `
 
 ## Hardening rules
 
-1. **No catch-all skip**: \`failParityGap\` throws \`PRODUCT_GAP\` / \`TEST_DEFECT\` — never \`context.skip()\`.
+1. **Exact known-gap skips only**: the root harness skips only reviewed fixture/provider manifest rows before execution. \`failParityGap\`, test bodies, and infrastructure never classify themselves as skipped.
 2. **Matrix hard-fails**: every accepted matrix ID is release-required.
 3. **Fixture-scoped discovery**: specialty fixtures only load matching suite globs (\`fixtureSuiteMap.ts\`).
-4. **Failure detail**: run summary includes \`failedTests[]\` with message + stack.
+4. **Outcome detail**: run summary includes \`failedTests[]\` with message + stack and \`skippedProductGaps[]\` with exact test + issue IDs.
 5. **Ledger completeness**: \`issueLedger.unit.test.ts\` fails if any ISSUE-* is missing from this file.
 6. **Svelte clean diagnostics**: do **not** mask TS7026 with permissive ambient JSX in the required clean gate (see ISSUE-svelte-jsx-intrinsics).
 7. **Public vs testing surface**: non-test imports must not expose script-setup internals (negative public-type tests).

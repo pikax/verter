@@ -15,19 +15,20 @@
 //! projection.
 //!
 //! `cargo test -p verter_session --lib --features bf2-authoritative
-//! bf2_seed_matrix -- --test-threads=1 --nocapture` runs one cell at a
-//! time for readable `--nocapture` output; each cell's `node
-//! bin/check-candidate.mjs` child process gets its own scratch
-//! subdirectory (`packages/framework-conformance-harness/src/compare.mjs`),
-//! so concurrent runs are safe and `--test-threads=1` is a readability
-//! choice here, not a correctness requirement.
+//! authoritative_seed_matrix_contracts_share_one_verified_run -- --nocapture`
+//! executes the matrix as one table-driven test. That process verifies the
+//! matrix once, compiles each primary cell once, performs only the explicit
+//! determinism recompile, and sends ordered candidates through batched Node
+//! oracle processes. No test-thread restriction is required.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
+use super::bf2_full_axis_gate::{candidate_case, check_candidate_batch, CellReport};
 use super::*;
 use crate::compile::AssembledVueModule;
 
@@ -36,17 +37,16 @@ use crate::compile::AssembledVueModule;
 /// this bounds the latter without ever being reached by the former.
 pub(super) const ORACLE_TIMEOUT: Duration = Duration::from_secs(180);
 
+static SEED_MATRIX_READS: AtomicUsize = AtomicUsize::new(0);
+static CELL_COMPILES: AtomicUsize = AtomicUsize::new(0);
+
 // The locked seed manifest
 
-// `pub(super)` on this module's manifest-reading/compile/oracle-invocation
-// plumbing (`Backend`, `SeedCell`, `read_seed_matrix`, `compile_cell`,
-// `assemble`, `TempCandidate`, `Finished`, `run_bounded`, `ORACLE_TIMEOUT`) is
-// deliberate reuse surface for the sibling `bf2_full_axis_gate` module (same
-// `map_equality_tests` parent, same crate — no crate-boundary violation): the
-// full-axis gate reads the exact same locked manifest and drives the exact
-// same oracle CLI, and a second hand-written copy of this digest-verification
-// and subprocess-handling logic is exactly the kind of common-mode error a
-// second reader is supposed to catch, not reproduce.
+// `pub(super)` is the deliberate sibling-module seam: the aggregate owns the
+// verified `SeedRun`, while `bf2_full_axis_gate` consumes that immutable run
+// and reuses this module's bounded subprocess/temp-file plumbing. There is one
+// manifest reader, compiler path, and oracle launcher rather than parallel
+// copies that could silently disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Backend {
     Vdom,
@@ -133,6 +133,7 @@ pub(super) fn str_member(value: &Value, path: &[&str], context: &str) -> String 
 /// whose bytes do not hash to its manifest name is not the locked record, and
 /// reading its request axis would be reading something else's.
 pub(super) fn read_seed_matrix() -> Vec<SeedCell> {
+    SEED_MATRIX_READS.fetch_add(1, Ordering::SeqCst);
     let goldens = harness_root().join("goldens");
     let manifest = read_json(&goldens.join("manifest.json"));
     let entries = manifest
@@ -210,6 +211,7 @@ pub(super) fn read_seed_matrix() -> Vec<SeedCell> {
 /// prod-implies-inline default would be a different topology from the artifact
 /// the oracle is handed alongside it.
 pub(super) fn compile_cell(cell: &SeedCell) -> RealCompile {
+    CELL_COMPILES.fetch_add(1, Ordering::SeqCst);
     let mut compiled = compile_fixture(
         &cell.fixture,
         CompileAxes {
@@ -262,13 +264,44 @@ pub(super) fn assemble(case: &RealCompile) -> AssembledVueModule {
     })
 }
 
+/// Immutable production inputs and outputs shared by every matrix contract.
+/// Construction verifies the locked matrix once and compiles each cell once;
+/// only the determinism contract is allowed to compile a second time.
+pub(super) struct SeedRun {
+    pub(super) cells: Vec<SeedCell>,
+    pub(super) primary: Vec<RealCompile>,
+    pub(super) assembled: Vec<AssembledVueModule>,
+}
+
+impl SeedRun {
+    fn build() -> Self {
+        let cells = read_seed_matrix();
+        let primary: Vec<RealCompile> = cells.iter().map(compile_cell).collect();
+        let assembled: Vec<AssembledVueModule> = primary.iter().map(assemble).collect();
+        assert_eq!(
+            cells.len(),
+            primary.len(),
+            "every seed cell has one primary compile"
+        );
+        assert_eq!(
+            cells.len(),
+            assembled.len(),
+            "every primary compile assembled"
+        );
+        Self {
+            cells,
+            primary,
+            assembled,
+        }
+    }
+}
+
 // Required exit 1 — applicability from the locked manifest
 
 /// Every cell is accounted for, and the accounting reads the manifest's own
 /// request input rather than anything the candidate produced.
-#[test]
-fn seed_matrix_applicability_is_partitioned_from_the_locked_manifest() {
-    let cells = read_seed_matrix();
+fn seed_matrix_applicability_is_partitioned_from_the_locked_manifest(run: &SeedRun) {
+    let cells = &run.cells;
     assert_eq!(
         cells.len(),
         36,
@@ -290,7 +323,7 @@ fn seed_matrix_applicability_is_partitioned_from_the_locked_manifest() {
     // the partition above — `options.sourceMap` is — but the two disagreeing
     // would mean the locked manifest is internally inconsistent, which must be
     // loud rather than silently resolved in favour of whichever was read.
-    for cell in &cells {
+    for cell in cells {
         assert_eq!(
             cell.golden_name.contains("__map1__"),
             cell.source_map,
@@ -346,16 +379,15 @@ fn seed_matrix_applicability_is_partitioned_from_the_locked_manifest() {
 /// (which catches per-instance hash-map iteration order and anything else that
 /// varies between two calls), and once over an independently recompiled bundle
 /// (which catches the same class one layer up, in the carrier).
-#[test]
-fn map_presence_wire_validity_and_serialization_stability_hold_for_every_cell() {
-    let cells = read_seed_matrix();
+fn map_presence_wire_validity_and_serialization_stability_hold_for_every_cell(run: &SeedRun) {
+    let cells = &run.cells;
+    let compile_count_before = CELL_COMPILES.load(Ordering::SeqCst);
     let mut mapless_enabled = Vec::new();
     let mut segment_counts = BTreeMap::new();
 
-    for cell in &cells {
-        let case = compile_cell(cell);
-        let first = assemble(&case);
-        let second = assemble(&case);
+    for (index, cell) in cells.iter().enumerate() {
+        let first = &run.assembled[index];
+        let second = assemble(&run.primary[index]);
         assert_eq!(
             first.code, second.code,
             "{}: two identical assembly invocations produced different code",
@@ -420,6 +452,11 @@ fn map_presence_wire_validity_and_serialization_stability_hold_for_every_cell() 
          comparison and validation are vacuous: {mapless_enabled:?}"
     );
     println!("segments per map-enabled cell: {segment_counts:#?}");
+    assert_eq!(
+        CELL_COMPILES.load(Ordering::SeqCst),
+        compile_count_before + cells.len(),
+        "the determinism contract performs exactly one explicit recompile per cell"
+    );
 }
 
 // Required exits 2 and 5 — equality with the independent reference
@@ -436,13 +473,10 @@ fn map_presence_wire_validity_and_serialization_stability_hold_for_every_cell() 
 /// the code from the inputs and the frozen write grammar alone, so agreement
 /// means production's bytes are the specified bytes rather than merely stable
 /// ones.
-#[test]
-fn every_seed_matrix_cell_composes_identically_to_the_independent_reference() {
-    let cells = read_seed_matrix();
-    let cases: Vec<RealCompile> = cells.iter().map(compile_cell).collect();
-    let agreed = assert_real_compile_equality(&cases);
+fn every_seed_matrix_cell_composes_identically_to_the_independent_reference(run: &SeedRun) {
+    let agreed = assert_real_compile_equality(&run.primary);
 
-    for (cell, outcome) in cells.iter().zip(&agreed) {
+    for (cell, outcome) in run.cells.iter().zip(&agreed) {
         match outcome {
             ComposeOutcome::Composed { map, code } => {
                 assert!(
@@ -476,16 +510,13 @@ fn every_seed_matrix_cell_composes_identically_to_the_independent_reference() {
 /// chaining, no placement bookkeeping — so it is the pre-composition behaviour
 /// of the byte-producing writes. Requiring its map-enabled twin to be
 /// byte-identical is the direct statement that composition perturbs nothing.
-#[test]
-fn enabling_source_maps_perturbs_no_assembled_code_byte() {
-    let cells = read_seed_matrix();
+fn enabling_source_maps_perturbs_no_assembled_code_byte(run: &SeedRun) {
     let mut arms: BTreeMap<(String, Backend, bool), BTreeMap<bool, String>> = BTreeMap::new();
-    for cell in &cells {
-        let code = assemble(&compile_cell(cell)).code;
+    for (cell, assembled) in run.cells.iter().zip(&run.assembled) {
         let previous = arms
             .entry((cell.fixture.clone(), cell.backend, cell.is_production))
             .or_default()
-            .insert(cell.source_map, code);
+            .insert(cell.source_map, assembled.code.clone());
         assert!(previous.is_none(), "{}: duplicate arm", cell.golden_name);
     }
 
@@ -617,26 +648,22 @@ const WIRE_RULES: &[&str] = &["map-presence", "map-version", "mappings-decode"];
 /// Residual authored-truthfulness violations belong to the fragment emitters,
 /// not to assembly; what the oracle said about each cell is printed and written
 /// out so that work has its input.
-#[test]
-fn bf2_authored_source_oracle_runs_over_every_seed_matrix_cell() {
-    let harness = harness_root();
-    let entry = harness.join("bin/check-candidate.mjs");
-    assert!(
-        entry.exists(),
-        "the harness's accepted entry point is missing at {}",
-        entry.display()
+fn bf2_authored_source_oracle_runs_over_every_seed_matrix_cell(
+    run: &SeedRun,
+    oracle_reports: &[CellReport],
+) {
+    let cells = &run.cells;
+    assert_eq!(
+        oracle_reports.len(),
+        cells.len(),
+        "one authored-source report per seed cell"
     );
-
-    let cells = read_seed_matrix();
     let mut records = serde_json::Map::new();
     let mut not_run = Vec::new();
     let mut wire_violations = Vec::new();
     let mut summary = Vec::new();
 
-    for cell in &cells {
-        let case = compile_cell(cell);
-        let assembled = assemble(&case);
-
+    for ((cell, case), oracle_report) in cells.iter().zip(&run.primary).zip(oracle_reports) {
         // Diagnostics travel as the compiler produced them. All 36 goldens
         // record none, and Verter emits none for these fixtures, so the shape
         // question (how a Verter severity would map onto the official
@@ -651,53 +678,7 @@ fn bf2_authored_source_oracle_runs_over_every_seed_matrix_cell() {
             case.compiled.diagnostics
         );
 
-        let map: Value = match &assembled.source_map {
-            Some(raw) => serde_json::from_str(raw).unwrap_or_else(|error| {
-                panic!("{}: the emitted map is not JSON: {error}", cell.golden_name)
-            }),
-            None => Value::Null,
-        };
-        let candidate = TempCandidate::write(
-            &cell.golden_name,
-            &json!({ "code": assembled.code, "map": map, "diagnostics": [] }).to_string(),
-        );
-
-        let mut command = Command::new("node");
-        command
-            .arg(&entry)
-            .arg("--golden")
-            .arg(&cell.golden_name)
-            .arg("--candidate")
-            .arg(&candidate.path)
-            .arg("--authoritative")
-            .current_dir(&harness);
-        let finished = run_bounded(&mut command, ORACLE_TIMEOUT);
-
-        assert!(
-            !finished.timed_out,
-            "{}: the oracle did not finish within {ORACLE_TIMEOUT:?} — it was killed, so it did \
-             not run.\nstderr:\n{}",
-            cell.golden_name, finished.stderr
-        );
-        // 0 = pass, 1 = a comparison reported differences, 2 = authoritative
-        // mode saw a skipped axis. Anything else is the CLI failing rather than
-        // reporting, which is not a run.
-        assert!(
-            matches!(finished.code, Some(0..=2)),
-            "{}: the oracle exited with {:?} instead of reporting.\nstdout:\n{}\nstderr:\n{}",
-            cell.golden_name,
-            finished.code,
-            finished.stdout,
-            finished.stderr
-        );
-
-        let report: Value = serde_json::from_str(&finished.stdout).unwrap_or_else(|error| {
-            panic!(
-                "{}: the oracle emitted no JSON report ({error}), so nothing proves it ran.\n\
-                 stdout:\n{}\nstderr:\n{}",
-                cell.golden_name, finished.stdout, finished.stderr
-            )
-        });
+        let report = &oracle_report.raw;
         assert_eq!(
             report.get("goldenName").and_then(Value::as_str),
             Some(cell.golden_name.as_str()),
@@ -779,7 +760,7 @@ fn bf2_authored_source_oracle_runs_over_every_seed_matrix_cell() {
         summary.push(format!(
             "{:<48} exit={:<3} mapping={mapping_status} ok={:<7} segments={walked:<4} rules={:?}",
             cell.golden_name,
-            finished.code.unwrap_or(-1),
+            oracle_report.exit_code.unwrap_or(-1),
             mapping_ok.map_or("absent".to_string(), |ok| ok.to_string()),
             rule_names,
         ));
@@ -787,7 +768,7 @@ fn bf2_authored_source_oracle_runs_over_every_seed_matrix_cell() {
         records.insert(
             cell.golden_name.clone(),
             json!({
-                "exitCode": finished.code,
+                "exitCode": oracle_report.exit_code,
                 "sourceMapRequested": cell.source_map,
                 "verdict": report.get("verdict"),
                 "axes": report.get("axes"),
@@ -823,5 +804,128 @@ fn bf2_authored_source_oracle_runs_over_every_seed_matrix_cell() {
         "the oracle reported WIRE-level violations, which describe the emitted artifact's own \
          well-formedness and are therefore composition's own defects:\n{}",
         wire_violations.join("\n")
+    );
+}
+
+fn primary_oracle_reports(run: &SeedRun) -> Vec<CellReport> {
+    let mut cases: Vec<_> = run
+        .cells
+        .iter()
+        .zip(&run.assembled)
+        .enumerate()
+        .map(|(index, (cell, assembled))| {
+            candidate_case(
+                format!("seed:{index}:{}", cell.golden_name),
+                &cell.golden_name,
+                &assembled.code,
+                assembled.source_map.as_deref(),
+                json!([]),
+            )
+        })
+        .collect();
+
+    let first = run
+        .cells
+        .iter()
+        .position(|cell| cell.backend == Backend::Vdom && cell.source_map)
+        .expect("the seed matrix has a map-enabled VDOM cell");
+    let second = run
+        .cells
+        .iter()
+        .position(|cell| {
+            cell.backend == Backend::Ssr
+                && cell.source_map
+                && cell.fixture == run.cells[first].fixture
+        })
+        .expect("the seed matrix has a matching map-enabled SSR cell");
+    for (ordinal, index) in [first, second, first, second, first, second]
+        .into_iter()
+        .enumerate()
+    {
+        let cell = &run.cells[index];
+        let assembled = &run.assembled[index];
+        cases.push(candidate_case(
+            format!("order-reset:{ordinal}:{}", cell.golden_name),
+            &cell.golden_name,
+            &assembled.code,
+            assembled.source_map.as_deref(),
+            json!([]),
+        ));
+    }
+
+    let mut reports = check_candidate_batch(&cases);
+    let primary_len = run.cells.len();
+    assert_eq!(
+        reports.len(),
+        primary_len + 6,
+        "the order/reset probes all reported"
+    );
+    for offset in [0, 2, 4] {
+        assert_eq!(
+            reports[first].raw,
+            reports[primary_len + offset].raw,
+            "the first candidate's report changed after intervening cases"
+        );
+    }
+    for offset in [1, 3, 5] {
+        assert_eq!(
+            reports[second].raw,
+            reports[primary_len + offset].raw,
+            "the second candidate's report changed after intervening cases"
+        );
+    }
+    reports.truncate(primary_len);
+    reports
+}
+
+#[test]
+fn authoritative_seed_matrix_contracts_share_one_verified_run() {
+    assert_eq!(SEED_MATRIX_READS.load(Ordering::SeqCst), 0);
+    assert_eq!(CELL_COMPILES.load(Ordering::SeqCst), 0);
+
+    let run = SeedRun::build();
+    assert_eq!(SEED_MATRIX_READS.load(Ordering::SeqCst), 1);
+    assert_eq!(CELL_COMPILES.load(Ordering::SeqCst), run.cells.len());
+
+    let contracts: &[(&str, fn(&SeedRun))] = &[
+        (
+            "locked manifest applicability",
+            seed_matrix_applicability_is_partitioned_from_the_locked_manifest,
+        ),
+        (
+            "map wire validity and determinism",
+            map_presence_wire_validity_and_serialization_stability_hold_for_every_cell,
+        ),
+        (
+            "independent composition reference",
+            every_seed_matrix_cell_composes_identically_to_the_independent_reference,
+        ),
+        (
+            "source-map code-byte invariance",
+            enabling_source_maps_perturbs_no_assembled_code_byte,
+        ),
+    ];
+    for (name, contract) in contracts {
+        println!("running shared seed contract: {name}");
+        contract(&run);
+    }
+
+    let oracle_reports = primary_oracle_reports(&run);
+    bf2_authored_source_oracle_runs_over_every_seed_matrix_cell(&run, &oracle_reports);
+    super::bf2_full_axis_gate::full_axis_gate_passes_for_every_seed_matrix_cell(
+        &run,
+        &oracle_reports,
+    );
+    super::bf2_full_axis_gate::the_gate_detects_a_planted_defect_on_every_axis_family(&run);
+
+    assert_eq!(
+        SEED_MATRIX_READS.load(Ordering::SeqCst),
+        1,
+        "the verified seed matrix is read exactly once"
+    );
+    assert_eq!(
+        CELL_COMPILES.load(Ordering::SeqCst),
+        run.cells.len() * 2,
+        "one primary compile and one explicit determinism recompile are allowed per cell"
     );
 }

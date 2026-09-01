@@ -1270,11 +1270,23 @@ impl RealProviderTestSession {
     /// missing-default-export TS error) that only appears once the program is built
     /// is observed without a flaky first-shot empty read.
     pub(crate) async fn merged_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
+        self.merged_diagnostics_until(uri, |diagnostics| !diagnostics.is_empty())
+            .await
+    }
+
+    /// Retry merged diagnostics until the caller's exact semantic predicate is
+    /// present. A non-empty partial publish is not necessarily the settled
+    /// project result the test is waiting for.
+    pub(crate) async fn merged_diagnostics_until(
+        &self,
+        uri: &Uri,
+        predicate: impl Fn(&[Diagnostic]) -> bool,
+    ) -> Vec<Diagnostic> {
         let mut last = Vec::new();
         for attempt in 0..8 {
             self.ensure_synced(uri).await;
             let diags = self.server().test_merged_diagnostics(uri).await;
-            if !diags.is_empty() {
+            if predicate(&diags) {
                 return diags;
             }
             last = diags;

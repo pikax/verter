@@ -647,7 +647,7 @@ fn host_manage_thread_local_caches_absent_post_tier_1() {
 /// Discriminating predicate: the architecture-guards allow-list
 /// contains exactly the documented final entries
 /// (`query_profile`, `alias_to_canonical`,
-/// `last_const_prop_overrides`, `workspace`, `last_upsert_priority`)
+/// `last_const_prop_overrides`, `workspace`)
 /// and NONE of the rehomed F1/F2/F4/F5 entries. The guard is
 /// driven by the exact set; either an extra allow-list entry or a
 /// missing one would trip the discriminator.
@@ -663,7 +663,7 @@ fn no_off_store_host_caches_allow_list_shrunk() {
     // Locate the allow-list function body and check that:
     //  - F1/F2/F4/F5 are NOT present as keys (their string-literal
     //    keys would appear in the body if they were)
-    //  - the five expected final keys ARE present.
+    //  - the four expected final keys ARE present.
     let body_start = src
         .find("fn phase_8_allow_list()")
         .expect("phase_8_allow_list must exist in architecture_guards.rs");
@@ -690,7 +690,6 @@ fn no_off_store_host_caches_allow_list_shrunk() {
         "\"alias_to_canonical\"",
         "\"last_const_prop_overrides\"",
         "\"workspace\"",
-        "\"last_upsert_priority\"",
     ] {
         assert!(
             body.contains(required_key),

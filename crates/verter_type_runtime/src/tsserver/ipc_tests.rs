@@ -1635,6 +1635,57 @@ async fn carrier_refresh_pair_pays_one_background_idle_grace() {
         .expect("refresh batch must complete");
 }
 
+/// A carrier refresh begins on the background lane, then an editor open can
+/// promote its requested generation to urgent while the refresh is still in
+/// the idle-admission grace. The one-shot transport must return that
+/// preemption to the refresh scheduler; retrying admission internally would
+/// never let the scheduler observe the interactive upgrade under steady
+/// hover/reference polling.
+#[tokio::test(start_paused = true)]
+async fn one_shot_background_admission_reports_preemption_before_first_frame() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(8);
+    let transport = Arc::new(test_transport(stdin_tx));
+    transport
+        .pending
+        .interactive_in_flight
+        .store(1, Ordering::Release);
+
+    let refresh = {
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move {
+            transport
+                .request_background_batch_results_once(&[(
+                    "configurePlugin",
+                    serde_json::json!({ "pluginName": "@verter/typescript-plugin" }),
+                )])
+                .await
+        })
+    };
+
+    tokio::task::yield_now().await;
+    transport
+        .pending
+        .interactive_in_flight
+        .store(0, Ordering::Release);
+    transport.pending.interactive_idle.notify_waiters();
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(BACKGROUND_IDLE_GRACE / 2).await;
+    let interactive = transport.begin_interactive_request();
+    tokio::time::advance(BACKGROUND_IDLE_GRACE / 2).await;
+
+    let error = refresh
+        .await
+        .expect("one-shot background task must not panic")
+        .expect_err("admission-time editor traffic must preempt the one-shot batch");
+    assert!(error.message.contains("background transaction preempted"));
+    assert!(
+        stdin_rx.try_recv().is_err(),
+        "a preempted admission must not emit the first background frame"
+    );
+    drop(interactive);
+}
+
 /// The native TypeScript experience pulls semantic, syntactic, and suggestion
 /// diagnostics as one idle transaction. Paying the 150 ms quiet window per
 /// command adds fixed latency and creates three separate starvation points.
@@ -1939,6 +1990,13 @@ fn tsserver_cold_companion_error_classifier_is_narrow() {
     assert!(
         tsserver_diag_error_is_companion_not_ready("Could not find source file: 'X.svelte.tsx'"),
         "the message-substring match is case/path independent"
+    );
+    assert!(
+        tsserver_diag_error_is_companion_not_ready(
+            "Error processing request. Cannot read properties of undefined (reading \
+             'lineOffsetToPosition')\nTypeError: Cannot read properties of undefined"
+        ),
+        "TS 6's missing-ScriptInfo quickinfo failure is the same cold membership state"
     );
 
     // HAZARD: a genuine module-not-found the user must see never reaches this
