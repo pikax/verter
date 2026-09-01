@@ -2168,6 +2168,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     &mut fresh_literal_returns,
                                 );
                             }
+                            // The callee's OWN authored fresh literal
+                            // arms (its sealed per-constituent freshness)
+                            // stay fresh across the call boundary exactly
+                            // as a kept deposit does: a caller value
+                            // position widens them, the caller's return
+                            // join keeps them, a `const` binding records
+                            // them as widening membership. Substitution
+                            // never rewrites an authored literal, so the
+                            // sealed ids stay valid on the instantiated
+                            // seed; the sealed set is already
+                            // pinned-wins-folded and top-level-filtered
+                            // by its constructor.
+                            for arm in result.fresh_literal_arms().iter() {
+                                if !fresh_literal_returns.contains(arm) {
+                                    fresh_literal_returns.push(*arm);
+                                }
+                            }
                             if let Some(widened_substitution) = self
                                 .fresh_widened_substitution_outside_top_level(
                                     session_id,

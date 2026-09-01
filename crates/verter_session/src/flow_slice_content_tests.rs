@@ -24,8 +24,9 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
     FlowSliceSelection, SliceBindingKind, SliceCall, SliceCallSite, SliceContent, SliceExpr,
-    SliceGuard, SliceGuardLiteral, SliceNarrowRoot, SliceObjectEntry, SliceObjectMember,
-    SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind, SliceUnsupported,
+    SliceFreshness, SliceGuard, SliceGuardLiteral, SliceNarrowRoot, SliceObjectEntry,
+    SliceObjectMember, SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind,
+    SliceUnsupported,
 };
 
 /// The MEMBER entries of a structural object literal, in authored order.
@@ -228,7 +229,7 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
             &consequent.statements[0],
             SliceStatement::Return {
                 argument: Some(SliceExpr::Type(leaf)),
-                widening_literal: true,
+                freshness: SliceFreshness::Fresh,
             } if matches!(leaf.ty(), TypeExpr::Literal(LiteralValue::Number(_)))
         ),
         "a return argument PRESERVES its fresh literal and flags it: tsc \
@@ -243,7 +244,7 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
             &alternate.statements[0],
             SliceStatement::Return {
                 argument: Some(SliceExpr::Type(leaf)),
-                widening_literal: true,
+                freshness: SliceFreshness::Fresh,
             } if matches!(leaf.ty(), TypeExpr::Literal(LiteralValue::String(_)))
         ),
         "the else arm likewise preserves its fresh literal"
@@ -292,7 +293,7 @@ fn bare_return_carries_no_argument() {
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
             argument: None,
-            widening_literal: false,
+            freshness: SliceFreshness::Pinned,
         }],
     );
 }
@@ -3279,7 +3280,7 @@ fn return_of_parameter_is_param_carrier() {
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
             argument: Some(SliceExpr::Param { ordinal: 0 }),
-            widening_literal: false,
+            freshness: SliceFreshness::Pinned,
         }],
     );
 }
@@ -3359,7 +3360,7 @@ fn local_reaching_definition_is_binding_and_local() {
                 param: None,
                 captured: false,
             }),
-            widening_literal: false,
+            freshness: SliceFreshness::Pinned,
         },
     );
 }
@@ -3375,7 +3376,7 @@ fn direct_self_call_is_recursion_hold() {
                 SliceCall::DirectSelf,
                 SliceCallSite::new(0, false, false, verter_span::Span::new(26, 33)),
             )),
-            widening_literal: false,
+            freshness: SliceFreshness::Pinned,
         }],
     );
 }
@@ -3421,7 +3422,7 @@ fn symbolic_and_unrepresentable_calls() {
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
             argument: Some(SliceExpr::UnreducedCallValue),
-            widening_literal: false,
+            freshness: SliceFreshness::Pinned,
         }],
         "a `this` receiver is not modeled, so the call has no structural \
          arm and fails closed rather than fabricating `any`"
@@ -3615,7 +3616,7 @@ fn arrow_expression_body_is_single_return() {
             argument: Some(SliceExpr::Gap(
                 crate::semantic_query::FlowGap::UnmodeledExpression
             )),
-            widening_literal: false,
+            freshness: SliceFreshness::Pinned,
         }],
         "a binary expression is an unmodelled leaf, not semantic any"
     );

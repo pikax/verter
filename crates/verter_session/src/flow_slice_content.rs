@@ -242,13 +242,15 @@ pub enum SliceStatement {
     Return {
         /// The lowered return argument, when present.
         argument: Option<SliceExpr>,
-        /// Whether the argument is a FRESH literal source (a bare
-        /// literal expression with no const assertion). tsc widens a
-        /// fresh literal return only when it is the function's SOLE
-        /// return contributor; a multi-contributor join keeps every
-        /// literal, so the widening decision belongs to the join, not
-        /// to this position.
-        widening_literal: bool,
+        /// The argument's freshness mirror ([`SliceFreshness::Fresh`] =
+        /// a bare literal expression with no const assertion; a ternary
+        /// recurses per arm). tsc widens a fresh literal return only
+        /// when it is the function's SOLE return contributor — a
+        /// multi-contributor join keeps every literal — so the widening
+        /// decision belongs to the join, not to this position; the
+        /// per-arm tree additionally tells the evaluator WHICH kept
+        /// constituents stay fresh on the sealed return.
+        freshness: SliceFreshness,
     },
     /// An `if` statement. Each arm is its own region; the test lowers to
     /// a [`SliceGuard`] — never to value content, since the evaluator
@@ -1693,7 +1695,7 @@ pub(crate) fn build_flow_slice_content(
                 can_fall_through: false,
             }
         } else {
-            let widening_literal = expr_is_bare_literal(&expression.expression);
+            let freshness = expression_freshness(&expression.expression);
             let argument = if lowerer.value_span_selected(expression.expression.span()) {
                 lowerer.lower_expr(&expression.expression, ExprMode::Return)
             } else {
@@ -1710,7 +1712,7 @@ pub(crate) fn build_flow_slice_content(
             }
             statements.push(SliceStatement::Return {
                 argument: Some(argument),
-                widening_literal,
+                freshness,
             });
             SliceRegion {
                 statements: Arc::from(statements.into_boxed_slice()),
@@ -2266,14 +2268,15 @@ impl SliceFreshness {
     }
 }
 
-/// The freshness mirror for one assignment right-hand side. See
+/// The freshness mirror for one value expression — an assignment or
+/// binding right-hand side, or a `return` argument. See
 /// [`SliceFreshness`] for the alignment contract with `lower_expr`.
-fn assignment_rhs_freshness(expression: &Expression<'_>) -> SliceFreshness {
+fn expression_freshness(expression: &Expression<'_>) -> SliceFreshness {
     match expression {
-        Expression::ParenthesizedExpression(paren) => assignment_rhs_freshness(&paren.expression),
+        Expression::ParenthesizedExpression(paren) => expression_freshness(&paren.expression),
         Expression::ConditionalExpression(conditional) => SliceFreshness::PerArm(Arc::from([
-            assignment_rhs_freshness(&conditional.consequent),
-            assignment_rhs_freshness(&conditional.alternate),
+            expression_freshness(&conditional.consequent),
+            expression_freshness(&conditional.alternate),
         ])),
         _ => {
             if expr_is_bare_literal(expression) {
@@ -4062,7 +4065,10 @@ impl Lowerer<'_> {
             let statement_start = out.len();
             match statement {
                 Statement::ReturnStatement(ret) => {
-                    let widening_literal = ret.argument.as_ref().is_some_and(expr_is_bare_literal);
+                    let freshness = ret
+                        .argument
+                        .as_ref()
+                        .map_or(SliceFreshness::Pinned, expression_freshness);
                     let argument = ret.argument.as_ref().map(|arg| {
                         if self.value_span_selected(arg.span()) {
                             self.lower_expr(arg, ExprMode::Return)
@@ -4075,7 +4081,7 @@ impl Lowerer<'_> {
                     });
                     out.push(SliceStatement::Return {
                         argument,
-                        widening_literal,
+                        freshness,
                     });
                     can_fall_through = false;
                 }
@@ -4275,7 +4281,7 @@ impl Lowerer<'_> {
                             declarator
                                 .init
                                 .as_ref()
-                                .map_or(SliceFreshness::Pinned, assignment_rhs_freshness)
+                                .map_or(SliceFreshness::Pinned, expression_freshness)
                         } else {
                             SliceFreshness::Pinned
                         };
@@ -6111,7 +6117,7 @@ impl Lowerer<'_> {
             // IDENTIFIER — never the whole assignment expression.
             span: self.rebase(identifier.span),
             value: Box::new(value),
-            freshness: assignment_rhs_freshness(&assignment.right),
+            freshness: expression_freshness(&assignment.right),
         })
     }
 
@@ -6863,11 +6869,11 @@ impl Lowerer<'_> {
                     .map(|statement| match statement {
                         Statement::ExpressionStatement(expression) => (
                             nested.lower_expr(&expression.expression, ExprMode::Return),
-                            expr_is_bare_literal(&expression.expression),
+                            expression_freshness(&expression.expression),
                         ),
                         _ => (
                             SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression),
-                            false,
+                            SliceFreshness::Pinned,
                         ),
                     });
                 // The expression body's ternary-test gap lands ahead of
@@ -6878,12 +6884,12 @@ impl Lowerer<'_> {
                         crate::semantic_query::FlowGap::GuardNarrowing,
                     ));
                 }
-                statements.extend(argument.map(|(argument, widening_literal)| {
-                    SliceStatement::Return {
+                statements.extend(
+                    argument.map(|(argument, freshness)| SliceStatement::Return {
                         argument: Some(argument),
-                        widening_literal,
-                    }
-                }));
+                        freshness,
+                    }),
+                );
                 SliceRegion {
                     statements: Arc::from(statements.into_boxed_slice()),
                     can_fall_through: false,

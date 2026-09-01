@@ -1924,6 +1924,46 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "N137_declared_union_sentinel_collision_number",
         "0a1000522c8efa91cd1a60610a7af32c5d38ac1e038b3aa49b17b29f4cf10c31",
     ),
+    (
+        "N139_flow_callee_authored_fresh_arm_widens_at_member",
+        "e2ceb167458c8918b89e2096bc090c23299d39f2a2d071d64a5e8c188794072d",
+    ),
+    (
+        "N140_flow_callee_const_asserted_arm_stays_at_member",
+        "c0e4f76e6b35ba33f89fafbece268d74771472e385d0f56d8bd92c1be58dfe56",
+    ),
+    (
+        "N141_declared_union_literal_arm_stays_at_member",
+        "0943367a70fee651e904fab65193d4545ea98bd3ecd9ce87c7f38edc80e87e66",
+    ),
+    (
+        "N142_flow_callee_fresh_arm_transits_second_call_layer",
+        "c2c5d0e55e6501da633e0562d8397451a95f4d543cc3e6a10ae0ec983f5057bd",
+    ),
+    (
+        "N143_flow_callee_fresh_arm_widens_through_const_member_read",
+        "20d96bbae194285c703184b50d78b1961737d11f69a63b5612673e8a2d4f5f05",
+    ),
+    (
+        "N144_flow_pinned_sibling_cancels_callee_fresh_same_literal",
+        "2774faf42e5a4a2752fc67d1a0d53b9bf8af205c92c89f5add17af687f4e4e74",
+    ),
+    (
+        "N145_flow_ternary_return_arm_carries_callee_freshness",
+        "e961af159acb1f2f2f0f439c42d0d742b751dd997f871e9f760613343b1b4836",
+    ),
+    (
+        "N146_flow_non_generic_callee_fresh_arm_widens_at_member",
+        "18f3d8f7e6242fe9e60412c73040f3383c88cacab0173d12fe6de30f1c65c9d5",
+    ),
+    (
+        "N147_flow_callee_fresh_arm_widens_at_let_declaration",
+        "29bcbee00680f401c28df91fe64cf008b70fc9da8669345a89e725e4d2146953",
+    ),
+    (
+        "N148_flow_mixed_same_literal_dedup_stays_pinned_at_member",
+        "28ae02cbd19ada37efdb62716145a7439fd4c57fce4c95e76afc464552e50cb6",
+    ),
 ];
 
 // The suite
@@ -2866,6 +2906,63 @@ mod corpus_suite {
         /// the verdict-directed semantic test, and the byte-divergence
         /// claimed here is asserted live below.
         const RENDER_INCOMPARABLE: &[(&str, &str)] = &[
+            (
+                "N139_flow_callee_authored_fresh_arm_widens_at_member",
+                "checker prints `{ a: string | { value: string; }; }`; the renderer \
+                 spells the same node `{ a: Union(string | { value: string }) }` — \
+                 union spelling and member terminators differ",
+            ),
+            (
+                "N140_flow_callee_const_asserted_arm_stays_at_member",
+                "checker prints `{ a: \"error\" | { value: string; }; }`; the \
+                 renderer spells the same node \
+                 `{ a: Union(\"error\" | { value: string }) }`",
+            ),
+            (
+                "N141_declared_union_literal_arm_stays_at_member",
+                "checker prints `{ a: \"error\" | { value: string; }; }`; the \
+                 renderer spells the same node \
+                 `{ a: Union(\"error\" | { value: string }) }`",
+            ),
+            (
+                "N142_flow_callee_fresh_arm_transits_second_call_layer",
+                "checker prints `{ a: string | { value: string; }; }`; the renderer \
+                 spells the same node `{ a: Union(string | { value: string }) }`",
+            ),
+            (
+                "N143_flow_callee_fresh_arm_widens_through_const_member_read",
+                "checker prints `{ a: string | { value: string; }; }`; the renderer \
+                 spells the same node `{ a: Union(string | { value: string }) }`",
+            ),
+            (
+                "N144_flow_pinned_sibling_cancels_callee_fresh_same_literal",
+                "checker prints `{ a: \"error\" | { value: string; }; }`; the \
+                 renderer spells the same node \
+                 `{ a: Union(\"error\" | { value: string }) }`",
+            ),
+            (
+                "N145_flow_ternary_return_arm_carries_callee_freshness",
+                "checker prints `{ a: string | { value: string; } | { value: \
+                 number; }; }`; the renderer spells the same node \
+                 `{ a: Union(string | { value: string } | { value: number }) }`",
+            ),
+            (
+                "N146_flow_non_generic_callee_fresh_arm_widens_at_member",
+                "checker prints `{ a: string | { value: number; }; }`; the renderer \
+                 spells the same node `{ a: Union({ value: number } | string) }` — \
+                 union spelling, arm order, and member terminators differ",
+            ),
+            (
+                "N147_flow_callee_fresh_arm_widens_at_let_declaration",
+                "checker prints `string | { value: string; }`; the renderer spells \
+                 the same node `Union(string | { value: string })`",
+            ),
+            (
+                "N148_flow_mixed_same_literal_dedup_stays_pinned_at_member",
+                "checker prints `{ a: 1; }`; the renderer spells the same surface \
+                 `{ a: 1 }` — object members print without the trailing `;` \
+                 terminator",
+            ),
             (
                 "Y01_union_never_arm_collapses",
                 "checker prints `{ v: string; }`; the renderer spells the same \
@@ -4809,7 +4906,7 @@ const OPEN_DEBTS: &[&str] = &[
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 3, 1, 2),
     (Owner::U2MappedTemplate, 4, 1, 2),
-    (Owner::U6CallResolve, 23, 22, 1),
+    (Owner::U6CallResolve, 33, 32, 1),
     // Nine switch-, try/catch- and reunion-family rows are parked as the
     // SUBTYPE-REUNION class: TypeScript's return-position reunion applies
     // subtype reduction and absorbs a subtype arm into its supertype; the

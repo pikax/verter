@@ -3067,13 +3067,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         _ => flat.push(arm),
                     }
                 }
-                let next = FlowReturnResult::new(
+                // The SEED's surviving fresh literal arms carry through
+                // the fixed point (the constructor re-filters them to the
+                // joined return's kept constituents); hold-target arms
+                // join pinned — the component's own widening is the
+                // all-fresh-seed rule below, and per-constituent
+                // freshness never crosses a recursive edge.
+                let seed_fresh: Vec<SemanticNodeId> = current[i]
+                    .as_ref()
+                    .map(|result| result.fresh_literal_arms().to_vec())
+                    .unwrap_or_default();
+                let next = FlowReturnResult::new_with_fresh_literal_arms(
                     graph,
                     self.intern_normalized_union_or_intersection(&flat, true),
                     current[i]
                         .as_ref()
                         .is_some_and(|result| result.can_fall_through),
                     degradation,
+                    &seed_fresh,
                 );
                 if current[i].as_ref() != Some(&next) {
                     current[i] = Some(next);
@@ -4066,6 +4077,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `if (c) return 1;` is `1 | undefined`. Deduplicate FIRST — the
         // graph interns identical literals to one node id — then widen a
         // lone FRESH literal.
+        // The sealed result's FRESH set: every fresh literal value any
+        // contribution carries, minus every value some contribution
+        // spells PINNED at its own top level (pinned wins, by literal
+        // VALUE — measured against the pinned checker). The constructor
+        // then filters the survivors to the final return's kept top-level
+        // constituents, so join-widening and union absorption drop their
+        // values with them. A wholly-fresh contribution (a bare literal,
+        // a hold-marked equation arm) pins nothing.
+        let mut fresh_candidates: Vec<SemanticNodeId> = Vec::new();
+        let mut pinned_blockers: Vec<SemanticNodeId> = Vec::new();
+        for contribution in &contributors {
+            for value in &contribution.fresh_values {
+                if !fresh_candidates.contains(value) {
+                    fresh_candidates.push(*value);
+                }
+            }
+            if contribution.fresh_literal {
+                continue;
+            }
+            for lit in top_level_literal_nodes_in(graph, contribution.node) {
+                let data = graph.node_data(lit);
+                let fresh_here = contribution
+                    .fresh_values
+                    .iter()
+                    .any(|value| graph.node_data(*value) == data);
+                if !fresh_here && !pinned_blockers.contains(&lit) {
+                    pinned_blockers.push(lit);
+                }
+            }
+        }
+        let sealed_fresh: Vec<SemanticNodeId> = fresh_candidates
+            .into_iter()
+            .filter(|value| {
+                let data = graph.node_data(*value);
+                !pinned_blockers
+                    .iter()
+                    .any(|pinned| graph.node_data(*pinned) == data)
+            })
+            .collect();
         let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(contributors.len());
         let mut inference_only: Vec<bool> = Vec::with_capacity(contributors.len());
         let mut all_fresh = true;
@@ -4208,7 +4258,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let return_type = self.intern_normalized_union_or_intersection(&arms, true);
         Ok((
-            FlowReturnResult::new(graph, return_type, can_fall_through, degradation),
+            FlowReturnResult::new_with_fresh_literal_arms(
+                graph,
+                return_type,
+                can_fall_through,
+                degradation,
+                &sealed_fresh,
+            ),
             fresh_seed,
         ))
     }
@@ -4376,6 +4432,29 @@ fn widen_values_within(
         return dispatch.intern_normalized_union_or_intersection(&widened, true);
     }
     node
+}
+
+/// The top-level LITERAL constituents of one value node — the shared
+/// walk behind the evaluator's freshness fold and the join's sealed
+/// fresh set.
+fn top_level_literal_nodes_in(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Vec<SemanticNodeId> {
+    match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Literal(_)) => vec![node],
+        Some(SemanticNodeData::Union(members)) => members
+            .iter()
+            .copied()
+            .filter(|member| {
+                matches!(
+                    graph.node_data(*member).as_deref(),
+                    Some(SemanticNodeData::Literal(_))
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Widen one FRESH literal node to its primitive (tsc's
@@ -4968,7 +5047,7 @@ struct FlowExecutionWitness<'w> {
 /// of a widening-literal `const`). tsc widens a fresh literal return only
 /// when the deduplicated contributor set has exactly ONE member, so the
 /// freshness bit must survive to the join.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct FlowContribution {
     /// The evaluated contributor node.
     node: SemanticNodeId,
@@ -4977,6 +5056,26 @@ struct FlowContribution {
     /// The contributor is reached only through an overridden break's
     /// return-inference suffix edge.
     inference_only: bool,
+    /// The FRESH literal values this contribution carries into the join,
+    /// at its own top level: the node itself for a bare-literal return,
+    /// the membership's values for a widening-local read, a completed
+    /// call's kept fresh deposits and callee-authored fresh arms, and
+    /// the per-arm collection of a ternary argument. The join folds
+    /// these pinned-wins into the sealed result's fresh set; they never
+    /// affect the join's own widening decision (`fresh_literal` owns
+    /// that, unchanged).
+    fresh_values: Vec<SemanticNodeId>,
+}
+
+/// One evaluated arm of a mixed value position (a ternary initializer,
+/// assignment right-hand side, or ternary return argument): the settled
+/// node, whether the arm as a WHOLE is a fresh spelling, and the fresh
+/// literal values it carries at its own top level
+/// ([`FlowEvaluator::position_fresh_values`]).
+struct EvolvingPart {
+    node: SemanticNodeId,
+    fresh: bool,
+    fresh_values: Vec<SemanticNodeId>,
 }
 
 /// One captured `break` exit: the target the lowering resolved
@@ -5599,29 +5698,38 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::flow_slice_content::SliceFreshness::PerArm(_),
         ) = (expr, freshness)
         {
-            let mut parts: Vec<(SemanticNodeId, bool)> = Vec::new();
+            let mut parts: Vec<EvolvingPart> = Vec::new();
             self.collect_evolving_parts(expr, freshness, &mut parts);
             // Pinned-wins collapse of equal constituents, THEN widen the
             // surviving fresh ones. Node data (not id) is the equality,
             // exactly as the reaching-definition dedup below compares.
-            let mut merged: Vec<(SemanticNodeId, bool)> = Vec::new();
-            for (node, fresh) in parts {
-                let data = self.dispatch.graph().node_data(node);
+            let pinned = self.pinned_literal_blockers(&parts);
+            let mut merged: Vec<EvolvingPart> = Vec::new();
+            for part in parts {
+                let data = self.dispatch.graph().node_data(part.node);
                 match merged
                     .iter_mut()
-                    .find(|(existing, _)| self.dispatch.graph().node_data(*existing) == data)
+                    .find(|existing| self.dispatch.graph().node_data(existing.node) == data)
                 {
-                    Some((_, existing_fresh)) => *existing_fresh &= fresh,
-                    None => merged.push((node, fresh)),
+                    Some(existing) => {
+                        existing.fresh &= part.fresh;
+                        existing.fresh_values.extend(part.fresh_values);
+                    }
+                    None => merged.push(part),
                 }
             }
             let nodes: Vec<SemanticNodeId> = merged
                 .into_iter()
-                .map(|(node, fresh)| {
-                    if fresh {
-                        widen_fresh_read_node(self.dispatch, node)
+                .map(|part| {
+                    if part.fresh {
+                        widen_fresh_read_node(self.dispatch, part.node)
                     } else {
-                        node
+                        // The arm keeps its own shape, but a fresh value
+                        // it CARRIES (a call's kept deposit or authored
+                        // fresh arm) still widens at this write position
+                        // — unless a sibling arm pinned the same value.
+                        let values = self.uncancelled_fresh_values(&part.fresh_values, &pinned);
+                        widen_values_within(self.dispatch, part.node, &values)
                     }
                 })
                 .collect();
@@ -5646,21 +5754,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         })
     }
 
-    /// The recursive collector behind [`Self::eval_evolving_rhs`]: a
-    /// ternary's arms evaluate under the SAME guard scoping as the
-    /// ordinary `SliceExpr::Union` evaluation (positive reading on the
-    /// consequent, negated on the alternate, arm-scoped narrows) and each
-    /// contributes `(node, fresh)`. The freshness tree mirrors the
-    /// lowering's own descent, so a Union/PerArm pair aligns by
-    /// construction; a mismatch means the mirror missed a form — the
-    /// widening decision is then UNPROVEN, so the whole position fails
-    /// toward the typed gap (unwidened, degraded, never warm) rather than
-    /// guessing either direction.
+    /// The recursive collector behind [`Self::eval_evolving_rhs`] and the
+    /// ternary return argument: a ternary's arms evaluate under the SAME
+    /// guard scoping as the ordinary `SliceExpr::Union` evaluation
+    /// (positive reading on the consequent, negated on the alternate,
+    /// arm-scoped narrows) and each contributes one [`EvolvingPart`]. The
+    /// freshness tree mirrors the lowering's own descent, so a
+    /// Union/PerArm pair aligns by construction; a mismatch means the
+    /// mirror missed a form — the widening decision is then UNPROVEN, so
+    /// the whole position fails toward the typed gap (unwidened,
+    /// degraded, never warm) rather than guessing either direction.
     fn collect_evolving_parts(
         &mut self,
         expr: &crate::flow_slice_content::SliceExpr,
         freshness: &crate::flow_slice_content::SliceFreshness,
-        parts: &mut Vec<(SemanticNodeId, bool)>,
+        parts: &mut Vec<EvolvingPart>,
     ) {
         if let crate::flow_slice_content::SliceExpr::Union { arms, guard } = expr {
             match freshness {
@@ -5685,12 +5793,128 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let holds_before = self.holds.len();
         let outcome = self.eval_expr(expr);
         let node = self.settle_composite_part(outcome, holds_before);
-        let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
+        let bare_literal = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh);
+        let fresh = bare_literal
             || self.reads_widening_literal_local(expr)
             || self
                 .fresh_call_return_for(expr, node)
                 .is_some_and(|call| call.values.contains(&node));
-        parts.push((node, fresh));
+        let fresh_values = self.position_fresh_values(expr, node, bare_literal);
+        parts.push(EvolvingPart {
+            node,
+            fresh,
+            fresh_values,
+        });
+    }
+
+    /// The literal values any part contributes PINNED — its top-level
+    /// literal constituents outside its own fresh set. A pinned spelling
+    /// of a value cancels every sibling's freshness for that value
+    /// (pinned wins, measured), so these are the fold's blockers.
+    fn pinned_literal_blockers(&self, parts: &[EvolvingPart]) -> Vec<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        let mut pinned = Vec::new();
+        for part in parts {
+            for lit in self.top_level_literal_nodes(part.node) {
+                let data = graph.node_data(lit);
+                let fresh_here = part.fresh
+                    || part
+                        .fresh_values
+                        .iter()
+                        .any(|value| graph.node_data(*value) == data);
+                if !fresh_here && !pinned.contains(&lit) {
+                    pinned.push(lit);
+                }
+            }
+        }
+        pinned
+    }
+
+    /// `values` minus every entry whose literal VALUE some sibling
+    /// contributed pinned.
+    fn uncancelled_fresh_values(
+        &self,
+        values: &[SemanticNodeId],
+        pinned: &[SemanticNodeId],
+    ) -> Vec<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        values
+            .iter()
+            .copied()
+            .filter(|value| {
+                let data = graph.node_data(*value);
+                !pinned.iter().any(|p| graph.node_data(*p) == data)
+            })
+            .collect()
+    }
+
+    /// The top-level LITERAL constituents of one value node: the node
+    /// itself when it is a literal, a union's literal members, nothing
+    /// otherwise (intersection reduction pins its literal — measured).
+    fn top_level_literal_nodes(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        top_level_literal_nodes_in(self.dispatch.graph(), node)
+    }
+
+    /// The FRESH literal values one evaluated position carries, at its
+    /// own top level: the node itself for a bare-literal spelling, the
+    /// widening membership's values for a local read (`All` = every
+    /// kept literal), and a completed call's kept fresh values (argument
+    /// deposits plus the callee's own authored fresh arms). Every other
+    /// spelling carries none — annotations, assertions, and structural
+    /// values are pinned.
+    fn position_fresh_values(
+        &self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        node: SemanticNodeId,
+        bare_literal: bool,
+    ) -> Vec<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        if bare_literal
+            && matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Literal(_))
+            )
+        {
+            return vec![node];
+        }
+        if let crate::flow_slice_content::SliceExpr::Local {
+            name,
+            captured: false,
+            ..
+        } = expr
+        {
+            match self.membership_of(name.as_ref()) {
+                Some(WideningMembership::All) => return self.top_level_literal_nodes(node),
+                Some(WideningMembership::Partial(values)) => {
+                    let values = values.clone();
+                    return self
+                        .top_level_literal_nodes(node)
+                        .into_iter()
+                        .filter(|kept| {
+                            let data = graph.node_data(*kept);
+                            values.iter().any(|value| graph.node_data(*value) == data)
+                        })
+                        .collect();
+                }
+                None => {}
+            }
+        }
+        if let Some(call) = self.fresh_call_return_for(expr, node) {
+            let values = Arc::clone(&call.values);
+            if values.contains(&node) {
+                // The WHOLE return is the fresh deposit — the naked case.
+                return vec![node];
+            }
+            return self
+                .top_level_literal_nodes(node)
+                .into_iter()
+                .filter(|kept| {
+                    let data = graph.node_data(*kept);
+                    values.iter().any(|value| graph.node_data(*value) == data)
+                })
+                .collect();
+        }
+        Vec::new()
     }
 
     /// Read the newest narrow fact for exactly `subject`, if a guard
@@ -8819,7 +9043,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 crate::flow_slice_content::SliceStatement::Return {
                     argument,
-                    widening_literal,
+                    freshness,
                 } => {
                     path_alive = false;
                     if self.member_filter.is_some() {
@@ -8830,6 +9054,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 node,
                                 fresh_literal: false,
                                 inference_only: self.inference_only_path,
+                                fresh_values: Vec::new(),
                             }),
                             Ok(None) => {}
                             Err(failure) => return (Err(failure), region.can_fall_through),
@@ -8839,6 +9064,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     match argument {
                         Some(expr) => {
+                            let bare_literal = matches!(
+                                freshness,
+                                crate::flow_slice_content::SliceFreshness::Fresh
+                            );
                             // A FRESH literal contribution is a bare literal
                             // return argument or a read of a
                             // widening-literal `const`. The join decides
@@ -8846,7 +9075,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // contributor (`return 1` is `number`, but
                             // `if (c) return 1; return 0` is `0 | 1`).
                             let mut fresh_literal =
-                                *widening_literal || self.reads_widening_literal_local(expr);
+                                bare_literal || self.reads_widening_literal_local(expr);
                             // A `return f(…)` whose callee pops as a
                             // PROVISIONAL member of this component is
                             // fresh-NEUTRAL: its value is re-derived by the
@@ -8856,8 +9085,51 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // whether the callee was already in flight —
                             // i.e. on demand ORDER.
                             let holds_before = self.holds.len();
-                            let outcome = self.eval_expr(expr);
-                            if let Some(node) = self.settle(outcome) {
+                            // A TERNARY argument evaluates PER ARM (the
+                            // same guard-scoped walk `eval_expr` performs
+                            // over the union), so each arm's carried
+                            // freshness — a bare fresh literal, a
+                            // membership read, a call's kept fresh values
+                            // — enters the join instead of vanishing into
+                            // the joined node.
+                            let evaluated = match (expr, freshness) {
+                                (
+                                    crate::flow_slice_content::SliceExpr::Union { .. },
+                                    crate::flow_slice_content::SliceFreshness::PerArm(_),
+                                ) => {
+                                    let mut parts: Vec<EvolvingPart> = Vec::new();
+                                    self.collect_evolving_parts(expr, freshness, &mut parts);
+                                    let nodes: Vec<SemanticNodeId> =
+                                        parts.iter().map(|part| part.node).collect();
+                                    let node = self
+                                        .dispatch
+                                        .intern_normalized_union_or_intersection(&nodes, true);
+                                    // Pinned wins per literal VALUE: a
+                                    // sibling arm's authored pin of the
+                                    // same literal cancels the freshness.
+                                    let pinned = self.pinned_literal_blockers(&parts);
+                                    let mut fresh_values = Vec::new();
+                                    for part in &parts {
+                                        if part.fresh {
+                                            fresh_values
+                                                .extend(self.top_level_literal_nodes(part.node));
+                                        }
+                                        fresh_values.extend_from_slice(&part.fresh_values);
+                                    }
+                                    let fresh_values =
+                                        self.uncancelled_fresh_values(&fresh_values, &pinned);
+                                    Some((node, fresh_values))
+                                }
+                                _ => {
+                                    let outcome = self.eval_expr(expr);
+                                    self.settle(outcome).map(|node| {
+                                        let fresh_values =
+                                            self.position_fresh_values(expr, node, bare_literal);
+                                        (node, fresh_values)
+                                    })
+                                }
+                            };
+                            if let Some((node, fresh_values)) = evaluated {
                                 fresh_literal |= self.holds.len() > holds_before;
                                 // A COMPLETED call that closed on a
                                 // WHOLE-return fresh literal feeds the
@@ -8876,6 +9148,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     node,
                                     fresh_literal,
                                     inference_only: self.inference_only_path,
+                                    fresh_values,
                                 });
                             }
                         }
@@ -9821,31 +10094,46 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             && freshness.is_mixed()
                             && matches!(init, crate::flow_slice_content::SliceExpr::Union { .. })
                         {
-                            let mut parts: Vec<(SemanticNodeId, bool)> = Vec::new();
+                            let mut parts: Vec<EvolvingPart> = Vec::new();
                             self.collect_evolving_parts(init, freshness, &mut parts);
-                            let mut merged: Vec<(SemanticNodeId, bool)> = Vec::new();
-                            for (node, fresh) in parts {
-                                let data = self.dispatch.graph().node_data(node);
-                                match merged.iter_mut().find(|(existing, _)| {
-                                    self.dispatch.graph().node_data(*existing) == data
+                            let pinned = self.pinned_literal_blockers(&parts);
+                            let mut merged: Vec<EvolvingPart> = Vec::new();
+                            for part in parts {
+                                let data = self.dispatch.graph().node_data(part.node);
+                                match merged.iter_mut().find(|existing| {
+                                    self.dispatch.graph().node_data(existing.node) == data
                                 }) {
-                                    Some((_, existing_fresh)) => *existing_fresh &= fresh,
-                                    None => merged.push((node, fresh)),
+                                    Some(existing) => {
+                                        existing.fresh &= part.fresh;
+                                        existing.fresh_values.extend(part.fresh_values);
+                                    }
+                                    None => merged.push(part),
                                 }
                             }
                             let nodes: Vec<SemanticNodeId> =
-                                merged.iter().map(|(node, _)| *node).collect();
+                                merged.iter().map(|part| part.node).collect();
                             let value = self
                                 .dispatch
                                 .intern_normalized_union_or_intersection(&nodes, true);
-                            let fresh_values: Vec<SemanticNodeId> = merged
-                                .iter()
-                                .filter(|(_, fresh)| *fresh)
-                                .map(|(node, _)| *node)
-                                .collect();
+                            let all_fresh = merged.iter().all(|part| part.fresh);
+                            let mut fresh_values: Vec<SemanticNodeId> = Vec::new();
+                            for part in &merged {
+                                if part.fresh {
+                                    fresh_values.push(part.node);
+                                } else {
+                                    // A pinned-shaped arm may still CARRY
+                                    // fresh values (a call's kept deposit
+                                    // or authored fresh arm) — those enter
+                                    // the membership so a widening read of
+                                    // the binding widens them.
+                                    fresh_values.extend_from_slice(&part.fresh_values);
+                                }
+                            }
+                            let fresh_values =
+                                self.uncancelled_fresh_values(&fresh_values, &pinned);
                             let membership = if fresh_values.is_empty() {
                                 None
-                            } else if fresh_values.len() == merged.len() {
+                            } else if all_fresh {
                                 Some(WideningMembership::All)
                             } else {
                                 Some(WideningMembership::Partial(Arc::from(
@@ -11369,12 +11657,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     self.holds
                                         .push(HeldCallee::foreign(key, callee_clause.clone()));
                                 }
-                                Positional::Value(CallValue::of_served_return(
+                                let value = CallValue::of_served_return(
                                     self.dispatch,
                                     &callee_clause,
                                     result.return_type(),
                                     ReturnOrigin::ClauseScoped,
-                                ))
+                                );
+                                // The callee's sealed fresh literal arms
+                                // stay fresh across this direct-call rail
+                                // exactly as across the executor route:
+                                // record the call's fresh provenance so a
+                                // value position widens them, the return
+                                // join keeps them, and a `const` binding
+                                // records its widening membership.
+                                if !result.fresh_literal_arms().is_empty() {
+                                    self.call_fresh_literal_returns.push(FreshCallReturn {
+                                        span: site.span(),
+                                        node: value.node(),
+                                        values: Arc::clone(result.fresh_literal_arms()),
+                                    });
+                                }
+                                Positional::Value(value)
                             }
                             FlowReturnStep::Hold(key) => {
                                 self.holds
