@@ -994,3 +994,122 @@ fn nested_leaf_union_with_duplicate_leaves_composes_the_singleton_literal() {
         ),
     }
 }
+
+/// A SURVIVING multi-arm closed leaf-union re-anchors to the owning fact
+/// scope. The canonical route interns a derived multi-arm composite under
+/// `Global`; the authored lowering of the same union interns under the
+/// owning FILE scope, and scope is arena identity — without the re-anchor
+/// the closed-fact replay of the identical decided value forks a
+/// scope-split twin instead of hash-consing with the authored node.
+/// Top-level `ClosedTypeFact::LeafUnion` arm.
+#[test]
+fn closed_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let source = SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(Arc::from(
+        vec![
+            LeafTypeFact::StringLiteral("a".to_string()),
+            LeafTypeFact::StringLiteral("b".to_string()),
+        ]
+        .into_boxed_slice(),
+    )));
+    let raised = dispatch
+        .raise_semantic_type_source_to_hot(
+            &source,
+            navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
+        )
+        .at_optional_boundary()
+        .expect("a closed leaf union must raise");
+
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let data = graph.node_data(raised.node());
+    assert!(
+        matches!(data.as_deref(), Some(SemanticNodeData::Union(m)) if m.len() == 2),
+        "`\"a\" | \"b\"` survives as a two-arm union, got {data:?}"
+    );
+    let whole_hash = host
+        .shallow_file_state(OWNER_ID)
+        .expect("the owner file must have shallow state")
+        .whole_hash;
+    assert_eq!(
+        graph.node_scope(raised.node()),
+        Some(crate::semantic_query::NodeScopeId::File {
+            canonical_id: Arc::from(OWNER_ID),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash,
+            local_scope: None,
+        }),
+        "the surviving multi-arm decided union must re-anchor to the owning \
+         fact scope — a Global intern forks a scope-split twin off the \
+         authored lowering of the same union"
+    );
+}
+
+/// The nested `FactOrLocator::LeafUnion` position re-anchors exactly like
+/// the top-level arm: a surviving multi-arm decided union inside a
+/// containing fact shell interns under the owning fact scope, never a
+/// `Global` scope-split twin of the authored lowering.
+#[test]
+fn nested_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
+    use verter_type_expr::facts::{TupleElementFact, TuplePayloadFact};
+
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let source = SemanticTypeSource::Closed(ClosedTypeFact::Tuple(TuplePayloadFact {
+        readonly: false,
+        elements: Arc::from(
+            vec![TupleElementFact {
+                label: Some("payload".to_string()),
+                optional: false,
+                rest: false,
+                ty: FactOrLocator::LeafUnion(Arc::from(
+                    vec![
+                        LeafTypeFact::StringLiteral("a".to_string()),
+                        LeafTypeFact::StringLiteral("b".to_string()),
+                    ]
+                    .into_boxed_slice(),
+                )),
+            }]
+            .into_boxed_slice(),
+        ),
+    }));
+    let raised = dispatch
+        .raise_semantic_type_source_to_hot(
+            &source,
+            navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
+        )
+        .at_optional_boundary()
+        .expect("a closed tuple with a surviving-union element must raise");
+
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let data = graph.node_data(raised.node());
+    let Some(SemanticNodeData::Tuple { elements, .. }) = data.as_deref() else {
+        panic!("the closed tuple must compose a Tuple node, got {data:?}");
+    };
+    let element = elements[0].value;
+    let element_data = graph.node_data(element);
+    assert!(
+        matches!(element_data.as_deref(), Some(SemanticNodeData::Union(m)) if m.len() == 2),
+        "the nested `\"a\" | \"b\"` survives as a two-arm union, got {element_data:?}"
+    );
+    let whole_hash = host
+        .shallow_file_state(OWNER_ID)
+        .expect("the owner file must have shallow state")
+        .whole_hash;
+    assert_eq!(
+        graph.node_scope(element),
+        Some(crate::semantic_query::NodeScopeId::File {
+            canonical_id: Arc::from(OWNER_ID),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash,
+            local_scope: None,
+        }),
+        "the nested surviving multi-arm decided union must re-anchor to the \
+         owning fact scope — a Global intern forks a scope-split twin off \
+         the authored lowering of the same union"
+    );
+}

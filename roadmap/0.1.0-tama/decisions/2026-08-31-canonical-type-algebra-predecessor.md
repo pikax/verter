@@ -438,7 +438,15 @@ invented.
 Then the review round that followed made it free: a canonically-tagged union top now
 skips the pipeline entirely on an O(1) tag test, with no evidence deposit and no epoch
 advance, and the tag's own semantics guarantee that skip is exactly the idempotence
-no-op. The paragraph above therefore describes the state between those two rounds and
+no-op — but only under a qualifier a later probe had to force. As first written the
+builder stamped the tag UNCONDITIONALLY, incomplete paths included: an over-cap arm
+set, an exhausted compare budget, a dangling arm or an undecided peek all carried a
+tag asserting a canonical form they did not have, so the skip fired on a list that was
+not canonical and a budget-exceeded result became warm-classifiable on resurfacing,
+against the rule that budget exhaustion never warms. The builder now REFUSES the tag on
+incomplete evidence — those results carry a distinct unproven tag and pay the full
+re-close — so the tag is a witness of proven canonical form rather than of mint
+provenance. The paragraph above therefore describes the state between those two rounds and
 is retained rather than deleted, because the measurement that produced it is what
 forced the cheap path to exist. For the common case the closure is now O(1); the
 pipeline still runs, with its evidence deposit and epoch advance, for a top that is not

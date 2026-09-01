@@ -1449,13 +1449,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// through the canonical authority (flatten, lattice absorption,
     /// structural `T | T = T`) — with an O(1) canonicality test first: a
     /// top whose payload carries the at-rest `Canonical` origin category
-    /// was minted by the canonical authority, so its list IS in canonical
-    /// form (canonicalization is deterministic over immutable node data)
-    /// and the closure returns it unchanged WITHOUT re-running the
+    /// was minted by a COMPLETE canonicalization — the canonical builder
+    /// refuses that stamp on incomplete evidence (over-cap arm set,
+    /// exhausted compare budget, dangling arm, undecided peek all mint
+    /// `CanonicalUnproven`) — so its list IS in canonical form (a
+    /// complete canonicalization is deterministic over immutable node
+    /// data) and the closure returns it unchanged WITHOUT re-running the
     /// pipeline — no evidence deposit and no evidence-epoch advance on
-    /// the pure no-op path. A non-`Canonical`-tagged top (including a
-    /// canonical-form list that first interned under a bypass mint —
-    /// the first-wins tag) pays the full idempotent re-close.
+    /// the pure no-op path. Any other tag pays the full idempotent
+    /// re-close: `CanonicalUnproven` (so a budget-degraded list
+    /// resurfacing in a later request re-deposits its `incomplete`
+    /// evidence — ReturnOnly, never warm-classified), and a
+    /// canonical-form list that first interned under a bypass mint (the
+    /// first-wins tag).
     ///
     /// An INTERSECTION top passes through verbatim — but NOT because flow
     /// cannot derive one. It can: the per-key substitution inside this

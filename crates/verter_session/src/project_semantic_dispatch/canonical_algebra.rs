@@ -74,11 +74,30 @@ use crate::semantic_query::{
 use crate::semantic_query_memo::{ObservedGraphSelfRoot, SemanticGraphStore};
 
 /// The witness that a [`CompositeList`](crate::semantic_query::composite::CompositeList)
-/// member list was produced by THIS module's canonical builders. Its field is
-/// private and no constructor is exported: only the canonical algebra can
-/// mint the `Canonical` carrier category.
+/// member list was produced by THIS module's canonical builders. Its fields
+/// are private and no constructor is exported: only the canonical algebra
+/// can mint the `Canonical` carrier category.
 pub(crate) struct CanonicalMint {
+    /// `true` iff the canonicalization COMPLETED — no structural comparison
+    /// returned `Incomplete`, no bounded scan was skipped for size, no
+    /// bounded peek was undecided, no dangling arm was preserved. Only a
+    /// complete canonicalization proves the member list is canonical FORM;
+    /// the mint maps an incomplete one to the at-rest
+    /// `CanonicalUnproven` category, which the pre-seal closure's O(1)
+    /// skip does not accept — a budget-degraded list resurfacing in a
+    /// later request pays the full re-close (and its evidence re-deposit)
+    /// instead of being classified warm-eligible canonical form.
+    canonical_form_proven: bool,
     _sealed: (),
+}
+
+impl CanonicalMint {
+    /// Whether this mint's canonicalization PROVED canonical form (complete
+    /// evidence). Read by the category funnel to choose between the at-rest
+    /// `Canonical` and `CanonicalUnproven` facts.
+    pub(crate) fn certifies_canonical_form(&self) -> bool {
+        self.canonical_form_proven
+    }
 }
 
 /// Structural-identity verdict of one comparator run.
@@ -715,7 +734,11 @@ fn canonicalize(
     // 6. Folds + interning. Empty ⇒ `Primitive(Never)`; singleton ⇒ the
     //    retained member unchanged (that member's own scope); a derived
     //    multi-arm composite sorts deterministically and interns under
-    //    `Global` through the sealed canonical mint.
+    //    `Global` through the sealed canonical mint. The mint carries the
+    //    completeness verdict: only COMPLETE evidence certifies canonical
+    //    FORM, so an incomplete run (over-cap arm set, exhausted compare
+    //    budget, dangling arm, undecided peek) is stamped
+    //    `CanonicalUnproven` at rest — never skip-eligible `Canonical`.
     kept.sort_by_key(|id| id.0);
     kept.dedup();
     let node = match kept.as_slice() {
@@ -723,22 +746,22 @@ fn canonicalize(
         [only] => *only,
         _ => {
             let members: Arc<[SemanticNodeId]> = Arc::from(kept.into_boxed_slice());
+            let mint = CanonicalMint {
+                canonical_form_proven: !evidence.incomplete,
+                _sealed: (),
+            };
             if is_union {
                 graph.intern_node(SemanticNodeData::Union(
                     crate::semantic_query::composite::CompositeList::minted(
                         members,
-                        crate::semantic_query::composite::CompositeCarrierCategory::Canonical(
-                            CanonicalMint { _sealed: () },
-                        ),
+                        crate::semantic_query::composite::CompositeCarrierCategory::Canonical(mint),
                     ),
                 ))
             } else {
                 graph.intern_node(SemanticNodeData::Intersection(
                     crate::semantic_query::composite::CompositeList::minted(
                         members,
-                        crate::semantic_query::composite::CompositeCarrierCategory::Canonical(
-                            CanonicalMint { _sealed: () },
-                        ),
+                        crate::semantic_query::composite::CompositeCarrierCategory::Canonical(mint),
                     ),
                 ))
             }

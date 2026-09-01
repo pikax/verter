@@ -10113,20 +10113,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// projection/expansion/realization rebuild sites, driven by the
     /// original payload's at-rest [`CompositeOriginCategory`] fact.
     ///
-    /// A rebuild of a `Canonical` or `AuthoredShell` composite is a DERIVED
-    /// result (the authored shell stays recoverable through the original
-    /// node and origin evidence), so it routes canonical. Every other
-    /// category preserves verbatim: `OrderedCarrier` order IS overload
-    /// precedence; `PreservingRebuild` lost its original's category, so
-    /// re-deciding is unproven; `QuerySubject` shape is caller contract;
-    /// `TestFixture` is a deliberately raw fixture.
+    /// A rebuild of a `Canonical`, `CanonicalUnproven` or `AuthoredShell`
+    /// composite is a DERIVED result (the authored shell stays recoverable
+    /// through the original node and origin evidence; an unproven-canonical
+    /// list is the budgeted derived value, and re-deciding gives the
+    /// authority another complete attempt), so it routes canonical. Every
+    /// other category preserves verbatim: `OrderedCarrier` order IS
+    /// overload precedence; `PreservingRebuild` lost its original's
+    /// category, so re-deciding is unproven; `QuerySubject` shape is
+    /// caller contract; `TestFixture` is a deliberately raw fixture.
     ///
     /// INTERSECTION rebuilds additionally fail CLOSED on callability —
     /// mirroring the substitution split: when any rebuilt arm may
     /// contribute call signatures the rebuilt list is an overload-ordered
     /// carrier and the commutative route must not reorder it. (This guard
-    /// also neutralizes the one order-bearing first-wins tag collision —
-    /// see the `composite` module docs' identity discipline.)
+    /// NARROWS — it does not close — the one order-bearing first-wins tag
+    /// collision: order semantics independent of callability, such as
+    /// heritage topology, rendered-text fidelity and intersection-merge
+    /// slot order, stay exposed when an ordered mint collides with an
+    /// earlier `Canonical`-tagged twin — see the `composite` module docs'
+    /// identity discipline for the disclosed window.)
     ///
     /// EXHAUSTIVE over the category registry — no wildcard arm.
     pub(crate) fn composite_rebuild_re_decides(
@@ -10137,7 +10143,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> bool {
         use crate::semantic_query::composite::CompositeOriginCategory as C;
         let derived = match category {
-            C::Canonical | C::AuthoredShell => true,
+            C::Canonical | C::CanonicalUnproven | C::AuthoredShell => true,
             C::OrderedCarrier | C::PreservingRebuild | C::QuerySubject => false,
             #[cfg(any(test, feature = "test-support"))]
             C::TestFixture => false,

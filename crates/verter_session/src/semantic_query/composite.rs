@@ -66,14 +66,21 @@
 //! [`CompositeOriginCategory`] fact, readable through
 //! [`CompositeMembers::origin_category`]. This is what lets a REBUILD site
 //! classify by carrier semantics instead of by transformation shape: a
-//! member-wise rebuild of a `Canonical` or `AuthoredShell` composite is a
-//! DERIVED result and routes back through the canonical authority, while a
-//! rebuild of an `OrderedCarrier` (or of any category whose original
-//! semantics the tag cannot prove re-decidable — `PreservingRebuild`,
-//! `QuerySubject`, `TestFixture`) preserves the arm list verbatim. The
-//! pre-seal flow closure uses the same fact as its O(1) canonicality test:
-//! a `Canonical`-tagged top is already closed, so the closure skips the
-//! pipeline (and deposits no evidence) instead of re-proving a no-op.
+//! member-wise rebuild of a `Canonical`, `CanonicalUnproven` or
+//! `AuthoredShell` composite is a DERIVED result and routes back through
+//! the canonical authority, while a rebuild of an `OrderedCarrier` (or of
+//! any category whose original semantics the tag cannot prove
+//! re-decidable — `PreservingRebuild`, `QuerySubject`, `TestFixture`)
+//! preserves the arm list verbatim. The pre-seal flow closure uses the
+//! same fact as its O(1) canonicality test — keyed on exactly
+//! `Canonical`, which the canonical builder stamps ONLY on a COMPLETE
+//! canonicalization (an incomplete run — over-cap arm set, exhausted
+//! compare budget, dangling arm, undecided peek — stamps
+//! `CanonicalUnproven` instead): a `Canonical`-tagged top is proven
+//! closed, so the closure skips the pipeline (and deposits no evidence)
+//! instead of re-proving a no-op, while an unproven top pays the full
+//! re-close and its evidence re-deposit on every resurfacing —
+//! budget-degraded results are never skip-classified canonical form.
 //!
 //! **Identity discipline.** The category is EXCLUDED from `Eq` / `Hash`:
 //! arena identity stays `(members, kind, sidecar scope)` exactly as
@@ -81,19 +88,33 @@
 //! are unchanged. Under the arena's content dedup the retained tag is
 //! FIRST-WINS: two mints of the byte-identical list under the same scope
 //! share one node, tagged by whichever interned first. A cross-category
-//! collision requires the two member lists to be BYTE-IDENTICAL, and a
-//! list byte-identical to a canonical mint's output IS in canonical form
-//! (canonicalization is deterministic over immutable node data), so both
-//! dispositions of a collided node agree on the VALUE: re-closing a
-//! canonical-form list is the idempotence no-op, and preserving it keeps
-//! the same list. The one order-bearing residue — an overload-ordered
-//! carrier colliding with a canonical twin and later re-decided
-//! commutatively — is closed at the rebuild sites by the fail-closed
-//! callable guard (`value_may_contribute_call_signatures`): an
-//! intersection rebuild whose arms may carry call signatures preserves
-//! order regardless of the tag. A `Canonical`-tagged node that FIRST
-//! interned under a bypass mint simply loses the skip (the closure
-//! re-proves the no-op), never a wrong value.
+//! collision requires the two member lists to be BYTE-IDENTICAL. A list
+//! byte-identical to a `Canonical`-STAMPED output IS in canonical form
+//! (the stamp is refused on incomplete evidence, and a complete
+//! canonicalization is deterministic over immutable node data), so every
+//! collision agrees on the VALUE: re-closing a canonical-form list is the
+//! idempotence no-op, and preserving a list keeps that same list. A
+//! canonical-form node that FIRST interned under a bypass mint (or as
+//! `CanonicalUnproven`) simply loses the skip — the closure re-proves the
+//! no-op — never a wrong value.
+//!
+//! One order-bearing first-wins residue is DISCLOSED OPEN, not closed: an
+//! ordered mint whose arm list is byte-identical to an earlier
+//! `Canonical`-tagged twin is misread as re-decidable at the rebuild
+//! sites, and the fail-closed callable guard
+//! (`value_may_contribute_call_signatures`) narrows only the
+//! overload-group class of that misread — an intersection rebuild whose
+//! arms may carry call signatures preserves order regardless of the tag.
+//! Order semantics INDEPENDENT of callability are not covered by it:
+//! own-body-LAST heritage topology, rendered-type-text fidelity, and the
+//! first-encountered entry/keyspace slots of the intersection surface
+//! merge (`merge_intersection_surfaces_with_graph`) all consume arm
+//! order, so a collided ordered carrier whose rebuilt arms are
+//! signature-free CAN be reordered by a commutative re-decide. The live
+//! window is narrow — ordered mints share the `Global` identity domain
+//! with canonical multi-arm mints, and canonical order (node-id order)
+//! typically coincides with construction order, so the colliding twin
+//! usually already carries the ordered spelling — but it is NOT empty.
 //!
 //! ## Confinement — the disclosed language limit
 //!
@@ -246,11 +267,21 @@ impl<K: CompositeKind> CompositeList<K> {
         category: CompositeCarrierCategory,
     ) -> Self {
         let category = match category {
-            // The canonical builder is the sole derived-composite mint: the
-            // witness proves the member list already carries the canonical
-            // algebra (flattened, absorbed, structurally deduplicated,
-            // deterministically ordered).
-            CompositeCarrierCategory::Canonical(_witness) => CompositeOriginCategory::Canonical,
+            // The canonical builder is the sole derived-composite mint. The
+            // witness carries the builder's completeness verdict: only a
+            // COMPLETE canonicalization proves the member list carries the
+            // canonical algebra (flattened, absorbed, structurally
+            // deduplicated, deterministically ordered), so only it stamps
+            // the skip-eligible `Canonical` fact; an incomplete run
+            // (budgeted, over-cap, dangling-arm, undecided-peek) stamps
+            // `CanonicalUnproven` — same value, no canonical-form claim.
+            CompositeCarrierCategory::Canonical(witness) => {
+                if witness.certifies_canonical_form() {
+                    CompositeOriginCategory::Canonical
+                } else {
+                    CompositeOriginCategory::CanonicalUnproven
+                }
+            }
             // Bypass categories carry the list VERBATIM — authored order,
             // overload order, or the rebuilt original's order is exactly
             // what each category exists to preserve.
@@ -336,8 +367,20 @@ impl<K: CompositeKind> std::ops::Deref for CompositeList<K> {
 /// EXHAUSTIVE consumers match it without a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompositeOriginCategory {
-    /// Minted by the canonical algebra: the list IS in canonical form.
+    /// Minted by a COMPLETE canonicalization: the list is PROVEN canonical
+    /// form. This is the sole tag the pre-seal closure's O(1) skip
+    /// accepts.
     Canonical,
+    /// Minted by the canonical algebra from an INCOMPLETE canonicalization
+    /// (over-cap arm set, exhausted compare budget, dangling arm,
+    /// undecided bounded peek): the value is the deterministic budgeted
+    /// result, but canonical FORM is unproven — the list may still carry
+    /// structural duplicates the skipped tier would have collapsed. The
+    /// O(1) skip refuses it, so a resurfacing top pays the full re-close
+    /// and its evidence re-deposit (`incomplete` ⇒ ReturnOnly, never
+    /// warm). A rebuild of one is a DERIVED result and re-routes
+    /// canonical.
+    CanonicalUnproven,
     /// Authored-syntax / locator-shape shell: authored order, authored
     /// scope. A member-wise rebuild of one is a DERIVED result.
     AuthoredShell,

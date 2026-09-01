@@ -76,9 +76,10 @@ impl ProjectSemanticDispatch<'_> {
     /// of the same union interns under the owning file scope, and a
     /// closed-fact replay of the identical decided value must hash-cons
     /// with it, never fork instantiation/cache identity onto a
-    /// scope-split twin. The re-anchored payload keeps its `Canonical`
-    /// origin category (the list IS canonical form); anchoring is a
-    /// same-kind, value-identical re-intern, not a second mint.
+    /// scope-split twin. The re-anchored payload keeps its origin
+    /// category unchanged (`Canonical` when the canonicalization
+    /// completed, `CanonicalUnproven` when it was budgeted); anchoring is
+    /// a same-kind, value-identical re-intern, not a second mint.
     pub(in crate::project_semantic_dispatch) fn raise_closed_leaf_union(
         &self,
         members: &[SemanticNodeId],
@@ -176,7 +177,7 @@ impl ProjectSemanticDispatch<'_> {
                         )
                     })
                     .collect();
-                self.intern_normalized_union_or_intersection(&members, true)
+                self.raise_closed_leaf_union(&members, scope)
             }
             FactOrLocator::Locator(slot) => required(&|| {
                 self.raise_body_slot(slot, ctx.scope_canonical_id)

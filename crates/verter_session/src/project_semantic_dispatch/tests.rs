@@ -29618,3 +29618,220 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
          carrier and keeps its origin File scope"
     );
 }
+
+/// An INCOMPLETE canonicalization (here an undecidable over-deep alias
+/// peek; the over-cap arm set, an exhausted compare budget and a dangling
+/// arm take the same evidence path) must REFUSE the `Canonical` stamp on
+/// its multi-arm output. The stamp is the pre-seal closure's O(1) skip
+/// witness of canonical FORM; stamping an unproven list would let a
+/// budget-degraded result resurface in a later request as skip-eligible
+/// — warm-classifiable with no fresh canonicalization and no evidence
+/// deposit — the budget-exceeded-never-warm class. The unproven top pays
+/// the full idempotent re-close instead: its evidence re-deposits (epoch
+/// advance), so suppression re-arms in every request that resurfaces it.
+#[test]
+fn incomplete_canonicalization_refuses_the_canonical_stamp_and_pays_the_re_close() {
+    use crate::semantic_query::FlowReturnResult;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // Over-deep alias chain: the bounded lattice peek cannot decide the
+    // arm, so the canonicalization completes with `incomplete` evidence
+    // while keeping both arms.
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let mut aliased = never;
+    for _ in 0..9 {
+        aliased = graph.intern_node(SemanticNodeData::Alias(aliased));
+    }
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let union = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+        &graph,
+        &[aliased, string_node],
+    );
+    assert!(union.evidence.incomplete, "fixture produces incompleteness");
+    let data = graph.node_data(union.node);
+    let Some(SemanticNodeData::Union(members)) = data.as_deref() else {
+        panic!("the undecided-arm union keeps both arms, got {data:?}");
+    };
+    assert_eq!(
+        members.origin_category(),
+        crate::semantic_query::composite::CompositeOriginCategory::CanonicalUnproven,
+        "an incomplete canonicalization is not proven canonical form — the \
+         Canonical stamp (the O(1) skip witness) must be refused in favour \
+         of the unproven fact"
+    );
+    drop(data);
+
+    // The unproven top must PAY the pre-seal re-close: no O(1) skip, so
+    // the pipeline's evidence deposit advances the epoch and re-arms
+    // warm-admission suppression in the resurfacing request.
+    let epoch_before = dispatch.canonical_evidence_epoch.get();
+    let closed =
+        dispatch.close_flow_result_pre_seal(FlowReturnResult::new(&graph, union.node, false, None));
+    assert_eq!(
+        closed.return_type(),
+        union.node,
+        "the budgeted algorithm is deterministic and idempotent on its own output"
+    );
+    assert_ne!(
+        dispatch.canonical_evidence_epoch.get(),
+        epoch_before,
+        "a not-proven-canonical top must re-enter the full closure pipeline — \
+         evidence deposits and the epoch advances; the skip is reserved for \
+         the proven `Canonical` stamp"
+    );
+}
+
+/// The ordered-PRESERVE leg of the projection-rebuild carrier dispatch,
+/// pinned at a real rebuild site (the expansion walk's arm combine): an
+/// `OrderedCarrier` union whose expansion CHANGES an arm — and whose
+/// expanded arm ids are DESCENDING, so a commutative re-decide's ordinal
+/// sort would provably reorder them — keeps its verbatim arm order and
+/// comes back as a `PreservingRebuild` carrier, never a canonical
+/// re-decide. Arm order on an ordered carrier is overload precedence and
+/// rendered-text fidelity; this leg is what the fail-closed side of
+/// `composite_rebuild_re_decides` protects.
+#[test]
+fn expanded_projection_preserves_ordered_carrier_arm_order() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/ordered-preserve.ts",
+        "export type B = { y: number };\nexport type A = { x: string };\n",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // Resolve B FIRST so its object interns with the LOWER node id: the
+    // preserved order below is then DESCENDING by id, which an ordinal
+    // sort cannot reproduce — the fixture discriminates order, not just
+    // membership.
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(
+            "/w/ordered-preserve.ts",
+            "B",
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let obj_b = outcome.ok().flatten().expect("B must resolve");
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(
+            "/w/ordered-preserve.ts",
+            "A",
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let obj_a = outcome.ok().flatten().expect("A must resolve");
+    assert!(
+        obj_a.0 > obj_b.0,
+        "fixture guard: the preserved order must be descending by id so a \
+         commutative re-decide would provably reorder it"
+    );
+
+    let whole_hash = host
+        .shallow_file_state("/w/ordered-preserve.ts")
+        .expect("the fixture file must have shallow state")
+        .whole_hash;
+    let placeholder_a = graph.intern_node(SemanticNodeData::Opaque(
+        crate::semantic_query::QueryError::DeclPlaceholder {
+            canonical_id: Arc::from("/w/ordered-preserve.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name: Arc::from("A"),
+            whole_hash,
+        },
+    ));
+    let base = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
+            vec![placeholder_a, obj_b].into_boxed_slice(),
+        )),
+    ));
+    let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    });
+    let QueryResult::Value(SemanticQueryOutput { value: result, .. }) = projected else {
+        panic!("the ordered union must project, got {projected:?}");
+    };
+    let data = graph.node_data(result);
+    let Some(SemanticNodeData::Union(members)) = data.as_deref() else {
+        panic!("the ordered carrier's expansion stays a union, got {data:?}");
+    };
+    assert_eq!(
+        &***members,
+        &[obj_a, obj_b],
+        "an OrderedCarrier rebuild preserves verbatim arm order — the \
+         descending-id order proves no ordinal sort ran"
+    );
+    assert_eq!(
+        members.origin_category(),
+        crate::semantic_query::composite::CompositeOriginCategory::PreservingRebuild,
+        "the preserved rebuild inherits the not-proven-re-decidable \
+         disposition, never a canonical re-decide"
+    );
+}
+
+/// The carrier dispatch of a member-wise composite rebuild, pinned per
+/// category and per fail-closed leg: derived categories (canonical,
+/// unproven-canonical, authored shell) re-decide; order-bearing and
+/// caller-contract categories preserve; and ANY intersection whose
+/// rebuilt arms may contribute call signatures fails closed to preserve
+/// regardless of the tag (the overload-ordered class).
+#[test]
+fn composite_rebuild_re_decision_is_per_category_with_callable_fail_closed() {
+    use crate::semantic_query::composite::CompositeOriginCategory as C;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let plain = [string_node, number_node];
+    let callable = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
+        params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new().into_boxed_slice()),
+        return_type: string_node,
+        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string_node),
+        signature_span: None,
+        return_type_span: None,
+    });
+    let with_callable = [callable, number_node];
+
+    // Union rebuilds: the category alone decides.
+    for (category, decides) in [
+        (C::Canonical, true),
+        (C::CanonicalUnproven, true),
+        (C::AuthoredShell, true),
+        (C::OrderedCarrier, false),
+        (C::PreservingRebuild, false),
+        (C::QuerySubject, false),
+        (C::TestFixture, false),
+    ] {
+        assert_eq!(
+            dispatch.composite_rebuild_re_decides(category, &plain, true),
+            decides,
+            "union rebuild of {category:?}"
+        );
+    }
+    // Intersection rebuilds: derived categories re-decide only when NO
+    // rebuilt arm may contribute call signatures.
+    assert!(
+        dispatch.composite_rebuild_re_decides(C::AuthoredShell, &plain, false),
+        "signature-free derived intersection re-decides"
+    );
+    assert!(
+        !dispatch.composite_rebuild_re_decides(C::AuthoredShell, &with_callable, false),
+        "a possibly-callable rebuilt arm fails the intersection closed"
+    );
+    assert!(
+        !dispatch.composite_rebuild_re_decides(C::Canonical, &with_callable, false),
+        "the callable fail-closed leg holds even for the canonical tag"
+    );
+}
