@@ -165,7 +165,7 @@ describe("TypeScriptService sync model (atomic syncSource per source)", () => {
           sourcePath: "/Comp.svelte",
           surfaces: {
             ide: undefined,
-            decl: { code: sv.decl!.code, sourceMap: null },
+            decl: { code: sv.decl!.code, sourceMap: sv.decl!.sourceMap ?? null },
             api: { code: sv.api!.code, sourceMap: null },
           },
         },
@@ -176,6 +176,44 @@ describe("TypeScriptService sync model (atomic syncSource per source)", () => {
     expect(await service.getHover("Comp.svelte", 0)).toBeNull();
     expect(await service.getDiagnostics("Comp.svelte")).toEqual([]);
     expect(sent.length).toBe(before);
+  });
+
+  it("an EMPTY declaration source map normalises to null on the wire, never the empty string", async () => {
+    // Deliberately fixture-independent: whether any captured surface currently
+    // arrives map-less is the host's business and moves with the compiler, so
+    // the empty-string input that exercises this normalisation is stated here.
+    // The wire distinguishes "this surface has no map" from "this surface has
+    // a map", and an empty string is the former: it must cross as `null`, so
+    // no consumer has to re-derive that a zero-length map is not a map.
+    const declCode = "export declare const count: number;\n";
+    const tscCode = "export const count = 1;\n";
+    const { service, sent } = stubbedService(() => []);
+    await service.syncWorkspace([
+      {
+        filename: "MapLess.svelte",
+        code: "<div>x</div>",
+        compiled: {
+          types: "",
+          typesSourceMap: "",
+          declCode,
+          declSourceMap: "",
+          tscCode,
+        },
+      },
+    ]);
+    expect(sent).toEqual([
+      {
+        type: "syncSource",
+        payload: {
+          sourcePath: "/MapLess.svelte",
+          surfaces: {
+            ide: undefined,
+            decl: { code: declCode, sourceMap: null },
+            api: { code: tscCode, sourceMap: null },
+          },
+        },
+      },
+    ]);
   });
 
   it("a non-syncable file (import-map.json) is skipped entirely", async () => {

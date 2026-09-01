@@ -52,7 +52,7 @@ Outcome: the committed fixture is regenerated from the currently built browser a
 - `.github/workflows/ci.yml`: a hard invocation of that command in the job that builds the browser artifact, placed after the build, so both a pure browser-binding change and a playground change compare the committed fixture against the artifact this run actually built. It is not advisory, not conditional on which paths changed within that job, and does not degrade to a skip.
 - Determinism is the renderer's own: repeated renders of the same artifact over the same sources produce identical bytes, including key order and formatting.
 - The fixture's sources, keys, per-source surfaces, and schema are unchanged. Recording an unavailable surface explicitly, rather than as a silent null, is preserved.
-- Rewriting the consuming guards, changing what they assert, migrating the capture tool onto a typed compile request, and any binding change are excluded.
+- Migrating the capture tool onto a typed compile request, and any binding change, are excluded. A consuming guard may be conformed to the regenerated fixture ONLY where that fixture invalidates a fact the guard incidentally encoded about captured output — the guard's behavioural claim must survive unchanged and stay discriminating, and a precondition it previously read from the fixture is stated directly instead. Rewriting what a guard actually proves remains excluded.
 
 ## Exact predecessor contract
 
@@ -68,7 +68,7 @@ Outcome: the committed fixture is regenerated from the currently built browser a
 - The comparison writes nothing: running it leaves the working tree unchanged whether it passes or fails.
 - Continuous integration runs the comparison after the browser artifact is built, and a difference fails that job rather than being reported and ignored.
 - The capture's source registration passes no compile-profile key, and the regenerated surfaces are equivalent to what the same sources produce through the current host.
-- The consuming guards keep loading the committed fixture and keep their existing assertions.
+- The consuming guards keep loading the committed fixture. Their behavioural assertions are unchanged and still fail against a planted regression; only an expectation the regenerated capture made untrue may be restated, and each such restatement is recorded with the fact that changed.
 
 ## Deletions, budgets, and aborts
 
