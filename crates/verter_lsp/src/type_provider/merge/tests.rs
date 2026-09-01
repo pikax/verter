@@ -6930,7 +6930,7 @@ fn svelte_attribute_merge_preserves_camel_case_prop_spelling() {
             detail: None,
             documentation: None,
             sort_text: None,
-            insert_text: None,
+            insert_text: Some("carrierUnusedOnly?".to_string()),
             edit_range_start: None,
             edit_range_end: None,
             text_edit_new_text: None,
@@ -6964,6 +6964,11 @@ fn svelte_attribute_merge_preserves_camel_case_prop_spelling() {
     assert!(
         !labels.contains(&"carrier-unused-only") && !labels.contains(&"carrierUnusedOnly?"),
         "Svelte labels must be neither Vue-kebabed nor decorated: {labels:?}"
+    );
+    assert_eq!(
+        items[0].insert_text.as_deref(),
+        Some("carrierUnusedOnly"),
+        "the insertion payload must drop the provider's optional marker too"
     );
 }
 

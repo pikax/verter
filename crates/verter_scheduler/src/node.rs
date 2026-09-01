@@ -322,13 +322,16 @@ impl FileNode {
     /// Returns the current Source only after its completion has integrated all
     /// dependency facts under the scheduler lock.
     pub fn current_integrated_source(&self) -> Option<Arc<SourceSnapshot>> {
+        let guard = self.source.load();
+        let snapshot = guard.as_ref().as_ref()?;
         let node_gen = self.generation.read();
-        if !self.source_integration_ready.load(Ordering::Acquire)
+        if snapshot.generation != node_gen
+            || !self.source_integration_ready.load(Ordering::Acquire)
             || self.source_integrated_generation.load(Ordering::Relaxed) != node_gen
         {
             return None;
         }
-        self.current_source()
+        Some(Arc::clone(snapshot))
     }
 
     /// Publish the integration fence for `generation` after dependency state

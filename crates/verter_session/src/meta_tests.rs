@@ -30175,6 +30175,64 @@ defineProps<{{ named: Sentinel }}>()
     );
 }
 
+// @ai-generated
+#[test]
+fn warm_output_publication_evidence_keeps_the_exact_validated_cache_key() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/WarmKey.vue",
+            r#"<script setup lang="ts">defineProps<{ value: string }>()</script><template/>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    host.get_component_meta_output("/WarmKey.vue")
+        .expect("cold output")
+        .expect("cold projection");
+
+    let view = crate::session_view::HostViewRef::new(host);
+    let fixed = host.capture_batch_fixed_view(&view);
+    let validated_key = host.component_meta_result_key(
+        "/WarmKey.vue",
+        &crate::host_manage::ComponentMetaOptions::default(),
+    );
+    let mutate = Arc::clone(&project);
+    crate::host_manage::component_meta_entry::WARM_OUTPUT_PRE_EVIDENCE_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            mutate
+                .host()
+                .configure_projects(vec![verter_workspace::ide_project_config(
+                    "/".to_string(),
+                    "/".to_string(),
+                    Some("/tsconfig.json".to_string()),
+                )]);
+        }));
+    });
+
+    let warm = host
+        .get_component_meta_output_via_view_with_publication_evidence(
+            "/WarmKey.vue",
+            &view,
+            &fixed,
+            false,
+        )
+        .expect("warm output")
+        .expect("warm projection");
+    let evidence = warm
+        .publication_evidence
+        .expect("a warm cache hit carries publication evidence");
+    let live_key = host.component_meta_result_key(
+        "/WarmKey.vue",
+        &crate::host_manage::ComponentMetaOptions::default(),
+    );
+
+    assert_eq!(evidence.final_result.key, validated_key);
+    assert_ne!(
+        evidence.final_result.key, live_key,
+        "the hook must move the live environment after validation; evidence must not recompute it"
+    );
+}
+
 /// AUDIT-lane equivalence: the audited session wrapper, the audited host
 /// entry (the LSP route), and the NAPI-shaped payload lane all serve the
 /// SAME materialized envelope for the same component.

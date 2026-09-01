@@ -239,11 +239,11 @@ impl VerterLanguageServer {
     /// barrel delivery legs, and — only for a COMPLETE pass under a stable
     /// key — the DependencyReady receipt mint.
     ///
-    /// A pass with any failed or requeued leg does NOT publish the receipt: the
-    /// receipt records that the import set was successfully delivered at this
-    /// generation, and a partial pass has not delivered it. The failed state is
-    /// simply a cold memo — the next enqueue (readiness miss, edit, open)
-    /// retries, so a transient failure never poisons and never strands.
+    /// A pass with any retryable failed or requeued leg does NOT publish the
+    /// receipt: the receipt records that the import set reached a settled state
+    /// at this generation. A provenance-fenced permanent authored projection
+    /// refusal is settled (and invalidates on later content/config changes);
+    /// transient failure remains cold so the next enqueue retries.
     async fn publish_import_dependencies(&self, uri: &Uri, canonical_id: &str) {
         // Singleflight: coalesce concurrent enqueues onto ONE pass. A follower
         // that acquires the lock after the leader finished sees a fresh memo
@@ -405,7 +405,7 @@ impl VerterLanguageServer {
             let provider_is_current =
                 matches!(self.type_provider_kind, crate::TypeProviderKind::None)
                     || self.imported_carrier_already_delivered(&import_id);
-            if provider_is_current && self.cached_child_public_contract(&import_id).is_some() {
+            if provider_is_current && self.child_public_contract_is_settled(&import_id) {
                 continue;
             }
             outcome = outcome.and(self.sync_imported_carrier_api_lightweight(&import_id).await);
@@ -649,7 +649,7 @@ impl VerterLanguageServer {
             let provider_is_current =
                 matches!(self.type_provider_kind, crate::TypeProviderKind::None)
                     || self.imported_carrier_already_delivered(carrier_id);
-            if provider_is_current && self.cached_child_public_contract(carrier_id).is_some() {
+            if provider_is_current && self.child_public_contract_is_settled(carrier_id) {
                 continue;
             }
             outcome = outcome.and(self.sync_imported_carrier_api_lightweight(carrier_id).await);

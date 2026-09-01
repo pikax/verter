@@ -2065,18 +2065,6 @@ impl VerterHost {
             self.provenance
                 .indexed_ready_materializes
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // Captured BEFORE any read/parse so the pre-publish fence
-            // below detects every mid-flight mutation; the
-            // `project_generation` value is also the stamp the published
-            // artifact carries.
-            let flight_workspace_generation = self.ws().content_generation();
-            let flight_project_generation = self.project_type_store.current_project_generation();
-            let flight_store_view_epoch = self.current_store_view_epoch();
-            let flight_resolution_fact_generation = self.ws().resolution_fact_generation();
-            // The R21 parse dimension the parse below runs under — the
-            // value-side stamp the reuse gates compare against the live
-            // per-canonical parse env.
-            let flight_parse_env_hash = self.host_view_env_hashes_for(canonical_id).parse_env_hash;
             #[cfg(test)]
             self.fire_materialize_seam();
             // Materialize: read source, build analysis, construct facts.
@@ -2125,6 +2113,22 @@ impl VerterHost {
                         state.whole_hash,
                     )
                 };
+
+            // The flight begins only after source acquisition. A cold
+            // `ensure_loaded` may legitimately advance the store view while
+            // installing the very source this computation consumes; capturing
+            // before that work would make the flight fence itself out. From
+            // this point onward, every external mutation is superseding and
+            // must prevent publication. The project generation is also the
+            // stamp carried by the published artifact.
+            let flight_workspace_generation = self.ws().content_generation();
+            let flight_project_generation = self.project_type_store.current_project_generation();
+            let flight_store_view_epoch = self.current_store_view_epoch();
+            let flight_resolution_fact_generation = self.ws().resolution_fact_generation();
+            // The R21 parse dimension the parse below runs under — the
+            // value-side stamp the reuse gates compare against the live
+            // per-canonical parse env.
+            let flight_parse_env_hash = self.host_view_env_hashes_for(canonical_id).parse_env_hash;
 
             // A carrier canonical (`.vue`, `.svelte`, …) the scheduler has not
             // parsed yet runs the carrier parser ONCE here through the counted

@@ -824,6 +824,38 @@ pub struct TsgoCompositeProvider {
     /// Generation-scoped carrier feature admission cache. It memoizes the one shared
     /// resolver per `(source, generation)`; it is not a second binding engine.
     admission: CarrierAdmissionCache,
+    /// Compiler-lifted file-check directive for each generated companion.
+    /// The configured-project diagnostics API is not available for every
+    /// generated JSX root, so the fallback must retain the authored override
+    /// without reaching into an opaque managed provider.
+    file_check_directives: dashmap::DashMap<String, FileCheckDirective>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileCheckDirective {
+    Check,
+    NoCheck,
+}
+
+fn leading_file_check_directive(content: &str) -> Option<FileCheckDirective> {
+    let first_line = content.split_once('\n').map_or(content, |(line, _)| line);
+    let first_line = first_line.strip_suffix('\r').unwrap_or(first_line);
+    match first_line {
+        "// @ts-check" => Some(FileCheckDirective::Check),
+        "// @ts-nocheck" => Some(FileCheckDirective::NoCheck),
+        _ => None,
+    }
+}
+
+fn effective_javascript_check_policy(
+    configured_check_js: Option<bool>,
+    directive: Option<FileCheckDirective>,
+) -> Option<bool> {
+    match directive {
+        Some(FileCheckDirective::Check) => Some(true),
+        Some(FileCheckDirective::NoCheck) => Some(false),
+        None => configured_check_js,
+    }
 }
 
 impl TsgoCompositeProvider {
@@ -840,7 +872,41 @@ impl TsgoCompositeProvider {
             host,
             shared,
             admission: CarrierAdmissionCache::new(),
+            file_check_directives: dashmap::DashMap::new(),
         }
+    }
+
+    fn record_file_check_directive(&self, path: &str, content: &str) {
+        let path = normalize_canonical_id(path);
+        match leading_file_check_directive(content) {
+            Some(directive) => {
+                self.file_check_directives.insert(path, directive);
+            }
+            None => {
+                self.file_check_directives.remove(&path);
+            }
+        }
+    }
+
+    fn clear_file_check_directive(&self, path: &str) {
+        self.file_check_directives
+            .remove(&normalize_canonical_id(path));
+    }
+
+    fn effective_javascript_check_policy(
+        &self,
+        path: &str,
+        configured_project: &str,
+    ) -> Option<bool> {
+        let path = normalize_canonical_id(path);
+        let directive = self
+            .file_check_directives
+            .get(&path)
+            .map(|entry| *entry.value());
+        effective_javascript_check_policy(
+            self.configured_project_check_js(configured_project),
+            directive,
+        )
     }
 
     /// Select the provider for a feature query while preserving the serving order.
@@ -1017,12 +1083,13 @@ impl TsgoCompositeProvider {
             // The pinned TSGO API cannot expose some generated companions as roots
             // of nested configured projects. A raw LSP fallback would bind that JSX
             // to an inferred project and re-enable semantic diagnostics even when
-            // the authoritative owning project has `checkJs: false`. Preserve the
-            // published project's policy in that unavailable-capability case. This
-            // deliberately does not synthesize support for authored `@ts-check` in
-            // the unavailable TSGO project shape; that remains a known capability
-            // gap rather than a wrong-project diagnostic result.
-            if self.configured_project_check_js(carrier.bound().project()) == Some(false) {
+            // the authoritative owning project has checking disabled. Preserve the
+            // effective per-file policy in that unavailable-capability case:
+            // compiler-lifted `@ts-check` overrides `checkJs: false`, while
+            // `@ts-nocheck` overrides `checkJs: true`.
+            if self.effective_javascript_check_policy(path, carrier.bound().project())
+                == Some(false)
+            {
                 return Ok(Vec::new());
             }
         }
@@ -1119,6 +1186,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.open_file(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Interactive);
             Ok(())
         })
@@ -1129,6 +1197,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.load_file(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Interactive);
             Ok(())
         })
@@ -1139,6 +1208,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.update_file(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Interactive);
             Ok(())
         })
@@ -1148,6 +1218,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         Box::pin(async move {
             self.managed.close_file(&path).await?;
+            self.clear_file_check_directive(&path);
             self.shared_feed_close(&path).await;
             Ok(())
         })
@@ -1158,6 +1229,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.open_file_background(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Background);
             Ok(())
         })
@@ -1168,6 +1240,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.load_file_background(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Background);
             Ok(())
         })
@@ -1178,6 +1251,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.update_file_background(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Background);
             Ok(())
         })
@@ -1187,6 +1261,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         Box::pin(async move {
             self.managed.close_file_background(&path).await?;
+            self.clear_file_check_directive(&path);
             self.shared_feed_close(&path).await;
             Ok(())
         })
@@ -1197,6 +1272,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.open_file_normal(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Normal);
             Ok(())
         })
@@ -1207,6 +1283,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.load_file_normal(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Normal);
             Ok(())
         })
@@ -1217,6 +1294,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.update_file_normal(&path, &content).await?;
+            self.record_file_check_directive(&path, &content);
             self.shared_record(&path, &content, OverlayPriority::Normal);
             Ok(())
         })
@@ -1226,6 +1304,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         Box::pin(async move {
             self.managed.close_file_normal(&path).await?;
+            self.clear_file_check_directive(&path);
             self.shared_feed_close(&path).await;
             Ok(())
         })

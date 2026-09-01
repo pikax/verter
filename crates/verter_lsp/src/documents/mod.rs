@@ -218,7 +218,10 @@ pub(crate) fn progressive_span_is_current(
     span.end > span.start
         && end <= prior_source.len()
         && end <= current_source.len()
-        && prior_source.get(..end) == current_source.get(..end)
+        && matches!(
+            (prior_source.get(..end), current_source.get(..end)),
+            (Some(prior), Some(current)) if prior == current
+        )
 }
 
 fn progressive_prop_owner_witness_is_current(

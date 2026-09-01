@@ -5665,6 +5665,11 @@ import type { Attrs } from './types'
         .get_public_api_with_mode("/src/MalformedAttrs.vue", PublicApiMode::Declaration, None)
         .expect_err("malformed attrs type syntax must fail closed");
 
+    assert!(
+        !error.is_retryable(),
+        "malformed authored syntax is stable until its provenance changes"
+    );
+
     assert_eq!(
         error.subject(),
         crate::PublicApiProjectionSubject::ScriptSetupAttrs { source_range }

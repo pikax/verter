@@ -81,6 +81,22 @@ pub(crate) fn run_warm_output_pre_materialize_hook() {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only hook between finalized output reads and warm publication
+    /// evidence construction. It makes key drift at that exact boundary
+    /// deterministic without invalidating the materialization read set.
+    pub(crate) static WARM_OUTPUT_PRE_EVIDENCE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_warm_output_pre_evidence_hook() {
+    if let Some(hook) = WARM_OUTPUT_PRE_EVIDENCE_HOOK.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
 /// The publish fence a cold component-meta compute must pass before its
 /// result may warm the shared cache.
 ///
@@ -425,7 +441,7 @@ impl VerterHost {
         );
 
         // Warm probe against the capture's proven-current overlaid view.
-        if let Some(cached_entry) =
+        if let Some((cache_key, cached_entry)) =
             self.try_component_meta_cache_entry_with_view(canonical.as_str(), view, fixed)
         {
             let cached = &cached_entry.payload;
@@ -474,20 +490,17 @@ impl VerterHost {
                 }
             );
             let output = output?;
+            let output_read_set = finalized_output_signature(output_read_set);
+            #[cfg(test)]
+            run_warm_output_pre_evidence_hook();
             let publication_evidence =
-                finalized_output_signature(output_read_set).map(|output_read_set| {
-                    ComponentMetaOutputPublicationEvidence {
-                        final_result:
-                            crate::component_meta_result_db::AdmittedComponentMetaResult {
-                                key: self.component_meta_result_key(
-                                    canonical.as_str(),
-                                    &ComponentMetaOptions::default(),
-                                ),
-                                owner_whole_hash: cached.whole_hash,
-                                entry: cached_entry.clone(),
-                            },
-                        output_read_set,
-                    }
+                output_read_set.map(|output_read_set| ComponentMetaOutputPublicationEvidence {
+                    final_result: crate::component_meta_result_db::AdmittedComponentMetaResult {
+                        key: cache_key,
+                        owner_whole_hash: cached.whole_hash,
+                        entry: cached_entry.clone(),
+                    },
+                    output_read_set,
                 });
             return Ok(Some(ComponentMetaOutputWithPublicationEvidence {
                 output,
@@ -938,27 +951,28 @@ impl VerterHost {
         fixed: &crate::resolver_store::BatchFixedView,
     ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
         self.try_component_meta_cache_entry_with_view(canonical, view, fixed)
-            .map(|entry| entry.payload.analysis.clone())
+            .map(|(_, entry)| entry.payload.analysis.clone())
     }
 
-    /// Entry-returning core of the view-aware warm probe: the FULL cached
-    /// payload (analysis + resolution template), for consumers that need
-    /// more than the analysis projection (the output-bearing entries seed
-    /// their resolution sidecar from the cached template without a
-    /// rehydrate). Validation semantics identical to
+    /// Entry-returning core of the view-aware warm probe: the exact key that
+    /// was validated plus the FULL cached payload (analysis + resolution
+    /// template), for consumers that need more than the analysis projection
+    /// (the output-bearing entries seed their resolution sidecar from the
+    /// cached template without a rehydrate). Validation semantics identical to
     /// [`Self::try_component_meta_cache_hit_with_view_inner`].
     fn try_component_meta_cache_entry_with_view(
         &self,
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
-    ) -> Option<
+    ) -> Option<(
+        crate::component_meta_result_db::ComponentMetaResultKey,
         std::sync::Arc<
             crate::component_meta_result_db::ComponentMetaResultEntry<
                 crate::component_meta_result_db::CachedComponentMetaResult,
             >,
         >,
-    > {
+    )> {
         // Owner-canonical tombstone short-circuit: a canonical the
         // session deleted has no meaningful component-meta result and
         // must NOT collapse onto a base cache slot. `content_hash_for`
@@ -1023,7 +1037,9 @@ impl VerterHost {
                 return None;
             }
         };
-        results.get_with_view(self, current_view, &key, owner_whole_hash)
+        results
+            .get_with_view(self, current_view, &key, owner_whole_hash)
+            .map(|entry| (key, entry))
     }
 
     /// Publish-fence token recheck.
