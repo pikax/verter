@@ -807,6 +807,7 @@ pub(crate) enum BoundCompileRoute {
     /// this bound execution.
     HostBacked,
     /// The render-only route (`compile_entry_runtime_render`).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     RuntimeRender,
 }
 

@@ -2317,7 +2317,7 @@ fn build_vue_script_outputs(
         script_source.len() as u32,
         std::panic::AssertUnwindSafe(|| {
             let parser =
-                Parser::new(&alloc, &script_source, source_type).with_options(ParseOptions {
+                Parser::new(&alloc, script_source, source_type).with_options(ParseOptions {
                     parse_regular_expression: false,
                     ..ParseOptions::default()
                 });
@@ -2335,7 +2335,7 @@ fn build_vue_script_outputs(
     }
 
     let mut walked = vue_script_walks_for_sfc(
-        &script_source,
+        script_source,
         source_type,
         &parse_result.program,
         parsed,

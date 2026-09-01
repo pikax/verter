@@ -310,6 +310,7 @@ pub(crate) enum SuppliedBlockScope<'p> {
     /// sole content authority for this read. A block whose authored
     /// dialect needs external preprocessing therefore refuses as
     /// unavailable rather than silently borrowing another route's bytes.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     RegisteredSourceOnly,
 }
 

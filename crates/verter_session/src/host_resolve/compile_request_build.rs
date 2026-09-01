@@ -349,6 +349,7 @@ enum SharedDependencyAxis {
     /// Leave the recorded axis exactly as it stands. The stateless
     /// caller-supplied-request route, which publishes no cache slot: it
     /// owes no invalidation record and must not narrow another lane's.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     LeaveUntouched,
 }
 
@@ -442,6 +443,7 @@ fn prepare_svelte_execution_inputs(
 
 /// Executing a caller-supplied canonical request refused before any
 /// product published.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) enum SuppliedRequestFailure {
     /// The supplied request names a framework the bound backend is not.
     /// The backend that owns the registered carrier is the sole authority
@@ -483,6 +485,7 @@ pub(crate) enum SuppliedRequestFailure {
 /// runtime product renders the runtime `props` / `model` option objects
 /// and is the one demand that pays for per-member broad-runtime
 /// classification; every other demand takes the public binding names.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn execute_supplied_host_request(
     host: &crate::VerterHost,
     binding: super::native_host_binding::BoundNativeHostRequest,
@@ -637,6 +640,7 @@ pub(crate) fn execute_supplied_host_request(
 /// `HOST_COMPILE_PRODUCT_UNSUPPORTED`: the bound host integration has no
 /// production route for a demanded product kind. The kind is named so the
 /// refusal is readable without parsing the message.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn unsupported_product_diagnostics(
     canonical_id: &str,
     source_len: u32,
@@ -659,6 +663,7 @@ fn unsupported_product_diagnostics(
 /// The bound backend owns request composition and admission; this
 /// function only translates the profile into the backend's demand
 /// document.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn vue_runtime_render_demand(
     profile: &CompileProfile,
     canonical_id: &str,
@@ -694,6 +699,7 @@ pub(crate) fn vue_runtime_render_demand(
 /// admission the host-backed Svelte constructor uses — a malformed token
 /// refuses HERE, never a silent default, and an axis the bound execution
 /// cannot honor refuses typed at the backend's issuance.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn svelte_runtime_render_demand(
     profile: &CompileProfile,
     canonical_id: &str,
@@ -975,6 +981,7 @@ pub(crate) fn runtime_bundle_unsupported_diagnostics(
 /// host-backed lane's exact code/message; an issuance/execution pairing
 /// breach — structurally unreachable on the lane — mapped typed rather
 /// than unwrapped).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) enum RenderExecutionRefusal {
     /// The requested runtime surface was refused; carries the carrier's
     /// structural code and message.
@@ -987,6 +994,7 @@ pub(crate) enum RenderExecutionRefusal {
 }
 
 /// Maps the Vue bound backend's execution refusal for the render lane.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn vue_render_execution_refusal(
     artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
     canonical_id: &str,
@@ -1022,6 +1030,7 @@ pub(crate) fn vue_render_execution_refusal(
 /// surface: a runtime-surface refusal is the typed
 /// `HostError::RuntimeSurfaceRefused`; everything else is a fatal compile
 /// failure carrying the request's diagnostics plus the refusal's payload.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn render_execution_error(
     refusal: RenderExecutionRefusal,
     canonical_id: &str,
@@ -1073,6 +1082,7 @@ impl BoundRenderedMain {
 }
 
 /// Svelte sibling of [`vue_render_execution_refusal`].
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn svelte_render_execution_refusal(
     artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
     canonical_id: &str,

@@ -659,6 +659,7 @@ pub(crate) struct VueParsedRuntimeOutput {
 /// Canonical Vue parsed-runtime lowerer. Classifies topology before emission
 /// and is shared by every Vue runtime-backend entry (trait, parsed-route,
 /// and bundle).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_vue_parsed_runtime(
     source: &str,
     parsed: &ParsedSfc,
@@ -710,6 +711,7 @@ pub(crate) fn lower_vue_parsed_runtime(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_projected_setup(
     source: &str,
     parsed: &ParsedSfc,
@@ -855,6 +857,7 @@ fn compile_projected_setup(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_carrier_selected_template(
     source: &str,
     parsed: &ParsedSfc,
@@ -995,6 +998,7 @@ fn parse_selected_template<'a>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_selected_runtime_template(
     bundle: &mut RuntimeCompileOutput,
     diagnostics: &mut Vec<CompileDiagnostic>,

@@ -253,13 +253,17 @@ impl<F, P, S, R, H> From<TypedCapabilityRegistration<HostCap<H>>> for CatalogRow
     }
 }
 
+/// The catalog's frozen row storage. Named so the five capability
+/// parameters read once here rather than at every use.
+type CatalogRows<F, P, S, R, H> = Box<[CatalogRow<F, P, S, R, H>]>;
+
 /// Process-lifetime immutable catalog of typed rows.
 ///
 /// Construction accepts typed registrations only. Duplicate keys fail; there
 /// is no later mutation and no identity-only catalog that can diverge.
 #[derive(Debug, Clone)]
 pub struct ImmutableCapabilityCatalog<F, P, S, R, H> {
-    rows: Box<[CatalogRow<F, P, S, R, H>]>,
+    rows: CatalogRows<F, P, S, R, H>,
 }
 
 impl<F, P, S, R, H> ImmutableCapabilityCatalog<F, P, S, R, H> {

@@ -11,18 +11,24 @@ use rustc_hash::FxHashMap;
 
 use crate::instant::Instant;
 
-#[cfg(not(target_arch = "wasm32"))]
-use super::compile_request_build::BoundRenderedMain;
+// The runtime-render half of this module is native-only: the bound
+// framework backends, their refusal mappers and `Main` assembly all live
+// behind the same target gate as the render entry points that call them.
 use super::compile_request_build::{
-    execute_bound_host_products, no_carrier_artifact_diagnostics, render_execution_error,
-    request_construction_refused_diagnostics, svelte_admission_refused_diagnostics,
-    svelte_render_execution_refusal, svelte_runtime_render_demand,
-    vue_admission_refused_diagnostics, vue_render_execution_refusal, vue_runtime_render_demand,
-    HostProductsFailure,
+    execute_bound_host_products, no_carrier_artifact_diagnostics, HostProductsFailure,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use super::compile_request_build::{
+    render_execution_error, request_construction_refused_diagnostics,
+    svelte_admission_refused_diagnostics, svelte_render_execution_refusal,
+    svelte_runtime_render_demand, vue_admission_refused_diagnostics, vue_render_execution_refusal,
+    vue_runtime_render_demand, BoundRenderedMain,
 };
 use super::native_host_binding::BoundNativeHostRequest;
 use super::vue_script_extract::template_converter_inputs;
-use crate::compile::{assemble_vue_main_module, VueMainAssemblyFailure};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::compile::assemble_vue_main_module;
+use crate::compile::VueMainAssemblyFailure;
 use crate::hash::compile_profile_hash;
 use crate::id::{parse_raw_id, render_ids, render_single_id};
 use crate::types::*;
