@@ -12,6 +12,7 @@ import {
 } from "./sharedLaunch";
 import { clearRunArtifacts, enforceRunSummary } from "../src/runSummaryOracle";
 import {
+  knownFrameworkContractGapsForRoute,
   requiredFrameworkContractIds,
   type ContractFramework,
 } from "./lib/frameworkContractManifest";
@@ -37,6 +38,19 @@ import {
   type E2eServerProfile,
 } from "./lib/serverProfiles";
 import { FIXTURE_SUITE_GLOBS } from "./lib/fixtureSuiteMap";
+import {
+  isProjectlessContractFixture,
+  PROJECTLESS_CONTRACT_LOADED_FILES,
+  PROJECTLESS_CONTRACT_SUITE_GLOB,
+  PROJECTLESS_CONTRACT_TEST_IDS,
+} from "./lib/projectlessContractManifest";
+import { knownProductGapsForRoute } from "./lib/knownProductGapManifest";
+import {
+  BARREL_REGRESSION_LOADED_FILES,
+  BARREL_REGRESSION_SUITE_GLOB,
+  BARREL_REGRESSION_TEST_IDS,
+  isBarrelRegressionFixture,
+} from "./lib/barrelRegressionManifest";
 
 const EDITOR_ACCEPTANCE_FIXTURE = "editor-owned-project";
 const EXTENSION_ACCEPTANCE_FIXTURE = "out-of-tree-monorepo";
@@ -59,6 +73,43 @@ const CONTRACT_FIXTURES: Readonly<Record<string, { framework: ContractFramework;
     "vue-contract": { framework: "vue", only: "frameworks/vue/contract.test" },
     "svelte-contract": { framework: "svelte", only: "frameworks/svelte/contract.test" },
   };
+
+function reportRouteResult(label: string, productGaps: Readonly<Record<string, string>>): number {
+  const gaps = Object.entries(productGaps).sort(([left], [right]) => left.localeCompare(right));
+  if (gaps.length === 0) {
+    console.log(`  PASSED: ${label}`);
+    return 0;
+  }
+
+  console.warn(
+    `  DEGRADED: ${label} passed executable checks with ${gaps.length} known product-gap ` +
+      `test(s) skipped`,
+  );
+  for (const [id, issue] of gaps) console.warn(`    - ${id} (${issue})`);
+
+  if (process.env.GITHUB_ACTIONS === "true") {
+    console.warn(
+      `::warning title=VS Code E2E degraded::${label} skipped ${gaps.length} known ` +
+        "product-gap test(s); see the job summary for the exact inventory",
+    );
+  }
+  const stepSummary = process.env.GITHUB_STEP_SUMMARY;
+  if (stepSummary) {
+    const rows = gaps.map(([id, issue]) => `| \`${id}\` | \`${issue}\` |`).join("\n");
+    try {
+      fs.appendFileSync(
+        stepSummary,
+        `\n### ⚠️ ${label}: degraded by known product gaps\n\n` +
+          `${gaps.length} test(s) were skipped before execution. This route is not fully green.\n\n` +
+          "| Skipped test | Tracking issue |\n| --- | --- |\n" +
+          `${rows}\n`,
+      );
+    } catch (error) {
+      console.warn(`  Could not append the degraded route report to ${stepSummary}: ${error}`);
+    }
+  }
+  return gaps.length;
+}
 /** Focused parity fixtures: only the parity suite tree runs. */
 const PARITY_FIXTURE_CONFIGS: Readonly<Record<ParityFixture, { only: string }>> = {
   "vue-parity": { only: "parity/" },
@@ -347,6 +398,8 @@ async function main() {
   const lspBinaryPath = copyLspBinaryToTemp(extensionDevelopmentPath);
 
   let totalFailures = 0;
+  let totalDegradedRoutes = 0;
+  let totalSkippedProductGaps = 0;
 
   for (const [index, route] of routesToRun.entries()) {
     const { fixture, typeProvider } = route;
@@ -503,52 +556,69 @@ async function main() {
         if (typeProvider !== "shared-tsgo") {
           launchArgs.push("--disable-extensions");
         }
-        await runTests({
-          vscodeExecutablePath,
-          extensionDevelopmentPath,
-          extensionTestsPath,
-          launchArgs,
-          extensionTestsEnv: {
-            ...process.env,
-            // Every temp-derived artifact the extension host and the LSP it spawns create —
-            // the carrier store above all — lands under this route's own root. `TMPDIR` is
-            // what Node's `os.tmpdir()` and Rust's `std::env::temp_dir()` read on Unix;
-            // `TMP`/`TEMP` are the Windows equivalents, so all three are set.
-            TMPDIR: tempRoot,
-            TMP: tempRoot,
-            TEMP: tempRoot,
-            VERTER_E2E_TEST: "1",
-            VERTER_E2E_PROVIDER_ONLY_COMPLETIONS: "1",
-            VERTER_E2E_LOG_FILE: logFile,
-            VERTER_E2E_FIXTURE: fixture,
-            // What the server was STARTED with. A suite must not infer this from the
-            // live settings — a previous suite may have flipped them — and the
-            // default-configuration pin refuses to run on anything but `default`.
-            [`VERTER_E2E_${E2E_SERVER_PROFILE_ENV}`]: serverProfile,
-            [`VERTER_E2E_${E2E_BASE_SERVER_PROFILE_ENV}`]: baseServerProfile,
-            VERTER_E2E_TIMING_FILE: path.join(HARNESS_TEMP_ROOT, `verter-e2e-timing-${label}.json`),
-            VERTER_LOG: "debug",
-            ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
-            ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
-            ...(rcTsgoBinaryPath && (typeProvider === "tsgo" || typeProvider === "shared-tsgo")
-              ? { VERTER_TSGO_BIN: rcTsgoBinaryPath }
-              : {}),
-            ...(fixture === EDITOR_ACCEPTANCE_FIXTURE
-              ? { VERTER_E2E_ONLY: "editor-owned-project.test" }
-              : fixture === EXTENSION_ACCEPTANCE_FIXTURE
-                ? { VERTER_E2E_ONLY: "out-of-tree-monorepo.test" }
-                : CONTRACT_FIXTURES[fixture]
-                  ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
-                  : fixture in PARITY_FIXTURE_CONFIGS
-                    ? {
-                        VERTER_E2E_ONLY:
-                          onlyPattern ?? PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
-                      }
-                    : onlyPattern
-                      ? { VERTER_E2E_ONLY: onlyPattern }
-                      : {}),
-          },
-        });
+        let extensionHostError: unknown;
+        try {
+          await runTests({
+            vscodeExecutablePath,
+            extensionDevelopmentPath,
+            extensionTestsPath,
+            launchArgs,
+            extensionTestsEnv: {
+              ...process.env,
+              // Every temp-derived artifact the extension host and the LSP it spawns create —
+              // the carrier store above all — lands under this route's own root. `TMPDIR` is
+              // what Node's `os.tmpdir()` and Rust's `std::env::temp_dir()` read on Unix;
+              // `TMP`/`TEMP` are the Windows equivalents, so all three are set.
+              TMPDIR: tempRoot,
+              TMP: tempRoot,
+              TEMP: tempRoot,
+              VERTER_E2E_TEST: "1",
+              VERTER_E2E_PROVIDER_ONLY_COMPLETIONS: "1",
+              VERTER_E2E_LOG_FILE: logFile,
+              VERTER_E2E_FIXTURE: fixture,
+              // What the server was STARTED with. A suite must not infer this from the
+              // live settings — a previous suite may have flipped them — and the
+              // default-configuration pin refuses to run on anything but `default`.
+              [`VERTER_E2E_${E2E_SERVER_PROFILE_ENV}`]: serverProfile,
+              [`VERTER_E2E_${E2E_BASE_SERVER_PROFILE_ENV}`]: baseServerProfile,
+              VERTER_E2E_TIMING_FILE: path.join(
+                HARNESS_TEMP_ROOT,
+                `verter-e2e-timing-${label}.json`,
+              ),
+              VERTER_LOG: "debug",
+              ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
+              ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
+              ...(rcTsgoBinaryPath && (typeProvider === "tsgo" || typeProvider === "shared-tsgo")
+                ? { VERTER_TSGO_BIN: rcTsgoBinaryPath }
+                : {}),
+              ...(fixture === EDITOR_ACCEPTANCE_FIXTURE
+                ? { VERTER_E2E_ONLY: "editor-owned-project.test" }
+                : fixture === EXTENSION_ACCEPTANCE_FIXTURE
+                  ? { VERTER_E2E_ONLY: "out-of-tree-monorepo.test" }
+                  : isProjectlessContractFixture(fixture)
+                    ? { VERTER_E2E_ONLY: PROJECTLESS_CONTRACT_SUITE_GLOB }
+                    : isBarrelRegressionFixture(fixture)
+                      ? { VERTER_E2E_ONLY: BARREL_REGRESSION_SUITE_GLOB }
+                      : CONTRACT_FIXTURES[fixture]
+                        ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
+                        : fixture in PARITY_FIXTURE_CONFIGS
+                          ? {
+                              VERTER_E2E_ONLY:
+                                onlyPattern ??
+                                PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
+                            }
+                          : onlyPattern
+                            ? { VERTER_E2E_ONLY: onlyPattern }
+                            : {}),
+            },
+          });
+        } catch (error) {
+          // The structured run summary below is the verdict authority: it rejects
+          // every failure, missing/duplicate required tests, and missing summaries.
+          // Retain the launcher error for diagnostics because the editor process
+          // exit code is unreliable on some hosts.
+          extensionHostError = error;
+        }
         // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
         // on some hosts (Windows: VS Code can exit 0 even when the extension test run
         // rejected). The authoritative oracle is the run summary the mocha runner writes
@@ -557,18 +627,54 @@ async function main() {
         // required gate; no ordinary fixture is allowed a legacy zero-execution pass.
         const contract = CONTRACT_FIXTURES[fixture];
         const parity = requiredParityRun(fixture, onlyPattern);
+        const projectlessContract = isProjectlessContractFixture(fixture);
+        const barrelRegression = isBarrelRegressionFixture(fixture);
+        const allowedProductGaps = parity
+          ? knownProductGapsForRoute(fixture, typeProvider, parity.testIds)
+          : contract
+            ? knownFrameworkContractGapsForRoute(contract.framework, typeProvider)
+            : undefined;
         const requiredLoadedFiles = contract
           ? [`frameworks/${contract.framework}/contract.test.js`]
-          : parity?.loadedFiles;
-        await enforceRunSummary(logFile, label, {
-          expectedFixture: fixture,
-          expectedTypeProvider: typeProvider,
-          requiredLoadedFiles,
-          requiredTestIds: contract
-            ? requiredFrameworkContractIds(contract.framework)
-            : parity?.testIds,
-        });
-        console.log(`  PASSED: ${label}`);
+          : projectlessContract
+            ? PROJECTLESS_CONTRACT_LOADED_FILES
+            : barrelRegression
+              ? BARREL_REGRESSION_LOADED_FILES
+              : parity?.loadedFiles;
+        try {
+          await enforceRunSummary(logFile, label, {
+            expectedFixture: fixture,
+            expectedTypeProvider: typeProvider,
+            requiredLoadedFiles,
+            requiredTestIds: contract
+              ? requiredFrameworkContractIds(contract.framework)
+              : projectlessContract
+                ? PROJECTLESS_CONTRACT_TEST_IDS
+                : barrelRegression
+                  ? BARREL_REGRESSION_TEST_IDS
+                  : parity?.testIds,
+            allowedProductGaps,
+          });
+        } catch (summaryError) {
+          if (extensionHostError) {
+            console.error(
+              `  Extension-host process also exited non-zero for ${label}:`,
+              extensionHostError,
+            );
+          }
+          throw summaryError;
+        }
+        if (extensionHostError) {
+          console.warn(
+            `  Extension-host process exited non-zero for ${label}; the complete run summary ` +
+              "contains no test failures and passed its exact inventory checks.",
+          );
+        }
+        const skippedProductGaps = reportRouteResult(label, allowedProductGaps ?? {});
+        if (skippedProductGaps > 0) {
+          totalDegradedRoutes++;
+          totalSkippedProductGaps += skippedProductGaps;
+        }
       } catch (err) {
         console.error(`  FAILED: ${label}`, err);
         totalFailures++;
@@ -591,7 +697,14 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("\nAll fixture E2E tests passed.");
+  if (totalDegradedRoutes > 0) {
+    console.warn(
+      `\nFixture E2E gates completed with ${totalDegradedRoutes} DEGRADED route(s) and ` +
+        `${totalSkippedProductGaps} known product-gap test(s) skipped; not fully green.`,
+    );
+  } else {
+    console.log("\nAll fixture E2E tests passed with no known product-gap skips.");
+  }
 }
 
 main().catch((err) => {

@@ -125,12 +125,32 @@ assert.deepEqual(
 
 const observed = { ready: new Set(), sync: new Set() };
 const latestDiagnostics = new Map();
+const diagnosticHistory = new Map();
+const diagnosticNotificationCounts = new Map();
 const client = new LspClient(`${plan.editor}-contract`, plan.command, plan.args, root, {
   defaultTimeout: 30_000,
-  stderr: { maxBytes: Number.POSITIVE_INFINITY },
+  stderr: {
+    maxBytes: 256 * 1024,
+    onLine:
+      process.env.VERTER_EDITOR_CONTRACT_TRACE === "1"
+        ? (line) => console.error(`[server stderr] ${line}`)
+        : undefined,
+  },
   onAnyNotification(method, params) {
     if (method === "textDocument/publishDiagnostics" && typeof params?.uri === "string") {
-      latestDiagnostics.set(params.uri, params.diagnostics ?? []);
+      const diagnostics = params.diagnostics ?? [];
+      latestDiagnostics.set(params.uri, diagnostics);
+      const history = diagnosticHistory.get(params.uri) ?? [];
+      diagnosticNotificationCounts.set(
+        params.uri,
+        (diagnosticNotificationCounts.get(params.uri) ?? 0) + 1,
+      );
+      history.push({
+        version: params.version ?? null,
+        count: diagnostics.length,
+        codes: diagnostics.map(diagnosticCode),
+      });
+      diagnosticHistory.set(params.uri, history.slice(-8));
     }
     if (process.env.VERTER_EDITOR_CONTRACT_TRACE === "1") {
       console.error(`[${method}] ${JSON.stringify(params)}`);
@@ -143,6 +163,26 @@ function latestFixtureDiagnostics(file) {
     if (isFixtureUri(uri, file)) return diagnostics;
   }
   return [];
+}
+
+function fixtureFailureTelemetry(file) {
+  let matchingUri;
+  for (const uri of new Set([
+    ...latestDiagnostics.keys(),
+    ...diagnosticNotificationCounts.keys(),
+  ])) {
+    if (isFixtureUri(uri, file)) {
+      matchingUri = uri;
+      break;
+    }
+  }
+  const history = matchingUri ? (diagnosticHistory.get(matchingUri) ?? []) : [];
+  return JSON.stringify({
+    notificationCount: matchingUri ? (diagnosticNotificationCounts.get(matchingUri) ?? 0) : 0,
+    recentNotifications: history,
+    latestDiagnostics: latestFixtureDiagnostics(file),
+    stderrTail: client.stderr.lines().slice(-20),
+  });
 }
 client.onNotification("$/verter/ready", (params) => observed.ready.add(params?.gen));
 client.onNotification("$/verter/typeProviderSyncComplete", (params) =>
@@ -217,7 +257,7 @@ try {
     const invalidPublished = await invalidDiagnostics.catch((error) => {
       throw new Error(
         `${plan.editor}/${testCase.file} did not publish the authored mutation diagnostic; ` +
-          `latest=${JSON.stringify(latestFixtureDiagnostics(testCase.file))}: ${error.message}`,
+          `telemetry=${fixtureFailureTelemetry(testCase.file)}: ${error.message}`,
       );
     });
     assert.equal(
@@ -245,7 +285,7 @@ try {
     const restored = await restoredDiagnostics.catch((error) => {
       throw new Error(
         `${plan.editor}/${testCase.file} did not restore to zero diagnostics; ` +
-          `latest=${JSON.stringify(latestFixtureDiagnostics(testCase.file))}: ${error.message}`,
+          `telemetry=${fixtureFailureTelemetry(testCase.file)}: ${error.message}`,
       );
     });
     assert.deepEqual(

@@ -20,7 +20,6 @@ import {
   PROJECT_VIEWS,
   ProtectedMappingError,
   schedule,
-  syncIssues,
 } from "../index.mjs";
 import { deriveState } from "../../../roadmap/0.1.0-tama/tools/lib.mjs";
 
@@ -29,7 +28,6 @@ const REPO_ROOT = path.resolve(HERE, "../../..");
 const CLI = path.join(HERE, "../githubctl.mjs");
 const TOOLS = path.join(REPO_ROOT, "roadmap/0.1.0-tama/tools");
 const CONTRACT = path.join(REPO_ROOT, "roadmap/0.1.0-tama/contracts/github-control-plane.md");
-const MODEL = "rel0-test-model";
 
 function fake(options = {}) {
   return new FakeGitHubAdapter({ owner: "pikax", repo: "verter", ...options });
@@ -182,25 +180,6 @@ test("REL0-AC1 milestone write without --set-milestone does not call setIssueMil
   assert.equal(applied.release_target, null);
   assert.equal(fx.adapter.milestoneWrites.length, 0);
   assert.equal(fx.adapter.getIssue(10).milestone ?? null, null);
-});
-
-test("REL0-AC1 GH2 sync-issues still does not add project items", () => {
-  const adapter = fake({ nextIssueNumber: 40 });
-  const ledgerPath = writeLedger({
-    implemented: ["ORC0", "GH0", "GH1"],
-    issues: [],
-  });
-  const report = syncIssues({
-    adapter,
-    mode: "apply",
-    nodes: ["GH0"],
-    model: MODEL,
-    ledgerPath,
-    clearance: clearanceFor(adapter),
-  });
-  assert.equal(report.created[0].gh_issue, 40);
-  assert.deepEqual(adapter.getProjectItems(PROJECT_NUMBER), []);
-  assert.equal(adapter.milestoneWrites.length, 0);
 });
 
 test("REL0-AC1 programctl stays GitHub-blind", () => {
@@ -559,7 +538,7 @@ test("REL0-AC1 GraphQL 200 with errors on addProjectV2ItemById aborts and schedu
         "issue(",
         {
           data: {
-            repository: { issue: { id: "I_1", projectsV2: { totalCount: 0, nodes: [] } } },
+            repository: { issue: { id: "I_1", projectItems: { totalCount: 0, nodes: [] } } },
           },
         },
       ],
@@ -592,7 +571,7 @@ test("addIssueToProject requires a returned item identity", () => {
         "issue(",
         {
           data: {
-            repository: { issue: { id: "I_1", projectsV2: { totalCount: 0, nodes: [] } } },
+            repository: { issue: { id: "I_1", projectItems: { totalCount: 0, nodes: [] } } },
           },
         },
       ],
@@ -640,9 +619,9 @@ test("incomplete Project membership fails closed and complete membership is exac
             repository: {
               issue: {
                 id: "I_1",
-                projectsV2: {
+                projectItems: {
                   totalCount: 1,
-                  nodes: [{ id: "PVT_3", number: 3 }],
+                  nodes: [{ id: "PVTI_3", project: { id: "PVT_3", number: 3 } }],
                 },
               },
             },
@@ -672,7 +651,7 @@ test("incomplete Project membership fails closed and complete membership is exac
         {
           data: {
             repository: {
-              issue: { id: "I_1", projectsV2: { totalCount: 0, nodes: [] } },
+              issue: { id: "I_1", projectItems: { totalCount: 0, nodes: [] } },
             },
           },
         },
@@ -700,9 +679,9 @@ test("incomplete Project membership fails closed and complete membership is exac
             repository: {
               issue: {
                 id: "I_1",
-                projectsV2: {
+                projectItems: {
                   totalCount: 1,
-                  nodes: [{ id: "PVT_3", number: 3 }],
+                  nodes: [{ id: "PVTI_3", project: { id: "PVT_3", number: 3 } }],
                 },
               },
             },
@@ -759,7 +738,7 @@ test("REL0-AC2 live addIssueToProject is doctor-gated and idempotent on GraphQL"
             return {
               data: {
                 repository: {
-                  issue: { id: "I_1", projectsV2: { totalCount: 0, nodes: [] } },
+                  issue: { id: "I_1", projectItems: { totalCount: 0, nodes: [] } },
                 },
               },
             };
@@ -800,6 +779,19 @@ test("REL0-AC2 live addIssueToProject is doctor-gated and idempotent on GraphQL"
   assert.equal(applied.number, 3);
   assert.equal(applied.issueNumber, 10);
   assert.equal(
+    calls.some((row) => row.path === "graphql" && row.body?.query?.includes("projectsV2")),
+    false,
+  );
+  assert.equal(
+    calls.some(
+      (row) =>
+        row.path === "graphql" &&
+        row.body?.query?.includes("projectItems(first:100)") &&
+        row.body.query.includes("pullRequest(number:"),
+    ),
+    false,
+  );
+  assert.equal(
     calls.some(
       (row) => row.path === "graphql" && row.body?.query?.includes("addProjectV2ItemById"),
     ),
@@ -810,15 +802,13 @@ test("REL0-AC2 live addIssueToProject is doctor-gated and idempotent on GraphQL"
 test("CLI scheduling fails closed when the mapped issue is missing", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-schedule-cli-"));
   const ledgerPath = path.join(dir, "implemented.toml");
+  const liveLedger = fs.readFileSync(
+    path.join(REPO_ROOT, "roadmap/0.1.0-tama/authority/state/implemented.toml"),
+    "utf8",
+  );
   fs.writeFileSync(
     ledgerPath,
-    `${fs.readFileSync(path.join(REPO_ROOT, "roadmap/0.1.0-tama/authority/state/implemented.toml"), "utf8").trimEnd()}
-
-[[github_issue]]
-node_id = "D1"
-gh_issue = 10
-sync_to_github = true
-`,
+    liveLedger.replace(/node_id = "D1"\ngh_issue = \d+/u, 'node_id = "D1"\ngh_issue = 10'),
   );
   const check = spawnSync(
     process.execPath,

@@ -19,6 +19,7 @@ review_profile = "semantic-3"
 dispatchable = true
 optional = false
 release_gating = "none"
+gh_milestone = "0.0.2"
 external_requirements = []
 charter = "charters/rev11-host-runtime/H1.md"
 implementation_effort_min = "medium"

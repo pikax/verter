@@ -666,6 +666,6 @@ pub fn check_corpus(root: &Path) -> Result<(), Vec<Drift>> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "conformance-tests"))]
 #[path = "generate_tests.rs"]
 mod generate_tests;

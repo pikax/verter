@@ -30,6 +30,12 @@ export {
 export { loadEnduranceConfig } from "./config.js";
 
 export {
+  ENDURANCE_FIXTURE_DEPENDENCIES,
+  stageEnduranceFixtureDependencies,
+  type EnduranceFixtureFramework,
+} from "./fixtureDependencies.js";
+
+export {
   classifyRequestError,
   ConcurrencyPool,
   LatencyRecorder,

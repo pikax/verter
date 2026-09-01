@@ -128,7 +128,7 @@ fn bad_target_option_surfaces_ts6046() {
         return;
     };
 
-    let bin = env!("CARGO_BIN_EXE_verter-tsc");
+    let bin = verter_test_support::cargo_test_binary_path!("verter-tsc");
     let output = Command::new(bin)
         .env("VERTER_TSGO_BIN", &rc_engine)
         .arg("--noEmit")

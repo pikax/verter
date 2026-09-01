@@ -420,7 +420,7 @@ The sealed `applyBlockOverrides()` handoff remains the input channel for caller-
 
 Style blocks with `lang="scss"`, `lang="sass"`, `lang="less"`, or `lang="stylus"` require caller-owned preprocessing before the plain-CSS module/scoping stages.
 
-**Vite mode:** the unplugin caches raw authored style content and preserves its authored `lang` in the style request. Vite's CSS pipeline performs preprocessing; Vue-specific post-processing then consumes the resulting plain CSS.
+**Vite mode:** the unplugin caches raw authored style content and preserves its authored `lang` in the style request. Its Vue `RuntimeRender` Main request selects the typed `RuntimeStyleProcessing::AuthoredOnly` plan so authored `v-bind()` facts still drive runtime codegen without claiming modules/scoping before CSS exists. Vite's CSS pipeline performs preprocessing; Vue-specific post-processing then consumes the resulting plain CSS. Host-backed, non-Vite, and direct compiles retain the default `Complete` plan and therefore remain fail-closed for scoped non-CSS without supplied preprocessing.
 
 **Non-Vite mode:** `preprocessBlock()` / `preprocessStyle()` use Vite's `preprocessCSS()` when configured. The result returns through the sealed `applyBlockOverrides()` channel with validated artifact, revision, source-space, and content hashes before the compiler runs the plain-CSS stages.
 

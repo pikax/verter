@@ -32,6 +32,7 @@ use std::sync::Arc;
 use crate::resolver_core::StoreView;
 use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_scheduler::stage::Priority;
 
 const DEP_ID: &str = "/proj/dep.ts";
 const DEP_SRC: &str = "export const d = 1\nexport interface D { x: number }\n";
@@ -39,19 +40,50 @@ const MEMBER_SRC: &str =
     "import { d, type D } from './dep'\nexport const use = d\nexport type R = D\n";
 
 /// Host sizes the O(1) claim is measured across. A 12x span: any surviving
-/// per-owner term shows up as a 12x cost, not as noise.
+/// per-owner term shows up as a 12x cost, not as noise. Every fixture file is
+/// virtual: its canonical ID names an in-memory `MemoryWorkspace` overlay and
+/// its source is supplied directly through `UpsertRequest`; this suite performs
+/// no fixture filesystem I/O.
 const HOST_SIZES: [usize; 3] = [250, 1000, 3000];
+
+fn ts_request(id: impl Into<String>, source: &str) -> UpsertRequest {
+    UpsertRequest {
+        canonical_id: None,
+        input_id: id.into(),
+        source: Arc::from(source),
+        file_language: FileLanguage::script_ts(),
+        aliases: Vec::new(),
+    }
+}
 
 fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
     let _ = host
-        .upsert(UpsertRequest {
-            canonical_id: None,
-            input_id: id.to_string(),
-            source: Arc::from(source),
-            file_language: FileLanguage::script_ts(),
-            aliases: Vec::new(),
-        })
+        .upsert(ts_request(id, source))
         .unwrap_or_else(|err| panic!("upsert {id} must succeed: {err:?}"));
+}
+
+/// Admit a complete synthetic project through the host's production bulk
+/// boundary: one atomic scheduler submission and one batch wait. The logical
+/// `/proj/...` IDs are virtual paths; all source bytes stay in memory. Building
+/// a bulk fixture from singleton `upsert` calls would test the same final host
+/// state while redundantly paying one scheduler transaction per file.
+fn upsert_materialized_project_sources(host: &VerterHost, n: usize) {
+    let mut requests = Vec::with_capacity(n + 1);
+    requests.push(ts_request(DEP_ID, DEP_SRC));
+    requests.extend((0..n).map(|i| ts_request(member_id(i), MEMBER_SRC)));
+
+    let outcomes = host.upsert_many_with_priority(requests, Priority::Interactive);
+    assert_eq!(
+        outcomes.len(),
+        n + 1,
+        "bulk fixture admission must report one outcome per source"
+    );
+    for outcome in outcomes {
+        let canonical = outcome.canonical_id;
+        let _ = outcome
+            .result
+            .unwrap_or_else(|err| panic!("bulk upsert {canonical} must succeed: {err:?}"));
+    }
 }
 
 fn member_id(i: usize) -> String {
@@ -62,13 +94,38 @@ fn member_id(i: usize) -> String {
 /// cross-file import edge — the state the eager builder had to walk.
 fn host_with_n_materialized_files(n: usize) -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    upsert_ts(&host, DEP_ID, DEP_SRC);
+    upsert_materialized_project_sources(&host, n);
+    // This suite measures store-view capture, not declaration-index parsing.
+    // Seed the minimum current-content IndexedReady row directly from each
+    // scheduler-authoritative whole hash. Production bulk admission above has
+    // already parsed every source and published the real workspace edges; a
+    // second serial `ensure_indexed_ready_serve` pass would benchmark an
+    // unrelated materializer N times before the O(1) assertion starts.
+    let seed_indexed = |canonical: &str| {
+        let whole_hash = host
+            .scheduler
+            .try_get_source(canonical)
+            .unwrap_or_else(|| panic!("bulk admission must retain {canonical}"))
+            .whole_hash;
+        let canonical: Arc<str> = Arc::from(canonical);
+        let indexed = Arc::new(crate::project_type_store::IndexedReady::new_for_test(
+            whole_hash,
+        ));
+        let key = crate::file_artifact_store::FileArtifactKey::for_indexed(
+            Arc::clone(&canonical),
+            &indexed,
+            crate::file_artifact_store::BASE_PARSE_ENV_HASH,
+        );
+        host.project_type_store().indexed().insert_artifacts(
+            key,
+            Arc::new(crate::file_artifact_store::FileArtifacts::with_indexed(
+                indexed,
+            )),
+        );
+    };
+    seed_indexed(DEP_ID);
     for i in 0..n {
-        upsert_ts(&host, &member_id(i), MEMBER_SRC);
-    }
-    let _ = host.ensure_indexed_ready_serve(DEP_ID);
-    for i in 0..n {
-        let _ = host.ensure_indexed_ready_serve(&member_id(i));
+        seed_indexed(&member_id(i));
     }
     // Precondition: without published artifacts there would be nothing for
     // a per-owner term to walk, and "no work happened" would be vacuous.
@@ -80,7 +137,45 @@ fn host_with_n_materialized_files(n: usize) -> Arc<VerterHost> {
         "precondition: every preloaded member must be materialised, else \
          the zero-work assertions below prove nothing"
     );
+    assert_eq!(
+        host.ws().forward_deps_for(&member_id(n - 1)),
+        vec![DEP_ID.to_string()],
+        "precondition: the last owner must retain its real workspace import edge"
+    );
     host
+}
+
+/// Bulk source admission must leave ordinary import resolution to the
+/// workspace's batched parsed-edge transaction. `DependencyState` retains the
+/// authored relative stem for bookkeeping; resolving that stem again through
+/// `normalized_analysis_canonical` once per owner duplicates the workspace
+/// resolver and makes this fixture scale with N resolver walks before the
+/// store-view assertion even begins.
+#[test]
+fn bulk_fixture_admission_performs_no_per_owner_host_resolution() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    host.begin_resolution_currency_observation();
+
+    upsert_materialized_project_sources(&host, 32);
+
+    assert_eq!(
+        host.take_resolution_currency_observations(),
+        Vec::<crate::host_test_audit::ResolutionCurrencyObservation>::new(),
+        "ordinary imports must be resolved by the one workspace parsed-edge batch, not once per owner through the host resolver"
+    );
+    assert_eq!(
+        host.dependency_cache()
+            .get(&member_id(0))
+            .expect("bulk admission must publish dependency state")
+            .dependencies,
+        std::collections::BTreeSet::from(["/proj/dep".to_string()]),
+        "DependencyState keeps the parse-derived joined stem; the workspace graph owns the resolved target"
+    );
+    assert_eq!(
+        host.ws().forward_deps_for(&member_id(0)),
+        vec![DEP_ID.to_string()],
+        "the workspace batch must still publish the fully resolved dependency edge"
+    );
 }
 
 /// Force a fresh build (the manager serves a token-stable view from cache
@@ -96,13 +191,24 @@ fn freshly_built_view(host: &VerterHost) -> crate::resolver_store::HostStoreView
 fn store_view_build_resolves_zero_canonicals_at_any_host_size() {
     for n in HOST_SIZES {
         let host = host_with_n_materialized_files(n);
-        let view = freshly_built_view(&host);
+        host.bump_store_view_epoch();
+        crate::store_view_roots::reset_store_view_owner_visits();
+        let view = host.resolver_store_view_read().into_owned_view();
         assert_eq!(
             view.memo_len_for_tests(),
             0,
             "host size {n}: a build must resolve ZERO canonicals — it captures \
              roots and nothing else. A per-owner term would show up here as a \
              count proportional to {n}."
+        );
+        let visits = crate::store_view_roots::store_view_owner_visits();
+        assert_eq!(
+            visits, 0,
+            "host size {n}: the build touched {visits} owner(s) through its \
+             captured roots. A build must be a fixed number of scalar reads \
+             and `Arc` clones — any owner visit means a per-owner term is \
+             back, and a build that does this at N={n} would do it at every \
+             host size the O(1) contract is measured across."
         );
     }
 }
@@ -148,44 +254,6 @@ fn the_resolved_canonical_witness_moves_when_a_canonical_is_actually_resolved() 
         2,
         "a repeated demand for the same canonical must not add a second entry"
     );
-}
-
-/// Deterministic companion to the structural assertion above: the build
-/// must not touch a SINGLE owner through its captured roots, at any host
-/// size. This used to be measured as a wall-clock ratio (a 12x host span
-/// must not produce a ~12x build), but `Instant`-based timing flakes under
-/// parallel/loaded test execution and correctness tests in this crate must
-/// be deterministic — wall-clock budgets belong in `verter_bench`.
-///
-/// `store_view_owner_visits` (`crate::store_view_roots`) is a THREAD-LOCAL
-/// counter that increments on every read through a view's captured roots
-/// while a store-view BUILD scope is active — the exact production build
-/// path (`HostStoreView::build` enters the scope itself), not a test-only
-/// variant. It is proven to have a live producer and to be scope-gated
-/// (counts build-time reads, not demand-time ones) by
-/// `store_view_marginal_admit_tests::the_owner_visit_counter_moves_only_inside_a_build_scope`.
-/// A restored per-owner term in the builder — even one that copies data
-/// without going through `memo_len_for_tests` — visits at least one owner
-/// per already-materialised file and moves this counter by N; a correct
-/// O(1) build moves it by exactly zero, at every host size.
-#[test]
-fn store_view_build_touches_no_owner_at_any_host_size() {
-    for n in HOST_SIZES {
-        let host = host_with_n_materialized_files(n);
-        host.bump_store_view_epoch();
-        crate::store_view_roots::reset_store_view_owner_visits();
-        let view = host.resolver_store_view_read().into_owned_view();
-        let visits = crate::store_view_roots::store_view_owner_visits();
-        assert_eq!(
-            visits, 0,
-            "host size {n}: the build touched {visits} owner(s) through its \
-             captured roots. A build must be a fixed number of scalar reads \
-             and `Arc` clones — any owner visit means a per-owner term is \
-             back, and a build that does this at N={n} would do it at every \
-             host size the O(1) contract is measured across."
-        );
-        drop(view);
-    }
 }
 
 // ── 2. The captured roots answer for the view's own world ──

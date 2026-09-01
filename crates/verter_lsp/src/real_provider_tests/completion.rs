@@ -118,9 +118,15 @@ real_provider_test!(
         session
             .server()
             .set_provider_only_completions_for_test(true);
+        let child_uri = session
+            .open_fixture_file("src/ide/IdeSurfaceChild.svelte")
+            .await;
         let uri = session
             .open_fixture_file("src/ide/IdeSurfaceParent.svelte")
             .await;
+        session.ensure_synced(&child_uri).await;
+        session.ensure_synced(&uri).await;
+        session.settle_import_dependencies(&uri).await;
         let original = session
             .server()
             .test_documents()
@@ -144,6 +150,8 @@ real_provider_test!(
                 }],
             })
             .await;
+        session.ensure_synced(&uri).await;
+        session.settle_import_dependencies(&uri).await;
         let position = session.find_position(&uri, "onPick={on}", "onPick={on".len());
 
         let mut labels = Vec::new();
@@ -231,7 +239,7 @@ import IdeSurfaceChild from './IdeSurfaceChild.vue'
 );
 
 #[tokio::test(flavor = "multi_thread")]
-async fn svelte_contract_tsgo_template_completion_survives_provider_specialization() {
+async fn svelte_contract_template_completion_survives_provider_specialization_tsgo() {
     use crate::test_harness::{TestProviderKind, TestSessionBuilder};
 
     let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsgo)
@@ -688,6 +696,7 @@ real_provider_test!(
         session.ensure_synced(&emit_child_uri).await;
         session.ensure_synced(&global_emit_uri).await;
         session.ensure_synced(&uri).await;
+        session.settle_import_dependencies(&uri).await;
 
         // Warm-up probe on a stable interpolation binding (NOT the event-arg path under
         // test) so a regression FAILS the assertions below instead of vacuously skipping.

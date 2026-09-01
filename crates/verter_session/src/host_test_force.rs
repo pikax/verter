@@ -16,6 +16,18 @@
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct TestForceKnobs {
+    /// Cumulative host-level audit state exposed only to in-process tests.
+    pub(crate) audit: std::sync::Arc<crate::host_test_audit::HostTestAuditState>,
+    /// Last scheduler priority observed by `upsert_with_priority`.
+    pub(crate) last_upsert_priority: parking_lot::Mutex<Option<verter_scheduler::stage::Priority>>,
+    /// Number of `compile_one_in_batch` invocations.
+    pub(crate) compile_one_call_count: std::sync::atomic::AtomicUsize,
+    /// Number of full public `HostUpdateResult` payloads materialized by
+    /// scheduler-backed admission. `compile_many` needs only success/failure
+    /// and must leave this at zero.
+    pub(crate) upsert_result_materialization_count: std::sync::atomic::AtomicUsize,
+    /// Encoded `CallerKind` observed by the latest compile worker.
+    pub(crate) compile_one_caller_kind_tag: std::sync::atomic::AtomicU8,
     /// Seam fired inside the base `IndexedReady` materialise flight after the
     /// scheduler source snapshot is held and before remaining products are
     /// assembled from it. Fence tests install a content upsert here to assert
@@ -155,6 +167,9 @@ pub(crate) enum TracerScope {
     /// cache producer: nested scopes stay cacheable while only the final
     /// resolved-meta publication is refused.
     ComponentMetaRequest,
+    /// The separately-finalized output-materialization read set used by a
+    /// reusable component public-contract projection witness.
+    ComponentMetaOutput,
     /// The framework script-fact entry-point's IMPORT-ROUTE resolution scope —
     /// the cacheability tracer that brackets `resolve_snapshot_imports`, whose
     /// verdict (fenced serve OR fact-signature overflow) is the ONLY thing that

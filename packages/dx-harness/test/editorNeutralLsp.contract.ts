@@ -80,6 +80,7 @@ const counters: RunCounters = { attempted: 0, passed: 0, failed: 0, setupFailure
 const outcomes: ExecutionOutcome[] = [];
 const typeScriptCliControls: Partial<Record<"jsx" | "tsx", TypeScriptCliControlOutcome>> = {};
 let laxJavaScriptPolicyControl: TypeScriptCliControlOutcome | undefined;
+let authoredCheckJavaScriptPolicyControl: TypeScriptCliControlOutcome | undefined;
 
 async function resolveTypeScript7Compiler(): Promise<{ compiler: string; version: string }> {
   const resolver = path.join(REPO_ROOT, "node_modules", "typescript", "lib", "getExePath.js");
@@ -181,6 +182,58 @@ describe.sequential("TypeScript >=7 authority control", () => {
       expect(diagnosticCodes).toEqual([]);
     } catch (error) {
       laxJavaScriptPolicyControl = {
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      };
+      throw error;
+    }
+  });
+
+  // @ai-generated - Pins the authored directive override against the real TS7 compiler.
+  it("honors authored @ts-check when project checking is disabled", async () => {
+    try {
+      const { compiler, version } = await resolveTypeScript7Compiler();
+      const controlFile = path.join(
+        WORKSPACE_ROOT,
+        "src",
+        "policy",
+        "lax",
+        "plain-authored-check-control.jsx",
+      );
+      const control = spawnSync(
+        compiler,
+        [
+          "--ignoreConfig",
+          "--noEmit",
+          "--allowJs",
+          "--checkJs",
+          "false",
+          "--target",
+          "es2022",
+          "--module",
+          "esnext",
+          "--moduleResolution",
+          "bundler",
+          "--lib",
+          "es2022,dom",
+          controlFile,
+        ],
+        { cwd: REPO_ROOT, encoding: "utf8" },
+      );
+      const output = `${control.stdout}${control.stderr}`.trim();
+      const diagnosticCodes = [...output.matchAll(/error TS(\d+):/g)].map((match) =>
+        Number(match[1]),
+      );
+      authoredCheckJavaScriptPolicyControl = {
+        status: "passed",
+        version,
+        diagnosticCodes,
+        output,
+      };
+      expect(control.status, "the authored directive must re-enable JavaScript checking").toBe(1);
+      expect(diagnosticCodes).toEqual([2339]);
+    } catch (error) {
+      authoredCheckJavaScriptPolicyControl = {
         status: "failed",
         error: error instanceof Error ? error.message : String(error),
       };
@@ -321,7 +374,10 @@ afterAll(() => {
         expectedExecutions: EXPECTED_EXECUTIONS,
         authorityControls: {
           typeScriptCli: typeScriptCliControls,
-          authoredPolicy: { laxJavaScript: laxJavaScriptPolicyControl },
+          authoredPolicy: {
+            laxJavaScript: laxJavaScriptPolicyControl,
+            authoredCheckJavaScript: authoredCheckJavaScriptPolicyControl,
+          },
         },
         inventoryGroups,
         executionGroups,
@@ -339,7 +395,7 @@ afterAll(() => {
   // Must Prove Execution"). The inventory is independently discovered by
   // createEditorNeutralContractInventory(); this pin ratifies its expected size so a
   // silently added/dropped case fails the gate rather than passing unnoticed.
-  // Derivation of 89 (every contributing case is a required, adversarially-reviewed
+  // Derivation of 93 (every contributing case is a required, adversarially-reviewed
   // landed block — none accidental):
   //   73  initial editor-neutral provider contract.
   //   +9  → 82: the neutral-LSP hardening range (provider evidence, navigation
@@ -353,13 +409,22 @@ afterAll(() => {
   //        default in the server AND the shipped client), which would have left
   //        NOTHING asserting the default. This pins the default's actual behaviour
   //        on the same anchor, so a flip in either direction fails the gate.
+  //   -1  → 89: the JSX diagnostic row moved back to direct-compiler authority;
+  //        current tsserver and tsgo provider routes expose different legitimate
+  //        JSX capabilities. The TSX diagnostic row remains on every route.
+  //   +4  → 93: authored `@ts-check` and `@ts-nocheck` policy overrides for
+  //        Vue and Svelte JavaScript carriers.
+  //   +2  → 95 total inventory: one custom-protocol provider attestation and one
+  //        shared-provider topology case outside the standard-LSP surface.
+  // The two authored `@ts-check` rows run on tsserver only: the pinned managed/shared
+  // TSGO API does not expose the per-file enable override when `checkJs` is false.
   // EXPECTED_EXECUTIONS is COMPUTED from per-route applicability (see ROUTES.reduce
-  // above), never hardcoded; the .toBe(274) below is a drift-guard on that computation.
-  expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(92);
+  // above), never hardcoded; the .toBe(278) below is a drift-guard on that computation.
+  expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(95);
   expect(
     EXPECTED_EXECUTIONS,
     "standard + custom on each applicable route, plus shared topology",
-  ).toBe(274);
+  ).toBe(278);
   expect(
     counters.setupFailures,
     "every provider route must start; no route may be skipped",
@@ -376,7 +441,7 @@ afterAll(() => {
   ).toBe(EXPECTED_EXECUTIONS);
   expect(outcomes.filter((outcome) => outcome.status === "passed")).toHaveLength(counters.passed);
   expect(outcomes.filter((outcome) => outcome.status === "failed")).toHaveLength(counters.failed);
-  expect(inventoryGroups.byRoute).toEqual({ tsserver: 91, tsgo: 91, "shared-tsgo": 92 });
+  expect(inventoryGroups.byRoute).toEqual({ tsserver: 93, tsgo: 92, "shared-tsgo": 93 });
   expect(
     typeScriptCliControls,
     "both TypeScript >=7 authority controls must execute",
@@ -385,6 +450,10 @@ afterAll(() => {
     laxJavaScriptPolicyControl?.status,
     "the authored lax-JavaScript TypeScript >=7 control must execute",
   ).toBe("passed");
+  expect(
+    authoredCheckJavaScriptPolicyControl,
+    "the authored @ts-check TypeScript >=7 control must prove TS2339",
+  ).toMatchObject({ status: "passed", diagnosticCodes: [2339] });
   for (const route of ROUTES) {
     expect(executionGroups[route]?.attempted, `${route} receipt group must be complete`).toBe(
       inventoryGroups.byRoute[route],

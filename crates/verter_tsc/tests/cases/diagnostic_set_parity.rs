@@ -441,7 +441,7 @@ fn verter_tsc_diagnostic_set_parity() {
         }
     };
 
-    let bin = env!("CARGO_BIN_EXE_verter-tsc");
+    let bin = verter_test_support::cargo_test_binary_path!("verter-tsc");
     let output = Command::new(bin)
         .env("VERTER_TSGO_BIN", &gated_engine)
         .arg("--noEmit")
@@ -638,7 +638,7 @@ fn vue_export_star_members_resolve_without_spurious_errors() {
         }
     };
 
-    let bin = env!("CARGO_BIN_EXE_verter-tsc");
+    let bin = verter_test_support::cargo_test_binary_path!("verter-tsc");
     let output = Command::new(bin)
         .env("VERTER_TSGO_BIN", &gated_engine)
         .arg("--noEmit")

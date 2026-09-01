@@ -16,7 +16,7 @@
 //! golden, not a pretend-different request.
 //!
 //! `cargo test -p verter_session --lib --features bf2-authoritative
-//! svelte_official_conformance -- --test-threads=1 --nocapture`.
+//! svelte_official_conformance -- --nocapture`.
 //!
 //! Without the feature this module is not compiled. Read the
 //! `running N tests` line, never the exit code.

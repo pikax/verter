@@ -14217,13 +14217,11 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: crate::resolver_core::DerivedFactKind::Route,
-                ..
-            } if canonical_id == "/src/index.ts"
+            crate::resolver_core::FactVersionRef::Parse(parse)
+                if parse.canonical_id == "/src/index.ts"
+                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
         )),
-        "fast imported-root proof must track the provider route surface hash",
+        "fast imported-root proof must track the provider's parse-owned route interface",
     );
     assert!(
         facts.iter().any(|fact| matches!(
@@ -14236,13 +14234,11 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
     assert!(
         !facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: crate::resolver_core::DerivedFactKind::Route,
-                ..
-            } if canonical_id == "/src/target.ts"
+            crate::resolver_core::FactVersionRef::Parse(parse)
+                if parse.canonical_id == "/src/target.ts"
+                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
         )),
-        "direct imported-root proof should not need the child's route hash when the parent directly names the target reexport",
+        "direct imported-root proof should not need the child's route interface when the parent directly names the target reexport",
     );
 }
 
@@ -14382,13 +14378,11 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: crate::resolver_core::DerivedFactKind::Route,
-                ..
-            } if canonical_id == "/src/index.ts"
+            crate::resolver_core::FactVersionRef::Parse(parse)
+                if parse.canonical_id == "/src/index.ts"
+                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
         )),
-        "fast imported-root proof must track the provider route surface hash",
+        "fast imported-root proof must track the provider's parse-owned route interface",
     );
     assert!(
         facts.iter().any(|fact| matches!(
@@ -14401,13 +14395,11 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
     assert!(
         !facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: crate::resolver_core::DerivedFactKind::Route,
-                ..
-            } if canonical_id == "/src/target.ts"
+            crate::resolver_core::FactVersionRef::Parse(parse)
+                if parse.canonical_id == "/src/target.ts"
+                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
         )),
-        "direct imported-root proof should not need the child's route hash when the provider only re-exports the imported local binding",
+        "direct imported-root proof should not need the child's route interface when the provider only re-exports the imported local binding",
     );
 }
 
@@ -14475,13 +14467,11 @@ fn current_dependency_fact_versions_keeps_imported_barrel_route_facts_shallow() 
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: crate::resolver_core::DerivedFactKind::Route,
-                ..
-            } if canonical_id == "/src/types/index.ts"
+            crate::resolver_core::FactVersionRef::Parse(parse)
+                if parse.canonical_id == "/src/types/index.ts"
+                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
         )),
-        "captured fact-version lookup should reuse the snapshotted route fact for a shallow imported barrel without live wildcard replay",
+        "captured fact-version lookup should reuse the snapshotted parse-owned route interface for a shallow imported barrel without live wildcard replay",
     );
 }
 
@@ -14741,14 +14731,14 @@ export interface LinkProps extends SharedProps {
         entry.export_signatures.is_some(),
         "export-only shallow state should still capture export signatures",
     );
-    // The materialiser performs ZERO import resolution now — the artifact
-    // it publishes is a pure parse/index product — so the only producer
-    // re-entering Engine here is the scheduler dependency producer.
+    // The indexed materialiser publishes a pure parse/index product, and
+    // ordinary forward edges are workspace-owned rather than duplicated in
+    // the scheduler dependency producer. Neither path resolves this
+    // non-macro import during shallow materialisation.
     assert_eq!(
         ws.resolve_count("/src/Link.vue", "./shared"),
-        1,
-        "only the scheduler dependency producer resolves during materialisation; \
-         the indexed materialiser must resolve nothing",
+        0,
+        "non-macro imports must not re-enter Engine during shallow materialisation",
     );
 }
 

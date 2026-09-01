@@ -257,6 +257,13 @@ export type CompileManyTarget = "host-backed" | "runtime-render";
  */
 export interface CompileBatchRenderProfile {
   /**
+   * Style stages owned by this render. `"complete"` (default) runs the full
+   * compiler cascade. `"authored-only"` keeps authored `v-bind()` handling in
+   * Main and leaves preprocessing plus plain-CSS-only stages to the bundler's
+   * separate style-module lane.
+   */
+  styleProcessing?: "complete" | "authored-only";
+  /**
    * Codegen filename override (component-name extraction, scope-id
    * derivation, source-map source/file). Omit to fall back to the canonical
    * id — same semantics as `HostCompileProfile.filename`.
@@ -304,7 +311,8 @@ export interface CompileBatchOptions {
   defaultMode?: CompileCacheMode;
   /**
    * The compile lane. `"host-backed"` (default) runs the full session
-   * wrapper; `"runtime-render"` runs the render-only bundler lane, which
+   * wrapper; `"runtime-render"` selects the Vue render-only path while other
+   * registered carriers keep their effective host-backed route. The request
    * REQUIRES `compileProfile`.
    */
   target?: CompileManyTarget;
@@ -330,9 +338,9 @@ export interface CompileBatchEntry {
   /**
    * Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
    * compile, separate from the fatal `errors`. Populated by the
-   * RuntimeRender lane's soft-macro contract (an unresolved imported
+   * Vue render-only path's soft-macro contract (an unresolved imported
    * macro type renders successfully and reports a warning here). Always
-   * empty on the HostBacked lane and on any fatal outcome.
+   * empty on effective host-backed paths and on any fatal outcome.
    */
   diagnostics: HostDiagnostic[];
   durationMs: number;
@@ -736,6 +744,7 @@ export declare class VerterHost {
   /**
    * Compile a batch of carrier inputs through the production host
    * path (scheduler + dispatch + compile_cache).
+   * This does not run lint rules; call `lint` explicitly when wanted.
    *
    * Each input's source language is derived from its `canonicalId`, so
    * the id must carry the carrier's extension: `App.vue` compiles as

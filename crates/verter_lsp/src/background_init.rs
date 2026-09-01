@@ -458,6 +458,10 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         let vfs_workspace = Arc::clone(&vfs_workspace);
         let provider_sync_states = Arc::clone(&provider_sync_states);
         let project_sync = project_sync.clone();
+        let pending_snapshot_provider_sync = Arc::clone(&pending_snapshot_provider_sync);
+        let mru_canonical_ids = Arc::clone(&mru_canonical_ids);
+        let carrier_publish_coordinator = carrier_publish_coordinator.clone();
+        let carrier_transaction_coordinator = Arc::clone(&carrier_transaction_coordinator);
         tokio::spawn(async move {
             // Level 2 of the readiness ladder is emitted only after level 1: a fast
             // scan on a small workspace finishes before this init reaches its ready
@@ -472,6 +476,39 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
                 tracing::info!(
                     "init gen={my_gen} superseded before typeProviderSyncComplete, discarding"
+                );
+                return;
+            }
+
+            // The scanner may enqueue owner-aware carrier retries after the
+            // pre-scan drain above. Settle those retries before announcing the
+            // provider frontier; a non-empty queue means level 2 is not true yet.
+            drain_pending_snapshot_provider_sync(
+                project_sync.as_ref(),
+                &documents,
+                &vfs_workspace,
+                &provider_sync_states,
+                &pending_snapshot_provider_sync,
+                is_tsgo,
+                Some(&mru_canonical_ids),
+                carrier_publish_coordinator.as_ref(),
+                &carrier_transaction_coordinator,
+            )
+            .await;
+
+            // The drain awaits provider work, so this generation may have been
+            // superseded while it ran. Never publish level 2 for the old one.
+            if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+                tracing::info!(
+                    "init gen={my_gen} superseded during post-scan provider drain, discarding"
+                );
+                return;
+            }
+
+            if !pending_snapshot_provider_sync.is_empty() {
+                tracing::warn!(
+                    pending = pending_snapshot_provider_sync.len(),
+                    "post-scan provider retries remain pending (gen={my_gen}); suppressing typeProviderSyncComplete"
                 );
                 return;
             }

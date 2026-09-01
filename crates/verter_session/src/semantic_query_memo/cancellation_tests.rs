@@ -144,6 +144,8 @@ fn cancelled_leader_never_publishes_and_live_follower_retries_cold() {
     let follower_context = RequestContext::new(4, Arc::from("/w/cancel.ts"), false, None);
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let abort_barrier = Arc::new(std::sync::Barrier::new(2));
+    let _abort_gate = store.test_cancellation_abort_pre_retire_gate(Arc::clone(&abort_barrier));
 
     let leader = {
         let store = Arc::clone(&store);
@@ -204,6 +206,9 @@ fn cancelled_leader_never_publishes_and_live_follower_retries_cold() {
     leader_context.cancel();
     release_tx.send(()).unwrap();
 
+    abort_barrier.wait();
+    let follower = join_within(follower, "retrying live follower");
+    abort_barrier.wait();
     let leader = join_within(leader, "cancelled leader");
     assert!(matches!(
         leader.value,
@@ -211,7 +216,6 @@ fn cancelled_leader_never_publishes_and_live_follower_retries_cold() {
     ));
     assert!(leader.cache_suppress && leader.result_is_partial);
 
-    let follower = join_within(follower, "retrying live follower");
     let follower_node = match follower.value {
         QueryResult::Value(node) => node,
         other => panic!("expected follower value, got {other:?}"),

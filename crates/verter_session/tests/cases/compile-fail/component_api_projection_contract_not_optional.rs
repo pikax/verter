@@ -6,6 +6,7 @@ fn optional_contract() -> ComponentApiProjection {
     ComponentApiProjection {
         response: loop {},
         contract: None,
+        publication_witness: None,
     }
 }
 

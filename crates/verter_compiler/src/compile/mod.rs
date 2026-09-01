@@ -44,8 +44,8 @@ use crate::script::prepared::PreparedScript;
 use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style_planner::{
     analyze_css_module_classes, complete_static_class_names, generate_var_name,
-    prepared_style_for_sealed_slot, run_vue_style_cascade, AuthoredStyleInput, StyleRewriteFailure,
-    VBindVar,
+    prepared_style_for_sealed_slot, run_vue_style_authored_only, run_vue_style_cascade,
+    AuthoredStyleInput, StyleRewriteFailure, VBindVar,
 };
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
@@ -787,6 +787,7 @@ pub(crate) fn derive_legacy_vue_options(
         .unwrap_or(false),
         ide_source_map: ide.is_some_and(|i| i.want_source_map),
         ssr,
+        style_processing: request.runtime_style_processing(),
         prop_constness_overrides: execution_inputs.prop_constness_overrides.clone(),
         style_v_bind_vars: execution_inputs.style_v_bind_vars.clone(),
         style_v_bind_usage_complete: execution_inputs.style_v_bind_usage_complete,
@@ -932,7 +933,6 @@ fn compile_inner(
                         // The CSS-Modules byte-level class-name rewrite stays
                         // CSS-only; only that one stage is conditioned on the
                         // resolved dialect.
-                        let cascade_module = style.module && authored_dialect == CssDialect::Css;
                         let mut cascade_input = AuthoredStyleInput::new(
                             style_source,
                             authored_dialect,
@@ -949,13 +949,24 @@ fn compile_inner(
                             cascade_input = cascade_input.with_prepared(prepared.ir());
                         }
 
-                        let outcome = run_vue_style_cascade(
-                            cascade_input,
-                            scope_id_str,
-                            cascade_module,
-                            style.scoped,
-                            verter_options.source_map,
-                        );
+                        let outcome = match verter_options.style_processing {
+                            crate::compile_request::RuntimeStyleProcessing::Complete => {
+                                run_vue_style_cascade(
+                                    cascade_input,
+                                    scope_id_str,
+                                    style.module && authored_dialect == CssDialect::Css,
+                                    style.scoped,
+                                    verter_options.source_map,
+                                )
+                            }
+                            crate::compile_request::RuntimeStyleProcessing::AuthoredOnly => {
+                                run_vue_style_authored_only(
+                                    cascade_input,
+                                    scope_id_str,
+                                    verter_options.source_map,
+                                )
+                            }
+                        };
                         all_v_bind_vars.extend(outcome.facts.v_bind_vars);
                         for refusal in outcome
                             .facts
@@ -974,7 +985,12 @@ fn compile_inner(
                         // surface so IDE/consumer metadata is populated even though
                         // the emitted CSS text itself is left for external
                         // preprocessing to rewrite.
-                        if style.module && authored_dialect != CssDialect::Css {
+                        if style.module
+                            && (matches!(
+                                verter_options.style_processing,
+                                crate::compile_request::RuntimeStyleProcessing::AuthoredOnly
+                            ) || authored_dialect != CssDialect::Css)
+                        {
                             match analyze_css_module_classes(cascade_input, scope_id_str) {
                                 Ok(classes) => style_module_classes = classes,
                                 Err(error) => {
@@ -1939,12 +1955,34 @@ fn compile_inner(
         // One CT → one source map → template diagnostics map correctly.
         let tsx_alloc = Allocator::new();
         let mut tsx_ct = CodeTransform::new(input, &tsx_alloc);
-        // The per-file official Vue JSX authority must lead every TSX/JSX
-        // carrier, including carriers whose first authored script declaration
-        // maps to generated line/column zero. Put it in CodeTransform's
+        // Authored JavaScript file-check directives must remain header pragmas in
+        // the generated companion. Put them before the JSX authority: current
+        // TSGO recognizes the file-check override only from the leading pragma
+        // sequence. An unannotated carrier emits no override and remains governed
+        // by its configured project's `checkJs` policy.
+        let mut vue_ide_header = String::new();
+        if is_jsx {
+            let script_bodies = [parsed.script(), parsed.script_setup()]
+                .into_iter()
+                .flatten()
+                .filter_map(|script| script.content)
+                .map(|content| (content.start, content.end));
+            for directive in
+                crate::framework_common::typescript_directives::authored_check_directives(
+                    input,
+                    script_bodies,
+                )
+            {
+                vue_ide_header.push_str("// ");
+                vue_ide_header.push_str(directive);
+                vue_ide_header.push('\n');
+            }
+        }
+        // The per-file official Vue JSX authority remains in CodeTransform's
         // unmapped intro so source-map generation shifts authored mappings
         // structurally instead of a provider mutating mapped bytes later.
-        tsx_ct.prepend(ide::VUE_JSX_PRAGMA);
+        vue_ide_header.push_str(ide::VUE_JSX_PRAGMA);
+        tsx_ct.prepend(&vue_ide_header);
 
         // Compute template end position (byte offset after </template> close tag)
         let template_end: Option<u32> = template_ast_opt.map(|tpl| {

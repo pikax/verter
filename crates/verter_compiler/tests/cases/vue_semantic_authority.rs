@@ -312,18 +312,6 @@ fn vue_semantic_catalog_lookup_is_adapter_and_epoch_identity() {
 }
 
 #[test]
-fn combined_compiler_eval_source_is_unnameable() {
-    let tests = trybuild::TestCases::new();
-    tests.compile_fail("tests/cases/compile-fail/carrier_compiler_eval_source_unnameable.rs");
-}
-
-#[test]
-fn combined_compiler_template_data_is_unnameable() {
-    let tests = trybuild::TestCases::new();
-    tests.compile_fail("tests/cases/compile-fail/carrier_compiler_template_data_unnameable.rs");
-}
-
-#[test]
 fn planted_vue_epoch_does_not_select_a_svelte_semantic_authority() {
     let vue_row = vue_semantic_authority_registration();
     assert!(

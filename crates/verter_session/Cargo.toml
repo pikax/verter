@@ -38,7 +38,10 @@ attribution = ["verter_audit/attribution"]
 # that call them) use this gate so the reverse-materialization fence holds in
 # every build profile, not release-only. Production-unreachability is asserted
 # by `tests/cases/g_misc1/test_support_feature_off_in_default_build.rs`.
-test-support = []
+# The reusable worker-substrate seam exposes scheduler pool identities, so an
+# explicit session test-support opt-in must carry the scheduler's matching
+# default-off identity surface for downstream test crates too.
+test-support = ["verter_scheduler/test-support"]
 # Exposes test-only constructors (e.g. `ProjectBinding::new_for_test`) for
 # downstream crates' tests. Enabled ONLY via a downstream `[dev-dependencies]`
 # entry — never in a production build, so it cannot weaken a witness discipline.
@@ -76,7 +79,7 @@ external-corpus = []
 # (`src/compile/map_equality_tests/bf2_seed_matrix.rs`) plus the harness
 # authored-source oracle. Needs Node and a gitignored oracle install;
 # the default hermetic gate must not enable this. Run:
-# `cargo test -p verter_session --lib --features bf2-authoritative bf2_seed_matrix`.
+# `cargo test -p verter_session --lib --features bf2-authoritative authoritative_seed_matrix_contracts_share_one_verified_run`.
 bf2-authoritative = []
 # Opt-in: transport route-equivalence suite
 # (`src/transport_route_equivalence_tests.rs`). Drives built `@verter/native`
@@ -86,17 +89,6 @@ bf2-authoritative = []
 # `cargo test -p verter_session --lib --features transport-authoritative
 # transport_route_equivalence`.
 transport-authoritative = []
-# Opt-in: enables the full trybuild compile-fail SEAL fixture suite
-# (`tests/cases/g_compile/compile_fail.rs` — workspace-accessor visibility,
-# the NoTypeExpr / NoStoredSpan marker seals, the sealed carrier/recursive-self
-# proof traits, etc). trybuild spawns a full `cargo build` of a fixture crate
-# linking `verter_session` (~100s), so most fixtures are `#[ignore]`d unless
-# this feature is on. The combined hot-materialize/script-fact evidence rail is
-# always on in the default canonical gate because those fixtures are primary
-# structural enforcement. Run the remaining suite LOCALLY with
-# `cargo nextest run -p verter_session --features compile-fail` (or
-# `cargo test`).
-compile-fail = []
 # Diagnosis benchmark: enables the corpus-driven
 # `repo_first_pass_diagnosis_corpus` integration test that the vitest
 # at `packages/benchmark/src/repo-first-pass.spec.ts` invokes via
@@ -302,10 +294,6 @@ regex = "1.12"
 # annotated tests across the shared test process so a single-binary layout
 # keeps the deltas stable; finer than one global lock.
 serial_test = { workspace = true }
-# Phase 6b sub-plan §6b.D2b — T11 compile-fail trybuild target verifies
-# that `VerterHost::workspace()` is gated behind `pub(crate)` and is not
-# callable from external compilation units.
-trybuild = "1.0"
 tracing-test = "0.2.6"
 # Phase 8 — `no_off_store_host_caches` static guard parses
 # `crates/verter_session/src/lib.rs` via syn::parse_file to enumerate

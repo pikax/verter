@@ -13,7 +13,11 @@ use std::sync::Arc;
 
 use crate::instant::Instant;
 
+use crate::fact_signature_helpers::named_fact_tracer;
 use crate::VerterHost;
+
+#[cfg(test)]
+use crate::host_test_force::TracerScope;
 
 use super::{
     component_meta_debug, component_meta_debug_enabled, component_meta_options_fingerprint,
@@ -77,6 +81,22 @@ pub(crate) fn run_warm_output_pre_materialize_hook() {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only hook between finalized output reads and warm publication
+    /// evidence construction. It makes key drift at that exact boundary
+    /// deterministic without invalidating the materialization read set.
+    pub(crate) static WARM_OUTPUT_PRE_EVIDENCE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_warm_output_pre_evidence_hook() {
+    if let Some(hook) = WARM_OUTPUT_PRE_EVIDENCE_HOOK.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
 /// The publish fence a cold component-meta compute must pass before its
 /// result may warm the shared cache.
 ///
@@ -106,8 +126,44 @@ impl ColdSeedFence {
     }
 }
 
+/// Producer-owned evidence joining the exact admitted analysis result and the
+/// separately-finalized output-materialization reads for one component
+/// contract projection.
+pub(crate) struct ComponentMetaOutputPublicationEvidence {
+    pub(crate) final_result: crate::component_meta_result_db::AdmittedComponentMetaResult<
+        crate::component_meta_result_db::CachedComponentMetaResult,
+    >,
+    pub(crate) output_read_set: crate::fact_signature_helpers::ReadSetSignature,
+}
+
+/// Materialized component-meta output plus optional cache-publication
+/// evidence. Output remains caller-visible when either evidence rail refuses
+/// admission; only the downstream reusable projection is then unavailable.
+pub(crate) struct ComponentMetaOutputWithPublicationEvidence {
+    pub(crate) output: crate::meta_resolve::ComponentMetaOutput,
+    pub(crate) publication_evidence: Option<ComponentMetaOutputPublicationEvidence>,
+}
+
+fn finalized_output_signature(
+    read_set: crate::resolver_core::FactReadSetFinalise,
+) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
+    match read_set {
+        crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
+            Some(crate::fact_signature_helpers::ReadSetSignature::new(facts))
+        }
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        | crate::resolver_core::FactReadSetFinalise::Overflow
+        | crate::resolver_core::FactReadSetFinalise::MutationUnstable => None,
+    }
+}
+
 /// Strip the OWNER's own `DerivedFactHash { kind: Route }` fact from a
 /// `ComponentMetaResultEntry` signature before cache admission.
+///
+/// This is a compatibility guard for explicit legacy Route consumers. Normal
+/// route-only component-meta observations use the parse-owned
+/// `SyntacticRouteInterface` fact, which round-trips through `FileFacts` and is
+/// deliberately unaffected by this filter.
 ///
 /// **Why exactly this one fact.** The owner's `Route` hash is the only
 /// fact in the tracer-owned signature that does NOT reliably
@@ -251,7 +307,7 @@ impl VerterHost {
             overlay,
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        let (_resolved, meta) = self.component_meta_via_view_cold(
+        let (_resolved, meta, _admitted) = self.component_meta_via_view_cold(
             canonical.as_str(),
             &view,
             &fixed,
@@ -346,6 +402,29 @@ impl VerterHost {
         Option<crate::meta_resolve::ComponentMetaOutput>,
         crate::meta_resolve::ComponentMetaOutputError,
     > {
+        self.get_component_meta_output_via_view_with_publication_evidence(
+            canonical_or_alias,
+            view,
+            fixed,
+            with_resolution,
+        )
+        .map(|output| output.map(|output| output.output))
+    }
+
+    /// Evidence-bearing core of
+    /// [`Self::get_component_meta_output_via_view_with_fixed_store_view`].
+    /// The public output path discards this evidence; the background
+    /// component-contract publisher retains it as one opaque witness.
+    pub(crate) fn get_component_meta_output_via_view_with_publication_evidence(
+        &self,
+        canonical_or_alias: &str,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+        with_resolution: bool,
+    ) -> Result<
+        Option<ComponentMetaOutputWithPublicationEvidence>,
+        crate::meta_resolve::ComponentMetaOutputError,
+    > {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         if view.is_tombstoned(canonical.as_str()) {
             return Ok(None);
@@ -362,11 +441,10 @@ impl VerterHost {
         );
 
         // Warm probe against the capture's proven-current overlaid view.
-        if let Some(cached) =
+        if let Some((cache_key, cached_entry)) =
             self.try_component_meta_cache_entry_with_view(canonical.as_str(), view, fixed)
         {
-            #[cfg(test)]
-            run_warm_output_pre_materialize_hook();
+            let cached = &cached_entry.payload;
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
             // SESSION-BOUND materialization context (the session-bound
@@ -394,17 +472,40 @@ impl VerterHost {
             });
             // Output-dependency tracing stays SEPARATE from any outer
             // analysis tracer scope (none is active on the warm path).
-            let (output, _output_read_set) =
-                crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
-                    .with_fact_tracer(|| {
-                        crate::meta_resolve::projectors::build_component_meta_output(
-                            ctx,
-                            canonical.as_str(),
-                            cached.analysis.clone(),
-                            seed,
-                        )
-                    });
-            return output.map(Some);
+            let (output, output_read_set) = named_fact_tracer!(
+                &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+                TracerScope::ComponentMetaOutput,
+                || {
+                    #[cfg(test)]
+                    run_warm_output_pre_materialize_hook();
+                    crate::fact_signature_helpers::observe_fact_signature(
+                        &cached_entry.read_set_signature.facts,
+                    );
+                    crate::meta_resolve::projectors::build_component_meta_output(
+                        ctx,
+                        canonical.as_str(),
+                        cached.analysis.clone(),
+                        seed,
+                    )
+                }
+            );
+            let output = output?;
+            let output_read_set = finalized_output_signature(output_read_set);
+            #[cfg(test)]
+            run_warm_output_pre_evidence_hook();
+            let publication_evidence =
+                output_read_set.map(|output_read_set| ComponentMetaOutputPublicationEvidence {
+                    final_result: crate::component_meta_result_db::AdmittedComponentMetaResult {
+                        key: cache_key,
+                        owner_whole_hash: cached.whole_hash,
+                        entry: cached_entry.clone(),
+                    },
+                    output_read_set,
+                });
+            return Ok(Some(ComponentMetaOutputWithPublicationEvidence {
+                output,
+                publication_evidence,
+            }));
         }
 
         // Cold: shared cold body (publishes the analysis cache entry
@@ -423,7 +524,7 @@ impl VerterHost {
             overlay,
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
-        let Some((resolved, meta)) = self.component_meta_via_view_cold(
+        let Some((resolved, meta, admitted)) = self.component_meta_via_view_cold(
             canonical.as_str(),
             view,
             fixed,
@@ -440,18 +541,36 @@ impl VerterHost {
         // fold into the analysis entry's fact signature (the cold body's
         // tracer already sealed + published above). Reuse the SAME live
         // session context that extraction used.
-        let (output, _output_read_set) =
-            crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx).with_fact_tracer(
-                || {
-                    crate::meta_resolve::projectors::build_component_meta_output(
-                        ctx,
-                        canonical.as_str(),
-                        meta,
-                        seed,
-                    )
+        let (output, output_read_set) = named_fact_tracer!(
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+            TracerScope::ComponentMetaOutput,
+            || {
+                if let Some(final_result) = admitted.as_ref() {
+                    crate::fact_signature_helpers::observe_fact_signature(
+                        &final_result.entry.read_set_signature.facts,
+                    );
+                }
+                crate::meta_resolve::projectors::build_component_meta_output(
+                    ctx,
+                    canonical.as_str(),
+                    meta,
+                    seed,
+                )
+            }
+        );
+        let output = output?;
+        let publication_evidence = admitted
+            .zip(finalized_output_signature(output_read_set))
+            .map(
+                |(final_result, output_read_set)| ComponentMetaOutputPublicationEvidence {
+                    final_result,
+                    output_read_set,
                 },
             );
-        output.map(Some)
+        Ok(Some(ComponentMetaOutputWithPublicationEvidence {
+            output,
+            publication_evidence,
+        }))
     }
 
     /// View-aware variant of [`get_component_meta`].
@@ -622,7 +741,7 @@ impl VerterHost {
             overlay,
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
-        let (_resolved, meta) = self.component_meta_via_view_cold(
+        let (_resolved, meta, _admitted) = self.component_meta_via_view_cold(
             canonical.as_str(),
             view,
             fixed,
@@ -666,6 +785,11 @@ impl VerterHost {
     ) -> Option<(
         crate::meta_resolve::ResolvedComponentMetaState,
         verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+        Option<
+            crate::component_meta_result_db::AdmittedComponentMetaResult<
+                crate::component_meta_result_db::CachedComponentMetaResult,
+            >,
+        >,
     )> {
         #[cfg(test)]
         run_cold_body_pre_resolve_hook();
@@ -674,7 +798,7 @@ impl VerterHost {
         let (executor_view, executor_fp) = fixed.executor_fixed_view();
         let executor_fixed = Some((executor_view, executor_fp, fixed.is_current()));
         let results = self.project_type_store.component_meta_results();
-        let (resolved_opt, meta_opt) = results.compute_and_admit(
+        let ((resolved_opt, meta_opt), admitted) = results.compute_and_admit_with_entry(
             self,
             canonical,
             "view-aware path",
@@ -725,7 +849,7 @@ impl VerterHost {
         );
         let resolved = resolved_opt?;
         let (meta, _extract_completeness) = meta_opt?;
-        Some((resolved, meta))
+        Some((resolved, meta, admitted))
     }
 
     /// Canonical builder for the
@@ -827,21 +951,28 @@ impl VerterHost {
         fixed: &crate::resolver_store::BatchFixedView,
     ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
         self.try_component_meta_cache_entry_with_view(canonical, view, fixed)
-            .map(|cached| cached.analysis.clone())
+            .map(|(_, entry)| entry.payload.analysis.clone())
     }
 
-    /// Entry-returning core of the view-aware warm probe: the FULL cached
-    /// payload (analysis + resolution template), for consumers that need
-    /// more than the analysis projection (the output-bearing entries seed
-    /// their resolution sidecar from the cached template without a
-    /// rehydrate). Validation semantics identical to
+    /// Entry-returning core of the view-aware warm probe: the exact key that
+    /// was validated plus the FULL cached payload (analysis + resolution
+    /// template), for consumers that need more than the analysis projection
+    /// (the output-bearing entries seed their resolution sidecar from the
+    /// cached template without a rehydrate). Validation semantics identical to
     /// [`Self::try_component_meta_cache_hit_with_view_inner`].
     fn try_component_meta_cache_entry_with_view(
         &self,
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
-    ) -> Option<std::sync::Arc<crate::component_meta_result_db::CachedComponentMetaResult>> {
+    ) -> Option<(
+        crate::component_meta_result_db::ComponentMetaResultKey,
+        std::sync::Arc<
+            crate::component_meta_result_db::ComponentMetaResultEntry<
+                crate::component_meta_result_db::CachedComponentMetaResult,
+            >,
+        >,
+    )> {
         // Owner-canonical tombstone short-circuit: a canonical the
         // session deleted has no meaningful component-meta result and
         // must NOT collapse onto a base cache slot. `content_hash_for`
@@ -906,8 +1037,9 @@ impl VerterHost {
                 return None;
             }
         };
-        let entry = results.get_with_view(self, current_view, &key, owner_whole_hash)?;
-        Some(std::sync::Arc::clone(&entry.payload))
+        results
+            .get_with_view(self, current_view, &key, owner_whole_hash)
+            .map(|entry| (key, entry))
     }
 
     /// Publish-fence token recheck.

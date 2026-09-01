@@ -3145,6 +3145,15 @@ pub enum PublicApiProjectionError {
 }
 
 impl PublicApiProjectionError {
+    /// Whether a background publisher should retry this failure without a
+    /// source/environment change.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        match self {
+            Self::TscGeneration(error) => error.is_retryable(),
+        }
+    }
+
     /// Stable machine-readable error family.
     #[must_use]
     pub const fn code(&self) -> &'static str {

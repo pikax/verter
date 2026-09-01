@@ -27,6 +27,7 @@ pub mod registered_carrier_projection;
 mod registered_geometry_state;
 pub mod registry;
 pub mod svelte_host_integration;
+pub(crate) mod typescript_directives;
 pub mod vue_bridge;
 pub mod vue_carrier_frontend;
 pub mod vue_host_integration;

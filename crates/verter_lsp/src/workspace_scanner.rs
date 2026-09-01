@@ -351,9 +351,10 @@ fn parent_dir(path: &str) -> String {
 
 /// How many files to process before yielding to the tokio runtime.
 const BATCH_SIZE: usize = 10;
-/// Under continuous editor traffic, admit one carrier warmup unit occasionally
-/// so project-wide rename/reference coverage still converges. This bounds only
-/// background deferral; it never bounds or cancels an LSP/provider request.
+/// Under continuous editor traffic, admit discovery and one carrier warmup unit
+/// occasionally so project-wide rename/reference coverage still converges. This
+/// bounds only background deferral; it never bounds or cancels an LSP/provider
+/// request.
 const BACKGROUND_MAX_DEFER: std::time::Duration = std::time::Duration::from_secs(1);
 /// A filesystem walk cannot be preempted once handed to the blocking pool. Give
 /// editor startup/open traffic a stable lead before beginning that coarse unit.
@@ -384,8 +385,13 @@ async fn scanner_loop(
     let workspace_snapshot = config.workspace_snapshot.clone();
     let vfs_workspace = config.vfs_workspace.clone();
 
-    // Step 1: FS walk all roots (blocking) — collect both Vue and non-carrier files
-    crate::server::wait_for_handlers_quiet(DISCOVERY_IDLE_GRACE).await;
+    // Step 1: FS walk all roots (blocking) — collect both Vue and non-carrier
+    // files. Prefer a genuinely quiet window, but do not require one forever:
+    // references/rename themselves are interactive traffic, and after a
+    // provider-generation restart their polling must not prevent the scanner
+    // that makes their project frontier complete from even starting.
+    let _ =
+        crate::server::wait_for_handlers_quiet(DISCOVERY_IDLE_GRACE, BACKGROUND_MAX_DEFER).await;
     let (carrier_paths, source_paths) = tokio::task::spawn_blocking(move || {
         let mut carrier = Vec::new();
         let mut src = Vec::new();
@@ -468,6 +474,7 @@ async fn scanner_loop(
     // ── All carrier files (produce carrier public API artifacts for barrel re-exports) ──
     let mut published_companions = Vec::new();
     let mut idx = 0;
+    let mut fairness_burst_remaining = 0;
     while idx < carrier_classified.len() {
         drain_priority_signals(&mut rx, &mut priority_dirs, &mut carrier_classified[idx..]);
 
@@ -478,15 +485,23 @@ async fn scanner_loop(
             continue;
         }
 
-        // Background warmup must never monopolize the host CPU lane while an
-        // editor request is waiting. Re-check before every carrier so a newly
-        // arriving request competes with at most the one compile already in
-        // progress, then owns the lane until its handler finishes.
-        let _ = tokio::time::timeout(
-            BACKGROUND_MAX_DEFER,
-            crate::server::wait_for_handlers_idle(),
-        )
-        .await;
+        // Prefer interactive work before every carrier while handlers reach
+        // idle normally. Under continuous traffic, however, a one-second
+        // timeout PER FILE reduces a 70-carrier frontier to one activation per
+        // second and makes the 12-second references contract impossible. The
+        // fairness deadline therefore admits one bounded batch, then yields
+        // priority back to handlers before admitting another batch.
+        if fairness_burst_remaining == 0 {
+            let admitted_at_idle = tokio::time::timeout(
+                BACKGROUND_MAX_DEFER,
+                crate::server::wait_for_handlers_idle(),
+            )
+            .await
+            .is_ok();
+            if !admitted_at_idle {
+                fairness_burst_remaining = BATCH_SIZE;
+            }
+        }
 
         // Upsert + compile (blocking)
         let path_clone = path.clone();
@@ -531,6 +546,7 @@ async fn scanner_loop(
         }
 
         batch_count += 1;
+        fairness_burst_remaining = fairness_burst_remaining.saturating_sub(1);
         if batch_count.is_multiple_of(BATCH_SIZE) {
             tokio::task::yield_now().await;
         }
@@ -540,6 +556,50 @@ async fn scanner_loop(
         "workspace_scanner: carrier file pass complete — {} carrier files processed",
         batch_count,
     );
+
+    // A carrier publication can lose its provider-state admission race to a
+    // newer interactive transaction, or compilation can be transiently cold.
+    // Do not postpone those repairs behind the batched provider refresh and the
+    // rest of workspace discovery: derive the exact uniquely-owned misses from
+    // the authoritative membership ledger, queue them on the existing snapshot
+    // retry set, and drain through the single carrier reconciliation gateway.
+    if let (Some(coordinator), Some(snapshot)) =
+        (&config.carrier_publish_coordinator, &workspace_snapshot)
+    {
+        let expected_sources: Vec<String> = carrier_classified
+            .iter()
+            .filter(|(source, _)| {
+                matches!(
+                    snapshot.configured_owner_resolution_for_file(source),
+                    verter_workspace::ConfiguredOwnerResolution::Unique(_)
+                )
+            })
+            .map(|(source, _)| source.clone())
+            .collect();
+        let missing = coordinator.missing_published_activations(&expected_sources);
+        for source in &missing {
+            config.pending_snapshot_provider_sync.insert(source.clone());
+        }
+        if !config.pending_snapshot_provider_sync.is_empty() {
+            tracing::info!(
+                missing = missing.len(),
+                pending = config.pending_snapshot_provider_sync.len(),
+                "workspace_scanner: draining carrier-phase provider retries"
+            );
+            crate::server::drain_pending_snapshot_provider_sync(
+                config.project_sync.as_ref(),
+                &config.documents,
+                &config.vfs_workspace,
+                &config.provider_sync_states,
+                &config.pending_snapshot_provider_sync,
+                config.is_tsgo,
+                None,
+                config.carrier_publish_coordinator.as_ref(),
+                &config.carrier_transaction_coordinator,
+            )
+            .await;
+        }
+    }
 
     if !published_companions.is_empty() {
         if let Some(coordinator) = &config.carrier_publish_coordinator {

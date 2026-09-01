@@ -6,7 +6,8 @@
 //!    behind a disabled feature).
 //!
 //! Reader absence is proven by the compile-fail fixture
-//! (`tests/cases/attribution_compile_fail.rs`): naming
+//! (`tests/cases/compile-fail/attribution_reader_absent.rs`, executed by
+//! `node scripts/compile-contracts.mjs`): naming
 //! `attribution::snapshot()` must not compile.
 
 use std::cell::Cell;

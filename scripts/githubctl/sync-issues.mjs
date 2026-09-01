@@ -7,7 +7,7 @@ import {
   loadAuthority,
   topological,
 } from "../../roadmap/0.1.0-tama/tools/lib.mjs";
-import { assertMutationMode, parseIssuePayload } from "./adapter.mjs";
+import { assertApplyClearance, assertMutationMode, parseIssuePayload } from "./adapter.mjs";
 import { renderIssueDescription } from "./charter-render.mjs";
 import {
   DoctorRequiredError,
@@ -29,6 +29,13 @@ import {
   planRepositoryMilestones,
 } from "./issue-milestones.mjs";
 import { appendGitHubIssueMapping, assertSyncAncestors, loadLedgerFile } from "./ledger-write.mjs";
+import {
+  applyTrainChildren,
+  applyTrainParents,
+  ensureIssueProjectTodo,
+  planTrainSync,
+} from "./train-sync.mjs";
+import { loadTrainIssueCatalog } from "./train-issues.mjs";
 
 export { githubIssueByNumber as lookupIssueMapping };
 
@@ -155,6 +162,8 @@ function emptyReport(mode, selection) {
     required_blocker_issues: [],
     included_blocker_issues: [],
     ignored_blocker_issues: [],
+    skipped_completed: [],
+    skipped_history: [],
     closed: [],
     missing: [],
     drift: [],
@@ -176,6 +185,12 @@ function emptyReport(mode, selection) {
       created: [],
       updated: [],
     },
+    project: {
+      current: [],
+      added: [],
+      todo_initialized: [],
+    },
+    train_parents: null,
   };
 }
 
@@ -659,11 +674,16 @@ export function syncIssues(options) {
       .filter(([, row]) => row.status === "COMPLETE")
       .map(([nodeId]) => nodeId),
   );
+  const historicalNodeIds = new Set(
+    authority.nodes.filter((node) => node.semantic_role === "history").map((node) => node.id),
+  );
+  const inactiveNodeIds = new Set([...completedNodeIds, ...historicalNodeIds]);
+  const activeExplicitSelection = explicitSelection.filter((node) => !inactiveNodeIds.has(node.id));
   const requiredBlockers = externalBlockerRows(
     authority,
-    explicitSelection,
+    activeExplicitSelection,
     mappingByNode,
-    completedNodeIds,
+    inactiveNodeIds,
   );
   if (
     requiredBlockers.length > 0 &&
@@ -672,17 +692,23 @@ export function syncIssues(options) {
   ) {
     const report = emptyReport(
       mode,
-      explicitSelection.map((node) => node.id),
+      activeExplicitSelection.map((node) => node.id),
     );
+    report.skipped_completed = explicitSelection
+      .filter((node) => completedNodeIds.has(node.id))
+      .map((node) => node.id);
+    report.skipped_history = explicitSelection
+      .filter((node) => historicalNodeIds.has(node.id))
+      .map((node) => node.id);
     report.ok = false;
     report.required_blocker_issues = requiredBlockers;
     return report;
   }
   const selected =
     options.createBlockers === true
-      ? expandPredecessorClosure(authority, explicitSelection, completedNodeIds)
-      : explicitSelection;
-  const explicitIds = new Set(explicitSelection.map((node) => node.id));
+      ? expandPredecessorClosure(authority, activeExplicitSelection, inactiveNodeIds)
+      : activeExplicitSelection;
+  const explicitIds = new Set(activeExplicitSelection.map((node) => node.id));
   const selectedIds = new Set(selected.map((node) => node.id));
   const plannedCreationIds = new Set(
     selected.filter((node) => !mappingByNode.has(node.id)).map((node) => node.id),
@@ -691,6 +717,12 @@ export function syncIssues(options) {
     mode,
     selected.map((node) => node.id),
   );
+  report.skipped_completed = explicitSelection
+    .filter((node) => completedNodeIds.has(node.id))
+    .map((node) => node.id);
+  report.skipped_history = explicitSelection
+    .filter((node) => historicalNodeIds.has(node.id))
+    .map((node) => node.id);
   if (options.createBlockers === true) {
     report.included_blocker_issues = selected
       .filter((node) => !explicitIds.has(node.id))
@@ -701,9 +733,17 @@ export function syncIssues(options) {
   if (mode === "apply" && !options.clearance) {
     throw new DoctorRequiredError("apply requires GitHubDoctor issues clearance");
   }
+  const projectIssues = options.projectIssues !== false;
+  const syncTrainParents = options.syncTrainParents !== false;
+  if (mode === "apply" && projectIssues) {
+    assertApplyClearance(mode, options.clearance, "projects", options.adapter);
+  }
   const catalog = options.labelCatalog ?? loadIssueLabelCatalog(authority.packageRoot);
   const milestoneCatalog =
     options.milestoneCatalog ?? loadIssueMilestoneCatalog(authority.packageRoot);
+  const trainCatalog = syncTrainParents
+    ? (options.trainCatalog ?? loadTrainIssueCatalog(authority.packageRoot))
+    : null;
   const currentIssueByNode = new Map();
   const closedIssueNodeIds = new Set();
   for (const node of selected) {
@@ -741,6 +781,27 @@ export function syncIssues(options) {
   );
   reportRepositoryPlan(report, repositoryPlan);
   reportMilestoneRepositoryPlan(report, milestoneRepositoryPlan);
+  const trainSync = syncTrainParents
+    ? planTrainSync({
+        authority,
+        adapter: options.adapter,
+        ledger,
+        mappingByNode,
+        selected,
+        completedNodeIds,
+        currentIssueByNode,
+        trainCatalog,
+        labelCatalog: catalog,
+        milestoneCatalog,
+        refreshContent: options.refreshContent,
+        plannedCreationIds,
+      })
+    : null;
+  if (trainSync) {
+    report.train_parents = trainSync.report;
+    if (!trainSync.ok) report.ok = false;
+  }
+  if (!report.ok) return report;
   if (mode === "check") return report;
   const succeeded = [];
   applyRepositoryPlan(options.adapter, options.clearance, repositoryPlan, report, succeeded);
@@ -751,6 +812,25 @@ export function syncIssues(options) {
     report,
     succeeded,
   );
+  if (trainSync) {
+    try {
+      applyTrainParents({
+        plans: trainSync.plans,
+        adapter: options.adapter,
+        ledgerPath,
+        mappingByTrain: trainSync.mappingByTrain,
+        clearance: options.clearance,
+        report: report.train_parents,
+        succeeded,
+      });
+    } catch (error) {
+      if (succeeded.length === 0) throw error;
+      throw new PartialFailureError({
+        succeeded,
+        failed: { operation: { kind: "sync-train-parents" }, error },
+      });
+    }
+  }
   for (const plan of plans) {
     const node = plan.node;
     try {
@@ -879,6 +959,57 @@ export function syncIssues(options) {
         succeeded,
         failed: { operation: { node_id: plan.node.id, kind: "sync-issue-relations" }, error },
       });
+    }
+  }
+  if (trainSync) {
+    try {
+      applyTrainChildren({
+        plans: trainSync.plans,
+        adapter: options.adapter,
+        mappingByTrain: trainSync.mappingByTrain,
+        mappingByNode,
+        clearance: options.clearance,
+        report: report.train_parents,
+        succeeded,
+      });
+    } catch (error) {
+      if (succeeded.length === 0) throw error;
+      throw new PartialFailureError({
+        succeeded,
+        failed: { operation: { kind: "sync-train-children" }, error },
+      });
+    }
+  } else if (projectIssues) {
+    for (const plan of plans) {
+      if (plan.kind === "protected" || plan.kind === "closed") continue;
+      const mapping = mappingByNode.get(plan.node.id);
+      if (!mapping) continue;
+      try {
+        const projected = ensureIssueProjectTodo(
+          options.adapter,
+          mapping.gh_issue,
+          options.clearance,
+          (kind) => {
+            succeeded.push(
+              mutationRecord({
+                nodeId: plan.node.id,
+                ghIssue: mapping.gh_issue,
+                kind,
+                mappingWritten: true,
+              }),
+            );
+          },
+        );
+        if (projected.added) report.project.added.push(mapping.gh_issue);
+        else report.project.current.push(mapping.gh_issue);
+        if (projected.initialized) report.project.todo_initialized.push(mapping.gh_issue);
+      } catch (error) {
+        if (succeeded.length === 0) throw error;
+        throw new PartialFailureError({
+          succeeded,
+          failed: { operation: { node_id: plan.node.id, kind: "sync-project-item" }, error },
+        });
+      }
     }
   }
   return report;

@@ -630,6 +630,8 @@ impl VerterHost {
         // change leaves the surface edge-stale for the shared oracle).
         let flight_workspace_generation = self.ws().content_generation();
         let flight_project_generation = self.project_type_store.current_project_generation();
+        let flight_store_view_epoch = self.current_store_view_epoch();
+        let flight_resolution_fact_generation = self.ws().resolution_fact_generation();
         // The R21 parse dimension the overlay parse below runs under —
         // same value-side stamp contract as the base materialise.
         let flight_parse_env_hash = self
@@ -1016,6 +1018,8 @@ impl VerterHost {
         self.fire_materialize_seam();
         if self.ws().content_generation() != flight_workspace_generation
             || self.project_type_store.current_project_generation() != flight_project_generation
+            || self.current_store_view_epoch() != flight_store_view_epoch
+            || self.ws().resolution_fact_generation() != flight_resolution_fact_generation
         {
             return Some(crate::project_type_store::IndexedFlightOutcome {
                 indexed,

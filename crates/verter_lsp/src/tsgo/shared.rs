@@ -67,7 +67,8 @@ use verter_type_runtime::protocol::{
 };
 use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
 use verter_type_runtime::tsgo::{
-    position_carrier_diagnostics, select_configured_project_carrier, TsgoTypeProvider,
+    javascript_carrier_semantic_diagnostics_enabled, position_carrier_diagnostics,
+    select_configured_project_carrier, TsgoTypeProvider,
 };
 
 use super::shared_support::{
@@ -714,7 +715,7 @@ impl TsgoSharedProvider {
     ) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {
         let carrier = slash(path);
         Ok(self
-            .api_carrier_diagnostics(&carrier, &self.tsconfig_path)
+            .api_carrier_diagnostics(&carrier, &self.tsconfig_path, false)
             .await?
             .unwrap_or_default())
     }
@@ -736,19 +737,7 @@ impl TsgoSharedProvider {
         tsconfig: &str,
     ) -> Result<Option<Vec<TypeDiagnostic>>, TypeProviderError> {
         let carrier = slash(path);
-        self.api_carrier_diagnostics(&carrier, tsconfig).await
-    }
-
-    /// Full pull diagnostics from the exact editor-owned LSP session. Unlike the
-    /// ordinary provider facade this is strict: a relay failure is returned to the
-    /// composite, never converted into a legitimate empty report. The composite calls
-    /// this only after the `--api` membership proof has established that the carrier is
-    /// a root of its resolved configured project.
-    pub async fn full_diagnostics_for_carrier(
-        &self,
-        path: &str,
-    ) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {
-        self.features.get_diagnostics_strict(path).await
+        self.api_carrier_diagnostics(&carrier, tsconfig, true).await
     }
 
     /// The shared `--api` carrier-diagnostics core: open `tsconfig` on the checker,
@@ -763,6 +752,7 @@ impl TsgoSharedProvider {
         &self,
         carrier: &str,
         tsconfig: &str,
+        include_syntactic: bool,
     ) -> Result<Option<Vec<TypeDiagnostic>>, TypeProviderError> {
         let snap = match self
             .api
@@ -782,25 +772,43 @@ impl TsgoSharedProvider {
         else {
             return Ok(None);
         };
+        let project_check_js = snap
+            .project_for_config(|config| verter_span::path::fs_paths_equal(config, tsconfig))
+            .and_then(|project| project.compiler_options.get("checkJs"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         *self.snapshot.lock() = Some((snap.snapshot, project_id.clone()));
 
-        let diags = self
-            .api
-            .get_semantic_diagnostics(&snap.snapshot, &project_id, &engine_carrier)
-            .await
-            .map_err(|e| {
-                TypeProviderError::new(format!("shared --api getSemanticDiagnostics: {e}"))
-            })?;
-
-        // The engine may report the carrier under a different canonicalization than
-        // the key Verter injected under; look up by the engine's form first, then
-        // fall back to the injected key. Serve ONLY the barrier-SYNCED content (the
-        // text the shared Program actually accepted). A reserved/uncertain
-        // (`PossiblyOpenUnsynced`) or never-injected carrier yields `None`: FAIL CLOSED to
-        // OWNED (an `Err`) rather than positioning an (even empty) SHARED result against an
-        // absent barrier-synced basis.
+        // Read only the carrier revision whose ordered injection barrier completed,
+        // and use that exact content for both policy and UTF-16 positioning.
         let content =
             require_synced_carrier_content(self.sync.synced_content(&engine_carrier, carrier))?;
+        let semantic_enabled = javascript_carrier_semantic_diagnostics_enabled(
+            &engine_carrier,
+            &content,
+            project_check_js,
+        );
+        let mut diags = if semantic_enabled {
+            self.api
+                .get_semantic_diagnostics(&snap.snapshot, &project_id, &engine_carrier)
+                .await
+                .map_err(|e| {
+                    TypeProviderError::new(format!("shared --api getSemanticDiagnostics: {e}"))
+                })?
+        } else {
+            Vec::new()
+        };
+        if include_syntactic {
+            diags.extend(
+                self.api
+                    .get_syntactic_diagnostics(&snap.snapshot, &project_id, &engine_carrier)
+                    .await
+                    .map_err(|e| {
+                        TypeProviderError::new(format!("shared --api getSyntacticDiagnostics: {e}"))
+                    })?,
+            );
+        }
+
         Ok(Some(position_carrier_diagnostics(
             &diags,
             Some(content),

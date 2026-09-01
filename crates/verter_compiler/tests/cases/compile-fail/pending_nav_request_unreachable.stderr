@@ -1,11 +1,11 @@
-error[E0603]: module `template` is private
-  --> tests/cases/compile-fail/pending_nav_request_unreachable.rs:22:36
-   |
-22 |     let _request: verter_compiler::template::code_gen::vapor::PendingNavRequest = todo!();
-   |                                    ^^^^^^^^ private module    ----------------- enum `PendingNavRequest` is not publicly re-exported
-   |
-note: the module `template` is defined here
-  --> src/lib.rs
-   |
-   | pub(crate) mod template;
-   | ^^^^^^^^^^^^^^^^^^^^^^^
+error[E0603]: enum `PendingNavRequest` is private
+ --> $WORKSPACE/crates/verter_compiler/tests/cases/compile-fail/pending_nav_request_unreachable.rs
+  |
+  |     let _request: verter_compiler::template::code_gen::vapor::PendingNavRequest = todo!();
+  |                                                               ^^^^^^^^^^^^^^^^^ private enum
+  |
+note: the enum `PendingNavRequest` is defined here
+ --> $WORKSPACE/crates/verter_compiler/src/template/code_gen/vapor/mod.rs
+  |
+  | use nav_request::PendingNavRequest;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

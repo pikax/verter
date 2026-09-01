@@ -597,8 +597,14 @@ fn specifier_retarget_reseats_the_slot_under_an_unchanged_key() {
         .resolved_import_facts()
         .entry_count();
 
-    // Retarget. The owner's own bytes never change.
+    // Retarget. The owner's own bytes and project-shape identity never change.
+    let project_generation = host.project_type_store().current_project_generation();
     host.set_import_dependencies(owner, route("/retarget/second.ts"));
+    assert_eq!(
+        host.project_type_store().current_project_generation(),
+        project_generation,
+        "a real route retarget must not reset project-shape identity"
+    );
 
     let view_after = HostView::new(Arc::clone(&host));
     let key_after = key_with(
@@ -638,5 +644,31 @@ fn specifier_retarget_reseats_the_slot_under_an_unchanged_key() {
         slots_before,
         "the re-admitted bundle must join the owner's EXISTING slot as a \
          second candidate, not occupy a new key"
+    );
+
+    let fresh_host = fresh_host();
+    upsert(
+        &fresh_host,
+        "/retarget/first.ts",
+        "export interface T { a: string }\n",
+    );
+    upsert(
+        &fresh_host,
+        "/retarget/second.ts",
+        "export interface T { b: string }\n",
+    );
+    upsert(
+        &fresh_host,
+        owner,
+        "import { T } from './dep'\nexport type Re = T\n",
+    );
+    fresh_host.set_import_dependencies(owner, route("/retarget/second.ts"));
+    let fresh = HostView::new(Arc::clone(&fresh_host))
+        .resolved_import_facts(owner)
+        .expect("fresh retargeted bundle");
+    assert_eq!(
+        after.as_ref(),
+        fresh.as_ref(),
+        "incremental retarget publication must equal a fresh host at the same route"
     );
 }

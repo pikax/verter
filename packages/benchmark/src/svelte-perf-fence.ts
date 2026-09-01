@@ -249,7 +249,13 @@ async function createCompiler(
   // Artifact hashing is performed by the unmeasured parent before and after the
   // complete run. Reading the binary here would inflate this worker's lifetime
   // peak RSS with the hash buffer and contaminate the memory comparison.
-  const host = new VerterHost({ devMode: false, analysisLevel: "none", hostCpuThreads: 1 });
+  const host = new VerterHost({
+    devMode: false,
+    analysisLevel: "none",
+    hostCpuThreads: 1,
+    schedulerCpuThreads: 1,
+    schedulerIoThreads: 1,
+  });
   return {
     backendVersion: "native-artifact",
     compileOnce: (validateMapContent) => {

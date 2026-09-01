@@ -164,6 +164,11 @@ jobs:
       # install at all and leaned on an `npx @typescript/native-preview@latest`
       # step that populated an npx cache nothing ever reads.
       - run: pnpm install --frozen-lockfile
+      # Coverage executes the complete workspace test universe, including the
+      # real-tsserver suites. The workspace install creates the plugin symlink
+      # but not its `dist` entry or the language-shared output it loads.
+      - name: Build real-tsserver test prerequisites
+        run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage

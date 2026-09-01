@@ -19,6 +19,7 @@ review_profile = "semantic-3"
 dispatchable = true
 optional = false
 release_gating = "non_release"
+gh_milestone = "0.0.4"
 external_requirements = []
 charter = "charters/compiler-vue-style-query/VST1.md"
 implementation_effort_min = "medium"

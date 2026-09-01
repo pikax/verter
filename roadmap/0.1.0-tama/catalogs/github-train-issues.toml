@@ -1,0 +1,343 @@
+schema = 1
+
+[[train_issue]]
+train = "rev11.flow"
+title = "Make semantic flow facts deterministic"
+problem = "Semantic flow currently lacks one bounded authority for producing and reusing facts, which can cause inconsistent narrowing results and leave consumers dependent on accidental execution order."
+expected_outcome = "One solver owns semantic flow facts, preserves stable identity across reuse, and exposes deterministic results to every supported consumer."
+acceptance = ["One authority produces and caches semantic flow facts.", "Equivalent inputs produce equivalent narrowing and control-flow results.", "Memory and invalidation remain bounded under repeated edits."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.public-typeinfo"
+title = "Publish one coherent public type graph"
+problem = "Public type information is assembled through incompatible representations, which can cause consumers to observe incomplete graphs and prevents component metadata from sharing one dependable protocol."
+expected_outcome = "All public type consumers read a coherent graph with stable identities, explicit cycles, and one compatibility boundary."
+acceptance = ["Public type graphs preserve stable identity and cycle semantics.", "Component metadata and compatibility consumers use the same protocol.", "Incomplete graphs cannot be published as successful results."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.style"
+title = "Give style analysis stable identity and ownership"
+problem = "Style analysis does not yet share one exact identity and ownership model, which risks stale selector results and makes reuse across compiler and tooling consumers unreliable."
+expected_outcome = "Style facts, transforms, and diagnostics use stable identities with explicit owners and coherent invalidation."
+acceptance = ["Style inputs and derived facts have stable identities.", "Owners invalidate only the facts affected by a change.", "Compiler and tooling consumers observe the same current style result."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "compiler.compiler-bridge"
+title = "Unify compiler capability registration and execution"
+problem = "Compiler capabilities are registered and executed through fragmented paths, which causes framework behavior to diverge and makes policy, diagnostics, and result ownership difficult to verify."
+expected_outcome = "Vue, Svelte, and shared compiler capabilities use one typed catalog, one admission policy, and one observable execution path."
+acceptance = ["Every supported compiler capability is represented in one typed catalog.", "Registration, admission, execution, and diagnostics use one shared path.", "Vue, Svelte, and shared behavior remains independently testable."]
+problem_label = "problem:architecture"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.semantic-compile"
+title = "Make semantic compilation transactional"
+problem = "Semantic compilation can expose intermediate state through multiple gateways, which risks inconsistent results and prevents callers from knowing whether a published result belongs to one coherent input snapshot."
+expected_outcome = "A sealed compilation facade publishes semantic results atomically from one committed snapshot and rejects stale work."
+acceptance = ["Compilation reads one committed input snapshot.", "Intermediate or stale semantic results cannot be published.", "All callers use the sealed transactional facade."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.inputs"
+title = "Establish one committed input authority"
+problem = "Source and configuration inputs can be observed through separate mutable paths, which causes incoherent snapshots and leaves downstream caches unable to prove which inputs produced a result."
+expected_outcome = "One authority commits coherent source, configuration, and environment snapshots with stable provenance."
+acceptance = ["Each operation observes one coherent committed snapshot.", "Input identity includes every value that can change observable output.", "Downstream results retain the provenance of their committed inputs."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.core"
+title = "Make core query results hermetic"
+problem = "Core queries can depend on ambient or untracked state, which causes equivalent requests to return different results and prevents caches from safely reusing completed work."
+expected_outcome = "Core query contracts enumerate their inputs, return self-contained facts, and remain deterministic under reuse."
+acceptance = ["Every query result is determined by its declared inputs.", "Equivalent requests reuse the same valid facts.", "Ambient state cannot silently change observable output."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.query-runtime"
+title = "Deduplicate concurrent query production"
+problem = "Concurrent requests for the same query can perform duplicate work or publish competing results, which wastes resources and risks inconsistent completion behavior."
+expected_outcome = "One bounded runtime owns same-key production, waiters share its result, and cancellation cannot corrupt cached facts."
+acceptance = ["Only one producer runs for an equivalent in-flight query.", "Concurrent waiters observe the same completed result.", "Cancellation and failure leave no misleading cached success."]
+problem_label = "problem:correctness"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.scheduler-runtime"
+title = "Bound scheduler work and preserve ownership"
+problem = "CPU and owner-affine work can enter execution without one bounded admission model, which risks starvation, oversubscription, and commands running against the wrong owner."
+expected_outcome = "The scheduler admits bounded work atomically, routes it to the correct execution pool, and preserves owner affinity."
+acceptance = ["Admission limits bound queued and running work.", "CPU, I/O, and owner-affine commands use the correct execution route.", "Batch admission cannot leave a partially accepted operation."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.cache-runtime"
+title = "Keep cache reuse correct and bounded"
+problem = "Cache ownership and retention are split across stores, which can retain stale facts, grow without a clear bound, and make reuse correctness difficult to prove."
+expected_outcome = "One cache architecture stores immutable facts, invalidates them precisely, and enforces measurable retention limits."
+acceptance = ["Cache keys include every observable dependency.", "Invalidation removes stale facts without discarding unrelated reuse.", "Long-running sessions remain within the defined retention bounds."]
+problem_label = "problem:correctness"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.host-runtime"
+title = "Reuse host work across stable source identities"
+problem = "Host processing can rebuild work after harmless path or session changes, which causes unnecessary recomputation and weakens the identity guarantees needed for correct incremental behavior."
+expected_outcome = "Stable source identities allow the host to reuse valid work while invalidating precisely when source meaning changes."
+acceptance = ["Stable source identity survives harmless host lifecycle changes.", "Unchanged work is reused across incremental requests.", "Meaningful source changes invalidate every affected result."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.provider-runtime"
+title = "Bind external type providers by project"
+problem = "External type providers can be selected without one project-scoped authority, which risks cross-project leakage and makes provider health and capability publication unreliable."
+expected_outcome = "A project-scoped provider hub owns selection, lifecycle, health, and capability truth for external engines."
+acceptance = ["Provider bindings are isolated by project identity.", "Provider lifecycle and health are observable through one authority.", "Unavailable providers cannot publish supported capabilities."]
+problem_label = "problem:correctness"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.publication"
+title = "Publish results atomically and reject stale work"
+problem = "Results can become visible before all required facts are ready or after their inputs are stale, which causes consumers to observe incorrect mixed snapshots."
+expected_outcome = "Publication is atomic, completion is explicit, and stale results are rejected before any consumer can observe them."
+acceptance = ["A result becomes visible only when all required facts are ready.", "Published facts belong to one coherent input snapshot.", "Stale or superseded work cannot overwrite a current result."]
+problem_label = "problem:correctness"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.host-session"
+title = "Decompose host sessions by capability"
+problem = "The host session concentrates unrelated responsibilities in one catch-all runtime, which causes lifecycle coupling and prevents ownership boundaries from being tested independently."
+expected_outcome = "Capability-composed services own their state and lifecycle while the session provides only explicit coordination."
+acceptance = ["Each service has one documented owner and lifecycle.", "The session coordinates capabilities without owning their internal state.", "Legacy catch-all routes are removed after equivalent behavior is proven."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.typescript-mapper"
+title = "Separate TypeScript mapping from observation identity"
+problem = "TypeScript mapping and observation identity are coupled through legacy routes, which can misattribute results and makes mapper invalidation depend on unrelated host behavior."
+expected_outcome = "Mapping and observation use explicit identities, isolated ownership, and one supported cutover path."
+acceptance = ["Mapping identity is independent from transient observation state.", "Invalidation follows explicit TypeScript and source dependencies.", "Legacy mapper routes are removed after parity is demonstrated."]
+problem_label = "problem:architecture"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "rev11.finalization"
+title = "Prove and lock the revised architecture"
+problem = "The revised runtime cannot be treated as stable until bounded memory, equivalent work, and public behavior are proven together, leaving future products exposed to architectural regressions."
+expected_outcome = "The architecture passes long-running correctness and resource proofs, records the final decisions, and closes incompatible legacy paths."
+acceptance = ["Long-running workloads stay within defined memory and work bounds.", "Equivalent public behavior is demonstrated across the supported surfaces.", "The final architecture decision and remaining non-goals are recorded."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "governance.governance"
+title = "Open successor products after the architecture lock"
+problem = "Successor products need an explicit promotion boundary after the architecture is locked; without it, new surface work can begin against unstable ownership and invalid assumptions, risking incompatible public behavior."
+expected_outcome = "Maintainers can promote successor product work only after the locked architecture and its public contracts are available."
+acceptance = ["Promotion requires the final architecture lock to be complete.", "Successor work references current public contracts and owners.", "No release sequence is encoded as an execution dependency."]
+problem_label = "problem:documentation"
+gh_milestone = "0.0.3"
+
+[[train_issue]]
+train = "expansion.kernel"
+title = "Build the shared product kernel"
+problem = "New products need shared identity, configuration, diagnostics, publication, and integration primitives, but fragmented implementations would cause inconsistent behavior and repeated infrastructure."
+expected_outcome = "A reusable kernel provides the common contracts and bounded services required by compiler, tooling, and framework products."
+acceptance = ["Shared identities and configuration are explicit and versioned.", "Diagnostics, publication, and integration use common contracts.", "Product-specific behavior remains isolated behind owned interfaces."]
+problem_label = "problem:correctness"
+gh_milestone = "0.0.3"
+
+[[train_issue]]
+train = "compiler.compiler-core"
+title = "Create one framework-neutral compiler core"
+problem = "Compiler execution is still tied to framework-specific paths, which causes duplicated policy and prevents shared correctness, caching, and publication behavior from being proven once."
+expected_outcome = "A framework-neutral compiler core owns request identity, execution policy, assembly, and result contracts for every supported frontend."
+acceptance = ["Compiler requests and results use framework-neutral contracts.", "Framework frontends contribute behavior through explicit capabilities.", "Shared execution, caching, and publication are independently verified."]
+problem_label = "problem:architecture"
+gh_milestone = "0.1.0"
+
+[[train_issue]]
+train = "compiler.compiler-perf"
+title = "Measure equivalent compiler work"
+problem = "Compiler performance comparisons can reward incomplete or different work, which produces misleading rankings and prevents maintainers from identifying genuine execution regressions."
+expected_outcome = "Performance evidence compares equivalent work with valid references, visible exclusions, and repeatable resource measurements."
+acceptance = ["Every ranked comparison proves equivalent observable work.", "Invalid references and incomplete cells remain visible but unranked.", "Performance and resource regressions have repeatable evidence."]
+problem_label = "problem:performance"
+gh_milestone = "0.1.0"
+
+[[train_issue]]
+train = "compiler.vue-compiler"
+title = "Deliver the Vue compiler product"
+problem = "Vue compilation is split across legacy paths and incomplete targets, which causes semantic differences between outputs and prevents one truthful supported-capability contract."
+expected_outcome = "Vue VDOM, SSR, and Vapor compilation use the shared compiler core with framework-owned semantics and atomic product integration."
+acceptance = ["Supported Vue targets satisfy their semantic conformance suites.", "Vue-specific behavior is isolated from the shared compiler core.", "The public capability contract matches the behavior actually shipped."]
+problem_label = "problem:architecture"
+gh_milestone = "0.0.3"
+
+[[train_issue]]
+train = "compiler.vue-style"
+title = "Integrate Vue style semantics"
+problem = "Vue style behavior lacks one framework-owned semantic contract over the shared style substrate, which can cause scope and source processing results to disagree with compiled templates."
+expected_outcome = "Vue style semantics, scope identity, and source integration produce coherent results across compiler and tooling consumers."
+acceptance = ["Vue scope semantics are represented by explicit framework-owned facts.", "Style and template results share coherent source identity.", "Compiler and tooling consumers agree on current style behavior."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.3"
+
+[[train_issue]]
+train = "compiler.vue-style-query"
+title = "Query Vue selectors against templates"
+problem = "Vue selector analysis cannot yet query template structure through a bounded shared engine, which causes inaccurate matches and makes incremental style diagnostics unnecessarily expensive."
+expected_outcome = "A selector-to-template query engine returns precise, reusable Vue match facts with bounded candidate work."
+acceptance = ["Selector queries use authored template and style identities.", "Candidate selection avoids unrelated template traversal.", "Incremental edits invalidate only affected match facts."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.4"
+
+[[train_issue]]
+train = "expansion.language-service"
+title = "Deliver coherent language-service operations"
+problem = "Navigation, rename, completion, hover, and diagnostics rely on inconsistent coordinate and provenance paths, which causes incorrect edits and unreliable results after incremental changes."
+expected_outcome = "Language-service operations share authored coordinates, stable semantic targets, transactional edits, and one publication model."
+acceptance = ["Navigation and presentation operations resolve authored semantic targets.", "Rename and fixes publish conflict-checked transactional edits.", "Incremental and real-world conformance remains correct across supported frameworks."]
+problem_label = "problem:developer-experience"
+gh_milestone = "0.0.4"
+
+[[train_issue]]
+train = "expansion.cli"
+title = "Provide one reliable Verter command line"
+problem = "Compiler, checking, formatting, and lint workflows lack one stable command surface, which causes inconsistent configuration and makes watch, fix, and package behavior difficult to trust."
+expected_outcome = "The Verter command line exposes coherent compile, check, fix, watch, and compatibility behavior over shared product contracts."
+acceptance = ["Commands share configuration, diagnostics, and exit semantics.", "Watch mode preserves correct incremental behavior.", "Transactional fixes cannot leave partially written results."]
+problem_label = "problem:developer-experience"
+gh_milestone = "0.0.6"
+
+[[train_issue]]
+train = "expansion.native-checker"
+title = "Deliver native semantic checking"
+problem = "Verter does not yet own a complete semantic diagnostic authority, which leaves important JavaScript, TypeScript, Vue, and Svelte findings dependent on external or inconsistent behavior."
+expected_outcome = "A native checker produces certified diagnostic families through shared semantic rules, incremental queries, and truthful publication."
+acceptance = ["Required diagnostic families have discriminating certification evidence.", "Framework contributions remain isolated from shared semantic rules.", "Checker diagnostics publish consistently across supported consumer surfaces."]
+problem_label = "problem:architecture"
+gh_milestone = "0.0.5"
+
+[[train_issue]]
+train = "expansion.formatter"
+title = "Deliver deterministic formatting"
+problem = "Formatting lacks one complete syntax-preserving product across supported files, which risks semantic changes and makes configuration, range formatting, and embedded-language output inconsistent."
+expected_outcome = "A deterministic formatter preserves meaning, comments, and source boundaries across supported JavaScript, TypeScript, Vue, Svelte, HTML, and style content."
+acceptance = ["Repeated formatting is idempotent for every supported syntax.", "Comments, embedded content, and authored meaning are preserved.", "Configuration and range behavior are consistent across entry points."]
+problem_label = "problem:developer-experience"
+gh_milestone = "0.0.6"
+
+[[train_issue]]
+train = "expansion.lint"
+title = "Deliver unified native linting"
+problem = "Lint behavior is fragmented by language and entry point, which causes inconsistent diagnostics and prevents safe fixes from sharing one semantic rule and transaction model."
+expected_outcome = "Native lint packs for supported languages and frameworks publish coherent diagnostics and transactional fixes through one product surface."
+acceptance = ["Shared rules produce consistent findings across supported syntaxes.", "Framework-specific lint behavior remains explicitly owned.", "Fixes are conflict-checked and applied transactionally."]
+problem_label = "problem:developer-experience"
+gh_milestone = "0.0.6"
+
+[[train_issue]]
+train = "expansion.engine-provisioning"
+title = "Provision external engines safely"
+problem = "External engines can be discovered or installed without one integrity and trust policy, which risks incompatible binaries, silent network behavior, and misleading capability publication."
+expected_outcome = "Engine selection, acquisition, verification, activation, and health follow explicit offline-capable and enterprise-safe contracts."
+acceptance = ["Selected engines satisfy identity, compatibility, and integrity checks.", "Network and installation behavior follows explicit maintainer policy.", "Unavailable or unhealthy engines cannot advertise working capabilities."]
+problem_label = "problem:automation"
+gh_milestone = "0.1.0"
+
+[[train_issue]]
+train = "expansion.html-wc"
+title = "Deliver HTML and Web Components support"
+problem = "Neutral HTML and standards-based Custom Elements lack a complete shared substrate, which causes duplicated framework handling and prevents tooling from understanding standard component contracts."
+expected_outcome = "HTML parsing, semantics, metadata, formatting, linting, and Custom Elements integration use one standards-oriented product foundation."
+acceptance = ["HTML behavior follows the supported standards contract.", "Custom Element metadata is shared across compiler and tooling consumers.", "Framework adapters do not duplicate neutral HTML semantics."]
+problem_label = "problem:compatibility"
+gh_milestone = "0.0.6"
+
+[[train_issue]]
+train = "compiler.svelte-compiler"
+title = "Deliver the Svelte compiler product"
+problem = "Svelte compilation does not yet exercise the shared compiler as a complete second framework, which leaves generic contracts insufficiently tested and product behavior incomplete."
+expected_outcome = "Svelte client, server, and analysis targets use framework-owned semantics over the shared compiler core with truthful capability publication."
+acceptance = ["Supported Svelte targets satisfy their semantic conformance suites.", "Svelte-specific behavior remains isolated behind explicit capabilities.", "The second framework exposes and resolves invalid shared assumptions."]
+problem_label = "problem:architecture"
+gh_milestone = "0.0.7"
+
+[[train_issue]]
+train = "compiler.svelte-style"
+title = "Integrate Svelte style semantics"
+problem = "Svelte style scope and selector behavior lack one framework-owned model over the shared style substrate, which can cause source processing and template matches to become incorrect."
+expected_outcome = "Svelte style semantics and selector queries produce precise, reusable facts that remain coherent with compiled component structure."
+acceptance = ["Svelte scope semantics are represented by explicit framework-owned facts.", "Selector queries use bounded candidate selection.", "Incremental edits invalidate only affected style match facts."]
+problem_label = "problem:capability"
+gh_milestone = "0.0.7"
+
+[[train_issue]]
+train = "expansion.svelte-ce"
+title = "Support Svelte Custom Elements end to end"
+problem = "Svelte Custom Element producers and consumers do not yet share one standards-compatible metadata path, which causes interoperability gaps and unreliable tooling behavior."
+expected_outcome = "Svelte Custom Elements compile, publish metadata, and participate in language tooling through the shared standards substrate."
+acceptance = ["Produced elements expose standards-compatible metadata.", "Consumers resolve Svelte Custom Elements through the shared registry.", "Compiler and tooling behavior agrees on public element contracts."]
+problem_label = "problem:compatibility"
+gh_milestone = "0.1.0"
+
+[[train_issue]]
+train = "expansion.vue-ce"
+title = "Support Vue Custom Elements end to end"
+problem = "Vue Custom Element producers and consumers do not yet share one standards-compatible metadata path, which causes interoperability gaps and unreliable tooling behavior."
+expected_outcome = "Vue Custom Elements compile, publish metadata, and participate in language tooling through the shared standards substrate."
+acceptance = ["Produced elements expose standards-compatible metadata.", "Consumers resolve Vue Custom Elements through the shared registry.", "Compiler and tooling behavior agrees on public element contracts."]
+problem_label = "problem:compatibility"
+gh_milestone = "0.1.0"
+
+[[train_issue]]
+train = "expansion.custom-elements"
+title = "Unify framework Custom Element interoperability"
+problem = "Vue and Svelte Custom Elements can expose incompatible legacy schemas and registry behavior, which causes cross-framework consumers to resolve different public contracts."
+expected_outcome = "Framework producers and consumers converge on one shared schema, registry, and interoperability contract."
+acceptance = ["Vue and Svelte elements publish compatible shared metadata.", "Legacy schema and registry routes are removed after parity is proven.", "Cross-framework interoperability survives repeated real-world use."]
+problem_label = "problem:compatibility"
+gh_milestone = "0.1.0"
+
+[[train_issue]]
+train = "expansion.architecture-proof"
+title = "Falsify the shared architecture with varied frontends"
+problem = "A supposedly universal architecture can still encode assumptions from its first frameworks, which risks later frontends requiring hidden special cases or incompatible ownership."
+expected_outcome = "Representative frontend slices with different geometries expose invalid assumptions while preserving shared contracts and bounded execution."
+acceptance = ["Each representative slice targets a distinct architectural pressure.", "Invalid shared assumptions are corrected in their owning contracts.", "Proof slices remain evidence and do not overstate product support."]
+problem_label = "problem:architecture"
+gh_milestone = "0.1.0"
+
+[[train_issue]]
+train = "expansion.skills"
+title = "Provide maintainable contributor workflows"
+problem = "Contributor guidance is distributed across dense references and inconsistent workflows, which causes agents and maintainers to miss required context or apply obsolete procedures."
+expected_outcome = "Progressive, tested workflow skills expose the right project guidance for planning, implementation, review, and verification."
+acceptance = ["Each workflow loads only the references needed for its task.", "Forward tests detect stale paths and missing required guidance.", "Maintainers ratify one atomic activation path."]
+problem_label = "problem:developer-experience"
+gh_milestone = "0.0.6"
+
+[[train_issue]]
+train = "compiler.compiler-optimization"
+title = "Define a measured compiler optimization engine"
+problem = "Compiler optimization work lacks a separately measured and maintainer-approved scope, which risks trading correctness or equivalent work for misleading performance gains."
+expected_outcome = "Maintainers approve an optimization design whose inputs, outputs, resource effects, and comparison evidence are independently measurable."
+acceptance = ["Optimization scope is separated from semantic correctness work.", "Every proposed gain preserves equivalent observable work.", "Maintainers ratify the evidence and resulting implementation scope."]
+problem_label = "problem:performance"
+gh_milestone = "0.1.0"

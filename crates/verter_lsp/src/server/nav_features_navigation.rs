@@ -12,10 +12,15 @@
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::documents::carrier_structure::project_carrier_blocks_for_document;
+use crate::documents::carrier_structure::{
+    project_carrier_blocks_for_document, svelte_render_lexical_visibility_at,
+    svelte_static_render_callee_span_at, SvelteRenderLexicalVisibility,
+};
 use crate::documents::line_index::LineIndex;
 use crate::documents::uri_to_canonical_id;
-use crate::features::definition::definition_at_position;
+use crate::features::definition::{
+    definition_at_position, source_authoritative_local_svelte_render_offset,
+};
 use crate::features::references::references_at_position;
 use crate::type_provider::merge;
 
@@ -66,6 +71,91 @@ fn host_export_location(
         uri: crate::uri::path_to_file_uri(&resolved_id)?,
         range,
     })
+}
+
+/// Classification of a script-root render callee against producer-owned
+/// `$props` syntax facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SvelteScriptRenderPropResolution {
+    Owned(verter_span::Span),
+    /// Facts cannot prove either ownership or absence. Generic native binding
+    /// fallback is unsafe; the provider retains the request.
+    Indeterminate,
+    NotAProp,
+}
+
+/// Join the current parser-owned static render callee with exact Svelte script
+/// syntax. An authored `$props` local binding is a lexical source identity even
+/// when a named/JSDoc alias prevents callable-role classification. Recovered
+/// syntax and duplicate bindings fail closed.
+fn source_owned_svelte_render_prop_from_script_facts(
+    document: &crate::documents::DocumentState,
+    position: &Position,
+    evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
+        verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+    >,
+) -> SvelteScriptRenderPropResolution {
+    let Some(offset) = document.line_index.position_to_offset(position) else {
+        return SvelteScriptRenderPropResolution::NotAProp;
+    };
+    let Some(structure) = document
+        .feature_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.structure())
+    else {
+        return SvelteScriptRenderPropResolution::NotAProp;
+    };
+    let Some(callee) = svelte_static_render_callee_span_at(structure, offset) else {
+        return SvelteScriptRenderPropResolution::NotAProp;
+    };
+    if svelte_render_lexical_visibility_at(structure, offset)
+        != Some(SvelteRenderLexicalVisibility::ScriptRootVisible)
+    {
+        return SvelteScriptRenderPropResolution::NotAProp;
+    }
+    let Some(name) = document
+        .source
+        .get(callee.start as usize..callee.end as usize)
+    else {
+        return SvelteScriptRenderPropResolution::Indeterminate;
+    };
+    let mut binding_spans = Vec::new();
+    match evidence {
+        verter_session::framework::script_facts::ScriptFactEvidence::Exact(exact) => {
+            for call in exact.facts().syntax().props_calls().iter() {
+                binding_spans.extend(
+                    call.local_bindings
+                        .iter()
+                        .filter(|binding| binding.name == name)
+                        .map(|binding| binding.span),
+                );
+            }
+        }
+        verter_session::framework::script_facts::ScriptFactEvidence::Partial(partial) => {
+            let Some(syntax) = partial.exact_syntax() else {
+                return SvelteScriptRenderPropResolution::Indeterminate;
+            };
+            for call in syntax.props_calls().iter() {
+                binding_spans.extend(
+                    call.local_bindings
+                        .iter()
+                        .filter(|binding| binding.name == name)
+                        .map(|binding| binding.span),
+                );
+            }
+        }
+        verter_session::framework::script_facts::ScriptFactEvidence::Unavailable(_)
+        | verter_session::framework::script_facts::ScriptFactEvidence::NotApplicable(_) => {
+            return SvelteScriptRenderPropResolution::Indeterminate;
+        }
+    }
+    binding_spans.sort_by_key(|span| (span.start, span.end));
+    binding_spans.dedup();
+    match binding_spans.as_slice() {
+        [span] => SvelteScriptRenderPropResolution::Owned(*span),
+        [] => SvelteScriptRenderPropResolution::NotAProp,
+        _ => SvelteScriptRenderPropResolution::Indeterminate,
+    }
 }
 
 pub(super) async fn handle_goto_definition(
@@ -154,11 +244,76 @@ pub(super) async fn handle_goto_definition(
         }
     }
 
-    let verter_result = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = project_carrier_blocks_for_document(&doc);
-        let canonical_id = uri_to_canonical_id(uri);
+    struct NativeDefinitionSnapshot {
+        capture: crate::documents::SourceFeatureDocumentCapture,
+        analysis: Option<verter_session::FileAnalysisSnapshot>,
+        svelte_render_lexical_visibility: Option<SvelteRenderLexicalVisibility>,
+        svelte_script_render_prop: SvelteScriptRenderPropResolution,
+        source_authoritative_svelte_render: bool,
+    }
+
+    let mut native_snapshot = None;
+    for _ in 0..2 {
+        let Some(capture) = server.documents.capture_source_feature_document(uri) else {
+            continue;
+        };
+        if !server
+            .documents
+            .source_feature_host_revision_is_current(&capture)
+        {
+            continue;
+        }
+        let svelte_evidence = server
+            .documents
+            .host()
+            .resolve_svelte_script_facts(&capture.document.canonical_id);
+        let analysis = server
+            .documents
+            .source_feature_analysis_from_capture(&capture, &svelte_evidence);
+        if !server
+            .documents
+            .source_feature_host_revision_is_current(&capture)
+        {
+            continue;
+        }
+        let document = &capture.document;
+        let offset = document.line_index.position_to_offset(position);
+        let structure = document
+            .feature_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.structure());
+        let svelte_render_lexical_visibility = offset
+            .zip(structure)
+            .and_then(|(offset, structure)| svelte_render_lexical_visibility_at(structure, offset));
+        let svelte_script_render_prop =
+            source_owned_svelte_render_prop_from_script_facts(document, position, &svelte_evidence);
+        let source_authoritative_svelte_render = offset.is_some_and(|offset| {
+            source_authoritative_local_svelte_render_offset(offset, structure)
+                || matches!(
+                    svelte_script_render_prop,
+                    SvelteScriptRenderPropResolution::Owned(_)
+                )
+        });
+        if server
+            .documents
+            .source_feature_capture_is_current(uri, &capture)
+        {
+            native_snapshot = Some(NativeDefinitionSnapshot {
+                capture,
+                analysis,
+                svelte_render_lexical_visibility,
+                svelte_script_render_prop,
+                source_authoritative_svelte_render,
+            });
+            break;
+        }
+    }
+
+    let mut verter_result = native_snapshot.as_ref().and_then(|native| {
+        let doc = &native.capture.document;
+        let analysis = native.analysis.as_ref();
+        let blocks = project_carrier_blocks_for_document(doc);
+        let canonical_id = doc.canonical_id.clone();
         let resolve_path = {
             let canonical_id = canonical_id.clone();
             let host = &server.documents.host;
@@ -217,6 +372,22 @@ pub(super) async fn handle_goto_definition(
             return Some(barrel_def);
         }
 
+        if let SvelteScriptRenderPropResolution::Owned(span) = native.svelte_script_render_prop {
+            return location_from_span(uri, &doc.line_index, span)
+                .map(GotoDefinitionResponse::Scalar);
+        }
+        if matches!(
+            native.svelte_render_lexical_visibility,
+            Some(SvelteRenderLexicalVisibility::Blocked | SvelteRenderLexicalVisibility::Ambiguous)
+        ) || native.svelte_script_render_prop == SvelteScriptRenderPropResolution::Indeterminate
+        {
+            // The parser proves a nearer lexical scope hides the script root,
+            // or cannot choose one authored declaration. Do not let generic
+            // analysis incorrectly target a same-named root binding; the
+            // provider retains ownership of the shadowed expression.
+            return None;
+        }
+
         let structure = doc
             .feature_snapshot
             .as_ref()
@@ -225,7 +396,7 @@ pub(super) async fn handle_goto_definition(
             position,
             &doc.source,
             &blocks,
-            analysis.as_ref(),
+            analysis,
             &doc.line_index,
             resolve_fn,
             resolve_export_fn,
@@ -250,9 +421,31 @@ pub(super) async fn handle_goto_definition(
         }
 
         Some(def)
-    })();
+    });
+
+    let native_snapshot_is_current = native_snapshot.as_ref().is_some_and(|native| {
+        server
+            .documents
+            .source_feature_capture_is_current(uri, &native.capture)
+    });
+    if !native_snapshot_is_current {
+        verter_result = None;
+    }
+    let source_authoritative_svelte_render = native_snapshot_is_current
+        && native_snapshot
+            .as_ref()
+            .is_some_and(|native| native.source_authoritative_svelte_render);
 
     tracing::debug!("definition: verter found={}", verter_result.is_some());
+
+    // A parser-minted Svelte render callee with an exact local-snippet or
+    // snippet-prop identity is resolved exclusively against that authored
+    // span. Unioning provider locations can otherwise surface a declaration
+    // from `node_modules/svelte`. Ordinary imported/dynamic callables retain
+    // normal navigation because they do not mint this source-owned proof.
+    if source_authoritative_svelte_render {
+        return Ok(verter_result);
+    }
 
     // B4: a GLOBAL css class token (declared non-scoped / :global) extends its
     // definition targets with every global declaration workspace-wide.

@@ -212,6 +212,223 @@ async fn lifecycle_is_cached_without_activation_and_replayed_once_on_first_query
 }
 
 #[tokio::test]
+async fn activation_replays_live_files_in_first_open_order_with_latest_contents() {
+    let managed = Arc::new(MockTypeProvider::new());
+    let provider = LazyManagedTypeProvider::new({
+        let managed = Arc::clone(&managed);
+        move || {
+            let managed = Arc::clone(&managed);
+            async move { Ok(managed as Arc<dyn TypeProvider>) }
+        }
+    });
+
+    provider
+        .open_file("/w/z-first.ts", "export const first = 1")
+        .await
+        .unwrap();
+    provider
+        .open_file("/w/m-reopened.ts", "export const stale = 1")
+        .await
+        .unwrap();
+    provider
+        .update_file("/w/z-first.ts", "export const first = 2")
+        .await
+        .unwrap();
+    provider
+        .open_file("/w/a-last.ts", "export const last = 3")
+        .await
+        .unwrap();
+    provider.close_file("/w/m-reopened.ts").await.unwrap();
+    provider
+        .open_file("/w/m-reopened.ts", "export const reopened = 4")
+        .await
+        .unwrap();
+
+    provider.get_hover("/w/a-last.ts", 0).await.unwrap();
+
+    let replayed = managed
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            MockCall::OpenFile { path, content } => Some((path, content)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replayed,
+        vec![
+            (
+                "/w/z-first.ts".to_string(),
+                "export const first = 2".to_string(),
+            ),
+            (
+                "/w/a-last.ts".to_string(),
+                "export const last = 3".to_string(),
+            ),
+            (
+                "/w/m-reopened.ts".to_string(),
+                "export const reopened = 4".to_string(),
+            ),
+        ],
+        "lazy activation must be observationally equivalent to the eager lifecycle: \
+         updates preserve first-live order, while close plus reopen establishes a new order"
+    );
+}
+
+async fn real_tsgo_or_skip() -> Option<std::path::PathBuf> {
+    let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root above crates/")
+        .to_path_buf();
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root),
+    );
+    match verter_tsgo_api::toolchain::discovery::resolve(&request).await {
+        Ok(resolution) => Some(resolution.path),
+        Err(error) => {
+            assert!(
+                std::env::var("VERTER_REQUIRE_TSGO").is_err(),
+                "VERTER_REQUIRE_TSGO is set but real lazy replay parity cannot locate tsgo: {error}"
+            );
+            eprintln!("SKIP real lazy replay parity: tsgo is unavailable: {error}");
+            None
+        }
+    }
+}
+
+async fn spawn_real_owned_tsgo(
+    executable: &std::path::Path,
+    workspace: &std::path::Path,
+) -> Arc<dyn TypeProvider> {
+    let root_uri = format!(
+        "file:///{}",
+        workspace
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+    );
+    let lsp = crate::tsgo::ipc::TsgoTypeProvider::spawn(&executable.to_string_lossy(), &root_uri)
+        .await
+        .expect("spawn real tsgo --lsp");
+    let owned = crate::tsgo::ipc::TsgoOwnedProvider::attach(Arc::new(lsp), executable)
+        .await
+        .expect("attach real tsgo --api checker");
+    Arc::new(owned)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lazy_real_tsgo_quick_info_matches_the_eager_file_lifecycle() {
+    let Some(executable) = real_tsgo_or_skip().await else {
+        return;
+    };
+    let workspace = tempfile::tempdir().expect("temporary real-tsgo project");
+    let source_dir = workspace.path().join("src");
+    let carrier_dir = source_dir.join("z-carrier");
+    std::fs::create_dir_all(&carrier_dir).expect("real-tsgo source directory");
+    std::fs::write(carrier_dir.join("Case.svelte"), "<p>{label}</p>\n")
+        .expect("authored carrier source");
+    std::fs::write(
+        workspace.path().join("tsconfig.json"),
+        r#"{"compilerOptions":{"strict":true,"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","jsx":"preserve","allowArbitraryExtensions":true,"allowImportingTsExtensions":true,"noEmit":true},"include":["src/**/*"]}"#,
+    )
+    .expect("real-tsgo tsconfig");
+
+    let normalize = |path: std::path::PathBuf| path.to_string_lossy().replace('\\', "/");
+    let declaration_path = normalize(carrier_dir.join("Case.d.svelte.ts"));
+    let ide_path = normalize(carrier_dir.join("Case.svelte.tsx"));
+    let consumer_path = normalize(source_dir.join("a-consumer.ts"));
+    let declaration_content = "type Component<Props, Exports> = (props: Props) => Exports;\n\
+                       declare const PublicCase: Component<{ label: string }, { focus: () => void }>;\n\
+                       export default PublicCase;\n";
+    let ide_content = "type Component<Props, Exports> = (props: Props) => Exports;\n\
+                       interface Props { label: string }\n\
+                       declare const IdeCase: Component<Props, {}>;\n\
+                       export default IdeCase;\n";
+    let consumer_content =
+        "import Case from './z-carrier/Case.svelte';\nexport const observed = Case;\n";
+    let hover_offset = consumer_content.rfind("Case").expect("consumer reference") as u32;
+
+    async fn open_fixture(
+        provider: &dyn TypeProvider,
+        ide_path: &str,
+        ide_content: &str,
+        declaration_path: &str,
+        declaration_content: &str,
+        consumer_path: &str,
+        consumer_content: &str,
+    ) {
+        provider
+            .open_file(ide_path, ide_content)
+            .await
+            .expect("open IDE projection first");
+        provider
+            .open_file(declaration_path, declaration_content)
+            .await
+            .expect("open public declaration projection second");
+        provider
+            .open_file(consumer_path, consumer_content)
+            .await
+            .expect("open consumer after its dependencies");
+    }
+
+    let eager = spawn_real_owned_tsgo(&executable, workspace.path()).await;
+    open_fixture(
+        eager.as_ref(),
+        &ide_path,
+        ide_content,
+        &declaration_path,
+        declaration_content,
+        &consumer_path,
+        consumer_content,
+    )
+    .await;
+    let eager_hover = eager
+        .get_hover(&consumer_path, hover_offset)
+        .await
+        .expect("eager real-tsgo hover")
+        .expect("eager real-tsgo QuickInfo");
+    eager.shutdown().await.expect("shutdown eager real tsgo");
+
+    let lazy = LazyManagedTypeProvider::new({
+        let executable = executable.clone();
+        let workspace = workspace.path().to_path_buf();
+        move || {
+            let executable = executable.clone();
+            let workspace = workspace.clone();
+            async move { Ok(spawn_real_owned_tsgo(&executable, &workspace).await) }
+        }
+    });
+    open_fixture(
+        &lazy,
+        &ide_path,
+        ide_content,
+        &declaration_path,
+        declaration_content,
+        &consumer_path,
+        consumer_content,
+    )
+    .await;
+    let lazy_hover = lazy
+        .get_hover(&consumer_path, hover_offset)
+        .await
+        .expect("lazy real-tsgo hover")
+        .expect("lazy real-tsgo QuickInfo");
+    lazy.shutdown().await.expect("shutdown lazy real tsgo");
+
+    assert_eq!(
+        lazy_hover.contents, eager_hover.contents,
+        "lazy activation must reproduce the exact QuickInfo of the eager file lifecycle"
+    );
+    assert!(
+        lazy_hover.contents.contains("focus") && !lazy_hover.contents.contains("IdeCase"),
+        "the direct carrier import must resolve the public projection, not the later IDE projection: {}",
+        lazy_hover.contents
+    );
+}
+
+#[tokio::test]
 async fn concurrent_first_queries_singleflight_the_managed_factory() {
     let spawn_count = Arc::new(AtomicUsize::new(0));
     let managed = Arc::new(MockTypeProvider::new());

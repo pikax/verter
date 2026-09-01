@@ -3,8 +3,8 @@
 //! The PRIMARY rail for the seal is the ordinary compile of the type itself
 //! (private inner field, no `Deserialize`, no `Deref`/`AsRef<str>`/
 //! `Into<String>`/`Display`, witness-gated construction) — every gate run
-//! exercises it. The trybuild fixtures (`compile_fail.rs`) are the
-//! belt-and-braces negative witness and sit OUTSIDE the default gate; this
+//! exercises it. The trybuild fixtures under `tests/cases/compile-fail/` are
+//! the belt-and-braces negative witness in the standalone compile-contract CI lane; this
 //! test is their IN-GATE complement, asserting from outside the crate that the
 //! deliberately-labelled accessor is the sole route to the display string and
 //! that minting flows through a provider-obtained witness.

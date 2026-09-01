@@ -209,6 +209,26 @@ pub trait TypeProvider: Send + Sync {
 
     fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>>;
 
+    /// Diagnostics for `path` in the exact configured project named by
+    /// `configured_project`.
+    ///
+    /// This is an optional served-signalling capability for generated carrier
+    /// companions whose on-disk path is not itself a configured-project member.
+    /// `Some(diagnostics)` means the provider served that exact project, including
+    /// `Some(Vec::new())` for an authoritative clean result. `None` means the
+    /// provider cannot serve the project-bound query; callers must fail closed or
+    /// try another project-bound provider. The default deliberately does NOT call
+    /// [`TypeProvider::get_diagnostics`]: a raw companion query may bind to an
+    /// inferred or broader ancestor project and return diagnostics under the wrong
+    /// compiler options.
+    fn get_diagnostics_in_project<'a>(
+        &'a self,
+        _path: &'a str,
+        _configured_project: &'a str,
+    ) -> ProviderFuture<'a, Option<Vec<TypeDiagnostic>>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>>;
 
     fn get_type_definition(&self, path: &str, offset: u32)

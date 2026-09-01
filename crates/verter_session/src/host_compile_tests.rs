@@ -13,6 +13,7 @@
 //! | `compile_many_dedup_conflicting_source_rejects_entire_group` | Both conflict entries fail; sibling /B.vue compiles. |
 //! | `compile_many_with_zero_inputs` | Empty input — no panic, no pool. |
 //! | `compile_many_compiles_each_canonical_once` | Read-once invariant via compile_one_call_count. |
+//! | `compile_many_admission_skips_unused_update_result_materialization` | Compile admission builds no discarded public update payloads; `upsert` control builds one. |
 //! | `compile_many_propagates_interactive_priority` | last_upsert_priority observable. |
 //! | `compile_many_priority_default_is_background` | Default = Background. |
 //! | `compile_many_compile_error_preserves_all_diagnostics` | Ok(Err(CompileError(failure))) arm unpacks all diags. |
@@ -31,6 +32,30 @@ use crate::host_compile::{
 };
 use crate::types::HostConfig;
 use crate::VerterHost;
+
+#[test]
+fn compile_many_host_path_contains_no_lint_stage() {
+    let source = include_str!("host_compile.rs");
+    let start = source
+        .find("pub fn compile_many(")
+        .expect("host compile_many entry point must exist");
+    let end = source[start..]
+        .find("fn compile_one_in_batch(")
+        .map(|offset| start + offset)
+        .expect("compile_many must end before compile_one_in_batch");
+    let body = &source[start..end];
+
+    for forbidden in ["Linter::", "lint_with_source(", ".lint("] {
+        assert!(
+            !body.contains(forbidden),
+            "compile_many admission/compile stages must never invoke lint; found `{forbidden}`"
+        );
+    }
+    assert!(
+        !include_str!("../Cargo.toml").contains("verter_diagnostics"),
+        "verter_session must not depend on the diagnostics/linter crate"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -338,13 +363,19 @@ fn compile_many_compiles_each_canonical_once() {
     let body = good_template("read-once");
     let inputs: Vec<CompileBatchInput> = (0..5).map(|_| ok_input("/A.vue", &body)).collect();
 
-    let baseline = host.compile_one_call_count.load(Ordering::Relaxed);
+    let baseline = host
+        .test_force
+        .compile_one_call_count
+        .load(Ordering::Relaxed);
     let entries = host.compile_many(
         inputs,
         CompileBatchOptions::default(),
         CompileManyTarget::HostBacked,
     );
-    let after = host.compile_one_call_count.load(Ordering::Relaxed);
+    let after = host
+        .test_force
+        .compile_one_call_count
+        .load(Ordering::Relaxed);
 
     assert_eq!(
         entries.len(),
@@ -375,6 +406,53 @@ fn compile_many_compiles_each_canonical_once() {
     }
 }
 
+#[test]
+fn compile_many_admission_skips_unused_update_result_materialization() {
+    let host = new_host();
+    let inputs: Vec<_> = (0..8)
+        .map(|i| ok_input(&format!("/status-only-{i}.vue"), &good_template("status")))
+        .collect();
+    let before = host
+        .test_force
+        .upsert_result_materialization_count
+        .load(Ordering::Relaxed);
+
+    let entries = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
+    assert!(
+        entries.iter().all(|entry| entry.errors().is_empty()),
+        "status-only admission must preserve successful compilation"
+    );
+    let after_compile = host
+        .test_force
+        .upsert_result_materialization_count
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        after_compile, before,
+        "compile_many consumes only admission success/failure and must not clone \
+         parse metadata or render a discarded HostUpdateResult per file"
+    );
+
+    let public_request = host.batch_upsert_request(&ok_input(
+        "/full-upsert-control.vue",
+        &good_template("full result"),
+    ));
+    let update = host
+        .upsert(public_request)
+        .expect("the public upsert control must succeed");
+    assert_eq!(update.canonical_id, "/full-upsert-control.vue");
+    assert_eq!(
+        host.test_force
+            .upsert_result_materialization_count
+            .load(Ordering::Relaxed),
+        after_compile + 1,
+        "public upsert must retain its full HostUpdateResult contract"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 9. Priority propagation — Interactive
 // ---------------------------------------------------------------------------
@@ -384,7 +462,7 @@ fn compile_many_propagates_interactive_priority() {
     let host = new_host();
     let inputs = vec![ok_input("/PRIO_INT.vue", &good_template("p"))];
 
-    *host.last_upsert_priority.lock() = None;
+    *host.test_force.last_upsert_priority.lock() = None;
     host.compile_many(
         inputs,
         CompileBatchOptions {
@@ -394,7 +472,7 @@ fn compile_many_propagates_interactive_priority() {
         CompileManyTarget::HostBacked,
     );
     assert_eq!(
-        *host.last_upsert_priority.lock(),
+        *host.test_force.last_upsert_priority.lock(),
         Some(Priority::Interactive),
         "explicit Interactive must propagate to upsert_with_priority"
     );
@@ -403,7 +481,7 @@ fn compile_many_propagates_interactive_priority() {
     // upsert (fast-path skip is keyed by hash of source) so the
     // observable is overwritten.
     let inputs2 = vec![ok_input("/PRIO_INT.vue", &good_template("p2"))];
-    *host.last_upsert_priority.lock() = None;
+    *host.test_force.last_upsert_priority.lock() = None;
     host.compile_many(
         inputs2,
         CompileBatchOptions {
@@ -413,7 +491,7 @@ fn compile_many_propagates_interactive_priority() {
         CompileManyTarget::HostBacked,
     );
     assert_eq!(
-        *host.last_upsert_priority.lock(),
+        *host.test_force.last_upsert_priority.lock(),
         Some(Priority::Background),
         "explicit Background must propagate (NOT silently coerced to Interactive)"
     );
@@ -427,7 +505,7 @@ fn compile_many_propagates_interactive_priority() {
 fn compile_many_priority_default_is_background() {
     let host = new_host();
     let inputs = vec![ok_input("/PRIO_DEF.vue", &good_template("p"))];
-    *host.last_upsert_priority.lock() = None;
+    *host.test_force.last_upsert_priority.lock() = None;
     host.compile_many(
         inputs,
         CompileBatchOptions {
@@ -437,7 +515,7 @@ fn compile_many_priority_default_is_background() {
         CompileManyTarget::HostBacked,
     );
     assert_eq!(
-        *host.last_upsert_priority.lock(),
+        *host.test_force.last_upsert_priority.lock(),
         Some(Priority::Background),
         "default priority must be Background per sub-"
     );
@@ -644,7 +722,8 @@ fn compile_many_workers_carry_host_cpu_pool_id() {
     let host = new_host();
     // Reset both observables so the read after `compile_many`
     // reflects only this batch's worker.
-    host.compile_one_caller_kind_tag
+    host.test_force
+        .compile_one_caller_kind_tag
         .store(0, std::sync::atomic::Ordering::Relaxed);
     host.compile_one_host_cpu_pool_token
         .store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
@@ -691,6 +770,7 @@ fn compile_many_workers_carry_host_cpu_pool_id() {
     // ran on a scheduler `CpuWorker` thread (e.g. via a refactor that
     // moved the token install into a different start_handler).
     let observed_kind = host
+        .test_force
         .compile_one_caller_kind_tag
         .load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(

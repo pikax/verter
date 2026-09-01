@@ -71,6 +71,8 @@ export const EXIT_USAGE = 127;
 // owned executable in both modes without introducing a production test seam.
 export const HARNESS_SMOKE_MARKER = "HARNESS-SMOKE FAILED";
 export const HARNESS_SMOKE_MODES = Object.freeze(["vapor", "typescript"]);
+export const CORE_HARNESS_SMOKE_MODES = Object.freeze(["typescript"]);
+export const BF2_HARNESS_SMOKE_MODES = Object.freeze(["vapor"]);
 export const HARNESS_SMOKE_RECEIPT_SCHEMA = "verter-harness-smoke/v1";
 
 export function harnessSmokeCommand(repoRoot, mode, nodePath = process.execPath) {
@@ -1415,11 +1417,11 @@ export function checkBuildPrerequisites(opts) {
 }
 
 // ----------------------------------------------------------------------------------------------------
-// ORACLE-CACHE PREREQUISITE PREFLIGHT (gate mode only; the gate's SECOND step — right after the
-// build-prerequisite preflight above, still before Cargo touches anything).
+// ORACLE-CACHE PREREQUISITE PREFLIGHT (the dedicated BF2 authoritative lane, before Cargo touches
+// anything).
 //
-// THE BUG IT GUARDS. `verter_session/bf2-authoritative` gates 45 tests that were absent from every
-// canonical gate run (see `ARCHIVE_FEATURES` below, which turns the feature on for the archived suite).
+// THE BUG IT GUARDS. `verter_session/bf2-authoritative` gates authoritative tests that used to be absent
+// from CI and now run in their own required lane (see `scripts/bf2-authoritative.mjs`).
 // Among them is the ENTIRE `compile::map_equality_tests::svelte_official_conformance_gate` /
 // `_matrix` suite — the tests that actually compare Verter's Svelte output against the pinned official
 // `svelte@5.56.10` oracle. Once the feature is on, those tests spawn `node bin/check-candidate.mjs`
@@ -1445,10 +1447,11 @@ export function checkBuildPrerequisites(opts) {
 // THIS IS REALIZATION, NOT PROVISIONING. `ensureOracleDomain` is OFFLINE (the cache is the sole package
 // source, `npm ci --offline`) and idempotent — it re-validates and reuses `.oracle-installs` on every
 // call, which is exactly what happens automatically the first time a `bf2-authoritative` test runs
-// regardless of whether this preflight exists. Running it here only makes the SAME automatic step happen
-// loudly, first, and before Cargo, instead of silently inside a test's divergence report. The ONE
+// regardless of whether this preflight exists. Running it in that lane only makes the SAME automatic step
+// happen loudly, first, and before Cargo, instead of silently inside a test's divergence report. The ONE
 // networked step, `packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs`, is never invoked here or anywhere else in the
-// gate — an absent or unusable cache fails setup and names that exact command; the gate does not run it.
+// checker — an absent or unusable cache fails setup and names that exact command; CI performs provisioning
+// explicitly before it enters the offline lane.
 // ----------------------------------------------------------------------------------------------------
 export const ORACLE_CACHE_PREREQUISITE_MARKER = "ORACLE-CACHE PREREQUISITE MISSING";
 
@@ -1504,8 +1507,8 @@ export const ORACLE_CACHE_PROBE_SOURCE =
 
 // SIGKILL: the child may itself have an `npm ci` grandchild in flight; a trappable SIGTERM (spawnSync's
 // default killSignal) can leave the parent blocked until that child chooses to exit — the same hazard
-// documented on `BUILD_PREREQUISITE_PROBE_KILL_SIGNAL` above, and for the same reason: this runs as the
-// gate's SECOND step, still holding the single-flight mutex.
+// documented on `BUILD_PREREQUISITE_PROBE_KILL_SIGNAL` above. The dedicated lane must not leave an npm
+// descendant behind if realization reaches its deadline.
 export const ORACLE_CACHE_PROBE_KILL_SIGNAL = "SIGKILL";
 
 // Upper bound on the probe. Larger than `BUILD_PREREQUISITE_PROBE_MAX_MS`: unlike the tsserver probe (one
@@ -1516,9 +1519,9 @@ export const ORACLE_CACHE_PROBE_KILL_SIGNAL = "SIGKILL";
 // realize from a freshly-provisioned cache.
 export const ORACLE_CACHE_PROBE_MAX_MS = 5 * 60_000;
 
-// The probe budget for a gate whose deadline is `deadlineMs` at wallclock `nowMsValue`: the remaining
+// The probe budget for a caller whose deadline is `deadlineMs` at wallclock `nowMsValue`: the remaining
 // time, capped at MAX. Deliberately no floor — see `probeBudgetMs` above for why a floor would let an
-// expired deadline buy the probe time past the gate's own wallclock limit.
+// expired deadline buy the probe time past the caller's own wallclock limit.
 export function oracleCacheProbeBudgetMs(deadlineMs, nowMsValue) {
   const remaining = deadlineMs - nowMsValue;
   if (!Number.isFinite(remaining)) return ORACLE_CACHE_PROBE_MAX_MS;
@@ -1676,17 +1679,17 @@ export function checkOracleCachePrerequisite(opts) {
       "output conformance tests need (`verter_session/bf2-authoritative`, including the ENTIRE " +
       "`svelte_official_conformance_gate` suite) is " +
       `${unprovisioned ? "not provisioned" : "provisioned but could not be realized (present but unusable)"}.` +
-      " Running the gate now would report divergences that are really an infrastructure absence, never a " +
-      "compiler regression — or, with the feature off, silently omit these 45 tests again.",
+      " Running the authoritative lane now would report divergences that are really an infrastructure " +
+      "absence, never a compiler regression.",
     `  probe target: ${probe.target}`,
     `  probe failure: ${probe.detail}`,
   ];
   if (probe.framework) lines.push(`  framework: ${probe.framework}`);
   lines.push(
-    "Produce it with (from the repo root — this is the ONLY sanctioned network step; the gate never runs " +
+    "Produce it with (from the repo root — this is the ONLY sanctioned network step; the checker never runs " +
       "it for you):",
     `    ${ORACLE_CACHE_PROVISION_COMMAND}`,
-    "The gate refuses to provision the cache for you (its verdict must not depend on a network mutation it " +
+    "The authoritative command refuses to provision the cache for you (its verdict must not depend on a network mutation it " +
       "performed) and refuses to silently skip or mis-report the tests that need it. This check performs " +
       "the SAME offline realization `bin/check-candidate.mjs` performs on every request — a " +
       "present-but-unusable cache (corrupt, torn, or drifted from the committed lockfile closure) fails " +
@@ -1697,14 +1700,223 @@ export function checkOracleCachePrerequisite(opts) {
 
 // ----------------------------------------------------------------------------------------------------
 // ARCHIVE-BUILD FEATURES — the features the ONE `cargo nextest archive --workspace` build (SURFACE 1's
-// archive, per SINGLE-TEST-UNIVERSE) is built with.
+// archive, per SINGLE-TEST-UNIVERSE) is built with. BF2 is deliberately absent: its authoritative tests
+// run in a separate required CI job so oracle work is not on the core Rust gate's critical path.
+export const ARCHIVE_FEATURES = Object.freeze([]);
+
+// ----------------------------------------------------------------------------------------------------
+// DEDICATED BF2 AUTHORITATIVE LANE.
 //
-// `ARCHIVE_FEATURES` turns `verter_session/bf2-authoritative` on for that archive build
-// (`archiveAndList` in gate.mjs), so the 45 tests that feature gates are PRESENT in the archived test
-// universe — not merely listed by a standalone `cargo test --features` invocation nobody runs. The
-// separate shipped-cfg lane (`runShippedCfgLane`) does not consume this archive at all — it is a
-// small package-scoped `cargo nextest run -p verter_shipped_cfg_contract`, built and run independently.
-export const ARCHIVE_FEATURES = Object.freeze(["verter_session/bf2-authoritative"]);
+// The exact feature-gated module set is pinned here and independently rediscovered from
+// `map_equality_tests.rs`. The lane lists through nextest before it runs and requires a per-module exact
+// match against the live `#[test]` source inventory. This makes a newly added gated module, a stale filter,
+// a missing source file, a zero-test inventory, and a partial nextest selection all fail closed.
+// ----------------------------------------------------------------------------------------------------
+export const BF2_AUTHORITATIVE_FEATURE = "bf2-authoritative";
+
+export const BF2_AUTHORITATIVE_MODULES = Object.freeze([
+  "bf2_full_axis_gate",
+  "bf2_seed_matrix",
+  "ide_surface_typescript_observation",
+  "nested_v_for_runtime_proof",
+  "public_api_typescript_observation",
+  "svelte_official_conformance_gate",
+  "svelte_official_conformance_matrix",
+]);
+
+// A feature-gated module may deliberately contribute contracts to a sibling's
+// single-process aggregate instead of owning a second `#[test]`. Keep that
+// exceptional topology explicit and checked: otherwise a zero-test module
+// would make the source/list inventory look exact while executing nothing.
+export const BF2_AUTHORITATIVE_AGGREGATIONS = Object.freeze({
+  bf2_full_axis_gate: Object.freeze({
+    ownerModule: "bf2_seed_matrix",
+    ownerTest: "authoritative_seed_matrix_contracts_share_one_verified_run",
+    requiredCalls: Object.freeze([
+      "super::bf2_full_axis_gate::full_axis_gate_passes_for_every_seed_matrix_cell",
+      "super::bf2_full_axis_gate::the_gate_detects_a_planted_defect_on_every_axis_family",
+    ]),
+  }),
+});
+
+const BF2_TEST_PREFIX = "compile::map_equality_tests::";
+
+export const BF2_AUTHORITATIVE_FILTER_EXPR =
+  "package(verter_session) and (" +
+  BF2_AUTHORITATIVE_MODULES.map((module) => `test(/^${BF2_TEST_PREFIX}${module}::/)`).join(" or ") +
+  ")";
+
+export function buildBf2NextestArgs(mode) {
+  if (mode !== "list" && mode !== "run") {
+    throw new Error(`unknown BF2 nextest mode ${JSON.stringify(mode)}`);
+  }
+  const args = [
+    "nextest",
+    mode,
+    "--package",
+    "verter_session",
+    "--lib",
+    "--features",
+    BF2_AUTHORITATIVE_FEATURE,
+    "-E",
+    BF2_AUTHORITATIVE_FILTER_EXPR,
+  ];
+  if (mode === "list") args.push("--message-format", "json");
+  else args.push("--no-fail-fast");
+  return args;
+}
+
+export function scanBf2AuthoritativeSourceInventory(repoRoot) {
+  const sourceRoot = join(
+    repoRoot,
+    "crates",
+    "verter_session",
+    "src",
+    "compile",
+    "map_equality_tests",
+  );
+  const parentSource = readFileSync(`${sourceRoot}.rs`, "utf8");
+  const declarationPattern = new RegExp(
+    String.raw`#\s*\[\s*cfg\s*\(\s*feature\s*=\s*["']${BF2_AUTHORITATIVE_FEATURE}["']\s*\)\s*\]\s*mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;`,
+    "g",
+  );
+  const modules = [...parentSource.matchAll(declarationPattern)].map((match) => match[1]).sort();
+  const countByModule = {};
+  let total = 0;
+  for (const module of modules) {
+    const source = readFileSync(join(sourceRoot, `${module}.rs`), "utf8");
+    const count = (source.match(/^\s*#\s*\[\s*test\s*\]\s*$/gm) || []).length;
+    countByModule[module] = count;
+    total += count;
+  }
+
+  const zeroTestModules = modules.filter((module) => countByModule[module] === 0);
+  const registeredAggregations = Object.keys(BF2_AUTHORITATIVE_AGGREGATIONS).sort();
+  if (JSON.stringify(zeroTestModules) !== JSON.stringify(registeredAggregations)) {
+    throw new Error(
+      "BF2 zero-test modules must exactly match the explicit aggregation registry: " +
+        `zero-test=${JSON.stringify(zeroTestModules)} registered=${JSON.stringify(registeredAggregations)}`,
+    );
+  }
+
+  const aggregationsByModule = {};
+  for (const module of registeredAggregations) {
+    const aggregation = BF2_AUTHORITATIVE_AGGREGATIONS[module];
+    if (
+      !modules.includes(aggregation.ownerModule) ||
+      !(countByModule[aggregation.ownerModule] > 0)
+    ) {
+      throw new Error(
+        `BF2 aggregate owner ${aggregation.ownerModule} for ${module} is absent or declares no #[test]`,
+      );
+    }
+    const ownerSource = readFileSync(join(sourceRoot, `${aggregation.ownerModule}.rs`), "utf8");
+    const ownerTestPattern = new RegExp(
+      String.raw`#\s*\[\s*test\s*\]\s*fn\s+${aggregation.ownerTest}\s*\(`,
+      "m",
+    );
+    if (!ownerTestPattern.test(ownerSource)) {
+      throw new Error(
+        `BF2 aggregate owner ${aggregation.ownerModule} does not declare #[test] fn ${aggregation.ownerTest}`,
+      );
+    }
+    for (const requiredCall of aggregation.requiredCalls) {
+      const occurrences = ownerSource.split(requiredCall).length - 1;
+      if (occurrences !== 1) {
+        throw new Error(
+          `BF2 aggregate ${aggregation.ownerTest} must reference ${requiredCall} exactly once; found ${occurrences}`,
+        );
+      }
+    }
+    aggregationsByModule[module] = {
+      ownerModule: aggregation.ownerModule,
+      ownerTest: aggregation.ownerTest,
+      requiredCalls: [...aggregation.requiredCalls],
+    };
+  }
+  return { modules, countByModule, aggregationsByModule, total };
+}
+
+export function countBf2AuthoritativeListTests(listJson) {
+  const countByModule = Object.fromEntries(BF2_AUTHORITATIVE_MODULES.map((module) => [module, 0]));
+  const unexpected = [];
+  let total = 0;
+  for (const suite of Object.values(
+    listJson && listJson["rust-suites"] ? listJson["rust-suites"] : {},
+  )) {
+    for (const [testName, testcase] of Object.entries(
+      suite && suite.testcases ? suite.testcases : {},
+    )) {
+      // Machine-readable `nextest list` deliberately retains the full built
+      // inventory and marks filterset mismatches instead of omitting them.
+      // Count only admitted tests, while rejecting unknown/missing status
+      // metadata so a format drift cannot silently weaken this receipt.
+      const filterStatus = testcase?.["filter-match"]?.status;
+      if (filterStatus === "mismatch") continue;
+      if (filterStatus !== "matches") {
+        unexpected.push(
+          `${testName} (invalid filter-match status ${JSON.stringify(filterStatus)})`,
+        );
+        continue;
+      }
+      total++;
+      const module = BF2_AUTHORITATIVE_MODULES.find((candidate) =>
+        testName.startsWith(`${BF2_TEST_PREFIX}${candidate}::`),
+      );
+      if (module) countByModule[module]++;
+      else unexpected.push(testName);
+    }
+  }
+  return { countByModule, total, unexpected };
+}
+
+export function decideBf2AuthoritativeInventoryMatch(listed, source) {
+  if (JSON.stringify(source.modules) !== JSON.stringify(BF2_AUTHORITATIVE_MODULES)) {
+    return (
+      "BF2 authoritative source modules drifted: expected " +
+      `${JSON.stringify(BF2_AUTHORITATIVE_MODULES)}, discovered ${JSON.stringify(source.modules)}`
+    );
+  }
+  if (!(source.total > 0)) {
+    return "BF2 authoritative source inventory declares zero #[test] functions";
+  }
+  const expectedAggregations = Object.fromEntries(
+    Object.entries(BF2_AUTHORITATIVE_AGGREGATIONS).map(([module, aggregation]) => [
+      module,
+      {
+        ownerModule: aggregation.ownerModule,
+        ownerTest: aggregation.ownerTest,
+        requiredCalls: [...aggregation.requiredCalls],
+      },
+    ]),
+  );
+  if (JSON.stringify(source.aggregationsByModule || {}) !== JSON.stringify(expectedAggregations)) {
+    return (
+      "BF2 authoritative aggregation registry drifted: expected " +
+      `${JSON.stringify(expectedAggregations)}, discovered ${JSON.stringify(source.aggregationsByModule || {})}`
+    );
+  }
+  for (const module of BF2_AUTHORITATIVE_MODULES) {
+    const declared = source.countByModule[module] || 0;
+    if (declared === 0 && !Object.hasOwn(expectedAggregations, module)) {
+      return `BF2 module ${module} declares zero tests and has no checked aggregate owner`;
+    }
+  }
+  if (listed.unexpected.length > 0) {
+    return `BF2 nextest listing contained unexpected tests: ${JSON.stringify(listed.unexpected)}`;
+  }
+  if (listed.total !== source.total) {
+    return `BF2 nextest selected ${listed.total} tests but the exact source inventory declares ${source.total}`;
+  }
+  for (const module of BF2_AUTHORITATIVE_MODULES) {
+    const selected = listed.countByModule[module] || 0;
+    const declared = source.countByModule[module] || 0;
+    if (selected !== declared) {
+      return `BF2 module ${module} selected ${selected} tests but its source declares ${declared}`;
+    }
+  }
+  return null;
+}
 
 // Pure builder for the `cargo nextest archive` argv — used by BOTH archive variants in gate.mjs, so a
 // feature dropped here is dropped from every surface at once (never a per-variant divergence) and is
@@ -2180,95 +2392,12 @@ export function canonicalGateLaneTranscriptSegments({
 }
 
 // ----------------------------------------------------------------------------------------------------
-// TRYBUILD EXCLUSION — INTERIM, pending maintainer disposition. Do not delete this section without a
-// ruling: their permanent disposition (drop them for good, keep this exclusion permanently, or restore
-// them once the trybuild target dir is cached) is an open decision, not settled by this exclusion.
-//
-// A `trybuild::TestCases::new()` harness SPAWNS a real `cargo` build against a generated crate and, cold,
-// compiles the crate's ENTIRE dependency closure before checking a single fixture — not a unit test.
-// Measured here: 98s cold, 0.8s warm. Two of them tripped the gate's own 360s budget in a real run while
-// passing 3/3 in isolation (already-raised once). `.config/nextest.toml` carries a `slow-timeout` override
-// for the same class (see the "trybuild compile-fail tests" comment there) — that override is UNCHANGED
-// and still applies to anyone running these tests directly; this exclusion removes them from canonical
-// archive-backed Surface 1. The shipped contract has an independent package-only inventory.
-//
-// One row per file that actually calls `trybuild::TestCases::new()` — verified against a real
-// `cargo nextest list --workspace --message-format json` listing, not guessed from filenames. A
-// substring match on "compile_fail" also catches two UNRELATED tests that must stay in the gate and are
-// deliberately NOT rows here: verter_lsp's
-// `external_ts::membership_reconciler::tests::absent_compile_failed_removes` and verter_session's
-// `types::tests::compile_failure_code_classification`. Each row's `modulePrefix` is the exact source-order
-// module path (no trailing test name) so it covers every test in that file, present or future, including
-// ones already marked `#[ignore]` (most of the verter_session rows are — they cost nothing today because
-// no surface passes `--run-ignored`, but a future un-ignore must not silently reintroduce the cost without
-// this exclusion already covering it).
+// The canonical nextest surface excludes only packages that have their own execution model. Compile-fail
+// Cargo work is absent from test discovery and runs through scripts/compile-contracts.mjs.
 // ----------------------------------------------------------------------------------------------------
-export const TRYBUILD_EXCLUDED_SUITES = Object.freeze([
-  { package: "verter_session", modulePrefix: "cases::g_compile::compile_fail::" },
-  { package: "verter_language", modulePrefix: "cases::compile_fail::" },
-  { package: "verter_identity", modulePrefix: "cases::compile_fail::" },
-  { package: "verter_compiler", modulePrefix: "cases::assembly::assemble_sequence_compile_fail::" },
-  { package: "verter_compiler", modulePrefix: "cases::pending_nav_request_compile_fail::" },
-  { package: "verter_compiler", modulePrefix: "cases::registered_geometry_compile_fail::" },
-  { package: "verter_compiler", modulePrefix: "cases::segmented_overwrite_compile_fail::" },
-  { package: "verter_audit", modulePrefix: "cases::attribution_compile_fail::" },
-  { package: "verter_type_runtime", modulePrefix: "cases::compile_fail::" },
-]);
-
-// Builds the nextest filterset expression (see https://nexte.st/docs/filtersets) that excludes every row
-// above. `test(/^prefix/)` anchors at the start of the fully-qualified test name so it never matches a
-// same-named module nested deeper, and pairing each `test()` arm with its own `package()` arm means a
-// module path that happens to collide across two packages cannot cross-exclude the wrong crate's tests.
-export function buildTrybuildExclusionFilterExpr(suites = TRYBUILD_EXCLUDED_SUITES) {
-  const arms = suites.map((s) => `(package(${s.package}) and test(/^${s.modulePrefix}/))`);
-  return `not (${arms.join(" or ")})`;
+export function buildCanonicalSurface1FilterExpr() {
+  return "not package(verter_shipped_cfg_contract) and not package(verter_svelte_conformance)";
 }
-
-export function buildCanonicalSurface1FilterExpr(suites = TRYBUILD_EXCLUDED_SUITES) {
-  return `(${buildTrybuildExclusionFilterExpr(suites)}) and not package(verter_shipped_cfg_contract)`;
-}
-
-// Legacy Surface-2 selftest fixture: per-row skip args for a directly executed libtest binary, which never
-// sees a nextest filterset. Production gate.mjs no longer calls this helper. `--skip <prefix>` remains a
-// plain (non-`--exact`) substring filter for the frozen regression classifier exercised in gate-selftest.mjs.
-export function trybuildSkipArgsForPackage(pkg, suites = TRYBUILD_EXCLUDED_SUITES) {
-  const args = [];
-  for (const s of suites) {
-    if (s.package !== pkg) continue;
-    args.push("--skip", s.modulePrefix);
-  }
-  return args;
-}
-
-// Counts, from a REAL (unfiltered) nextest list JSON's suites, how many testcases each registered row
-// actually matches in the archive under test. A row that matches ZERO tests means its file was renamed,
-// moved, or deleted without updating this registry — the exclusion has silently gone stale (either it now
-// excludes nothing for that file, letting the cargo-spawning cost back into the gate unnoticed, or worse,
-// a differently-named module drifted under the same prefix). The caller must treat `missing.length > 0` as
-// a hard setup failure, never a silent pass — the same "selectors matched non-zero work" contract the
-// shipped-cfg guard's independent expected-test-inventory scan (`countTestAttributesInDir`) enforces for
-// verter_shipped_cfg_contract, applied per-row here.
-export function countTrybuildExclusionMatches(allSuites, suites = TRYBUILD_EXCLUDED_SUITES) {
-  const perRow = suites.map(() => 0);
-  let total = 0;
-  for (const suite of allSuites || []) {
-    const pkg = suite["package-name"];
-    const testcases = suite.testcases || {};
-    for (let i = 0; i < suites.length; i++) {
-      if (suites[i].package !== pkg) continue;
-      for (const name of Object.keys(testcases)) {
-        if (name.startsWith(suites[i].modulePrefix)) {
-          perRow[i]++;
-          total++;
-        }
-      }
-    }
-  }
-  const missing = suites.filter((_, i) => perRow[i] === 0);
-  return { total, perRow, missing };
-}
-
-// ----------------------------------------------------------------------------------------------------
 // Tolerated-failure allowlist — EXACT nextest test names (the env-only typeinfo freshness pair). A test
 // whose EXACT name is in this set is tolerated ONLY when the freshness-tooling preflight ALLOWS it (the
 // tools are genuinely absent); when the tools are present or were installed, a FAIL of one of these names
@@ -2286,15 +2415,9 @@ export function countTrybuildExclusionMatches(allSuites, suites = TRYBUILD_EXCLU
 // at once, all tolerated together.
 export const TOLERATED_TEST_BINARY_ID = "verter_protocol::main";
 
+// Retained for parser regression fixtures only. Production gate wiring never
+// enables tolerance now that proto freshness is not a Rust test.
 export const TOLERATED_TEST_NAMES = new Set([
-  // Post-consolidation, both env-only freshness tests live in the single `verter_protocol::main`
-  // integration binary under the module path `cases::typeinfo_proto_ts_freshness::<fn>`. nextest renders
-  // a run line as "<STATUS> [   …s] (n/m) verter_protocol::main cases::typeinfo_proto_ts_freshness::<fn>"
-  // (the last whitespace token is the bare libtest path). The retained legacy direct-libtest classifier's
-  // fixture prints "test cases::typeinfo_proto_ts_freshness::<fn> ... FAILED", so the exact name in both
-  // active Surface 1 and that selftest-only fixture is the `cases::`-prefixed module path.
-  // (Pre-consolidation these were a standalone `typeinfo_proto_ts_freshness`
-  // binary; that bare/`typeinfo_proto_ts_freshness::`-qualified form no longer exists in the archive.)
   "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output",
   "cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide",
 ]);
@@ -4802,11 +4925,7 @@ export const GATE_TELEMETRY_SCHEMA = "verter-gate-telemetry/v1";
 export const GATE_TELEMETRY_SCHEMA_VERSION = 1;
 
 export const GATE_TELEMETRY_PHASE_IDS = Object.freeze([
-  "build-prerequisite",
-  "oracle-cache",
-  "harness-smoke-vapor",
   "harness-smoke-typescript",
-  "freshness-tooling",
   "vue-macro-oracle-check",
   "vue-macro-oracle-tests",
   "dev-archive",
@@ -5064,7 +5183,7 @@ export function runBoundedVersionProbe(
   // Node treats a non-positive spawnSync timeout as "no timeout". Once the parent deadline is spent,
   // refuse before spawning instead of converting the expired gate into an unbounded mutex-held probe.
   if (!(effectiveTimeoutMs > 0)) {
-    return { available: false, stdout: "", error: "timeout" };
+    return { available: false, stdout: "", error: "timeout", pid: null };
   }
   try {
     const result = spawnSyncFn(command, args, {
@@ -5082,18 +5201,25 @@ export function runBoundedVersionProbe(
         available: false,
         stdout: "",
         error: result.error.code === "ETIMEDOUT" ? "timeout" : "spawn-unavailable",
+        pid: Number.isInteger(result.pid) ? result.pid : null,
       };
     }
     if (result.status !== 0) {
-      return { available: false, stdout: "", error: `exit-${result.status ?? "unknown"}` };
+      return {
+        available: false,
+        stdout: "",
+        error: `exit-${result.status ?? "unknown"}`,
+        pid: Number.isInteger(result.pid) ? result.pid : null,
+      };
     }
     return {
       available: true,
       stdout: String(result.stdout || result.stderr || "").trim(),
       error: null,
+      pid: Number.isInteger(result.pid) ? result.pid : null,
     };
   } catch {
-    return { available: false, stdout: "", error: "probe-error" };
+    return { available: false, stdout: "", error: "probe-error", pid: null };
   }
 }
 

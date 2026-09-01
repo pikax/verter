@@ -199,6 +199,12 @@ export {
 } from "./core/startupGate.js";
 
 export {
+  repositoryTypescriptPluginProbe,
+  resolvePluginProbeLocation,
+  type ResolvedPluginProbe,
+} from "./core/typescriptPluginProbe.js";
+
+export {
   RawEditorNeutralLspDriver,
   type RawEditorNeutralLspDriverOptions,
 } from "./editor-neutral/rawLspDriver.js";

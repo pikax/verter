@@ -1,0 +1,31 @@
+[package]
+name = "verter_compile_contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Standalone compile-fail contract runner for Verter workspace crates"
+publish = false
+
+[[bin]]
+name = "verter_compile_contracts"
+path = "src/main.rs"
+test = false
+bench = false
+
+[features]
+default = []
+audit = []
+compiler-default = []
+css-syntax = []
+identity = []
+language = []
+semantic = []
+session = []
+type-runtime = []
+workspace = []
+
+[dependencies]
+trybuild = "1.0"

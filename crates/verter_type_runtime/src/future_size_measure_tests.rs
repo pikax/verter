@@ -7,6 +7,7 @@
 //! Not a gate. Numbers are printed and copied into docs/contributing/gate-performance.md* findings.
 
 use std::mem::{size_of, size_of_val};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +35,8 @@ fn profile() -> &'static str {
 /// Minimal TypeProvider that mirrors the production pattern: every method
 /// returns `Box::pin(async move { … })` so outer sizes match the trait boundary.
 struct MeasureMock;
+
+static MEASURE_RAW_DIAGNOSTIC_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 impl TypeProvider for MeasureMock {
     fn provider_id(&self) -> &'static str {
@@ -79,6 +82,7 @@ impl TypeProvider for MeasureMock {
     }
 
     fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+        MEASURE_RAW_DIAGNOSTIC_CALLS.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move { Ok(Vec::new()) })
     }
 
@@ -144,6 +148,23 @@ impl TypeProvider for MeasureMock {
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
+}
+
+#[tokio::test]
+async fn project_bound_diagnostics_default_is_unserved_without_raw_delegation() {
+    MEASURE_RAW_DIAGNOSTIC_CALLS.store(0, Ordering::SeqCst);
+    let provider = MeasureMock;
+    let result = provider
+        .get_diagnostics_in_project("/ws/App.vue.jsx", "/ws/nested/jsconfig.json")
+        .await
+        .expect("default capability");
+
+    assert!(result.is_none(), "the default must signal unserved");
+    assert_eq!(
+        MEASURE_RAW_DIAGNOSTIC_CALLS.load(Ordering::SeqCst),
+        0,
+        "the default must never delegate to raw companion diagnostics"
+    );
 }
 
 /// Synthetic unboxed futures that mirror the transport's oneshot + timeout shape

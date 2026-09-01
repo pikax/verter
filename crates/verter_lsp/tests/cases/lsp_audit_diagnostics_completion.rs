@@ -5,20 +5,32 @@
 //! response shape, then asserts the published payload carries
 //! `num_diagnostics` / `num_completion_items` matching the body
 //! output.
+//!
+//! Canonical nextest execution uses the single aggregate `#[tokio::test]`
+//! below. Its two sequential cases share only execution worker pools; every
+//! case constructs a fresh workspace, host, scheduler/driver, and audit state.
 
 use std::sync::Arc;
 
 use verter_audit::payloads::tags::LspMethodTag;
 use verter_audit::{LspRequestPayload, RequestKind, RequestKindPayload};
 use verter_lsp::audit_harness;
-use verter_session::{HostConfig, VerterHost};
+use verter_session::{HostConfig, TestHostWorkerPools, VerterHost};
 
-#[tokio::test]
-async fn diagnostics_audit_records_num_diagnostics() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        ..HostConfig::default()
-    }));
+fn fresh_audit_host(worker_pools: &Arc<TestHostWorkerPools>) -> Arc<VerterHost> {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+    Arc::new(VerterHost::new_with_test_worker_pools(
+        HostConfig {
+            audit_enabled: true,
+            ..HostConfig::default()
+        },
+        workspace,
+        Arc::clone(worker_pools),
+    ))
+}
+
+async fn diagnostics_audit_records_num_diagnostics(worker_pools: &Arc<TestHostWorkerPools>) {
+    let host = fresh_audit_host(worker_pools);
 
     // The session API mirrors what `publish_full_diagnostics_with_audit`
     // emits internally — bind a known diagnostics count and finalize.
@@ -57,12 +69,8 @@ async fn diagnostics_audit_records_num_diagnostics() {
     assert!(p.error.is_none());
 }
 
-#[tokio::test]
-async fn completion_audit_records_num_completion_items() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        ..HostConfig::default()
-    }));
+async fn completion_audit_records_num_completion_items(worker_pools: &Arc<TestHostWorkerPools>) {
+    let host = fresh_audit_host(worker_pools);
 
     let result = audit_harness::run_with_audit::<usize, _, _>(
         &host,
@@ -105,4 +113,26 @@ async fn completion_audit_records_num_completion_items() {
         "num_completion_items must reflect the producer's count"
     );
     assert!(p.error.is_none());
+}
+
+#[tokio::test]
+async fn lsp_audit_diagnostics_completion_cases_share_only_execution_pools() {
+    let config = HostConfig {
+        audit_enabled: true,
+        ..HostConfig::default()
+    };
+    let worker_pools = TestHostWorkerPools::new(
+        &config,
+        verter_scheduler::scheduler::SchedulerConfig::default(),
+    );
+    let pool_ids = worker_pools.pool_ids();
+
+    diagnostics_audit_records_num_diagnostics(&worker_pools).await;
+    completion_audit_records_num_completion_items(&worker_pools).await;
+
+    let receipt = worker_pools.receipt();
+    assert_eq!(receipt.pool_ids, pool_ids);
+    assert_eq!(receipt.host_shells_created, 2);
+    assert_eq!(receipt.scheduler_shells_created, 2);
+    assert_eq!(receipt.active_scheduler_shells, 0);
 }

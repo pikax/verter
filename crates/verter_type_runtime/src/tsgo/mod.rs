@@ -21,5 +21,6 @@ pub use ipc::{
     TsgoTypeProvider,
 };
 pub use owned::{
-    position_carrier_diagnostics, select_configured_project_carrier, TsgoOwnedProvider,
+    javascript_carrier_semantic_diagnostics_enabled, position_carrier_diagnostics,
+    select_configured_project_carrier, TsgoOwnedProvider,
 };

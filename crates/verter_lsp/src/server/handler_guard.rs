@@ -20,14 +20,23 @@ pub(crate) async fn wait_for_handlers_idle() {
 /// idle for a complete quiet window. This is used before non-preemptible units
 /// such as a filesystem discovery walk; per-file scanner work continues to use
 /// [`wait_for_handlers_idle`].
-pub(crate) async fn wait_for_handlers_quiet(quiet: std::time::Duration) {
-    wait_for_quiet_counter(
+/// Give coarse background work a quiet-window preference without allowing
+/// continuous interactive traffic to starve correctness work forever.
+///
+/// The return value distinguishes a genuine quiet-window admission from the
+/// fairness deadline, which is useful to callers that want to trace the latter.
+pub(crate) async fn wait_for_handlers_quiet(
+    quiet: std::time::Duration,
+    max_defer: std::time::Duration,
+) -> bool {
+    wait_for_quiet_counter_bounded(
         &ACTIVE_HANDLERS,
         &HANDLERS_IDLE,
         &HANDLER_ACTIVITY_EPOCH,
         quiet,
+        max_defer,
     )
-    .await;
+    .await
 }
 
 async fn wait_for_idle_counter(active: &std::sync::atomic::AtomicU32, idle: &tokio::sync::Notify) {
@@ -71,6 +80,21 @@ async fn wait_for_quiet_counter(
             return;
         }
     }
+}
+
+async fn wait_for_quiet_counter_bounded(
+    active: &std::sync::atomic::AtomicU32,
+    idle: &tokio::sync::Notify,
+    activity_epoch: &std::sync::atomic::AtomicU64,
+    quiet: std::time::Duration,
+    max_defer: std::time::Duration,
+) -> bool {
+    tokio::time::timeout(
+        max_defer,
+        wait_for_quiet_counter(active, idle, activity_epoch, quiet),
+    )
+    .await
+    .is_ok()
 }
 
 /// RAII guard that tracks handler lifecycle. Logs entry (with thread ID and active
@@ -198,6 +222,36 @@ mod tests {
             tokio::time::Instant::now(),
             start + quiet * 2,
             "admission must land exactly one full quiet window after the last activity"
+        );
+    }
+
+    /// A request stream can remain continuously active for the lifetime of an
+    /// editor session. Coarse correctness work must still receive a bounded
+    /// admission slot instead of waiting forever for an idle transition.
+    #[tokio::test(start_paused = true)]
+    async fn coarse_background_admission_has_a_fairness_deadline() {
+        use std::task::Poll;
+
+        let active = std::sync::atomic::AtomicU32::new(1);
+        let idle = tokio::sync::Notify::new();
+        let epoch = std::sync::atomic::AtomicU64::new(1);
+        let quiet = std::time::Duration::from_millis(30);
+        let max_defer = std::time::Duration::from_secs(1);
+        let start = tokio::time::Instant::now();
+        let mut waiter = Box::pin(wait_for_quiet_counter_bounded(
+            &active, &idle, &epoch, quiet, max_defer,
+        ));
+
+        assert!(matches!(futures_util::poll!(&mut waiter), Poll::Pending));
+        tokio::time::advance(max_defer).await;
+        assert!(
+            !waiter.await,
+            "continuous handler traffic must take the bounded fairness path"
+        );
+        assert_eq!(
+            tokio::time::Instant::now(),
+            start + max_defer,
+            "background admission must not be deferred past its fairness deadline"
         );
     }
 

@@ -156,10 +156,13 @@ pub(crate) fn render_component_prelude(
     namespace: SvelteJsxNamespace,
     legacy_mode: bool,
     dialect: SvelteIdeDialect,
+    authored_check_directives: &[&str],
 ) -> String {
     match dialect {
         SvelteIdeDialect::TypeScript => render_prelude(namespace, legacy_mode),
-        SvelteIdeDialect::JavaScript => render_js_component_prelude(namespace, legacy_mode),
+        SvelteIdeDialect::JavaScript => {
+            render_js_component_prelude(namespace, legacy_mode, authored_check_directives)
+        }
     }
 }
 
@@ -448,7 +451,11 @@ $inspect.trace = function (name) {};
 /// Render the JavaScript component prelude. The function bodies are inert IDE
 /// witnesses; all framework contracts live in JSDoc so the carrier remains
 /// valid JavaScript and TypeScript can still infer/check every generated call.
-fn render_js_component_prelude(namespace: SvelteJsxNamespace, legacy_mode: bool) -> String {
+fn render_js_component_prelude(
+    namespace: SvelteJsxNamespace,
+    legacy_mode: bool,
+    authored_check_directives: &[&str],
+) -> String {
     let legacy = if legacy_mode {
         JS_LEGACY_MAGIC_PRELUDE
     } else {
@@ -463,6 +470,11 @@ fn render_js_component_prelude(namespace: SvelteJsxNamespace, legacy_mode: bool)
             + JS_COMPONENT_PROJECTION_CHECKERS.len()
             + legacy.len(),
     );
+    for directive in authored_check_directives {
+        out.push_str("// ");
+        out.push_str(directive);
+        out.push('\n');
+    }
     out.push_str(namespace.pragma_line());
     out.push_str(JS_COMPONENT_HEADER);
     out.push_str(JS_COMPONENT_ONLY_RUNES_PROPS_BINDABLE);
@@ -473,8 +485,7 @@ fn render_js_component_prelude(namespace: SvelteJsxNamespace, legacy_mode: bool)
     out
 }
 
-const JS_COMPONENT_HEADER: &str = r#"// @ts-check
-// --- Svelte 5 runes (JSDoc-typed; call sites stay verbatim) ---
+const JS_COMPONENT_HEADER: &str = r#"// --- Svelte 5 runes (JSDoc-typed; call sites stay verbatim) ---
 "#;
 
 const JS_COMPONENT_ONLY_RUNES_PROPS_BINDABLE: &str = r#"/**

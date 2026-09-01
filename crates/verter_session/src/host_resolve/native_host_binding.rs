@@ -969,7 +969,11 @@ mod tests {
         let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
         upsert_vue(&host, VUE_SRC);
         let render = host
-            .render_only_main(CANONICAL, &crate::types::CompileProfile::default())
+            .render_only_main(
+                CANONICAL,
+                &crate::types::CompileProfile::default(),
+                verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+            )
             .expect("the render route serves this component");
         assert!(
             !render.code.is_empty(),

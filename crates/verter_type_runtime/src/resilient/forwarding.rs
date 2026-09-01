@@ -501,6 +501,29 @@ where
         })
     }
 
+    fn get_diagnostics_in_project<'a>(
+        &'a self,
+        path: &'a str,
+        configured_project: &'a str,
+    ) -> ProviderFuture<'a, Option<Vec<TypeDiagnostic>>> {
+        let path_owned = path.to_string();
+        let configured_project = configured_project.to_string();
+        let fp = QueryFingerprint::new("diagnostics-in-project", path, 0, 0)
+            .in_scope(&configured_project);
+        Box::pin(async move {
+            self.run_guarded(
+                fp,
+                || None,
+                move |provider| async move {
+                    provider
+                        .get_diagnostics_in_project(&path_owned, &configured_project)
+                        .await
+                },
+            )
+            .await
+        })
+    }
+
     fn configure_paths_background(
         &self,
         base_url: &str,

@@ -77,6 +77,68 @@ fn component_meta_outcome_from_tracer(
     }
 }
 
+/// Root one component-meta cold compute in the exact owner content captured
+/// for that attempt.
+///
+/// `CapturedComponentMetaInputs` already carries the authoritative hash from
+/// the request capture. The fallback path obtains at most one authoritative
+/// hash while the request tracer is active and returns it to the caller so the
+/// compute cannot accidentally use a second read. A missing source is a
+/// return-only result: it taints the tracer instead of inventing a zero hash.
+fn observe_component_meta_owner_whole_hash(
+    canonical: &str,
+    captured: Option<&CapturedComponentMetaInputs>,
+    uncaptured_hash: impl FnOnce() -> Option<Hash16>,
+) -> Option<Hash16> {
+    let whole_hash = captured
+        .map(|captured| captured.whole_hash)
+        .or_else(uncaptured_hash);
+    let Some(whole_hash) = whole_hash else {
+        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+            crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+        );
+        return None;
+    };
+    crate::resolver_core::resolver_context::observe_fan_out(
+        crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: whole_hash,
+        },
+    );
+    Some(whole_hash)
+}
+
+/// Resolve an uncaptured component-meta owner through the request's session
+/// view without crossing an explicit overlay or deletion boundary.
+///
+/// An explicit tombstone is authoritative absence. An explicit overlay is
+/// authoritative only when the view's public content lookup agrees with the
+/// overlay hash. Only an unmasked canonical may fall through to the host's
+/// load-capable base lookup; this preserves eviction recovery without letting
+/// base bytes leak through a session overlay.
+fn uncaptured_component_meta_owner_hash_for_view(
+    host: &VerterHost,
+    view: &dyn crate::session_view::SessionView,
+    canonical: &str,
+) -> Option<Hash16> {
+    if view.is_tombstoned(canonical) {
+        return None;
+    }
+    if let Some(overlay_hash) = view.overlay_content_hash_for(canonical) {
+        return (view.content_hash_for(canonical) == Some(overlay_hash)).then_some(overlay_hash);
+    }
+    host.current_or_read_whole_hash(canonical)
+}
+
+#[cfg(test)]
+pub(crate) fn uncaptured_component_meta_owner_hash_for_view_for_test(
+    host: &VerterHost,
+    view: &dyn crate::session_view::SessionView,
+    canonical: &str,
+) -> Option<Hash16> {
+    uncaptured_component_meta_owner_hash_for_view(host, view, canonical)
+}
+
 pub(crate) fn trace_request_source(source: RequestSource) -> &'static str {
     match source {
         RequestSource::Cache => "cache",
@@ -298,6 +360,10 @@ impl ComponentMetaRequestHost for VerterHost {
             &crate::fact_signature_helpers::FactTracerBasisSource::unbound(self),
             TracerScope::ComponentMetaRequest,
             || {
+                let owner_whole_hash =
+                    observe_component_meta_owner_whole_hash(canonical, captured, || {
+                        self.current_or_read_whole_hash(canonical)
+                    });
                 // Consume the request-bound `store_view` to construct a
                 // `HostResolverContext` so the cold-compute pipeline binds
                 // overlay-aware reads to the same view the executor already
@@ -321,9 +387,7 @@ impl ComponentMetaRequestHost for VerterHost {
                                 base_is_current,
                             );
                         }
-                        let whole_hash = self
-                            .current_or_read_whole_hash(canonical)
-                            .unwrap_or_default();
+                        let whole_hash = owner_whole_hash?;
                         self.compute_component_meta_state_with_view_arg(
                             canonical,
                             mode,
@@ -352,9 +416,7 @@ impl ComponentMetaRequestHost for VerterHost {
                                 seed_is_current,
                             );
                         }
-                        let whole_hash = self
-                            .current_or_read_whole_hash(canonical)
-                            .unwrap_or_default();
+                        let whole_hash = owner_whole_hash?;
                         self.compute_component_meta_state_with_view_arg(
                             canonical,
                             mode,
@@ -470,6 +532,12 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
             &crate::fact_signature_helpers::FactTracerBasisSource::unbound(self.host),
             TracerScope::ComponentMetaRequest,
             || {
+                let owner_whole_hash =
+                    observe_component_meta_owner_whole_hash(canonical, captured, || {
+                        uncaptured_component_meta_owner_hash_for_view(
+                            self.host, self.view, canonical,
+                        )
+                    });
                 // View-aware cold compute: thread the session view through a
                 // `SessionResolverContext` so the resolver-tier reads (prepared
                 // declarations, dep-source materialisation, registry+macro shapes)
@@ -523,10 +591,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
                             &self.overlay,
                         );
                 }
-                let whole_hash = self
-                    .host
-                    .current_or_read_whole_hash(canonical)
-                    .unwrap_or_default();
+                let whole_hash = owner_whole_hash?;
                 self.host
                     .compute_component_meta_state_with_session_view_and_base(
                         canonical,

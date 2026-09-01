@@ -956,6 +956,160 @@ let { contractProp, optionalCount = 0 }: Props = $props();
 }
 
 #[test]
+fn svelte_public_projection_witness_records_relative_module_augmentation() {
+    const TYPES: &str = "export interface DraftProps { title: string }\n";
+    const AUG: &str = "import './types';\ndeclare module './types' { interface DraftProps { fromAug?: boolean } }\n";
+    const CHILD: &str = r#"<script lang="ts">
+import './aug';
+import type { DraftProps } from './types';
+let { title, fromAug }: DraftProps = $props();
+</script>
+<p>{title}: {fromAug}</p>
+"#;
+    let host = workspace_host_with_svelte(
+        "/workspace/DraftCard.svelte",
+        CHILD,
+        &[("/workspace/types.ts", TYPES), ("/workspace/aug.ts", AUG)],
+    );
+    upsert_ts(&host, "/workspace/types.ts", TYPES);
+    upsert_ts(&host, "/workspace/aug.ts", AUG);
+    upsert_svelte(&host, "/workspace/DraftCard.svelte", CHILD);
+
+    let projection = host
+        .get_public_api_projection("/workspace/DraftCard.svelte")
+        .expect("Svelte projection request")
+        .expect("Svelte public API projects");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = &projection.contract
+    else {
+        panic!("Svelte projector supplies a supported structured public contract");
+    };
+    assert!(
+        contract
+            .props
+            .iter()
+            .any(|prop| prop.name.as_ref() == "fromAug"),
+        "the producer must consume the relative module augmentation: {:?}",
+        contract
+            .props
+            .iter()
+            .map(|prop| prop.name.as_ref())
+            .collect::<Vec<_>>()
+    );
+    let witness = projection
+        .publication_witness
+        .as_ref()
+        .expect("cacheable projection witness");
+    assert_eq!(
+        witness
+            .observes_relative_augmentation_for_test("/workspace/types.ts", "/workspace/aug.ts",),
+        ((true, true), (true, true)),
+        "both admitted analysis and output materialization must carry the exact \
+         augmentation-set shape and contributor content witness"
+    );
+    assert!(witness.is_current(&host));
+    let witness = witness.clone();
+
+    let warm = host
+        .get_public_api_projection("/workspace/DraftCard.svelte")
+        .expect("warm Svelte projection request")
+        .expect("warm Svelte public API projects");
+    assert_eq!(
+        warm.publication_witness
+            .as_ref()
+            .expect("warm cacheable projection witness")
+            .observes_relative_augmentation_for_test("/workspace/types.ts", "/workspace/aug.ts",),
+        ((true, true), (true, true)),
+        "warm output materialization must replay the admitted augmentation evidence"
+    );
+
+    upsert_ts(
+        &host,
+        "/workspace/aug.ts",
+        "import './types';\ndeclare module './types' { interface DraftProps { fromAug?: string } }\n",
+    );
+    assert!(
+        !witness.is_current(&host),
+        "an augmenter body edit must reject the previously published witness"
+    );
+}
+
+#[test]
+fn svelte_public_projection_returns_output_without_uncacheable_publication_evidence() {
+    const CHILD: &str = r#"<script lang="ts">
+interface Props { title: string }
+let { title }: Props = $props();
+</script>
+<p>{title}</p>
+"#;
+
+    // A targeted output-tracer overflow leaves the consumer-visible result
+    // intact while refusing only reusable publication evidence.
+    let overflow_host = host();
+    upsert_svelte(&overflow_host, "/Overflow.svelte", CHILD);
+    overflow_host
+        .get_component_meta("/Overflow.svelte")
+        .expect("prime admitted analysis");
+    crate::host_test_force::arm_fact_tracer_overflow_once(
+        crate::host_test_force::TracerScope::ComponentMetaOutput,
+        crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+    );
+    let overflow = overflow_host
+        .get_public_api_projection("/Overflow.svelte")
+        .expect("overflow projection request")
+        .expect("overflow still returns the projection");
+    assert_eq!(
+        crate::host_test_force::fact_tracer_overflow_claimed_by(),
+        Some(crate::host_test_force::TracerScope::ComponentMetaOutput),
+        "the forced overflow must land on the separately-finalized output scope",
+    );
+    assert!(overflow.publication_witness.is_none());
+
+    // A non-cacheable observation on the warm output leg has the same typed
+    // response-only outcome.
+    let noncacheable_host = host();
+    upsert_svelte(&noncacheable_host, "/Noncacheable.svelte", CHILD);
+    noncacheable_host
+        .get_component_meta("/Noncacheable.svelte")
+        .expect("prime admitted analysis");
+    noncacheable_host
+        .test_force
+        .force_fact_tracer_non_cacheable_read
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let noncacheable = noncacheable_host
+        .get_public_api_projection("/Noncacheable.svelte")
+        .expect("non-cacheable projection request")
+        .expect("non-cacheable output still returns the projection");
+    noncacheable_host
+        .test_force
+        .force_fact_tracer_non_cacheable_read
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(noncacheable.publication_witness.is_none());
+
+    // A host mutation in the warm-validation-to-output window makes the
+    // separately finalized output read set mutation-unstable.
+    let mutation_host = host();
+    upsert_svelte(&mutation_host, "/Mutation.svelte", CHILD);
+    mutation_host
+        .get_component_meta("/Mutation.svelte")
+        .expect("prime admitted analysis");
+    let hook_host = Arc::clone(&mutation_host);
+    crate::host_manage::component_meta_entry::WARM_OUTPUT_PRE_MATERIALIZE_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            upsert_ts(
+                &hook_host,
+                "/unrelated.ts",
+                "export const changed = true;\n",
+            );
+        }));
+    });
+    let mutation = mutation_host
+        .get_public_api_projection("/Mutation.svelte")
+        .expect("mutation-unstable projection request")
+        .expect("mutation-unstable output still returns the projection");
+    assert!(mutation.publication_witness.is_none());
+}
+
+#[test]
 fn svelte_public_projection_carries_props_event_overloads_and_slots() {
     let source = r#"<script lang="ts">
 import { createEventDispatcher } from 'svelte';

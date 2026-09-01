@@ -9,7 +9,8 @@
 //! 2. the composition is population-scoped — a session-population witness
 //!    never validates against a base capture or another session's capture.
 
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use crate::memory::{MemoryOptions, MemoryWorkspace};
 use crate::resolution_currency::CapturedResolutionWorld;
@@ -66,6 +67,45 @@ fn capture_population(
         .engine
         .capture_published_resolution_world(population)
         .expect("a settled world is capturable for any population")
+}
+
+#[test]
+fn stable_capture_waits_for_a_short_publication_window_without_spending_a_retry() {
+    let workspace = Arc::new(workspace());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer_workspace = Arc::clone(&workspace);
+    let writer = std::thread::spawn(move || {
+        writer_workspace.engine.mutate_resolution_world(|_world| {
+            entered_tx.send(()).expect("capture test is listening");
+            release_rx
+                .recv()
+                .expect("publication window must be released");
+            ((), false)
+        });
+    });
+    entered_rx
+        .recv()
+        .expect("writer must enter its odd-epoch publication window");
+
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        release_tx.send(()).expect("writer is still waiting");
+    });
+    let captured = workspace
+        .engine
+        .capture_stable_resolution_world_with_policy(
+            workspace.engine.default_resolution_population(),
+            0,
+            Duration::from_secs(1),
+        );
+
+    releaser.join().expect("releaser must not panic");
+    writer.join().expect("writer must not panic");
+    assert!(
+        captured.is_some(),
+        "a short publication window is contention, not retry exhaustion"
+    );
 }
 
 #[test]

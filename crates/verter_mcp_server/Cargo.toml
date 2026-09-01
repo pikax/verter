@@ -18,3 +18,6 @@ verter_mcp = { path = "../verter_mcp" }
 tokio = { version = "1.52", features = ["full"] }
 clap = { version = "4.6", features = ["derive"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+verter_test_support = { path = "../verter_test_support" }

@@ -30,7 +30,8 @@ use http_serving_contract::{
 
 #[test]
 fn http_transport_emits_bound_port_record_first_and_serves_mcp_at_announced_url() {
-    assert_http_launcher_binds_announces_and_serves(env!("CARGO_BIN_EXE_verter-mcp"));
+    let binary = verter_test_support::cargo_test_binary_path!("verter-mcp");
+    assert_http_launcher_binds_announces_and_serves(binary.to_string_lossy().as_ref());
 }
 
 /// How long the contained server gets to notice its client died and exit.
@@ -48,7 +49,8 @@ fn client_pid_containment_exits_the_server_when_the_client_dies() {
     // Client stand-in: a second verter-mcp on the stdio transport with a held
     // stdin pipe — it blocks reading MCP framing, portably, from the same
     // binary the test already builds.
-    let client = Command::new(env!("CARGO_BIN_EXE_verter-mcp"))
+    let binary = verter_test_support::cargo_test_binary_path!("verter-mcp");
+    let client = Command::new(&binary)
         .args(["--transport", "stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -58,7 +60,7 @@ fn client_pid_containment_exits_the_server_when_the_client_dies() {
     let client_pid = client.id();
     let mut client = KillOnDrop(client);
 
-    let mut server = Command::new(env!("CARGO_BIN_EXE_verter-mcp"))
+    let mut server = Command::new(&binary)
         .args([
             "--transport",
             "http",

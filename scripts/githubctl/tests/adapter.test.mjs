@@ -10,11 +10,14 @@ import {
   DoctorRequiredError,
   DuplicateError,
   FakeGitHubAdapter,
+  GitHubAdapter,
   GitHubDoctor,
   InvalidIssueNumberError,
   NotFoundError,
   PartialFailureError,
   PermissionDeniedError,
+  ProtectedMappingError,
+  UnstructuredGitHubOutputError,
   WrongRepositoryError,
 } from "../index.mjs";
 
@@ -33,6 +36,44 @@ function clearanceFor(adapter) {
   );
   return report.clearance;
 }
+
+function issueMapping(number, identity = { node_id: `synthetic-${number}` }, syncToGitHub = true) {
+  return { ...identity, gh_issue: number, sync_to_github: syncToGitHub };
+}
+
+function issueState(number, { parent = null, subIssues = [] } = {}) {
+  const relation = (candidate) => ({
+    id: `I_${candidate}`,
+    number: candidate,
+    repository: { name: "verter", owner: { login: "pikax" } },
+  });
+  return {
+    data: {
+      repository: {
+        issue: {
+          ...relation(number),
+          parent: parent == null ? null : relation(parent),
+          projectItems: { totalCount: 0, nodes: [] },
+          subIssues: {
+            totalCount: subIssues.length,
+            nodes: subIssues.map((candidate) => ({
+              ...relation(candidate),
+              projectItems: { totalCount: 0, nodes: [] },
+            })),
+          },
+        },
+      },
+    },
+  };
+}
+
+const PROJECT_GRAPHQL_OK = {
+  data: {
+    repository: {
+      owner: { projectV2: { id: "PVT_test", number: 3, viewerCanUpdate: true } },
+    },
+  },
+};
 
 test("create issue returns deterministic numbers in the fake", () => {
   const adapter = fake({ nextIssueNumber: 40 });
@@ -407,4 +448,183 @@ test("fake issues and pull requests share one number space", () => {
       }),
     DuplicateError,
   );
+});
+
+test("native sub-issue check plans without reads or writes", () => {
+  const adapter = fake({
+    issues: [
+      { number: 10, title: "Train", body: "parent" },
+      { number: 11, title: "Block", body: "child" },
+    ],
+  });
+  const before = adapter.inspectState();
+  adapter.reads.length = 0;
+  const result = adapter.addIssueSubIssue({
+    parentIssueNumber: 10,
+    subIssueNumber: 11,
+    parentMapping: issueMapping(10, { train: "compiler.bridge" }),
+    subIssueMapping: issueMapping(11),
+    mode: "check",
+  });
+  assert.deepEqual(result, {
+    kind: "add-issue-sub-issue",
+    parentIssueNumber: 10,
+    subIssueNumber: 11,
+    applied: false,
+  });
+  assert.deepEqual(adapter.reads, []);
+  assert.deepEqual(adapter.inspectState(), before);
+});
+
+test("native sub-issue apply requires clearance, attaches once, and repeats unchanged", () => {
+  const adapter = fake({
+    issues: [
+      { number: 10, title: "Train", body: "parent" },
+      { number: 11, title: "Block", body: "child" },
+    ],
+  });
+  const request = {
+    parentIssueNumber: 10,
+    subIssueNumber: 11,
+    parentMapping: issueMapping(10, { train: "compiler.bridge" }),
+    subIssueMapping: issueMapping(11),
+    mode: "apply",
+  };
+  assert.throws(() => adapter.addIssueSubIssue(request), DoctorRequiredError);
+  const clearance = clearanceFor(adapter);
+  const attached = adapter.addIssueSubIssue({ ...request, clearance });
+  assert.deepEqual(attached, {
+    kind: "add-issue-sub-issue",
+    parentIssueNumber: 10,
+    subIssueNumber: 11,
+    applied: true,
+  });
+  assert.equal(adapter.getIssue(11).parent, 10);
+  assert.deepEqual(adapter.getIssue(10).subIssues, [11]);
+  const repeated = adapter.addIssueSubIssue({ ...request, clearance });
+  assert.equal(repeated.applied, true);
+  assert.equal(repeated.unchanged, true);
+  assert.equal(adapter.subIssueWrites.length, 1);
+});
+
+test("native sub-issue refuses a conflicting parent, protected mapping, and missing issue", () => {
+  const adapter = fake({
+    issues: [
+      { number: 9, title: "Other train", body: "other" },
+      { number: 10, title: "Train", body: "parent" },
+      { number: 11, title: "Block", body: "child", parent: 9 },
+    ],
+  });
+  const clearance = clearanceFor(adapter);
+  const base = {
+    parentIssueNumber: 10,
+    subIssueNumber: 11,
+    parentMapping: issueMapping(10, { train: "compiler.bridge" }),
+    subIssueMapping: issueMapping(11),
+    mode: "apply",
+    clearance,
+  };
+  assert.throws(() => adapter.addIssueSubIssue(base), /already has parent issue #9/u);
+  assert.equal(adapter.getIssue(11).parent, 9);
+  assert.deepEqual(adapter.getIssue(10).subIssues, []);
+  assert.throws(
+    () =>
+      adapter.addIssueSubIssue({
+        ...base,
+        subIssueNumber: 12,
+        subIssueMapping: issueMapping(12, { node_id: "protected-child" }, false),
+      }),
+    ProtectedMappingError,
+  );
+  assert.throws(
+    () =>
+      adapter.addIssueSubIssue({
+        ...base,
+        parentMapping: issueMapping(10, { train: "compiler.bridge" }, false),
+      }),
+    ProtectedMappingError,
+  );
+  assert.throws(
+    () =>
+      adapter.addIssueSubIssue({
+        ...base,
+        subIssueNumber: 12,
+        subIssueMapping: issueMapping(12),
+      }),
+    NotFoundError,
+  );
+  assert.equal(adapter.subIssueWrites.length, 0);
+});
+
+test("live native sub-issue mutation uses addSubIssue and validates returned identities", () => {
+  const calls = [];
+  let malformed = false;
+  const transport = {
+    request(request) {
+      calls.push(request);
+      if (request.method === "GET" && request.path === "/user") return { login: "alice" };
+      if (request.method === "GET" && request.path === "/repos/pikax/verter") {
+        return {
+          full_name: "pikax/verter",
+          has_issues: true,
+          permissions: { push: true },
+        };
+      }
+      if (request.method !== "POST" || request.path !== "graphql") {
+        throw new Error(`unexpected ${request.method} ${request.path}`);
+      }
+      const { query, variables } = request.body;
+      if (query.includes("addSubIssue")) {
+        assert.deepEqual(variables, {
+          issueId: "I_10",
+          subIssueId: "I_11",
+          replaceParent: false,
+        });
+        assert.match(
+          query,
+          /addSubIssue\(input:\{issueId:\$issueId,subIssueId:\$subIssueId,replaceParent:\$replaceParent\}\)/u,
+        );
+        return {
+          data: {
+            addSubIssue: {
+              issue: {
+                id: "I_10",
+                number: 10,
+                repository: { name: "verter", owner: { login: "pikax" } },
+              },
+              subIssue: {
+                id: malformed ? "I_12" : "I_11",
+                number: malformed ? 12 : 11,
+                repository: { name: "verter", owner: { login: "pikax" } },
+                parent: {
+                  id: "I_10",
+                  number: 10,
+                  repository: { name: "verter", owner: { login: "pikax" } },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (query.includes("subIssues(first:100)")) return issueState(variables.number);
+      if (query.includes("projectV2(number:")) return PROJECT_GRAPHQL_OK;
+      throw new Error("unexpected GraphQL query");
+    },
+  };
+  const adapter = new GitHubAdapter({ owner: "pikax", repo: "verter", transport });
+  const clearance = new GitHubDoctor(adapter).check({ require: ["issues"] }).clearance;
+  const request = {
+    parentIssueNumber: 10,
+    subIssueNumber: 11,
+    parentMapping: issueMapping(10, { train: "compiler.bridge" }),
+    subIssueMapping: issueMapping(11),
+    mode: "apply",
+    clearance,
+  };
+  assert.equal(adapter.addIssueSubIssue(request).applied, true);
+  const mutation = calls.find((row) => row.body?.query?.includes("addSubIssue"));
+  assert.equal(mutation.path, "graphql");
+
+  malformed = true;
+  assert.throws(() => adapter.addIssueSubIssue(request), UnstructuredGitHubOutputError);
 });

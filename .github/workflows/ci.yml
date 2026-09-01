@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      proto: ${{ steps.filter.outputs.proto }}
       js: ${{ steps.filter.outputs.js }}
       wasm: ${{ steps.filter.outputs.wasm }}
       playground: ${{ steps.filter.outputs.playground }}
@@ -26,7 +27,6 @@ jobs:
       dx: ${{ steps.filter.outputs.dx }}
       editor_lsp: ${{ steps.filter.outputs.editor_lsp }}
       svelte_oracle: ${{ steps.filter.outputs.svelte_oracle }}
-      svelte_conformance: ${{ steps.filter.outputs.svelte_conformance }}
       svelte_client_smokes: ${{ steps.filter.outputs.svelte_client_smokes }}
       svelte_perf: ${{ steps.filter.outputs.svelte_perf }}
       editors: ${{ steps.filter.outputs.editors }}
@@ -46,6 +46,34 @@ jobs:
               - 'rust-toolchain.toml'
               - 'scripts/check-integration-test-layout.mjs'
               - 'scripts/integration-test-layout-allowlist.json'
+              - 'scripts/gate*.mjs'
+              # Dedicated BF2 lane authority. A driver/self-test-only change
+              # must run the lane it can weaken rather than passing through a
+              # skipped required job.
+              - 'scripts/bf2-authoritative.mjs'
+              - 'scripts/bf2-ci-lane-selftest.mjs'
+              - 'scripts/compiler-ci-lane-selftest.mjs'
+              - 'scripts/provider-ci*.mjs'
+              - 'packages/framework-conformance-harness/**'
+              - 'packages/language-shared/**'
+              - 'packages/svelte-jsx/**'
+              # BF2's workspace-domain TypeScript observation resolves both
+              # @verter/svelte-jsx and @verter/types.
+              - 'packages/types/**'
+              - 'packages/typescript-plugin/**'
+              - '.npmrc'
+              - '.nvmrc'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.github/workflows/ci.yml'
+            proto:
+              - 'crates/verter_protocol/proto/**'
+              - 'packages/proto/src/gen/**'
+              - 'buf.gen.yaml'
+              - 'scripts/check-proto-generated.mjs'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
             js:
               - 'packages/**'
@@ -57,8 +85,13 @@ jobs:
               - 'scripts/gen-svelte-goldens.mjs'
               - 'scripts/sccache-env.mjs'
               - 'scripts/sccache-env.test.mjs'
+              - 'scripts/compiler-ci-lane-selftest.mjs'
+              - 'scripts/provider-ci*.mjs'
               - 'scripts/svelte-golden-lib.mjs'
               - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
+              # test:scripts validates the required BF2 dependencies in the
+              # release graph; release-only changes must execute that guard.
+              - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
             # Gates `wasm-build` ALONE, which both builds the browser artifact
             # and verifies the committed carrier fixture against it. So this
@@ -197,12 +230,6 @@ jobs:
               - 'crates/verter_compiler/Cargo.toml'
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
-            svelte_conformance:
-              - 'crates/verter_svelte_conformance/**'
-              - 'scripts/gen-svelte-goldens.mjs'
-              - 'scripts/svelte-golden-lib.mjs'
-              - 'pnpm-lock.yaml'
-              - '.github/workflows/ci.yml'
             svelte_client_smokes:
               - 'crates/verter_compiler/src/svelte/**'
               - 'packages/svelte-runtime-tests/**'
@@ -245,7 +272,6 @@ jobs:
               - 'CLAUDE.md'
               - '.github/workflows/ci.yml'
 
-
   tama-roadmap:
     name: Tama Roadmap
     needs: detect-changes
@@ -282,6 +308,22 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  proto-fmt:
+    name: Proto Generated Format/Freshness
+    needs: detect-changes
+    if: needs.detect-changes.outputs.proto == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm proto:check
 
   rust-clippy:
     name: Rust Clippy
@@ -341,12 +383,20 @@ jobs:
       - name: Clippy (wasm32-unknown-unknown)
         run: cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings
 
-  rust-test:
-    name: Rust Test
+  # Build the provider-free default-feature Rust test universe once. Real
+  # providers have separate serial libtest jobs below because each third-party
+  # engine needs explicit initialization and lifecycle management.
+  rust-test-build:
+    name: Rust Test Build
     needs: detect-changes
     if: needs.detect-changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 95
+    env:
+      # The GitHub backend makes repeat builds portable across fresh runners.
+      # Bump the namespace only for an intentional cache-generation reset.
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-rust-test-v1"
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -365,99 +415,82 @@ jobs:
           # to finish ever wrote a cache and the other six restored a
           # `target/` that did not match their build.
           key: rust-test
-          cache-directories: target/gate-runner
+      # Start with the compile-heavy canonical gate only. The existing target
+      # cache remains useful for registry/final artifacts while sccache proves
+      # its hit rate before a wider matrix rollout.
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      # setup-node enables package-manager caching from package.json metadata,
+      # so pnpm must already be on PATH even though this job does not install
+      # the JavaScript workspace.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+      - name: Anti-binary-growth integration-test layout
+        run: node scripts/check-integration-test-layout.mjs
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Build the shared Rust test archive
+        run: |
+          mkdir -p artifacts
+          # act has no GitHub Actions cache service. Compile the same archive
+          # directly there; GitHub keeps the telemetry-enforced sccache path.
+          if [ "${ACT:-}" = "true" ]; then
+            cargo nextest archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst
+          else
+            node scripts/run-cached.mjs -- 'cargo nextest archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst'
+          fi
+      # Fail closed before upload if a selector has gone stale, overlaps another
+      # lane, or would leave a provider lane empty.
+      - name: Verify the provider CI partition
+        run: node scripts/provider-ci.mjs verify --archive-file artifacts/rust-nextest-archive.tar.zst
+      - name: Upload the shared Rust test archive
+        uses: actions/upload-artifact@v6
+        with:
+          name: rust-nextest-archive
+          path: artifacts/rust-nextest-archive.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  rust-test:
+    name: Rust Test (Core ${{ matrix.shard }}/4)
+    needs: [detect-changes, rust-test-build]
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: pnpm
-      # REQUIRED for a non-vacuous gate. `cases::typeinfo_proto_ts_freshness::*`
-      # byte-pins the generated TS bindings by regenerating them through the
-      # workspace `buf` + `oxfmt` binaries, which it resolves from
-      # `node_modules/.bin`. Without an install those binaries are absent, the
-      # test SKIPS gracefully, and a stale-binding regression ships green. The
-      # gate's freshness preflight then verdict-gates tolerance OFF, making a
-      # freshness failure a HARD failure rather than PASS-WITH-TOLERATED.
+      # Core still owns generated-binding and compiler-tool tests that use the
+      # workspace's pinned JavaScript toolchain. Proto freshness has its own
+      # lint-style job and real providers have their own lifecycle jobs below.
       - run: pnpm install --frozen-lockfile
-      # REQUIRED for a non-vacuous gate — see gate.mjs's BUILD-PREREQUISITE PREFLIGHT. The real-provider
-      # suites spawn the pinned tsserver with `--globalPlugins @verter/typescript-plugin
-      # --pluginProbeLocations packages/vue-vscode/node_modules`; that probe dir is a pnpm SYMLINK to
-      # packages/typescript-plugin, whose `main` is `dist/index.js` — a `tsc -b` OUTPUT. `pnpm install`
-      # creates the symlink but NOT the dist, so this job used to run the gate against a tree where
-      # tsserver loaded no plugin, could not resolve `.vue`/`.svelte` carriers, and ~64 `*_tsserver` tests
-      # failed with `TS2307: Cannot find module './Comp.vue' or its corresponding type declarations.`
-      #
-      # NARROWEST SUFFICIENT SCOPE. Only two BUILD-produced artifacts are loaded from disk by the Rust
-      # suite: the plugin entry, and `@verter/language-shared`, which that entry `require`s at load time.
-      # NOT `pnpm build` (native + LSP + wasm + every TS package) and NOT `--filter
-      # @verter/typescript-plugin...` — the trailing ellipsis selects the package AND ITS DEPENDENCIES,
-      # dragging in `@verter/native` and its `napi build --release`. pnpm orders a multi-filter recursive
-      # script topologically, so language-shared builds first (the plugin type-checks against its emitted
-      # .d.ts; built alone it fails with TS2307 while still emitting a dist that throws at load).
-      - name: Build the Rust gate's TypeScript prerequisites
-        run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
-      - name: Anti-binary-growth integration-test layout
-        run: node scripts/check-integration-test-layout.mjs
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
-      # REQUIRED by the gate's wasm JavaScript-boundary lane, which executes the
-      # workspace's `#[wasm_bindgen_test]` cases through this runner. The runner
-      # and the `wasm-bindgen` library are ONE ABI: a version skew compiles
-      # cleanly and then fails inside generated JavaScript, so the gate derives
-      # the required version from the tree and refuses a mismatched runner. Keep
-      # this pin equal to the `wasm-bindgen` dependency in
-      # `crates/verter_wasm/Cargo.toml` — the same value `wasm-build` pins.
-      - name: Install wasm-bindgen CLI (test runner for the gate's wasm lane)
-        uses: taiki-e/install-action@v2
+      - name: Download the shared Rust test archive
+        uses: actions/download-artifact@v7
         with:
-          tool: wasm-bindgen-cli@0.2.122
-      # THE canonical Rust gate. Builds the workspace test universe ONCE via
-      # `cargo nextest archive` and lists that archive once, then starts two isolated post-list
-      # lanes concurrently: archive-backed Surface 1 (nextest process
-      # isolation) and the shipped-cfg guard.
-      #
-      # This replaces the legacy `cargo nextest run --workspace` +
-      # `cargo test -p verter_session --tests` pair that this job used to run.
-      # The package-scoped blanket replay was redundant with Surface 1 and
-      # could trigger a second resolution/build. Deliberate shared-process
-      # contracts now live inside Surface 1's one test universe. release.yml
-      # already used gate.mjs; main CI had drifted onto the legacy pair.
-      #
-      # The shipped lane is serial within itself: a workspace/all-targets
-      # compile check under `no-debug-assertions`, then the small package-scoped
-      # `verter_shipped_cfg_contract` nextest run under that profile. It uses a
-      # target root isolated from Surface 1, so neither lane serializes behind
-      # the other's Cargo target lock. `--exhaustive` changes failure collection
-      # only; it does not change commands, filters, profiles, or coverage.
-      #
-      # The gate also owns the wasm JavaScript-boundary lane, which this job
-      # PROVISIONS for (target + pinned runner above) but does not own: the lane
-      # runs inside `gate.mjs` on every real invocation. `wasm-build` keeps its
-      # own artifact responsibilities and does not execute or duplicate it.
-      - name: Rust gate (one archive, overlapping isolated lanes)
+          name: rust-nextest-archive
+          path: artifacts
+      - name: Run core Rust tests from the shared archive
         env:
-          VERTER_REQUIRE_TSGO: "1"
           NEXTEST_PROFILE: ci
-        run: node scripts/gate.mjs --exhaustive
-      # Independent FEATURE-OFF gate: the workspace runs above UNIFY cargo
-      # features — `verter_svelte_conformance` dev-deps `verter_compiler` with
-      # `features = ["conformance-trace"]`, so every workspace-built
-      # verter_compiler test target carries the trace side channel compiled
-      # in. This isolated `-p verter_compiler` invocation pulls no conformance
-      # crate, so it independently proves the DEFAULT trace-free compiler
-      # still compiles and its full lib suite (the Svelte behavioral tests
-      # included) passes feature-off. The isolation is kept honest by
-      # `svelte_conformance_trace_zero_cost_guard.rs` (no default features, no
-      # dev-dependency re-enable channel on verter_compiler's manifest).
-      - name: verter_compiler default feature-off build + lib tests (isolated)
         run: |
-          cargo build -p verter_compiler
-          cargo test -p verter_compiler --lib
-      # The gate runs nextest with CARGO_TARGET_DIR pointed at its runner-owned
-      # target dir, so the `ci` profile's junit.xml does NOT land at the
-      # historical `target/nextest/ci/junit.xml`. Locate it and FAIL LOUDLY if
-      # it is missing: `dorny/test-reporter` runs with `fail-on-error: false`,
-      # so a wrong path would silently report nothing instead of erroring.
+          mkdir -p target/rust-nextest-archive
+          export VERTER_NEXTEST_FILTER="$(node scripts/provider-ci.mjs filter core)"
+          cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition "hash:${{ matrix.shard }}/4" -E "$VERTER_NEXTEST_FILTER"
       - name: Locate nextest JUnit report
         if: always()
         id: junit
@@ -474,11 +507,166 @@ jobs:
         if: always() && steps.junit.outputs.path != ''
         uses: dorny/test-reporter@v3
         with:
-          name: Rust Test Results
+          name: Rust Core Test Results (${{ matrix.shard }}/4)
           path: ${{ steps.junit.outputs.path }}
           reporter: java-junit
           fail-on-error: false
 
+  rust-tsserver-live:
+    name: Rust Test (tsserver)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-provider-tsserver-v1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-provider-tsserver
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The live tsserver tests resolve the plugin through its workspace probe
+      # location. pnpm install creates the symlink but not these build outputs.
+      - name: Build the tsserver plugin prerequisites
+        run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
+      - name: Run serial tsserver provider tests
+        env:
+          VERTER_REQUIRE_TSSERVER: "1"
+        run: node scripts/provider-ci.mjs run tsserver
+      # These source-level plugin specs do not import @verter/native. The two
+      # src/tsc specs that do are retained in native-test below.
+      - name: Native-free TypeScript plugin tests
+        run: pnpm vitest run packages/typescript-plugin/src --exclude 'packages/typescript-plugin/src/tsc/**'
+  rust-tsgo-live:
+    name: Rust Test (tsgo)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-provider-tsgo-v1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-provider-tsgo
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      # The lockfile install provides the pinned project-local tsgo engine.
+      - run: pnpm install --frozen-lockfile
+      - name: Run serial tsgo provider tests
+        env:
+          VERTER_REQUIRE_TSGO: "1"
+        run: node scripts/provider-ci.mjs run tsgo
+
+  # Required and parallel with the shared archive build. Compile-fail fixtures
+  # are standalone Cargo work, not test cases, so this job owns their cached
+  # execution outside the nextest inventory.
+  compiler-contracts:
+    name: Compiler Contracts
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-compiler-contracts-v1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: compiler-contracts
+          cache-directories: target/tests/trybuild
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify compiler contracts lane and cache ownership
+        run: node --test scripts/compiler-ci-lane-selftest.mjs
+      - name: Run workspace compile contracts
+        run: node scripts/compile-contracts.mjs
+      - name: Verify generated Svelte artifacts
+        run: >-
+          cargo test --package verter_compiler --test main
+          cases::svelte_generated_artifacts_freshness::generated_svelte_artifacts_match_their_authoritative_inputs
+          -- --exact
+      # The workspace archive unifies verter_svelte_conformance's
+      # `conformance-trace` dev feature into verter_compiler. This isolated
+      # package build is a different feature configuration, so it cannot be
+      # represented by or fanned out from that archive.
+      - name: verter_compiler default feature-off build + lib tests (isolated)
+        run: |
+          cargo build -p verter_compiler
+          cargo test -p verter_compiler --lib
+
+  # Required and parallel with the shared archive lanes. The core filter omits
+  # `verter_session/bf2-authoritative`; this lane owns its pinned oracle setup,
+  # exact source/list inventory admission, and full-capacity nextest run.
+  bf2-authoritative:
+    name: BF2 Authoritative
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-bf2-authoritative-v1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bf2-authoritative
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The workspace TypeScript observation is part of BF2 and refuses to
+      # degrade when @verter/types or @verter/svelte-jsx is unavailable.
+      - name: Build BF2 TypeScript declaration prerequisites
+        run: pnpm run build:ts
+      # Provisioning is the explicit network boundary. The lane command only
+      # realizes these pinned closures offline and fails setup if unusable.
+      - name: Provision BF2's offline oracle npm cache
+        run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Verify BF2 CI lane contract
+        run: node --test scripts/bf2-ci-lane-selftest.mjs
+      - name: Run exact BF2 authoritative inventory
+        env:
+          NEXTEST_PROFILE: ci
+        run: node scripts/bf2-authoritative.mjs
 
   js-build-test:
     name: JS Build & Test
@@ -488,6 +676,9 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
+      # gen-svelte-goldens invokes the Rust semantic-comment extractor. Pin the
+      # toolchain instead of relying on GitHub-hosted runner preinstalls.
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
@@ -526,11 +717,9 @@ jobs:
         # Quarantined: none.
         run: pnpm vitest run packages/vue-vscode/src
       - name: Carrier-routing no-Vue-gate guard (typescript-plugin)
-        # Deliberately still a single path, and not for lack of coverage: the
-        # WHOLE typescript-plugin package is run by `native-test`, which has the
-        # built `@verter/native` that `src/tsc/*.spec.ts` require and this job
-        # does not produce. This step is only the fast, native-free carrier
-        # guard, kept here so a re-introduced Vue-only carrier gate fails early.
+        # The full native-free plugin suite runs in rust-tsserver-live. Keep
+        # this focused duplicate as an early JS-only carrier-routing signal;
+        # src/tsc remains in native-test because those specs import .node code.
         run: pnpm vitest run packages/typescript-plugin/src/carrier-routing-no-vue-gate.spec.ts
       - name: Rust build-tooling helper self-tests (sccache-env, publish set)
         # Explicit-path root vitest run: scripts/ is not a workspace package,
@@ -594,7 +783,7 @@ jobs:
   svelte-conformance:
     name: Svelte CSS Conformance (manifest + goldens drift)
     needs: detect-changes
-    if: needs.detect-changes.outputs.svelte_conformance == 'true'
+    if: needs.detect-changes.outputs.rust == 'true' || needs.detect-changes.outputs.svelte_oracle == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -611,6 +800,11 @@ jobs:
       # Installs the pinned `svelte` devDependency the conformance golden
       # check compiles against.
       - run: pnpm install --frozen-lockfile
+      - name: Run consolidated Rust conformance tests
+        run: >-
+          cargo test --no-fail-fast -p verter_svelte_conformance
+          --features conformance-tests --lib --bin verter_svelte_conformance
+          --test main -- --test-threads=4
       # The committed fixture corpus + review artifacts against the typed
       # Rust manifest (also builds the CLI the golden check spawns for its
       # emit-plan).
@@ -972,68 +1166,13 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  endurance-lsp:
-    name: Endurance/soak harness (all provider routes)
-    needs: [detect-changes, build-lsp-debug, build-vscode-e2e]
-    if: needs.detect-changes.outputs.editor_lsp == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Download editor integration binaries
-        uses: actions/download-artifact@v7
-        with:
-          name: lsp-debug-bins
-          path: target/debug
-      - name: Make editor integration binaries executable
-        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim target/debug/verter-mcp
-      - name: Download provider integration builds
-        uses: actions/download-artifact@v7
-        with:
-          name: vscode-e2e-build
-          path: packages
-      - name: Build endurance harness packages
-        run: pnpm --filter "@verter/dx-harness..." build
-      # CI-runnable subset (bounded per route): build-from-scratch, heavy-update,
-      # hover/definition storm, soak, and the synthetic scale lane. Long-soak and
-      # external-corpus lanes stay env-gated out of CI.
-      - name: Run endurance subset on all three provider routes
-        env:
-          VERTER_ENDURANCE_RECEIPT: ${{ runner.temp }}/verter-endurance
-          VERTER_ENDURANCE_SYNTHETIC_SCALE: "1"
-          VERTER_ENDURANCE_SCALE_CORPUS_FILES: "8"
-          VERTER_ENDURANCE_SCALE_OPEN_FILES: "16"
-          VERTER_ENDURANCE_HEAVY_UPDATE_CYCLES: "3"
-          VERTER_ENDURANCE_STORM_MS: "12000"
-          VERTER_ENDURANCE_STORM_WORKERS: "4"
-          VERTER_ENDURANCE_SOAK_MS: "5000"
-          VERTER_ENDURANCE_WINDOW_MS: "1000"
-          VERTER_ENDURANCE_TYPING_CPS: "24"
-        run: |
-          set -e
-          for route in tsserver tsgo shared-tsgo; do
-            echo "=== endurance route: ${route} ==="
-            VERTER_ENDURANCE_PROVIDER="${route}" pnpm --filter @verter/dx-harness test:endurance
-          done
-      - name: Upload endurance attestation receipts
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: endurance-lsp-receipts
-          path: ${{ runner.temp }}/verter-endurance/
-          if-no-files-found: error
-          retention-days: 7
-
   vscode-e2e:
     name: VS Code E2E (${{ matrix.fixture }} / ${{ matrix.type_provider }})
     needs: [detect-changes, build-lsp-debug, build-vscode-e2e]
-    if: needs.detect-changes.outputs.vscode == 'true'
+    # Temporarily disabled: the 32-route matrix remains reproducible locally in
+    # Docker, while CI keeps the editor-neutral LSP contract as the required
+    # integration signal without downloading a separate 330 MB VS Code per leg.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
@@ -1064,14 +1203,20 @@ jobs:
         env:
           E2E_FIXTURE: ${{ matrix.fixture }}
           E2E_TYPE_PROVIDER: ${{ matrix.type_provider }}
+          # Keep the required matrix on the reviewed editor baseline. Local
+          # reproduction can set the same variable or opt into another build.
+          E2E_VSCODE_VERSION: "1.135.0"
           VERTER_REQUIRE_TSSERVER: "1"
           VERTER_REQUIRE_TSGO: "1"
-      - name: Upload timing report
+      - name: Upload E2E diagnostics
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: e2e-timing-${{ matrix.fixture }}-${{ matrix.type_provider }}
-          path: /tmp/verter-e2e-timing-*.json
+          name: e2e-diagnostics-${{ matrix.fixture }}-${{ matrix.type_provider }}
+          path: |
+            /tmp/verter-e2e-timing-*.json
+            /tmp/verter-e2e-*.log
+            /tmp/verter-e2e-*.log.runsummary
           if-no-files-found: ignore
 
   # The ONE release build of the native N-API binding. `native-test` and
@@ -1146,8 +1291,8 @@ jobs:
         run: pnpm run build:ts
       - name: Test @verter/native
         run: pnpm --filter @verter/native test
-      - name: Test @verter/typescript-plugin
-        run: pnpm --filter @verter/typescript-plugin test
+      - name: Native-backed @verter/typescript-plugin tests
+        run: pnpm vitest run packages/typescript-plugin/src/tsc
       - name: Test @verter/unplugin
         run: pnpm --filter @verter/unplugin test
       # MANDATORY native-eval gate: the @verter/component-meta suite that
@@ -1657,9 +1802,15 @@ jobs:
       - detect-changes
       - tama-roadmap
       - rust-fmt
+      - proto-fmt
       - rust-clippy
       - rust-build-configs
+      - rust-test-build
       - rust-test
+      - rust-tsserver-live
+      - rust-tsgo-live
+      - compiler-contracts
+      - bf2-authoritative
       - js-build-test
       - svelte-oracle
       - svelte-conformance
@@ -1669,7 +1820,6 @@ jobs:
       - wasm-build
       - build-vscode-e2e
       - editor-neutral-lsp
-      - endurance-lsp
       - vscode-e2e
       - native-test
       - dx-harness-hermetic

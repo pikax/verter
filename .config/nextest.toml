@@ -5,10 +5,9 @@
 # Hang protection. A test flagged slow after `period` is TERMINATED after
 # `terminate-after` periods, so a wedged subprocess (e.g. a deadlocked
 # tsgo/tsserver child) is killed and reported as a timeout instead of stalling
-# the whole `--workspace` run indefinitely. Every test in this workspace
-# completes in seconds — EXCEPT the trybuild compile-fail tests, which shell out
-# to a real `cargo` build and are exempted below. For everything else 60s × 3 =
-# 180s is far past any legitimate test, so a trip is a genuine hang.
+# the whole `--workspace` run indefinitely. Compile-fail contracts live in a
+# standalone executable rather than the test inventory, so 60s × 3 is far past
+# any legitimate test and a trip is a genuine hang.
 slow-timeout = { period = "60s", terminate-after = 3 }
 
 [profile.ci]
@@ -17,18 +16,8 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 [profile.ci.junit]
 path = "junit.xml"
 
-# Every live-process shared-provider test that launches or attaches a TypeScript
-# engine. They are deterministic in isolation but contend for the shared
-# Windows process/pipe budget when nextest schedules them together. Pure
-# resolver tests and the missing-attach fallback (no shim/tsgo child) remain
-# parallel.
-[test-groups]
-shared-provider-live = { max-threads = 1 }
-lsp-server-unit = { max-threads = 1 }
-
 [[profile.default.overrides]]
 filter = 'test(/shared_provider_live::(shared_provider_serves_real_vue_macro_carrier|shared_provider_serves_dual_claimant_carrier_with_real_types|shared_provider_carrier_never_leaks_to_editor|shared_provider_reconnect_mints_fresh_engine_no_split_brain|composite_overlays_shared_diagnostics_via_live_resolver|composite_successful_shared_route_never_activates_managed_fallback|composite_shared_template_answers_are_typed_single_project|composite_shared_template_answers_are_typed_monorepo_nested_leaf)$/)'
-test-group = 'shared-provider-live'
 # The composite template tests declare up to 230s of in-test deadlines
 # (40s setup + a 90s diagnostics watchdog + two 45s guards + 10s teardown).
 # The outer terminator must sit strictly ABOVE that so it stays the backstop
@@ -38,67 +27,12 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 
 [[profile.ci.overrides]]
 filter = 'test(/shared_provider_live::(shared_provider_serves_real_vue_macro_carrier|shared_provider_serves_dual_claimant_carrier_with_real_types|shared_provider_carrier_never_leaks_to_editor|shared_provider_reconnect_mints_fresh_engine_no_split_brain|composite_overlays_shared_diagnostics_via_live_resolver|composite_successful_shared_route_never_activates_managed_fallback|composite_shared_template_answers_are_typed_single_project|composite_shared_template_answers_are_typed_monorepo_nested_leaf)$/)'
-test-group = 'shared-provider-live'
 # The composite template tests declare up to 230s of in-test deadlines
 # (40s setup + a 90s diagnostics watchdog + two 45s guards + 10s teardown).
 # The outer terminator must sit strictly ABOVE that so it stays the backstop
 # for a truly wedged subprocess, while the in-test watchdog is the deadline
 # that actually fires and reports its diagnostic message. 60s x 6 = 360s.
 slow-timeout = { period = "60s", terminate-after = 6 }
-
-# Each server contract builds an in-process LSP service and several scheduler
-# pools. Nextest process isolation makes them safe from shared Rust state, but
-# running many services together exhausts Windows scheduler/process capacity
-# and causes production request budgets to expire nondeterministically. Keep
-# the server contracts isolated from one another; every selector still runs.
-[[profile.default.overrides]]
-filter = 'test(/^server::server_tests::/)'
-test-group = 'lsp-server-unit'
-
-[[profile.ci.overrides]]
-filter = 'test(/^server::server_tests::/)'
-test-group = 'lsp-server-unit'
-
-# ── trybuild compile-fail tests: a real `cargo` build, not a unit test ───────
-# `hot_materialize_and_script_fact_structural_rails_smoke` is the combined
-# always-on structural-rail smoke. One trybuild invocation compiles all focused
-# fixtures by SPAWNING cargo against a generated crate in its own
-# `target/tests/trybuild` directory, which shares nothing with the main build,
-# so a cold run compiles verter_session's entire ~233-crate dependency closure
-# before the first fixture is even checked.
-#
-# Measured on a 4-job Linux build: 83.5s cold, 1.4s warm. CI is always cold
-# (the trybuild target dir is not part of the cached `target` layout) and runs
-# on a 4-core runner alongside other tests, which is how release run
-# 30266787819 recorded exactly 180.005s — the 60s x 3 default, tripped by a
-# test that was still making progress.
-#
-# The default budget encodes "no legitimate test takes minutes", which is true
-# of every test that does not invoke a compiler and false of this one. Raising
-# it here weakens nothing: the fixtures and their `.stderr` expectations are
-# unchanged, and a rail that goes hollow still fails because the fixture would
-# COMPILE. It only stops a real compile being reported as a hang.
-#
-# The durable fix is caching the trybuild target dir in CI, which turns this
-# into the 1.4s warm case; until then the budget has to fit a cold compile.
-[[profile.default.overrides]]
-filter = 'test(/^cases::g_compile::compile_fail::/)'
-slow-timeout = { period = "120s", terminate-after = 3 }
-
-[[profile.ci.overrides]]
-filter = 'test(/^cases::g_compile::compile_fail::/)'
-slow-timeout = { period = "120s", terminate-after = 3 }
-
-# verter_semantic's own trybuild compile-fail fixture (C1-AC-7) is the same
-# shape as the g_compile override above: a real spawned `cargo build` against
-# its own trybuild target dir, cold on every fresh worktree/CI run.
-[[profile.default.overrides]]
-filter = 'test(/^cases::resolver_observation_compile_fail::/)'
-slow-timeout = { period = "120s", terminate-after = 3 }
-
-[[profile.ci.overrides]]
-filter = 'test(/^cases::resolver_observation_compile_fail::/)'
-slow-timeout = { period = "120s", terminate-after = 3 }
 
 # ── The real-JS request boundary addon ──────────────────────────────────────
 # `cases::real_js_host_request_boundary` loads a test-only Node addon to put

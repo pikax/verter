@@ -582,6 +582,12 @@ fn requested_product_to_canonical(
                    }| RuntimeProductRequest {
         inline,
         runtime_source_map,
+        // The wire product carries no style-stage axis, so every transport
+        // request runs the complete authored-to-published cascade. A bundler
+        // that owns its own style-module lane reaches `AuthoredOnly` through
+        // the profile route only; giving the typed request that axis is a
+        // wire addition, not a silent default flip.
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
         output_profile: profiles.output.clone(),
         serialization: profiles.serialization.clone(),
     };

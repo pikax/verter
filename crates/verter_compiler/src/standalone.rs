@@ -897,6 +897,7 @@ fn compile_carrier_selected_template(
         source_map: verter_options.source_map,
         ide_source_map: verter_options.ide_source_map,
         ssr: verter_options.ssr,
+        style_processing: verter_options.style_processing,
         prop_constness_overrides: verter_options.prop_constness_overrides.clone(),
         style_v_bind_vars: verter_options.style_v_bind_vars.clone(),
         style_v_bind_usage_complete: verter_options.style_v_bind_usage_complete,
@@ -1903,6 +1904,7 @@ impl VueRuntimeBackend {
             source_map: opts.source_map,
             ide_source_map: false,
             ssr: opts.ssr,
+            style_processing: opts.style_processing,
             prop_constness_overrides: extras.and_then(|e| e.prop_constness_overrides.clone()),
             style_v_bind_vars: extras
                 .map(|e| e.style_v_bind_vars.clone())

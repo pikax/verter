@@ -96,6 +96,7 @@ function renderMainRuntime(
   canonicalId: string,
   source: string,
   profile: HostCompileProfile,
+  authoredOnlyStyleProcessing: boolean,
   warn?: (w: { message: string; id?: string }) => void,
 ): RenderedMain {
   const [entry] = host.compileMany(
@@ -109,6 +110,7 @@ function renderMainRuntime(
     {
       target: "runtime-render",
       compileProfile: {
+        styleProcessing: authoredOnlyStyleProcessing ? "authored-only" : "complete",
         // Required render-profile fields default to the same values the
         // `CompileProfile` default / FFI conversion applies for an absent
         // `HostCompileProfile` field, so a caller that omitted a field
@@ -825,6 +827,7 @@ function createFrameworkFactory(
             filename,
             source,
             profile,
+            Boolean(viteConfig) && carrierFramework === "vue",
             typeof (this as { warn?: unknown })?.warn === "function"
               ? (this as unknown as { warn: (w: { message: string }) => void }).warn.bind(this)
               : undefined,
@@ -953,6 +956,7 @@ function createFrameworkFactory(
             filename,
             code,
             profile,
+            false,
             typeof (this as { warn?: unknown })?.warn === "function"
               ? (this as unknown as { warn: (w: { message: string }) => void }).warn.bind(this)
               : undefined,
@@ -1083,6 +1087,7 @@ function createFrameworkFactory(
           filename,
           code,
           profile,
+          Boolean(viteConfig) && carrierFramework === "vue",
           typeof (this as { warn?: unknown })?.warn === "function"
             ? (this as unknown as { warn: (w: { message: string }) => void }).warn.bind(this)
             : undefined,

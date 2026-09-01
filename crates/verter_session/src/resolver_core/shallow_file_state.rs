@@ -109,12 +109,17 @@ pub struct ShallowFileState {
 
     /// Lazy per-state memo of the route-surface digest
     /// (`crate::resolver_store::hash_route_surface`). The digest is a pure
-    /// function of this state's routing surface (`exports`,
-    /// `wildcard_reexports`, `import_targets`, `whole_hash`), which is
+    /// function of this state's routing surface (`exports`, exact
+    /// owner-qualified imports, export assignment, typed route inventory,
+    /// and `whole_hash`), which is
     /// mutated only during construction — strictly before the state is
     /// `Arc`-published and first hashed — so one computation serves every
     /// later read. See [`RouteSurfaceHashMemo`] for the clone semantics.
     route_surface_hash: RouteSurfaceHashMemo,
+    /// Lazy per-state memo of the content-independent authored route
+    /// interface. This is the parse-fact digest; the legacy route digest
+    /// composes it with `whole_hash`.
+    syntactic_route_interface_hash: RouteSurfaceHashMemo,
 }
 
 /// One-shot memo cell for a [`ShallowFileState`]'s route-surface digest.
@@ -903,6 +908,7 @@ impl ShallowFileState {
             synthesised_value_symbols: FxHashMap::default(),
             synthesised_value_bodies: FxHashMap::default(),
             route_surface_hash: RouteSurfaceHashMemo::default(),
+            syntactic_route_interface_hash: RouteSurfaceHashMemo::default(),
         }
     }
 
@@ -999,6 +1005,13 @@ impl ShallowFileState {
     /// the first hash, so the populated digest never goes stale.
     pub(crate) fn route_surface_hash_memo(&self) -> &RouteSurfaceHashMemo {
         &self.route_surface_hash
+    }
+
+    /// The lazy authored route-interface digest memo. Construction-time
+    /// routing mutations precede the first read, matching the legacy memo's
+    /// immutability contract.
+    pub(crate) fn syntactic_route_interface_hash_memo(&self) -> &RouteSurfaceHashMemo {
+        &self.syntactic_route_interface_hash
     }
 
     /// Every file-scope TYPE symbol name in the shallow inventory

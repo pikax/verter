@@ -328,6 +328,10 @@ fan dependency signatures into that tracer; they must not maintain a parallel
 TLS accumulator or reconstruct a curated signature after the compute. A
 non-cacheable or overflowing tracer still returns the best computed value to the
 caller, carries the typed refusal rail, and skips every warm-cache write.
+The resolved-meta request trace always observes the request-captured owner
+`FileWholeHash` before resolution begins (and uses the session-view hash for an
+overlay request). This self-root is mandatory even for malformed or degraded
+surfaces that never reach a macro-body dispatch read.
 
 In every case the live whole-hash / version is re-sourced at value-compute time
 via `ensure_indexed_ready_serve` and validated against the live `StoreView` on
@@ -536,12 +540,13 @@ the same file does NOT invalidate consumers of an export that does not reach it.
 Editing a member that `Pick<Foo, "a">` does not select does NOT invalidate that
 consumer.
 
-**R15.** `SyntacticExportSet` (parse-domain) records local exports and bare
-re-export specifiers only — no resolution. Its resolve-domain counterpart is
+**R15.** `SyntacticExportSet` (parse-domain) records the exported-name set.
+`SyntacticRouteInterface` separately fingerprints the exact authored
+import/export routing geometry while excluding bodies, spans, resolved
+canonicals, and project state. Its resolve-domain counterpart is
 `RouteDb` — per-name route resolution (`RouteNameKey`) plus the barrel wildcard
-surface (`BarrelRouteSurface.wildcard_edges`, specifier → resolved canonical) —
-which resolves the specifiers the parse-domain fact only records. The two
-domains cannot be merged.
+surface (`BarrelRouteSurface.wildcard_edges`, specifier → resolved canonical).
+The parse-owned interface and resolved route domains cannot be merged.
 
 **R16.** Semantic fingerprints are alpha-normalised structural hashes.
 Source-text hashes, span-based hashes, position offsets, or any hash that
@@ -1560,6 +1565,9 @@ Parse-time emission (eager, shallow, O(file_size)) populates the parse-domain
 - `MemberPresence(exporter, name, space)` — header-only `(name, kind,
   exporter_salt)`; NO body fingerprint.
 - `SyntacticExportSet` — whole-file surface fingerprint.
+- `SyntacticRouteInterface` — exact authored import/export routing interface;
+  excludes bodies, spans, resolved targets, whole-content hashes, and project
+  state.
 - `ImportRef(specifier, binding, space)` — syntactic import shape; NO resolved
   canonical (R12).
 - `SyntacticReexportRef(specifier, source_name, target_name, space)`

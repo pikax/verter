@@ -1686,30 +1686,18 @@ fn apply_cascade_stage(
     Ok(Some((code, composition)))
 }
 
-/// Runs Vue's authored-v-bind → CSS-Modules → scoped-selector cascade,
-/// parsing each content identity at most once (A10i): a stage that produces
-/// no edits hands its own already-parsed `StyleSyntaxIr` to the next stage
-/// instead of causing a re-parse. Only a stage that DID change bytes forces
-/// the following stage to parse fresh (the new bytes are a new content
-/// identity `StyleSyntaxIr` never saw). `module`/`scoped` mirror the SFC's
-/// `<style module>`/`<style scoped>` attributes; both require the AUTHORED
-/// dialect to already be plain CSS (external preprocessing, JS/builder-owned,
-/// is not modelled here — same `PlainCssInput` gate the CSS-Modules/
-/// scoped-selector stages already enforce individually).
-///
-/// A stage that cannot safely run does not abort the whole cascade — see
-/// [`VueStyleCascadeOutcome::stage_failures`]. The authored-v-bind stage
-/// runs against the authored bytes regardless of whether it itself
-/// succeeds, so a v-bind failure still lets CSS-Modules/scoped-selector
-/// process those same authored bytes.
-pub fn run_vue_style_cascade(
+struct AuthoredVueStyleState {
+    owned: Option<(String, MapComposition)>,
+    facts: VueStyleFacts,
+    stage_failures: Vec<StyleRewriteFailure>,
+    retained_ir: Option<ParsedStyleIr>,
+}
+
+fn run_vue_authored_v_bind_stage(
     input: AuthoredStyleInput<'_>,
     scope_id: &str,
-    module: bool,
-    scoped: bool,
     want_source_map: bool,
-) -> VueStyleCascadeOutcome {
-    verter_audit::attribute_scope!(CssTransform);
+) -> AuthoredVueStyleState {
     let mut owned: Option<(String, MapComposition)> = None;
     let mut facts = VueStyleFacts::default();
     let mut stage_failures = Vec::new();
@@ -1756,6 +1744,86 @@ pub fn run_vue_style_cascade(
         }
     }
 
+    AuthoredVueStyleState {
+        owned,
+        facts,
+        stage_failures,
+        retained_ir,
+    }
+}
+
+fn finish_vue_style_cascade(
+    authored_code: &str,
+    owned: Option<(String, MapComposition)>,
+    facts: VueStyleFacts,
+    stage_failures: Vec<StyleRewriteFailure>,
+) -> VueStyleCascadeOutcome {
+    let (code, source_map) = match owned {
+        Some((code, composition)) => (
+            code,
+            composition
+                .accumulated()
+                .map(SourceMap::to_json_string)
+                .unwrap_or_default(),
+        ),
+        None => (authored_code.to_string(), String::new()),
+    };
+    VueStyleCascadeOutcome {
+        code,
+        source_map,
+        facts,
+        stage_failures,
+    }
+}
+
+/// Runs only Vue's authored-dialect `v-bind()` stage.
+///
+/// This is the explicit entry point for a bundler Main render whose separate
+/// style-module pipeline owns preprocessing and every plain-CSS-only stage.
+/// It never requests CSS Modules or selector scoping, so authored SCSS/Sass/
+/// Less/Stylus cannot be mistaken for completed CSS. The returned facts still
+/// drive `_useCssVars` generation in the runtime module.
+pub fn run_vue_style_authored_only(
+    input: AuthoredStyleInput<'_>,
+    scope_id: &str,
+    want_source_map: bool,
+) -> VueStyleCascadeOutcome {
+    verter_audit::attribute_scope!(CssTransform);
+    let state = run_vue_authored_v_bind_stage(input, scope_id, want_source_map);
+    finish_vue_style_cascade(input.code, state.owned, state.facts, state.stage_failures)
+}
+
+/// Runs Vue's authored-v-bind → CSS-Modules → scoped-selector cascade,
+/// parsing each content identity at most once (A10i): a stage that produces
+/// no edits hands its own already-parsed `StyleSyntaxIr` to the next stage
+/// instead of causing a re-parse. Only a stage that DID change bytes forces
+/// the following stage to parse fresh (the new bytes are a new content
+/// identity `StyleSyntaxIr` never saw). `module`/`scoped` mirror the SFC's
+/// `<style module>`/`<style scoped>` attributes; both require the AUTHORED
+/// dialect to already be plain CSS (external preprocessing, JS/builder-owned,
+/// is not modelled here — same `PlainCssInput` gate the CSS-Modules/
+/// scoped-selector stages already enforce individually).
+///
+/// A stage that cannot safely run does not abort the whole cascade — see
+/// [`VueStyleCascadeOutcome::stage_failures`]. The authored-v-bind stage
+/// runs against the authored bytes regardless of whether it itself
+/// succeeds, so a v-bind failure still lets CSS-Modules/scoped-selector
+/// process those same authored bytes.
+pub fn run_vue_style_cascade(
+    input: AuthoredStyleInput<'_>,
+    scope_id: &str,
+    module: bool,
+    scoped: bool,
+    want_source_map: bool,
+) -> VueStyleCascadeOutcome {
+    verter_audit::attribute_scope!(CssTransform);
+    let AuthoredVueStyleState {
+        mut owned,
+        mut facts,
+        mut stage_failures,
+        retained_ir,
+    } = run_vue_authored_v_bind_stage(input, scope_id, want_source_map);
+
     if module || scoped {
         let current_code = owned.as_ref().map_or(input.code, |(code, _)| code.as_str());
         let composition = owned
@@ -1780,22 +1848,7 @@ pub fn run_vue_style_cascade(
         }
     }
 
-    let (code, source_map) = match owned {
-        Some((code, composition)) => (
-            code,
-            composition
-                .accumulated()
-                .map(SourceMap::to_json_string)
-                .unwrap_or_default(),
-        ),
-        None => (input.code.to_string(), String::new()),
-    };
-    VueStyleCascadeOutcome {
-        code,
-        source_map,
-        facts,
-        stage_failures,
-    }
+    finish_vue_style_cascade(input.code, owned, facts, stage_failures)
 }
 
 /// Runs the full Vue style cascade from native-CSS grammar provenance.

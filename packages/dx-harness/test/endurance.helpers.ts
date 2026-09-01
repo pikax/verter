@@ -15,6 +15,7 @@ import {
   receiptCoreFailures,
   RequestTracker,
   RssSampler,
+  stageEnduranceFixtureDependencies,
   spawnEnduranceLsp,
   writeReceipt,
   type EnduranceConfig,
@@ -79,9 +80,11 @@ export async function spawnRig(
 export async function materializeRig(
   files: WorkspaceFiles,
   config: EnduranceConfig,
+  lane: EnduranceLane,
 ): Promise<EnduranceRig> {
   const workspaceRoot = materializeWorkspace(files);
   try {
+    stageEnduranceFixtureDependencies(workspaceRoot, lane.framework);
     return await spawnRig(workspaceRoot, config, true);
   } catch (error) {
     disposeWorkspace(workspaceRoot);

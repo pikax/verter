@@ -59,7 +59,7 @@ fn upsert_req(canonical_id: &str, source: &str) -> UpsertRequest {
 // ---------------------------------------------------------------------------
 
 /// Cold N unique inputs: Stage B must submit ONE
-/// `Submission::NewRequestBatch` carrying N source/Analysis requests,
+/// `Submission::NewRequestBatch` carrying N source-stage requests,
 /// admitted under a SINGLE `dag.lock()` acquisition — observable via the
 /// scheduler's per-admit epoch trace, which is populated ONLY from
 /// `handle_new_request_batch` (the atomic batch path) and records the
@@ -363,17 +363,18 @@ fn upsert_batch_completion_mapping_preserves_error_strings() {
 
     // (2) Ready arm → Ok carrying its canonical.
     match &outcomes[0].result {
-        Ok(update) => assert_eq!(
+        Ok(Some(update)) => assert_eq!(
             update.canonical_id, ids[0],
             "Ready arm must route through finish_upsert_post_commit and \
              carry the request's canonical"
         ),
+        Ok(None) => panic!("full upsert mapping must materialize its update result"),
         Err(e) => panic!("Ready arm must map to Ok, got error: {e}"),
     }
 
     // (3) Each failure arm → its EXACT `upsert failed: {e}` string,
     //     rendered through the same `HostError::Display` Stage B uses.
-    let render = |r: &Result<crate::types::HostUpdateResult, HostError>| match r {
+    let render = |r: &Result<Option<crate::types::HostUpdateResult>, HostError>| match r {
         Ok(_) => panic!("expected an Err arm"),
         Err(e) => format!("upsert failed: {e}"),
     };
@@ -473,7 +474,7 @@ fn upsert_batch_result_indices_map_to_prepared_canonicals() {
             "outcome[{i}].canonical_id must equal the i-th prepared canonical"
         );
         match (&outcome.result, expected_err[i]) {
-            (Ok(update), None) => assert_eq!(
+            (Ok(Some(update)), None) => assert_eq!(
                 update.canonical_id, ids[i],
                 "the Ready post-commit result for index {i} must carry the \
                  SAME canonical — a transposed zip would attach the result \
@@ -595,7 +596,10 @@ fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
     });
 
     assert!(
-        host.compile_one_call_count.load(Ordering::Relaxed) >= N,
+        host.test_force
+            .compile_one_call_count
+            .load(Ordering::Relaxed)
+            >= N,
         "every unique canonical must have been compiled at least once"
     );
 }
@@ -660,7 +664,7 @@ fn upsert_duplicate_canonical_panics_before_submit_batch_atomic() {
 
     // The side-effect-ordering observable starts unset on a fresh host.
     assert!(
-        host.last_upsert_priority.lock().is_none(),
+        host.test_force.last_upsert_priority.lock().is_none(),
         "precondition: fresh host has no recorded upsert priority"
     );
 
@@ -714,7 +718,7 @@ fn upsert_duplicate_canonical_panics_before_submit_batch_atomic() {
     // left this `Some(Priority::Interactive)` (the first duplicate ran
     // the loop body before the panic).
     assert!(
-        host.last_upsert_priority.lock().is_none(),
+        host.test_force.last_upsert_priority.lock().is_none(),
         "the uniqueness check must run BEFORE any per-request side effect — \
          `last_upsert_priority` (written inside the per-request loop) must \
          still be None after the panic. A recorded priority means the \

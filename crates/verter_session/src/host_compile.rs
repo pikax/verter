@@ -1,4 +1,4 @@
-//! Host-backed parallel SFC compilation.
+//! Parallel SFC runtime compilation.
 //!
 //! Bundler/runtime output only: assembled Main (script + template
 //! render). IDE TSX / TSC extract would be separate `ide_many` /
@@ -12,12 +12,15 @@
 //!    id; skip upsert only when the scheduler already holds that
 //!    registration (a byte-identical relabel is still a change: the
 //!    language row re-routes parse dispatch). Submit as one
-//!    [`VerterHost::upsert_many_with_priority`] atomic batch. Stage B
-//!    does not fan out through the batch coordinator.
-//! 3. Compile each unique canonical+profile once via
-//!    [`VerterHost::get_virtual_file`] for `Main`. Panic isolation is
-//!    the coordinator catch boundary (`compile_panic_entry`). Stage C
-//!    alone fans out through
+//!    [`VerterHost::upsert_many_for_compile`] status-only atomic batch. It
+//!    shares the ordinary upsert engine but does not construct discarded
+//!    public update payloads. Stage B does not fan out through the batch
+//!    coordinator.
+//! 3. Compile each unique canonical+profile once. HostBacked requests and
+//!    public Svelte/other non-Vue RuntimeRender requests use
+//!    [`VerterHost::get_virtual_file`] for `Main`; a Vue RuntimeRender request
+//!    uses the private render-only worker. Panic isolation is the coordinator
+//!    catch boundary (`compile_panic_entry`). Stage C alone fans out through
 //!    [`crate::host_batch_coordinator::HostBatchCoordinator::run_batch`]
 //!    on the host-owned [`verter_scheduler::HostCpuPool`] (8 MiB stack;
 //!    no Rayon global 1 MiB Windows default).
@@ -114,7 +117,7 @@ pub enum CompileBatchOutcome {
         lang: Option<String>,
         source_map: Option<Arc<str>>,
         /// Non-fatal WARNING-severity diagnostics of a SUCCESSFUL compile.
-        /// RuntimeRender uses this for closed row-local degradation (for
+        /// The Vue render-only path uses this for closed row-local degradation (for
         /// example, an unavailable member type rendered as `null`). An
         /// unavailable authoritative macro root stays fatal and never produces
         /// partial code, so it cannot appear here. Always empty on the
@@ -250,6 +253,10 @@ impl CompileBatchEntry {
 /// do not affect the runtime `Main` and default identically on both lanes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompileBatchRenderProfile {
+    /// Style stages owned by this render. `AuthoredOnly` is used when the
+    /// bundler's separate style-module lane owns preprocessing and every
+    /// plain-CSS-only continuation.
+    pub style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
     /// Codegen filename override (component-name extraction, scope-id
     /// derivation, source-map `source`/`file`). `None` falls back to the
     /// canonical id, exactly like an absent `CompileProfile::filename`.
@@ -308,24 +315,30 @@ pub struct CompileBatchOptions {
 /// Compile lane for [`VerterHost::compile_many`]. Always explicit —
 /// never inferred from node kind, file, or caller.
 ///
+/// For Vue, the HostBacked wrapper and private render-only worker share
+/// `compile_bundle` + `assemble_vue_main_module`. Svelte and other non-Vue
+/// RuntimeRender requests retain their carrier's effective host-backed
+/// substrate:
+///
 /// - [`CompileManyTarget::HostBacked`] — full `compile_entry` wrapper
 ///   (cache-mode, fact tracer, warm-hit, publish). IDE / analysis path.
-/// - [`CompileManyTarget::RuntimeRender`] — same `Main` bytes without
-///   per-file wrapper overhead. Each batch entry is its own host compile
+/// - [`CompileManyTarget::RuntimeRender`] — a public render request. Vue uses
+///   the render-only worker without per-file wrapper overhead; other carriers
+///   retain the effective host-backed path. Each entry is its own host compile
 ///   request with its own request-scoped bound host request; the bound
 ///   framework host backend issues the render admission and the matching
 ///   runtime backend executes it, then the host assembles `Main`
-///   (`assemble_vue_main_module` for Vue). Cross-file macros still go
-///   through TypeInfo dispatch. Authoritative macro-root failures stay
-///   fatal.
+///   (`assemble_vue_main_module` for Vue). Cross-file macros still go through
+///   TypeInfo dispatch. Authoritative failures stay fatal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileManyTarget {
     /// The full session-wrapper path (`compile_entry`). Byte-for-byte
     /// unchanged; used by every IDE / analysis / TSC / type-resolution
     /// consumer.
     HostBacked,
-    /// The render-only bundler lane. Same substrate + same host-side
-    /// `Main` assembly, without the per-file session-wrapper overhead. The
+    /// The public runtime-render request. Vue uses the same substrate +
+    /// host-side `Main` assembly without per-file wrapper overhead; other
+    /// registered carriers use their effective host-backed route. The
     /// [`CompileBatchRenderProfile`] is REQUIRED — carried on the variant so
     /// the lane is fail-closed by construction: you cannot request a runtime
     /// render without supplying the output-affecting build profile, and the
@@ -416,16 +429,22 @@ impl VerterHost {
         }
     }
 
-    /// Host-backed parallel SFC batch compile.
+    /// Parallel SFC runtime batch compile.
     ///
     /// See module-level docs for the four-stage algorithm. Returns
     /// one [`CompileBatchEntry`] per input, in the original input
     /// order. Output ordering is fixed by Stage D, not by Stage B/C's
     /// (non-deterministic) HashMap iteration.
     ///
-    /// Per-input panic isolation: if `get_virtual_file` panics for one
-    /// input, only that input's entry receives a `compiler panic: ...`
-    /// error; the rest of the batch completes normally.
+    /// There is deliberately no lint stage: Stage B admits source and Stage C
+    /// compiles it. Lint is an independent public operation and must never be
+    /// folded into `compile_many` admission or compilation.
+    ///
+    /// Per-input panic isolation: if the selected compile worker panics for
+    /// one input (`get_virtual_file` for HostBacked or Svelte/other non-Vue
+    /// RuntimeRender, or `render_only_main` for Vue RuntimeRender), only that
+    /// input's entry receives a `compiler panic: ...` error; the rest of the
+    /// batch completes normally.
     pub fn compile_many(
         &self,
         inputs: Vec<CompileBatchInput>,
@@ -445,9 +464,14 @@ impl VerterHost {
         // (reproducing the build's dev/prod/ssr/force_js/vapor/source-map/
         // comments/hmr/runtime-module/delimiters/custom-elements). Per-input
         // `component_id` is layered on later, on the RuntimeRender lane only.
-        let profile = match &target {
-            CompileManyTarget::HostBacked => compile_profile_for_bundler(),
-            CompileManyTarget::RuntimeRender { profile } => render_base_profile(profile),
+        let (profile, style_processing) = match &target {
+            CompileManyTarget::HostBacked => (
+                compile_profile_for_bundler(),
+                verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+            ),
+            CompileManyTarget::RuntimeRender { profile } => {
+                (render_base_profile(profile), profile.style_processing)
+            }
         };
 
         // Boundary canonicalization: pin every input's `canonical_id` to the
@@ -478,7 +502,6 @@ impl VerterHost {
         // Batch default cache mode; a per-input `requested_mode` overrides
         // it. `None` on both resolves to the host default `Session`.
         let default_mode = options.default_mode.unwrap_or(CompileCacheMode::Session);
-
         // ── group + selective upsert ──
         // HashMap iteration is non-deterministic, but we only iterate
         // it for parallel-independent upserts and probe-keys — never
@@ -576,7 +599,7 @@ impl VerterHost {
         // post-commit on this thread after the single wait. Upsert errors
         // fold into `group_errors`, surfaced to every original input
         // position for that canonical in Stage D.
-        for outcome in self.upsert_many_with_priority(upsert_requests, priority) {
+        for outcome in self.upsert_many_for_compile(upsert_requests, priority) {
             if let Err(e) = outcome.result {
                 group_errors
                     .entry(outcome.canonical_id)
@@ -585,9 +608,11 @@ impl VerterHost {
         }
 
         // ── compile each UNIQUE canonical group exactly once ──
-        // Stage C fans the parallel `get_virtual_file` calls out through
-        // the host batch coordinator — the single host-side coordination
-        // rule. The coordinator installs on the host-owned coordinator pool
+        // Stage C fans the per-input compile workers out through the host
+        // batch coordinator: `get_virtual_file` for HostBacked or Svelte/other
+        // non-Vue RuntimeRender, the private render-only worker for Vue
+        // RuntimeRender. This is the single host-side coordination rule. The
+        // coordinator installs on the host-owned coordinator pool
         // (built once at host construction with an 8 MiB worker stack;
         // workers register as `CallerKind::External`, so the coordinator
         // never inline-executes scheduler CPU tasks while blocked on a
@@ -634,8 +659,14 @@ impl VerterHost {
             coordinator
                 .run_batch(&canonical_to_compile, &compile_policy, |input| {
                     let pre_err = group_errors.get(&input.canonical_id).cloned();
-                    let entry =
-                        self.compile_one_in_batch(input, &profile, default_mode, &target, pre_err);
+                    let entry = self.compile_one_in_batch(
+                        input,
+                        &profile,
+                        default_mode,
+                        style_processing,
+                        &target,
+                        pre_err,
+                    );
                     let effective_mode = input.requested_mode.unwrap_or(default_mode);
                     (
                         (
@@ -728,6 +759,7 @@ impl VerterHost {
         input: &CompileBatchInput,
         profile: &CompileProfile,
         default_mode: CompileCacheMode,
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
         target: &CompileManyTarget,
         precomputed_error: Option<String>,
     ) -> CompileBatchEntry {
@@ -737,7 +769,8 @@ impl VerterHost {
         // this branch out completely; see field doc on
         // `VerterHost::compile_one_call_count`.
         #[cfg(test)]
-        self.compile_one_call_count
+        self.test_force
+            .compile_one_call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Test-only: record the caller-kind tag of the worker
@@ -758,7 +791,8 @@ impl VerterHost {
                 verter_scheduler::caller_kind::CallerKind::IoWorker => 4,
                 verter_scheduler::caller_kind::CallerKind::Inline => 5,
             };
-            self.compile_one_caller_kind_tag
+            self.test_force
+                .compile_one_caller_kind_tag
                 .store(tag, std::sync::atomic::Ordering::Relaxed);
             // Record the host-CPU-pool identity token of this worker.
             // The discriminator: a worker running on *this host's*
@@ -820,15 +854,21 @@ impl VerterHost {
             panic!("synthetic panic for compile_many_isolates_panics test");
         }
 
-        // Route by the explicit lane. `RuntimeRender` runs the render-only
-        // lane (same shared substrate + host-side `Main` assembly, without
-        // the per-file session-wrapper overhead); `HostBacked` runs the
-        // full session wrapper via `get_virtual_file`.
-        if matches!(target, CompileManyTarget::RuntimeRender { .. }) {
+        // The render-only worker is the Vue-specific fast path. A public
+        // RuntimeRender request for any other registered carrier keeps the
+        // effective host-backed route through `get_virtual_file`, preserving
+        // that carrier's ordinary compilation contract.
+        let runtime_render_vue = matches!(target, CompileManyTarget::RuntimeRender { .. })
+            && self
+                .language_classifier()
+                .classify(&input.canonical_id)
+                .is_vue();
+        if runtime_render_vue {
             return self.compile_one_runtime_render(
                 input,
                 &per_input_profile,
                 requested_mode,
+                style_processing,
                 start,
             );
         }
@@ -861,8 +901,8 @@ impl VerterHost {
                         source_map: response.source_map,
                         // HostBacked warnings ride in the response diagnostics
                         // and are not re-surfaced as a distinct success-warning
-                        // list. RuntimeRender exposes successful row-local
-                        // degradation warnings through this field.
+                        // list. The Vue render-only path exposes successful
+                        // row-local degradation warnings through this field.
                         diagnostics: Vec::new(),
                     },
                     duration_ms,
@@ -920,7 +960,7 @@ impl VerterHost {
         }
     }
 
-    /// The [`CompileManyTarget::RuntimeRender`] per-file worker: a
+    /// The Vue [`CompileManyTarget::RuntimeRender`] per-file worker: a
     /// render-only compile onto the shared runtime substrate that produces
     /// byte-identical `Main` output to the `HostBacked` wrapper without the
     /// per-file session-wrapper overhead.
@@ -929,10 +969,11 @@ impl VerterHost {
         input: &CompileBatchInput,
         per_input_profile: &CompileProfile,
         requested_mode: CompileCacheMode,
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
         start: Instant,
     ) -> CompileBatchEntry {
         let id_prefix = format!("[{}] ", input.canonical_id);
-        match self.render_only_main(&input.canonical_id, per_input_profile) {
+        match self.render_only_main(&input.canonical_id, per_input_profile, style_processing) {
             Ok(render) => CompileBatchEntry {
                 canonical_id: input.canonical_id.clone(),
                 outcome: CompileBatchOutcome::Produced {

@@ -266,7 +266,7 @@ pub use wire::UniqueSymbolKeyExpr;
 //
 // The proto carries `schema_version` as a wire field. Centralising the
 // current value here keeps producers from drifting away from the
-// freshness check `typeinfo_proto_ts_freshness`.
+// structural contract `typeinfo_proto_ts_contract` and `pnpm proto:check`.
 // -------------------------------------------------------------------------
 
 /// Current typeinfo graph wire schema version. Increment when adding a

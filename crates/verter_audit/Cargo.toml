@@ -21,13 +21,6 @@ default = []
 # not exist — which is what structurally prevents a counter from
 # reaching a semantic decision.
 attribution = []
-# Opt-in: enables the trybuild compile-fail fixture that proves the
-# attribution reader path is absent from a default build. trybuild
-# spawns a full `cargo build` of a fixture crate, so the test is
-# `#[ignore]`d unless this feature is on. The `cfg_attr` applies the
-# ignore only when the feature is OFF, so enabling it is enough:
-# `cargo test -p verter_audit --features compile-fail`.
-compile-fail = []
 
 [[bin]]
 name = "verter-audit-inspect"
@@ -60,7 +53,7 @@ web-time = "1.1"
 # [[oxc-is-the-ts-parser]]. Dev-only: production audit code has
 # no parser dependency.
 [dev-dependencies]
-trybuild = "1.0"
+verter_test_support = { path = "../verter_test_support" }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }

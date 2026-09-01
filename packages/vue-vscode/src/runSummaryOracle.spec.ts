@@ -39,7 +39,7 @@ describe("clearRunArtifacts", () => {
 
 describe("enforceRunSummary stale/missing robustness", () => {
   it("refuses a current run with no fresh summary after deleting a stale green summary", async () => {
-    writeSummary({ failures: 0, executed: 3 });
+    writeSummary({ failures: 0, executed: 3, passedTestIds: ["stale pass"] });
     clearRunArtifacts(logFile);
 
     await expect(
@@ -48,7 +48,7 @@ describe("enforceRunSummary stale/missing robustness", () => {
   });
 
   it("demonstrates that an uncleared stale green summary would be accepted", async () => {
-    writeSummary({ failures: 0, executed: 3 });
+    writeSummary({ failures: 0, executed: 3, passedTestIds: ["stale pass"] });
 
     await expect(
       enforceRunSummary(logFile, "editor-owned-project@shared-tsgo", { pollMs: 0 }),
@@ -96,23 +96,57 @@ describe("enforceRunSummary result semantics", () => {
   });
 
   it("passes a clean summary with executed tests", async () => {
-    writeSummary({ failures: 0, executed: 4 });
+    writeSummary({ failures: 0, executed: 4, passedTestIds: ["activation starts"] });
     await expect(
       enforceRunSummary(logFile, "editor-owned-project@shared-tsgo", { pollMs: 0 }),
     ).resolves.toBeUndefined();
   });
 
-  it("refuses pending tests even when the run has no named capability manifest", async () => {
+  it("allows fixture-inapplicable pending rows only when an unmanifested run has a real pass", async () => {
     writeSummary({
       failures: 0,
       executed: 2,
       passedTestIds: ["activation starts"],
-      pendingTestIds: ["hover fixture token is absent"],
+      pendingTestIds: ["TS plugin: definition from barrel file navigates to .vue (not .vue.d.ts)"],
     });
 
     await expect(
       enforceRunSummary(logFile, "single-project@tsserver", { pollMs: 0 }),
-    ).rejects.toThrow(/pending test.*hover fixture token is absent/i);
+    ).resolves.toBeUndefined();
+
+    writeSummary({
+      failures: 0,
+      executed: 1,
+      passedTestIds: [],
+      pendingTestIds: ["fixture-specific optional row"],
+    });
+    await expect(
+      enforceRunSummary(logFile, "single-project@tsserver", { pollMs: 0 }),
+    ).rejects.toThrow(/no passing test IDs/i);
+  });
+
+  it("accepts only the exact explicitly allowed pending manifest", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 2,
+      passedTestIds: ["activation starts"],
+      pendingTestIds: ["fixture-specific optional row"],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "single-project@tsserver", {
+        pollMs: 0,
+        allowedPendingTestIds: ["fixture-specific optional row"],
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      enforceRunSummary(logFile, "single-project@tsserver", {
+        pollMs: 0,
+        allowedPendingTestIds: ["different row"],
+      }),
+    ).rejects.toThrow(
+      /pending.*missing.*different row.*unexpected.*fixture-specific optional row/i,
+    );
   });
 
   it("refuses pending tests for a required capability contract", async () => {
@@ -128,7 +162,7 @@ describe("enforceRunSummary result semantics", () => {
         pollMs: 0,
         requiredTestIds: ["vue.ts.definition", "vue.ts.rename"],
       }),
-    ).rejects.toThrow(/pending test.*vue\.ts\.rename/i);
+    ).rejects.toThrow(/pending manifest mismatch.*vue\.ts\.rename/i);
   });
 
   it("refuses any passed ID outside the complete required inventory", async () => {
@@ -199,10 +233,187 @@ describe("enforceRunSummary result semantics", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("accepts an exact parity inventory split between passes and skipped product gaps", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 2,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      pendingTestIds: ["vue.definition.markup-to-script"],
+      skippedProductGaps: [
+        {
+          id: "vue.definition.markup-to-script",
+          issue: "ISSUE-vue-definition",
+        },
+      ],
+      failedTests: [],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@tsserver", {
+        pollMs: 0,
+        requiredTestIds: ["vue.clean-diagnostics.daily", "vue.definition.markup-to-script"],
+        allowedProductGaps: {
+          "vue.definition.markup-to-script": "ISSUE-vue-definition",
+        },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses a product-gap failure even when the route manifest allows that row", async () => {
+    writeSummary({
+      failures: 1,
+      executed: 1,
+      passedTestIds: [],
+      pendingTestIds: [],
+      skippedProductGaps: [],
+      failedTests: [
+        {
+          id: "vue.definition.markup-to-script",
+          err: "PRODUCT_GAP ISSUE-vue-definition vue.definition.markup-to-script: ran instead of skipping",
+          kind: "test",
+        },
+      ],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@tsgo", {
+        pollMs: 0,
+        requiredTestIds: ["vue.definition.markup-to-script"],
+        allowedProductGaps: {
+          "vue.definition.markup-to-script": "ISSUE-vue-definition",
+        },
+      }),
+    ).rejects.toThrow(/1 test\(s\) failed.*ran instead of skipping/i);
+  });
+
+  it("refuses duplicate or missing parity outcome rows", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 2,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      pendingTestIds: ["vue.clean-diagnostics.daily"],
+      skippedProductGaps: [
+        {
+          id: "vue.clean-diagnostics.daily",
+          issue: "ISSUE-clean",
+        },
+      ],
+      failedTests: [],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@shared-tsgo", {
+        pollMs: 0,
+        requiredTestIds: ["vue.clean-diagnostics.daily", "vue.definition.markup-to-script"],
+        allowedProductGaps: {
+          "vue.clean-diagnostics.daily": "ISSUE-clean",
+        },
+      }),
+    ).rejects.toThrow(/duplicate.*vue\.clean-diagnostics\.daily.*missing.*markup-to-script/i);
+  });
+
+  it("refuses root-hook failures even when every recorded test failure is a product gap", async () => {
+    writeSummary({
+      failures: 1,
+      executed: 1,
+      rootHookError: "provider warmup failed",
+      passedTestIds: [],
+      pendingTestIds: ["vue.clean-diagnostics.daily"],
+      skippedProductGaps: [{ id: "vue.clean-diagnostics.daily", issue: "ISSUE-clean" }],
+      failedTests: [],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@tsserver", {
+        pollMs: 0,
+        requiredTestIds: ["vue.clean-diagnostics.daily"],
+        allowedProductGaps: {
+          "vue.clean-diagnostics.daily": "ISSUE-clean",
+        },
+      }),
+    ).rejects.toThrow(/root hook error.*provider warmup failed/i);
+  });
+
+  it("refuses a hook failure even when it imitates the old product-gap marker", async () => {
+    writeSummary({
+      failures: 1,
+      executed: 1,
+      passedTestIds: [],
+      pendingTestIds: [],
+      skippedProductGaps: [],
+      failedTests: [
+        {
+          id: '"after all" hook',
+          err: 'PRODUCT_GAP ISSUE-clean "after all" hook: teardown failed',
+          kind: "hook",
+        },
+      ],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@tsserver", {
+        pollMs: 0,
+        requiredTestIds: ["vue.clean-diagnostics.daily"],
+        allowedProductGaps: {
+          "vue.clean-diagnostics.daily": "ISSUE-clean",
+        },
+      }),
+    ).rejects.toThrow(/1 test\(s\) failed/i);
+  });
+
+  it("refuses missing, unexpected, or wrongly classified product-gap skips", async () => {
+    const options = {
+      pollMs: 0,
+      requiredTestIds: ["vue.clean-diagnostics.daily", "vue.definition.markup-to-script"],
+      allowedProductGaps: {
+        "vue.definition.markup-to-script": "ISSUE-vue-definition",
+      },
+    } as const;
+
+    writeSummary({
+      failures: 0,
+      executed: 2,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      pendingTestIds: [],
+      skippedProductGaps: [],
+    });
+    await expect(enforceRunSummary(logFile, "vue-parity@tsserver", options)).rejects.toThrow(
+      /product-gap skip manifest mismatch.*missing.*vue\.definition\.markup-to-script/i,
+    );
+
+    writeSummary({
+      failures: 0,
+      executed: 2,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      pendingTestIds: ["vue.definition.markup-to-script"],
+      skippedProductGaps: [
+        { id: "vue.definition.markup-to-script", issue: "ISSUE-wrong-classification" },
+      ],
+    });
+    await expect(enforceRunSummary(logFile, "vue-parity@tsserver", options)).rejects.toThrow(
+      /product-gap skip manifest mismatch.*issue mismatch/i,
+    );
+
+    writeSummary({
+      failures: 0,
+      executed: 3,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      pendingTestIds: ["vue.definition.markup-to-script", "vue.unapproved-gap"],
+      skippedProductGaps: [
+        { id: "vue.definition.markup-to-script", issue: "ISSUE-vue-definition" },
+        { id: "vue.unapproved-gap", issue: "ISSUE-unapproved" },
+      ],
+    });
+    await expect(enforceRunSummary(logFile, "vue-parity@tsserver", options)).rejects.toThrow(
+      /product-gap skip manifest mismatch.*unexpected.*vue\.unapproved-gap/i,
+    );
+  });
+
   it("attests the exact fixture and loaded suite-file inventory", async () => {
     writeSummary({
       failures: 0,
       executed: 2,
+      passedTestIds: ["svelte.clean-diagnostics.daily"],
       fixture: "svelte-parity",
       loadedFiles: ["parity/svelte/daily.test.js", "parity/svelte/matrix.test.js"],
     });
@@ -239,6 +450,7 @@ describe("enforceRunSummary result semantics", () => {
     writeSummary({
       failures: 0,
       executed: 1,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
       fixture: "vue-parity",
       loadedFiles: ["parity/vue/daily.test.js", "parity/vue/daily.test.js"],
     });
@@ -254,6 +466,7 @@ describe("enforceRunSummary result semantics", () => {
     writeSummary({
       failures: 0,
       executed: 1,
+      passedTestIds: ["svelte.clean-diagnostics.daily"],
       fixture: "svelte-parity",
       loadedFiles: ["parity/svelte/daily.test.js", "parity/svelte/daily.test.js"],
     });

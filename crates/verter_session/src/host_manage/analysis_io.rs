@@ -1471,6 +1471,35 @@ impl VerterHost {
         .then_some(artifacts)
     }
 
+    /// Build the parse-owned authored-route-interface fact from the exact
+    /// `FileFacts` payload paired with `indexed` in the current artifact
+    /// store. A separately-read current registry is not sufficient: an edit
+    /// between the indexed serve and fact lookup could otherwise sign old
+    /// routing bytes with a new fact.
+    #[must_use]
+    pub(crate) fn syntactic_route_interface_fact_for_indexed(
+        &self,
+        canonical: &str,
+        indexed: &Arc<crate::project_type_store::IndexedReady>,
+    ) -> Option<crate::resolver_core::ParseFactRef> {
+        if !indexed.shallow_state.has_resolvable_surface() {
+            return None;
+        }
+        let artifacts = self.current_content_pinned_artifacts(canonical)?;
+        if !Arc::ptr_eq(&artifacts.indexed, indexed) {
+            return None;
+        }
+        let fact = artifacts
+            .facts
+            .lookup(&verter_semantic::facts::FactKey::SyntacticRouteInterface)?;
+        Some(crate::resolver_core::ParseFactRef {
+            canonical_id: canonical.to_string(),
+            key: verter_semantic::facts::FactKey::SyntacticRouteInterface,
+            lane: verter_semantic::facts::FactLane::Semantic,
+            expected_hash: fact.semantic_hash,
+        })
+    }
+
     /// Establish ONE tear-free
     /// [`crate::resolver_core::MaterializeScopeObservation`] for a
     /// materialize-memo scope canonical (base-host path).
@@ -2451,35 +2480,15 @@ impl VerterHost {
             // no fence dimension.
             return;
         }
-        // `set_import_dependencies` is a route-resolution mutation: the
-        // per-canonical route table (`DerivedRawState.import_routes`,
-        // mutated above) and the workspace exact-resolution table both
-        // changed while `content_generation` stays put. Bump
-        // `project_generation` so the mutation is FENCE-VISIBLE — an
-        // in-flight materialise that captured the pre-mutation stamp must
-        // trip the pre-publish fence (ReturnOnly) instead of publishing a
-        // stale route surface that afterwards passes
-        // `indexed_surface_is_current`. MUTATE-FIRST ordering (the bump
-        // strictly follows every route-affecting write above) — see
-        // `VerterHost::set_exact_resolutions` for why bump-before-mutate
-        // is a fence-defeating order.
-        //
-        // STAMP-ONLY bump (not `bump_project_generation_and_evict`): the
-        // wide evict variant clears `derived_raw_cache_db` wholesale,
-        // which would destroy the very `import_routes` /
-        // known-miss-generation state this method just admitted (and
-        // every other canonical's bundler-preloaded routes). The stamp
-        // move alone is what the fence and the
-        // `indexed_surface_is_current` read gate consume; per-canonical
-        // derived layers are drained right below, and OTHER canonicals'
-        // cross-edge surfaces refresh lazily through the stamp gate
-        // (edge refresh — no re-parse).
-        self.project_type_store.bump_project_generation();
+        // Route publication is not a project-shape reset. Its currency and
+        // torn-publication fences are the exact-resolution facts installed
+        // above plus the store-view epoch advanced below. Moving the project
+        // generation here would invalidate every project-shaped result when a
+        // caller merely restores or retargets one owner's route table.
         // Soft-invalidate: file content didn't change, only import routes.
         // The content-addressed `IndexedReady` payload is RETAINED — the
-        // project-stamp read gate routes the next read through the
-        // edge-refresh materialise (route surface rebuilt, no re-parse),
-        // the same shape as the `set_exact_resolutions` wrapper cascade.
+        // exact-resolution facts route the next semantic read through the
+        // current route surface without re-parsing the retained artifact.
         self.resolver.runtime.invalidate_canonical(&canonical);
         self.project_type_store
             .evict_canonical_for_route_mutation(&canonical);

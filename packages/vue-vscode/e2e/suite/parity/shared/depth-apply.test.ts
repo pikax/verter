@@ -30,6 +30,9 @@ suite(`Depth apply + mapping [${FIXTURE_NAME}]`, function () {
   });
 
   test("depth.rename.script-and-markup.min-two-edits", async function () {
+    // The assertion can consume multiple bounded 12s provider polls before it
+    // reaches the exact PRODUCT_GAP classifier below.
+    this.timeout(60_000);
     const fw = framework();
     if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
     const file = fw === "vue" ? "src/DailyBinding.vue" : "src/DailyBinding.svelte";

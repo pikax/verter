@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub train parent issue catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "train_issue"],
+  "properties": {
+    "schema": { "const": 1 },
+    "train_issue": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "train",
+          "title",
+          "problem",
+          "expected_outcome",
+          "acceptance",
+          "problem_label",
+          "gh_milestone"
+        ],
+        "properties": {
+          "train": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "problem": { "type": "string", "minLength": 1 },
+          "expected_outcome": { "type": "string", "minLength": 1 },
+          "acceptance": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 6,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "problem_label": { "type": "string", "pattern": "^problem:" },
+          "gh_milestone": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

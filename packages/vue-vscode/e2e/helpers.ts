@@ -844,7 +844,8 @@ function isE2eTypeProviderRoute(value: string): value is E2eTypeProviderRoute {
     value === "tsgo" ||
     value === "shared-tsgo" ||
     value === "editor-tsserver" ||
-    value === "extension"
+    value === "extension" ||
+    value === "off"
   );
 }
 
@@ -1349,6 +1350,12 @@ export async function ensureTypeProviderSynced(budgets?: {
   await ensureFixtureWarm(budgets?.readyBudgetMs);
   await waitForTypeProviderSync(budgets?.syncBudgetMs);
   _typeProviderSynced = true;
+}
+
+/** Invalidate readiness facts after an explicit language-server restart. */
+export function invalidateTypeProviderSyncCache(): void {
+  _typeProviderSynced = false;
+  _fileReadyCache.clear();
 }
 
 /** Opens file, waits for readiness, caches result. */

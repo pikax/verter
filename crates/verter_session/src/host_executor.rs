@@ -16,6 +16,30 @@ use verter_scheduler::node::{
 
 use crate::types::{HostConfig, ParseSnapshot};
 
+#[cfg(test)]
+fn scheduler_dep_resolution_counts(
+) -> &'static parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>> {
+    static COUNTS: std::sync::OnceLock<parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    COUNTS.get_or_init(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()))
+}
+
+#[cfg(test)]
+pub(crate) fn reset_scheduler_dep_resolution_count_for_test(canonical_id: &str) {
+    scheduler_dep_resolution_counts()
+        .lock()
+        .remove(canonical_id);
+}
+
+#[cfg(test)]
+pub(crate) fn scheduler_dep_resolution_count_for_test(canonical_id: &str) -> u64 {
+    scheduler_dep_resolution_counts()
+        .lock()
+        .get(canonical_id)
+        .copied()
+        .unwrap_or(0)
+}
+
 /// Host-specific data stored in a [`SourceSnapshot`].
 ///
 /// Wraps a `ParseSnapshot` — the result of SFC tokenization, hashing, and analysis.
@@ -463,49 +487,33 @@ impl StageExecutor for HostStageExecutor {
         };
         let parse = &host_data.parse;
         let workspace = self.workspace.read().clone();
-        let resolve_dep = |specifier: &str, kind| match workspace
-            .resolve_import_outcome(
-                canonical_id,
-                specifier,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind,
-                },
-            )
-            .into_publication()
-        {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
-                .into_result()
-                .map(|resolution| resolution.source_id),
-            verter_workspace::ResolutionPublication::Refused(_) => None,
+        let resolve_dep = |specifier: &str, kind| {
+            #[cfg(test)]
+            {
+                *scheduler_dep_resolution_counts()
+                    .lock()
+                    .entry(canonical_id.to_string())
+                    .or_default() += 1;
+            }
+            match workspace
+                .resolve_import_outcome(
+                    canonical_id,
+                    specifier,
+                    verter_semantic::resolver_core::ResolutionContext {
+                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                        kind,
+                    },
+                )
+                .into_publication()
+            {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
+                    .into_result()
+                    .map(|resolution| resolution.source_id),
+                verter_workspace::ResolutionPublication::Refused(_) => None,
+            }
         };
 
-        let mut forward_deps = Vec::new();
         let mut blocker_ids = Vec::new();
-
-        // Forward deps from external src blocks (e.g. <script src="./setup.ts">).
-        for req in &parse.external_requests {
-            let Some(resolved) = resolve_dep(
-                &req.specifier,
-                verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
-            ) else {
-                return ExtractedDeps::default();
-            };
-            forward_deps.push(resolved);
-        }
-
-        // Forward deps from relative imports.
-        for imp in &parse.script_analysis.imports {
-            if imp.source.starts_with('.') || imp.source.starts_with("../") {
-                let Some(resolved) = resolve_dep(
-                    &imp.source,
-                    verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
-                ) else {
-                    return ExtractedDeps::default();
-                };
-                forward_deps.push(resolved);
-            }
-        }
 
         // Blocker IDs from macro type deps (defineProps<ExternalType>(), etc.).
         // These files must reach Analysis before this file's Artifact can proceed,
@@ -525,7 +533,7 @@ impl StageExecutor for HostStageExecutor {
         }
 
         ExtractedDeps {
-            forward_deps,
+            forward_deps: Vec::new(),
             blocker_ids,
         }
     }
@@ -536,6 +544,13 @@ impl StageExecutor for HostStageExecutor {
         source: &SourceSnapshot,
         generation: u64,
     ) -> Result<AnalysisSnapshot, StageError> {
+        // `AnalysisScope::NONE` deliberately carries no analysis payload.
+        // Avoid materialising the Arc-wrapped read views for the empty
+        // snapshot: bundler/stateless hosts still cross the scheduler's
+        // Analysis commit fence, but have no analysis facts to publish.
+        if self.config.effective_scope().is_empty() {
+            return Ok(AnalysisSnapshot::new_empty(generation));
+        }
         // In the current host architecture, analysis is computed during parse.
         // Extract the real data from HostSourceData and commit it in the
         // AnalysisSnapshot so read-side consumers get real payloads.

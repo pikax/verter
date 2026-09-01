@@ -1,10 +1,12 @@
-//! Tests for the [`crate::host_compile::CompileManyTarget::RuntimeRender`]
-//! render-only bundler compile lane.
+//! Tests for the public
+//! [`crate::host_compile::CompileManyTarget::RuntimeRender`] bundler request.
 //!
-//! The lane produces byte-identical `Main` output to the `HostBacked`
-//! session wrapper through the SAME shared substrate + host-side
-//! assembly, without the per-file wrapper overhead. Unavailable macro roots
-//! fail closed; only row-local runtime-type degradation remains a warning.
+//! Vue requests use a private render-only worker that produces byte-identical
+//! `Main` output to the `HostBacked` session wrapper through the SAME shared
+//! substrate + host-side assembly, without the per-file wrapper overhead.
+//! Svelte requests retain their effective host-backed route. Unavailable Vue
+//! macro roots fail closed; only row-local runtime-type degradation remains a
+//! warning.
 //!
 //! | Test | Discriminating assertion |
 //! | ---- | ------------------------ |
@@ -13,7 +15,9 @@
 //! | `runtime_render_unresolved_imported_macro_type_is_fatal` | An unavailable authoritative macro root remains fatal and emits no partial render. |
 //! | `runtime_render_missing_external_src_is_fatal` | A missing external `<script src>` file stays fatal. |
 //! | `runtime_render_syntax_error_is_fatal` | Template/script syntax error stays fatal. |
-//! | `runtime_render_bypasses_stage_c_wrapper` | Zero wrapper-op counter hits on a simple render; >0 on HostBacked. |
+//! | `runtime_render_authored_only_style_processing_defers_scoped_scss` | The Vite-shaped lane keeps authored `v-bind()` work but defers plain-CSS-only scoping; the default lane remains fail-closed. |
+//! | `runtime_render_bypasses_stage_c_wrapper` | A Vue request records zero wrapper-op hits; Svelte RuntimeRender and Vue HostBacked controls record >0. |
+//! | `render_only_main_rejects_a_registered_svelte_artifact_without_a_product` | The private Vue worker rejects a direct Svelte call with `HOST_RUNTIME_RENDER_REQUIRES_VUE` and no product. |
 //! | `runtime_render_does_not_leave_stale_semantic_axis_for_host_backed` | (e)-skip safety: a later HostBacked read sees current, not stale, deps. |
 //! | `runtime_render_upper_drive_input_resolves_macro_types_wired_under_lower_drive_routes` | Drive-letter case parity: an upper-drive compile input converges on the lower-drive canonical whose alias routes were wired via `set_import_dependencies`. |
 //! | `runtime_render_upper_drive_input_single_hop_relative_import_control` | Single-hop relative control: resolves without the route table across the same case split. |
@@ -118,6 +122,7 @@ fn render_profile(
     hmr: crate::types::HmrStrategy,
 ) -> crate::host_compile::CompileBatchRenderProfile {
     crate::host_compile::CompileBatchRenderProfile {
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
         is_production,
         custom_element: false,
         ssr,
@@ -533,6 +538,53 @@ fn runtime_render_syntax_error_is_fatal() {
     );
 }
 
+#[test]
+fn runtime_render_authored_only_style_processing_defers_scoped_scss() {
+    const SOURCE: &str = r#"<script setup>
+const tone = "red"
+</script>
+<template><div class="card">x</div></template>
+<style lang="scss" scoped>
+$pad: 1rem;
+.card { color: v-bind(tone); padding: $pad; &:hover { color: blue; } }
+</style>"#;
+
+    let host = new_host();
+    let complete = render_one(&host, "/src/ScopedScss.vue", SOURCE);
+    assert!(
+        complete
+            .errors()
+            .iter()
+            .any(|error| error.contains("StageRequiresPlainCss")),
+        "the normal complete-style runtime product must stay fail-closed: {:?}",
+        complete.errors()
+    );
+
+    let mut authored_only = host.compile_many(
+        vec![input("/src/ScopedScss.vue", SOURCE)],
+        CompileBatchOptions::default(),
+        CompileManyTarget::RuntimeRender {
+            profile: crate::host_compile::CompileBatchRenderProfile {
+                style_processing:
+                    verter_compiler::compile_request::RuntimeStyleProcessing::AuthoredOnly,
+                ..simple_render_profile()
+            },
+        },
+    );
+    let authored_only = authored_only
+        .pop()
+        .expect("one input must produce one entry");
+    assert!(
+        authored_only.errors().is_empty(),
+        "the authored-only style lane must defer scoping until Vite supplies CSS: {:?}",
+        authored_only.errors()
+    );
+    assert!(
+        authored_only.code().contains("_useCssVars"),
+        "deferring post-preprocessor stages must preserve authored v-bind runtime injection"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test 6b — SSR x Vapor stays a typed refusal on RuntimeRender, not wrong output
 // ---------------------------------------------------------------------------
@@ -667,6 +719,44 @@ fn runtime_render_bypasses_stage_c_wrapper() {
         "RuntimeRender must NOT construct a resolver context for a simple file"
     );
 
+    // A public RuntimeRender request for Svelte keeps the effective
+    // host-backed carrier route. It must succeed and exercise the wrapper;
+    // only Vue owns the render-only worker above.
+    let host_svelte = new_host();
+    let svelte = render_one(
+        &host_svelte,
+        "/proj/Bypass.svelte",
+        "<script>let value = 1;</script>\n<div>{value}</div>\n",
+    );
+    assert!(
+        svelte.errors().is_empty(),
+        "Svelte RuntimeRender errors: {:?}",
+        svelte.errors()
+    );
+    assert!(
+        host_svelte
+            .test_force
+            .wrapper_source_clone_count
+            .load(Ordering::Relaxed)
+            > 0,
+        "Svelte RuntimeRender must exercise the host-backed source clone"
+    );
+    assert!(
+        host_svelte
+            .test_force
+            .wrapper_cache_mode_classification_count
+            .load(Ordering::Relaxed)
+            > 0,
+        "Svelte RuntimeRender must exercise host-backed cache-mode classification"
+    );
+    assert!(
+        host_svelte
+            .test_force
+            .wrapper_sync_transitive_count
+            .load(Ordering::Relaxed)
+            > 0,
+        "Svelte RuntimeRender must exercise host-backed dependency synchronization"
+    );
     // HostBacked: the SAME file touches the wrapper ops (counters fire).
     let host_h = new_host();
     let host_backed = host_backed_one(&host_h, "/proj/Bypass.vue", src);
@@ -699,6 +789,38 @@ fn runtime_render_bypasses_stage_c_wrapper() {
             > 0,
         "HostBacked must exercise the transitive dep sync (proves the counter fires)"
     );
+}
+
+#[test]
+fn render_only_main_rejects_a_registered_svelte_artifact_without_a_product() {
+    let host = new_host();
+    let canonical_id = "/proj/PrivateWorkerGuard.svelte";
+    upsert_sibling(
+        &host,
+        canonical_id,
+        "<script>let value = 1;</script>\n<div>{value}</div>\n",
+    );
+    let profile = get_virtual_file_profile(simple_render_profile(), None);
+
+    match host.render_only_main(
+        canonical_id,
+        &profile,
+        verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+    ) {
+        Err(crate::types::HostError::CompileError(failure)) => {
+            assert!(
+                failure
+                    .diagnostics
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "HOST_RUNTIME_RENDER_REQUIRES_VUE"),
+                "the private Vue worker must reject the registered Svelte artifact with the exact guard diagnostic: {:?}",
+                failure.diagnostics.diagnostics
+            );
+        }
+        Err(other) => panic!("expected the typed Vue-artifact guard, got {other:?}"),
+        Ok(_) => panic!("the private Vue worker must not publish a product for Svelte"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1862,11 +1984,17 @@ fn runtime_render_request_shape_follows_the_bound_catalog_arm() {
     // Leg 1 — the render route over the Svelte carrier: the Svelte-bound
     // admission REFUSES the option with the same request-construction
     // refusal code the framework-aware route reports.
-    let err = host.render_only_main(canonical, &profile).expect_err(
-        "the Svelte-bound render demand must refuse svelte_generate_module \
+    let err = host
+        .render_only_main(
+            canonical,
+            &profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
+        .expect_err(
+            "the Svelte-bound render demand must refuse svelte_generate_module \
          at admission — the option is refusal-grade under the carrier's own \
          request shape",
-    );
+        );
     let crate::HostError::CompileError(failure) = err else {
         panic!("the render refusal must surface as a compile failure, got: {err:?}");
     };
@@ -1918,7 +2046,11 @@ fn runtime_render_request_shape_follows_the_bound_catalog_arm() {
         "<script setup lang=\"ts\">\nconst n = 1\n</script>\n<template><div>{{ n }}</div></template>\n",
     );
     let render = host
-        .render_only_main(vue_canonical, &profile)
+        .render_only_main(
+            vue_canonical,
+            &profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
         .expect("a Vue carrier ignores the Svelte-only field — the bound demand has no such axis");
     assert!(
         !render.code.is_empty(),
@@ -1955,7 +2087,11 @@ fn runtime_render_honors_svelte_request_options_through_the_bound_request() {
     let host_a = new_host();
     upsert_sibling(&host_a, canonical, SVELTE_RUNES_SRC);
     let with_option = host_a
-        .render_only_main(canonical, &no_disclose_profile)
+        .render_only_main(
+            canonical,
+            &no_disclose_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
         .expect("the render route must render the Svelte component");
     assert!(
         !with_option
@@ -1971,7 +2107,11 @@ fn runtime_render_honors_svelte_request_options_through_the_bound_request() {
     let host_b = new_host();
     upsert_sibling(&host_b, canonical, SVELTE_RUNES_SRC);
     let without_option = host_b
-        .render_only_main(canonical, &base_profile)
+        .render_only_main(
+            canonical,
+            &base_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
         .expect("the render route must render the Svelte component");
     assert!(
         without_option
@@ -2029,7 +2169,11 @@ fn runtime_render_profile_borne_svelte_css_hash_override_survives() {
     let host = new_host();
     upsert_sibling(&host, canonical, styled_src);
     let render = host
-        .render_only_main(canonical, &profile)
+        .render_only_main(
+            canonical,
+            &profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
         .expect("a styled Svelte component must render");
     assert!(
         render.code.contains("verteroverriddenhash"),
@@ -2046,7 +2190,11 @@ fn runtime_render_profile_borne_svelte_css_hash_override_survives() {
         ..CompileProfile::default()
     };
     let derived = host
-        .render_only_main(canonical, &base_profile)
+        .render_only_main(
+            canonical,
+            &base_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
         .expect("the override-less render must also succeed");
     assert!(
         !derived.code.contains("verteroverriddenhash"),
@@ -2094,7 +2242,11 @@ fn runtime_render_profile_borne_svelte_runes_survives_and_flips_the_mode() {
     let host_a = new_host();
     upsert_sibling(&host_a, neutral, neutral_src);
     let forced = host_a
-        .render_only_main(neutral, &runes_on)
+        .render_only_main(
+            neutral,
+            &runes_on,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
         .expect("a mode-neutral component must render under forced runes");
     assert!(
         !forced.code.contains("svelte/internal/flags/legacy"),
@@ -2106,7 +2258,11 @@ fn runtime_render_profile_borne_svelte_runes_survives_and_flips_the_mode() {
     let host_b = new_host();
     upsert_sibling(&host_b, neutral, neutral_src);
     let inferred = host_b
-        .render_only_main(neutral, &base_profile)
+        .render_only_main(
+            neutral,
+            &base_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
         .expect("the runes-less render must also succeed");
     assert!(
         inferred
@@ -2129,7 +2285,11 @@ fn runtime_render_profile_borne_svelte_runes_survives_and_flips_the_mode() {
     runes_off.svelte_runes = Some(false);
     let host_c = new_host();
     upsert_sibling(&host_c, runed, SVELTE_RUNES_SRC);
-    let diagnostic_code = match host_c.render_only_main(runed, &runes_off) {
+    let diagnostic_code = match host_c.render_only_main(
+        runed,
+        &runes_off,
+        verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+    ) {
         Ok(rendered) => panic!(
             "svelte_runes=Some(false) must reach the backend and force legacy \
              interpretation of the $state reference — the render must not \
@@ -2154,7 +2314,11 @@ fn runtime_render_profile_borne_svelte_runes_survives_and_flips_the_mode() {
     let host_d = new_host();
     upsert_sibling(&host_d, runed, SVELTE_RUNES_SRC);
     let unset = host_d
-        .render_only_main(runed, &base_profile)
+        .render_only_main(
+            runed,
+            &base_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
         .expect("the $state fixture renders when runes stays unset");
     assert!(
         unset.code.contains("$.state(0)"),
@@ -2194,7 +2358,11 @@ fn runtime_render_refuses_a_malformed_profile_borne_svelte_token() {
     let host_a = new_host();
     upsert_sibling(&host_a, canonical, SVELTE_RUNES_SRC);
     let err = host_a
-        .render_only_main(canonical, &bogus_profile)
+        .render_only_main(
+            canonical,
+            &bogus_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
         .expect_err(
             "the Svelte-bound render demand decodes svelte_namespace and \
              must refuse an unrecognized token, never silently default it",
@@ -2218,7 +2386,11 @@ fn runtime_render_refuses_a_malformed_profile_borne_svelte_token() {
     let host_b = new_host();
     upsert_sibling(&host_b, canonical, SVELTE_RUNES_SRC);
     let without = host_b
-        .render_only_main(canonical, &base_profile)
+        .render_only_main(
+            canonical,
+            &base_profile,
+            verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        )
         .expect("the token-less render must succeed");
     assert!(
         without
@@ -2398,5 +2570,6 @@ fn runtime_render_bound_attribution_must_name_the_executed_artifact() {
         &input,
         &CompileProfile::default(),
         Some(foreign_binding),
+        verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
     );
 }

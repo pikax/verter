@@ -85,7 +85,7 @@ pub(super) struct CarrierPublishCtx<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn drain_pending_snapshot_provider_sync(
+pub(crate) async fn drain_pending_snapshot_provider_sync(
     project_sync: Option<&ProjectSync>,
     documents: &DocumentRegistry,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,

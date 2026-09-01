@@ -127,4 +127,4 @@ Legend: **done** = suite exists · **thin** = smoke only · **gap** = not covere
 | @ts-expect-error unused fails         | done (type-neg + slots)                                                   |
 | Required matrix ID set                | done (all tree-discovered cases required; exact loaded-suite attestation) |
 
-When adding a case: write the **failing** diagnostic / expect-error fixture first, then wire `PRODUCT_GAP` ISSUE ids — do not weaken to name-only hovers.
+When adding a case: write the **failing** diagnostic / expect-error fixture first. If triage confirms known product debt, add its exact test + `ISSUE-*` pair to only the affected route manifests so it is visibly skipped/degraded — do not weaken to name-only hovers.

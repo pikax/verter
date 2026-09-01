@@ -69,8 +69,8 @@ explicit command after cutover.
 
 doctor validates GitHub authentication, repository access, issue/PR
 mutation capability, and whether Project 3 is readable. It never writes.
-sync-issues --apply is doctor-gated for issues and does not require
-Project 3. project-status --apply is doctor-gated for Project 3.
+sync-issues --apply is doctor-gated for issues and Project 3.
+project-status --apply is doctor-gated for Project 3.
 create-pr --apply and review-summary --apply are doctor-gated for issues
 and pullRequests and do not require Project 3. squash-land --apply is
 doctor-gated for pullRequests and Project 3. release-cut --apply is
@@ -88,8 +88,10 @@ sync-issues is occasional one-way DAG/charter-to-GitHub issue sync for an
 explicit train or node set. Normal runs reconcile the versioned label
 catalog and managed issue labels without rewriting issue prose. Creating a
 missing issue or using --refresh-content writes the stable AI-Generated
-footer. It also reconciles catalog-backed milestones and direct blocked-by
-edges. A selection with predecessor blocks outside its boundary fails before
+footer. It also reconciles catalog-backed milestones, direct blocked-by
+edges, stable train parents, native sub-issues, and Project membership. Every
+new Project item is initialized to Todo without resetting an existing status.
+A selection with predecessor blocks outside its boundary fails before
 mutation. --create-blockers recursively includes those predecessors and
 creates missing issues; --ignore-blockers leaves their relationships
 untouched. The flags are mutually exclusive. Sync never imports GitHub edits.

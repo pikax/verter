@@ -38,6 +38,27 @@ export function assertUniqueMappings(rows) {
   }
 }
 
+export function assertUniqueTrainMappings(rows, issueMappings = []) {
+  if (!Array.isArray(rows)) {
+    throw new MappingMismatchError("github_train_issue must be an array");
+  }
+  const trains = new Set();
+  const issues = new Set(issueMappings.map((row) => row.gh_issue));
+  for (const row of rows) {
+    if (!row || typeof row !== "object") {
+      throw new MappingMismatchError("train mapping row is required");
+    }
+    if (typeof row.train !== "string" || row.train.length === 0) {
+      throw new MappingMismatchError("mapping.train is required");
+    }
+    assertIssueNumber(row.gh_issue, "mapping.gh_issue");
+    if (trains.has(row.train)) throw new DuplicateError(`duplicate train ${row.train}`);
+    if (issues.has(row.gh_issue)) throw new DuplicateError(`duplicate issue ${row.gh_issue}`);
+    trains.add(row.train);
+    issues.add(row.gh_issue);
+  }
+}
+
 export function loadLedgerFile(file) {
   const text = fs.readFileSync(file, "utf8");
   const parsed = parseToml(text);
@@ -46,12 +67,15 @@ export function loadLedgerFile(file) {
   }
   const githubIssue = parsed.github_issue ?? [];
   assertUniqueMappings(githubIssue);
+  const githubTrain = parsed.github_train_issue ?? [];
+  assertUniqueTrainMappings(githubTrain, githubIssue);
   return {
     file,
     text,
     parsed,
     implemented: parsed.implemented,
     github_issue: githubIssue,
+    github_train_issue: githubTrain,
   };
 }
 
@@ -220,4 +244,19 @@ export function appendGitHubIssueMapping(file, mapping) {
   const prefix = loaded.text.length === 0 || loaded.text.endsWith("\n") ? "" : "\n";
   fs.writeFileSync(file, `${loaded.text}${prefix}${block}`);
   return { node_id: mapping.node_id, gh_issue: mapping.gh_issue, sync_to_github: true };
+}
+
+export function appendGitHubTrainMapping(file, mapping) {
+  const loaded = loadLedgerFile(file);
+  assertUniqueTrainMappings(
+    [...loaded.github_train_issue, { train: mapping.train, gh_issue: mapping.gh_issue }],
+    loaded.github_issue,
+  );
+  const block =
+    `[[github_train_issue]]\n` +
+    `train = "${mapping.train}"\n` +
+    `gh_issue = ${mapping.gh_issue}\n`;
+  const prefix = loaded.text.length === 0 || loaded.text.endsWith("\n") ? "" : "\n";
+  fs.writeFileSync(file, `${loaded.text}${prefix}${block}`);
+  return { train: mapping.train, gh_issue: mapping.gh_issue };
 }

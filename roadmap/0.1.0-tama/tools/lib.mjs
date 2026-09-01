@@ -583,6 +583,7 @@ const RETAINED_CATALOG_SCHEMAS = [
   ],
   ["github-milestones.toml", "github-milestone-catalog.schema.json", "milestone", "title"],
   ["github-issue-content.toml", "github-issue-content-catalog.schema.json", "issue", "node_id"],
+  ["github-train-issues.toml", "github-train-issue-catalog.schema.json", "train_issue", "train"],
 ];
 
 export function validateRetainedCatalogSchemas(packageRoot = PACKAGE_ROOT) {
@@ -711,6 +712,18 @@ function validateCatalogReferences(authority) {
       errors.push(`github-issue-content.toml: unknown node_id ${row.node_id}`);
     }
   }
+  const trainIssueCatalog = readToml(
+    path.join(authority.packageRoot, "catalogs", "github-train-issues.toml"),
+  );
+  const knownTrains = new Set(authority.nodes.map((node) => node.train));
+  for (const row of trainIssueCatalog.train_issue || []) {
+    if (!knownTrains.has(row.train)) {
+      errors.push(`github-train-issues.toml: unknown train ${row.train}`);
+    }
+    if (!milestoneTitles.has(row.gh_milestone)) {
+      errors.push(`github-train-issues.toml: unknown gh_milestone ${row.gh_milestone}`);
+    }
+  }
   const githubProgram = readToml(
     path.join(authority.packageRoot, "catalogs", "github-control-plane-program.toml"),
   );
@@ -782,6 +795,20 @@ export function validateAuthority(authority, options = {}) {
     if (mappedIssues.has(row.gh_issue))
       errors.push(`GitHub issue ledger: duplicate issue ${row.gh_issue}`);
     mappedNodes.add(row.node_id);
+    mappedIssues.add(row.gh_issue);
+  }
+  const mappedTrains = new Set();
+  for (const row of authority.ledger.github_train_issue || []) {
+    if (!authority.nodes.some((node) => node.train === row.train)) {
+      errors.push(`GitHub train issue ledger: unknown train ${row.train}`);
+    }
+    if (mappedTrains.has(row.train)) {
+      errors.push(`GitHub train issue ledger: duplicate train ${row.train}`);
+    }
+    if (mappedIssues.has(row.gh_issue)) {
+      errors.push(`GitHub train issue ledger: duplicate issue ${row.gh_issue}`);
+    }
+    mappedTrains.add(row.train);
     mappedIssues.add(row.gh_issue);
   }
   if (options.strict) errors.push(...validateStaticSchemas(authority));

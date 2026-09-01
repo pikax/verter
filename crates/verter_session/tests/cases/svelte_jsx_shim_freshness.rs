@@ -11,7 +11,7 @@
 //! This pin byte-compares each in-crate mirror against its
 //! `packages/svelte-jsx/` canonical. A drift between the authority package
 //! and the embedded copy — an edit to one without the other — fails the
-//! gate. Mirrors the `typeinfo_proto_ts_freshness` discipline (regenerate +
+//! gate. Mirrors the `pnpm proto:check` discipline (regenerate +
 //! byte-compare), except the authority is the hand-written package file.
 //!
 //! Regenerate (after an intentional package edit): run with

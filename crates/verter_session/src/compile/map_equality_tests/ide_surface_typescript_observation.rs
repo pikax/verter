@@ -5,7 +5,7 @@
 //! packages REFUSE the observation, never degrade.
 //!
 //! `cargo test -p verter_session --lib --features bf2-authoritative
-//! ide_surface_typescript_observation -- --test-threads=1 --nocapture`.
+//! ide_surface_typescript_observation -- --nocapture`.
 //!
 //! Without the feature this module is not compiled. Read the
 //! `running N tests` line, never the exit code.

@@ -15,6 +15,7 @@ import {
   MutationModeRequiredError,
   NotFoundError,
   PROJECT_NUMBER,
+  rehearsalIdentity as resolveRehearsalIdentity,
   releasePlan,
 } from "../index.mjs";
 
@@ -61,13 +62,22 @@ sync_to_github = ${syncToGithub}
 `;
 }
 
+function trainMappingBlock(train, issue) {
+  return `[[github_train_issue]]
+train = "${train}"
+gh_issue = ${issue}
+`;
+}
+
 function writeLedger(options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-release-plan-"));
   const file = path.join(dir, "implemented.toml");
   const implemented = options.implemented ?? ["A"];
   const issues = options.issues ?? [];
+  const trainIssues = options.trainIssues ?? [];
   const parts = ["schema = 1", "", ...implemented.map(implementedBlock)];
   for (const row of issues) parts.push(mappingBlock(row.node_id, row.gh_issue, row.sync_to_github));
+  for (const row of trainIssues) parts.push(trainMappingBlock(row.train, row.gh_issue));
   fs.writeFileSync(file, parts.join("\n"));
   return file;
 }
@@ -95,7 +105,8 @@ function fixture(options = {}) {
     { node_id: "B", gh_issue: 10, sync_to_github: true },
     { node_id: "C", gh_issue: 11, sync_to_github: true },
   ];
-  const ledgerPath = writeLedger({ implemented, issues });
+  const trainIssues = options.trainIssues ?? [];
+  const ledgerPath = writeLedger({ implemented, issues, trainIssues });
   const adapter =
     options.adapter ??
     fake({
@@ -127,7 +138,11 @@ function fixture(options = {}) {
     authority: {
       nodes,
       ledgerFile: ledgerPath,
-      ledger: { implemented: implemented.map((id) => ({ node_id: id })), github_issue: issues },
+      ledger: {
+        implemented: implemented.map((id) => ({ node_id: id })),
+        github_issue: issues,
+        github_train_issue: trainIssues,
+      },
     },
   };
 }
@@ -246,6 +261,60 @@ test("REL1-AC1 missing predecessor is listed and unmapped items are blockers", (
   assert.deepEqual(
     ordered,
     [...ordered].sort((left, right) => left.localeCompare(right)),
+  );
+});
+
+test("train parent milestone items are coordination containers, not release blockers", () => {
+  const fx = fixture({
+    implemented: ["A", "B", "C"],
+    trainIssues: [{ train: "t", gh_issue: 12 }],
+    githubIssues: [
+      { number: 10, title: "B", body: "b", milestone: MILESTONE },
+      { number: 11, title: "C", body: "c", milestone: MILESTONE },
+      { number: 12, title: "Train parent", body: "parent", milestone: MILESTONE },
+    ],
+  });
+
+  const report = plan(fx, { mode: "check" });
+  assert.equal(report.ok, true);
+  assert.equal(report.items.find((row) => row.number === 12)?.train_parent, "t");
+  assert.equal(
+    report.blockers.some((row) => row.gh_issue === 12),
+    false,
+  );
+});
+
+test("an unknown train mapping cannot hide a milestone issue", () => {
+  const fx = fixture({
+    implemented: ["A", "B", "C"],
+    trainIssues: [{ train: "stale.train", gh_issue: 12 }],
+    githubIssues: [
+      { number: 10, title: "B", body: "b", milestone: MILESTONE },
+      { number: 11, title: "C", body: "c", milestone: MILESTONE },
+      { number: 12, title: "Unrelated work", body: "unrelated", milestone: MILESTONE },
+    ],
+  });
+
+  assert.throws(() => plan(fx, { mode: "check" }), /unknown train mapping stale\.train/u);
+});
+
+test("explicitly non-release work does not block its milestone", () => {
+  const fx = fixture({
+    nodes: [node("foundation"), node("optional-tuning", { predecessors: ["foundation"] })],
+    implemented: ["foundation"],
+    issues: [{ node_id: "optional-tuning", gh_issue: 10, sync_to_github: true }],
+    githubIssues: [
+      { number: 10, title: "Optional tuning", body: "optional", milestone: MILESTONE },
+    ],
+  });
+  fx.authority.nodes.find((row) => row.id === "optional-tuning").release_gating = "non_release";
+
+  const report = plan(fx, { mode: "check" });
+  assert.equal(report.ok, true);
+  assert.equal(report.items[0].release_gating, "non_release");
+  assert.equal(
+    report.blockers.some((row) => row.gh_issue === 10),
+    false,
   );
 });
 
@@ -528,6 +597,36 @@ jobs:
   );
   const fx = fixture({ implemented: ["A", "B", "C"] });
   assert.throws(() => plan(fx, { mode: "check", repoRoot }), /dry_run/u);
+});
+
+test("REL1-AC1 ordinary step jobs do not hide the dispatched rehearsal caller", () => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-rehearsal-"));
+  writeWorkflows(
+    repoRoot,
+    `name: Release Check
+jobs:
+  pull-request-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v5
+        with:
+          cache: pnpm
+      - run: node contract.mjs
+  dry-run:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      dry_run: true
+`,
+  );
+
+  assert.deepEqual(resolveRehearsalIdentity(repoRoot), {
+    workflow: "release-check.yml",
+    uses: "release.yml",
+    dry_run: true,
+  });
 });
 
 test("REL1-AC1 dispatch apply without mode or clearance is refused", () => {

@@ -405,6 +405,9 @@ pub struct RuntimeCompileOptions {
     pub ide_source_map: Option<bool>,
     /// Server-side rendering mode (the carrier emits its SSR backend).
     pub ssr: bool,
+    /// Style-pipeline ownership for this runtime product. Vue's authored-only mode
+    /// defers plain-CSS-only modules/scoping to a bundler style lane.
+    pub style_processing: crate::compile_request::RuntimeStyleProcessing,
     /// Runtime module name for helper imports (Vue default `"vue"`).
     pub runtime_module_name: Option<String>,
     /// Explicit component / scope id for scoped-style hashing.
@@ -508,6 +511,7 @@ impl Default for RuntimeCompileOptions {
             source_map: false,
             ide_source_map: None,
             ssr: false,
+            style_processing: crate::compile_request::RuntimeStyleProcessing::Complete,
             runtime_module_name: None,
             component_id: None,
             svelte_css_hash_override: None,

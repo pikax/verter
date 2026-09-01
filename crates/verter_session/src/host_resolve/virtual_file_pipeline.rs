@@ -103,75 +103,8 @@ pub(super) fn compose_template_virtual_file<'t>(
 }
 
 #[cfg(test)]
-mod compose_template_virtual_file_tests {
-    use super::*;
-    use verter_compiler::framework_common::{
-        RuntimeOutputDescriptor, SourceMapFidelity, TemplateRenderExport,
-    };
-
-    fn template(code: &str, source_map: &str, imports: Vec<String>) -> RuntimeTemplateBlock {
-        RuntimeTemplateBlock {
-            code: code.to_string(),
-            source_map: source_map.to_string(),
-            imports,
-            ssr_imports: Vec::new(),
-            render_export: TemplateRenderExport::Render,
-            output_descriptor: RuntimeOutputDescriptor::generated(
-                code,
-                None,
-                &[("test:space", "test:artifact")],
-                SourceMapFidelity::Approximate,
-            ),
-        }
-    }
-
-    #[test]
-    fn no_imports_returns_the_template_verbatim() {
-        let block = template("const a = 1", "", vec![]);
-        let (code, map) = compose_template_virtual_file(&block, None)
-            .expect("no-import template composes trivially");
-        assert_eq!(code, "const a = 1");
-        assert!(map.is_none());
-    }
-
-    #[test]
-    fn imports_present_prepends_the_import_line_and_shifts_the_map() {
-        let map_json =
-            "{\"version\":3,\"sources\":[\"Comp.vue\"],\"names\":[],\"mappings\":\"MACM\"}";
-        let block = template("const n = 1", map_json, vec!["_openBlock".to_string()]);
-        let (code, map) =
-            compose_template_virtual_file(&block, None).expect("import template composes");
-        assert_eq!(
-            code, "import { openBlock as _openBlock } from \"vue\"\nconst n = 1",
-            "the import preamble must precede the template's own code verbatim"
-        );
-        let map = map.expect("a present input map must still be present after composition");
-        let decoded = verter_compiler::oxc_sourcemap::SourceMap::from_json_string(&map).unwrap();
-        let token = decoded
-            .get_tokens()
-            .next()
-            .expect("the shifted segment survives composition");
-        assert_eq!(
-            token.get_dst_line(),
-            1,
-            "the segment must move down by exactly the one-line preamble"
-        );
-        assert_eq!(token.get_dst_col(), 6);
-        assert_eq!(
-            decoded.get_source(token.get_source_id().unwrap()),
-            Some("Comp.vue"),
-            "the original source identity must survive — never a synthetic placeholder"
-        );
-    }
-
-    #[test]
-    fn custom_runtime_module_name_reaches_the_import_specifier() {
-        let block = template("const n = 1", "", vec!["_openBlock".to_string()]);
-        let (code, _) =
-            compose_template_virtual_file(&block, Some("@vue/runtime-dom")).expect("composes");
-        assert!(code.starts_with("import { openBlock as _openBlock } from \"@vue/runtime-dom\"\n"));
-    }
-}
+#[path = "virtual_file_pipeline_compose_tests.rs"]
+mod compose_template_virtual_file_tests;
 
 pub(crate) fn vue_macro_output_matches_revision(
     output: &crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
@@ -180,9 +113,10 @@ pub(crate) fn vue_macro_output_matches_revision(
     output.origin_whole_hash == Some(expected)
 }
 
-/// Render-only `Main` from the runtime-render lane: assembled
-/// `_sfc_main` bytes, optional map, and warning diagnostics of a
-/// successful render. Native-only (`host_compile`).
+/// Vue-only private render-worker `Main`: assembled `_sfc_main` bytes,
+/// optional map, and warning diagnostics of a successful render. Public
+/// non-Vue RuntimeRender requests do not construct this type; they retain
+/// their effective host-backed route. Native-only (`host_compile`).
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub(crate) struct RenderOnlyMain {
@@ -1230,17 +1164,19 @@ impl VerterHost {
         }
     }
 
-    /// Render-only `Main` output for the
-    /// [`crate::host_compile::CompileManyTarget::RuntimeRender`] lane:
+    /// Private Vue render-worker `Main` output for a Vue
+    /// [`crate::host_compile::CompileManyTarget::RuntimeRender`] request:
     /// byte-identical `Main` bytes to the `HostBacked` wrapper, produced
     /// through the SAME shared substrate and host-side `Main` assembly,
-    /// without the per-file session-wrapper overhead. `diagnostics` carries
-    /// only the soft (warning-severity) diagnostics of a SUCCESSFUL render.
+    /// without the per-file session-wrapper overhead. Public non-Vue requests
+    /// remain on their effective host-backed route. `diagnostics` carries only
+    /// the soft (warning-severity) diagnostics of a SUCCESSFUL Vue render.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn render_only_main(
         &self,
         canonical_id: &str,
         profile: &CompileProfile,
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
     ) -> Result<RenderOnlyMain, HostError> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
 
@@ -1254,8 +1190,8 @@ impl VerterHost {
         // key validated supplied block content under. The bundler's
         // preprocessor path (Pug / CoffeeScript templates+scripts, custom
         // blocks, non-Vite styles) admits supplied artifacts for this profile
-        // immediately before rendering, so the render lane must read the
-        // override-aware effective state — otherwise it compiles the RAW
+        // immediately before rendering, so the private Vue worker must read
+        // the override-aware effective state — otherwise it compiles the RAW
         // (un-preprocessed) block content.
         let profile_hash = compile_profile_hash(profile);
         let block_content_capture_fence = self.block_content.admission_fence.lock();
@@ -1263,10 +1199,10 @@ impl VerterHost {
         // ── ONE coherent source snapshot ──
         // Every content-determined input derives from this single read
         // (identical to the HostBacked cache-miss path), so the bytes and
-        // analysis cohere. The render lane consults NO cache output node and
-        // runs NO classification; the override-aware reads below consume the
-        // SAME stored override layers the HostBacked cache-miss path does —
-        // host state, not the Stage-C session wrapper.
+        // analysis cohere. The private Vue worker consults NO cache output
+        // node and runs NO classification; the override-aware reads below
+        // consume the SAME stored override layers the HostBacked cache-miss
+        // path does — host state, not the Stage-C session wrapper.
         let source_snap =
             self.scheduler
                 .try_get_source(&canonical)
@@ -1349,7 +1285,12 @@ impl VerterHost {
         // `Main` assembly as `compile_entry`, without the per-file wrapper
         // overhead, and with the imported-macro-resolution fatality softened
         // to a warning.
-        self.compile_entry_runtime_render(&compile_input, profile, native_host_binding)
+        self.compile_entry_runtime_render(
+            &compile_input,
+            profile,
+            native_host_binding,
+            style_processing,
+        )
     }
 
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
@@ -1684,8 +1625,9 @@ impl VerterHost {
                 let owner_has_module_augmentation = requested_mode == CompileCacheMode::Content
                     && self.owner_has_module_augmentation_dependency(&canonical_id);
                 // Test-only observable: the cache-mode classification the
-                // RuntimeRender lane skips entirely (fixed render target, no
-                // IDE-carrier cache decision). See
+                // private Vue render-only worker skips entirely (fixed render
+                // target, no IDE-carrier cache decision). Public non-Vue
+                // RuntimeRender requests still traverse this wrapper. See
                 // `VerterHost::wrapper_cache_mode_classification_count`.
                 #[cfg(test)]
                 self.test_force
@@ -2687,22 +2629,40 @@ impl VerterHost {
         adapter_id: &verter_language::FrameworkAdapterId,
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
-    ) -> crate::framework::ComponentContractAvailability {
-        match self.get_component_meta_output_via_view_with_fixed_store_view(
+    ) -> (
+        crate::framework::ComponentContractAvailability,
+        Option<crate::framework::api_projector::ComponentApiProjectionWitness>,
+    ) {
+        match self.get_component_meta_output_via_view_with_publication_evidence(
             canonical, view, fixed, false,
         ) {
-            Ok(Some(output)) => output.contract().clone(),
-            Ok(None) => crate::framework::ComponentContractAvailability::Unsupported(
-                crate::framework::ComponentContractUnsupported {
+            Ok(Some(output)) => {
+                let contract = output.output.contract().clone();
+                let witness = output.publication_evidence.and_then(|evidence| {
+                    crate::framework::api_projector::ComponentApiProjectionWitness::from_publication_evidence(
+                        canonical,
+                        evidence,
+                    )
+                });
+                (contract, witness)
+            }
+            Ok(None) => (
+                crate::framework::ComponentContractAvailability::Unsupported(
+                    crate::framework::ComponentContractUnsupported {
                     adapter_id: adapter_id.clone(),
                     reason:
                         crate::framework::ComponentContractUnsupportedReason::ComponentMetaUnavailable,
                     diagnostics: std::sync::Arc::from([]),
-                },
+                    },
+                ),
+                None,
             ),
-            Err(error) => crate::framework::public_contract::unsupported_from_output_error(
-                adapter_id.clone(),
-                &error,
+            Err(error) => (
+                crate::framework::public_contract::unsupported_from_output_error(
+                    adapter_id.clone(),
+                    &error,
+                ),
+                None,
             ),
         }
     }
@@ -2835,9 +2795,14 @@ impl VerterHost {
         else {
             return Ok(None);
         };
-        let contract = self.compose_component_contract(&canonical, &adapter_id, &view, &fixed);
+        let (contract, publication_witness) =
+            self.compose_component_contract(&canonical, &adapter_id, &view, &fixed);
         Ok(Some(
-            crate::framework::api_projector::ComponentApiProjection { response, contract },
+            crate::framework::api_projector::ComponentApiProjection {
+                response,
+                contract,
+                publication_witness,
+            },
         ))
     }
 
@@ -3154,8 +3119,9 @@ impl VerterHost {
     ) -> Result<CompileEntryOutcome, DiagnosticsSnapshot> {
         let diagnostics = snapshot.parse_diagnostics.clone();
 
-        // Test-only observable: the per-file source re-clone the
-        // RuntimeRender lane avoids for a simple (no external `src=`) file.
+        // Test-only observable: the per-file source re-clone the private Vue
+        // render-only worker avoids for a simple (no external `src=`) file.
+        // Public non-Vue RuntimeRender requests still traverse this wrapper.
         // See `VerterHost::wrapper_source_clone_count`.
         #[cfg(test)]
         self.test_force
@@ -3460,6 +3426,7 @@ impl VerterHost {
         snapshot: &CompileInput,
         profile: &CompileProfile,
         binding: Option<BoundNativeHostRequest>,
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
     ) -> Result<RenderOnlyMain, HostError> {
         use verter_compiler::framework_common::{
             FrameworkHostIntegrationBackend as _, SvelteHostExecutionInputs, VueHostExecutionInputs,
@@ -3552,8 +3519,12 @@ impl VerterHost {
                 let scope = self.config.effective_scope();
                 let want_template_data =
                     scope.needs_template_analysis() || profile.target.needs_template_data();
-                let demand =
-                    vue_runtime_render_demand(profile, &snapshot.canonical_id, want_template_data);
+                let demand = vue_runtime_render_demand(
+                    profile,
+                    &snapshot.canonical_id,
+                    want_template_data,
+                    style_processing,
+                );
                 let admission = match backend.admit_runtime_render(artifact, demand) {
                     Ok(admission) => admission,
                     Err(refusal) => {
@@ -3602,7 +3573,11 @@ impl VerterHost {
                 // option tokens through the SAME typed admission the
                 // host-backed constructor uses: a malformed token refuses
                 // HERE, never a silent default.
-                let demand = match svelte_runtime_render_demand(profile, &snapshot.canonical_id) {
+                let demand = match svelte_runtime_render_demand(
+                    profile,
+                    &snapshot.canonical_id,
+                    style_processing,
+                ) {
                     Ok(demand) => demand,
                     Err(error) => {
                         return Err(fatal(diagnostics.merge(

@@ -15,8 +15,8 @@
 //! `--lsp` fall-through (the pre-fix composite delegated `get_diagnostics` to OWNED
 //! unconditionally, so the marker would leak for a non-bound carrier).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use verter_lsp::tsgo::composite::TsgoCompositeProvider;
 use verter_lsp::tsgo::project_binding::{
@@ -65,6 +65,11 @@ const MARKER_CODE: &str = "9999";
 /// Counters are added per feature-group as each group is gated.
 #[derive(Default)]
 struct MarkerOwned {
+    raw_diagnostics_calls: AtomicUsize,
+    project_diagnostics_calls: AtomicUsize,
+    serve_project_diagnostics: AtomicBool,
+    clean_project_diagnostics: AtomicBool,
+    requested_projects: Mutex<Vec<(String, String)>>,
     type_definition_calls: AtomicUsize,
     signature_help_calls: AtomicUsize,
     semantic_tokens_calls: AtomicUsize,
@@ -78,6 +83,16 @@ struct MarkerOwned {
     resolve_completion_calls: AtomicUsize,
     rename_locations_calls: AtomicUsize,
     code_actions_calls: AtomicUsize,
+}
+
+impl MarkerOwned {
+    fn project_bound(clean: bool) -> Self {
+        Self {
+            serve_project_diagnostics: AtomicBool::new(true),
+            clean_project_diagnostics: AtomicBool::new(clean),
+            ..Self::default()
+        }
+    }
 }
 
 fn marker_diag() -> TypeDiagnostic {
@@ -158,10 +173,35 @@ impl TypeProvider for MarkerOwned {
         Box::pin(async move { Ok(()) })
     }
     fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+        self.raw_diagnostics_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move { Ok(vec![marker_diag()]) })
     }
     fn get_diagnostics_background(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+        self.raw_diagnostics_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move { Ok(vec![marker_diag()]) })
+    }
+    fn get_diagnostics_in_project<'a>(
+        &'a self,
+        path: &'a str,
+        configured_project: &'a str,
+    ) -> ProviderFuture<'a, Option<Vec<TypeDiagnostic>>> {
+        self.project_diagnostics_calls
+            .fetch_add(1, Ordering::SeqCst);
+        self.requested_projects
+            .lock()
+            .expect("project request log")
+            .push((path.to_string(), configured_project.to_string()));
+        let served = self.serve_project_diagnostics.load(Ordering::SeqCst);
+        let clean = self.clean_project_diagnostics.load(Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(served.then(|| {
+                if clean {
+                    Vec::new()
+                } else {
+                    vec![marker_diag()]
+                }
+            }))
+        })
     }
     fn get_completions(
         &self,
@@ -294,14 +334,16 @@ impl TypeProvider for MarkerOwned {
 /// A configured-project snapshot whose `include: ["src/**/*"]` OWNS `src/` under
 /// [`TSCONFIG`], built through the SAME production membership parse/expansion chain
 /// the resolver's own tests use, hermetically over an in-memory workspace.
-fn owning_snapshot() -> WorkspaceSnapshot {
+fn owning_snapshot_with_check_js(check_js: bool) -> WorkspaceSnapshot {
     let ws = MemoryWorkspace::new(MemoryOptions {
         roots: vec![WS_ROOT.to_string()],
         default_resolve_extensions: None,
     });
     ws.inject_file(
         TSCONFIG.to_string(),
-        Arc::<str>::from(r#"{ "include": ["src/**/*"] }"#),
+        Arc::<str>::from(format!(
+            r#"{{ "compilerOptions": {{ "checkJs": {check_js} }}, "include": ["src/**/*"] }}"#
+        )),
     );
     let root = CanonicalPath::new(WS_ROOT);
     let raw_membership = load_project_membership(&ws, TSCONFIG);
@@ -330,10 +372,24 @@ fn owning_snapshot() -> WorkspaceSnapshot {
     build_workspace_snapshot_simple(vec![project], SnapshotGeneration(1))
 }
 
+fn owning_snapshot() -> WorkspaceSnapshot {
+    owning_snapshot_with_check_js(false)
+}
+
 /// A host with the owning snapshot published (a bound source under `src/` resolves).
 fn host_with_snapshot() -> Arc<VerterHost> {
     let ws = Arc::new(FilesystemWorkspace::new(FilesystemOptions::default()));
     ws.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(owning_snapshot())));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    host.set_workspace(Arc::clone(&ws) as Arc<dyn WorkspaceAccess>);
+    host
+}
+
+fn host_with_check_js_snapshot() -> Arc<VerterHost> {
+    let ws = Arc::new(FilesystemWorkspace::new(FilesystemOptions::default()));
+    ws.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        owning_snapshot_with_check_js(true),
+    )));
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     host.set_workspace(Arc::clone(&ws) as Arc<dyn WorkspaceAccess>);
     host
@@ -363,14 +419,14 @@ fn codes(diags: &[TypeDiagnostic]) -> Vec<String> {
 fn composite(host: Arc<VerterHost>) -> TsgoCompositeProvider {
     // The always-present admission layer with NO SHARED overlay (bare host-aware
     // OWNED). The gate is what is under test — SHARED is not required to prove it.
-    TsgoCompositeProvider::new(Arc::new(MarkerOwned::default()), host, None)
+    TsgoCompositeProvider::new(Arc::new(MarkerOwned::project_bound(false)), host, None)
 }
 
 /// A composite over a MARKER OWNED double whose `Arc` is ALSO returned, so a feature
 /// test can inspect the OWNED per-method call counters (a denied carrier must leave the
 /// counter at ZERO — the gate served the external default WITHOUT delegating to OWNED).
 fn composite_with_owned(host: Arc<VerterHost>) -> (TsgoCompositeProvider, Arc<MarkerOwned>) {
-    let owned = Arc::new(MarkerOwned::default());
+    let owned = Arc::new(MarkerOwned::project_bound(false));
     let composite =
         TsgoCompositeProvider::new(Arc::clone(&owned) as Arc<dyn TypeProvider>, host, None);
     (composite, owned)
@@ -458,17 +514,100 @@ fn helper_unconfigured_workspace_source_resolves_no_project() {
 // ── The composite OWNED carrier-diagnostics gate. ──
 
 #[tokio::test]
-async fn gate_bound_carrier_delegates_to_owned() {
-    let c = composite(host_with_snapshot());
+async fn gate_bound_carrier_uses_established_managed_diagnostics_route() {
+    let (c, owned) = composite_with_owned(host_with_snapshot());
+    let path = format!("{WS_ROOT}/src/Widget.vue.tsx");
     let diags = c
-        .get_diagnostics(&format!("{WS_ROOT}/src/Widget.vue.tsx"))
+        .get_diagnostics(&path)
         .await
         .expect("composite diagnostics");
     assert_eq!(
         codes(&diags),
         vec![MARKER_CODE.to_string()],
-        "a BOUND carrier delegates to OWNED — the OWNED `--lsp` marker surfaces"
+        "a BOUND carrier is admitted to the established rich managed diagnostics route"
     );
+    assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        *owned
+            .requested_projects
+            .lock()
+            .expect("project request log"),
+        Vec::<(String, String)>::new(),
+        "the partial attached-API capability must not replace user-facing managed diagnostics"
+    );
+}
+
+#[tokio::test]
+async fn partial_project_capability_none_falls_back_when_check_js_is_enabled() {
+    let owned = Arc::new(MarkerOwned::default());
+    let c = TsgoCompositeProvider::new(
+        Arc::clone(&owned) as Arc<dyn TypeProvider>,
+        host_with_check_js_snapshot(),
+        None,
+    );
+    let diags = c
+        .get_diagnostics(&format!("{WS_ROOT}/src/Widget.vue.jsx"))
+        .await
+        .expect("composite diagnostics");
+    assert_eq!(codes(&diags), vec![MARKER_CODE.to_string()]);
+    assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *owned
+            .requested_projects
+            .lock()
+            .expect("project request log"),
+        vec![(
+            format!("{WS_ROOT}/src/Widget.vue.jsx"),
+            TSCONFIG.to_string()
+        )],
+        "a JavaScript carrier must ask its bound configured project before using the rich fallback"
+    );
+}
+
+#[tokio::test]
+async fn unavailable_project_capability_never_reenables_check_js_through_raw_fallback() {
+    let owned = Arc::new(MarkerOwned::default());
+    let c = TsgoCompositeProvider::new(
+        Arc::clone(&owned) as Arc<dyn TypeProvider>,
+        host_with_snapshot(),
+        None,
+    );
+    let diags = c
+        .get_diagnostics(&format!("{WS_ROOT}/src/Widget.vue.jsx"))
+        .await
+        .expect("composite diagnostics");
+    assert!(
+        diags.is_empty(),
+        "an unavailable project-bound capability under checkJs:false must not fall back to an inferred-project semantic result"
+    );
+    assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        owned.raw_diagnostics_calls.load(Ordering::SeqCst),
+        0,
+        "the raw diagnostic marker proves a wrong inferred-project fallback leaked"
+    );
+}
+
+#[tokio::test]
+async fn project_bound_clean_javascript_diagnostics_are_authoritative() {
+    let owned = Arc::new(MarkerOwned::project_bound(true));
+    let c = TsgoCompositeProvider::new(
+        Arc::clone(&owned) as Arc<dyn TypeProvider>,
+        host_with_snapshot(),
+        None,
+    );
+    let diags = c
+        .get_diagnostics(&format!("{WS_ROOT}/src/Widget.svelte.jsx"))
+        .await
+        .expect("composite diagnostics");
+    assert!(
+        diags.is_empty(),
+        "the configured JavaScript project's clean result must preserve its checkJs policy"
+    );
+    assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -526,7 +665,7 @@ async fn gate_non_carrier_path_is_not_gated() {
 //    the background lane too, and a bound carrier still delegates to OWNED. ──
 
 #[tokio::test]
-async fn gate_bound_carrier_delegates_to_owned_background() {
+async fn gate_bound_carrier_uses_established_managed_diagnostics_background() {
     // A BOUND carrier on the BACKGROUND lane delegates to OWNED — the OWNED `--lsp`
     // marker surfaces. This is the discriminator proving the background lane PRODUCES the
     // marker for a bound carrier, so the empty result in the sibling test below is the
@@ -539,7 +678,7 @@ async fn gate_bound_carrier_delegates_to_owned_background() {
     assert_eq!(
         codes(&diags),
         vec![MARKER_CODE.to_string()],
-        "a BOUND carrier delegates to OWNED on the BACKGROUND lane — the OWNED marker surfaces"
+        "a BOUND carrier uses the established managed diagnostics route on the BACKGROUND lane"
     );
 }
 

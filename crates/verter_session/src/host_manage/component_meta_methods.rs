@@ -2826,20 +2826,14 @@ impl VerterHost {
         // `component_meta_entry.rs`) captures the union and sources
         // the published `ComponentMetaResultEntry` signature from it.
         //
-        // The owner's OWN facts are excluded from the fan-out. The
-        // owner's content is already observed by the cold compute's
-        // dispatch reads and gated by the result cache's legacy
-        // whole-hash rail; bubbling them is redundant. Critically,
-        // `state.fact_versions` carries the curated
-        // `DerivedFactHash{owner, Route}` entry from
-        // `current_dependency_fact_versions` — the owner's export
-        // route is NOT a dependency of the owner's own component-meta
-        // result, and its hash is dual-sourced on
-        // `HostStoreView::derived_hashes` (see `resolver_store.rs`
-        // `HostStoreView::build`), so it does not round-trip on warm
-        // validation. Excluding owner-scoped facts from the tracer
-        // fan-out keeps that non-dependency noise out of the
-        // tracer-owned signature.
+        // The owner's OWN facts are excluded from this mirror fan-out. The
+        // enclosing `ComponentMetaRequest` tracer explicitly self-roots every
+        // cold compute in its captured owner `FileWholeHash`, including
+        // degraded/malformed paths whose dispatch reads may observe no macro
+        // body. Bubbling the same owner facts here is therefore redundant.
+        // The mirror can also retain explicit compatibility-only owner Route
+        // observations; excluding owner-scoped mirror facts keeps that noise
+        // out of the outer tracer while cross-file dependencies still fan out.
         let cross_file_facts: Vec<crate::resolver_core::FactVersionRef> = full_fact_versions
             .iter()
             .filter(|fact| fact.canonical_id() != Some(canonical))
@@ -3049,15 +3043,14 @@ impl VerterHost {
             }
         }
 
-        let kind = crate::resolver_core::DerivedFactKind::Route;
-        if let Some(hash) = self.current_derived_fact_hash(canonical, kind) {
-            let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id: canonical.to_string(),
-                kind,
-                hash,
-            };
-            if seen.insert(fact.clone()) {
-                facts.push(fact);
+        if let Some(artifacts) = self.current_content_pinned_artifacts(canonical) {
+            if let Some(parse_fact) =
+                self.syntactic_route_interface_fact_for_indexed(canonical, &artifacts.indexed)
+            {
+                let fact = crate::resolver_core::FactVersionRef::Parse(parse_fact);
+                if seen.insert(fact.clone()) {
+                    facts.push(fact);
+                }
             }
         }
 
@@ -3078,6 +3071,13 @@ impl VerterHost {
         // invalidates via shallow module surface hashes.
     }
 
+    /// Observe a legacy derived fact without materializing or refreshing it.
+    ///
+    /// Production route-only component-meta capture uses the parse-owned
+    /// `SyntacticRouteInterface` fact above. This compatibility accessor remains
+    /// available to the explicit legacy consumers and invariant tests that pin
+    /// the whole-content `Route` digest.
+    #[allow(dead_code)]
     pub(crate) fn current_derived_fact_hash(
         &self,
         canonical_id: &str,
@@ -3088,30 +3088,6 @@ impl VerterHost {
                 self.current_or_read_whole_hash(canonical_id)
             }
             crate::resolver_core::DerivedFactKind::Route => {
-                // Fact capture is OBSERVE-ONLY: it must never
-                // materialise, refresh, or publish — a capture that
-                // cold-builds breadth-walks every unrelated import of
-                // the owner just to sign a result. So this reads through
-                // `observe_content_pinned_indexed` (content-pinned, NO
-                // re-index arm) and DECLINES on anything it cannot
-                // observe as current:
-                //
-                // - NEVER-MATERIALISED canonical → `None`. The
-                //   `FileWholeHash` fact (more sensitive on the owner's
-                //   own content: any content change invalidates) is
-                //   always captured alongside and covers invalidation
-                //   until the canonical's first traversal materialises
-                //   its route surface.
-                // - STALE surface (parse env moved, or only a
-                //   non-current content candidate exists) → `None`, so a
-                //   dependent entry rooted on the stale `Route` fact
-                //   fails warm validation and recomputes against the live
-                //   state — without this read rebuilding anything itself.
-                //
-                // The lookup is content-pinned: a permissive `get_any`
-                // would let a stale `IndexedReady` surface its old route
-                // digest as the "current" Route fact, confirming a stale
-                // dependent cache entry as valid.
                 let indexed = self.observe_content_pinned_indexed(canonical_id)?;
                 if !self.indexed_surface_is_current(canonical_id, &indexed) {
                     return None;

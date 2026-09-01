@@ -663,12 +663,17 @@ pub(crate) fn vue_runtime_render_demand(
     profile: &CompileProfile,
     canonical_id: &str,
     template_fact_diagnostics: bool,
+    style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
 ) -> VueHostRuntimeRenderDemand {
     use verter_compiler::compile_request::RuntimeProductRequest;
     VueHostRuntimeRenderDemand {
         runtime: RuntimeProductRequest {
             inline: profile.inline,
             runtime_source_map: profile.source_map,
+            // The render caller owns which style stages this product runs: a
+            // bundler with its own style-module lane demands `AuthoredOnly`,
+            // every other caller the complete authored-to-published cascade.
+            style_processing,
             ..Default::default()
         },
         template_fact_diagnostics,
@@ -692,12 +697,15 @@ pub(crate) fn vue_runtime_render_demand(
 pub(crate) fn svelte_runtime_render_demand(
     profile: &CompileProfile,
     canonical_id: &str,
+    style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
 ) -> Result<SvelteHostRuntimeRenderDemand, verter_compiler::compile_request::CompileRequestError> {
     use verter_compiler::compile_request::RuntimeProductRequest;
     Ok(SvelteHostRuntimeRenderDemand {
         runtime: RuntimeProductRequest {
             inline: profile.inline,
             runtime_source_map: profile.source_map,
+            // Same caller-owned style policy as the Vue arm above.
+            style_processing,
             ..Default::default()
         },
         ssr: profile.ssr,

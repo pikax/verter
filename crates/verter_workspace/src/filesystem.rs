@@ -452,12 +452,14 @@ impl FilesystemWorkspace {
                 .resolve_import_outcome_for_published_in_operation(
                     &recorder,
                     self.resolution_evidence_source(),
-                    published,
                     importer_id,
                     specifier,
                     ctx,
-                    &mut input_ledger,
-                    &|| true,
+                    crate::engine::ResolutionOperation::pinned(
+                        published,
+                        &mut input_ledger,
+                        &|| true,
+                    ),
                 );
             if matches!(
                 discovery.non_admission_reason(),
@@ -486,16 +488,18 @@ impl FilesystemWorkspace {
                 .resolve_import_outcome_for_published_in_operation(
                     &frozen,
                     self.resolution_evidence_source(),
-                    published,
                     importer_id,
                     specifier,
                     ctx,
-                    &mut input_ledger,
-                    &|| {
-                        let valid = frozen.complete() && frozen.revalidate();
-                        final_valid.set(valid);
-                        valid
-                    },
+                    crate::engine::ResolutionOperation::pinned(
+                        published,
+                        &mut input_ledger,
+                        &|| {
+                            let valid = frozen.complete() && frozen.revalidate();
+                            final_valid.set(valid);
+                            valid
+                        },
+                    ),
                 );
             if final_valid.get() {
                 return outcome;
@@ -534,12 +538,14 @@ impl FilesystemWorkspace {
                     .resolve_import_outcome_for_published_in_operation(
                         &reader,
                         self.resolution_evidence_source(),
-                        &published,
                         importer_id,
                         specifier,
                         ctx,
-                        &mut input_ledger,
-                        &|| true,
+                        crate::engine::ResolutionOperation::pinned(
+                            &published,
+                            &mut input_ledger,
+                            &|| true,
+                        ),
                     )
             };
             if matches!(
@@ -571,16 +577,18 @@ impl FilesystemWorkspace {
                     .resolve_import_outcome_for_published_in_operation(
                         &reader,
                         self.resolution_evidence_source(),
-                        &published,
                         importer_id,
                         specifier,
                         ctx,
-                        &mut input_ledger,
-                        &|| {
-                            let valid = frozen.complete() && frozen.revalidate();
-                            final_valid.set(valid);
-                            valid
-                        },
+                        crate::engine::ResolutionOperation::pinned(
+                            &published,
+                            &mut input_ledger,
+                            &|| {
+                                let valid = frozen.complete() && frozen.revalidate();
+                                final_valid.set(valid);
+                                valid
+                            },
+                        ),
                     )
             };
             if final_valid.get() {
@@ -650,6 +658,70 @@ impl FilesystemWorkspace {
                 return Some(product);
             }
             if final_valid.get() || input_ledger.charge_outer_restart(self).is_err() {
+                break;
+            }
+        }
+        None
+    }
+
+    fn record_parsed_edges_many_with_frozen_evidence(
+        &self,
+        records: &[(String, Vec<crate::types::ParsedEdge>)],
+    ) -> Option<()> {
+        crate::probe_scope!(RECORD_EDGES_FROZEN);
+        if records.is_empty() {
+            return Some(());
+        }
+        let published = self.load_published()?;
+        let mut input_ledgers: Vec<_> = records
+            .iter()
+            .map(|_| {
+                crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets)
+            })
+            .collect();
+
+        loop {
+            let recorder = FilesystemResolutionRecorder::new(self, Arc::clone(&published));
+            for ((canonical_id, edges), ledger) in records.iter().zip(input_ledgers.iter_mut()) {
+                self.engine.observe_parsed_edge_evidence_in_operation(
+                    &recorder,
+                    canonical_id,
+                    edges,
+                    ledger,
+                );
+                ledger.discard_staged_loaded_inputs();
+            }
+
+            let frozen = recorder.freeze();
+            if !frozen.revalidate() {
+                if input_ledgers
+                    .iter_mut()
+                    .any(|ledger| ledger.charge_outer_restart(self).is_err())
+                {
+                    break;
+                }
+                continue;
+            }
+
+            let final_valid = std::cell::Cell::new(true);
+            let committed = self.engine.record_parsed_edges_many_in_operation(
+                &frozen,
+                records,
+                &mut input_ledgers,
+                &|| {
+                    let valid = frozen.complete() && frozen.revalidate();
+                    final_valid.set(valid);
+                    valid
+                },
+            );
+            if committed {
+                return Some(());
+            }
+            if final_valid.get()
+                || input_ledgers
+                    .iter_mut()
+                    .any(|ledger| ledger.charge_outer_restart(self).is_err())
+            {
                 break;
             }
         }
@@ -1274,7 +1346,7 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
             } = entry
             {
                 self.observations
-                    .record_manifest(manifest_path, value.clone());
+                    .record_manifest(manifest_path, value.as_deref().cloned());
             }
         }
         Ok(loaded)
@@ -1511,7 +1583,7 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
                     self.mark_incomplete();
                     Err(
                         verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
-                            key: key.clone(),
+                            key: Box::new(key.clone()),
                         },
                     )
                 }
@@ -1541,7 +1613,7 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
                         self.mark_incomplete();
                         Err(
                             verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
-                                key: key.clone(),
+                                key: Box::new(key.clone()),
                             },
                         )
                     }
@@ -1843,9 +1915,9 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                     {
                         self.native_fs.probe_path_live(path).map_err(|_| {
                             verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
-                                key: verter_semantic::resolver_core::InputKey::PathProbe {
+                                key: Box::new(verter_semantic::resolver_core::InputKey::PathProbe {
                                     path: path.into(),
-                                },
+                                }),
                             }
                         })?
                     }
@@ -1866,9 +1938,9 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                     {
                         self.native_fs.realpath_live(path).map_err(|_| {
                             verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
-                                key: verter_semantic::resolver_core::InputKey::RealPath {
+                                key: Box::new(verter_semantic::resolver_core::InputKey::RealPath {
                                     path: path.into(),
-                                },
+                                }),
                             }
                         })?
                     }
@@ -1887,21 +1959,20 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                     .read()
                     .get(manifest_path)
                     .or_else(|| self.engine.snapshot.read().read(manifest_path));
+                #[cfg(target_arch = "wasm32")]
+                let length = {
+                    let _ = key;
+                    in_memory.map(|source| source.len() as u64)
+                };
+                #[cfg(not(target_arch = "wasm32"))]
                 let length = if let Some(source) = in_memory {
                     Some(source.len() as u64)
                 } else {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        self.native_fs.file_len_live(manifest_path).map_err(|_| {
-                            verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
-                                key: key.clone(),
-                            }
-                        })?
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        None
-                    }
+                    self.native_fs.file_len_live(manifest_path).map_err(|_| {
+                        verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
+                            key: Box::new(key.clone()),
+                        }
+                    })?
                 };
                 Ok((length.is_some(), length.unwrap_or(0), Vec::new()))
             },
@@ -1942,7 +2013,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                             .read_file_bounded_live(manifest_path, reserved_raw_bytes)
                             .map_err(|_| {
                                 verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
-                                    key: key.clone(),
+                                    key: Box::new(key.clone()),
                                 }
                             })? {
                             crate::native_fs::BoundedFileRead::Missing => None,
@@ -2259,6 +2330,31 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         );
     }
 
+    fn record_parsed_edges_many(&self, records: &[(String, Vec<crate::types::ParsedEdge>)]) {
+        if self
+            .record_parsed_edges_many_with_frozen_evidence(records)
+            .is_none()
+        {
+            for (canonical_id, edges) in records {
+                self.record_parsed_edges_with_frozen_evidence(
+                    canonical_id,
+                    edges,
+                    |reader, ledger, valid| {
+                        self.engine
+                            .record_parsed_edges_in_operation(
+                                reader,
+                                canonical_id,
+                                edges,
+                                ledger,
+                                valid,
+                            )
+                            .then_some(())
+                    },
+                );
+            }
+        }
+    }
+
     fn set_exact_resolutions(
         &self,
         canonical_id: &str,
@@ -2321,6 +2417,10 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
             }
             ((), changed)
         });
+    }
+
+    fn notify_upsert_many(&self, records: &[(String, Arc<str>)]) {
+        self.engine.mutate_overlay_upsert_many(records);
     }
 
     fn notify_close(&self, canonical_id: &str) {

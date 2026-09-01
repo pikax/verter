@@ -1,17 +1,14 @@
-error[E0603]: function `compile` is private
- --> tests/cases/compile-fail/scanners_replacement_raw_parser_public.rs:7:31
+error[E0432]: unresolved import `verter_compiler::compile::compile`
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/scanners_replacement_raw_parser_public.rs
   |
-7 | use verter_compiler::compile::compile;
-  |                               ^^^^^^^ private function
+  | use verter_compiler::compile::compile;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `compile` in `compile`
   |
-note: the function `compile` is defined here
+note: found an item that was configured out
  --> $WORKSPACE/crates/verter_compiler/src/compile/mod.rs
   |
-  | / pub(crate) fn compile(
-  | |     input: &str,
-  | |     options: &CodegenOptions,
-  | |     verter_options: &VerterCompileOptions,
-  | |     macro_semantics: &VueMacroSemanticInput,
-  | |     allocator: &Allocator,
-  | | ) -> VerterCompileResult {
-  | |________________________^
+  | #[cfg(any(test, feature = "test-support"))]
+  |          -------------------------------- the item is gated here
+  | #[cfg_attr(feature = "hotpath", hotpath::measure)]
+  | pub fn compile(
+  |        ^^^^^^^

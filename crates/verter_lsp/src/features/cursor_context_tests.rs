@@ -1,6 +1,7 @@
 use super::*;
 use crate::documents::carrier_structure::{
-    project_carrier_blocks, test_carrier_blocks, test_structure,
+    authored_component_attribute_name_context, project_carrier_blocks, test_carrier_blocks,
+    test_structure,
 };
 use verter_semantic::analysis::template::*;
 use verter_session::FileAnalysisSnapshot;
@@ -1881,6 +1882,38 @@ fn analysis_absent_fallback_classifies_attribute_position_from_facts() {
         }
         other => panic!("expected AttributeName for `<DraftCard |`, got: {other:?}"),
     }
+}
+
+#[test]
+fn analysis_absent_fallback_classifies_self_closing_attribute_insertion_anchor() {
+    let source = "<template><Button /></template>";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let cursor = source.find("/>").expect("self-closing marker") as u32;
+    assert!(
+        authored_component_attribute_name_context(&structure, cursor).is_some(),
+        "the cursor immediately before '/>' is an authored component attribute insertion point: {:#?}",
+        structure.inventory().markup().nodes()
+    );
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::AttributeName {
+                ref tag_name,
+                is_component: true,
+                ..
+            }) if tag_name == "Button"
+        ),
+        "expected AttributeName at `<Button |/>`, got: {ctx:?}"
+    );
 }
 
 #[test]

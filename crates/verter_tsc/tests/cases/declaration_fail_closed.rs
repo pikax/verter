@@ -14,9 +14,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const VERTER_TSC: &str = env!("CARGO_BIN_EXE_verter-tsc");
-const FAKE_ENGINE: &str = env!("CARGO_BIN_EXE_verter_tsc_fake_engine");
-
 /// Copy the fake engine to a scenario-named path (the scenario is selected by
 /// the binary's file name). Copies land via an atomic rename so parallel tests
 /// never execute a partially-written file.
@@ -34,7 +31,11 @@ fn fake_engine(scenario: &str) -> PathBuf {
         let _guard = COPY_LOCK.lock().unwrap();
         if !target.exists() {
             let tmp = dir.join(format!(".copying-{scenario}"));
-            std::fs::copy(FAKE_ENGINE, &tmp).expect("copy the fake engine");
+            std::fs::copy(
+                verter_test_support::cargo_test_binary_path!("verter_tsc_fake_engine"),
+                &tmp,
+            )
+            .expect("copy the fake engine");
             let _ = std::fs::remove_file(&target);
             std::fs::rename(&tmp, &target).expect("rename the fake engine into place");
         }
@@ -87,7 +88,7 @@ fn run_declaration(
     fake_scenario: Option<&str>,
 ) -> Output {
     let empty_path = tempfile::TempDir::new().expect("empty PATH dir");
-    let mut cmd = Command::new(VERTER_TSC);
+    let mut cmd = Command::new(verter_test_support::cargo_test_binary_path!("verter-tsc"));
     cmd.arg("--declaration")
         .arg("--declarationDir")
         .arg(declaration_dir)

@@ -26,11 +26,23 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Notify, Semaphore};
 
 use super::{
-    NotifySeverity, ProviderNotifier, ResilientBackend, ResilientProvider, TracingNotifier,
+    NotifySeverity, ProviderNotifier, QueryFingerprint, ResilientBackend, ResilientProvider,
+    TracingNotifier,
 };
 use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
 use crate::tsserver::TsserverTypeProvider;
+
+// @ai-generated
+#[test]
+fn project_bound_diagnostics_quarantine_is_scoped_to_the_configured_project() {
+    let first = QueryFingerprint::new("diagnostics-in-project", "/ws/App.vue.jsx", 0, 0)
+        .in_scope("/ws/tsconfig.app.json");
+    let second = QueryFingerprint::new("diagnostics-in-project", "/ws/App.vue.jsx", 0, 0)
+        .in_scope("/ws/tsconfig.tests.json");
+
+    assert_ne!(first, second);
+}
 
 /// A recorded provider call.
 #[derive(Debug, Clone, PartialEq)]

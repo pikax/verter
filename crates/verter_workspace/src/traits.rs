@@ -158,11 +158,11 @@ pub trait WorkspaceRead: Send + Sync {
         }
         Err(
             verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
-                key: keys.first().cloned().unwrap_or_else(|| {
+                key: Box::new(keys.first().cloned().unwrap_or_else(|| {
                     verter_semantic::resolver_core::InputKey::PathProbe {
                         path: Arc::from("<empty-bounded-preflight>"),
                     }
-                }),
+                })),
             },
         )
     }
@@ -179,11 +179,11 @@ pub trait WorkspaceRead: Send + Sync {
     > {
         Err(
             verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
-                key: reservation.keys().first().cloned().unwrap_or_else(|| {
+                key: Box::new(reservation.keys().first().cloned().unwrap_or_else(|| {
                     verter_semantic::resolver_core::InputKey::PathProbe {
                         path: Arc::from("<empty-bounded-load>"),
                     }
-                }),
+                })),
             },
         )
     }
@@ -743,6 +743,16 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// clear `ambient_resolved`.**
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[ParsedEdge]);
 
+    /// Bulk form of [`Self::record_parsed_edges`]. Implementations may share
+    /// resolution capture and publication work across the batch; the default
+    /// preserves identical per-owner semantics for workspace adapters that do
+    /// not own a bulk transaction.
+    fn record_parsed_edges_many(&self, records: &[(String, Vec<ParsedEdge>)]) {
+        for (canonical_id, edges) in records {
+            self.record_parsed_edges(canonical_id, edges);
+        }
+    }
+
     /// Replace bundler-injected exact resolutions for a file. The active
     /// stem set is recomputed AFTER the exact mutation; parsed-unresolved
     /// entries are NOT destroyed (active-stem model).
@@ -841,6 +851,15 @@ pub trait WorkspaceAccess: WorkspaceRead {
     }
 
     fn notify_upsert(&self, _canonical_id: &str, _source: Arc<str>) {}
+
+    /// Bulk form of [`Self::notify_upsert`]. The default preserves the
+    /// per-file contract; native workspace engines override it so an atomic
+    /// source batch publishes one coherent overlay generation.
+    fn notify_upsert_many(&self, records: &[(String, Arc<str>)]) {
+        for (canonical_id, source) in records {
+            self.notify_upsert(canonical_id, Arc::clone(source));
+        }
+    }
 
     /// Notify the workspace that an editor buffer was closed.
     ///

@@ -3172,9 +3172,9 @@ dependencies = [
  "oxc_span",
  "serde",
  "serde_json",
- "trybuild",
  "ts-rs",
  "verter_span",
+ "verter_test_support",
  "web-time",
  "windows-sys",
 ]
@@ -3210,6 +3210,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_compile_contracts"
+version = "0.0.1-beta.3"
+dependencies = [
+ "trybuild",
+]
+
+[[package]]
+name = "verter_compile_contracts_bench"
+version = "0.0.1-beta.3"
+dependencies = [
+ "trybuild",
+ "verter_compiler",
+ "verter_css_syntax",
+ "verter_language",
+]
+
+[[package]]
+name = "verter_compile_contracts_session_variants"
+version = "0.0.1-beta.3"
+dependencies = [
+ "trybuild",
+ "verter_compiler",
+ "verter_session",
+ "verter_type_expr",
+]
+
+[[package]]
 name = "verter_compiler"
 version = "0.0.1-beta.3"
 dependencies = [
@@ -3240,7 +3267,6 @@ dependencies = [
  "static_assertions",
  "syn 2.0.117",
  "tempfile",
- "trybuild",
  "verter_audit",
  "verter_compiler",
  "verter_css_syntax",
@@ -3264,7 +3290,6 @@ dependencies = [
  "bumpalo",
  "memchr",
  "smallvec",
- "trybuild",
  "verter_audit",
  "verter_debug_assert",
  "verter_span",
@@ -3340,7 +3365,6 @@ version = "0.0.1-beta.3"
 dependencies = [
  "blake3",
  "serde_json",
- "trybuild",
 ]
 
 [[package]]
@@ -3349,7 +3373,6 @@ version = "0.0.1-beta.3"
 dependencies = [
  "getrandom 0.2.17",
  "serde",
- "trybuild",
  "verter_identity",
  "verter_span",
 ]
@@ -3453,6 +3476,7 @@ dependencies = [
  "tokio",
  "tracing-subscriber",
  "verter_mcp",
+ "verter_test_support",
 ]
 
 [[package]]
@@ -3573,7 +3597,6 @@ dependencies = [
  "serde_json",
  "static_assertions",
  "syn 2.0.117",
- "tempfile",
  "ts-rs",
  "verter_language",
  "verter_no_typeexpr",
@@ -3640,7 +3663,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "static_assertions",
- "trybuild",
  "verter_audit",
  "verter_css_syntax",
  "verter_debug_assert",
@@ -3694,7 +3716,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-test",
- "trybuild",
  "ts-rs",
  "uuid",
  "verter_audit",
@@ -3812,6 +3833,7 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_test_support",
  "verter_tsc",
  "verter_tsgo_api",
  "verter_workspace",
@@ -3831,6 +3853,7 @@ dependencies = [
  "tokio",
  "verter_debug_assert",
  "verter_span",
+ "verter_test_support",
  "verter_tsgo_api",
  "windows-sys",
 ]
@@ -3874,7 +3897,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "trybuild",
  "verter_debug_assert",
  "verter_language",
  "verter_span",
@@ -3947,7 +3969,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
- "trybuild",
  "verter_audit",
  "verter_debug_assert",
  "verter_language",

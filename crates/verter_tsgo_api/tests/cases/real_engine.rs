@@ -446,6 +446,101 @@ async fn program_getter_surfaces_non_root_imported_error_that_per_file_misses() 
     clean_client.close().await.expect("close clean");
 }
 
+/// Capability pin for the current TSGO `--api` project checker. TypeScript itself
+/// treats a leading `@ts-check` as a per-file override of `checkJs: false`, but a
+/// nested source config owning `src/**/*.vue` does not expose the injected
+/// `.vue.jsx` companion as an API source file. The exact-file operation therefore
+/// refuses it and the whole-Program operation has no diagnostic to return. The
+/// provider layer deliberately normalizes that unavailable capability to an empty,
+/// fail-closed result instead of consulting a raw or wrong project.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_api_cannot_serve_authored_ts_check_companion_owned_by_source_config() {
+    use verter_tsgo_api::TsgoClient;
+
+    let Some(exe) = common::engine_or_skip().await else {
+        return;
+    };
+
+    let tmp = tempdir();
+    let nested = tmp.join("nested");
+    let src = nested.join("src");
+    std::fs::create_dir_all(&src).expect("create nested src");
+    let source = src.join("AuthoredCheck.vue");
+    std::fs::write(
+        &source,
+        "<script setup>\n// @ts-check\n/** @param {PointerEvent} event */\nfunction handlePointer(event) { return event.__verterMissingPointerMember; }\n</script>\n",
+    )
+    .expect("write authored carrier source");
+    let carrier = src.join("AuthoredCheck.vue.jsx");
+    let carrier_norm = common::norm(&carrier);
+    let carrier_src = "// @ts-check\n\n\
+/** @param {PointerEvent} event */\n\
+export function handlePointer(event) {\n\
+  return event.__verterMissingPointerMember;\n\
+}\n";
+    let tsconfig = nested.join("tsconfig.json");
+    std::fs::write(
+        &tsconfig,
+        r#"{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "jsx": "preserve",
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.vue"]
+}
+"#,
+    )
+    .expect("write nested tsconfig");
+
+    let snapshot = OverlaySnapshot::builder()
+        .file(&carrier_norm, carrier_src)
+        .directory(common::norm(&src))
+        .real_dir_source(Arc::new(StdFsDirSource))
+        .build();
+    let client = TsgoClient::connect(&exe, &tmp, snapshot, 16)
+        .await
+        .expect("connect");
+    client.initialize().await.expect("initialize");
+    let snap = client
+        .update_snapshot(&UpdateSnapshotParams::single_project(common::norm(
+            &tsconfig,
+        )))
+        .await
+        .expect("updateSnapshot");
+    let project = snap
+        .projects
+        .iter()
+        .find(|project| {
+            common::norm(std::path::Path::new(&project.config_file_name)) == common::norm(&tsconfig)
+        })
+        .expect("nested project opened");
+    let per_file = client
+        .get_semantic_diagnostics(&snap.snapshot, &project.id, &carrier_norm)
+        .await;
+    let whole_program = client
+        .get_semantic_diagnostics_for_program(&snap.snapshot, &project.id)
+        .await
+        .expect("whole-program diagnostics");
+    assert!(
+        per_file
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("source file not found")),
+        "the pinned per-file API must reject the non-member companion: {per_file:?}"
+    );
+    assert!(
+        whole_program.is_empty(),
+        "the pinned whole-program API currently omits the authored override: {whole_program:?}"
+    );
+
+    client.close().await.expect("close");
+}
+
 /// DISCRIMINATING (config/options): `getConfigFileParsingDiagnostics` surfaces a
 /// compiler-options error (an invalid `target` → TS6046) that neither per-file
 /// nor whole-program semantic/syntactic getters report; a clean config returns

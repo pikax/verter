@@ -1,17 +1,17 @@
-//! Single consolidated integration-test binary for `verter_source_policy_gate`.
+//! Consolidated integration-test target for `verter_source_policy_gate`.
 //!
-//! Six of the eight guards here derive their verdict purely from reading the
-//! workspace source tree (via `syn`/`walkdir`/`git ls-files`). The other two
-//! (`tracked_paths_are_portable`, `output_projector_residual_guards`) build
-//! against `verter_session`'s public API to check a generated/typed surface,
-//! but do not RUN it — no `VerterHost`, no compiled request, no shared
-//! process state. None is sensitive to `debug_assertions` or to
-//! shared-process leakage between tests, which is why these guards live in
-//! their own crate instead of `verter_session`'s consolidated `tests/main.rs`:
-//! a plain `cargo nextest run --workspace` (Surface 1) still runs them once,
-//! but Surface 2 (verter_session-only shared-process) and Surface 3
-//! (shipped-cfg, package-filtered) select by PACKAGE, so neither can see
-//! this crate's tests regardless of what it depends on — they are no longer
-//! replayed under either surface for no behavioral reason.
+//! Canonical Surface 1 uses Nextest, so separate `#[test]` entries still run in
+//! separate processes even though they compile into this one target. The
+//! scan-heavy production policies therefore dispatch from one aggregate test:
+//! it walks and reads workspace production sources once, caches the shared
+//! residual/whole-env inventories and hot-path fact model, and retains
+//! policy-level parallelism inside that process. Rules with distinct fact
+//! shapes derive those facts from the same immutable source bytes. Cheap
+//! synthetic discriminators and typed/generated-surface checks remain granular.
+//!
+//! These guards are independent of `debug_assertions` and do not execute a
+//! `VerterHost` or compiled request. Keeping them in this package means Surface
+//! 1 executes them, while the package-filtered session surfaces do not replay
+//! the same repository-policy work.
 
 mod cases;

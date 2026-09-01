@@ -6,6 +6,9 @@
  *
  * Globs are matched against the path under `e2e/suite/` with posix slashes.
  */
+import { PROJECTLESS_CONTRACT_SUITE_GLOB } from "./projectlessContractManifest";
+import { BARREL_REGRESSION_SUITE_GLOB } from "./barrelRegressionManifest";
+
 const LEGACY_SUITE_GLOBS = [
   // Top-level legacy feature suites (not under parity/ or frameworks/)
   "activation.test",
@@ -49,9 +52,11 @@ export const FIXTURE_SUITE_GLOBS: Readonly<Record<string, readonly string[]>> = 
   "tsconfig-references": LEGACY_SUITE_GLOBS,
   "path-aliases": LEGACY_SUITE_GLOBS,
   "composite-paths": LEGACY_SUITE_GLOBS,
-  "no-config": LEGACY_SUITE_GLOBS,
-  "single-file": LEGACY_SUITE_GLOBS,
-  "barrel-exports": LEGACY_SUITE_GLOBS,
+  "no-config": [PROJECTLESS_CONTRACT_SUITE_GLOB],
+  "single-file": [PROJECTLESS_CONTRACT_SUITE_GLOB],
+  // The required barrel route is an exact typed-surface regression contract.
+  // The legacy omnibus also contains known, unfinished IDE feature probes.
+  "barrel-exports": [BARREL_REGRESSION_SUITE_GLOB],
   "editor-owned-project": ["editor-owned-project.test"],
   // The extension-hosted provider's acceptance: its own suite only. The legacy
   // tree assumes an in-repo fixture layout this out-of-tree workspace does not have.

@@ -14,7 +14,7 @@
  *
  * This mirrors `scripts/generate-html-intrinsics.js`: one idempotent command
  * rewrites the committed Rust data module; a freshness test
- * (`svelte_entity_table_in_sync`) re-runs this generator and byte-compares.
+ * (`svelte_generated_artifacts_freshness`) re-runs this generator and byte-compares.
  *
  *     node scripts/generate-svelte-entities.mjs            # rewrite the table
  *     node scripts/generate-svelte-entities.mjs --check    # assert in sync
@@ -24,7 +24,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
 
@@ -56,8 +56,17 @@ function entitiesModulePath() {
   return p;
 }
 
+export function pinnedSvelteEntitiesPresent() {
+  try {
+    entitiesModulePath();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Render the committed Rust data module from the canonical entity table. */
-async function renderModule() {
+export async function renderSvelteEntityTable() {
   const mod = await import(pathToFileURL(entitiesModulePath()).href);
   const entities = mod.default;
   const keys = Object.keys(entities);
@@ -115,28 +124,35 @@ pub(crate) fn lookup_named_entity(name: &str) -> Option<u32> {
 `;
 }
 
+export async function checkSvelteEntityTable() {
+  const rendered = await renderSvelteEntityTable();
+  const existing = existsSync(OUT_PATH) ? readFileSync(OUT_PATH, "utf8") : "";
+  if (existing !== rendered) {
+    throw new Error(
+      `${OUT_PATH} is OUT OF SYNC with svelte@${SVELTE_ORACLE_VERSION}. ` +
+        `Run \`node scripts/generate-svelte-entities.mjs\` and review the diff.`,
+    );
+  }
+}
+
 async function main() {
   const check = process.argv.includes("--check");
-  const rendered = await renderModule();
   if (check) {
-    const existing = existsSync(OUT_PATH) ? readFileSync(OUT_PATH, "utf8") : "";
-    if (existing !== rendered) {
-      console.error(
-        `generate-svelte-entities --check: ${OUT_PATH} is OUT OF SYNC with svelte@${SVELTE_ORACLE_VERSION}. ` +
-          `Run \`node scripts/generate-svelte-entities.mjs\` and review the diff.`,
-      );
-      process.exit(1);
-    }
+    await checkSvelteEntityTable();
     console.log(
       `generate-svelte-entities --check: entity table in sync with svelte@${SVELTE_ORACLE_VERSION}.`,
     );
     return;
   }
+  const rendered = await renderSvelteEntityTable();
   writeFileSync(OUT_PATH, rendered);
   console.log(`generate-svelte-entities: wrote ${OUT_PATH} from svelte@${SVELTE_ORACLE_VERSION}.`);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+if (isMain) {
+  main().catch((e) => {
+    console.error(e);
+    process.exitCode = 1;
+  });
+}

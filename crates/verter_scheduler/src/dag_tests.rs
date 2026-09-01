@@ -135,6 +135,49 @@ fn submit_dedup_merges_identity_and_upgrades_priority() {
     );
 }
 
+/// Priority inheritance is a per-canonical lookup. A batch can retain
+/// thousands of unrelated DAG nodes while one Source completion asks for its
+/// own urgency; visiting the whole DAG here makes batch completion quadratic.
+#[test]
+fn highest_priority_for_file_visits_only_the_canonical_bucket() {
+    let mut dag = SchedulerDag::new();
+    for i in 0..2048 {
+        let _ = dag.submit_expect(
+            file_stage(&format!("/unrelated/{i}.ts"), 1, FileStageKey::Source),
+            WorkKind::Load,
+            Priority::Interactive,
+            Vec::new(),
+            None,
+        );
+    }
+    let target = canonical("/target.ts");
+    let _ = dag.submit_expect(
+        file_stage(&target, 7, FileStageKey::Source),
+        WorkKind::Load,
+        Priority::Background,
+        Vec::new(),
+        None,
+    );
+    let _ = dag.submit_expect(
+        file_stage(&target, 7, FileStageKey::Analysis),
+        WorkKind::Analysis,
+        Priority::Critical,
+        Vec::new(),
+        None,
+    );
+
+    dag.test_reset_highest_priority_node_visit_count();
+    assert_eq!(
+        dag.highest_priority_for_file(&target, 7),
+        Some(Priority::Critical)
+    );
+    assert_eq!(
+        dag.test_highest_priority_node_visit_count(),
+        2,
+        "priority inheritance must inspect only live nodes indexed to the requested canonical"
+    );
+}
+
 /// Newer generation supersedes older — the cancel path drops the
 /// older node so it never dispatches.
 #[test]
@@ -1131,4 +1174,97 @@ fn loan_capacity_for_class_io_bumps_past_cap_and_releases_on_drop() {
         pre_io,
         "loan Drop must release the I/O counter back to its pre-loan level",
     );
+}
+
+/// Blocker-backed Analysis demand must be a keyed lookup. Registry size is
+/// deliberately high so a scan cannot hide behind a tiny fixture.
+#[test]
+fn analysis_demand_probe_is_constant_in_blocker_registry_cardinality() {
+    let mut dag = SchedulerDag::new();
+    let demanded: Arc<str> = Arc::from("/demanded.ts");
+    let demanded_dep = DepKey::FileStage {
+        canonical: Arc::clone(&demanded),
+        generation: 1,
+        stage: FileStageKey::Analysis,
+    };
+
+    for index in 0..20_000_u64 {
+        let owner: Arc<str> = Arc::from(format!("/owner-{index}.vue"));
+        let dep = if index == 19_999 {
+            demanded_dep.clone()
+        } else {
+            DepKey::FileStage {
+                canonical: Arc::from(format!("/dep-{index}.ts")),
+                generation: 1,
+                stage: FileStageKey::Analysis,
+            }
+        };
+        dag.record_artifact_blockers(
+            &owner,
+            1,
+            PendingBlockerSet {
+                deps: [dep].into_iter().collect(),
+                failed: Vec::new(),
+            },
+        );
+    }
+
+    dag.test_reset_analysis_demand_probe_count();
+    assert!(dag.has_analysis_demand(&demanded, 1));
+    assert_eq!(
+        dag.test_analysis_demand_probe_count(),
+        1,
+        "one DepKey demand query must perform one reverse-index probe regardless of registry size",
+    );
+}
+
+#[test]
+fn blocker_demand_refcounts_follow_every_registry_lifecycle_funnel() {
+    let mut dag = SchedulerDag::new();
+    let shared = DepKey::FileStage {
+        canonical: canonical("/shared.ts"),
+        generation: 1,
+        stage: FileStageKey::Analysis,
+    };
+    let replacement = DepKey::FileStage {
+        canonical: canonical("/replacement.ts"),
+        generation: 1,
+        stage: FileStageKey::Analysis,
+    };
+    let set = |dep: DepKey| PendingBlockerSet {
+        deps: [dep].into_iter().collect(),
+        failed: Vec::new(),
+    };
+    let owner_a = canonical("/owner-a.vue");
+    let owner_b = canonical("/owner-b.vue");
+
+    dag.record_artifact_blockers(&owner_a, 1, set(shared.clone()));
+    dag.record_artifact_blockers(&owner_b, 1, set(shared.clone()));
+    assert_eq!(dag.analysis_blocker_demand.get(&shared), Some(&2));
+
+    let _ = dag.drain_artifact_blockers(&owner_a, 1);
+    assert_eq!(dag.analysis_blocker_demand.get(&shared), Some(&1));
+
+    dag.record_artifact_blockers(&owner_b, 1, set(replacement.clone()));
+    assert!(!dag.analysis_blocker_demand.contains_key(&shared));
+    assert_eq!(dag.analysis_blocker_demand.get(&replacement), Some(&1));
+
+    dag.scrub_artifact_blockers_referencing("/replacement.ts");
+    assert!(!dag.analysis_blocker_demand.contains_key(&replacement));
+
+    dag.record_artifact_blockers(&owner_a, 1, set(shared.clone()));
+    dag.artifact_blocker_deps_remove_owner("/owner-a.vue");
+    assert!(!dag.analysis_blocker_demand.contains_key(&shared));
+
+    dag.record_artifact_blockers(&owner_a, 1, set(shared.clone()));
+    dag.supersede_old_file_generations(&owner_a, 2);
+    assert!(!dag.analysis_blocker_demand.contains_key(&shared));
+
+    dag.record_artifact_blockers(&owner_b, 2, set(replacement.clone()));
+    dag.clear_artifact_blockers(&owner_b, 2);
+    assert!(!dag.analysis_blocker_demand.contains_key(&replacement));
+
+    dag.record_artifact_blockers(&owner_b, 2, set(replacement.clone()));
+    dag.clear();
+    assert!(dag.analysis_blocker_demand.is_empty());
 }

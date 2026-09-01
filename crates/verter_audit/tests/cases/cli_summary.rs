@@ -46,7 +46,7 @@ use verter_audit::{
 /// Path to the compiled binary — Cargo populates this env var for
 /// integration tests in the same crate.
 fn bin_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_verter-audit-inspect"))
+    verter_test_support::cargo_test_binary_path!("verter-audit-inspect")
 }
 
 /// Make a temp directory under `target/cli-test-<name>` and clean

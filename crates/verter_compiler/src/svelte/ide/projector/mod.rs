@@ -255,7 +255,9 @@ pub fn project_svelte_ide(
     projector.project_template(&parsed.template, region);
     drop(projector);
 
-    let prelude = render_component_prelude(namespace, legacy_mode, dialect);
+    let authored_check_directives = authored_check_directives(source, parsed);
+    let prelude =
+        render_component_prelude(namespace, legacy_mode, dialect, &authored_check_directives);
     // Register the prelude as the unmapped intro after mode finalization.
     // CodeTransform still emits it before every authored/moved chunk and
     // publishes the `x_verter_helper_preamble_end` source-map boundary.
@@ -323,6 +325,18 @@ pub fn project_svelte_ide(
         is_jsx: dialect.is_javascript(),
         diagnostics,
     }
+}
+
+/// Return genuine TypeScript file-check pragmas from the leading trivia of the
+/// authored script blocks, in carrier source order. The generated JSX header
+/// must retain an authored override, but must not invent one when project
+/// `checkJs` is the authority.
+fn authored_check_directives<'a>(source: &'a str, parsed: &ParsedSvelte) -> Vec<&'a str> {
+    let bodies = [parsed.module_content(), parsed.instance_content()]
+        .into_iter()
+        .flatten()
+        .map(|span| (span.start, span.end));
+    crate::framework_common::typescript_directives::authored_check_directives(source, bodies)
 }
 
 /// Classify the component through the shared scope-aware Svelte mode authority.

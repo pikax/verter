@@ -166,8 +166,15 @@ async fn assert_global_component_surface(
     }
 
     // --- Mistyped `:count="'mistyped'"` produces a REAL type diagnostic. ---
-    let diags = session.merged_diagnostics(uri).await;
     let mistype_line = session.find_position(uri, ":count=\"'mistyped'\"", 2).line;
+    let diags = session
+        .merged_diagnostics_until(uri, |diagnostics| {
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == Some(DiagnosticSeverity::ERROR)
+                    && diagnostic.range.start.line == mistype_line
+            })
+        })
+        .await;
     let has_count_error = diags.iter().any(|d| {
         d.severity == Some(DiagnosticSeverity::ERROR) && d.range.start.line == mistype_line
     });

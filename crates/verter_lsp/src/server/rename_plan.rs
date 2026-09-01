@@ -153,13 +153,12 @@ pub(super) fn ownership_changed_during_rename_error() -> tower_lsp_server::jsonr
 /// never learns which framework it is looking at. Two rows deviate from the
 /// enumerated default, and both deviate towards FAIL-CLOSED:
 ///
-/// * A SVELTE carrier models no markup occurrence at all. Its template snapshot
-///   exists but `binding_occurrences` / `unresolved_bindings` stay empty however
-///   much the markup references the binding, so its markup contributes nothing to
-///   any claim and the claim can never be the whole file. Refusing is the right
-///   answer there: it keeps the rename fail-closed instead of shipping a
-///   transaction that renames the script and leaves an authored markup occurrence
-///   like `$count` bound to the old name.
+/// * A SVELTE carrier models no semantic markup occurrence inventory. Its
+///   template snapshot exists but `binding_occurrences` / `unresolved_bindings`
+///   stay empty however much the markup references the binding. The conservative
+///   ASCII-token proof built by [`conservative_svelte_authored_occurrences`] can
+///   still enumerate a local name across the whole authored file; without that
+///   proof this capability remains `NotModelled` and rename refuses.
 /// * A file that is not a carrier at all has no markup region this surface reads,
 ///   and its provider companion is its own buffer (rename is deferred for a
 ///   self-file projection, so no companion drop can arise) — claim nothing.
@@ -179,6 +178,57 @@ fn markup_occurrence_inventory(canonical_id: &str) -> MarkupOccurrenceInventory 
     }
 }
 
+/// Conservatively enumerate every authored spelling of the ASCII identifier at
+/// `anchor` in a Svelte source file.
+///
+/// This is a COMPLETENESS proof, not an edit producer. It deliberately includes
+/// same-spelled text in comments, strings, and unrelated scopes; those false
+/// positives can only make rename refuse when the provider does not cover them.
+/// They can never make a partial transaction pass. The `$name` Svelte store
+/// spelling is included when renaming `name`, because `$` is a framework prefix
+/// there rather than evidence that the textual `name` occurrence is unrelated.
+/// Unicode and otherwise non-identifier anchors decline the proof and retain the
+/// existing fail-closed behavior.
+fn conservative_svelte_authored_occurrences(
+    source: &str,
+    line_index: &LineIndex,
+    anchor: Option<Range>,
+) -> Option<Vec<Range>> {
+    let anchor = anchor?;
+    let anchor_start = line_index.position_to_offset(&anchor.start)? as usize;
+    let anchor_end = line_index.position_to_offset(&anchor.end)? as usize;
+    let name = source.get(anchor_start..anchor_end)?;
+    let mut name_bytes = name.bytes();
+    let first = name_bytes.next()?;
+    let is_start = |byte: u8| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$');
+    let is_continue = |byte: u8| is_start(byte) || byte.is_ascii_digit();
+    if !is_start(first) || !name_bytes.all(is_continue) {
+        return None;
+    }
+
+    let source_bytes = source.as_bytes();
+    let mut ranges = Vec::new();
+    for (start, _) in source.match_indices(name) {
+        let end = start + name.len();
+        let preceded_by_identifier = start.checked_sub(1).is_some_and(|before| {
+            let byte = source_bytes[before];
+            is_continue(byte) && !(byte == b'$' && first != b'$')
+        });
+        let followed_by_identifier = source_bytes.get(end).is_some_and(|byte| is_continue(*byte));
+        if preceded_by_identifier || followed_by_identifier {
+            continue;
+        }
+        ranges.push(Range::new(
+            line_index.offset_to_position(start as u32)?,
+            line_index.offset_to_position(end as u32)?,
+        ));
+    }
+    ranges
+        .iter()
+        .any(|range| range == &anchor)
+        .then_some(ranges)
+}
+
 /// One request's rename target: the feature-layer classification of the cursor,
 /// resolved from ONE document snapshot.
 ///
@@ -189,6 +239,7 @@ fn markup_occurrence_inventory(canonical_id: &str) -> MarkupOccurrenceInventory 
 /// the analysis that produced it describe ONE revision.
 pub(super) struct RenameTargetResolution {
     target: RenameTarget,
+    conservative_svelte_authored_ranges: Option<Vec<Range>>,
 }
 
 impl RenameTargetResolution {
@@ -229,7 +280,7 @@ impl RenameTargetResolution {
         position: &Position,
     ) -> Self {
         let _document_commit_fence = server.did_change_mutex.lock().await;
-        let target = (|| {
+        let (target, conservative_svelte_authored_ranges) = (|| {
             let doc = server.documents.get(uri)?;
             let analysis = server.documents.get_analysis(uri);
             let is_svelte = carrier_language_for(&doc.canonical_id)
@@ -311,10 +362,23 @@ impl RenameTargetResolution {
             {
                 target.grant_markup_occurrence_enumeration();
             }
-            Some(target)
+            let conservative_svelte_authored_ranges = (is_svelte
+                && target.class == RenameTargetClass::Native)
+                .then(|| {
+                    conservative_svelte_authored_occurrences(
+                        &doc.source,
+                        &doc.line_index,
+                        target.anchor,
+                    )
+                })
+                .flatten();
+            Some((target, conservative_svelte_authored_ranges))
         })()
-        .unwrap_or_else(RenameTarget::unavailable);
-        Self { target }
+        .unwrap_or_else(|| (RenameTarget::unavailable(), None));
+        Self {
+            target,
+            conservative_svelte_authored_ranges,
+        }
     }
 
     /// Whether Verter's NATIVE CSS surface owns this position. A CSS class/id has
@@ -356,6 +420,12 @@ impl RenameTargetResolution {
     ///   nothing (so a provider-owned result is not suppressed) and vouches for
     ///   nothing (so it cannot license a drop delegation either).
     pub(super) fn same_file_proof(&self) -> SameFileProof {
+        if let Some(ranges) = &self.conservative_svelte_authored_ranges {
+            return SameFileProof::Requires {
+                ranges: ranges.clone(),
+                enumerates_whole_file: true,
+            };
+        }
         let whole_file = matches!(
             self.target.same_file_enumeration,
             SameFileEnumeration::Complete

@@ -180,9 +180,9 @@ fn attempt_outcome_complete_discards_non_complete_variants() {
 
     let terminal: AttemptOutcome<i32> =
         AttemptOutcome::Terminal(AttemptFailure::InputLoadUnavailable {
-            key: InputKey::PackageManifest {
+            key: Box::new(InputKey::PackageManifest {
                 directory: canonical("pkg"),
-            },
+            }),
         });
     assert_eq!(terminal.complete(), None);
 }
