@@ -45,9 +45,6 @@ pub enum FrameworkOption {
 /// Svelte backend reads none of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VueOnlyAxis {
-    /// Vue's explicit scope id. Svelte derives its own CSS hash and
-    /// documents `component_id` as a distinct Vue concept.
-    ComponentId,
     /// The generated types module the Vue TSX projection imports from.
     TypesModuleName,
     /// Vue conditional-root narrowing in the TSX projection.
@@ -257,14 +254,15 @@ impl CompileRequest {
                 // field.
                 return Err(CompileRequestError::InlineSsrUnsupported);
             }
-            // The remaining Vue-only axes, same rule. A bool axis is
-            // "present" only when explicitly true: `false` IS the Svelte
-            // behaviour, so refusing it would reject every default request.
-            if component_id.is_some() {
-                return Err(CompileRequestError::VueOnlyAxisOnSvelteRequest(
-                    VueOnlyAxis::ComponentId,
-                ));
-            }
+            // The IDE-companion axes, same rule. A bool axis is "present"
+            // only when explicitly true: `false` IS the Svelte behaviour, so
+            // refusing it would reject every default request.
+            //
+            // `component_id` is deliberately NOT here. It rides the request's
+            // SHARED identity block, existing Svelte wire payloads set it, and
+            // the Svelte backend does not read it — a real gap, but closing it
+            // changes an accepted wire shape and belongs to a wire decision
+            // rather than to this one.
             for product in &products {
                 let CompileProduct::IdeCompanion(ide) = product else {
                     continue;
@@ -791,24 +789,26 @@ mod tests {
         )
     }
 
+    /// `component_id` rides the request's SHARED identity block, so it stays
+    /// admitted on a Svelte request even though the Svelte backend does not
+    /// read it: existing wire payloads set it, and refusing it changes an
+    /// accepted wire shape — a wire decision, not part of closing the
+    /// IDE-axis gap. Pinned so the exemption reads as a stated boundary
+    /// rather than an oversight.
     #[test]
-    fn svelte_request_refuses_a_vue_component_id() {
-        let err = CompileRequest::new(
+    fn a_svelte_request_still_admits_a_component_id() {
+        CompileRequest::new(
             vec![CompileProduct::RuntimeClient(
                 RuntimeProductRequest::default(),
             )],
             FrameworkCompileRequest::Svelte(SvelteCompileRequest::default()),
             None,
             None,
-            Some("data-v-abc123".to_string()),
+            Some("c-2".to_string()),
             false,
             false,
         )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            CompileRequestError::VueOnlyAxisOnSvelteRequest(VueOnlyAxis::ComponentId)
-        );
+        .expect("the shared identity axis stays admitted on a Svelte request");
     }
 
     #[test]
