@@ -546,6 +546,18 @@ pub(crate) fn extract_component_meta_from_resolved(
     }
     let completeness = crate::request_context::current_cold_compute_completeness();
     extract_scope.discard();
+    // `accepted_surface_completeness` is an EXHAUSTIVENESS claim over the
+    // accepted surface. The fallthrough resolver computes it from root
+    // reachability alone, but the accepted set SUBTRACTS the declared
+    // props/events — so when the surrounding compute is PARTIAL (an
+    // unresolvable props import, a budget-tripped macro read) the declared
+    // surface may be missing members and `Exact` is unsupportable: demote to
+    // the lower-bound claim. A COMPLETE compute keeps the resolver.s claim —
+    // a genuinely props-less component stays `Exact`.
+    if resolved.completeness.is_partial() || completeness.is_partial() {
+        meta.accepted_surface_completeness =
+            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound;
+    }
     ComponentMetaExtractOutcome {
         analysis: meta,
         fallthrough_fact_versions: fallthrough_facts,
@@ -631,6 +643,12 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     );
     let completeness = crate::request_context::current_cold_compute_completeness();
     extract_scope.discard();
+    // Same exhaustiveness demotion as `extract_component_meta_from_resolved`:
+    // a PARTIAL compute cannot support the `Exact` accepted-surface claim.
+    if resolved.completeness.is_partial() || completeness.is_partial() {
+        meta.accepted_surface_completeness =
+            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound;
+    }
     ComponentMetaExtractOutcome {
         analysis: meta,
         fallthrough_fact_versions: fallthrough_facts,

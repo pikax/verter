@@ -1714,9 +1714,9 @@ fn authored_fallback_surface(
     match resolution {
         crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
         | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
-            Some(surface)
+            Some(surface.into_inner())
         }
-        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => None,
+        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => None,
         crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
             incomplete.into_authored_fallback()
         }

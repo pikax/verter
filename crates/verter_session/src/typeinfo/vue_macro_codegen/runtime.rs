@@ -441,9 +441,21 @@ pub(super) fn emit_rows(
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate)
         .with_orthogonal_axes_from(runtime_context);
     for signature in surface.call_signatures.iter() {
-        let Some(names) = CallableNodeView::new(dispatch, signature.node).event_names(context)
-        else {
-            continue;
+        // The runtime `emits: [...]` array is DERIVED from the resolved value,
+        // so an INCOMPLETE name enumeration records its typed reason before
+        // the skip — the projection is then partial, never an option array
+        // that silently dropped authored events. A complete no-name signature
+        // (`NoSurface`) genuinely contributes no event.
+        let names = match CallableNodeView::new(dispatch, signature.node).event_names(context) {
+            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(names)
+            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(names) => {
+                names.into_inner()
+            }
+            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
+            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                let _ = incomplete.into_recorded_partial();
+                continue;
+            }
         };
         for name in names {
             push_emit(

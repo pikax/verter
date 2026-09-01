@@ -104,8 +104,12 @@ pub(crate) fn slots_from_typeinfo_surface(
             // surface that legitimately has no such slot.
             let realized_root = match view.realized_callable_root(context) {
                 crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
-                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => id,
-                crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => return None,
+                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                    id.into_inner()
+                }
+                crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                    return None
+                }
                 crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
                     let _ = incomplete.into_recorded_partial();
                     return None;
@@ -298,7 +302,7 @@ fn binding_fields_from_param_node(
         crate::project_semantic_dispatch::node_data_for(ctx, first_param).as_deref(),
     ) {
         crate::request_context::fold_result_completeness(
-            crate::semantic_query::ResultCompleteness::partial(reasons),
+            crate::semantic_query::ResultCompleteness::partial(reasons.get()),
         );
         return Vec::new();
     }
@@ -326,8 +330,10 @@ fn binding_fields_from_param_node(
         None,
     ) {
         crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
-        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => surface,
-        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => return Vec::new(),
+        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
+            surface.into_inner()
+        }
+        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => return Vec::new(),
         crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
             match incomplete.into_recorded_partial() {
                 Some(surface) => surface,

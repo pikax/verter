@@ -216,7 +216,9 @@ impl VerterHost {
             &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
         >,
     ) -> crate::typeinfo::surface_resolution::SurfaceResolution<TypeInfoSurface> {
-        use crate::typeinfo::surface_resolution::{unresolved_node_partiality, SurfaceResolution};
+        use crate::typeinfo::surface_resolution::{
+            unresolved_node_partiality, NonEmptyReasons, SurfaceResolution,
+        };
         verter_debug_assert_eq!(
             context.mode,
             ProjectionMode::Shallow,
@@ -243,6 +245,36 @@ impl VerterHost {
         // typeinfo path keeps its own projection so an open / multi-branch
         // formula resolves through the presence-only OPEN arm; only a
         // single closed alternative may claim the complete `Resolved` arm.
+        // An UNBOUND generic at the surface ROOT (`<script setup generic="T">
+        // defineProps<T>()`) is an OPEN member domain, not an empty one. The
+        // shared walker synthesises a CLOSED empty object for a bare
+        // `TypeParam` subject, which would make the generic component
+        // byte-identical to a props-less one — so the open domain is handled
+        // HERE, before the walk: the constraint's closed part is the presence
+        // lower bound (`T extends { a: number }` publishes `a`), and an
+        // unconstrained parameter publishes the empty presence floor.
+        // Complete-as-a-RESULT and warm-capable — never a reason-free empty
+        // success, and never a false partial.
+        if path.is_empty() {
+            if let Some(SemanticNodeData::TypeParam { constraint, .. }) =
+                graph.node_data(base).as_deref()
+            {
+                let constraint = *constraint;
+                return match constraint {
+                    Some(constraint) => self
+                        .project_shallow_surface_graph_only(
+                            ctx,
+                            dispatch,
+                            constraint,
+                            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                            context,
+                            walker_diagnostics,
+                        )
+                        .into_open_presence(),
+                    None => SurfaceResolution::open_presence(TypeInfoSurface::empty()),
+                };
+            }
+        }
         let spread_base = if path.is_empty()
             && matches!(
                 graph.node_data(base).as_deref(),
@@ -262,8 +294,16 @@ impl VerterHost {
                 };
                 dispatch.record_dispatch_intent_counters(&key);
                 let surface_read = dispatch.execute_read(key);
+                // Mirror `partial_reason_classes`: a partial read whose
+                // producer captured no specific class is a downstream
+                // PROPAGATED partial — stated here, at the one conversion
+                // site, never normalized inside the claim type.
                 let read_partiality = if surface_read.result_is_partial {
-                    Some(surface_read.partial_reasons)
+                    Some(
+                        NonEmptyReasons::new(surface_read.partial_reasons).unwrap_or_else(|| {
+                            NonEmptyReasons::of(crate::semantic_query::PartialReason::Propagated)
+                        }),
+                    )
                 } else {
                     None
                 };
@@ -272,20 +312,20 @@ impl VerterHost {
                 }
                 match surface_read.value {
                     QueryResult::Value(node) => (node, read_partiality),
-                    QueryResult::Recursive(node) => {
-                        (
-                            node,
-                            Some(read_partiality.unwrap_or_default().union(
-                                crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
-                            )),
-                        )
-                    }
-                    QueryResult::Error(error) => {
-                        return SurfaceResolution::incomplete(
-                            crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(
-                                &error,
+                    QueryResult::Recursive(node) => (
+                        node,
+                        Some(match read_partiality {
+                            Some(reasons) => reasons
+                                .with(crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION),
+                            None => NonEmptyReasons::of(
+                                crate::semantic_query::PartialReason::SamePathRecursion,
                             ),
-                        );
+                        }),
+                    ),
+                    QueryResult::Error(error) => {
+                        return SurfaceResolution::incomplete(NonEmptyReasons::from_query_error(
+                            &error,
+                        ));
                     }
                 }
             }
@@ -297,12 +337,9 @@ impl VerterHost {
             // subset but is INCOMPLETE with the read's typed reasons:
             // omission is not absence evidence, and the subset never passes
             // as the complete surface.
-            Some(SemanticNodeData::Object(view)) => match read_partiality {
-                None => SurfaceResolution::Resolved(TypeInfoSurface::build(graph, view)),
-                Some(reasons) => {
-                    SurfaceResolution::incomplete_with(reasons, TypeInfoSurface::build(graph, view))
-                }
-            },
+            Some(SemanticNodeData::Object(view)) => {
+                SurfaceResolution::resolved(TypeInfoSurface::build(graph, view))
+            }
             // Open carrier terminal (the walker's open-safe policy returns
             // the compound node when any nested open program contributed):
             // recurse the branches with the shared presence-only read —
@@ -323,16 +360,14 @@ impl VerterHost {
                 ) {
                     QueryResult::Value(formula) => formula,
                     QueryResult::Recursive(_) => {
-                        return SurfaceResolution::incomplete(
-                            crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
-                        );
+                        return SurfaceResolution::incomplete(NonEmptyReasons::of(
+                            crate::semantic_query::PartialReason::SamePathRecursion,
+                        ));
                     }
                     QueryResult::Error(error) => {
-                        return SurfaceResolution::incomplete(
-                            crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(
-                                &error,
-                            ),
-                        );
+                        return SurfaceResolution::incomplete(NonEmptyReasons::from_query_error(
+                            &error,
+                        ));
                     }
                 };
                 let mut canonical_evidence =
@@ -346,6 +381,30 @@ impl VerterHost {
                 dispatch.deposit_canonical_evidence(canonical_evidence);
                 surface
             }
+            // An UNBOUND generic at the surface ROOT (`<script setup
+            // generic="T"> defineProps<T>()`) is an OPEN member domain, not an
+            // empty one: the constraint's closed part is the presence lower
+            // bound (`T extends { a: number }` publishes `a`), and an
+            // unconstrained parameter publishes the empty presence floor.
+            // Complete-as-a-RESULT and warm-capable — never a reason-free
+            // "no such surface" that makes the generic component
+            // byte-identical to a props-less one, and never a false partial.
+            Some(SemanticNodeData::TypeParam { constraint, .. }) => {
+                let constraint = *constraint;
+                match constraint {
+                    Some(constraint) => self
+                        .project_shallow_surface_graph_only(
+                            ctx,
+                            dispatch,
+                            constraint,
+                            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                            context,
+                            None,
+                        )
+                        .into_open_presence(),
+                    None => SurfaceResolution::open_presence(TypeInfoSurface::empty()),
+                }
+            }
             // The terminal is an UNRESOLVED carrier (a missed hop's
             // `Opaque(Miss)`, an unresolved import's `BareRef`, a raw
             // fallback, a missing arena node): the resolution could not
@@ -354,14 +413,32 @@ impl VerterHost {
             // function) genuinely has no one-level object surface.
             other => match unresolved_node_partiality(other) {
                 Some(reasons) => SurfaceResolution::incomplete(reasons),
-                None => SurfaceResolution::NoSurface,
+                None => SurfaceResolution::no_surface(),
             },
         };
-        // The Object arm above folded the read's typed partiality into its
-        // claim; the open-presence and no-surface arms carry their own
-        // classification (an open program's walker flag is open EVIDENCE,
-        // not an operational failure — the read rails still carry any
-        // genuine read partiality to the request scope).
-        resolution
+        // EVERY arm folds the read.s typed partiality into its returned
+        // claim: a producer that observed a partial read can never hand
+        // onward a reason-free complete/warm claim, whichever shape the
+        // terminal took. With no read partiality this is the identity.
+        // EVERY arm folds the read's typed partiality into its returned
+        // claim, with ONE discrimination on the OPEN arm: the walker's
+        // open-program flag rides the read as the class-less `PROPAGATED`
+        // bridge — open EVIDENCE, not an operational failure. The
+        // `OpenPresence` claim itself carries that openness (omission is
+        // not absence evidence), and the read rails still carry the flag
+        // to the request scope, so a pure-`PROPAGATED` partial keeps the
+        // presence-only claim. Any CLASSED partial (budget / missing
+        // dependency / cancellation / recursion / …) demotes the claim on
+        // every arm — a producer that observed a classed partial read can
+        // never hand onward a reason-free complete/warm claim.
+        let read_partiality = match (&resolution, read_partiality) {
+            (SurfaceResolution::OpenPresence(_), Some(reasons)) => NonEmptyReasons::new(
+                reasons
+                    .get()
+                    .without(crate::semantic_query::PartialReasonSet::PROPAGATED),
+            ),
+            (_, other) => other,
+        };
+        resolution.with_read_partiality(read_partiality)
     }
 }

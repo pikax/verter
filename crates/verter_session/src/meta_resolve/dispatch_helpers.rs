@@ -113,16 +113,20 @@ fn realize_callable_member_inner(
 ) -> crate::typeinfo::surface_resolution::SurfaceResolution<crate::semantic_query::SemanticNodeId> {
     use crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts;
     use crate::semantic_query::{
-        PartialReasonSet, ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey,
+        PartialReason, ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey,
         SemanticNodeData, SemanticQueryKey,
     };
-    use crate::typeinfo::surface_resolution::SurfaceResolution;
+    use crate::typeinfo::surface_resolution::{NonEmptyReasons, SurfaceResolution};
 
     if depth > 32 {
-        return SurfaceResolution::incomplete(PartialReasonSet::PROJECTION_WORK_LIMIT);
+        return SurfaceResolution::incomplete(NonEmptyReasons::of(
+            PartialReason::ProjectionWorkLimit,
+        ));
     }
     let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
-        return SurfaceResolution::incomplete(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
+        return SurfaceResolution::incomplete(NonEmptyReasons::of(
+            PartialReason::MissingSemanticNodeData,
+        ));
     };
     match data.as_ref() {
         // (1) A CALL signature — the realized callable. Return verbatim.
@@ -131,7 +135,7 @@ fn realize_callable_member_inner(
         SemanticNodeData::Signature {
             kind: crate::semantic_query::SignatureKind::Call,
             ..
-        } => SurfaceResolution::Resolved(node),
+        } => SurfaceResolution::resolved(node),
 
         // (2) Alias → recurse on inner.
         SemanticNodeData::Alias(inner) => {
@@ -176,16 +180,16 @@ fn realize_callable_member_inner(
                 // (not decidable) — nothing further to realize; the
                 // undecided conditional is a complete "not a callable
                 // surface" answer.
-                QueryResult::Value(_) => return SurfaceResolution::NoSurface,
+                QueryResult::Value(_) => return SurfaceResolution::no_surface(),
                 QueryResult::Recursive(_) => {
-                    return SurfaceResolution::incomplete(PartialReasonSet::SAME_PATH_RECURSION);
+                    return SurfaceResolution::incomplete(NonEmptyReasons::of(
+                        PartialReason::SamePathRecursion,
+                    ));
                 }
                 QueryResult::Error(error) => {
-                    return SurfaceResolution::incomplete(
-                        crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(
-                            &error,
-                        ),
-                    );
+                    return SurfaceResolution::incomplete(NonEmptyReasons::from_query_error(
+                        &error,
+                    ));
                 }
             };
             realize_callable_member_inner(dispatch, reduced, context, depth + 1)
@@ -218,14 +222,14 @@ fn realize_callable_member_inner(
             let body = match read.value {
                 QueryResult::Value(id) => id,
                 QueryResult::Recursive(_) => {
-                    return SurfaceResolution::incomplete(PartialReasonSet::SAME_PATH_RECURSION);
+                    return SurfaceResolution::incomplete(NonEmptyReasons::of(
+                        PartialReason::SamePathRecursion,
+                    ));
                 }
                 QueryResult::Error(error) => {
-                    return SurfaceResolution::incomplete(
-                        crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(
-                            &error,
-                        ),
-                    );
+                    return SurfaceResolution::incomplete(NonEmptyReasons::from_query_error(
+                        &error,
+                    ));
                 }
             };
             realize_callable_member_inner(dispatch, body, context, depth + 1)
@@ -256,14 +260,14 @@ fn realize_callable_member_inner(
             let resolved = match read.value {
                 QueryResult::Value(id) => id,
                 QueryResult::Recursive(_) => {
-                    return SurfaceResolution::incomplete(PartialReasonSet::SAME_PATH_RECURSION);
+                    return SurfaceResolution::incomplete(NonEmptyReasons::of(
+                        PartialReason::SamePathRecursion,
+                    ));
                 }
                 QueryResult::Error(error) => {
-                    return SurfaceResolution::incomplete(
-                        crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(
-                            &error,
-                        ),
-                    );
+                    return SurfaceResolution::incomplete(NonEmptyReasons::from_query_error(
+                        &error,
+                    ));
                 }
             };
             realize_callable_member_inner(dispatch, resolved, context, depth + 1)
@@ -309,17 +313,19 @@ fn realize_callable_member_inner(
                 // the placeholder unchanged: an UNRESOLVED declaration — an
                 // incomplete realization, never a silent "not callable".
                 QueryResult::Value(_) => {
-                    return SurfaceResolution::incomplete(PartialReasonSet::MISSING_DEPENDENCY);
+                    return SurfaceResolution::incomplete(NonEmptyReasons::of(
+                        PartialReason::MissingDependency,
+                    ));
                 }
                 QueryResult::Recursive(_) => {
-                    return SurfaceResolution::incomplete(PartialReasonSet::SAME_PATH_RECURSION);
+                    return SurfaceResolution::incomplete(NonEmptyReasons::of(
+                        PartialReason::SamePathRecursion,
+                    ));
                 }
                 QueryResult::Error(error) => {
-                    return SurfaceResolution::incomplete(
-                        crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(
-                            &error,
-                        ),
-                    );
+                    return SurfaceResolution::incomplete(NonEmptyReasons::from_query_error(
+                        &error,
+                    ));
                 }
             };
             realize_callable_member_inner(dispatch, body, context, depth + 1)
@@ -346,10 +352,12 @@ fn realize_callable_member_inner(
             for arm in arms.iter() {
                 let realized =
                     match realize_callable_member_inner(dispatch, *arm, context, depth + 1) {
-                        SurfaceResolution::Resolved(id) | SurfaceResolution::OpenPresence(id) => id,
+                        SurfaceResolution::Resolved(id) | SurfaceResolution::OpenPresence(id) => {
+                            id.into_inner()
+                        }
                         // A non-callable arm makes the whole composite not
                         // slot-callable — the complete negative answer.
-                        SurfaceResolution::NoSurface => return SurfaceResolution::NoSurface,
+                        SurfaceResolution::NoSurface(_) => return SurfaceResolution::no_surface(),
                         // An UNRESOLVED arm makes the whole composite
                         // incomplete with the arm's typed reason.
                         incomplete @ SurfaceResolution::Incomplete(_) => return incomplete,
@@ -357,12 +365,12 @@ fn realize_callable_member_inner(
                 realized_arms.push(realized);
             }
             if realized_arms.is_empty() {
-                return SurfaceResolution::NoSurface;
+                return SurfaceResolution::no_surface();
             }
             // If realization left every arm unchanged, return the original node
             // (avoid interning an identical composite).
             if realized_arms.iter().zip(arms.iter()).all(|(a, b)| a == b) {
-                return SurfaceResolution::Resolved(node);
+                return SurfaceResolution::resolved(node);
             }
             // Carrier-semantics dispatch on the original composite's
             // at-rest origin category: realizing a canonical/authored
@@ -373,7 +381,7 @@ fn realize_callable_member_inner(
             // intersection whose realized arms may carry call signatures
             // — keeps its verbatim order- and arity-preserving rebuild.
             if dispatch.composite_rebuild_re_decides(category, &realized_arms, is_union) {
-                return SurfaceResolution::Resolved(
+                return SurfaceResolution::resolved(
                     dispatch.intern_normalized_union_or_intersection(&realized_arms, is_union),
                 );
             }
@@ -388,7 +396,7 @@ fn realize_callable_member_inner(
                     crate::semantic_query::composite::CompositeList::preserving_rebuild(realized),
                 )
             };
-            SurfaceResolution::Resolved(
+            SurfaceResolution::resolved(
                 dispatch
                     .ctx
                     .project_type_store()
@@ -410,7 +418,7 @@ fn realize_callable_member_inner(
             Some(other),
         ) {
             Some(reasons) => SurfaceResolution::incomplete(reasons),
-            None => SurfaceResolution::NoSurface,
+            None => SurfaceResolution::no_surface(),
         },
     }
 }

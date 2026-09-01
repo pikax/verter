@@ -2799,6 +2799,283 @@ defineProps<Known | Extra>()
     );
 }
 
+/// PUBLIC BOUNDARY — a call-signature `defineEmits` whose EVENT-NAME position
+/// cannot be fully enumerated never publishes the emit surface as COMPLETE and
+/// never warms. Two spellings of the same drop:
+///
+/// 1. the event-name parameter typed by an unresolvable import — the whole
+///    name enumeration fails;
+/// 2. a union name position with one authored RESOLVABLE literal beside an
+///    unresolvable arm — fail-closed-whole still refuses the enumeration, but
+///    the refusal must be a typed partial: the authored `'a'` contributor is
+///    dropped, which is only sound when the result says it is incomplete.
+///
+/// The SAME unresolvable import on the props lane fails closed; the emit lane
+/// must not be the one producer that spells the identical failure as an empty
+/// complete surface.
+///
+/// CONTROL: a resolvable literal event name publishes, stays COMPLETE, and
+/// WARMS.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_unresolvable_emit_event_name_never_publishes_complete_or_warm() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    // 1. The whole name position behind an unresolvable import.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/EmitNameMissing.vue",
+            r#"<script setup lang="ts">
+import type { E } from './missing'
+defineEmits<{ (e: E, v: number): void }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let _ = get_meta(&project, "/src/EmitNameMissing.vue");
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/EmitNameMissing.vue")
+        .expect("the resolve must still return metadata");
+    assert!(
+        resolved.synthesis_should_suppress,
+        "an emit surface whose event-name position is unresolvable must NOT \
+         report COMPLETE — the empty emit set is a failed enumeration, not an \
+         authored empty surface"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/EmitNameMissing.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "an unresolvable emit event-name surface must NOT warm"
+    );
+
+    // 2. A resolvable authored literal beside an unresolvable union arm: the
+    // fail-closed-whole enumeration drops the authored `'a'`, so the result
+    // must say PARTIAL — never complete-and-warm.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/EmitNameUnionMissing.vue",
+            r#"<script setup lang="ts">
+import type { Unknown1 } from './missing'
+defineEmits<{ (e: 'a' | Unknown1, v: number): void }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let _ = get_meta(&project, "/src/EmitNameUnionMissing.vue");
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/EmitNameUnionMissing.vue")
+        .expect("the resolve must still return metadata");
+    assert!(
+        resolved.synthesis_should_suppress,
+        "dropping the authored resolvable 'a' over an unresolvable union arm \
+         must publish a typed PARTIAL, never an empty complete emit set"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/EmitNameUnionMissing.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a partially-enumerable emit name union must NOT warm"
+    );
+
+    // CONTROL: the resolvable literal name publishes complete and warms.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/EmitNameOk.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ (e: 'save', v: number): void }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/EmitNameOk.vue");
+    assert!(
+        meta.events.iter().any(|event| event.name == "save"),
+        "the control publishes the authored 'save' event; got {:?}",
+        meta.events.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/EmitNameOk.vue")
+        .expect("the control resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the resolvable-name control is COMPLETE"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/EmitNameOk.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(hits_after, hits_before + 1, "the control WARMS on replay");
+}
+
+/// PUBLIC BOUNDARY — an SFC-generic props payload (`<script setup
+/// generic="T"> defineProps<T>()`) is an OPEN member domain, not a complete
+/// empty surface: the constraint's closed part publishes as the presence
+/// lower bound, and the surface stays warm-capable (an open domain is a
+/// complete RESULT — never a false partial).
+///
+/// The constrained arm is the public discrimination: `T extends { a: number }`
+/// must publish the `a` prop rather than an empty exact surface.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_sfc_generic_props_payload_publishes_its_constraint_lower_bound() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/GenericConstrained.vue",
+            r#"<script setup lang="ts" generic="T extends { a: number }">
+defineProps<T>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/GenericConstrained.vue");
+    assert!(
+        meta.props.iter().any(|prop| prop.name == "a"),
+        "the constraint's closed member `a` is the props lower bound; got {:?}",
+        meta.props.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/GenericConstrained.vue")
+        .expect("the resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "an open generic payload is a complete open RESULT, never a false partial"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/GenericConstrained.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after,
+        hits_before + 1,
+        "an open generic payload stays warm-capable"
+    );
+
+    // The UNCONSTRAINED arm: zero members is the honest presence floor of an
+    // open domain — still not a partial, still warm-capable.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/GenericBare.vue",
+            r#"<script setup lang="ts" generic="T">
+defineProps<T>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/GenericBare.vue");
+    assert!(
+        meta.props.is_empty(),
+        "an unconstrained generic payload has no closed lower-bound members"
+    );
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/GenericBare.vue")
+        .expect("the resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the unconstrained open domain is a complete open RESULT"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/GenericBare.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after,
+        hits_before + 1,
+        "the open floor stays warm-capable"
+    );
+}
+
+/// PUBLIC BOUNDARY — `accepted_surface_completeness` is an EXHAUSTIVENESS
+/// claim over the accepted surface. A component whose own props resolution is
+/// PARTIAL (an unresolvable props import) cannot claim `Exact`: the accepted
+/// set was computed against a props surface that may be missing members, so
+/// the claim demotes to `LowerBound`.
+///
+/// CONTROL: a genuinely props-less component keeps `Exact` — the whole point
+/// of the demotion is that it fires on partial COMPUTE, not on emptiness.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_partial_props_resolution_demotes_accepted_surface_exactness() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/AcceptedMissing.vue",
+            r#"<script setup lang="ts">
+import type { P } from './missing'
+defineProps<P>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let meta = get_meta(&project, "/src/AcceptedMissing.vue");
+    assert_eq!(
+        meta.accepted_surface_completeness,
+        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound,
+        "a partial props resolution must demote the accepted-surface claim: \
+         `Exact` says every accepted member is known, and the declared props \
+         that would subtract from the accepted set are unknown"
+    );
+
+    // CONTROL: props-less component — the empty declared surface is COMPLETE
+    // and the accepted claim stays Exact.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/AcceptedPropless.vue",
+            r#"<script setup lang="ts">
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let meta = get_meta(&project, "/src/AcceptedPropless.vue");
+    assert_eq!(
+        meta.accepted_surface_completeness,
+        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+        "a genuinely props-less component keeps the Exact accepted claim"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn one_unmodeled_member_marks_its_prop_and_the_props_surface_survives() {

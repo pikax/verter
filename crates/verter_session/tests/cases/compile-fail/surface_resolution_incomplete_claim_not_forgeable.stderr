@@ -1,9 +1,40 @@
-error[E0451]: fields `reason` and `partial` of struct `IncompleteSurface` are private
-  --> tests/cases/compile-fail/surface_resolution_incomplete_claim_not_forgeable.rs:14:9
+warning: unreachable expression
+  --> tests/cases/compile-fail/surface_resolution_incomplete_claim_not_forgeable.rs:25:18
    |
-13 |     let _forged: IncompleteSurface<Vec<u8>> = IncompleteSurface {
+24 |         reason: todo!(),
+   |                 ------- any code following this expression is unreachable
+25 |         partial: None,
+   |                  ^^^^ unreachable expression
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable expression
+  --> tests/cases/compile-fail/surface_resolution_incomplete_claim_not_forgeable.rs:27:47
+   |
+27 |       let _forged_witness: Witnessed<Vec<u8>> = Witnessed {
+   |  _______________________________________________^
+28 | |         value: Vec::new(),
+29 | |         _proof: todo!(),
+   | |                 ------- any code following this expression is unreachable
+30 | |     };
+   | |_____^ unreachable expression
+
+error[E0451]: fields `reason` and `partial` of struct `IncompleteSurface` are private
+  --> tests/cases/compile-fail/surface_resolution_incomplete_claim_not_forgeable.rs:24:9
+   |
+23 |     let _forged: IncompleteSurface<Vec<u8>> = IncompleteSurface {
    |                                               ----------------- in this type
-14 |         reason: PartialReasonSet::empty(),
+24 |         reason: todo!(),
    |         ^^^^^^ private field
-15 |         partial: None,
+25 |         partial: None,
    |         ^^^^^^^ private field
+
+error[E0451]: fields `value` and `_proof` of struct `Witnessed` are private
+  --> tests/cases/compile-fail/surface_resolution_incomplete_claim_not_forgeable.rs:28:9
+   |
+27 |     let _forged_witness: Witnessed<Vec<u8>> = Witnessed {
+   |                                               --------- in this type
+28 |         value: Vec::new(),
+   |         ^^^^^ private field
+29 |         _proof: todo!(),
+   |         ^^^^^^ private field

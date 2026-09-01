@@ -1,32 +1,70 @@
 error[E0599]: no method named `unwrap_or_default` found for enum `SurfaceResolution<T>` in the current scope
-  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:23:69
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:31:13
    |
-23 |     let _escaped: Vec<u8> = SurfaceResolution::<Vec<u8>>::NoSurface.unwrap_or_default();
-   |                                                                     ^^^^^^^^^^^^^^^^^ method not found in `SurfaceResolution<Vec<u8>>`
+31 |     outcome.unwrap_or_default()
+   |             ^^^^^^^^^^^^^^^^^ method not found in `SurfaceResolution<Vec<u8>>`
 
 error[E0277]: the trait bound `SurfaceResolution<Vec<u8>>: std::default::Default` is not satisfied
-  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:22:50
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:35:50
    |
-22 |     let _defaulted: SurfaceResolution<Vec<u8>> = Default::default();
+35 |     let _defaulted: SurfaceResolution<Vec<u8>> = Default::default();
    |                                                  ^^^^^^^^^^^^^^^^^^ the trait `std::default::Default` is not implemented for `SurfaceResolution<Vec<u8>>`
 
 error[E0624]: associated function `incomplete` is private
-  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:24:66
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:36:66
    |
-24 |     let _minted: SurfaceResolution<Vec<u8>> = SurfaceResolution::incomplete(todo!());
+36 |     let _minted: SurfaceResolution<Vec<u8>> = SurfaceResolution::incomplete(todo!());
    |                                                                  ^^^^^^^^^^ private associated function
    |
   ::: src/typeinfo/surface_resolution.rs
    |
-   |     pub(crate) fn incomplete(reason: PartialReasonSet) -> Self {
-   |     ---------------------------------------------------------- private associated function defined here
+   |     pub(crate) fn incomplete(reason: NonEmptyReasons) -> Self {
+   |     --------------------------------------------------------- private associated function defined here
 
 warning: unreachable call
-  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:24:47
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:36:47
    |
-24 |     let _minted: SurfaceResolution<Vec<u8>> = SurfaceResolution::incomplete(todo!());
+36 |     let _minted: SurfaceResolution<Vec<u8>> = SurfaceResolution::incomplete(todo!());
    |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
    |                                               |
    |                                               unreachable call
    |
    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0308]: mismatched types
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:38:37
+   |
+38 |         SurfaceResolution::Resolved(TypeInfoSurface::empty());
+   |         --------------------------- ^^^^^^^^^^^^^^^^^^^^^^^^ expected `Witnessed<TypeInfoSurface>`, found `TypeInfoSurface`
+   |         |
+   |         arguments to this enum variant are incorrect
+   |
+   = note: expected struct `Witnessed<TypeInfoSurface>`
+              found struct `TypeInfoSurface`
+note: tuple variant defined here
+  --> src/typeinfo/surface_resolution.rs
+   |
+   |     Resolved(Witnessed<T>),
+   |     ^^^^^^^^
+
+error[E0624]: associated function `resolved` is private
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:40:28
+   |
+40 |         SurfaceResolution::resolved(TypeInfoSurface::empty());
+   |                            ^^^^^^^^ private associated function
+   |
+  ::: src/typeinfo/surface_resolution.rs
+   |
+   |     pub(crate) fn resolved(value: T) -> Self {
+   |     ---------------------------------------- private associated function defined here
+
+error[E0624]: associated function `no_surface` is private
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:41:85
+   |
+41 |     let _sealed_no_surface: SurfaceResolution<TypeInfoSurface> = SurfaceResolution::no_surface();
+   |                                                                                     ^^^^^^^^^^ private associated function
+   |
+  ::: src/typeinfo/surface_resolution.rs
+   |
+   |     pub(crate) fn no_surface() -> Self {
+   |     ---------------------------------- private associated function defined here

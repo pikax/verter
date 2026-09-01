@@ -7894,7 +7894,7 @@ defineEmits<ConditionalEmits>()
         PayloadSurfaceScope::EmitClassMacroObject,
         &mut diag_sink,
     );
-    let surface = surface.expect(
+    let surface = surface.resolved_for_tests().expect(
         "the emits branch-merge must resolve the aliased-conditional \
          payload surface by following the DeclRef carrier to the Conditional root",
     );
@@ -8045,10 +8045,10 @@ fn emit_branch_merge_with_one_unresolvable_branch_records_partiality() {
             PayloadSurfaceScope::EmitClassMacroObject,
             &mut diag_sink,
         );
-        let completeness = crate::request_context::current_cold_compute_completeness();
-        drop(scope);
-        let reasons = completeness.reasons();
-        let names = surface.map(|surface| {
+        // Discharge the typed outcome FIRST: an incomplete claim records its
+        // reasons into the active scope at the discharge, not as a producer
+        // side effect.
+        let names = surface.recorded().map(|surface| {
             crate::meta_resolve::projectors::read_positive_surface_members(host, surface)
                 .resolved_for_tests()
                 .unwrap_or_default()
@@ -8056,6 +8056,9 @@ fn emit_branch_merge_with_one_unresolvable_branch_records_partiality() {
                 .filter_map(|m| m.string_name().map(|n| n.to_string()))
                 .collect::<Vec<_>>()
         });
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        drop(scope);
+        let reasons = completeness.reasons();
         (names, completeness.is_partial(), reasons)
     };
 
@@ -8196,6 +8199,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
         PayloadSurfaceScope::EmitClassMacroObject,
         &mut diag_sink,
     )
+    .resolved_for_tests()
     .expect("the open-branch merge still returns a surface");
     assert_eq!(
         surface,
@@ -8344,7 +8348,7 @@ defineEmits<EmitChain0>()
         PayloadSurfaceScope::EmitClassMacroObject,
         &mut diag_sink,
     );
-    let surface = surface.expect(
+    let surface = surface.resolved_for_tests().expect(
         "long-chain branch-merge must follow the >8-hop DeclRef carrier chain \
          to the Conditional root — identity-bounded termination reaches it; the \
          retired depth-8 cap returned None before hop 12 and lost the merge",

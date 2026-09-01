@@ -417,10 +417,12 @@ impl TypeInfoSurface {
             if let Some(closed) = only.closed() {
                 let Some(view) = closed.to_closed_surface_view() else {
                     return crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(
-                        crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
+                        crate::typeinfo::surface_resolution::NonEmptyReasons::of(
+                            crate::semantic_query::PartialReason::SemanticQueryFault,
+                        ),
                     );
                 };
-                return crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(
+                return crate::typeinfo::surface_resolution::SurfaceResolution::resolved(
                     Self::build(graph, &view),
                 );
             }
@@ -566,7 +568,7 @@ impl TypeInfoSurface {
             })
             .collect();
         let has_index_signature = !index_signatures.is_empty();
-        crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(
+        crate::typeinfo::surface_resolution::SurfaceResolution::open_presence(
             Self::from_ordered_entries(
                 members
                     .into_iter()

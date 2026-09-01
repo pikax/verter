@@ -958,7 +958,9 @@ pub(crate) fn navigate_param_to_object_surface(
         .map(|raised| raised.node())
     else {
         return crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(
-            crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+            crate::typeinfo::surface_resolution::NonEmptyReasons::of(
+                crate::semantic_query::PartialReason::MissingDependency,
+            ),
         );
     };
     // Open-generic gate: a slot-param root that is symbolic-only (an open
@@ -982,7 +984,7 @@ pub(crate) fn navigate_param_to_object_surface(
     {
         // The open-generic gate DECLINES a committed surface by design — a
         // complete negative answer, not a failure.
-        return crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface;
+        return crate::typeinfo::surface_resolution::SurfaceResolution::no_surface();
     }
     ctx.host_for_fact_tracer_install()
         .project_shallow_surface_from_base(

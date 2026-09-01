@@ -567,7 +567,7 @@ fn event_names_single_string_literal() {
 
     let view = CallableNodeView::new(&dispatch, f);
     assert_eq!(
-        view.event_names(navigate()),
+        view.event_names(navigate()).resolved_for_tests(),
         Some(vec![Arc::<str>::from("click")]),
         "a single string-literal first param yields one event name"
     );
@@ -587,7 +587,7 @@ fn event_names_union_of_string_literals() {
 
     let view = CallableNodeView::new(&dispatch, f);
     assert_eq!(
-        view.event_names(navigate()),
+        view.event_names(navigate()).resolved_for_tests(),
         Some(vec![Arc::<str>::from("save"), Arc::<str>::from("cancel")]),
         "a union of string-literal first params yields each event name in order"
     );
@@ -605,7 +605,7 @@ fn event_names_non_literal_first_param_is_none() {
 
     let view = CallableNodeView::new(&dispatch, f);
     assert_eq!(
-        view.event_names(navigate()),
+        view.event_names(navigate()).resolved_for_tests(),
         None,
         "a non-literal (string) first param yields no event names"
     );
@@ -622,7 +622,7 @@ fn event_names_no_params_is_none() {
 
     let view = CallableNodeView::new(&dispatch, f);
     assert_eq!(
-        view.event_names(navigate()),
+        view.event_names(navigate()).resolved_for_tests(),
         None,
         "a no-param callable declares no event names"
     );
@@ -1761,19 +1761,25 @@ fn event_names_resolves_declref_and_instantiationref_event_unions() {
 
     // DeclRef-aliased event-name union → its names.
     assert_eq!(
-        CallableNodeView::new(&dispatch, member("onsave")).event_names(navigate()),
+        CallableNodeView::new(&dispatch, member("onsave"))
+            .event_names(navigate())
+            .resolved_for_tests(),
         Some(vec![Arc::<str>::from("save"), Arc::<str>::from("cancel")]),
         "a `DeclRef`-aliased event-name union resolves to its names"
     );
     // InstantiationRef-instantiated event-name union → its names.
     assert_eq!(
-        CallableNodeView::new(&dispatch, member("ongen")).event_names(navigate()),
+        CallableNodeView::new(&dispatch, member("ongen"))
+            .event_names(navigate())
+            .resolved_for_tests(),
         Some(vec![Arc::<str>::from("x"), Arc::<str>::from("y")]),
         "a generic-instantiated (`InstantiationRef`) event-name union resolves to its names"
     );
     // A non-literal first param surfaces no names (fail-closed).
     assert_eq!(
-        CallableNodeView::new(&dispatch, member("onplain")).event_names(navigate()),
+        CallableNodeView::new(&dispatch, member("onplain"))
+            .event_names(navigate())
+            .resolved_for_tests(),
         None,
         "a non-literal (`string`) first param yields no event names"
     );
@@ -2650,7 +2656,7 @@ fn event_names_direct_self_reference_terminates_complete() {
         .value;
 
     assert_eq!(
-        CallableNodeView::new(&dispatch, onself).event_names(navigate()),
+        CallableNodeView::new(&dispatch, onself).event_names(navigate()).resolved_for_tests(),
         Some(vec![Arc::<str>::from("x")]),
         "a direct self-referential union is bounded by the resolver's `Opaque(RecursiveRef)` carrier-stop and enumerates the COMPLETE literal set `[\"x\"]`"
     );
@@ -2721,7 +2727,7 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
     };
 
     assert_eq!(
-        CallableNodeView::new(&dispatch, member("onmut")).event_names(navigate()),
+        CallableNodeView::new(&dispatch, member("onmut")).event_names(navigate()).resolved_for_tests(),
         None,
         "a genuine mutual cycle (`A` references `B`, `B` references `A`) re-yields the same union node on the back-edge → the active-path visited set fails the WHOLE enumeration (not a partial `Some([\"a\", \"b\"])`, not a stack overflow)"
     );
@@ -2748,7 +2754,7 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
     // sub-fuse chain is never truncated). It pins the active-path removed-on-
     // unwind semantics this one cannot.
     assert_eq!(
-        CallableNodeView::new(&dispatch, member("onack")).event_names(navigate()),
+        CallableNodeView::new(&dispatch, member("onack")).event_names(navigate()).resolved_for_tests(),
         Some(vec![
             Arc::<str>::from("ack0"),
             Arc::<str>::from("ack1"),
@@ -2792,7 +2798,7 @@ fn event_names_over_deep_nested_union_trips_collect_fuse() {
         void,
     );
     assert_eq!(
-        CallableNodeView::new(&dispatch, f).event_names(navigate()),
+        CallableNodeView::new(&dispatch, f).event_names(navigate()).resolved_for_tests(),
         None,
         "a fuse trip on ANY arm fails the WHOLE enumeration — never a partial `Some([\"present\"])`"
     );
@@ -2811,7 +2817,9 @@ fn event_names_over_deep_nested_union_trips_collect_fuse() {
         void,
     );
     assert_eq!(
-        CallableNodeView::new(&dispatch, f2).event_names(navigate()),
+        CallableNodeView::new(&dispatch, f2)
+            .event_names(navigate())
+            .resolved_for_tests(),
         Some(vec![Arc::<str>::from("shallow")]),
         "a shallowly-nested union (under the fuse) still surfaces the literal"
     );
@@ -2851,6 +2859,7 @@ fn event_names_finite_deep_dag_union_enumerates_completely() {
 
     let names = CallableNodeView::new(&dispatch, f)
         .event_names(navigate())
+        .resolved_for_tests()
         .expect(
             "a finite deep DAG union enumerates completely (no false cycle, no fuse truncation)",
         );
@@ -2930,7 +2939,7 @@ fn event_names_residual_carrier_arm_fails_whole_not_partial() {
         void,
     );
     assert_eq!(
-        CallableNodeView::new(&dispatch, f).event_names(navigate()),
+        CallableNodeView::new(&dispatch, f).event_names(navigate()).resolved_for_tests(),
         None,
         "`'present' | <unresolvable residual carrier>` fails the WHOLE enumeration (the carrier could hide a literal) — NEVER a partial `Some([\"present\"])`"
     );
@@ -2961,7 +2970,7 @@ fn event_names_concrete_non_literal_arm_is_skipped_not_failed() {
         void,
     );
     assert_eq!(
-        CallableNodeView::new(&dispatch, f).event_names(navigate()),
+        CallableNodeView::new(&dispatch, f).event_names(navigate()).resolved_for_tests(),
         Some(vec![Arc::<str>::from("a")]),
         "a concrete non-literal arm (`number`) is SKIPPED (complete-no-name), not fail-closed — `'a' | number` yields `[\"a\"]`"
     );
@@ -3003,7 +3012,7 @@ fn event_names_constructor_type_arm_is_skipped_not_failed() {
         void,
     );
     assert_eq!(
-        CallableNodeView::new(&dispatch, f).event_names(navigate()),
+        CallableNodeView::new(&dispatch, f).event_names(navigate()).resolved_for_tests(),
         Some(vec![Arc::<str>::from("a")]),
         "a construct `Signature` (`new () => X`) arm is SKIPPED (complete-no-name), exactly like a call signature — `'a' | (new () => X)` yields `[\"a\"]`, never fail-closed `None`"
     );

@@ -572,6 +572,7 @@ fn resolve_runes_props(
     let (mut fields, prop_origins) = match surface {
         crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
         | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
+            let surface = surface.into_inner();
             let prop_origins = prop_origins_from_surface(owner, &surface);
             let dispatch = ctx.dispatch();
             let callable_roles = surface
@@ -610,7 +611,7 @@ fn resolve_runes_props(
         // A props type that RESOLVES to no object surface (a primitive /
         // open generic) still establishes a PRESENT props surface —
         // supported-empty, never a Missing.
-        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => {
+        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
             (Vec::new(), Vec::new())
         }
         // An UNRESOLVABLE `$props()` type is NOT a supported-empty surface:

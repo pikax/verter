@@ -683,9 +683,9 @@ impl ExecutorResolveCtx<'_> {
         ) {
             crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
             | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
-                ResolvedOutcome::Resolved(surface)
+                ResolvedOutcome::Resolved(surface.into_inner())
             }
-            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => {
+            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
                 ResolvedOutcome::Missing
             }
             // A failed projection is PARTIAL on the wire — its typed reason is

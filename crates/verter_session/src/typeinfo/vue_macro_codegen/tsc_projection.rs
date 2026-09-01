@@ -1242,8 +1242,24 @@ pub(super) fn tsc_emit_rows(
 
     for signature in surface.call_signatures.iter() {
         let callable = CallableNodeView::new(dispatch, signature.node);
-        let Some(names) = callable.event_names(context) else {
-            continue;
+        // The TSC projection splices the AUTHORED declaration for an external
+        // checker — the parser-anchored `mac.emit_fields` loop below carries
+        // the authored rows regardless of resolution, so an INCOMPLETE name
+        // enumeration takes the named authored-fallback discharge (no resolved
+        // surface is published from this lane, hence no completeness claim to
+        // gate). A complete no-name signature contributes no row.
+        let names = match callable.event_names(context) {
+            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(names)
+            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(names) => {
+                names.into_inner()
+            }
+            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
+            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                match incomplete.into_authored_fallback() {
+                    Some(names) => names,
+                    None => continue,
+                }
+            }
         };
         let Some(signature) = callable.signature(context) else {
             continue;

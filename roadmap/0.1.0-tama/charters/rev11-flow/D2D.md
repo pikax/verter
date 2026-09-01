@@ -197,3 +197,67 @@ Before squashing or review, the implementation patch adds one `[[implemented]]`
 row to `authority/state/implemented.toml` with the node ID, planned squash commit
 message, approximate date with timezone, and optional pull-request number. Row
 presence is the implementation fact. Commit metadata is a loose locator only.
+
+## Amendments
+
+- **Outcome vocabulary (ratified shape).** The typed outcome carries FOUR
+  arms, not two: `Resolved(surface)` and `Incomplete(non-empty reason)` as
+  chartered, plus two additional COMPLETE claims the migration surfaced —
+  `OpenPresence(surface)` (a positive presence-only projection of an OPEN
+  member domain: every carried member is real, omission is not absence
+  evidence; complete-as-a-result and warm-capable) and `NoSurface` (the
+  proven complete negative answer: the demand resolved and there is no such
+  surface). Both are SUCCESS claims and therefore carry the same opaque
+  evidence as `Resolved` (below); neither is a failure spelling.
+- **AC1 mechanism (architect-ruled).** Every success arm carries opaque
+  evidence minted by exactly ONE private finalizer in the carrier's module:
+  `Resolved` / `OpenPresence` hold their surface inside the proof-bearing
+  `Witnessed<T>` wrapper and `NoSurface` holds a bare `SurfaceProof`; the
+  proof's field is private, so no other module or crate can construct a
+  success arm — the crate-internal mint surface is the named claim-stating
+  constructors, which route through the finalizer. `Incomplete`'s reason is
+  the type-level non-empty `NonEmptyReasons` newtype (no `Default`, no empty
+  spelling, no runtime empty-set normalizer); its constructors are either
+  type-level (one closed `PartialReason` maps to its guaranteed non-zero
+  bit) or checked (`Option`-returning). Compile-fail fixtures pin the
+  previously-legal shapes: raw `Resolved(TypeInfoSurface::empty())` from
+  outside, bare `NoSurface` construction from outside, and a reason-free
+  incomplete claim.
+- **Completeness is enforced at the publication/warm-admission sinks
+  (architect-ruled ADOPT-NOW).** Audits are supplemental, not the
+  enumeration authority: the sinks demand sealed proof-bearing types, so a
+  producer that never migrated cannot reach publication. Concretely: the
+  emit EVENT-NAME enumeration returns the typed outcome (an unenumerable
+  authored name set is an `Incomplete` claim, recorded at the metadata and
+  runtime sinks; the TSC projection takes the named authored-fallback
+  discharge because its authored `emit_fields` rows ride regardless); the
+  payload-surface authorities discharge the carrier through `recorded()` at
+  the token mint, so incomplete reasons ride the return value rather than
+  bare side effects; the graph-native slot-binding synthesis returns a
+  SEALED completeness claim (`SynthesisCompleteness`) minted only from its
+  typed suppression ledger, and the `ComponentMetaResultDb` admission fold
+  consumes that claim — a reverted boolean rail cannot feed the sink; and
+  the shallow-surface chokepoint folds observed read partiality into EVERY
+  returned arm (`with_read_partiality`), so no arm makes a reason-free
+  complete/warm claim over a partial read.
+- **Emits/slots value-failure asymmetry (deliberate, D2D-AC2 scope note).**
+  A `defineSlots` member whose VALUE is unresolvable suppresses and never
+  warms; a `defineEmits` OBJECT-VALUE member with the byte-identical shape
+  publishes the member and stays warm-capable. This is a difference in
+  MEMBERSHIP AUTHORITY, not a missed migration: slot membership is DERIVED
+  from callable classification of the value (an unresolvable value makes
+  membership itself unprovable — fail closed), while emit membership is the
+  authored object KEY (complete without value resolution); the emit
+  payload's unresolved interior rides the published replay route / authored
+  display under the established stable-carrier member-position rule rather
+  than a resolved-surface claim. The uniform rule across the nine producers
+  is therefore: membership-bearing resolution failures name a reason and
+  never publish complete; value-interior carriers follow the member-position
+  stable-carrier contract.
+- **Open generic props payloads.** `<script setup generic="T">
+  defineProps<T>()` is an OPEN member domain, not an empty surface: the
+  constraint's closed part publishes as the presence lower bound
+  (`T extends { a: number }` publishes `a`) and an unconstrained parameter
+  publishes the empty presence floor — `OpenPresence`, complete-as-a-result
+  and warm-capable, never a reason-free `NoSurface` and never a false
+  partial.

@@ -129,15 +129,90 @@ pub(crate) struct ResolvedSlotBinding {
     pub source: SlotBindingSource,
 }
 
+/// Typed warm-suppression ledger for the graph-native synthesis walk.
+///
+/// Every fatal branch in this module records a NON-EMPTY typed reason
+/// (`suppress` / `suppress_partial_read`); the final [`SynthesisResult`]'s
+/// sealed completeness claim is minted FROM the ledger by this module's
+/// private finalizer. There is no bare boolean rail: a suppression that
+/// does not name its reason cannot be spelled, and a caller cannot forge
+/// (or OR away) the claim at the publication sink.
+#[derive(Debug, Default)]
+pub(crate) struct SuppressionLedger {
+    reasons: Option<crate::typeinfo::surface_resolution::NonEmptyReasons>,
+}
+
+impl SuppressionLedger {
+    /// Record a typed suppression reason (unions with any prior record).
+    fn suppress(&mut self, reasons: crate::typeinfo::surface_resolution::NonEmptyReasons) {
+        self.reasons = Some(match self.reasons {
+            Some(acc) => acc.union(reasons),
+            None => reasons,
+        });
+    }
+
+    /// Record a PARTIAL read's reason classes. Callers pass
+    /// `partial_reason_classes()` of a read whose `result_is_partial` was
+    /// observed true, which is non-empty by that method's own bridge; the
+    /// checked conversion states the (unreachable) empty-classification
+    /// policy explicitly as the downstream `Propagated` class rather than
+    /// normalizing silently inside the claim type.
+    fn suppress_partial_read(&mut self, classes: crate::semantic_query::PartialReasonSet) {
+        use crate::typeinfo::surface_resolution::NonEmptyReasons;
+        self.suppress(NonEmptyReasons::new(classes).unwrap_or_else(|| {
+            NonEmptyReasons::of(crate::semantic_query::PartialReason::Propagated)
+        }));
+    }
+
+    /// Whether any suppression reason has been recorded.
+    fn is_suppressed(&self) -> bool {
+        self.reasons.is_some()
+    }
+}
+
+/// The sealed completeness claim of one graph-native synthesis run.
+///
+/// `Complete` is mintable only by [`SynthesisResult::from_ledger`] over a
+/// reason-free ledger; `Suppressed` always carries the ledger's non-empty
+/// typed reasons. The publication sink consumes THIS claim — reverting the
+/// synthesis walk to an unforgeable-free boolean cannot feed the sink.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SynthesisCompleteness {
+    /// The walk completed without a fatal read — the result may publish
+    /// and warm (subject to the sink's other rails).
+    Complete,
+    /// A fatal / partial read suppressed warm promotion, with the typed
+    /// non-empty reasons the walk recorded.
+    Suppressed(crate::typeinfo::surface_resolution::NonEmptyReasons),
+}
+
 /// Result of [`resolve_slot_bindings_graph_native`].
 ///
-/// `should_suppress` is consumed by the caller and gates
+/// The sealed claim is consumed by the caller and gates
 /// `ComponentMetaResultDb` publication: when a fatal `QueryError`
 /// propagated up through the per-macro walk, the partially-populated
 /// result must not warm the shared cache.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct SynthesisResult {
-    pub should_suppress: bool,
+    completeness: SynthesisCompleteness,
+}
+
+impl SynthesisResult {
+    /// The module-private mint: the claim derives EXCLUSIVELY from the
+    /// walk's typed ledger.
+    fn from_ledger(ledger: SuppressionLedger) -> Self {
+        Self {
+            completeness: match ledger.reasons {
+                Some(reasons) => SynthesisCompleteness::Suppressed(reasons),
+                None => SynthesisCompleteness::Complete,
+            },
+        }
+    }
+
+    /// The sealed completeness claim.
+    pub(crate) fn completeness(&self) -> SynthesisCompleteness {
+        self.completeness
+    }
 }
 
 /// Join identity for one slot-binding row: `(owner, macro_index, slot_name,
@@ -244,7 +319,7 @@ fn macro_expansion_for_cycle(
 ///
 /// Emits `ExpansionStopReason::BudgetExceeded` with `Interrupted`
 /// execution status: a budget-exceeded run is not a complete
-/// synthesis, so callers (and downstream `should_suppress` consumers)
+/// synthesis, so callers (and downstream suppression consumers)
 /// must treat the published surface as torn.
 fn macro_expansion_for_budget_exceeded(
     macro_index: usize,
@@ -668,7 +743,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         "synthesize_slot_bindings",
     );
 
-    let mut should_suppress = false;
+    let mut ledger = SuppressionLedger::default();
     let dispatch = ProjectSemanticDispatch::new(ctx.ctx);
     // Synthesis-step budget. Production code leaves
     // `synthesis_steps` `None` so the synthesis runs at full
@@ -739,7 +814,9 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         // producer). The carrier stays a lazy shell — the shallow walker
         // materialises the surface when the dispatch reads it downstream.
         if consume_synthesis_step(&mut synthesis_steps_executed) {
-            should_suppress = true;
+            ledger.suppress(crate::typeinfo::surface_resolution::NonEmptyReasons::of(
+                crate::semantic_query::PartialReason::BudgetExceeded,
+            ));
             diag_sink.push(macro_expansion_for_budget_exceeded(
                 macro_index,
                 MacroExpansionKind::DefineSlots,
@@ -776,7 +853,9 @@ pub(crate) fn resolve_slot_bindings_graph_native(
 
         // Step 2: ResolveMacroPayload. USE execute_read; ACCUMULATE deps.
         if consume_synthesis_step(&mut synthesis_steps_executed) {
-            should_suppress = true;
+            ledger.suppress(crate::typeinfo::surface_resolution::NonEmptyReasons::of(
+                crate::semantic_query::PartialReason::BudgetExceeded,
+            ));
             diag_sink.push(macro_expansion_for_budget_exceeded(
                 macro_index,
                 MacroExpansionKind::DefineSlots,
@@ -814,7 +893,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         // PARTIAL signal, not on inner-memo non-cacheability. A benign
         // non-cacheable nested read must NOT suppress a complete result.
         if macro_payload_read.result_is_partial {
-            should_suppress = true;
+            ledger.suppress_partial_read(macro_payload_read.partial_reason_classes());
         }
 
         let macro_payload_node = match macro_payload_read.value {
@@ -829,7 +908,9 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             }
             QueryResult::Error(e) => {
                 if is_fatal_query_error(&e) {
-                    should_suppress = true;
+                    ledger.suppress(
+                        crate::typeinfo::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                    );
                 }
                 diag_sink.push(macro_expansion_for_query_error(
                     macro_index,
@@ -851,11 +932,11 @@ pub(crate) fn resolve_slot_bindings_graph_native(
                 type_args: type_args.clone(),
             },
             diag_sink,
-            &mut should_suppress,
+            &mut ledger,
             synthesis_step_budget,
             &mut synthesis_steps_executed,
         );
-        if should_suppress && synthesis_step_budget.is_some() {
+        if ledger.is_suppressed() && synthesis_step_budget.is_some() {
             // Budget-exceeded inside `compute_bindings_via_graph`
             // already pushed the diagnostic and flipped suppression;
             // bail the macro loop so subsequent macros do not consume
@@ -921,7 +1002,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         &mut existing_names,
     );
 
-    SynthesisResult { should_suppress }
+    SynthesisResult::from_ledger(ledger)
 }
 
 /// Per-macro graph-native binding computation. Walks
@@ -929,15 +1010,15 @@ pub(crate) fn resolve_slot_bindings_graph_native(
 /// slot member walks the `Function.params[0].ty`'s Shallow surface to
 /// enumerate bindings.
 ///
-/// Aggregates `should_suppress` via `&mut bool` so every fatal
-/// `QueryError` propagates up to
-/// [`resolve_slot_bindings_graph_native`]'s return.
+/// Aggregates suppression via the typed [`SuppressionLedger`] so every
+/// fatal `QueryError` propagates its NON-EMPTY reason up to
+/// [`resolve_slot_bindings_graph_native`] and its sealed claim.
 ///
 /// The `synthesis_step_budget` / `synthesis_steps_executed` pair
 /// extends the same step counter the entry-point owns so the slot-
 /// surface walk and per-member param walk participate in the same
 /// `synthesis_steps` cap. Returning early via the `BudgetExceeded`
-/// branch sets `*should_suppress = true` so the caller skips
+/// branch records its typed reason so the caller skips
 /// publication.
 pub(crate) fn compute_bindings_via_graph(
     dispatch: &ProjectSemanticDispatch<'_>,
@@ -945,7 +1026,7 @@ pub(crate) fn compute_bindings_via_graph(
     macro_payload_node: SemanticNodeId,
     owner_macro: SlotMacroIdentity,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-    should_suppress: &mut bool,
+    ledger: &mut SuppressionLedger,
     synthesis_step_budget: Option<u32>,
     synthesis_steps_executed: &mut u32,
 ) -> Vec<ResolvedSlotBinding> {
@@ -961,7 +1042,9 @@ pub(crate) fn compute_bindings_via_graph(
 
     // Step 3: empty-path Shallow surface for slot names.
     if consume_step(synthesis_steps_executed) {
-        *should_suppress = true;
+        ledger.suppress(crate::typeinfo::surface_resolution::NonEmptyReasons::of(
+            crate::semantic_query::PartialReason::BudgetExceeded,
+        ));
         diag_sink.push(macro_expansion_for_budget_exceeded(
             owner_macro.macro_index,
             MacroExpansionKind::DefineSlots,
@@ -992,7 +1075,7 @@ pub(crate) fn compute_bindings_via_graph(
     }
     // A2 signal split: key the warm gate on the PARTIAL signal only.
     if slot_surface_read.result_is_partial {
-        *should_suppress = true;
+        ledger.suppress_partial_read(slot_surface_read.partial_reason_classes());
     }
     let slot_surface = match slot_surface_read.value {
         QueryResult::Value(id) => id,
@@ -1006,7 +1089,9 @@ pub(crate) fn compute_bindings_via_graph(
         }
         QueryResult::Error(e) => {
             if is_fatal_query_error(&e) {
-                *should_suppress = true;
+                ledger.suppress(
+                    crate::typeinfo::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                );
             }
             diag_sink.push(macro_expansion_for_query_error(
                 owner_macro.macro_index,
@@ -1018,12 +1103,14 @@ pub(crate) fn compute_bindings_via_graph(
     };
     let slot_members = match super::projectors::read_positive_surface_members(ctx, slot_surface) {
         crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(members)
-        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(members) => members,
-        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => Vec::new(),
+        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(members) => {
+            members.into_inner()
+        }
+        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => Vec::new(),
         // An unresolvable slot-surface member read suppresses warm promotion
         // and records its typed reason; the usable subset still publishes.
         crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-            *should_suppress = true;
+            ledger.suppress(incomplete.non_empty_reasons());
             diag_sink.push(macro_expansion_for_query_error(
                 owner_macro.macro_index,
                 MacroExpansionKind::DefineSlots,
@@ -1067,10 +1154,14 @@ pub(crate) fn compute_bindings_via_graph(
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
         ) {
             crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
-            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => id,
-            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => slot_member.value,
+            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                id.into_inner()
+            }
+            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                slot_member.value
+            }
             crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-                *should_suppress = true;
+                ledger.suppress(incomplete.non_empty_reasons());
                 diag_sink.push(macro_expansion_for_query_error(
                     owner_macro.macro_index,
                     MacroExpansionKind::DefineSlots,
@@ -1122,7 +1213,9 @@ pub(crate) fn compute_bindings_via_graph(
 
         // Empty-path Shallow on param0_ty.
         if consume_step(synthesis_steps_executed) {
-            *should_suppress = true;
+            ledger.suppress(crate::typeinfo::surface_resolution::NonEmptyReasons::of(
+                crate::semantic_query::PartialReason::BudgetExceeded,
+            ));
             diag_sink.push(macro_expansion_for_budget_exceeded(
                 owner_macro.macro_index,
                 MacroExpansionKind::DefineSlots,
@@ -1153,7 +1246,7 @@ pub(crate) fn compute_bindings_via_graph(
         }
         // A2 signal split: key the warm gate on the PARTIAL signal only.
         if param_surface_read.result_is_partial {
-            *should_suppress = true;
+            ledger.suppress_partial_read(param_surface_read.partial_reason_classes());
         }
         let param_surface = match param_surface_read.value {
             QueryResult::Value(id) => id,
@@ -1167,7 +1260,9 @@ pub(crate) fn compute_bindings_via_graph(
             }
             QueryResult::Error(e) => {
                 if is_fatal_query_error(&e) {
-                    *should_suppress = true;
+                    ledger.suppress(
+                        crate::typeinfo::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                    );
                 }
                 diag_sink.push(macro_expansion_for_query_error(
                     owner_macro.macro_index,
@@ -1181,13 +1276,13 @@ pub(crate) fn compute_bindings_via_graph(
             match super::projectors::read_positive_surface_members(ctx, param_surface) {
                 crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(members)
                 | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(members) => {
-                    members
+                    members.into_inner()
                 }
-                crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => Vec::new(),
+                crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => Vec::new(),
                 // An unresolvable binding-surface read suppresses warm promotion
                 // and records its typed reason; the usable subset still publishes.
                 crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-                    *should_suppress = true;
+                    ledger.suppress(incomplete.non_empty_reasons());
                     diag_sink.push(macro_expansion_for_query_error(
                         owner_macro.macro_index,
                         MacroExpansionKind::DefineSlots,
@@ -1237,7 +1332,7 @@ pub(crate) fn compute_bindings_via_graph(
                     crate::request_context::observe_component_meta_read_suppress(&value_read);
                     emit_slot_binding_graph_dispatch_facts(ctx, &value_read.dep_signature);
                     if value_read.result_is_partial {
-                        *should_suppress = true;
+                        ledger.suppress_partial_read(value_read.partial_reason_classes());
                     }
                     match value_read.value {
                         QueryResult::Value(id) => id,
@@ -2432,6 +2527,109 @@ pub(crate) fn publish_merged_bindings(
                     verter_type_expr::ResolutionProvenance::SessionProjector,
                 ));
         }
+    }
+}
+
+#[cfg(test)]
+mod synthesis_claim_tests {
+    use super::*;
+    use crate::resolver_core::with_bare_host_ctx_for_test;
+    use crate::types::{FileLanguage, HostConfig, UpsertRequest};
+    use crate::VerterHost;
+    use std::sync::Arc;
+    use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
+
+    const OWNER: &str = "/src/Comp.vue";
+
+    fn host_with_vue(src: &str) -> Arc<VerterHost> {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: OWNER.to_string(),
+                source: Arc::from(src),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert vue");
+        host
+    }
+
+    fn drive(src: &str) -> SynthesisCompleteness {
+        let host = host_with_vue(src);
+        let mut claim = None;
+        with_bare_host_ctx_for_test(host.as_ref(), |ctx| {
+            let indexed = ctx
+                .ensure_indexed_ready_serve(OWNER)
+                .expect("owner is indexed")
+                .indexed;
+            let snapshot = Arc::clone(&indexed.snapshot);
+            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
+            let mut expanded = ExpandedComponentTypes::default();
+            let mut diags = Vec::new();
+            let result = resolve_slot_bindings_graph_native(
+                &mut engine,
+                OWNER,
+                &snapshot,
+                &[],
+                &mut expanded,
+                &mut diags,
+            );
+            claim = Some(result.completeness());
+        });
+        claim.expect("synthesis ran")
+    }
+
+    /// SITE-SPECIFIC discriminator for THIS module's suppression ledger:
+    /// the sealed claim `resolve_slot_bindings_graph_native` returns
+    /// derives EXCLUSIVELY from the ledger the walk feeds — request-context
+    /// folds from deeper layers cannot reach it. An unresolvable slot
+    /// VALUE therefore returns `Suppressed` carrying the dependency reason
+    /// this module's own discharge recorded; disabling the module's
+    /// discharges flips the returned claim to `Complete` and fails HERE,
+    /// where a downstream-fold-backed behavioural test stays green.
+    #[test]
+    fn synthesis_claim_derives_from_this_modules_ledger() {
+        let claim = drive(
+            r#"<script setup lang="ts">
+import type { Missing } from './missing'
+defineSlots<{ default: Missing }>()
+</script>
+<template><div /></template>
+"#,
+        );
+        match claim {
+            SynthesisCompleteness::Suppressed(reasons) => assert!(
+                reasons
+                    .get()
+                    .contains(crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY),
+                "the unresolvable slot value's suppression names the missing \
+                 dependency; got {:?}",
+                reasons.get()
+            ),
+            SynthesisCompleteness::Complete => panic!(
+                "an unresolvable slot value must return a Suppressed claim \
+                 from THIS walk's ledger — a Complete claim means the module's \
+                 own discharge did not record"
+            ),
+        }
+    }
+
+    /// CONTROL: a resolvable slot fixture returns `Complete` — the sealed
+    /// claim discriminates the discharge, not a blanket partial.
+    #[test]
+    fn synthesis_claim_stays_complete_for_a_resolvable_slot() {
+        let claim = drive(
+            r#"<script setup lang="ts">
+defineSlots<{ default(props: { row: string }): any }>()
+</script>
+<template><div /></template>
+"#,
+        );
+        assert!(
+            matches!(claim, SynthesisCompleteness::Complete),
+            "a fully-resolvable slot walk mints the Complete claim; got {claim:?}"
+        );
     }
 }
 
