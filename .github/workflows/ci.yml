@@ -593,6 +593,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          # A trybuild `.stderr` is EXACT rustc output, and rustc renders the
+          # snippet behind a `help:` that points into the standard library only
+          # when the library source is present. Without `rust-src` those lines
+          # vanish and a fixture whose expectation was blessed on an ordinary
+          # developer machine (where rustup installs it) mismatches for a reason
+          # that has nothing to do with the seal it protects.
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
         with:
           key: compiler-contracts

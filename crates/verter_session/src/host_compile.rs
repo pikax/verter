@@ -16,11 +16,11 @@
 //!    shares the ordinary upsert engine but does not construct discarded
 //!    public update payloads. Stage B does not fan out through the batch
 //!    coordinator.
-//! 3. Compile each unique canonical+profile once. HostBacked requests and
-//!    public Svelte/other non-Vue RuntimeRender requests use
-//!    [`VerterHost::get_virtual_file`] for `Main`; a Vue RuntimeRender request
-//!    uses the private render-only worker. Panic isolation is the coordinator
-//!    catch boundary (`compile_panic_entry`). Stage C alone fans out through
+//! 3. Compile each unique canonical+profile once. HostBacked requests use
+//!    [`VerterHost::get_virtual_file`] for `Main`; every RuntimeRender request
+//!    uses the render worker, whichever carrier it names. Panic isolation is
+//!    the coordinator catch boundary (`compile_panic_entry`). Stage C alone
+//!    fans out through
 //!    [`crate::host_batch_coordinator::HostBatchCoordinator::run_batch`]
 //!    on the host-owned [`verter_scheduler::HostCpuPool`] (8 MiB stack;
 //!    no Rayon global 1 MiB Windows default).
@@ -315,21 +315,17 @@ pub struct CompileBatchOptions {
 /// Compile lane for [`VerterHost::compile_many`]. Always explicit —
 /// never inferred from node kind, file, or caller.
 ///
-/// For Vue, the HostBacked wrapper and private render-only worker share
-/// `compile_bundle` + `assemble_vue_main_module`. Svelte and other non-Vue
-/// RuntimeRender requests retain their carrier's effective host-backed
-/// substrate:
-///
 /// - [`CompileManyTarget::HostBacked`] — full `compile_entry` wrapper
 ///   (cache-mode, fact tracer, warm-hit, publish). IDE / analysis path.
-/// - [`CompileManyTarget::RuntimeRender`] — a public render request. Vue uses
-///   the render-only worker without per-file wrapper overhead; other carriers
-///   retain the effective host-backed path. Each entry is its own host compile
-///   request with its own request-scoped bound host request; the bound
-///   framework host backend issues the render admission and the matching
-///   runtime backend executes it, then the host assembles `Main`
-///   (`assemble_vue_main_module` for Vue). Cross-file macros still go through
-///   TypeInfo dispatch. Authoritative failures stay fatal.
+/// - [`CompileManyTarget::RuntimeRender`] — the render request, for EVERY
+///   registered carrier, without the per-file session-wrapper overhead. Each
+///   entry is its own host compile request with its own request-scoped bound
+///   host request; the bound framework host backend issues the render
+///   admission and the matching runtime backend executes it, then the host
+///   assembles `Main` (`assemble_vue_main_module` for Vue). The carrier is
+///   chosen by that binding, never by a language predicate at the
+///   coordinator. Cross-file macros still go through TypeInfo dispatch.
+///   Authoritative failures stay fatal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileManyTarget {
     /// The full session-wrapper path (`compile_entry`). Byte-for-byte
@@ -442,7 +438,7 @@ impl VerterHost {
     ///
     /// Per-input panic isolation: if the selected compile worker panics for
     /// one input (`get_virtual_file` for HostBacked or Svelte/other non-Vue
-    /// RuntimeRender, or `render_only_main` for Vue RuntimeRender), only that
+    /// RuntimeRender, or `render_only_main` for RuntimeRender), only that
     /// input's entry receives a `compiler panic: ...` error; the rest of the
     /// batch completes normally.
     pub fn compile_many(
@@ -609,9 +605,9 @@ impl VerterHost {
 
         // ── compile each UNIQUE canonical group exactly once ──
         // Stage C fans the per-input compile workers out through the host
-        // batch coordinator: `get_virtual_file` for HostBacked or Svelte/other
-        // non-Vue RuntimeRender, the private render-only worker for Vue
-        // RuntimeRender. This is the single host-side coordination rule. The
+        // batch coordinator: `get_virtual_file` for HostBacked, the render
+        // worker for RuntimeRender. This is the single host-side coordination
+        // rule, and it reads the requested target only. The
         // coordinator installs on the host-owned coordinator pool
         // (built once at host construction with an 8 MiB worker stack;
         // workers register as `CallerKind::External`, so the coordinator
@@ -854,16 +850,15 @@ impl VerterHost {
             panic!("synthetic panic for compile_many_isolates_panics test");
         }
 
-        // The render-only worker is the Vue-specific fast path. A public
-        // RuntimeRender request for any other registered carrier keeps the
-        // effective host-backed route through `get_virtual_file`, preserving
-        // that carrier's ordinary compilation contract.
-        let runtime_render_vue = matches!(target, CompileManyTarget::RuntimeRender { .. })
-            && self
-                .language_classifier()
-                .classify(&input.canonical_id)
-                .is_vue();
-        if runtime_render_vue {
+        // The render lane is selected by the REQUESTED TARGET alone. There is
+        // deliberately no framework predicate here: the worker binds a
+        // request-scoped host request whose catalog arm selects the framework
+        // backend, so dispatch happens inside the binding, not from a language
+        // classification at the coordinator. A `.is_vue()` branch here would
+        // give Vue the no-cache render lane and every other carrier the
+        // host-backed one — two execution contracts for one requested target,
+        // with different caching, wrapper and refusal semantics.
+        if matches!(target, CompileManyTarget::RuntimeRender { .. }) {
             return self.compile_one_runtime_render(
                 input,
                 &per_input_profile,
@@ -960,10 +955,11 @@ impl VerterHost {
         }
     }
 
-    /// The Vue [`CompileManyTarget::RuntimeRender`] per-file worker: a
+    /// The [`CompileManyTarget::RuntimeRender`] per-file worker: a
     /// render-only compile onto the shared runtime substrate that produces
     /// byte-identical `Main` output to the `HostBacked` wrapper without the
-    /// per-file session-wrapper overhead.
+    /// per-file session-wrapper overhead. Framework-neutral — the bound
+    /// host request selects the carrier's backend.
     fn compile_one_runtime_render(
         &self,
         input: &CompileBatchInput,

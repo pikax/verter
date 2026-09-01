@@ -758,6 +758,12 @@ fn derive_admitted_runtime_options(
         source_map: runtime.is_some_and(|r| r.runtime_source_map),
         ide_source_map: Some(ide.is_some_and(|i| i.want_source_map)),
         ssr,
+        // The style stages this render owns, read off the admitted request.
+        // A bundler that owns its own style-module lane demands
+        // `AuthoredOnly`; dropping it here would run the full cascade and
+        // fail closed on a preprocessor dialect the bundler was going to
+        // handle.
+        style_processing: request.runtime_style_processing(),
         runtime_module_name: vue.and_then(|v| v.runtime_module_name.clone()),
         component_id: request.component_id().map(str::to_string),
         force_js: request.force_js(),

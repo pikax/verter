@@ -570,7 +570,7 @@ impl CarrierFrontend for InstalledCarrierFrontend {
         opts: &ParseOptions,
     ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject> {
         #[cfg(test)]
-        REGISTERED_FRONTEND_PARSE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        REGISTERED_FRONTEND_PARSE_COUNT.with(|count| count.set(count.get() + 1));
         match self {
             Self::Vue(frontend) => frontend.parse(source, opts),
             Self::Svelte(frontend) => frontend.parse(source, opts),
@@ -578,13 +578,24 @@ impl CarrierFrontend for InstalledCarrierFrontend {
     }
 }
 
+// PER-THREAD, not a process global. The two tests that read this counter
+// snapshot it, perform ONE projection, and assert the delta is exactly one (or
+// exactly zero). A process-global count cannot support that claim in a shared
+// test process: any sibling test parsing between the two reads inflates the
+// delta, which is why those assertions failed under parallel `cargo test`
+// while passing under nextest's process isolation and under a single thread.
+// Each test owns a thread, and this projection parses synchronously on the
+// caller's thread, so a thread-local count is exactly the quantity the
+// assertions mean.
 #[cfg(test)]
-static REGISTERED_FRONTEND_PARSE_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static REGISTERED_FRONTEND_PARSE_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(super) fn registered_frontend_parse_count() -> usize {
-    REGISTERED_FRONTEND_PARSE_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+    REGISTERED_FRONTEND_PARSE_COUNT.with(std::cell::Cell::get)
 }
 
 /// Frozen Vue + Svelte frontend catalog. Built once from the Vue/Svelte

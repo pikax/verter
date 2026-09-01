@@ -1,13 +1,5 @@
 schema = 1
 
-# Trusted implementation index. A row means the node is implemented. The
-# commit metadata is a locator for people and agents; tooling never validates
-# it against Git, content, ancestry, a tree, or another receipt.
-# Separate [[github_issue]] rows may map node_id to gh_issue after the GH train.
-# sync_to_github is required: true permits the one-way refresh; false protects a
-# pre-existing issue that was manually mapped into the DAG. Neither value makes
-# a node implemented.
-
 [[implemented]]
 node_id = "A0"
 commit_message = "chore(*): add the architecture-lock program documents, state validator, and gate wiring"
@@ -223,1340 +215,6 @@ node_id = "PGF0"
 commit_message = "fix(session): separate project-shape and route-publication fences"
 commit_date = "2026-08-30T14:48:45+01:00"
 
-[[github_issue]]
-node_id = "B4R0"
-gh_issue = 102
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA0"
-gh_issue = 105
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1A"
-gh_issue = 106
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1B"
-gh_issue = 107
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1C"
-gh_issue = 108
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1D1"
-gh_issue = 109
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1D2"
-gh_issue = 110
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1D"
-gh_issue = 111
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1E"
-gh_issue = 112
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1F"
-gh_issue = 113
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1GE"
-gh_issue = 114
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1GT"
-gh_issue = 115
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1G"
-gh_issue = 116
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1H"
-gh_issue = 117
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1I"
-gh_issue = 118
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1J"
-gh_issue = 119
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1K"
-gh_issue = 120
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1L"
-gh_issue = 121
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1M1"
-gh_issue = 122
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1M2"
-gh_issue = 123
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1M3"
-gh_issue = 124
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1M"
-gh_issue = 125
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1N1"
-gh_issue = 126
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1N2"
-gh_issue = 127
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1N3"
-gh_issue = 128
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1N4"
-gh_issue = 129
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1N"
-gh_issue = 130
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O1"
-gh_issue = 131
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O2"
-gh_issue = 132
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O2A"
-gh_issue = 133
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O2B"
-gh_issue = 134
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O2C"
-gh_issue = 135
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O2D"
-gh_issue = 136
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O2E"
-gh_issue = 137
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O2F"
-gh_issue = 138
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O2G"
-gh_issue = 139
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O3"
-gh_issue = 140
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O3A"
-gh_issue = 141
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O3B"
-gh_issue = 142
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O4"
-gh_issue = 143
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O4D"
-gh_issue = 144
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O5"
-gh_issue = 145
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O5D"
-gh_issue = 146
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1O"
-gh_issue = 147
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1T1"
-gh_issue = 148
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1T2S"
-gh_issue = 149
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1T2V"
-gh_issue = 150
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1T2"
-gh_issue = 151
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1T3"
-gh_issue = 152
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1T4"
-gh_issue = 153
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA1"
-gh_issue = 154
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2A"
-gh_issue = 155
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2BS"
-gh_issue = 156
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2BV"
-gh_issue = 157
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2B"
-gh_issue = 158
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2C"
-gh_issue = 159
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2D0"
-gh_issue = 160
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2DS"
-gh_issue = 161
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2DV"
-gh_issue = 162
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2D"
-gh_issue = 163
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2E0"
-gh_issue = 164
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2EV"
-gh_issue = 165
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2EH"
-gh_issue = 166
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2E"
-gh_issue = 167
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2F"
-gh_issue = 168
-sync_to_github = true
-[[github_issue]]
-node_id = "CCA2"
-gh_issue = 169
-sync_to_github = true
-[[github_issue]]
-node_id = "J2"
-gh_issue = 170
-sync_to_github = true
-[[github_issue]]
-node_id = "J3"
-gh_issue = 171
-sync_to_github = true
-[[github_issue]]
-node_id = "J4"
-gh_issue = 172
-sync_to_github = true
-[[github_issue]]
-node_id = "D1"
-gh_issue = 173
-sync_to_github = true
-[[github_issue]]
-node_id = "D2"
-gh_issue = 174
-sync_to_github = true
-[[github_issue]]
-node_id = "D3"
-gh_issue = 175
-sync_to_github = true
-[[github_issue]]
-node_id = "D4"
-gh_issue = 176
-sync_to_github = true
-[[github_issue]]
-node_id = "D5"
-gh_issue = 177
-sync_to_github = true
-[[github_issue]]
-node_id = "D6"
-gh_issue = 178
-sync_to_github = true
-[[github_issue]]
-node_id = "D7"
-gh_issue = 179
-sync_to_github = true
-[[github_issue]]
-node_id = "D8"
-gh_issue = 180
-sync_to_github = true
-[[github_issue]]
-node_id = "E1"
-gh_issue = 181
-sync_to_github = true
-[[github_issue]]
-node_id = "C2"
-gh_issue = 182
-sync_to_github = true
-[[github_issue]]
-node_id = "C3"
-gh_issue = 183
-sync_to_github = true
-[[github_issue]]
-node_id = "C4"
-gh_issue = 184
-sync_to_github = true
-[[github_issue]]
-node_id = "E2"
-gh_issue = 185
-sync_to_github = true
-[[github_issue]]
-node_id = "E3"
-gh_issue = 186
-sync_to_github = true
-[[github_issue]]
-node_id = "E4"
-gh_issue = 187
-sync_to_github = true
-[[github_issue]]
-node_id = "F1"
-gh_issue = 188
-sync_to_github = true
-[[github_issue]]
-node_id = "F2"
-gh_issue = 189
-sync_to_github = true
-[[github_issue]]
-node_id = "G1"
-gh_issue = 190
-sync_to_github = true
-[[github_issue]]
-node_id = "G2"
-gh_issue = 191
-sync_to_github = true
-[[github_issue]]
-node_id = "G3"
-gh_issue = 192
-sync_to_github = true
-[[github_issue]]
-node_id = "G4"
-gh_issue = 193
-sync_to_github = true
-[[github_issue]]
-node_id = "G5"
-gh_issue = 194
-sync_to_github = true
-[[github_issue]]
-node_id = "H1"
-gh_issue = 195
-sync_to_github = true
-[[github_issue]]
-node_id = "H2"
-gh_issue = 196
-sync_to_github = true
-[[github_issue]]
-node_id = "H3"
-gh_issue = 197
-sync_to_github = true
-[[github_issue]]
-node_id = "K1"
-gh_issue = 198
-sync_to_github = true
-[[github_issue]]
-node_id = "K2"
-gh_issue = 199
-sync_to_github = true
-[[github_issue]]
-node_id = "TCM0R"
-gh_issue = 200
-sync_to_github = true
-[[github_issue]]
-node_id = "TCM1"
-gh_issue = 201
-sync_to_github = true
-[[github_issue]]
-node_id = "TCM2"
-gh_issue = 202
-sync_to_github = true
-[[github_issue]]
-node_id = "TCM3"
-gh_issue = 203
-sync_to_github = true
-[[github_issue]]
-node_id = "TCM4"
-gh_issue = 204
-sync_to_github = true
-[[github_issue]]
-node_id = "K3"
-gh_issue = 205
-sync_to_github = true
-[[github_issue]]
-node_id = "L1"
-gh_issue = 206
-sync_to_github = true
-[[github_issue]]
-node_id = "L2"
-gh_issue = 207
-sync_to_github = true
-[[github_issue]]
-node_id = "L3"
-gh_issue = 208
-sync_to_github = true
-[[github_issue]]
-node_id = "L4"
-gh_issue = 209
-sync_to_github = true
-[[github_issue]]
-node_id = "BR0"
-gh_issue = 210
-sync_to_github = true
-[[github_issue]]
-node_id = "UAK0"
-gh_issue = 211
-sync_to_github = true
-[[github_issue]]
-node_id = "UAK1"
-gh_issue = 212
-sync_to_github = true
-[[github_issue]]
-node_id = "ENC0"
-gh_issue = 213
-sync_to_github = true
-[[github_issue]]
-node_id = "ENCF0"
-gh_issue = 214
-sync_to_github = true
-[[github_issue]]
-node_id = "ENCL0"
-gh_issue = 215
-sync_to_github = true
-[[github_issue]]
-node_id = "ENCT0"
-gh_issue = 216
-sync_to_github = true
-[[github_issue]]
-node_id = "ENC1"
-gh_issue = 217
-sync_to_github = true
-[[github_issue]]
-node_id = "VID0"
-gh_issue = 218
-sync_to_github = true
-[[github_issue]]
-node_id = "CAT0"
-gh_issue = 219
-sync_to_github = true
-[[github_issue]]
-node_id = "CFG0"
-gh_issue = 220
-sync_to_github = true
-[[github_issue]]
-node_id = "CPF0"
-gh_issue = 221
-sync_to_github = true
-[[github_issue]]
-node_id = "CPF1"
-gh_issue = 222
-sync_to_github = true
-[[github_issue]]
-node_id = "DEM0"
-gh_issue = 223
-sync_to_github = true
-[[github_issue]]
-node_id = "PAR0"
-gh_issue = 224
-sync_to_github = true
-[[github_issue]]
-node_id = "CMP0"
-gh_issue = 225
-sync_to_github = true
-[[github_issue]]
-node_id = "EAK0"
-gh_issue = 226
-sync_to_github = true
-[[github_issue]]
-node_id = "EMB0"
-gh_issue = 227
-sync_to_github = true
-[[github_issue]]
-node_id = "FMK0"
-gh_issue = 228
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT0"
-gh_issue = 229
-sync_to_github = true
-[[github_issue]]
-node_id = "FCFG0"
-gh_issue = 230
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT1P"
-gh_issue = 231
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT1"
-gh_issue = 232
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT1A"
-gh_issue = 233
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT1B"
-gh_issue = 234
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT1C"
-gh_issue = 235
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT1D"
-gh_issue = 236
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT1E"
-gh_issue = 237
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT2"
-gh_issue = 238
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT2T"
-gh_issue = 239
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT2X"
-gh_issue = 240
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT2TX"
-gh_issue = 241
-sync_to_github = true
-[[github_issue]]
-node_id = "FMTC0"
-gh_issue = 242
-sync_to_github = true
-[[github_issue]]
-node_id = "FMTCL0"
-gh_issue = 243
-sync_to_github = true
-[[github_issue]]
-node_id = "FMTCS0"
-gh_issue = 244
-sync_to_github = true
-[[github_issue]]
-node_id = "FMTS0"
-gh_issue = 245
-sync_to_github = true
-[[github_issue]]
-node_id = "FMTV0"
-gh_issue = 246
-sync_to_github = true
-[[github_issue]]
-node_id = "TIF0"
-gh_issue = 247
-sync_to_github = true
-[[github_issue]]
-node_id = "EAK1"
-gh_issue = 248
-sync_to_github = true
-[[github_issue]]
-node_id = "TIF1"
-gh_issue = 249
-sync_to_github = true
-[[github_issue]]
-node_id = "IDX0"
-gh_issue = 250
-sync_to_github = true
-[[github_issue]]
-node_id = "CEF0"
-gh_issue = 251
-sync_to_github = true
-[[github_issue]]
-node_id = "COX0"
-gh_issue = 252
-sync_to_github = true
-[[github_issue]]
-node_id = "LRA0"
-gh_issue = 253
-sync_to_github = true
-[[github_issue]]
-node_id = "LNT0"
-gh_issue = 254
-sync_to_github = true
-[[github_issue]]
-node_id = "LNTCFG0"
-gh_issue = 255
-sync_to_github = true
-[[github_issue]]
-node_id = "LNT2"
-gh_issue = 256
-sync_to_github = true
-[[github_issue]]
-node_id = "LNT1"
-gh_issue = 257
-sync_to_github = true
-[[github_issue]]
-node_id = "LNTCSS0"
-gh_issue = 258
-sync_to_github = true
-[[github_issue]]
-node_id = "LNTS0"
-gh_issue = 259
-sync_to_github = true
-[[github_issue]]
-node_id = "LNTV0"
-gh_issue = 260
-sync_to_github = true
-[[github_issue]]
-node_id = "PER0"
-gh_issue = 261
-sync_to_github = true
-[[github_issue]]
-node_id = "CPER0"
-gh_issue = 262
-sync_to_github = true
-[[github_issue]]
-node_id = "CPER1"
-gh_issue = 263
-sync_to_github = true
-[[github_issue]]
-node_id = "CMP1"
-gh_issue = 264
-sync_to_github = true
-[[github_issue]]
-node_id = "CMP2"
-gh_issue = 265
-sync_to_github = true
-[[github_issue]]
-node_id = "CMP3"
-gh_issue = 266
-sync_to_github = true
-[[github_issue]]
-node_id = "CMP4"
-gh_issue = 267
-sync_to_github = true
-[[github_issue]]
-node_id = "CPER2"
-gh_issue = 268
-sync_to_github = true
-[[github_issue]]
-node_id = "CMP5"
-gh_issue = 269
-sync_to_github = true
-[[github_issue]]
-node_id = "PUB0"
-gh_issue = 270
-sync_to_github = true
-[[github_issue]]
-node_id = "CLI0"
-gh_issue = 271
-sync_to_github = true
-[[github_issue]]
-node_id = "CLI1"
-gh_issue = 272
-sync_to_github = true
-[[github_issue]]
-node_id = "CLI2"
-gh_issue = 273
-sync_to_github = true
-[[github_issue]]
-node_id = "CLI4"
-gh_issue = 274
-sync_to_github = true
-[[github_issue]]
-node_id = "CLIC0"
-gh_issue = 275
-sync_to_github = true
-[[github_issue]]
-node_id = "CLITS0"
-gh_issue = 276
-sync_to_github = true
-[[github_issue]]
-node_id = "CLI5"
-gh_issue = 277
-sync_to_github = true
-[[github_issue]]
-node_id = "EPR0"
-gh_issue = 278
-sync_to_github = true
-[[github_issue]]
-node_id = "EPR1"
-gh_issue = 279
-sync_to_github = true
-[[github_issue]]
-node_id = "EPR2"
-gh_issue = 280
-sync_to_github = true
-[[github_issue]]
-node_id = "EPR3"
-gh_issue = 281
-sync_to_github = true
-[[github_issue]]
-node_id = "EPR4"
-gh_issue = 282
-sync_to_github = true
-[[github_issue]]
-node_id = "EPR5"
-gh_issue = 283
-sync_to_github = true
-[[github_issue]]
-node_id = "LNT3"
-gh_issue = 284
-sync_to_github = true
-[[github_issue]]
-node_id = "CLIL0"
-gh_issue = 285
-sync_to_github = true
-[[github_issue]]
-node_id = "NCK0"
-gh_issue = 286
-sync_to_github = true
-[[github_issue]]
-node_id = "SCP0"
-gh_issue = 287
-sync_to_github = true
-[[github_issue]]
-node_id = "SCP1"
-gh_issue = 288
-sync_to_github = true
-[[github_issue]]
-node_id = "SCP2"
-gh_issue = 289
-sync_to_github = true
-[[github_issue]]
-node_id = "SCP5"
-gh_issue = 290
-sync_to_github = true
-[[github_issue]]
-node_id = "SST0"
-gh_issue = 291
-sync_to_github = true
-[[github_issue]]
-node_id = "SST1"
-gh_issue = 292
-sync_to_github = true
-[[github_issue]]
-node_id = "SST2"
-gh_issue = 293
-sync_to_github = true
-[[github_issue]]
-node_id = "SCP3"
-gh_issue = 294
-sync_to_github = true
-[[github_issue]]
-node_id = "SCP4"
-gh_issue = 295
-sync_to_github = true
-[[github_issue]]
-node_id = "SCP6"
-gh_issue = 296
-sync_to_github = true
-[[github_issue]]
-node_id = "SCP7"
-gh_issue = 297
-sync_to_github = true
-[[github_issue]]
-node_id = "UAI0"
-gh_issue = 298
-sync_to_github = true
-[[github_issue]]
-node_id = "NCK1"
-gh_issue = 299
-sync_to_github = true
-[[github_issue]]
-node_id = "NCK2"
-gh_issue = 300
-sync_to_github = true
-[[github_issue]]
-node_id = "NCK3"
-gh_issue = 301
-sync_to_github = true
-[[github_issue]]
-node_id = "UAO0"
-gh_issue = 302
-sync_to_github = true
-[[github_issue]]
-node_id = "UAP0"
-gh_issue = 303
-sync_to_github = true
-[[github_issue]]
-node_id = "LSO0"
-gh_issue = 304
-sync_to_github = true
-[[github_issue]]
-node_id = "LSO1"
-gh_issue = 305
-sync_to_github = true
-[[github_issue]]
-node_id = "LSO2"
-gh_issue = 306
-sync_to_github = true
-[[github_issue]]
-node_id = "LSO3"
-gh_issue = 307
-sync_to_github = true
-[[github_issue]]
-node_id = "LSO4"
-gh_issue = 308
-sync_to_github = true
-[[github_issue]]
-node_id = "LSO5"
-gh_issue = 309
-sync_to_github = true
-[[github_issue]]
-node_id = "LSO6"
-gh_issue = 310
-sync_to_github = true
-[[github_issue]]
-node_id = "LSO7"
-gh_issue = 311
-sync_to_github = true
-[[github_issue]]
-node_id = "LSO8"
-gh_issue = 312
-sync_to_github = true
-[[github_issue]]
-node_id = "VCP0"
-gh_issue = 313
-sync_to_github = true
-[[github_issue]]
-node_id = "VCP1"
-gh_issue = 314
-sync_to_github = true
-[[github_issue]]
-node_id = "VCP2"
-gh_issue = 315
-sync_to_github = true
-[[github_issue]]
-node_id = "VIM0"
-gh_issue = 316
-sync_to_github = true
-[[github_issue]]
-node_id = "VIM1"
-gh_issue = 317
-sync_to_github = true
-[[github_issue]]
-node_id = "EPR6"
-gh_issue = 318
-sync_to_github = true
-[[github_issue]]
-node_id = "LSO9"
-gh_issue = 319
-sync_to_github = true
-[[github_issue]]
-node_id = "LSO10"
-gh_issue = 320
-sync_to_github = true
-[[github_issue]]
-node_id = "NCK4"
-gh_issue = 321
-sync_to_github = true
-[[github_issue]]
-node_id = "NCK5"
-gh_issue = 322
-sync_to_github = true
-[[github_issue]]
-node_id = "NCK6"
-gh_issue = 323
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-AT-CYCLE"
-gh_issue = 324
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-AT-QUERY"
-gh_issue = 325
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-AT-REDUCE"
-gh_issue = 326
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-BD-DUP"
-gh_issue = 327
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-BD-INIT"
-gh_issue = 328
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-BD-SCOPE"
-gh_issue = 329
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-CF-CONTEXT"
-gh_issue = 330
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-CF-THIS"
-gh_issue = 331
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-CF-VAR"
-gh_issue = 332
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-CO-CALL"
-gh_issue = 333
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-CO-INFER"
-gh_issue = 334
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-CO-OVER"
-gh_issue = 335
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-FD-CFLOW"
-gh_issue = 336
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-FD-DEF"
-gh_issue = 337
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-FD-NARROW"
-gh_issue = 338
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-JD-DEC"
-gh_issue = 339
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-JD-JS"
-gh_issue = 340
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-JD-JSDOC"
-gh_issue = 341
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-JF-JSX"
-gh_issue = 342
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-JF-SVELTE"
-gh_issue = 343
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-JF-VUE"
-gh_issue = 344
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-MP-AUG"
-gh_issue = 345
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-MP-MODULE"
-gh_issue = 346
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-MP-PROJECT"
-gh_issue = 347
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-OC-HERIT"
-gh_issue = 348
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-OC-MEM"
-gh_issue = 349
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-OC-MERGE"
-gh_issue = 350
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-RO-ASSIGN"
-gh_issue = 351
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-RO-EXCESS"
-gh_issue = 352
-sync_to_github = true
-[[github_issue]]
-node_id = "NCF-RO-OPER"
-gh_issue = 353
-sync_to_github = true
-[[github_issue]]
-node_id = "NCK7"
-gh_issue = 354
-sync_to_github = true
-[[github_issue]]
-node_id = "NCKF0"
-gh_issue = 355
-sync_to_github = true
-[[github_issue]]
-node_id = "NCK8"
-gh_issue = 356
-sync_to_github = true
-[[github_issue]]
-node_id = "UAM0"
-gh_issue = 357
-sync_to_github = true
-[[github_issue]]
-node_id = "SKL0"
-gh_issue = 358
-sync_to_github = true
-[[github_issue]]
-node_id = "SKL1"
-gh_issue = 359
-sync_to_github = true
-[[github_issue]]
-node_id = "SKL2"
-gh_issue = 360
-sync_to_github = true
-[[github_issue]]
-node_id = "SKL3"
-gh_issue = 361
-sync_to_github = true
-[[github_issue]]
-node_id = "HWC0"
-gh_issue = 362
-sync_to_github = true
-[[github_issue]]
-node_id = "HWC1"
-gh_issue = 363
-sync_to_github = true
-[[github_issue]]
-node_id = "HWC2"
-gh_issue = 364
-sync_to_github = true
-[[github_issue]]
-node_id = "FMTH0"
-gh_issue = 365
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT3C"
-gh_issue = 366
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT4P"
-gh_issue = 367
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT4F"
-gh_issue = 368
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT4L"
-gh_issue = 369
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT3"
-gh_issue = 370
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT4M"
-gh_issue = 371
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT4N"
-gh_issue = 372
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT4W"
-gh_issue = 373
-sync_to_github = true
-[[github_issue]]
-node_id = "FMT4"
-gh_issue = 374
-sync_to_github = true
-[[github_issue]]
-node_id = "CLIF0"
-gh_issue = 375
-sync_to_github = true
-[[github_issue]]
-node_id = "CLI3"
-gh_issue = 376
-sync_to_github = true
-[[github_issue]]
-node_id = "HWC3"
-gh_issue = 377
-sync_to_github = true
-[[github_issue]]
-node_id = "HWCI0"
-gh_issue = 378
-sync_to_github = true
-[[github_issue]]
-node_id = "HWCL0"
-gh_issue = 379
-sync_to_github = true
-[[github_issue]]
-node_id = "HWCP0"
-gh_issue = 380
-sync_to_github = true
-[[github_issue]]
-node_id = "HWC4"
-gh_issue = 381
-sync_to_github = true
-[[github_issue]]
-node_id = "HWC5"
-gh_issue = 382
-sync_to_github = true
-[[github_issue]]
-node_id = "SCE0"
-gh_issue = 383
-sync_to_github = true
-[[github_issue]]
-node_id = "UAK2"
-gh_issue = 384
-sync_to_github = true
-[[github_issue]]
-node_id = "VCE0"
-gh_issue = 385
-sync_to_github = true
-[[github_issue]]
-node_id = "CEC0"
-gh_issue = 386
-sync_to_github = true
-[[github_issue]]
-node_id = "CEJ0"
-gh_issue = 387
-sync_to_github = true
-[[github_issue]]
-node_id = "PRF0"
-gh_issue = 388
-sync_to_github = true
-[[github_issue]]
-node_id = "MDXP"
-gh_issue = 389
-sync_to_github = true
-[[github_issue]]
-node_id = "LITP"
-gh_issue = 390
-sync_to_github = true
-[[github_issue]]
-node_id = "RCTP"
-gh_issue = 391
-sync_to_github = true
-[[github_issue]]
-node_id = "MDXR0"
-gh_issue = 392
-sync_to_github = true
-[[github_issue]]
-node_id = "SLDP"
-gh_issue = 393
-sync_to_github = true
-[[github_issue]]
-node_id = "ALPP"
-gh_issue = 394
-sync_to_github = true
-[[github_issue]]
-node_id = "ANGP"
-gh_issue = 395
-sync_to_github = true
-[[github_issue]]
-node_id = "ASTP"
-gh_issue = 396
-sync_to_github = true
-[[github_issue]]
-node_id = "UKS0"
-gh_issue = 397
-sync_to_github = true
-[[github_issue]]
-node_id = "VST0"
-gh_issue = 398
-sync_to_github = true
-[[github_issue]]
-node_id = "VCP3"
-gh_issue = 399
-sync_to_github = true
-[[github_issue]]
-node_id = "VCP4"
-gh_issue = 400
-sync_to_github = true
-[[github_issue]]
-node_id = "VCP5"
-gh_issue = 401
-sync_to_github = true
-[[github_issue]]
-node_id = "VCP6"
-gh_issue = 402
-sync_to_github = true
-[[github_issue]]
-node_id = "VCP7"
-gh_issue = 403
-sync_to_github = true
-[[github_issue]]
-node_id = "CMP6"
-gh_issue = 404
-sync_to_github = true
-[[github_issue]]
-node_id = "CPER3"
-gh_issue = 405
-sync_to_github = true
-[[github_issue]]
-node_id = "OPT0"
-gh_issue = 406
-sync_to_github = true
-
-[[github_train_issue]]
-train = "compiler.compiler-bridge"
-gh_issue = 104
-
-[[github_issue]]
-node_id = "VST1"
-gh_issue = 407
-sync_to_github = true
-[[github_train_issue]]
-train = "rev11.flow"
-gh_issue = 408
-[[github_train_issue]]
-train = "rev11.public-typeinfo"
-gh_issue = 409
-[[github_train_issue]]
-train = "rev11.style"
-gh_issue = 410
-[[github_train_issue]]
-train = "rev11.semantic-compile"
-gh_issue = 411
-[[github_train_issue]]
-train = "rev11.inputs"
-gh_issue = 412
-[[github_train_issue]]
-train = "rev11.core"
-gh_issue = 413
-[[github_train_issue]]
-train = "rev11.query-runtime"
-gh_issue = 414
-[[github_train_issue]]
-train = "rev11.scheduler-runtime"
-gh_issue = 415
-[[github_train_issue]]
-train = "rev11.cache-runtime"
-gh_issue = 416
-[[github_train_issue]]
-train = "rev11.host-runtime"
-gh_issue = 417
-[[github_train_issue]]
-train = "rev11.provider-runtime"
-gh_issue = 418
-[[github_train_issue]]
-train = "rev11.publication"
-gh_issue = 419
-[[github_train_issue]]
-train = "rev11.host-session"
-gh_issue = 420
-[[github_train_issue]]
-train = "rev11.typescript-mapper"
-gh_issue = 421
-[[github_train_issue]]
-train = "rev11.finalization"
-gh_issue = 422
-[[github_train_issue]]
-train = "governance.governance"
-gh_issue = 423
-[[github_train_issue]]
-train = "expansion.kernel"
-gh_issue = 424
-[[github_train_issue]]
-train = "compiler.compiler-core"
-gh_issue = 425
-[[github_train_issue]]
-train = "expansion.formatter"
-gh_issue = 426
-[[github_train_issue]]
-train = "expansion.lint"
-gh_issue = 427
-[[github_train_issue]]
-train = "compiler.compiler-perf"
-gh_issue = 428
-[[github_train_issue]]
-train = "expansion.cli"
-gh_issue = 429
-[[github_train_issue]]
-train = "expansion.engine-provisioning"
-gh_issue = 430
-[[github_train_issue]]
-train = "expansion.native-checker"
-gh_issue = 431
-[[github_train_issue]]
-train = "compiler.svelte-compiler"
-gh_issue = 432
-[[github_train_issue]]
-train = "compiler.svelte-style"
-gh_issue = 433
-[[github_train_issue]]
-train = "expansion.language-service"
-gh_issue = 434
-[[github_train_issue]]
-train = "compiler.vue-compiler"
-gh_issue = 435
-[[github_train_issue]]
-train = "expansion.skills"
-gh_issue = 436
-[[github_train_issue]]
-train = "expansion.html-wc"
-gh_issue = 437
-[[github_train_issue]]
-train = "expansion.svelte-ce"
-gh_issue = 438
-[[github_train_issue]]
-train = "expansion.vue-ce"
-gh_issue = 439
-[[github_train_issue]]
-train = "expansion.custom-elements"
-gh_issue = 440
-[[github_train_issue]]
-train = "expansion.architecture-proof"
-gh_issue = 441
-[[github_train_issue]]
-train = "compiler.vue-style"
-gh_issue = 442
-[[github_train_issue]]
-train = "compiler.compiler-optimization"
-gh_issue = 443
-[[github_train_issue]]
-train = "compiler.vue-style-query"
-gh_issue = 444
-
 [[implemented]]
 node_id = "CCA0"
 commit_message = "docs(core): lock compiler authority, policy, demand, and admission"
@@ -1771,1206 +429,1507 @@ sync_to_github = true
 node_id = "CCA0"
 gh_issue = 105
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1A"
 gh_issue = 106
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1B"
 gh_issue = 107
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1C"
 gh_issue = 108
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1D1"
 gh_issue = 109
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1D2"
 gh_issue = 110
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1D"
 gh_issue = 111
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1E"
 gh_issue = 112
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1F"
 gh_issue = 113
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1GE"
 gh_issue = 114
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1GT"
 gh_issue = 115
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1G"
 gh_issue = 116
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1H"
 gh_issue = 117
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1I"
 gh_issue = 118
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1J"
 gh_issue = 119
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1K"
 gh_issue = 120
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1L"
 gh_issue = 121
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1M1"
 gh_issue = 122
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1M2"
 gh_issue = 123
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1M3"
 gh_issue = 124
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1M"
 gh_issue = 125
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1N1"
 gh_issue = 126
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1N2"
 gh_issue = 127
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1N3"
 gh_issue = 128
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1N4"
 gh_issue = 129
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1N"
 gh_issue = 130
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O1"
 gh_issue = 131
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O2"
 gh_issue = 132
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O2A"
 gh_issue = 133
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O2B"
 gh_issue = 134
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O2C"
 gh_issue = 135
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O2D"
 gh_issue = 136
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O2E"
 gh_issue = 137
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O2F"
 gh_issue = 138
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O2G"
 gh_issue = 139
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O3"
 gh_issue = 140
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O3A"
 gh_issue = 141
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O3B"
 gh_issue = 142
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O4"
 gh_issue = 143
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O4D"
 gh_issue = 144
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O5"
 gh_issue = 145
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O5D"
 gh_issue = 146
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O"
 gh_issue = 147
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1T1"
 gh_issue = 148
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1T2S"
 gh_issue = 149
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1T2V"
 gh_issue = 150
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1T2"
 gh_issue = 151
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1T3"
 gh_issue = 152
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1T4"
 gh_issue = 153
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1"
 gh_issue = 154
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2A"
 gh_issue = 155
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2BS"
 gh_issue = 156
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2BV"
 gh_issue = 157
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2B"
 gh_issue = 158
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2C"
 gh_issue = 159
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2D0"
 gh_issue = 160
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2DS"
 gh_issue = 161
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2DV"
 gh_issue = 162
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2D"
 gh_issue = 163
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2E0"
 gh_issue = 164
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2EV"
 gh_issue = 165
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2EH"
 gh_issue = 166
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2E"
 gh_issue = 167
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2F"
 gh_issue = 168
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA2"
 gh_issue = 169
 sync_to_github = true
+
 [[github_issue]]
 node_id = "J2"
 gh_issue = 170
 sync_to_github = true
+
 [[github_issue]]
 node_id = "J3"
 gh_issue = 171
 sync_to_github = true
+
 [[github_issue]]
 node_id = "J4"
 gh_issue = 172
 sync_to_github = true
+
 [[github_issue]]
 node_id = "D1"
 gh_issue = 173
 sync_to_github = true
+
 [[github_issue]]
 node_id = "D2"
 gh_issue = 174
 sync_to_github = true
+
 [[github_issue]]
 node_id = "D3"
 gh_issue = 175
 sync_to_github = true
+
 [[github_issue]]
 node_id = "D4"
 gh_issue = 176
 sync_to_github = true
+
 [[github_issue]]
 node_id = "D5"
 gh_issue = 177
 sync_to_github = true
+
 [[github_issue]]
 node_id = "D6"
 gh_issue = 178
 sync_to_github = true
+
 [[github_issue]]
 node_id = "D7"
 gh_issue = 179
 sync_to_github = true
+
 [[github_issue]]
 node_id = "D8"
 gh_issue = 180
 sync_to_github = true
+
 [[github_issue]]
 node_id = "E1"
 gh_issue = 181
 sync_to_github = true
+
 [[github_issue]]
 node_id = "C2"
 gh_issue = 182
 sync_to_github = true
+
 [[github_issue]]
 node_id = "C3"
 gh_issue = 183
 sync_to_github = true
+
 [[github_issue]]
 node_id = "C4"
 gh_issue = 184
 sync_to_github = true
+
 [[github_issue]]
 node_id = "E2"
 gh_issue = 185
 sync_to_github = true
+
 [[github_issue]]
 node_id = "E3"
 gh_issue = 186
 sync_to_github = true
+
 [[github_issue]]
 node_id = "E4"
 gh_issue = 187
 sync_to_github = true
+
 [[github_issue]]
 node_id = "F1"
 gh_issue = 188
 sync_to_github = true
+
 [[github_issue]]
 node_id = "F2"
 gh_issue = 189
 sync_to_github = true
+
 [[github_issue]]
 node_id = "G1"
 gh_issue = 190
 sync_to_github = true
+
 [[github_issue]]
 node_id = "G2"
 gh_issue = 191
 sync_to_github = true
+
 [[github_issue]]
 node_id = "G3"
 gh_issue = 192
 sync_to_github = true
+
 [[github_issue]]
 node_id = "G4"
 gh_issue = 193
 sync_to_github = true
+
 [[github_issue]]
 node_id = "G5"
 gh_issue = 194
 sync_to_github = true
+
 [[github_issue]]
 node_id = "H1"
 gh_issue = 195
 sync_to_github = true
+
 [[github_issue]]
 node_id = "H2"
 gh_issue = 196
 sync_to_github = true
+
 [[github_issue]]
 node_id = "H3"
 gh_issue = 197
 sync_to_github = true
+
 [[github_issue]]
 node_id = "K1"
 gh_issue = 198
 sync_to_github = true
+
 [[github_issue]]
 node_id = "K2"
 gh_issue = 199
 sync_to_github = true
+
 [[github_issue]]
 node_id = "TCM0R"
 gh_issue = 200
 sync_to_github = true
+
 [[github_issue]]
 node_id = "TCM1"
 gh_issue = 201
 sync_to_github = true
+
 [[github_issue]]
 node_id = "TCM2"
 gh_issue = 202
 sync_to_github = true
+
 [[github_issue]]
 node_id = "TCM3"
 gh_issue = 203
 sync_to_github = true
+
 [[github_issue]]
 node_id = "TCM4"
 gh_issue = 204
 sync_to_github = true
+
 [[github_issue]]
 node_id = "K3"
 gh_issue = 205
 sync_to_github = true
+
 [[github_issue]]
 node_id = "L1"
 gh_issue = 206
 sync_to_github = true
+
 [[github_issue]]
 node_id = "L2"
 gh_issue = 207
 sync_to_github = true
+
 [[github_issue]]
 node_id = "L3"
 gh_issue = 208
 sync_to_github = true
+
 [[github_issue]]
 node_id = "L4"
 gh_issue = 209
 sync_to_github = true
+
 [[github_issue]]
 node_id = "BR0"
 gh_issue = 210
 sync_to_github = true
+
 [[github_issue]]
 node_id = "UAK0"
 gh_issue = 211
 sync_to_github = true
+
 [[github_issue]]
 node_id = "UAK1"
 gh_issue = 212
 sync_to_github = true
+
 [[github_issue]]
 node_id = "ENC0"
 gh_issue = 213
 sync_to_github = true
+
 [[github_issue]]
 node_id = "ENCF0"
 gh_issue = 214
 sync_to_github = true
+
 [[github_issue]]
 node_id = "ENCL0"
 gh_issue = 215
 sync_to_github = true
+
 [[github_issue]]
 node_id = "ENCT0"
 gh_issue = 216
 sync_to_github = true
+
 [[github_issue]]
 node_id = "ENC1"
 gh_issue = 217
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VID0"
 gh_issue = 218
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CAT0"
 gh_issue = 219
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CFG0"
 gh_issue = 220
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CPF0"
 gh_issue = 221
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CPF1"
 gh_issue = 222
 sync_to_github = true
+
 [[github_issue]]
 node_id = "DEM0"
 gh_issue = 223
 sync_to_github = true
+
 [[github_issue]]
 node_id = "PAR0"
 gh_issue = 224
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CMP0"
 gh_issue = 225
 sync_to_github = true
+
 [[github_issue]]
 node_id = "EAK0"
 gh_issue = 226
 sync_to_github = true
+
 [[github_issue]]
 node_id = "EMB0"
 gh_issue = 227
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMK0"
 gh_issue = 228
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT0"
 gh_issue = 229
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FCFG0"
 gh_issue = 230
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT1P"
 gh_issue = 231
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT1"
 gh_issue = 232
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT1A"
 gh_issue = 233
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT1B"
 gh_issue = 234
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT1C"
 gh_issue = 235
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT1D"
 gh_issue = 236
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT1E"
 gh_issue = 237
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT2"
 gh_issue = 238
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT2T"
 gh_issue = 239
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT2X"
 gh_issue = 240
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT2TX"
 gh_issue = 241
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMTC0"
 gh_issue = 242
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMTCL0"
 gh_issue = 243
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMTCS0"
 gh_issue = 244
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMTS0"
 gh_issue = 245
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMTV0"
 gh_issue = 246
 sync_to_github = true
+
 [[github_issue]]
 node_id = "TIF0"
 gh_issue = 247
 sync_to_github = true
+
 [[github_issue]]
 node_id = "EAK1"
 gh_issue = 248
 sync_to_github = true
+
 [[github_issue]]
 node_id = "TIF1"
 gh_issue = 249
 sync_to_github = true
+
 [[github_issue]]
 node_id = "IDX0"
 gh_issue = 250
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CEF0"
 gh_issue = 251
 sync_to_github = true
+
 [[github_issue]]
 node_id = "COX0"
 gh_issue = 252
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LRA0"
 gh_issue = 253
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LNT0"
 gh_issue = 254
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LNTCFG0"
 gh_issue = 255
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LNT2"
 gh_issue = 256
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LNT1"
 gh_issue = 257
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LNTCSS0"
 gh_issue = 258
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LNTS0"
 gh_issue = 259
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LNTV0"
 gh_issue = 260
 sync_to_github = true
+
 [[github_issue]]
 node_id = "PER0"
 gh_issue = 261
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CPER0"
 gh_issue = 262
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CPER1"
 gh_issue = 263
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CMP1"
 gh_issue = 264
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CMP2"
 gh_issue = 265
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CMP3"
 gh_issue = 266
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CMP4"
 gh_issue = 267
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CPER2"
 gh_issue = 268
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CMP5"
 gh_issue = 269
 sync_to_github = true
+
 [[github_issue]]
 node_id = "PUB0"
 gh_issue = 270
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CLI0"
 gh_issue = 271
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CLI1"
 gh_issue = 272
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CLI2"
 gh_issue = 273
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CLI4"
 gh_issue = 274
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CLIC0"
 gh_issue = 275
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CLITS0"
 gh_issue = 276
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CLI5"
 gh_issue = 277
 sync_to_github = true
+
 [[github_issue]]
 node_id = "EPR0"
 gh_issue = 278
 sync_to_github = true
+
 [[github_issue]]
 node_id = "EPR1"
 gh_issue = 279
 sync_to_github = true
+
 [[github_issue]]
 node_id = "EPR2"
 gh_issue = 280
 sync_to_github = true
+
 [[github_issue]]
 node_id = "EPR3"
 gh_issue = 281
 sync_to_github = true
+
 [[github_issue]]
 node_id = "EPR4"
 gh_issue = 282
 sync_to_github = true
+
 [[github_issue]]
 node_id = "EPR5"
 gh_issue = 283
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LNT3"
 gh_issue = 284
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CLIL0"
 gh_issue = 285
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCK0"
 gh_issue = 286
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SCP0"
 gh_issue = 287
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SCP1"
 gh_issue = 288
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SCP2"
 gh_issue = 289
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SCP5"
 gh_issue = 290
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SST0"
 gh_issue = 291
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SST1"
 gh_issue = 292
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SST2"
 gh_issue = 293
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SCP3"
 gh_issue = 294
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SCP4"
 gh_issue = 295
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SCP6"
 gh_issue = 296
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SCP7"
 gh_issue = 297
 sync_to_github = true
+
 [[github_issue]]
 node_id = "UAI0"
 gh_issue = 298
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCK1"
 gh_issue = 299
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCK2"
 gh_issue = 300
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCK3"
 gh_issue = 301
 sync_to_github = true
+
 [[github_issue]]
 node_id = "UAO0"
 gh_issue = 302
 sync_to_github = true
+
 [[github_issue]]
 node_id = "UAP0"
 gh_issue = 303
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LSO0"
 gh_issue = 304
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LSO1"
 gh_issue = 305
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LSO2"
 gh_issue = 306
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LSO3"
 gh_issue = 307
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LSO4"
 gh_issue = 308
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LSO5"
 gh_issue = 309
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LSO6"
 gh_issue = 310
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LSO7"
 gh_issue = 311
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LSO8"
 gh_issue = 312
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VCP0"
 gh_issue = 313
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VCP1"
 gh_issue = 314
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VCP2"
 gh_issue = 315
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VIM0"
 gh_issue = 316
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VIM1"
 gh_issue = 317
 sync_to_github = true
+
 [[github_issue]]
 node_id = "EPR6"
 gh_issue = 318
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LSO9"
 gh_issue = 319
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LSO10"
 gh_issue = 320
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCK4"
 gh_issue = 321
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCK5"
 gh_issue = 322
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCK6"
 gh_issue = 323
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-AT-CYCLE"
 gh_issue = 324
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-AT-QUERY"
 gh_issue = 325
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-AT-REDUCE"
 gh_issue = 326
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-BD-DUP"
 gh_issue = 327
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-BD-INIT"
 gh_issue = 328
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-BD-SCOPE"
 gh_issue = 329
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-CF-CONTEXT"
 gh_issue = 330
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-CF-THIS"
 gh_issue = 331
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-CF-VAR"
 gh_issue = 332
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-CO-CALL"
 gh_issue = 333
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-CO-INFER"
 gh_issue = 334
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-CO-OVER"
 gh_issue = 335
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-FD-CFLOW"
 gh_issue = 336
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-FD-DEF"
 gh_issue = 337
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-FD-NARROW"
 gh_issue = 338
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-JD-DEC"
 gh_issue = 339
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-JD-JS"
 gh_issue = 340
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-JD-JSDOC"
 gh_issue = 341
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-JF-JSX"
 gh_issue = 342
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-JF-SVELTE"
 gh_issue = 343
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-JF-VUE"
 gh_issue = 344
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-MP-AUG"
 gh_issue = 345
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-MP-MODULE"
 gh_issue = 346
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-MP-PROJECT"
 gh_issue = 347
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-OC-HERIT"
 gh_issue = 348
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-OC-MEM"
 gh_issue = 349
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-OC-MERGE"
 gh_issue = 350
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-RO-ASSIGN"
 gh_issue = 351
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-RO-EXCESS"
 gh_issue = 352
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCF-RO-OPER"
 gh_issue = 353
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCK7"
 gh_issue = 354
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCKF0"
 gh_issue = 355
 sync_to_github = true
+
 [[github_issue]]
 node_id = "NCK8"
 gh_issue = 356
 sync_to_github = true
+
 [[github_issue]]
 node_id = "UAM0"
 gh_issue = 357
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SKL0"
 gh_issue = 358
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SKL1"
 gh_issue = 359
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SKL2"
 gh_issue = 360
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SKL3"
 gh_issue = 361
 sync_to_github = true
+
 [[github_issue]]
 node_id = "HWC0"
 gh_issue = 362
 sync_to_github = true
+
 [[github_issue]]
 node_id = "HWC1"
 gh_issue = 363
 sync_to_github = true
+
 [[github_issue]]
 node_id = "HWC2"
 gh_issue = 364
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMTH0"
 gh_issue = 365
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT3C"
 gh_issue = 366
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT4P"
 gh_issue = 367
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT4F"
 gh_issue = 368
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT4L"
 gh_issue = 369
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT3"
 gh_issue = 370
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT4M"
 gh_issue = 371
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT4N"
 gh_issue = 372
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT4W"
 gh_issue = 373
 sync_to_github = true
+
 [[github_issue]]
 node_id = "FMT4"
 gh_issue = 374
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CLIF0"
 gh_issue = 375
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CLI3"
 gh_issue = 376
 sync_to_github = true
+
 [[github_issue]]
 node_id = "HWC3"
 gh_issue = 377
 sync_to_github = true
+
 [[github_issue]]
 node_id = "HWCI0"
 gh_issue = 378
 sync_to_github = true
+
 [[github_issue]]
 node_id = "HWCL0"
 gh_issue = 379
 sync_to_github = true
+
 [[github_issue]]
 node_id = "HWCP0"
 gh_issue = 380
 sync_to_github = true
+
 [[github_issue]]
 node_id = "HWC4"
 gh_issue = 381
 sync_to_github = true
+
 [[github_issue]]
 node_id = "HWC5"
 gh_issue = 382
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SCE0"
 gh_issue = 383
 sync_to_github = true
+
 [[github_issue]]
 node_id = "UAK2"
 gh_issue = 384
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VCE0"
 gh_issue = 385
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CEC0"
 gh_issue = 386
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CEJ0"
 gh_issue = 387
 sync_to_github = true
+
 [[github_issue]]
 node_id = "PRF0"
 gh_issue = 388
 sync_to_github = true
+
 [[github_issue]]
 node_id = "MDXP"
 gh_issue = 389
 sync_to_github = true
+
 [[github_issue]]
 node_id = "LITP"
 gh_issue = 390
 sync_to_github = true
+
 [[github_issue]]
 node_id = "RCTP"
 gh_issue = 391
 sync_to_github = true
+
 [[github_issue]]
 node_id = "MDXR0"
 gh_issue = 392
 sync_to_github = true
+
 [[github_issue]]
 node_id = "SLDP"
 gh_issue = 393
 sync_to_github = true
+
 [[github_issue]]
 node_id = "ALPP"
 gh_issue = 394
 sync_to_github = true
+
 [[github_issue]]
 node_id = "ANGP"
 gh_issue = 395
 sync_to_github = true
+
 [[github_issue]]
 node_id = "ASTP"
 gh_issue = 396
 sync_to_github = true
+
 [[github_issue]]
 node_id = "UKS0"
 gh_issue = 397
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VST0"
 gh_issue = 398
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VCP3"
 gh_issue = 399
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VCP4"
 gh_issue = 400
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VCP5"
 gh_issue = 401
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VCP6"
 gh_issue = 402
 sync_to_github = true
+
 [[github_issue]]
 node_id = "VCP7"
 gh_issue = 403
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CMP6"
 gh_issue = 404
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CPER3"
 gh_issue = 405
 sync_to_github = true
+
 [[github_issue]]
 node_id = "OPT0"
 gh_issue = 406
@@ -2980,59 +1939,225 @@ sync_to_github = true
 node_id = "VST1"
 gh_issue = 407
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1N2A"
 gh_issue = 445
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1N2B"
 gh_issue = 446
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1N2G"
 gh_issue = 447
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1N4A"
 gh_issue = 449
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1N3A"
 gh_issue = 450
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O1A"
 gh_issue = 451
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O2H"
 gh_issue = 452
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O2I"
 gh_issue = 453
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O3C"
 gh_issue = 454
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CPER0M"
 gh_issue = 455
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O1B"
 gh_issue = 456
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O2J"
 gh_issue = 457
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O3D"
 gh_issue = 458
 sync_to_github = true
+
 [[github_issue]]
 node_id = "CCA1O3E"
 gh_issue = 459
 sync_to_github = true
+
+[[github_train_issue]]
+train = "compiler.compiler-bridge"
+gh_issue = 104
+
+[[github_train_issue]]
+train = "rev11.flow"
+gh_issue = 408
+
+[[github_train_issue]]
+train = "rev11.public-typeinfo"
+gh_issue = 409
+
+[[github_train_issue]]
+train = "rev11.style"
+gh_issue = 410
+
+[[github_train_issue]]
+train = "rev11.semantic-compile"
+gh_issue = 411
+
+[[github_train_issue]]
+train = "rev11.inputs"
+gh_issue = 412
+
+[[github_train_issue]]
+train = "rev11.core"
+gh_issue = 413
+
+[[github_train_issue]]
+train = "rev11.query-runtime"
+gh_issue = 414
+
+[[github_train_issue]]
+train = "rev11.scheduler-runtime"
+gh_issue = 415
+
+[[github_train_issue]]
+train = "rev11.cache-runtime"
+gh_issue = 416
+
+[[github_train_issue]]
+train = "rev11.host-runtime"
+gh_issue = 417
+
+[[github_train_issue]]
+train = "rev11.provider-runtime"
+gh_issue = 418
+
+[[github_train_issue]]
+train = "rev11.publication"
+gh_issue = 419
+
+[[github_train_issue]]
+train = "rev11.host-session"
+gh_issue = 420
+
+[[github_train_issue]]
+train = "rev11.typescript-mapper"
+gh_issue = 421
+
+[[github_train_issue]]
+train = "rev11.finalization"
+gh_issue = 422
+
+[[github_train_issue]]
+train = "governance.governance"
+gh_issue = 423
+
+[[github_train_issue]]
+train = "expansion.kernel"
+gh_issue = 424
+
+[[github_train_issue]]
+train = "compiler.compiler-core"
+gh_issue = 425
+
+[[github_train_issue]]
+train = "expansion.formatter"
+gh_issue = 426
+
+[[github_train_issue]]
+train = "expansion.lint"
+gh_issue = 427
+
+[[github_train_issue]]
+train = "compiler.compiler-perf"
+gh_issue = 428
+
+[[github_train_issue]]
+train = "expansion.cli"
+gh_issue = 429
+
+[[github_train_issue]]
+train = "expansion.engine-provisioning"
+gh_issue = 430
+
+[[github_train_issue]]
+train = "expansion.native-checker"
+gh_issue = 431
+
+[[github_train_issue]]
+train = "compiler.svelte-compiler"
+gh_issue = 432
+
+[[github_train_issue]]
+train = "compiler.svelte-style"
+gh_issue = 433
+
+[[github_train_issue]]
+train = "expansion.language-service"
+gh_issue = 434
+
+[[github_train_issue]]
+train = "compiler.vue-compiler"
+gh_issue = 435
+
+[[github_train_issue]]
+train = "expansion.skills"
+gh_issue = 436
+
+[[github_train_issue]]
+train = "expansion.html-wc"
+gh_issue = 437
+
+[[github_train_issue]]
+train = "expansion.svelte-ce"
+gh_issue = 438
+
+[[github_train_issue]]
+train = "expansion.vue-ce"
+gh_issue = 439
+
+[[github_train_issue]]
+train = "expansion.custom-elements"
+gh_issue = 440
+
+[[github_train_issue]]
+train = "expansion.architecture-proof"
+gh_issue = 441
+
+[[github_train_issue]]
+train = "compiler.vue-style"
+gh_issue = 442
+
+[[github_train_issue]]
+train = "compiler.compiler-optimization"
+gh_issue = 443
+
+[[github_train_issue]]
+train = "compiler.vue-style-query"
+gh_issue = 444
