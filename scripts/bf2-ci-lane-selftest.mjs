@@ -201,10 +201,10 @@ test("release.yml runs the same BF2 command in parallel and blocks publishing on
   }
 });
 
-test("nextest retains timeout overrides without Windows-only serialized groups", () => {
+test("nextest retains the two base and two provider timeout policies without Windows-only serialized groups", () => {
   const config = readFileSync(join(REPO_ROOT, ".config", "nextest.toml"), "utf8");
   assert.doesNotMatch(config, /max-threads\s*=\s*1/);
   assert.doesNotMatch(config, /test-group\s*=\s*'(?:shared-provider-live|lsp-server-unit)'/);
   assert.equal((config.match(/terminate-after\s*=\s*6/g) || []).length, 2);
-  assert.equal((config.match(/terminate-after\s*=\s*3/g) || []).length, 6);
+  assert.equal((config.match(/terminate-after\s*=\s*3/g) || []).length, 2);
 });

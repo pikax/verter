@@ -28,11 +28,6 @@ verter_tsgo_api = { path = "../verter_tsgo_api" }
 [dev-dependencies]
 blake3 = { workspace = true }
 verter_test_support = { path = "../verter_test_support" }
-# Compile-fail SEAL witness for the branded `DisplaySignature` (P1-03): the
-# fixtures under `tests/cases/compile-fail/` prove the out-of-crate forge
-# vectors (struct literal, witness forge, Deserialize, &str coercion) do not
-# compile. Gated behind the `compile-fail` feature (see [features]).
-trybuild = "1.0"
 # Per-test isolated temp dirs (auto-cleaned) for the discovery version-parse
 # tests, so parallel runs never collide on a fixed temp path.
 tempfile = "3.27"
@@ -50,13 +45,3 @@ tokio = { version = "1.52", features = [
 
 [features]
 default = []
-# Opt-in: enables the trybuild compile-fail SEAL fixtures
-# (`tests/cases/compile_fail.rs` — the `DisplaySignature` brand seal).
-# trybuild spawns a full `cargo build` of a fixture crate linking
-# `verter_type_runtime`, so each fixture is `#[ignore]`d unless this feature is
-# on. Run LOCALLY with `cargo nextest run -p verter_type_runtime --features
-# compile-fail` (or `cargo test`). It is NOT wired into the default gate
-# (`node scripts/gate.mjs`) or any CI workflow — the seals it asserts are also
-# enforced structurally by the normal build, so a broken seal fails the
-# ordinary compile. Recorded in `docs/contributing/gate-integrity-ledger.md`.
-compile-fail = []

@@ -1217,6 +1217,6 @@ pub fn semantic_value_families() -> Vec<SemanticValueFamily> {
     ]
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "conformance-tests"))]
 #[path = "model_tests.rs"]
 mod model_tests;

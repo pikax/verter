@@ -446,6 +446,13 @@ pub struct SemanticGraphStore {
     /// operation's linearization point.
     #[cfg(any(test, feature = "test-support"))]
     cold_winner_post_admission_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only injection point inside cancellation abort, after
+    /// joiners are notified and before the cancelled owner's flight is
+    /// retired. A test can hold the owner in this exact window and prove a
+    /// live follower makes progress without repeatedly rejoining the aborted
+    /// flight.
+    #[cfg(any(test, feature = "test-support"))]
+    cancellation_abort_pre_retire_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Per-store test-only injection point inside [`Self::invalidate_all`],
     /// fired right BEFORE the `canonical_to_entries` reverse-index clear —
     /// and, in final-state code, with the `entries` lock STILL held. A
@@ -2502,10 +2509,15 @@ impl SemanticGraphStore {
                     // whole dispatch flow from step 1 — the warm slot is
                     // either already repopulated by another winner or
                     // still empty, in which case this caller may become
-                    // the fresh cold winner.
+                    // the fresh cold winner. Retire the exact aborted
+                    // entry before retrying: the cancelling owner may not
+                    // yet have reached its own retirement step, and without
+                    // this pointer-guarded removal a fast follower can rejoin
+                    // the same aborted entry until its retry budget is gone.
                     retries += 1;
                     record_inflight_aborted_retry(&self.stats);
                     drop(state);
+                    self.retire_inflight(&prepared, &inflight, independent_owner);
                     drop(inflight);
                     continue;
                 }
@@ -3084,6 +3096,14 @@ impl SemanticGraphStore {
             state.partial_reasons = crate::semantic_query::PartialReasonSet::CANCELLED;
         }
         inflight.ready.notify_all();
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let gate = self.cancellation_abort_pre_retire_gate.lock().clone();
+            if let Some(barrier) = gate {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
         self.retire_inflight(prepared, inflight, independent_owner);
     }
 

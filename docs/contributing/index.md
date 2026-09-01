@@ -43,8 +43,8 @@ pnpm --filter @verter/typescript-plugin test  # One package
 pnpm exec vitest run path/to/test.ts           # One test file
 
 # Rust
-cargo nextest run --workspace              # Every workspace test target
-cargo test -p verter_session --tests       # Shared-process session surface
+node scripts/gate.mjs                      # Provider-free core Rust gate
+node scripts/compile-contracts.mjs         # Standalone compile contracts
 cargo test -p verter_compiler test_name    # Targeted iteration
 ```
 
@@ -133,8 +133,8 @@ Before submitting a pull request:
 - [ ] Tests added or updated covering the change
 - [ ] Documentation updated if applicable
 - [ ] No TypeScript errors (`pnpm build:ts` succeeds)
-- [ ] Rust checks pass (`cargo fmt --all --check`, warning-denied Clippy, and
-      the canonical Nextest/session pair where applicable)
+- [ ] Rust checks pass (`node scripts/gate.mjs`, `node scripts/compile-contracts.mjs`,
+      `cargo fmt --all --check`, and warning-denied Clippy where applicable)
 - [ ] Code style is consistent with surrounding code
 - [ ] Conventional commit message used
 - [ ] Both positive and negative assertions in tests (see [Testing Guide](./testing.md))

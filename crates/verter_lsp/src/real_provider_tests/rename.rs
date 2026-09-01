@@ -379,7 +379,7 @@ real_provider_test!(
 // bounded settle loop exhausts and the assertion fails — verified during
 // development.
 #[tokio::test(flavor = "multi_thread")]
-async fn parent_did_open_prewarms_imported_child_carrier_api() {
+async fn parent_did_open_prewarms_imported_child_carrier_api_tsserver() {
     use crate::test_harness::{TestProviderKind, TestSessionBuilder};
 
     let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsserver)

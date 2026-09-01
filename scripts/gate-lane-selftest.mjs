@@ -10,7 +10,6 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   buildGateLaneCommandPlan,
   buildCanonicalSurface1FilterExpr,
-  buildTrybuildExclusionFilterExpr,
   canonicalGateLaneTranscriptSegments,
   createGateRunSupervisor,
   deriveGateLaneLayout,
@@ -90,18 +89,14 @@ const completeShippedReceipt = (overrides = {}) => ({
     /contained/i,
   );
 
-  // `expectedSurface1Filter` is built independently of `buildCanonicalSurface1FilterExpr()` — it composes
-  // the same `and not package(verter_shipped_cfg_contract)` wrapper as a literal here, over the (separately
-  // pinned, in gate-selftest.mjs GB13.2) trybuild-exclusion arms. Asserting against
-  // `buildCanonicalSurface1FilterExpr()`'s own return value is a self-referential tautology that cannot
-  // catch a regression inside that function itself (e.g. a dropped `verter_shipped_cfg_contract` exclusion,
-  // which would let that package's tests run twice — once under Surface 1's dev profile, once under the
-  // shipped-cfg lane's `no-debug-assertions` profile).
-  const expectedSurface1Filter = `(${buildTrybuildExclusionFilterExpr()}) and not package(verter_shipped_cfg_contract)`;
+  // Build this independently so dropping either dedicated-lane package from
+  // the canonical filter cannot hide behind a self-referential assertion.
+  const expectedSurface1Filter =
+    "not package(verter_shipped_cfg_contract) and not package(verter_svelte_conformance)";
   assert.equal(
     buildCanonicalSurface1FilterExpr(),
     expectedSurface1Filter,
-    "buildCanonicalSurface1FilterExpr must wrap the trybuild exclusion with the shipped-cfg-contract exclusion",
+    "the canonical filter must exclude both dedicated-lane packages",
   );
 
   const commandPlan = buildGateLaneCommandPlan({
@@ -357,7 +352,11 @@ const completeShippedReceipt = (overrides = {}) => ({
       fastFailCancels.push([laneId, reason]);
     },
   });
-  assert.deepEqual(fastFailStarts, ["surface-1"], "shipped-cfg must never start after a fail-fast hard failure");
+  assert.deepEqual(
+    fastFailStarts,
+    ["surface-1"],
+    "shipped-cfg must never start after a fail-fast hard failure",
+  );
   assert.deepEqual(fastFailCancels, [["shipped-cfg", "SURFACE_1_FAIL_FAST"]]);
   assert.equal(fastFail.shipped, null);
   assert.equal(reduceGateLaneReceipts(fastFail).verdict, "FAIL");

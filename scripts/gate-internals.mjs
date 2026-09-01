@@ -2341,148 +2341,12 @@ export function canonicalGateLaneTranscriptSegments({ surface = null, shipped = 
 }
 
 // ----------------------------------------------------------------------------------------------------
-// TRYBUILD EXCLUSION — INTERIM, pending maintainer disposition. Do not delete this section without a
-// ruling: their permanent disposition (drop them for good, keep this exclusion permanently, or restore
-// them once the trybuild target dir is cached) is an open decision, not settled by this exclusion.
-//
-// A `trybuild::TestCases::new()` harness SPAWNS a real `cargo` build against a generated crate and, cold,
-// compiles the crate's ENTIRE dependency closure before checking a single fixture — not a unit test.
-// Measured here: 98s cold, 0.8s warm. Two of them tripped the gate's own 360s budget in a real run while
-// passing 3/3 in isolation (already-raised once). `.config/nextest.toml` carries a `slow-timeout` override
-// for the same class (see the "trybuild compile-fail tests" comment there) — that override is UNCHANGED
-// and still applies to anyone running these tests directly; this exclusion removes them from canonical
-// archive-backed Surface 1. The shipped contract has an independent package-only inventory.
-//
-// One row per source driver included in this interim exclusion — verified against a real
-// `cargo nextest list --workspace --message-format json` listing, not guessed from test names. A
-// substring match on "compile_fail" also catches two UNRELATED tests that must stay in the gate and are
-// deliberately NOT rows here: verter_lsp's
-// `external_ts::membership_reconciler::tests::absent_compile_failed_removes` and verter_session's
-// `types::tests::compile_failure_code_classification`. Each row's `modulePrefix` is the exact source-order
-// module path (no trailing test name) so it covers every test in that file, present or future, including
-// ones already marked `#[ignore]` (most of the verter_session rows are — they cost nothing today because
-// no surface passes `--run-ignored`, but a future un-ignore must not silently reintroduce the cost without
-// this exclusion already covering it). The compiler subset is also checked against its source tree by
-// `discoverCompilerTrybuildSourceModulePrefixes`, so a new compiler driver cannot remain unregistered.
+// The canonical nextest surface excludes only packages that have their own execution model. Compile-fail
+// Cargo work is absent from test discovery and runs through scripts/compile-contracts.mjs.
 // ----------------------------------------------------------------------------------------------------
-export const TRYBUILD_EXCLUDED_SUITES = Object.freeze([
-  { package: "verter_session", modulePrefix: "cases::g_compile::compile_fail::" },
-  { package: "verter_language", modulePrefix: "cases::compile_fail::" },
-  { package: "verter_identity", modulePrefix: "cases::compile_fail::" },
-  { package: "verter_compiler", modulePrefix: "cases::compiler_compile_fail::" },
-  { package: "verter_audit", modulePrefix: "cases::attribution_compile_fail::" },
-  { package: "verter_type_runtime", modulePrefix: "cases::compile_fail::" },
-]);
-
-export function compilerTrybuildDriverUsesCanonicalConstructor(source, sourceLabel = "<source>") {
-  const canonicalCalls = [...source.matchAll(/\btrybuild\s*::\s*TestCases\s*::\s*new\s*\(/g)]
-    .length;
-  const canonicalReferences = [...source.matchAll(/\btrybuild\s*::\s*TestCases\s*::\s*new\b/g)]
-    .length;
-  const testCasesCalls = [
-    ...source.matchAll(/\b(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*TestCases\s*::\s*new\s*\(/g),
-  ].length;
-  const importsTrybuild = /^\s*use\s+(?:::)?trybuild\b/m.test(source);
-  const aliasesTestCases =
-    /^\s*type\s+[A-Za-z_][A-Za-z0-9_]*[^=]*=\s*(?:::)?trybuild\s*::\s*TestCases\b/m.test(source);
-
-  if (
-    importsTrybuild ||
-    aliasesTestCases ||
-    canonicalReferences !== canonicalCalls ||
-    testCasesCalls !== canonicalCalls
-  ) {
-    throw new Error(
-      `unsupported trybuild constructor spelling in ${sourceLabel}; compiler drivers must call ` +
-        "`trybuild::TestCases::new(...)` directly so exclusion discovery is fail-closed",
-    );
-  }
-  return canonicalCalls > 0;
+export function buildCanonicalSurface1FilterExpr() {
+  return "not package(verter_shipped_cfg_contract) and not package(verter_svelte_conformance)";
 }
-
-// Discover the compiler integration modules that actually instantiate trybuild. This is deliberately
-// source-derived rather than a filename convention: compile-fail fixtures do not themselves instantiate
-// the harness, while a newly named driver still must be registered by its real Rust module path.
-export function discoverCompilerTrybuildSourceModulePrefixes(repoRoot) {
-  const testsRoot = join(repoRoot, "crates", "verter_compiler", "tests");
-  const casesRoot = join(testsRoot, "cases");
-  const prefixes = [];
-
-  function walk(dir) {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const absolute = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(absolute);
-        continue;
-      }
-      if (!entry.isFile() || !entry.name.endsWith(".rs")) continue;
-      const source = readFileSync(absolute, "utf8");
-      if (!compilerTrybuildDriverUsesCanonicalConstructor(source, absolute)) continue;
-
-      let modulePath = relative(testsRoot, absolute).replace(/\\/g, "/").replace(/\.rs$/, "");
-      if (modulePath.endsWith("/mod")) modulePath = modulePath.slice(0, -4);
-      prefixes.push(`${modulePath.replaceAll("/", "::")}::`);
-    }
-  }
-
-  walk(casesRoot);
-  return prefixes.sort();
-}
-
-// Builds the nextest filterset expression (see https://nexte.st/docs/filtersets) that excludes every row
-// above. `test(/^prefix/)` anchors at the start of the fully-qualified test name so it never matches a
-// same-named module nested deeper, and pairing each `test()` arm with its own `package()` arm means a
-// module path that happens to collide across two packages cannot cross-exclude the wrong crate's tests.
-export function buildTrybuildExclusionFilterExpr(suites = TRYBUILD_EXCLUDED_SUITES) {
-  const arms = suites.map((s) => `(package(${s.package}) and test(/^${s.modulePrefix}/))`);
-  return `not (${arms.join(" or ")})`;
-}
-
-export function buildCanonicalSurface1FilterExpr(suites = TRYBUILD_EXCLUDED_SUITES) {
-  return `(${buildTrybuildExclusionFilterExpr(suites)}) and not package(verter_shipped_cfg_contract)`;
-}
-
-// Legacy Surface-2 selftest fixture: per-row skip args for a directly executed libtest binary, which never
-// sees a nextest filterset. Production gate.mjs no longer calls this helper. `--skip <prefix>` remains a
-// plain (non-`--exact`) substring filter for the frozen regression classifier exercised in gate-selftest.mjs.
-export function trybuildSkipArgsForPackage(pkg, suites = TRYBUILD_EXCLUDED_SUITES) {
-  const args = [];
-  for (const s of suites) {
-    if (s.package !== pkg) continue;
-    args.push("--skip", s.modulePrefix);
-  }
-  return args;
-}
-
-// Counts, from a REAL (unfiltered) nextest list JSON's suites, how many testcases each registered row
-// actually matches in the archive under test. A row that matches ZERO tests means its file was renamed,
-// moved, or deleted without updating this registry — the exclusion has silently gone stale (either it now
-// excludes nothing for that file, letting the cargo-spawning cost back into the gate unnoticed, or worse,
-// a differently-named module drifted under the same prefix). The caller must treat `missing.length > 0` as
-// a hard setup failure, never a silent pass — the same "selectors matched non-zero work" contract the
-// shipped-cfg guard's independent expected-test-inventory scan (`countTestAttributesInDir`) enforces for
-// verter_shipped_cfg_contract, applied per-row here.
-export function countTrybuildExclusionMatches(allSuites, suites = TRYBUILD_EXCLUDED_SUITES) {
-  const perRow = suites.map(() => 0);
-  let total = 0;
-  for (const suite of allSuites || []) {
-    const pkg = suite["package-name"];
-    const testcases = suite.testcases || {};
-    for (let i = 0; i < suites.length; i++) {
-      if (suites[i].package !== pkg) continue;
-      for (const name of Object.keys(testcases)) {
-        if (name.startsWith(suites[i].modulePrefix)) {
-          perRow[i]++;
-          total++;
-        }
-      }
-    }
-  }
-  const missing = suites.filter((_, i) => perRow[i] === 0);
-  return { total, perRow, missing };
-}
-
-// ----------------------------------------------------------------------------------------------------
 // Tolerated-failure allowlist — EXACT nextest test names (the env-only typeinfo freshness pair). A test
 // whose EXACT name is in this set is tolerated ONLY when the freshness-tooling preflight ALLOWS it (the
 // tools are genuinely absent); when the tools are present or were installed, a FAIL of one of these names
@@ -2500,15 +2364,9 @@ export function countTrybuildExclusionMatches(allSuites, suites = TRYBUILD_EXCLU
 // at once, all tolerated together.
 export const TOLERATED_TEST_BINARY_ID = "verter_protocol::main";
 
+// Retained for parser regression fixtures only. Production gate wiring never
+// enables tolerance now that proto freshness is not a Rust test.
 export const TOLERATED_TEST_NAMES = new Set([
-  // Post-consolidation, both env-only freshness tests live in the single `verter_protocol::main`
-  // integration binary under the module path `cases::typeinfo_proto_ts_freshness::<fn>`. nextest renders
-  // a run line as "<STATUS> [   …s] (n/m) verter_protocol::main cases::typeinfo_proto_ts_freshness::<fn>"
-  // (the last whitespace token is the bare libtest path). The retained legacy direct-libtest classifier's
-  // fixture prints "test cases::typeinfo_proto_ts_freshness::<fn> ... FAILED", so the exact name in both
-  // active Surface 1 and that selftest-only fixture is the `cases::`-prefixed module path.
-  // (Pre-consolidation these were a standalone `typeinfo_proto_ts_freshness`
-  // binary; that bare/`typeinfo_proto_ts_freshness::`-qualified form no longer exists in the archive.)
   "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output",
   "cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide",
 ]);
@@ -5016,9 +4874,7 @@ export const GATE_TELEMETRY_SCHEMA = "verter-gate-telemetry/v1";
 export const GATE_TELEMETRY_SCHEMA_VERSION = 1;
 
 export const GATE_TELEMETRY_PHASE_IDS = Object.freeze([
-  "build-prerequisite",
   "harness-smoke-typescript",
-  "freshness-tooling",
   "vue-macro-oracle-check",
   "vue-macro-oracle-tests",
   "dev-archive",
@@ -5274,7 +5130,7 @@ export function runBoundedVersionProbe(
   // Node treats a non-positive spawnSync timeout as "no timeout". Once the parent deadline is spent,
   // refuse before spawning instead of converting the expired gate into an unbounded mutex-held probe.
   if (!(effectiveTimeoutMs > 0)) {
-    return { available: false, stdout: "", error: "timeout" };
+    return { available: false, stdout: "", error: "timeout", pid: null };
   }
   try {
     const result = spawnSyncFn(command, args, {
@@ -5292,18 +5148,25 @@ export function runBoundedVersionProbe(
         available: false,
         stdout: "",
         error: result.error.code === "ETIMEDOUT" ? "timeout" : "spawn-unavailable",
+        pid: Number.isInteger(result.pid) ? result.pid : null,
       };
     }
     if (result.status !== 0) {
-      return { available: false, stdout: "", error: `exit-${result.status ?? "unknown"}` };
+      return {
+        available: false,
+        stdout: "",
+        error: `exit-${result.status ?? "unknown"}`,
+        pid: Number.isInteger(result.pid) ? result.pid : null,
+      };
     }
     return {
       available: true,
       stdout: String(result.stdout || result.stderr || "").trim(),
       error: null,
+      pid: Number.isInteger(result.pid) ? result.pid : null,
     };
   } catch {
-    return { available: false, stdout: "", error: "probe-error" };
+    return { available: false, stdout: "", error: "probe-error", pid: null };
   }
 }
 

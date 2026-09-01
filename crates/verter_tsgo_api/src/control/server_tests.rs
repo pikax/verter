@@ -435,14 +435,14 @@ async fn control_dispatch_drives_full_attach_lifecycle_through_relay() {
 /// the timeout must NOT tear the relay down.
 ///
 /// Discrimination: `handle_wait_initialized` bounds its `relay.wait_initialized()` await with
-/// an internal 10s timeout, so with no editor initialize the bounded typed timeout error
-/// returns after ~10s — well before the 20s outer bound. An UNBOUNDED await would never return,
-/// the OUTER bound (strictly longer than the handler's internal 10s timeout) would fire, and the
+/// an internal 3s timeout, so with no editor initialize the bounded typed timeout error
+/// returns before the 5s outer bound. An UNBOUNDED await would never return,
+/// the OUTER bound (strictly longer than the handler's internal timeout) would fire, and the
 /// `expect("BOUNDED")` would panic.
 ///
 /// A real (unpaused) clock is used deliberately: `verter_tsgo_api` does not enable
 /// tokio's `test-util` feature, so the virtual-clock `start_paused` seam is unavailable —
-/// the outer bound (20s) is > the handler's 10s internal timeout, so the handler's
+/// the outer bound (5s) is > the handler's 3s internal timeout, so the handler's
 /// timeout is what returns and boundedness is proven within the outer bound.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wait_initialized_times_out_when_editor_never_initializes() {
@@ -456,10 +456,10 @@ async fn wait_initialized_times_out_when_editor_never_initializes() {
         .await
         .expect("hello");
 
-    // The control call must return a BOUNDED typed error. The outer bound (20s) is
-    // strictly longer than the handler's internal 10s timeout, so the INNER timeout is
+    // The control call must return a BOUNDED typed error. The outer bound (5s) is
+    // strictly longer than the handler's internal 3s timeout, so the INNER timeout is
     // what returns; an unbounded handler would instead let the OUTER bound fire.
-    let outer = Duration::from_secs(20);
+    let outer = Duration::from_secs(5);
     let result = tokio::time::timeout(outer, lb.client.wait_initialized()).await;
     let err = result
         .expect("waitInitialized must be BOUNDED — it must return within the outer bound")

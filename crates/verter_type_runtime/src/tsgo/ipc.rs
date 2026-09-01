@@ -4024,9 +4024,15 @@ impl TypeProvider for TsgoTypeProvider {
                 let _ = transport.control_tx.send(StdinMessage::Shutdown);
                 return Ok(());
             };
-            // Best-effort: try shutdown request + exit notification with overall 3s timeout.
+            // Best-effort: try shutdown request + exit notification with an overall timeout.
             // If TSGO is unresponsive, we don't hang — the child has kill_on_drop.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            #[cfg(not(test))]
+            const BEST_EFFORT_SHUTDOWN_TIMEOUT: std::time::Duration =
+                std::time::Duration::from_secs(3);
+            #[cfg(test)]
+            const BEST_EFFORT_SHUTDOWN_TIMEOUT: std::time::Duration =
+                std::time::Duration::from_secs(1);
+            let _ = tokio::time::timeout(BEST_EFFORT_SHUTDOWN_TIMEOUT, async {
                 let _ = transport.request("shutdown", serde_json::Value::Null).await;
                 let _ = transport.notify("exit", serde_json::Value::Null).await;
             })

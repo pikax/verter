@@ -3654,9 +3654,9 @@ async fn shutdown_completes_within_timeout_when_provider_unresponsive() {
 
     let transport = Arc::new(test_transport_with_pending(stdin_tx, pending));
 
-    // Simulate the shutdown path: 3s internal timeout + Shutdown message
-    let shutdown_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    // Simulate the shutdown path: 1s internal timeout + Shutdown message
+    let shutdown_result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
             let _ = transport.request("shutdown", serde_json::Value::Null).await;
             let _ = transport.notify("exit", serde_json::Value::Null).await;
         })
@@ -3667,7 +3667,7 @@ async fn shutdown_completes_within_timeout_when_provider_unresponsive() {
 
     assert!(
         shutdown_result.is_ok(),
-        "Shutdown should complete within 5s even when provider is unresponsive"
+        "Shutdown should complete within 3s even when provider is unresponsive"
     );
 }
 
@@ -3681,7 +3681,7 @@ async fn managed_shutdown_kills_and_reaps_unresponsive_owned_child() {
     let stdout = child.stdout.take().expect("owned child stdout");
     let provider = TsgoTypeProvider::from_transport_parts(stdout, stdin, Some(child), None);
 
-    tokio::time::timeout(std::time::Duration::from_secs(7), provider.shutdown())
+    tokio::time::timeout(std::time::Duration::from_secs(5), provider.shutdown())
         .await
         .expect("managed shutdown exceeded its bounded teardown")
         .expect("managed shutdown failed");
@@ -4579,7 +4579,7 @@ async fn interactive_request_stays_bounded_when_the_writer_is_stalled_behind_a_f
         }));
     }
 
-    let joined = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(3), async {
         let mut out = Vec::new();
         for h in handles {
             out.push(h.await.expect("request task panicked"));
@@ -4825,7 +4825,7 @@ async fn a_slow_but_progressing_child_does_not_trip_the_writer_stall_watchdog() 
 
     // Positive control: the child genuinely received the whole frame, so the
     // no-crash assertion cannot pass vacuously against a writer that wrote nothing.
-    let seen = tokio::time::timeout(std::time::Duration::from_secs(15), drained)
+    let seen = tokio::time::timeout(std::time::Duration::from_secs(5), drained)
         .await
         .expect("the slow child must finish draining the frame")
         .expect("drain task panicked");

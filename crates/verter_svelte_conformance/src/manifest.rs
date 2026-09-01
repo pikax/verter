@@ -473,6 +473,6 @@ fn disposition_tag(disposition: Disposition) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "conformance-tests"))]
 #[path = "manifest_tests.rs"]
 mod manifest_tests;

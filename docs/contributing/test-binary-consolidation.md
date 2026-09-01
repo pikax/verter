@@ -67,7 +67,7 @@ Result: ~30× fewer links (301 → ~12), groups compile in parallel, and editing
    and generate `tests/it/<G>/mod.rs` with `pub mod <name>;` per moved file.
 3. Re-home shared helpers. The 40 files that declare a sibling `mod foo;` keep their helper file, moved into the same group dir. Genuinely shared helpers move to `tests/it/common/` and are pulled in with `#[path = "../common/mod.rs"]`. The existing module/fixture subdirs (`correctness/`, `fixtures/`, `block_2_canary/`, `component_meta_audit/`, `component_meta_audit_corpus/`, `fact_matrix/`, `perf_bounds/`, `compile-fail/`) move under `tests/it/` and are referenced from the relevant group root.
 4. Relative-path reads: guard/corpus tests that read via `CARGO_MANIFEST_DIR` and target `src/**` (e.g. `architecture_guards.rs`, `no_legacy_walker.rs`) are unaffected. Any test that enumerates `tests/*.rs` by path, or any guard asserting a `tests/*.rs` naming/location convention, must be updated to the new layout.
-5. `trybuild`/`compile-fail` (`tests/compile_fail.rs` + `tests/compile-fail/`) stays its own root (trybuild drives its own harness) — fold it into a `compile_fail` group root rather than the shared modules.
+5. Compile-fail fixtures stay under their owner crate, but their Cargo work is driven by the standalone `node scripts/compile-contracts.mjs` lane and must not be registered as Rust tests.
 
 ## 4. Legacy deletions
 
