@@ -4274,6 +4274,49 @@ fn flow_demanded_member_name(
     }
 }
 
+/// The bare identifier one indexed argument expression reads, if it is
+/// exactly a frame-binding read: a bare `Ref` or a single-segment
+/// `typeof` path — the two spellings the indexed lowering mints for one.
+fn indexed_bare_name(expression: &verter_type_expr::IndexedValueExpression) -> Option<&str> {
+    match expression {
+        verter_type_expr::IndexedValueExpression::Value(verter_type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        }) if type_arguments.is_empty() && !name.contains('.') => Some(name.as_ref()),
+        verter_type_expr::IndexedValueExpression::Value(verter_type_expr::TypeExpr::TypeOf(
+            verter_type_expr::ValueRef { path, type_args },
+        )) if type_args.is_empty() && path.len() == 1 => Some(path[0].as_str()),
+        _ => None,
+    }
+}
+
+/// Widen a FRESH value at a widening READ position: a lone literal
+/// widens to its primitive, and a UNION widens every literal arm — the
+/// value a widening-literal `const` bound from an all-fresh conditional
+/// carries (`const v = f ? 1 : "s"` reads `string | number` at a member
+/// position; a narrowed read of the same binding widens the surviving
+/// arm the same way). Sound only where every literal arm is KNOWN
+/// fresh, which the widening-locals membership guarantees: it admits a
+/// union-valued binding only when every conditional leaf was a bare
+/// literal.
+fn widen_fresh_read_node(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> SemanticNodeId {
+    let graph = dispatch.graph();
+    if let Some(SemanticNodeData::Union(members)) = graph.node_data(node).as_deref() {
+        let widened: Vec<SemanticNodeId> = members
+            .iter()
+            .map(|member| widen_literal_node(dispatch, *member))
+            .collect();
+        if widened.as_slice() == members.as_ref() {
+            return node;
+        }
+        return dispatch.intern_normalized_union_or_intersection(&widened, true);
+    }
+    widen_literal_node(dispatch, node)
+}
+
 /// Widen one FRESH literal node to its primitive (tsc's
 /// widening-literal-type rule). Every non-literal node passes through
 /// unchanged.
@@ -5480,7 +5523,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .into_iter()
                 .map(|(node, fresh)| {
                     if fresh {
-                        widen_literal_node(self.dispatch, node)
+                        widen_fresh_read_node(self.dispatch, node)
                     } else {
                         node
                     }
@@ -5498,7 +5541,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
             || self.reads_widening_literal_local(expr);
         Positional::Value(if fresh {
-            widen_literal_node(self.dispatch, node)
+            widen_fresh_read_node(self.dispatch, node)
         } else {
             node
         })
@@ -7937,95 +7980,107 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ArmFilter::Unchanged => GuardNarrowing::Unchanged,
             };
         }
-        // The positive edge is the checker's own per-arm rule, the same
-        // rule `narrow_to_predicate_target` applies to `x is T`: an arm
-        // assignable to the instance type survives as itself; an arm the
-        // instance type is assignable to narrows TO the instance type
-        // (the downcast reading — `x: Base` guarded by `instanceof Sub`
-        // reads `Sub`); an arm related in neither direction keeps the
-        // checker's intersection unless the two are provably disjoint
-        // (a primitive arm against a class instance), which is the one
-        // proved dead reading. Arms the graph cannot classify or relate
-        // stay possible, degraded.
+        // The POSITIVE edge, measured against the checker over a
+        // local-class matrix:
+        //
+        // * `null` / `undefined` arms are STRIPPED first — they never
+        //   survive the positive edge and never enter the fallback
+        //   intersection (`L | null` narrows to `L & K`, never
+        //   `(L | null) & K`).
+        // * an arm IDENTICAL to the instance type survives as itself,
+        //   and with any surviving arm every unrelated arm is DROPPED
+        //   (`string | K` narrows to `K`; `K | L` to `K` — never to
+        //   `K | (K & L)`).
+        // * when NO arm is related in EITHER direction, the checker
+        //   intersects the WHOLE remaining subject with the instance
+        //   type (`string | L` narrows to `(string | L) & K`) — a
+        //   primitive arm stays INSIDE the intersection, never dropped;
+        //   dropping it published a strict subset of the checker's
+        //   type, clean and warm.
+        // * an arm ASSIGNABLE to the instance type without being it —
+        //   or one the instance type is assignable to — is the
+        //   direction structural assignability cannot decide: a genuine
+        //   subclass relationship and a same-shape underived
+        //   constructor are indistinguishable, and the checker treats
+        //   them differently (the derived arm survives or downcasts;
+        //   the underived twin routes through the subtype fallback).
+        //   The subject stays UNCHANGED behind the typed guard gap — a
+        //   superset, ReturnOnly, never a partial narrow that could
+        //   drop a real contributor.
+        //
+        // Each unrelated-arm proof is per-arm and the instance type is
+        // a class instance (not a union), so the checker's union-level
+        // fallback clauses (candidate-subtype-of-subject,
+        // subject-assignable-to-candidate) are provably closed off when
+        // every remaining arm is unrelated in both directions: the
+        // whole-subject intersection is exact, not an approximation.
         let Some(current) = self.subject_current_node(subject) else {
             return GuardNarrowing::Unchanged;
         };
         let arms = self.enumerated_union_arms_or_self(current);
-        let mut out: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
-        let mut changed = false;
-        let mut gapped = false;
+        let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        let mut remainder: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in &arms {
             if self.instanceof_arm_is_unclassifiable(*arm) {
-                out.push(*arm);
-                gapped = true;
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+                return GuardNarrowing::Unchanged;
+            }
+            if matches!(
+                self.dispatch.graph().node_data(*arm).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined | PrimitiveKind::Never,
+                ))
+            ) {
                 continue;
             }
-            match self.assignable(*arm, instance) {
-                Some(true) => out.push(*arm),
-                Some(false) => {
-                    match self.assignable(instance, *arm) {
-                        Some(true) => {
-                            out.push(instance);
-                            changed = true;
-                        }
-                        Some(false) => {
-                            // The instance type is a CLASS instance by
-                            // the fact-minting rule, so a primitive or
-                            // literal arm is proved off the positive
-                            // edge outright — no primitive value is a
-                            // class instance, and the checker drops such
-                            // arms rather than intersect them.
-                            if self.arm_is_non_object_runtime_value(*arm) {
-                                changed = true;
-                            } else {
-                                let relation = self.nodes_provably_disjoint(*arm, instance);
-                                if relation.nominal_identity_missing {
-                                    self.record_degradation(FlowReturnDegradation::FlowGap(
-                                        crate::semantic_query::FlowGap::NominalRelation,
-                                    ));
-                                }
-                                if relation.provably_disjoint {
-                                    changed = true;
-                                } else {
-                                    out.push(
-                                        self.dispatch.intern_normalized_union_or_intersection(
-                                            &[*arm, instance],
-                                            false,
-                                        ),
-                                    );
-                                    changed = true;
-                                }
-                            }
-                        }
-                        None => {
-                            out.push(*arm);
-                            gapped = true;
-                        }
-                    }
-                }
-                None => {
-                    out.push(*arm);
-                    gapped = true;
+            if *arm == instance {
+                survivors.push(*arm);
+                remainder.push(*arm);
+                continue;
+            }
+            match (
+                self.assignable(*arm, instance),
+                self.assignable(instance, *arm),
+            ) {
+                (Some(false), Some(false)) => remainder.push(*arm),
+                _ => {
+                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                        crate::semantic_query::FlowGap::GuardNarrowing,
+                    ));
+                    return GuardNarrowing::Unchanged;
                 }
             }
         }
-        if gapped {
-            self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
-            ));
+        if !survivors.is_empty() {
+            if survivors.len() == arms.len() {
+                return GuardNarrowing::Unchanged;
+            }
+            let node = self
+                .dispatch
+                .intern_normalized_union_or_intersection(&survivors, true);
+            return GuardNarrowing::Narrowed(subject.clone(), node);
         }
-        if out.is_empty() {
-            // Every arm is proved off the positive edge: the subject
-            // reads `never` there and the edge stays alive — a
-            // non-subject contributor on it keeps its own type.
+        if remainder.is_empty() {
+            // Only nullish / `never` arms: no runtime value can take the
+            // positive edge, which reads `never` while the edge stays
+            // alive — a non-subject contributor on it keeps its own type.
             return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
         }
-        if !changed && out.len() == arms.len() {
-            return GuardNarrowing::Unchanged;
-        }
+        // No survivor and every remaining arm proved unrelated: the
+        // whole remaining subject intersects the instance type. When
+        // nothing was stripped the AUTHORED subject node is kept as the
+        // intersection's subject arm, preserving its spelling.
+        let subject_node = if remainder.len() == arms.len() {
+            current
+        } else {
+            self.dispatch
+                .intern_normalized_union_or_intersection(&remainder, true)
+        };
         let node = self
             .dispatch
-            .intern_normalized_union_or_intersection(&out, true);
+            .intern_normalized_union_or_intersection(&[subject_node, instance], false);
         GuardNarrowing::Narrowed(subject.clone(), node)
     }
 
@@ -8041,31 +8096,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             | Some(SemanticNodeData::Opaque(_))
             | None => true,
             Some(SemanticNodeData::Object(surface)) => surface.closed().is_empty(),
-            _ => false,
-        }
-    }
-
-    /// Whether one union arm's runtime values are never objects — a
-    /// scalar primitive or a literal. Such an arm cannot inhabit the
-    /// positive edge of an `instanceof` test against a class instance
-    /// type, so it is proved off that edge without consulting the
-    /// relation oracle. `object` is object-like and the top/uninhabited
-    /// kinds are classified elsewhere, so none of them answer here.
-    fn arm_is_non_object_runtime_value(&self, arm: SemanticNodeId) -> bool {
-        match self.dispatch.graph().node_data(arm).as_deref() {
-            Some(SemanticNodeData::Primitive(primitive)) => matches!(
-                primitive,
-                PrimitiveKind::String
-                    | PrimitiveKind::Number
-                    | PrimitiveKind::BigInt
-                    | PrimitiveKind::Boolean
-                    | PrimitiveKind::Symbol
-                    | PrimitiveKind::Undefined
-                    | PrimitiveKind::Null
-                    | PrimitiveKind::Void
-                    | PrimitiveKind::Never
-            ),
-            Some(SemanticNodeData::Literal(_)) => true,
             _ => false,
         }
     }
@@ -8465,9 +8495,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.widening_of(name.as_ref())
     }
 
-    /// Widen `node` to its literal's primitive when `expr` is a read of a
-    /// WIDENING-literal local and the evaluated node IS that literal.
-    /// Every other shape passes through unchanged.
+    /// Widen `node` at a widening READ of a WIDENING-literal local: a
+    /// lone literal widens to its primitive, a union widens every
+    /// literal arm (the all-fresh conditional binding). Every other
+    /// shape — and every non-widening read — passes through unchanged.
     fn widen_if_widening_local_read(
         &self,
         expr: &crate::flow_slice_content::SliceExpr,
@@ -8476,7 +8507,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if !self.reads_widening_literal_local(expr) {
             return node;
         }
-        widen_literal_node(self.dispatch, node)
+        widen_fresh_read_node(self.dispatch, node)
     }
 
     /// Lower one body-position `TypeExpr` (a fully lowered expression
@@ -10513,16 +10544,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // reaching local), which owner-scope lowering cannot see. The
         // indexed lowering spells one as either a bare `Ref` or a
         // single-segment `typeof` path — both are the same read here.
-        let bare_name = match expression {
-            verter_type_expr::IndexedValueExpression::Value(verter_type_expr::TypeExpr::Ref {
-                name,
-                type_arguments,
-            }) if type_arguments.is_empty() && !name.contains('.') => Some(name.as_ref()),
-            verter_type_expr::IndexedValueExpression::Value(
-                verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef { path, type_args }),
-            ) if type_args.is_empty() && path.len() == 1 => Some(path[0].as_str()),
-            _ => None,
-        };
+        let bare_name = indexed_bare_name(expression);
         if let Some(name) = bare_name {
             // The narrowing overlay answers a bare-argument read exactly
             // like the frame's own `Param` / `Local` carriers do.
@@ -10661,6 +10683,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // typed marker with one less hop.
                 return Some(self.degraded_unrepresentable_callee());
             };
+            // A read of a WIDENING-literal `const` is a FRESH literal
+            // source exactly as a bare literal argument is (the checker
+            // widens `wrap(a)` for `const a = "x"` identically to
+            // `wrap("x")`); the indexed lowering classifies every
+            // reference as pinned because only this frame knows the
+            // binding's widening membership.
+            let reads_widening_local =
+                indexed_bare_name(&argument.expression).is_some_and(|name| self.widening_of(name));
             args.push(crate::semantic_query::CallArgKey::Eager {
                 ty,
                 spread: argument.spread,
@@ -10670,7 +10700,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         crate::semantic_query::ArgumentLiteralMode::Widened
                     }
                     verter_type_expr::IndexedValueLiteralMode::Literal => {
-                        crate::semantic_query::ArgumentLiteralMode::Literal
+                        if reads_widening_local {
+                            crate::semantic_query::ArgumentLiteralMode::Widened
+                        } else {
+                            crate::semantic_query::ArgumentLiteralMode::Literal
+                        }
                     }
                 },
             });

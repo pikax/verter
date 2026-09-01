@@ -2020,7 +2020,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match &candidate.return_carrier {
             SignatureReturnCarrier::Declared(declared) => {
                 let seed = self.substitute_canonical(*declared, &substitution);
-                concrete_seeds.push(seed);
                 // Freshness provenance: a NAKED declared return (the raw
                 // annotation IS one of the clause's own binders) whose
                 // fixed bound is a FRESH-preserved bare literal closes on
@@ -2030,18 +2029,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .iter()
                     .any(|binding| binding.param == *declared && binding.bound == seed);
                 if declared_is_naked_binding
-                    && self
-                        .dispatch_txn
-                        .borrow()
-                        .relation
-                        .sessions
-                        .iter()
-                        .any(|session| {
-                            session.id == session_id
-                                && session.fresh_literal_deposit(*declared, seed)
-                        })
+                    && self.binding_is_fresh_literal_deposit(session_id, *declared, seed)
                 {
                     fresh_literal_returns.push(seed);
+                    concrete_seeds.push(seed);
+                } else {
+                    // A fresh literal fixed INSIDE the return's structure
+                    // (a member value, an array element) widens at the
+                    // call boundary itself — the checker's own reading of
+                    // `dwrap("x")` for `dwrap<T>(v: T): { box: T }` is
+                    // `{ box: string }` at every observed position.
+                    match self.fresh_widened_substitution(session_id, &substitution) {
+                        Some(widened) => {
+                            concrete_seeds.push(self.substitute_canonical(*declared, &widened));
+                        }
+                        None => concrete_seeds.push(seed),
+                    }
                 }
             }
             SignatureReturnCarrier::Function(source) => match source {
@@ -2076,20 +2079,83 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         {
                             let seed =
                                 self.substitute_canonical(result.return_type(), &substitution);
-                            if key.args.iter().any(|argument| {
-                                matches!(
-                                    argument,
-                                    crate::semantic_query::CallArgKey::Eager {
-                                        ty,
-                                        literal_mode:
-                                            crate::semantic_query::ArgumentLiteralMode::Literal,
-                                        ..
-                                    } if *ty == seed
-                                )
-                            }) {
+                            // A whole-return that IS a fresh-deposited
+                            // literal closes on a fresh literal: the
+                            // caller's return join widens it, a value
+                            // position keeps it. A fresh literal fixed
+                            // INSIDE the return's structure widens at
+                            // the call boundary itself (`wrap("x")` for
+                            // `wrap<T>(v: T) { return { box: v } }` is
+                            // `{ box: string }` at every observed
+                            // position, member reads of the call
+                            // expression included): the callee's flow
+                            // return is re-taken under the WIDENED
+                            // bindings, because the instantiated flow
+                            // result carries the literal with no binder
+                            // left to substitute. An `as const` or
+                            // explicit-type-argument binding deposits as
+                            // authored, so neither path fires for it and
+                            // the literal stays pinned.
+                            let seed_is_fresh_literal =
+                                substitution.bindings().iter().any(|(param, bound)| {
+                                    *bound == seed
+                                        && self.binding_is_fresh_literal_deposit(
+                                            session_id, *param, seed,
+                                        )
+                                });
+                            if seed_is_fresh_literal {
                                 fresh_literal_returns.push(seed);
+                                concrete_seeds.push(seed);
+                            } else if let Some(widened_substitution) =
+                                self.fresh_widened_substitution(session_id, &substitution)
+                            {
+                                let widened_args: Vec<SemanticNodeId> = raw_type_params
+                                    .iter()
+                                    .map(|decl| {
+                                        widened_substitution
+                                            .bindings()
+                                            .iter()
+                                            .find_map(|(param, bound)| {
+                                                (*param == decl.param).then_some(*bound)
+                                            })
+                                            .unwrap_or(unknown)
+                                    })
+                                    .collect();
+                                let widened_key = self.flow_return_key_for_instantiation(
+                                    identity,
+                                    Arc::from(widened_args.as_slice()),
+                                    widened_substitution.clone(),
+                                );
+                                let widened_pending_before = self
+                                    .dispatch_txn
+                                    .borrow()
+                                    .obligations
+                                    .pending()
+                                    .pending_len();
+                                match self.execute_flow_return(widened_key) {
+                                    crate::semantic_query::FlowReturnStep::Complete(widened)
+                                        if self
+                                            .dispatch_txn
+                                            .borrow()
+                                            .obligations
+                                            .pending()
+                                            .pending_len()
+                                            == widened_pending_before =>
+                                    {
+                                        concrete_seeds.push(self.substitute_canonical(
+                                            widened.return_type(),
+                                            &widened_substitution,
+                                        ));
+                                    }
+                                    // The widened instantiation did not
+                                    // close independently (a hold, a
+                                    // refusal): keep the literal seed —
+                                    // never narrower than before.
+                                    _ => concrete_seeds.push(seed),
+                                }
+                            } else {
+                                concrete_seeds.push(seed);
                             }
-                            concrete_seeds.push(seed);
                         }
                         crate::semantic_query::FlowReturnStep::Complete(_)
                         | crate::semantic_query::FlowReturnStep::Hold(_) => {
@@ -2412,6 +2478,66 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         node
+    }
+
+    /// Whether one collecting session recorded `(param, bound)` as a
+    /// FRESH-preserved literal deposit — the inference-time provenance
+    /// distinguishing a bare-literal (or widening-`const`-read) argument
+    /// from an authored pin (`as const`, an explicit type argument),
+    /// which deposits as authored and never records one.
+    fn binding_is_fresh_literal_deposit(
+        &self,
+        session_id: SessionId,
+        param: SemanticNodeId,
+        bound: SemanticNodeId,
+    ) -> bool {
+        self.dispatch_txn
+            .borrow()
+            .relation
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id && session.fresh_literal_deposit(param, bound))
+    }
+
+    /// The substitution with every FRESH-deposited literal binding
+    /// widened to its primitive — the checker's rule for a fresh literal
+    /// fixed INSIDE the return's structure: `wrap("x")` for
+    /// `wrap<T>(v: T) { return { box: v } }` reads `{ box: string }` at
+    /// every observed position (the caller's return, a binding
+    /// initializer, a member value, a member read of the call
+    /// expression). Bindings without a fresh deposit — authored pins,
+    /// explicit type arguments, outer-context bindings — stay
+    /// unchanged; `None` when no binding is a fresh literal.
+    fn fresh_widened_substitution(
+        &self,
+        session_id: SessionId,
+        substitution: &CanonicalTypeSubstitution,
+    ) -> Option<CanonicalTypeSubstitution> {
+        let graph = self.graph();
+        let mut any_widened = false;
+        let widened_bindings: Vec<(SemanticNodeId, SemanticNodeId)> = substitution
+            .bindings()
+            .iter()
+            .map(|(param, bound)| {
+                let widened = match graph.node_data(*bound).as_deref() {
+                    Some(SemanticNodeData::Literal(value))
+                        if self.binding_is_fresh_literal_deposit(session_id, *param, *bound) =>
+                    {
+                        let primitive = match value {
+                            verter_type_expr::LiteralValue::String(_) => PrimitiveKind::String,
+                            verter_type_expr::LiteralValue::Number(_) => PrimitiveKind::Number,
+                            verter_type_expr::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
+                            verter_type_expr::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
+                        };
+                        graph.intern_node(SemanticNodeData::Primitive(primitive))
+                    }
+                    _ => *bound,
+                };
+                any_widened |= widened != *bound;
+                (*param, widened)
+            })
+            .collect();
+        any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings))
     }
 
     pub(super) fn call_inference_candidate(

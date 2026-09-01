@@ -4298,22 +4298,27 @@ fn unclassifiable_in_guard_arms_remain_possible_degrade_and_never_warm() {
     }
 }
 
-/// `instanceof` narrows by the checker's own per-arm rule — the same
-/// rule the `x is T` predicate applies — and degrades ONLY the arms it
-/// cannot prove. Positive edge: an arm assignable to the instance type
-/// survives as itself; an arm the instance type is assignable to
-/// narrows TO the instance type (the downcast reading — dropping it
-/// instead fabricated a dead branch that published a wrong value warm);
-/// an arm related in neither direction keeps the checker's intersection
-/// (the checker keeps such a branch ALIVE — measured `0 | ({ name:
-/// string } & Unrel)` from the pinned tsc, not a dead branch). Negated
-/// edge: only an arm proved to BE the tested class (node identity with
-/// the instance type) drops; structural assignability alone cannot
-/// prove derivation (the checker KEEPS a same-shape underived arm), so
-/// such an arm is retained with the typed guard gap, ReturnOnly. A
-/// generic-class arm the relation oracle cannot decide and a
-/// construct-signature-typed right-hand side stay retained + gapped —
-/// sound supersets, never warm, never a fabricated dead edge.
+/// `instanceof` narrows by the checker's measured arm rule and
+/// degrades whenever a needed relation is unprovable. Positive edge:
+/// nullish arms strip first; an arm IDENTICAL to the instance type
+/// survives, and any survivor drops every unrelated arm; when NO arm
+/// is related in either direction the WHOLE remaining subject
+/// intersects the instance type (the checker keeps such a branch
+/// ALIVE — measured `0 | ({ name: string } & Unrel)` from the pinned
+/// tsc, not a dead branch). An arm assignable to the instance type
+/// without BEING it — or one the instance type is assignable to (the
+/// downcast direction) — is underivable structurally: a genuine
+/// subclass and a same-shape underived constructor are
+/// indistinguishable, and guessing either way can publish a subset or
+/// an ungapped superset, so the subject stays UNCHANGED behind the
+/// typed guard gap, ReturnOnly. Negated edge: only an arm proved to BE
+/// the tested class (node identity with the instance type) drops;
+/// structural assignability alone cannot prove derivation (the checker
+/// KEEPS a same-shape underived arm), so such an arm is retained with
+/// the typed guard gap. A generic-class arm the relation oracle cannot
+/// decide and a construct-signature-typed right-hand side stay
+/// retained + gapped — sound supersets, never warm, never a fabricated
+/// dead edge.
 #[test]
 fn instanceof_narrows_by_the_checker_rule_and_gaps_only_unproven_arms() {
     struct Case {
@@ -4327,28 +4332,36 @@ fn instanceof_narrows_by_the_checker_rule_and_gaps_only_unproven_arms() {
     }
     let cases = [
         Case {
+            // The downcast direction is underivable from structure
+            // alone: the subject stays `Base` behind the typed gap
+            // where the checker downcasts to `Sub` — an honest
+            // ReturnOnly superset, never an unproven exact answer.
             id: "instanceof_downcast_positive",
             script: "class Base { name = \"\" }\nclass Sub extends Base { extra = 1 }\nexport function f(x: Base) { if (x instanceof Sub) return x; return 0; }",
             checker: "0 | Sub",
-            rendered: "Union(DeclRef(Sub) | 0)",
-            degradation: Degr::None,
-            warm: true,
+            rendered: "Union(DeclRef(Base) | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
         },
         Case {
+            // The double-negated spelling rides the same positive edge
+            // and gaps identically.
             id: "instanceof_downcast_negated",
             script: "class Base { name = \"\" }\nclass Sub extends Base { extra = 1 }\nexport function f(x: Base) { if (!(x instanceof Sub)) return 0; return x; }",
             checker: "0 | Sub",
-            rendered: "Union(DeclRef(Sub) | 0)",
-            degradation: Degr::None,
-            warm: true,
+            rendered: "Union(DeclRef(Base) | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
         },
         Case {
+            // An interface subject under an implementing-class test is
+            // the same underivable downcast direction.
             id: "instanceof_interface_subject_implementing_class",
             script: "interface Animal { name: string }\nclass Dog implements Animal { name: string = \"\"; bark(): void { } }\nexport function f(x: Animal) { if (x instanceof Dog) return x; return 0; }",
             checker: "0 | Dog",
-            rendered: "Union(DeclRef(Dog) | 0)",
-            degradation: Degr::None,
-            warm: true,
+            rendered: "Union(DeclRef(Animal) | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
         },
         Case {
             id: "instanceof_unrelated_structural_arm_intersects_alive",

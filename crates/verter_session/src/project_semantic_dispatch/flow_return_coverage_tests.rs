@@ -1840,8 +1840,10 @@ fn ambient_overload_group_callee_resolves_the_first_applicable_signature() {
 /// A GENERIC overload group callee resolves by arity and argument
 /// inference — the pair `<T>(a: T)` / `<T, U>(a: T, b: U)` IS resolved by
 /// the supplied arguments, and the picked signature's clause instantiates
-/// from them. The member values are the un-widened literals of the
-/// checker's widened answer.
+/// from them. The member values are the checker's widened answer: the
+/// fresh literal arguments close fresh inference bindings, and a fresh
+/// literal fixed inside the return's structure widens at the call
+/// boundary.
 ///
 /// Oracle: `ReturnType<typeof tlCallOvlGen>` is `{ g: string; h: number; }`.
 #[test]
@@ -1859,14 +1861,15 @@ fn generic_overload_group_callee_resolves_by_arity_and_inference() {
     assert_eq!(candidates, 1, "tlCallOvlGen must warm-admit");
     assert_eq!(
         projected_member(&ty, "g"),
-        &string_lit("a"),
-        "the picked overload's `g` infers from the first argument"
+        &TypeExpr::Primitive(PrimitiveName::String),
+        "the picked overload's `g` infers from the first argument and the \
+         fresh literal widens at the call boundary"
     );
     assert_eq!(
         projected_member(&ty, "h"),
-        &TypeExpr::Literal(LiteralValue::Number(1.0)),
+        &TypeExpr::Primitive(PrimitiveName::Number),
         "the second overload's `h` — arity picked it — infers from the \
-         second argument"
+         second argument and widens the same way"
     );
 }
 

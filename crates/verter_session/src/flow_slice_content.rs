@@ -2205,6 +2205,24 @@ fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
     }
 }
 
+/// Whether `expression` is a bare (fresh) literal, or a conditional tree
+/// whose EVERY leaf is one — the shape whose every evaluated arm is a
+/// fresh literal, so a per-binding widening membership widens exactly
+/// what the checker widens. The descent mirrors
+/// [`assignment_rhs_freshness`]: parentheses and conditionals only;
+/// every other form is one leaf verdict from the shared bare-literal
+/// authority.
+fn expr_is_bare_literal_tree(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::ParenthesizedExpression(paren) => expr_is_bare_literal_tree(&paren.expression),
+        Expression::ConditionalExpression(conditional) => {
+            expr_is_bare_literal_tree(&conditional.consequent)
+                && expr_is_bare_literal_tree(&conditional.alternate)
+        }
+        _ => expr_is_bare_literal(expression),
+    }
+}
+
 /// The top-level FRESHNESS shape of one applied write's right-hand side —
 /// the lowering-time input to the evaluator's evolving-target widening
 /// rule (an assignment into a binding with NO declared authority widens
@@ -4224,12 +4242,25 @@ impl Lowerer<'_> {
                         });
                         // A WIDENING literal binding: an unannotated
                         // `const` initialized from a bare literal with no
-                        // const assertion. `let` / `var` initializers
-                        // already widened at `BindingInit` lowering, and
-                        // an annotated `const` takes its declared type.
+                        // const assertion — or from a conditional whose
+                        // EVERY leaf is such a literal (`f ? 1 : "s"`),
+                        // where the checker widens every arm at a
+                        // widening read (`{ label: v }` reads
+                        // `string | number`). A conditional with any
+                        // non-bare leaf (an `as const` arm, a call, a
+                        // reference) stays outside the membership: the
+                        // single per-binding fact cannot express
+                        // per-arm freshness, and widening a pinned arm
+                        // would publish a superset. `let` / `var`
+                        // initializers already widened at `BindingInit`
+                        // lowering, and an annotated `const` takes its
+                        // declared type.
                         let widening_literal = kind == SliceBindingKind::Const
                             && declared.is_none()
-                            && declarator.init.as_ref().is_some_and(expr_is_bare_literal);
+                            && declarator
+                                .init
+                                .as_ref()
+                                .is_some_and(expr_is_bare_literal_tree);
                         out.push(SliceStatement::Binding {
                             name: Arc::from(id.name.as_str()),
                             kind,

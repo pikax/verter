@@ -250,6 +250,7 @@ pub(crate) enum Owner {
     U6ContextualCore,
     U6FlowReturnSubstrate,
     U6NarrowTypeof,
+    U6NarrowInstanceof,
     U6NarrowLattice,
     U6NarrowSubstitution,
     U6NarrowInvalidation,
@@ -276,6 +277,7 @@ impl Owner {
         Owner::U6ContextualCore,
         Owner::U6FlowReturnSubstrate,
         Owner::U6NarrowTypeof,
+        Owner::U6NarrowInstanceof,
         Owner::U6NarrowLattice,
         Owner::U6NarrowSubstitution,
         Owner::U6NarrowInvalidation,
@@ -294,6 +296,7 @@ impl Owner {
             Self::U6ContextualCore => "U6.CONTEXTUAL_CORE",
             Self::U6FlowReturnSubstrate => "U6.FLOW_RETURN_SUBSTRATE",
             Self::U6NarrowTypeof => "U6.NARROW_TYPEOF",
+            Self::U6NarrowInstanceof => "U6.NARROW_INSTANCEOF",
             Self::U6NarrowLattice => "U6.NARROW_LATTICE",
             Self::U6NarrowSubstitution => "U6.NARROW_SUBSTITUTION",
             Self::U6NarrowInvalidation => "U6.NARROW_INVALIDATION",
@@ -371,6 +374,9 @@ pub(crate) enum Demand {
 pub(crate) enum NarrowBlock {
     /// `typeof` / `instanceof` / literal guards.
     NarrowTypeof,
+    /// The `instanceof` arm rule: derived-arm selection, nullish
+    /// stripping, and the whole-subject intersection fallback.
+    NarrowInstanceof,
     /// Branch joins — the lattice over two or more arms.
     NarrowLattice,
     /// A guard applied ACROSS a call boundary (user-defined type predicates,
@@ -386,6 +392,7 @@ impl NarrowBlock {
     pub(crate) const fn id(self) -> &'static str {
         match self {
             Self::NarrowTypeof => "U6.NARROW_TYPEOF",
+            Self::NarrowInstanceof => "U6.NARROW_INSTANCEOF",
             Self::NarrowLattice => "U6.NARROW_LATTICE",
             Self::NarrowSubstitution => "U6.NARROW_SUBSTITUTION",
             Self::NarrowInvalidation => "U6.NARROW_INVALIDATION",
@@ -1482,20 +1489,12 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "2dd449fce9efd3e5cc8118b1e9095c288579fd996f47d9bf466e3085cb397242",
     ),
     (
-        "X36_labeled_break_drops_arm_assertion",
-        "176de2cc44dab4a016e1f959c08b3dab3c2b42367d0b7a34e99bec80d37aa69b",
-    ),
-    (
         "X37_labeled_conditional_break_write",
         "6d60cab979362bebab7da91d67f85471c25d0d69f8294d22653128a6e89b9f2d",
     ),
     (
         "X38_switch_conditional_break_write",
         "1829d8babb7153432c4f63a983ba1f92f6e12ec4247e7f76888efb677d470e5b",
-    ),
-    (
-        "X39_try_catch_throw_point_join",
-        "c4ba93be6a64d0623e1611185e9b9b4993857d1ed313948755c78173fb0fc283",
     ),
     (
         "X40_finally_write_to_outer_let",
@@ -1516,26 +1515,6 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "X44_switch_exhaustive_boolean",
         "34a9b1a6c4c4d5beece191a0befbe3c1e3bbe6c52176d154fe8869f06c72da1a",
-    ),
-    (
-        "X45_switch_fallthrough_case_narrows_by_chain_tests",
-        "fa98bb8cfe211a8b9222f5fc78b6f14203a8063351d1f6dbbb6573dfa528dd91",
-    ),
-    (
-        "X46_try_catch_template_throw_point",
-        "356ac397793235f19291f2b8c753351922d2ff62e096b696237ad5a9012c6641",
-    ),
-    (
-        "X47_try_catch_sequence_throw_point",
-        "45c888d2b714c93bd1c10a23f1846e8b01c5bf43223139bf6d857b923267570a",
-    ),
-    (
-        "X48_try_catch_if_guard_throw_point",
-        "04aae8b579f541b7921161c25dbf1a221058f0c9615cfc7dbaf04998197ee35f",
-    ),
-    (
-        "X49_try_catch_new_callee_throw_point",
-        "d246294ba4212cb5b8d6798941e6ed7207fcb5257074a11e0b719d78b1042a2a",
     ),
     (
         "X50_switch_break_exit_closes_crossed_scope",
@@ -1776,6 +1755,18 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "N91_typeof_function_over_member_surface_reads_never",
         "dbd07ccc18231dafc886ff3256758ae19486616b6b4cde25a12ad44400d87b5a",
+    ),
+    (
+        "N92_instanceof_unrelated_class_intersects_whole_subject",
+        "5b07bcbff3b37bec6f99a9d10cbbb302a49abb3f48136249fe5acd2f0f1189bf",
+    ),
+    (
+        "N93_instanceof_strips_nullish_before_the_intersection",
+        "67a7ac428ba6b57aefdd4a9d249f5298cff4aaf9f50e449cc010f2c6bee808ee",
+    ),
+    (
+        "N95_instanceof_related_arm_drops_unrelated_class_arm",
+        "50706288d26387ef6e464f1b79e31e783bff2bb561539cc26e0a24c37357217e",
     ),
 ];
 
@@ -2959,6 +2950,66 @@ mod corpus_suite {
                 "N90_typeof_function_over_object_narrows_to_function",
                 "the renderer spells the (KnownOwed-divergent) node `Union(object | 0)` where the checker prints `0 | Function` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
             ),
+            (
+                "N07_branch_join_widens",
+                "checker prints `{ label: string | number; }`; the renderer spells the same surface `{ label: Union(string | number) }`",
+            ),
+            (
+                "X09_generic_wrap_return",
+                "checker prints `{ box: string; }`; the renderer spells the same surface `{ box: string }` — object members print without the trailing `;` terminator",
+            ),
+            (
+                "X36_labeled_break_drops_arm_assertion",
+                "the renderer spells the (KnownOwed-divergent) node `Union({ v: string } | { v: Union(string | number) })` where the checker prints `{ v: string | number; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "X39_try_catch_throw_point_join",
+                "the renderer spells the (KnownOwed-divergent) node `Union({ v: Union(string | number) } | { v: number })` where the checker prints `{ v: string | number; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "X45_switch_fallthrough_case_narrows_by_chain_tests",
+                "the renderer spells the (KnownOwed-divergent) node `Union({ v: Union(\"a\" | \"b\") } | { v: string })` where the checker prints `{ v: string; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "X46_try_catch_template_throw_point",
+                "the renderer spells the (KnownOwed-divergent) node `Union({ v: Union(string | number) } | { v: number })` where the checker prints `{ v: string | number; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "X47_try_catch_sequence_throw_point",
+                "the renderer spells the (KnownOwed-divergent) node `Union({ v: Union(string | number) } | { v: number })` where the checker prints `{ v: string | number; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "X48_try_catch_if_guard_throw_point",
+                "the renderer spells the (KnownOwed-divergent) node `Union({ v: Union(string | number) } | { v: number })` where the checker prints `{ v: string | number; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "X49_try_catch_new_callee_throw_point",
+                "the renderer spells the (KnownOwed-divergent) node `Union({ v: Union(string | number) } | { v: number })` where the checker prints `{ v: string | number; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N92_instanceof_unrelated_class_intersects_whole_subject",
+                "checker prints `{ v: (string | L) & K; } | { v: number; }`; the renderer spells the same node `Union({ v: Intersection(Union(string | DeclRef(L)) & DeclRef(K)) } | { v: number })`",
+            ),
+            (
+                "N93_instanceof_strips_nullish_before_the_intersection",
+                "checker prints `{ v: L & K; } | { v: number; }`; the renderer spells the same node `Union({ v: Intersection(DeclRef(L) & DeclRef(K)) } | { v: number })`",
+            ),
+            (
+                "N94_instanceof_subclass_test_over_base_gaps",
+                "the renderer spells the (KnownOwed-divergent) node `Union({ v: DeclRef(K) } | { v: number })` where the checker prints `{ v: KSub; } | { v: number; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N95_instanceof_related_arm_drops_unrelated_class_arm",
+                "checker prints `{ v: K; } | { v: number; }`; the renderer spells the same node `Union({ v: DeclRef(K) } | { v: number })`",
+            ),
+            (
+                "N96_branch_join_mixed_pinned_arm",
+                "the renderer spells the (KnownOwed-divergent) node `{ label: Union(1 | \"s\") }` where the checker prints `{ label: number | \"s\"; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N97_widening_const_read_through_let_initializer",
+                "the renderer spells the (KnownOwed-divergent) surface `{ label: 1 }` where the checker prints `{ label: number; }` — semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
         ];
         let mut failures = Vec::new();
         for row in CORPUS {
@@ -3781,6 +3832,7 @@ mod programme_ledgers {
         assert_eq!(
             seen_blocks,
             [
+                "U6.NARROW_INSTANCEOF",
                 "U6.NARROW_INVALIDATION",
                 "U6.NARROW_LATTICE",
                 "U6.NARROW_SUBSTITUTION",
@@ -3935,11 +3987,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member `evA` Other + member `evB` Other — a function value; deepening pins the signature (params + return)",
     ),
     (
-        "N07_branch_join_widens",
-        Owner::U6NarrowLattice,
-        "member `label` Union — deepening pins the exact constituent set",
-    ),
-    (
         "N18_logical_and_opaque_false_edge_keeps_union",
         Owner::U6NarrowTypeof,
         "member `v` Union — deepening pins the exact constituent set",
@@ -3958,11 +4005,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "N23_impossible_conjunction_drops_dead_disjunction_alternative",
         Owner::U6NarrowLattice,
         "member `v` Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X09_generic_wrap_return",
-        Owner::U6CallResolve,
-        "member `box` Literal — deepening pins the exact literal value",
     ),
     (
         "X10_destructured_default_conditional",
@@ -4035,11 +4077,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "root Union — deepening pins the exact constituent set",
     ),
     (
-        "X36_labeled_break_drops_arm_assertion",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
         "X37_labeled_conditional_break_write",
         Owner::U6ValueInference,
         "member `v` Union — deepening pins the exact constituent set",
@@ -4048,36 +4085,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "X38_switch_conditional_break_write",
         Owner::U6ValueInference,
         "member `v` Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X39_try_catch_throw_point_join",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X45_switch_fallthrough_case_narrows_by_chain_tests",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X46_try_catch_template_throw_point",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X47_try_catch_sequence_throw_point",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X48_try_catch_if_guard_throw_point",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X49_try_catch_new_callee_throw_point",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
     ),
     (
         "X50_switch_break_exit_closes_crossed_scope",
@@ -4312,7 +4319,7 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 // text the deep-pin comparer cannot yet parse (a `Record<K, V>` generic
 // in the recorded answer) — see the ledger entry's reason. Burn-down
 // pressure is unchanged: deepening any entry lowers this again.
-const SHALLOW_PINNED_ROWS_CEILING: usize = 82;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 73;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -4343,9 +4350,16 @@ const OPEN_DEBTS: &[&str] = &[
     // not the narrowing — `v.trim()` is a call to a string-intrinsic
     // method and the walk authority has no lib/intrinsic member surface
     // for a primitive base (`UnrepresentableCallee`, ReturnOnly).
-    // `N07_branch_join_widens` was always absent here: it is the
-    // over-narrow control and agreed with the checker from day one.
     "N09_narrow_then_write",
+    // A widening-literal `const` bound from a conditional with a PINNED
+    // arm (`f ? 1 : "s" as const`): the widening membership is a single
+    // per-binding fact, so the fresh arm stays pinned alongside the
+    // authored one where the checker widens exactly the fresh arm.
+    "N96_branch_join_mixed_pinned_arm",
+    // A widening-literal `const` read through a `let` initializer: the
+    // intermediate binding pins the literal where the checker widens it
+    // at the mutable declaration.
+    "N97_widening_const_read_through_let_initializer",
     // The impossible-predicate STATEMENT spelling keeps the dead `x`
     // contributor (`v: A | B | "ok" | "no"` where the checker computes
     // `"no" | "ok"`), wrong-and-warm. Exposed by the recursive expect
@@ -4417,6 +4431,12 @@ const OPEN_DEBTS: &[&str] = &[
     "N37_destructured_local_discriminant",
     "N39_instanceof_imported_class",
     "N41_instanceof_member_expression_constructor",
+    // The `instanceof` arm direction the graph cannot prove derived: a
+    // subclass test over a base-typed subject is assignable in exactly
+    // one direction, and structural assignability cannot separate a
+    // genuine subclass from a same-shape underived constructor. The
+    // subject publishes unnarrowed behind the typed guard gap.
+    "N94_instanceof_subclass_test_over_base_gaps",
     "N42_comma_sequence_guard",
     "N43_boolean_wrapped_guard",
     "N44_typeof_over_unknown",
@@ -4464,6 +4484,21 @@ const OPEN_DEBTS: &[&str] = &[
     "X105_closure_captures_narrowed_binding_in_guarded_arm",
     "X108_record_index_read_has_no_undefined",
     "X109_optional_index_read_through_optional_chain",
+    // ── SUBTYPE-REUNION: TypeScript's return-position reunion applies
+    //    subtype reduction (a subtype arm is absorbed into its supertype
+    //    peer); the canonical union keeps both constituents. Each row is
+    //    EXTENSIONALLY equal to the checker — the extra arm is redundant,
+    //    never wrong — so the surfaces stay clean and warm while parked
+    //    with the value-inference owner. Subtype absorption must NOT be
+    //    added to the canonical layer; the debt closes in the inference
+    //    layer that owns reunion.
+    "X36_labeled_break_drops_arm_assertion",
+    "X39_try_catch_throw_point_join",
+    "X45_switch_fallthrough_case_narrows_by_chain_tests",
+    "X46_try_catch_template_throw_point",
+    "X47_try_catch_sequence_throw_point",
+    "X48_try_catch_if_guard_throw_point",
+    "X49_try_catch_new_callee_throw_point",
 ];
 
 // Per-owner conformance — the merge go/no-go
@@ -4485,15 +4520,27 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 3, 1, 2),
     (Owner::U2MappedTemplate, 4, 1, 2),
     (Owner::U6CallResolve, 5, 4, 1),
-    (Owner::U6ValueInference, 79, 70, 6),
+    // Seven try/catch- and reunion-family rows are parked as the
+    // SUBTYPE-REUNION class: TypeScript's return-position reunion applies
+    // subtype reduction and absorbs a subtype arm into its supertype; the
+    // canonical union keeps both constituents. Extensionally equal, so
+    // the rows stay clean and warm while parked with the value-inference
+    // owner.
+    (Owner::U6ValueInference, 80, 63, 14),
     (Owner::U6LoopClosure, 6, 1, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
     (Owner::U6FlowReturnSubstrate, 63, 47, 3),
     (Owner::U6NarrowTypeof, 44, 24, 20),
+    // The `instanceof` arm rule: derived-arm selection with nullish
+    // stripping and the whole-subject intersection fallback are exact;
+    // the assignable-but-unproven-derived arm direction (a subclass test
+    // over a base-typed subject, a structural twin constructor) publishes
+    // the unnarrowed subject behind the typed guard gap and is parked.
+    (Owner::U6NarrowInstanceof, 4, 3, 1),
     // N25's MatchesChecker label predated the recursive expect pin; the
     // deep measurement showed the dead contributor SURVIVES (wrong-and-
     // warm), so the row is parked against its narrowing block.
-    (Owner::U6NarrowLattice, 32, 18, 14),
+    (Owner::U6NarrowLattice, 33, 18, 15),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 12, 7, 3),
