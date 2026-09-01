@@ -435,6 +435,18 @@ No counters or soak were built to quantify it, per the charter. The trade is sta
 a later owner can find it, not buried in a measurement that would have had to be
 invented.
 
+CORRECTED A THIRD TIME (architect review, 2026-09-01): the paragraph below's opening
+claim that the following review round "made it free" is itself an overbroad
+performance claim — this same rationale has now been corrected for an inaccurate
+performance claim twice already, immediately above. It is retracted in place rather
+than deleted, per this trail's convention, and retained only as the historical record
+of what was previously claimed. The accurate final state, and the only claim made
+here, is: proved-canonical union tops re-close in O(1); unproven/untagged tops still
+run the pipeline; and the substitution-memo replay fence described above still causes
+disclosed cross-request recomputation. No stronger, and no newly-measured, performance
+claim is asserted beyond that sentence.
+
+[HISTORICAL / "made it free" framing retracted above — mechanism description retained]
 Then the review round that followed made it free: a canonically-tagged union top now
 skips the pipeline entirely on an O(1) tag test, with no evidence deposit and no epoch
 advance, and the tag's own semantics guarantee that skip is exactly the idempotence

@@ -74,6 +74,83 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Every proposed new test must name a plausible regression or contract boundary not already discriminated; prose/format assertions are allowed only when those bytes are the public contract. Do not add implementation mirrors, duplicate permutations, or universal negative/mutation tests.
 - Test homes: `crates/verter_semantic/tests`, `crates/verter_session/tests/cases`.
 
+## Amendments
+
+Two architect rulings issued during D2B's round-16 review amend this charter's
+acceptance boundary. They are recorded here verbatim because `.feedback/` review
+packages and codex outputs are not authority — this charter is.
+
+### Amendment: whole-control-position tri-state fail-closed boundary
+
+Source: `.feedback/rev11/review/ARCHITECT-RULING.md` ("Architect ruling —
+control-position narrowing acceptance boundary"), issued in response to a scope
+consult asking whether the corrected D2B acceptance boundary is switch-only or the
+whole control-position class. Verbatim ruling:
+
+> **(b): the whole control-position class.** D2B may mint `Complete` only when
+> every narrowing-capable control fact is either represented or positively proven
+> irrelevant. Because `if` and ternary share `lower_guard`, rows 1–5 are the same
+> acceptance-boundary defect as the switch cases—not successor debt.
+>
+> Architecturally, `SliceGuard::None` must mean **proved non-narrowing**, never
+> "unsupported or unrecognized." Unsupported narrowing becomes one typed
+> `GuardNarrowing` gap and therefore `ReturnOnly`.
+>
+> The common requirement is a tri-state disposition: **modeled guard / proved no
+> narrowing / typed gap**. A binary `SliceGuard | None` result cannot express the
+> D2B acceptance boundary safely.
+
+This amends D2B-AC1/AC2/AC3: the guard-lowering authority
+(`crates/verter_session/src/flow_slice_content.rs`) implements the tri-state
+disposition as `GuardDisposition::{Modeled(SliceGuard), NoNarrowing,
+Unexpressible}`, and every live control-position spelling the ruling's full text
+names (both equality operators applied through boolean-wrapped/recursive
+detection; `==`/`!=`; the `in` operator; nullish-coalescing narrowing; the
+unwrap/assertion transparent-wrapper boundary; checker-eligible alias
+preservation; switch discriminant/case relations; and the captured/free-subject
+silence boundary) is represented or gapped — never silently dropped as an
+"unsupported" form.
+
+### Amendment: unclassifiable guard arms are retained and degraded, never dropped
+
+Source: `.feedback/rev11/d2b-p2-disposition-consult.md` (the finding) and
+`.feedback/rev11/d2b-p2-disposition-out.txt` (the ruling), disposing a
+pre-existing wrong-complete defect in `arm_typeof_matches` / `narrow_arms_by`
+(`crates/verter_session/src/project_semantic_dispatch/flow_return.rs`) surfaced by
+the adversarial review lens during D2B round-16. Verbatim ruling:
+
+> 1. **ADOPT-NOW.** D2B is not acceptable to land until this is repaired.
+>
+> The correctness budget binds D2B's certified public flow-return outcome—not
+> every unrelated pre-existing defect in the tree, but also not merely lines
+> authored by D2B. This defect is directly inside that outcome: the finalizer
+> certifies and warms a wrong-complete `FlowReturn`. Provenance changes blame, not
+> acceptance.
+>
+> The minimal fail-closed direction is correct, with one clarification:
+>
+> - Arm classification must distinguish `Match`, `NoMatch`, and `Unclassified`.
+> - An unclassified arm remains possible on both edges, is retained, and records
+>   `FlowGap::GuardNarrowing`.
+> - `GuardNarrowing::Impossible` requires positive proof that no arm can inhabit
+>   that edge.
+> - Apply this to the reproduced `typeof` and `instanceof` paths; a `typeof`-only
+>   repair would leave the measured class open.
+> - Do not add exact narrowing capability. Exact results remain owned by
+>   `U6.NARROW_TYPEOF` and `U6.NARROW_INSTANCEOF`. The safe `ReturnOnly` mirror
+>   over-gap also stays there.
+>
+> This is an amendment to D2B-AC2/AC3, not a second independently acceptable
+> outcome, so no new DAG node is required.
+
+This amends D2B-AC2/AC3 exactly as ruled — no exact narrowing capability was
+added; only fail-closed retention of unclassifiable arms. The required
+discriminating regressions are `unclassifiable_guard_arms_remain_possible_degrade_and_never_warm`
+(the `typeof` spelling) and `unclassifiable_in_guard_arms_remain_possible_degrade_and_never_warm`
+(the `instanceof` spelling, per the ruling's explicit requirement that a
+`typeof`-only repair would leave the measured class open) — both required
+alongside the six discriminating cutover tests named above.
+
 ## Deletions and forbidden designs
 
 - Delete only source-verified displaced responsibilities, each citing the displaced route it replaces; absence of proof means preserve. The old evaluator's state, caches, tasks, flags, compatibility shims, and migration guards are deleted with it, and the three distributed `FlowReturnResult` admission channels named in the scope section are part of the retired legacy admission path.
@@ -84,9 +161,9 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 
 ## Budgets and mandatory rescope
 
-- Target ceiling: 800 production LOC, 8 production files, 2 related crates/packages.
-- Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
-- Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
+- Target ceiling: 800 production LOC / 8 production files — **HISTORICAL, NON-BINDING for D2B.** `decisions/2026-08-30-rev11-flow-d2b-budget-amendment.md` holds that this LOC/file target does not apply to D2B's landed candidate; the figures are retained here only as the schema-required historical value, not as a live constraint. The "2 related crates/packages" ceiling is unaffected by that amendment, remains binding, and was not breached.
+- Mandatory rescope above 1,500 production LOC / 12 files — **HISTORICAL, NON-BINDING for D2B**, same amendment. The "3 unrelated crates/packages" trigger, and the "public/wire, unsafe, concurrency, or lifetime work combined with another major concern" trigger, are unaffected, remain binding, and were not breached.
+- Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing. This constraint is unaffected by the budget amendment and remains fully binding.
 - Performance budget: when preflight identifies touched authority or a hot path, equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance remains 0.0% unless an owning-authority amendment supplies exact replacement thresholds. Otherwise performance evidence is not applicable; do not create counters or a 100-request retention soak solely to satisfy this charter.
 
 ## Abort conditions

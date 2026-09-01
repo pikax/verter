@@ -183,6 +183,26 @@ boundary; it contains no independently dispatchable subblocks.
   `SealedFlowCompletion` / `CompleteFlowResult` is minted — the cache gate requires
   the proof's value to equal the admitted value exactly; in display." TA1B owns
   landing the final idempotent pre-seal closure at exactly the sanctioned boundary.
+- **Correction to the heritage-carrier rationale quoted above (stale wording, do not
+  cite as-is).** The quoted rationale's claim that "commutative sorting or dedup
+  would break own-body-last precedence and overload order" is STALE for the
+  precedence half. `decisions/2026-08-31-canonical-type-algebra-predecessor.md` →
+  "Correction: why the heritage carrier is excluded" measured it directly: planting
+  a canonical sort of the heritage carrier's arms failed ZERO tests across the
+  merged-declaration, heritage and shadow suites, and an unambiguous reversal still
+  left every value-level "own body shadows inherited member" test green — every
+  reachable consumer resolves own-versus-heritage member conflicts through the role
+  stamp and topology classification re-derived at the consumption site, never
+  through the arm's position. Member-type precedence is therefore
+  order-INDEPENDENT today, and the quoted rationale's stated justification does not
+  hold for it. What the order actually protects is the RENDERED TYPE TEXT /
+  authored-order display fidelity: a reordered carrier renders `B & A & { x: number
+  }` where the authored type is `A & B & { x: number }`, changing hover and display
+  output. The overload-order half of the quoted rationale stands as stated — it is
+  genuinely pinned by an existing assertion reading the first and last projected
+  signature. TA1B's construction-site closure still excludes these ordered
+  carriers per the Enforcement exclusion list above; the reason to cite is display
+  and authored-order fidelity, not member precedence.
 - **Alias and policy discipline.** "Alias and source identity are preserved through
   carriers and origin edges; normalization never inlines aliases or whole
   declaration graphs, and normalizes only the already-demanded semantic portion.
