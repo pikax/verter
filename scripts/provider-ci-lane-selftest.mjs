@@ -121,3 +121,21 @@ test("native-only TypeScript plugin specs remain with the native artifact", () =
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
   assert.match(pkg.scripts["test:scripts"], /provider-ci-lane-selftest\.mjs/);
 });
+
+test("nightly coverage builds real-tsserver prerequisites before workspace tests", () => {
+  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "nightly.yml"), "utf8");
+  const coverage = yamlJob(workflow, "rust-coverage");
+  const install = coverage.indexOf("pnpm install --frozen-lockfile");
+  const build = coverage.indexOf(
+    "pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build",
+  );
+  const testRun = coverage.indexOf("cargo llvm-cov --workspace");
+
+  assert.notEqual(install, -1, "coverage must install the pinned TypeScript toolchain");
+  assert.notEqual(build, -1, "coverage must build the tsserver plugin and its runtime dependency");
+  assert.notEqual(testRun, -1, "coverage must execute the workspace test universe");
+  assert.ok(
+    install < build && build < testRun,
+    "coverage prerequisites must be built before tests",
+  );
+});
