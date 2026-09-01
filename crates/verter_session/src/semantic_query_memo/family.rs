@@ -517,6 +517,14 @@ pub(super) enum FamilyKey {
     ClassifyMaterializationCycleGate {
         key: Box<crate::semantic_query::MaterializationCycleGateKey>,
     },
+    /// Mode-erased truthiness-domain classifier identity: the interned
+    /// subject node IS the family identity (a structural classification
+    /// over already-interned nodes — no mode, demand, or env-context
+    /// axis; version-rooting lives on the cached value's observed
+    /// self-roots).
+    ClassifyTruthinessDomain {
+        subject: SemanticNodeId,
+    },
     /// Mode-erased `FlowReturn` identity. The family fields are EXACTLY
     /// the full [`crate::semantic_query::FlowReturnKey`] — function slot
     /// identity (declaration slot + part + overload ordinal), normalized
@@ -636,6 +644,7 @@ impl FamilyKey {
             }
             FamilyKey::FlowReturn { .. } => "FlowReturn",
             FamilyKey::ResolveCall { .. } => "ResolveCall",
+            FamilyKey::ClassifyTruthinessDomain { .. } => "ClassifyTruthinessDomain",
         }
     }
 
@@ -690,6 +699,7 @@ impl FamilyKey {
             FamilyKey::ContextualTypeAt { .. } => 4,
             FamilyKey::LowerLocator { .. } => 4,
             FamilyKey::ClassifyMaterializationCycleGate { .. } => 4,
+            FamilyKey::ClassifyTruthinessDomain { .. } => 4,
             FamilyKey::ResolveCall { .. } => 4,
         }
     }
@@ -1886,6 +1896,14 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         // context), so the family uses the `Single` slot.
         SemanticQueryKey::ResolveCall(key) => (
             FamilyKey::ResolveCall { key: key.clone() },
+            ModeSlot::Single,
+        ),
+        // ClassifyTruthinessDomain — LIVE producer with a mode-erased
+        // key: the interned subject node IS the family identity (no
+        // mode/demand/env-context axis), so the family uses the `Single`
+        // slot.
+        SemanticQueryKey::ClassifyTruthinessDomain { subject } => (
+            FamilyKey::ClassifyTruthinessDomain { subject: *subject },
             ModeSlot::Single,
         ),
     }

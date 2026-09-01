@@ -177,6 +177,11 @@ pub(crate) fn semantic_query_key_spec_table_equals_enum() {
             // (the selected occurrence + final substitution, or genuine
             // dynamic `any`).
             SemanticQueryKeyTag::ResolveCall => SemanticQueryValueTag::ResolveCall,
+            // The truthiness-domain classifier carries its own value
+            // domain (the per-bucket trilean pair), NOT a type node.
+            SemanticQueryKeyTag::ClassifyTruthinessDomain => {
+                SemanticQueryValueTag::TruthinessDomain
+            }
             _ => SemanticQueryValueTag::TypeNode,
         };
         assert_eq!(
@@ -187,7 +192,8 @@ pub(crate) fn semantic_query_key_spec_table_equals_enum() {
              `ContextualTypeAt` must be `ProgramAnalysis`, `ClassifyBroadRuntime` \
              must be `BroadRuntime`, `ClassifyMaterializationCycleGate` must be \
              `MaterializationCycleGate`, `ProjectObjectSpread` must be \
-             `ObjectProjection`, and every other \
+             `ObjectProjection`, `ClassifyTruthinessDomain` must be \
+             `TruthinessDomain`, and every other \
              live key must be `TypeNode`",
             spec.variant.name()
         );

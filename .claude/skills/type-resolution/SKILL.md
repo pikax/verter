@@ -299,6 +299,29 @@ transient path and remain ReturnOnly even when a descendant is file-rooted.
 `SemanticNodeId`, content hashes, spans, and source/rendered text are forbidden
 in the durable classifier family identity.
 
+`ClassifyTruthinessDomain` is the sole truthiness-domain authority, owned by
+the canonical semantic-types layer (`project_semantic_dispatch::canonical_algebra`)
+and CONSUMED by the flow narrowing truthiness frame, which holds no private
+truthiness rule. It is a demand-scoped structural query over one interned
+subject node returning per-bucket trileans (`TruthinessDomain { truthy, falsy }`,
+each `Yes | No | Undecided`): union arms OR; intersections are `never`-dominant
+then OR (checker-measured: `string & {x: 1}` keeps the falsy edge, `{a: 1} & {b: 2}`
+leaves it); a template-literal type contains `""` iff every quasi is empty and
+every placeholder can render empty — only a `string` placeholder can:
+`${number}`/`${bigint}`/`${boolean}`/`${null}`/`${undefined}` always render
+non-empty, and the checker treats `${any}` as non-empty too (measured: its
+falsy edge is `never` even though `""` is assignable to it); a `never`
+placeholder empties the template; a memberless `{}` keeps both buckets while any-membered surfaces,
+arrays, tuples, and signatures are truthy-only; a type parameter classifies
+through its constraint (`unknown`'s domain when unconstrained). It never
+resolves references or inlines aliases — an unresolved carrier is `Undecided`,
+reported, never guessed, and only a FULLY decided domain admits into the family
+memo (an `Undecided` bucket or incomplete walk is `ReturnOnly`). The flow
+consumer settles each arm through the shared identity-carrier unwrap, keeps an
+arm whose tested bucket is not `No`, records the typed `GuardNarrowing` gap on
+`Undecided`, and narrows the subject to `never` (branch alive, syntactic
+returns retained) when no arm survives an edge.
+
 ## Semantic Heuristic Prevention (CRITICAL)
 
 Semantic behavior must be driven by typed facts, explicit projection policy, and complete semantic query identity. Do not encode type meaning, resolver routing, cache validity, or published component-meta shape in local heuristics.

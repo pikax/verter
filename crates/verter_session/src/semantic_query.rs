@@ -5091,8 +5091,9 @@ pub enum QueryResult<T> {
 /// [`TypeNode`](Self::TypeNode) — the interned graph node id for the
 /// resolved type — EXCEPT [`SemanticQueryKey::ProjectObjectSpread`],
 /// [`SemanticQueryKey::ResolveOverloadSet`],
-/// [`SemanticQueryKey::ClassifyBroadRuntime`], and
-/// [`SemanticQueryKey::ClassifyMaterializationCycleGate`]. The projection
+/// [`SemanticQueryKey::ClassifyBroadRuntime`],
+/// [`SemanticQueryKey::ClassifyMaterializationCycleGate`], and
+/// [`SemanticQueryKey::ClassifyTruthinessDomain`]. The projection
 /// family has the
 /// dedicated [`ObjectProjection`](Self::ObjectProjection) domain and remains
 /// non-producing until its ordered-effect evaluator lands; the next two live
@@ -5111,8 +5112,9 @@ pub enum QueryResult<T> {
 pub enum SemanticQueryValue {
     /// The interned graph node id for the resolved type — the domain every
     /// live query produces, EXCEPT [`SemanticQueryKey::ResolveOverloadSet`],
-    /// [`SemanticQueryKey::ClassifyBroadRuntime`], and
-    /// [`SemanticQueryKey::ClassifyMaterializationCycleGate`].
+    /// [`SemanticQueryKey::ClassifyBroadRuntime`],
+    /// [`SemanticQueryKey::ClassifyMaterializationCycleGate`], and
+    /// [`SemanticQueryKey::ClassifyTruthinessDomain`].
     TypeNode(SemanticNodeId),
     /// Selector-aware correlated projection facts for one authored object
     /// construction program. This is intentionally not disguised as a graph
@@ -5168,6 +5170,13 @@ pub enum SemanticQueryValue {
     /// [`MaterializationCycleGateOutcome::Decided`] admits into the family
     /// memo; a `LegacyFallback` flows to the caller suppressed.
     MaterializationCycleGate(MaterializationCycleGateOutcome),
+    /// The truthiness DOMAIN of the classified type — the LIVE value
+    /// domain of [`SemanticQueryKey::ClassifyTruthinessDomain`], the sole
+    /// authority for "does this type have truthy and/or falsy runtime
+    /// inhabitants". Only a fully decided domain admits into the family
+    /// memo; a domain with any `Undecided` bucket flows to the caller
+    /// suppressed.
+    TruthinessDomain(TruthinessDomain),
     /// Reserved native-checker seam for diagnostic analysis. NON-LIVE: no
     /// producer, no key spec row. Uses a local shell so this crate keeps no
     /// back-edge to `verter_tsc::CheckResult`.
@@ -5189,6 +5198,7 @@ pub enum SemanticQueryValueTag {
     MaterializationCycleGate,
     FlowReturn,
     ResolveCall,
+    TruthinessDomain,
     DiagnosticAnalysis,
 }
 
@@ -5207,6 +5217,7 @@ impl SemanticQueryValue {
             Self::MaterializationCycleGate(_) => SemanticQueryValueTag::MaterializationCycleGate,
             Self::FlowReturn(_) => SemanticQueryValueTag::FlowReturn,
             Self::ResolveCall(_) => SemanticQueryValueTag::ResolveCall,
+            Self::TruthinessDomain(_) => SemanticQueryValueTag::TruthinessDomain,
             Self::DiagnosticAnalysis(_) => SemanticQueryValueTag::DiagnosticAnalysis,
         }
     }
@@ -5481,6 +5492,118 @@ pub struct MaterializationCycleGateKey {
     pub parse_env_hash: HashValue,
     /// Import / name-resolution dimension (`R`).
     pub resolve_env_hash: HashValue,
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Truthiness domain (ClassifyTruthinessDomain)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Three-valued inhabitance verdict for ONE bucket of a type's truthiness
+/// domain: whether a runtime inhabitant of the classified type exists on
+/// that bucket. `Yes` and `No` are decided from the demanded structure
+/// under the checker's MEASURED truthiness-fact rules (which are the
+/// contract, not a pure inhabitance proof: the checker's own template and
+/// intersection fact rules are mirrored where they diverge from set
+/// semantics — see the classifier); `Undecided` is the honest verdict
+/// for a form the classifier may not resolve (an unresolved
+/// reference/operator carrier, a constraint it cannot see, a tripped
+/// walk budget) — never guessed in either direction. Consumers treat `Undecided` as "keep the arm on this edge"
+/// AND record their own typed gap; only a fully decided domain is ever
+/// admitted warm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TruthinessInhabitance {
+    Yes,
+    No,
+    Undecided,
+}
+
+impl TruthinessInhabitance {
+    /// Three-valued union composition (a union has an inhabitant on a
+    /// bucket iff ANY arm does): `Yes` dominates, all-`No` stays `No`,
+    /// anything else is `Undecided`.
+    #[must_use]
+    pub(crate) fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Yes, _) | (_, Self::Yes) => Self::Yes,
+            (Self::No, Self::No) => Self::No,
+            _ => Self::Undecided,
+        }
+    }
+}
+
+/// The truthiness DOMAIN of one demanded type — the LIVE value domain of
+/// [`SemanticQueryKey::ClassifyTruthinessDomain`]: whether the type has a
+/// truthy runtime inhabitant and whether it has a falsy one. A domain
+/// fact, not a narrowed type: producing the narrowed arm from the fact
+/// stays with the consumer. Only a FULLY decided domain admits into the
+/// family memo; a domain with any `Undecided` bucket is `ReturnOnly`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TruthinessDomain {
+    /// Whether a truthy inhabitant of the classified type exists.
+    pub truthy: TruthinessInhabitance,
+    /// Whether a falsy inhabitant (`""`, `0`, `-0`, `0n`, `false`,
+    /// `null`, `undefined`, `NaN`) of the classified type exists.
+    pub falsy: TruthinessInhabitance,
+}
+
+impl TruthinessDomain {
+    /// Both buckets undecided — the conservative non-answer.
+    pub const UNDECIDED: Self = Self {
+        truthy: TruthinessInhabitance::Undecided,
+        falsy: TruthinessInhabitance::Undecided,
+    };
+    /// No inhabitants at all (`never`, an uninhabited template).
+    pub const UNINHABITED: Self = Self {
+        truthy: TruthinessInhabitance::No,
+        falsy: TruthinessInhabitance::No,
+    };
+    /// Truthy inhabitants only (objects, functions, `symbol`, …).
+    pub const TRUTHY_ONLY: Self = Self {
+        truthy: TruthinessInhabitance::Yes,
+        falsy: TruthinessInhabitance::No,
+    };
+    /// Falsy inhabitants only (`undefined`, `null`, `void`, `""`, …).
+    pub const FALSY_ONLY: Self = Self {
+        truthy: TruthinessInhabitance::No,
+        falsy: TruthinessInhabitance::Yes,
+    };
+    /// Both buckets inhabited (`string`, `number`, `unknown`, …).
+    pub const BOTH: Self = Self {
+        truthy: TruthinessInhabitance::Yes,
+        falsy: TruthinessInhabitance::Yes,
+    };
+
+    /// Whether BOTH buckets are proven — the family-memo admission gate:
+    /// anything less is `ReturnOnly`.
+    #[must_use]
+    pub fn is_decided(&self) -> bool {
+        self.truthy != TruthinessInhabitance::Undecided
+            && self.falsy != TruthinessInhabitance::Undecided
+    }
+
+    /// Union composition (per-bucket three-valued OR).
+    #[must_use]
+    pub(crate) fn union_with(self, other: Self) -> Self {
+        Self {
+            truthy: self.truthy.or(other.truthy),
+            falsy: self.falsy.or(other.falsy),
+        }
+    }
+
+    /// Intersection composition — the checker's measured rule: a `never`
+    /// arm empties the whole intersection, otherwise buckets compose by
+    /// per-bucket OR exactly like a union (measured: `string & {x: 1}`
+    /// KEEPS the falsy edge — the branded `""` inhabits it — while
+    /// `{a: 1} & {b: 2}` leaves it). Joint-inhabitance reduction of a
+    /// deeply empty intersection is the normalization layer's law, not a
+    /// classification concern.
+    #[must_use]
+    pub(crate) fn intersect_with(self, other: Self) -> Self {
+        if self == Self::UNINHABITED || other == Self::UNINHABITED {
+            return Self::UNINHABITED;
+        }
+        self.union_with(other)
+    }
 }
 
 /// A single call/construct signature: its graph node (a
@@ -7429,6 +7552,28 @@ pub enum SemanticQueryKey {
     ///
     /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
     ResolveCall(Box<ResolveCallKey>),
+    /// Classify the truthiness DOMAIN of one demanded type: whether it
+    /// has truthy runtime inhabitants and whether it has falsy ones —
+    /// the sole truthiness-domain authority, owned by the canonical
+    /// semantic-types layer and CONSUMED by the flow narrowing frames
+    /// (which hold no private truthiness rule).
+    ///
+    /// Demand-scoped and structural: the producer walks the demanded
+    /// node's interned structure (union arms, template quasis and
+    /// placeholder types, surface emptiness, type-parameter constraint
+    /// nodes) and NEVER resolves references, inlines aliases, or reduces
+    /// types — an unresolved carrier is an `Undecided` bucket, reported,
+    /// never guessed. `subject` is the interned node (content-free, R6);
+    /// version-rooting lives on the cached value's observed self-roots,
+    /// one per file-scoped node the walk inspected. Value domain:
+    /// [`SemanticQueryValueTag::TruthinessDomain`]; only a FULLY decided
+    /// domain admits into the family memo — an `Undecided` bucket or a
+    /// tripped walk budget is `ReturnOnly`, never warm.
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    ClassifyTruthinessDomain {
+        subject: SemanticNodeId,
+    },
 }
 
 /// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
@@ -7473,6 +7618,7 @@ pub enum SemanticQueryKeyTag {
     ClassifyMaterializationCycleGate,
     FlowReturn,
     ResolveCall,
+    ClassifyTruthinessDomain,
 }
 
 impl SemanticQueryKeyTag {
@@ -7507,6 +7653,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::ClassifyMaterializationCycleGate,
         SemanticQueryKeyTag::FlowReturn,
         SemanticQueryKeyTag::ResolveCall,
+        SemanticQueryKeyTag::ClassifyTruthinessDomain,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -7545,6 +7692,7 @@ impl SemanticQueryKeyTag {
             }
             SemanticQueryKeyTag::FlowReturn => "FlowReturn",
             SemanticQueryKeyTag::ResolveCall => "ResolveCall",
+            SemanticQueryKeyTag::ClassifyTruthinessDomain => "ClassifyTruthinessDomain",
         }
     }
 
@@ -7556,7 +7704,7 @@ impl SemanticQueryKeyTag {
     /// nested `execute_read` sub-dispatches are recorded too) ORs
     /// `1 << bit_index()` into a `u32` mask surfaced on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
-    /// `ALL.len()` is 26 (≤ 32) so the mask never overflows `u32`.
+    /// `ALL.len()` is 28 (≤ 32) so the mask never overflows `u32`.
     #[must_use]
     pub fn bit_index(self) -> u32 {
         Self::ALL
@@ -7636,6 +7784,9 @@ impl SemanticQueryKey {
             }
             SemanticQueryKey::FlowReturn(_) => SemanticQueryKeyTag::FlowReturn,
             SemanticQueryKey::ResolveCall(_) => SemanticQueryKeyTag::ResolveCall,
+            SemanticQueryKey::ClassifyTruthinessDomain { .. } => {
+                SemanticQueryKeyTag::ClassifyTruthinessDomain
+            }
         }
     }
 }
@@ -9621,6 +9772,10 @@ mod tests {
                 SemanticQueryValueTag::ResolveCall,
             ),
             (
+                SemanticQueryValue::TruthinessDomain(TruthinessDomain::TRUTHY_ONLY),
+                SemanticQueryValueTag::TruthinessDomain,
+            ),
+            (
                 SemanticQueryValue::DiagnosticAnalysis(DiagnosticAnalysisShell),
                 SemanticQueryValueTag::DiagnosticAnalysis,
             ),
@@ -9628,15 +9783,15 @@ mod tests {
         for (value, tag) in &cases {
             assert_eq!(value.tag(), *tag, "tag must match the value domain");
         }
-        // Distinctness: eleven cases, eleven unique tags. Sort before dedup so
-        // non-adjacent duplicates are caught (`Vec::dedup` only collapses
+        // Distinctness: twelve cases, twelve unique tags. Sort before dedup
+        // so non-adjacent duplicates are caught (`Vec::dedup` only collapses
         // consecutive runs).
         let mut tags: Vec<SemanticQueryValueTag> = cases.iter().map(|(_, t)| *t).collect();
         tags.sort_by_key(|t| *t as u8);
         tags.dedup();
         assert_eq!(
             tags.len(),
-            11,
+            12,
             "every value domain must have a distinct tag"
         );
     }

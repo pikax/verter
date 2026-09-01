@@ -2545,6 +2545,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if let SemanticQueryKey::ClassifyMaterializationCycleGate(key) = &key_for_build {
                 return self.build_classify_materialization_cycle_gate(key);
             }
+            if let SemanticQueryKey::ClassifyTruthinessDomain { subject } = &key_for_build {
+                return self.build_classify_truthiness_domain(*subject);
+            }
             // The SOLE relation authority (design
             // `.claude/skills/type-resolution/SKILL.md`): `execute(Relate)`
             // is a LIVE producer — decided binary judgements admit into
@@ -2724,6 +2727,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     unreachable!("typed classifier returned before node-domain build")
                 }
                 SemanticQueryKey::ClassifyMaterializationCycleGate(_) => {
+                    unreachable!("typed classifier returned before node-domain build")
+                }
+                SemanticQueryKey::ClassifyTruthinessDomain { .. } => {
                     unreachable!("typed classifier returned before node-domain build")
                 }
                 // ApparentType — LIVE producer for the CALLABLE arm. A base
@@ -4135,5 +4141,8 @@ mod broad_runtime_tests;
 
 #[cfg(test)]
 mod cycle_gate_tests;
+
 #[cfg(test)]
 mod projection_stack_safety_tests;
+#[cfg(test)]
+mod truthiness_domain_tests;

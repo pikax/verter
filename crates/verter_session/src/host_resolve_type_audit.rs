@@ -512,6 +512,9 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         // design (no projection demand to consume a budget).
         | SemanticQueryKey::LowerLocator { .. }
         | SemanticQueryKey::ClassifyMaterializationCycleGate(_)
+        // ClassifyTruthinessDomain is the modeless truthiness-domain
+        // classification — no projection demand.
+        | SemanticQueryKey::ClassifyTruthinessDomain { .. }
         | SemanticQueryKey::ClassifyBroadRuntime { .. } => ProjectionMode::Identity,
     }
 }

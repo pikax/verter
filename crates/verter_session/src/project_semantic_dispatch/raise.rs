@@ -295,6 +295,7 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::ClassifyMaterializationCycleGate(_) => "ClassifyMaterializationCycleGate",
         SemanticQueryKey::FlowReturn(_) => "FlowReturn",
         SemanticQueryKey::ResolveCall(_) => "ResolveCall",
+        SemanticQueryKey::ClassifyTruthinessDomain { .. } => "ClassifyTruthinessDomain",
     }
 }
 

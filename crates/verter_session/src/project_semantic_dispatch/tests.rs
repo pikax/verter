@@ -20686,6 +20686,7 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
             ClassifyMaterializationCycleGate(_) => "ClassifyMaterializationCycleGate",
             FlowReturn(_) => "FlowReturn",
             ResolveCall(_) => "ResolveCall",
+            ClassifyTruthinessDomain { .. } => "ClassifyTruthinessDomain",
         }
     }
     // Sanity probe: each variant carries a distinct label and the

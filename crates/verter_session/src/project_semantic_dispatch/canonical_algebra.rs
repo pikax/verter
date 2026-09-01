@@ -1630,3 +1630,451 @@ fn compare_composite_members<K: crate::semantic_query::composite::CompositeKind>
     }
     true
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Truthiness-domain classification (ClassifyTruthinessDomain)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Node-visit budget for one truthiness-domain classification. A demanded
+/// arm is small (a primitive, a literal, a template, a shallow union); the
+/// cap is a runaway fuse, not an expected boundary — a tripped walk marks
+/// the evidence incomplete and yields `Undecided` buckets, never a guess.
+const TRUTHINESS_WALK_CAP: usize = 512;
+
+/// How one template-literal PLACEHOLDER type renders into the template's
+/// string domain: can a rendering be the empty string, can it be
+/// non-empty, and is the placeholder provably uninhabited (`never`, which
+/// makes the whole template uninhabited). Distinct from the placeholder's
+/// own truthiness domain: `0` is falsy but renders the NON-empty `"0"`.
+struct RenderDomain {
+    empty: crate::semantic_query::TruthinessInhabitance,
+    nonempty: crate::semantic_query::TruthinessInhabitance,
+    uninhabited: bool,
+}
+
+impl RenderDomain {
+    const UNKNOWN: Self = Self {
+        empty: crate::semantic_query::TruthinessInhabitance::Undecided,
+        nonempty: crate::semantic_query::TruthinessInhabitance::Undecided,
+        uninhabited: false,
+    };
+    const NONEMPTY_ONLY: Self = Self {
+        empty: crate::semantic_query::TruthinessInhabitance::No,
+        nonempty: crate::semantic_query::TruthinessInhabitance::Yes,
+        uninhabited: false,
+    };
+    const EMPTY_ONLY: Self = Self {
+        empty: crate::semantic_query::TruthinessInhabitance::Yes,
+        nonempty: crate::semantic_query::TruthinessInhabitance::No,
+        uninhabited: false,
+    };
+    const ANY_STRING: Self = Self {
+        empty: crate::semantic_query::TruthinessInhabitance::Yes,
+        nonempty: crate::semantic_query::TruthinessInhabitance::Yes,
+        uninhabited: false,
+    };
+    const UNINHABITED: Self = Self {
+        empty: crate::semantic_query::TruthinessInhabitance::No,
+        nonempty: crate::semantic_query::TruthinessInhabitance::No,
+        uninhabited: true,
+    };
+}
+
+/// One classification's walk state: the freshness evidence (one self-root
+/// per inspected file-scoped node, `incomplete` on a tripped budget), the
+/// in-flight path for cycle safety, and the visit budget.
+struct TruthinessWalk<'g> {
+    graph: &'g SemanticGraphStore,
+    evidence: CanonicalEvidence,
+    in_flight: FxHashSet<SemanticNodeId>,
+    visits: usize,
+}
+
+impl TruthinessWalk<'_> {
+    /// Charge one node visit; `false` means the budget tripped (the
+    /// evidence is already marked incomplete).
+    fn charge(&mut self) -> bool {
+        self.visits += 1;
+        if self.visits > TRUTHINESS_WALK_CAP {
+            self.evidence.incomplete = true;
+            return false;
+        }
+        true
+    }
+}
+
+/// Classify the truthiness DOMAIN of `subject` — the sole truthiness
+/// authority, owned by the canonical semantic-types layer and consumed by
+/// the flow narrowing frames. Demand-scoped and structural: it walks the
+/// interned node structure (union/intersection arms, template quasis and
+/// placeholder types, surface emptiness, type-parameter constraint nodes)
+/// and NEVER resolves references, inlines aliases, or reduces types — an
+/// unresolved carrier is an `Undecided` bucket, reported, never guessed.
+///
+/// Every rule is checker-measured (tsc 7.0.2 `--strict`):
+///
+/// - `undefined` / `null` / `void` are falsy-only; `symbol`, `object`,
+///   arrays, tuples, functions, and any surface with at least one member,
+///   signature, or index signature are truthy-only; the MEMBERLESS `{}`
+///   admits primitives (`""`, `0`, `false`) and keeps both buckets;
+///   `never` has neither.
+/// - Literals classify by value; `-0` is falsy (`-0.0 == 0.0`).
+/// - A template-literal type contains `""` iff every quasi is empty AND
+///   every placeholder can render empty (only string-like placeholders
+///   can: `${number}`, `${bigint}`, `${boolean}`, `${null}`,
+///   `${undefined}` always render non-empty text), and it is uninhabited
+///   when any placeholder is `never`.
+/// - A union has a bucket inhabitant iff ANY arm does; an intersection
+///   with a `never` arm is uninhabited, and otherwise composes buckets by
+///   per-bucket OR exactly like a union — measured: `string & {x: 1}`
+///   KEEPS the falsy edge (the branded `""` inhabits it) while
+///   `{a: 1} & {b: 2}` leaves it.
+/// - A type parameter classifies through its constraint's domain
+///   (`unknown`'s — both buckets — when unconstrained), which is exactly
+///   the checker's apparent-type rule: `T extends "a"` has no falsy
+///   inhabitant, bare `T` keeps both edges.
+pub(crate) fn classify_truthiness_domain(
+    graph: &SemanticGraphStore,
+    subject: SemanticNodeId,
+) -> (crate::semantic_query::TruthinessDomain, CanonicalEvidence) {
+    let mut walk = TruthinessWalk {
+        graph,
+        evidence: CanonicalEvidence::default(),
+        in_flight: FxHashSet::default(),
+        visits: 0,
+    };
+    let domain = classify_node(&mut walk, subject);
+    (domain, walk.evidence)
+}
+
+fn classify_node(
+    walk: &mut TruthinessWalk<'_>,
+    node: SemanticNodeId,
+) -> crate::semantic_query::TruthinessDomain {
+    use crate::semantic_query::TruthinessDomain as Domain;
+    if !walk.charge() {
+        return Domain::UNDECIDED;
+    }
+    if !walk.in_flight.insert(node) {
+        // A cyclic structure (an alias chain closing on itself): the
+        // domain is not decidable from the demanded portion.
+        return Domain::UNDECIDED;
+    }
+    walk.evidence.record_file_root(walk.graph, node);
+    let domain = match walk.graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Alias(inner)) => classify_node(walk, *inner),
+        Some(SemanticNodeData::Primitive(kind)) => match kind {
+            PrimitiveKind::Any
+            | PrimitiveKind::Unknown
+            | PrimitiveKind::String
+            | PrimitiveKind::Number
+            | PrimitiveKind::BigInt
+            | PrimitiveKind::Boolean => Domain::BOTH,
+            PrimitiveKind::Symbol | PrimitiveKind::Object => Domain::TRUTHY_ONLY,
+            PrimitiveKind::Undefined | PrimitiveKind::Null | PrimitiveKind::Void => {
+                Domain::FALSY_ONLY
+            }
+            PrimitiveKind::Never => Domain::UNINHABITED,
+        },
+        Some(SemanticNodeData::Literal(literal)) => {
+            if literal_is_truthy(literal) {
+                Domain::TRUTHY_ONLY
+            } else {
+                Domain::FALSY_ONLY
+            }
+        }
+        Some(SemanticNodeData::Object(surface)) => {
+            if surface.closed().is_empty() {
+                // The memberless `{}` admits primitives (`""`, `0`,
+                // `false` are all assignable), so both buckets are
+                // inhabited — measured: `if (v)` over `{} | 0` keeps
+                // BOTH constituents on the falsy edge.
+                Domain::BOTH
+            } else {
+                Domain::TRUTHY_ONLY
+            }
+        }
+        Some(
+            SemanticNodeData::ObjectSpreadProgram(_)
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::Signature { .. },
+        ) => Domain::TRUTHY_ONLY,
+        Some(SemanticNodeData::TemplateLiteral {
+            quasis,
+            expressions,
+        }) => {
+            let quasis = Arc::clone(quasis);
+            let expressions = Arc::clone(expressions);
+            classify_template(walk, &quasis, &expressions)
+        }
+        Some(SemanticNodeData::Union(members)) => {
+            let members = members.members_arc();
+            let mut folded = Domain::UNINHABITED;
+            for member in members.iter() {
+                folded = folded.union_with(classify_node(walk, *member));
+            }
+            folded
+        }
+        Some(SemanticNodeData::Intersection(members)) => {
+            let members = members.members_arc();
+            // The checker's measured intersection facts: a `never` arm
+            // empties the type; otherwise buckets compose by OR exactly
+            // like a union (`string & {x: 1}` keeps the falsy edge — its
+            // branded `""` inhabits it — while `{a: 1} & {b: 2}` leaves
+            // it). The fold seeds from the FIRST arm: `UNINHABITED` is
+            // `intersect_with`'s absorbing element, never its identity.
+            let mut folded: Option<Domain> = None;
+            for member in members.iter() {
+                let member_domain = classify_node(walk, *member);
+                folded = Some(match folded {
+                    None => member_domain,
+                    Some(prior) => prior.intersect_with(member_domain),
+                });
+            }
+            folded.unwrap_or(Domain::UNDECIDED)
+        }
+        Some(SemanticNodeData::TypeParam { constraint, .. }) => match constraint {
+            // The checker classifies an open parameter through its
+            // apparent type: the constraint's domain, `unknown`'s when
+            // unconstrained.
+            Some(constraint) => {
+                let constraint = *constraint;
+                classify_node(walk, constraint)
+            }
+            None => Domain::BOTH,
+        },
+        // Everything else — an unresolved reference / operator carrier
+        // (`DeclRef`, `InstantiationRef`, `BareRef`, `ImportType`,
+        // `KeyOf`, `IndexedAccess`, `Mapped`, `TypeOf`, `Conditional`,
+        // `Infer`/`InferRef`, `MergedDecl` and the other ordered
+        // carriers, `Opaque`, …) — is not decidable from the demanded
+        // structure: classification never resolves or inlines it.
+        Some(_) | None => Domain::UNDECIDED,
+    };
+    walk.in_flight.remove(&node);
+    domain
+}
+
+/// Whether a literal VALUE is truthy at runtime. `-0` and bare `0` are
+/// both falsy (`-0.0 == 0.0`); a bigint is falsy iff its digits are all
+/// zero (sign ignored).
+fn literal_is_truthy(literal: &LiteralValue) -> bool {
+    match literal {
+        LiteralValue::Boolean(value) => *value,
+        LiteralValue::String(value) => !value.is_empty(),
+        LiteralValue::Number(value) => *value != 0.0,
+        LiteralValue::BigInt(value) => !value.trim_start_matches('-').chars().all(|c| c == '0'),
+    }
+}
+
+fn classify_template(
+    walk: &mut TruthinessWalk<'_>,
+    quasis: &[Arc<str>],
+    expressions: &[SemanticNodeId],
+) -> crate::semantic_query::TruthinessDomain {
+    use crate::semantic_query::TruthinessInhabitance as Tri;
+    let any_quasi_nonempty = quasis.iter().any(|quasi| !quasi.is_empty());
+    let mut renders: Vec<RenderDomain> = Vec::with_capacity(expressions.len());
+    for expression in expressions {
+        let render = render_domain(walk, *expression);
+        if render.uninhabited {
+            // A `never` placeholder empties the whole template's string
+            // domain — measured: `` `a${never}` `` leaves BOTH edges.
+            return crate::semantic_query::TruthinessDomain::UNINHABITED;
+        }
+        renders.push(render);
+    }
+    let falsy = if any_quasi_nonempty || renders.iter().any(|r| r.empty == Tri::No) {
+        // `""` needs every part empty; a non-empty quasi or a
+        // provably-non-empty placeholder rendering rules it out.
+        Tri::No
+    } else if renders.iter().all(|r| r.empty == Tri::Yes) {
+        Tri::Yes
+    } else {
+        Tri::Undecided
+    };
+    let all_inhabited = renders
+        .iter()
+        .all(|r| r.empty == Tri::Yes || r.nonempty == Tri::Yes);
+    let truthy = if (any_quasi_nonempty || renders.iter().any(|r| r.nonempty == Tri::Yes))
+        && all_inhabited
+    {
+        Tri::Yes
+    } else if !any_quasi_nonempty
+        && renders
+            .iter()
+            .all(|r| r.nonempty == Tri::No && r.empty == Tri::Yes)
+    {
+        // Every rendering is `""` — measured: `` `${""}` `` leaves the
+        // truthy edge.
+        Tri::No
+    } else {
+        Tri::Undecided
+    };
+    crate::semantic_query::TruthinessDomain { truthy, falsy }
+}
+
+fn render_domain(walk: &mut TruthinessWalk<'_>, node: SemanticNodeId) -> RenderDomain {
+    use crate::semantic_query::TruthinessInhabitance as Tri;
+    if !walk.charge() {
+        return RenderDomain::UNKNOWN;
+    }
+    if !walk.in_flight.insert(node) {
+        return RenderDomain::UNKNOWN;
+    }
+    walk.evidence.record_file_root(walk.graph, node);
+    let render = match walk.graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Alias(inner)) => render_domain(walk, *inner),
+        Some(SemanticNodeData::Primitive(kind)) => match kind {
+            // Only a `string` placeholder admits an empty rendering in the
+            // checker's truthiness facts. The other permitted placeholder
+            // kinds always render non-empty text (`"0"`, `"false"`,
+            // `"null"`, `"undefined"`, …) — and so does `any`, measured:
+            // the falsy edge of `` `${any}` `` is `never` even though
+            // `""` IS assignable to the template — the checker's own
+            // template-facts rule, mirrored here, not an inhabitance
+            // claim.
+            PrimitiveKind::String => RenderDomain::ANY_STRING,
+            PrimitiveKind::Any
+            | PrimitiveKind::Number
+            | PrimitiveKind::BigInt
+            | PrimitiveKind::Boolean
+            | PrimitiveKind::Null
+            | PrimitiveKind::Undefined => RenderDomain::NONEMPTY_ONLY,
+            PrimitiveKind::Never => RenderDomain::UNINHABITED,
+            PrimitiveKind::Unknown
+            | PrimitiveKind::Void
+            | PrimitiveKind::Symbol
+            | PrimitiveKind::Object => RenderDomain::UNKNOWN,
+        },
+        Some(SemanticNodeData::Literal(literal)) => match literal {
+            LiteralValue::String(value) if value.is_empty() => RenderDomain::EMPTY_ONLY,
+            _ => RenderDomain::NONEMPTY_ONLY,
+        },
+        Some(SemanticNodeData::Union(members)) => {
+            let members = members.members_arc();
+            let mut empty = Tri::No;
+            let mut nonempty = Tri::No;
+            let mut uninhabited = true;
+            for member in members.iter() {
+                let render = render_domain(walk, *member);
+                if render.uninhabited {
+                    continue;
+                }
+                uninhabited = false;
+                empty = empty.or(render.empty);
+                nonempty = nonempty.or(render.nonempty);
+            }
+            RenderDomain {
+                empty,
+                nonempty,
+                uninhabited,
+            }
+        }
+        Some(SemanticNodeData::TemplateLiteral {
+            quasis,
+            expressions,
+        }) => {
+            let quasis = Arc::clone(quasis);
+            let expressions = Arc::clone(expressions);
+            let nested = classify_template(walk, &quasis, &expressions);
+            // A template denotes strings, so its render domain IS its
+            // truthiness domain: the one falsy string is `""`.
+            RenderDomain {
+                empty: nested.falsy,
+                nonempty: nested.truthy,
+                uninhabited: nested == crate::semantic_query::TruthinessDomain::UNINHABITED,
+            }
+        }
+        Some(SemanticNodeData::TypeParam { constraint, .. }) => match constraint {
+            Some(constraint) => {
+                let constraint = *constraint;
+                render_domain(walk, constraint)
+            }
+            None => RenderDomain::UNKNOWN,
+        },
+        Some(_) | None => RenderDomain::UNKNOWN,
+    };
+    walk.in_flight.remove(&node);
+    render
+}
+
+impl super::ProjectSemanticDispatch<'_> {
+    /// The `execute(ClassifyTruthinessDomain)` producer — the family
+    /// cold-build arm. SOLE constructor of the truthiness-domain value.
+    /// A domain with any `Undecided` bucket, or a walk whose evidence is
+    /// incomplete (budget trip / missing payload), is `ReturnOnly`: the
+    /// value flows to the caller, the memo refuses admission.
+    pub(super) fn build_classify_truthiness_domain(
+        &self,
+        subject: SemanticNodeId,
+    ) -> super::walk::QueryBuildOutput<crate::semantic_query::SemanticQueryValue> {
+        let (domain, evidence) = classify_truthiness_domain(self.graph(), subject);
+        let fence = self.project_generation_signature();
+        // Self-version rooting: the subject node's own file origin plus
+        // every file-scoped node the walk inspected.
+        let mut observed_self_roots = self.observed_self_roots_from_nodes(std::iter::once(subject));
+        for root in evidence.inspected_file_roots {
+            if !observed_self_roots
+                .iter()
+                .any(|(c, h)| *c == root.0 && *h == root.1)
+            {
+                observed_self_roots.push(root);
+            }
+        }
+        let mut output = super::walk::QueryBuildOutput::from((
+            crate::semantic_query::QueryResult::Value(
+                crate::semantic_query::SemanticQueryValue::TruthinessDomain(domain),
+            ),
+            fence,
+        ))
+        .with_observed_self_roots(observed_self_roots);
+        output.cache_suppress |= evidence.incomplete || !domain.is_decided();
+        output
+    }
+
+    /// The sealed consumer API for the truthiness-domain authority:
+    /// executes the demand-scoped query through the family singleflight
+    /// and narrows the value domain onto
+    /// [`TruthinessDomain`](crate::semantic_query::TruthinessDomain). A
+    /// memo-level non-value (cancellation, same-path recursion, a
+    /// poisoned in-flight join) maps onto the fully `Undecided` domain —
+    /// reported, suppressed, never a fabricated verdict. The flow
+    /// narrowing frames CONSUME this fact and hold no truthiness rule of
+    /// their own.
+    pub(crate) fn classify_truthiness_domain_read(
+        &self,
+        subject: SemanticNodeId,
+    ) -> crate::semantic_query::CacheRead<crate::semantic_query::TruthinessDomain> {
+        let read = self.execute_via_cold_build_helper(
+            crate::semantic_query::SemanticQueryKey::ClassifyTruthinessDomain { subject },
+        );
+        let read_partial_reasons = read.partial_reason_classes();
+        let (value, defensive) = match read.value {
+            crate::semantic_query::QueryResult::Value(
+                crate::semantic_query::SemanticQueryValue::TruthinessDomain(domain),
+            ) => (domain, false),
+            crate::semantic_query::QueryResult::Value(_)
+            | crate::semantic_query::QueryResult::Recursive(_)
+            | crate::semantic_query::QueryResult::Error(_) => {
+                (crate::semantic_query::TruthinessDomain::UNDECIDED, true)
+            }
+        };
+        // The defensive conversion is a partial with no class of its own —
+        // it rides the anonymous bridge on top of whatever the read named.
+        let partial_reasons = read_partial_reasons.union(if defensive {
+            crate::semantic_query::PartialReasonSet::PROPAGATED
+        } else {
+            crate::semantic_query::PartialReasonSet::empty()
+        });
+        crate::semantic_query::CacheRead {
+            value,
+            dep_signature: read.dep_signature,
+            walker_diagnostics: read.walker_diagnostics,
+            cache_suppress: read.cache_suppress || !value.is_decided() || defensive,
+            result_is_partial: read.result_is_partial || defensive,
+            partial_reasons,
+        }
+    }
+}

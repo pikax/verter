@@ -6957,10 +6957,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// A bare truthiness test keeps every arm that CAN take the requested
-    /// edge. Broad primitives such as `boolean`, `string`, and `number` can
-    /// be either truthy or falsy; treating "not definitely falsy" as
-    /// "definitely truthy" would incorrectly make their negative edge dead.
+    /// A bare truthiness test keeps every arm the shared truthiness-domain
+    /// authority proves CAN take the requested edge — the flow frame holds
+    /// no truthiness rule of its own: per enumerated arm it CONSUMES the
+    /// demand-scoped [`ClassifyTruthinessDomain`] fact (settling identity
+    /// carriers through the same shared unwrap the enumeration and the
+    /// relation engine use) and reads the tested edge's bucket. Broad
+    /// primitives such as `boolean`, `string`, and `number` inhabit both
+    /// buckets, so both edges keep them; an UNDECIDED bucket keeps the arm
+    /// on the tested edge AND records the typed guard gap — the checker
+    /// decides such arms, so treating "undecided" as "proved on/off the
+    /// edge" would publish a wrong narrow clean and warm. An edge no arm
+    /// survives narrows the subject to `never` WITHOUT killing the branch:
+    /// the checker keeps the branch's syntactic returns, typed through the
+    /// `never` subject (measured: `` `item-${string}` | "none" `` under
+    /// `if (v)` reads `{ v: never }` from the falsy edge's `return { v }`).
+    ///
+    /// [`ClassifyTruthinessDomain`]: crate::semantic_query::SemanticQueryKey::ClassifyTruthinessDomain
     fn narrow_truthy(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
@@ -6975,6 +6988,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // falsy edge (`""` inhabits it). The parent fact rides the
         // narrowing overlay directly; the leaf fact is the returned
         // narrow, so both land under the same guard scope.
+        let mut undecided = false;
         if !subject.path.is_empty() {
             let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
                 root: subject.root.clone(),
@@ -6992,85 +7006,90 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let parent_fact = self.narrow_arms_by(&parent_subject, &parent_subject, |this, arm| {
                 let member = this.project_segments_navigate(arm, &last)?;
                 let leaves = this.enumerated_union_arms_or_self(member);
-                Some(leaves.iter().any(|leaf| {
-                    if negated {
-                        this.arm_can_be_falsy(*leaf)
-                    } else {
-                        this.arm_can_be_truthy(*leaf)
-                    }
-                }))
+                Some(
+                    leaves
+                        .iter()
+                        .any(|leaf| match this.arm_truthiness_edge(*leaf, negated) {
+                            crate::semantic_query::TruthinessInhabitance::Yes => true,
+                            crate::semantic_query::TruthinessInhabitance::No => false,
+                            crate::semantic_query::TruthinessInhabitance::Undecided => {
+                                undecided = true;
+                                true
+                            }
+                        }),
+                )
             });
             match parent_fact {
-                GuardNarrowing::Impossible => return GuardNarrowing::Impossible,
+                // Every parent arm is proved off the tested edge: the
+                // parent reference narrows to `never` — the branch stays
+                // alive and its syntactic returns keep contributing,
+                // exactly as the checker types them.
+                GuardNarrowing::Impossible => {
+                    let never = self
+                        .dispatch
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+                    self.narrowings.push((parent_subject, never));
+                }
                 GuardNarrowing::Narrowed(fact_subject, node) => {
                     self.narrowings.push((fact_subject, node));
                 }
                 GuardNarrowing::Unchanged => {}
             }
         }
-        self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(if negated {
-                this.arm_can_be_falsy(arm)
-            } else {
-                this.arm_can_be_truthy(arm)
-            })
-        })
-    }
-
-    /// Whether one union arm has a truthy runtime inhabitant.
-    fn arm_can_be_truthy(&self, arm: SemanticNodeId) -> bool {
-        match self.dispatch.graph().node_data(arm).as_deref() {
-            Some(SemanticNodeData::Primitive(
-                PrimitiveKind::Undefined | PrimitiveKind::Null | PrimitiveKind::Void,
-            )) => false,
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => false,
-            Some(SemanticNodeData::Literal(literal)) => match literal {
-                crate::semantic_query::LiteralValue::Boolean(value) => *value,
-                crate::semantic_query::LiteralValue::String(value) => !value.is_empty(),
-                crate::semantic_query::LiteralValue::Number(value) => *value != 0.0,
-                crate::semantic_query::LiteralValue::BigInt(value) => {
-                    !value.trim_start_matches('-').chars().all(|c| c == '0')
+        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+            Some(match this.arm_truthiness_edge(arm, negated) {
+                crate::semantic_query::TruthinessInhabitance::Yes => true,
+                crate::semantic_query::TruthinessInhabitance::No => false,
+                crate::semantic_query::TruthinessInhabitance::Undecided => {
+                    undecided = true;
+                    true
                 }
-            },
-            _ => true,
+            })
+        });
+        if undecided {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        match fact {
+            GuardNarrowing::Impossible => {
+                let never = self
+                    .dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+                GuardNarrowing::Narrowed(subject.clone(), never)
+            }
+            other => other,
         }
     }
 
-    /// Whether one union arm has a falsy runtime inhabitant. Only broad
-    /// scalar primitives and the concrete falsy values qualify; object and
-    /// callable surfaces are always truthy, while unresolved forms stay
-    /// conservative and keep both edges.
-    fn arm_can_be_falsy(&self, arm: SemanticNodeId) -> bool {
-        match self.dispatch.graph().node_data(arm).as_deref() {
-            Some(SemanticNodeData::Primitive(primitive)) => matches!(
-                primitive,
-                PrimitiveKind::Any
-                    | PrimitiveKind::Unknown
-                    | PrimitiveKind::Undefined
-                    | PrimitiveKind::Null
-                    | PrimitiveKind::Void
-                    | PrimitiveKind::String
-                    | PrimitiveKind::Number
-                    | PrimitiveKind::BigInt
-                    | PrimitiveKind::Boolean
-            ),
-            Some(SemanticNodeData::Literal(literal)) => match literal {
-                crate::semantic_query::LiteralValue::Boolean(value) => !value,
-                crate::semantic_query::LiteralValue::String(value) => value.is_empty(),
-                crate::semantic_query::LiteralValue::Number(value) => *value == 0.0,
-                crate::semantic_query::LiteralValue::BigInt(value) => {
-                    value.trim_start_matches('-').chars().all(|c| c == '0')
-                }
-            },
-            Some(
-                SemanticNodeData::Object(_)
-                | SemanticNodeData::ObjectSpreadProgram(_)
-                | SemanticNodeData::Array { .. }
-                | SemanticNodeData::Tuple { .. }
-                | SemanticNodeData::Signature { .. },
-            ) => false,
-            Some(SemanticNodeData::Union(_)) | Some(SemanticNodeData::Intersection(_)) => true,
-            Some(_) | None => true,
+    /// The tested edge's bucket of one arm's truthiness domain, CONSUMED
+    /// from the sole authority ([`ClassifyTruthinessDomain`]): the falsy
+    /// bucket on the negated edge, the truthy bucket otherwise. The arm is
+    /// settled through the shared identity-carrier unwrap first (the same
+    /// `Instantiate`-backed peel the arm enumeration and the relation
+    /// engine use) so an alias/`DeclRef` arm classifies by its concrete
+    /// structure; an unresolvable carrier is `Undecided` — reported, never
+    /// guessed.
+    ///
+    /// [`ClassifyTruthinessDomain`]: crate::semantic_query::SemanticQueryKey::ClassifyTruthinessDomain
+    fn arm_truthiness_edge(
+        &mut self,
+        arm: SemanticNodeId,
+        negated: bool,
+    ) -> crate::semantic_query::TruthinessInhabitance {
+        let settled = match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+            super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+            super::relation::IdentityCarrierUnwrap::Unresolvable => {
+                return crate::semantic_query::TruthinessInhabitance::Undecided;
+            }
+        };
+        let domain = self.dispatch.classify_truthiness_domain_read(settled).value;
+        if negated {
+            domain.falsy
+        } else {
+            domain.truthy
         }
     }
 

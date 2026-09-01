@@ -4808,6 +4808,193 @@ fn deep_path_guards_narrow_the_parent_reference_not_the_root() {
     }
 }
 
+/// A bare truthiness guard consumes the shared demand-scoped
+/// truthiness-domain fact (`ClassifyTruthinessDomain`) per enumerated
+/// arm: an arm with NO inhabitant on the tested edge leaves the edge, an
+/// arm with a proven inhabitant stays, and an edge with NO surviving arm
+/// narrows the subject to `never` WITHOUT deleting the branch's
+/// syntactic return contributor — the checker keeps `return { v }` as
+/// `{ v: never }` (measured), so a dead-branch reading that drops the
+/// return publishes a subset of the checker's type. An arm whose domain
+/// the authority cannot decide (an unresolved operator carrier) stays on
+/// both edges, records the typed guard gap, and never warms. Every
+/// `checker` column is measured against the pinned tsc 7.0.2
+/// (`--strict --declaration --emitDeclarationOnly`).
+#[test]
+fn truthiness_domain_facts_narrow_like_the_checker() {
+    struct Case {
+        id: &'static str,
+        script: &'static str,
+        /// tsc 7.0.2 `--strict --emitDeclarationOnly` verdict.
+        checker: &'static str,
+        rendered: &'static str,
+        degradation: Degr,
+        warm: bool,
+    }
+    let cases = [
+        // The certified falsy-edge fact defect: a template-literal type
+        // with a non-empty literal prefix has NO falsy inhabitant, so
+        // neither `Tag` arm survives the falsy edge — yet the syntactic
+        // `return { v }` still contributes, typed `{ v: never }`.
+        Case {
+            id: "truthy3_template_prefix_falsy_edge_is_never",
+            script: "type Tag = `item-${string}` | \"none\";\nexport function f(v: Tag) { if (v) return 1; return { v } }",
+            checker: "1 | { v: never; }",
+            rendered: "Union(1 | { v: never })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // The negated spelling consumes the same falsy bit on the
+        // then-edge — a swapped truthy/falsy mapping fails exactly here.
+        Case {
+            id: "truthy3_template_prefix_negated_edge_is_never",
+            script: "type Tag = `item-${string}` | \"none\";\nexport function f(v: Tag) { if (!v) return { v }; return 1 }",
+            checker: "1 | { v: never; }",
+            rendered: "Union({ v: never } | 1)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // `${number}` renders only non-empty strings ("0", "NaN", …):
+        // no falsy inhabitant even though every quasi is empty.
+        Case {
+            id: "truthy3_number_template_falsy_edge_is_never",
+            script: "export function f(v: `${number}`) { if (v) return 1; return { v } }",
+            checker: "1 | { v: never; }",
+            rendered: "Union(1 | { v: never })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // `${string}` contains `""`: the falsy edge keeps the arm. This
+        // is the overreach control for the non-empty-prefix rule.
+        Case {
+            id: "truthy3_string_template_keeps_falsy_edge",
+            script: "export function f(v: `${string}`) { if (v) return 1; return { v } }",
+            checker: "1 | { v: string; }",
+            rendered: "Union(1 | { v: TemplateLiteral(…) })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // A bare broad `string` has both a truthy and a falsy inhabitant
+        // (`""`): both edges keep it, unrefined, clean and warm — the
+        // discriminating pair's second half.
+        Case {
+            id: "truthy3_bare_string_keeps_both_edges",
+            script: "export function f(v: string) { if (v) return 1; return { v } }",
+            checker: "1 | { v: string; }",
+            rendered: "Union(1 | { v: string })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // An intersection with an object arm has no falsy inhabitant
+        // (every inhabitant would inhabit the always-truthy arm), so the
+        // falsy edge drops it while `number` stays.
+        Case {
+            id: "truthy3_object_intersection_falsy_edge_dropped",
+            script: "export function f(v: ({ a: 1 } & { b: 2 }) | number) { if (v) return 1; return { v } }",
+            checker: "1 | { v: number; }",
+            rendered: "Union(1 | { v: number })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // A branded primitive intersection (`string & {x: 1}`) keeps
+        // BOTH edges: the branded `""` inhabits the falsy bucket, so the
+        // buckets compose by per-bucket OR — the arm survives the truthy
+        // edge too (a fold that absorbs into uninhabited drops it there).
+        Case {
+            id: "truthy3_branded_string_intersection_keeps_both_edges",
+            script: "export function f(v: (string & { x: 1 }) | number) { if (v) return { v }; return 1 }",
+            checker: "1 | { v: number | (string & { x: 1; }); }",
+            rendered: "Union(1 | { v: Union(Intersection(string & { x: 1 }) | number) })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // The MEMBERLESS `{}` admits primitives (`""`, `0`, `false` are
+        // all assignable), so BOTH edges keep it — a surface with any
+        // member (even optional) stays object-only instead.
+        Case {
+            id: "truthy3_empty_object_surface_keeps_both_edges",
+            script: "export function f(v: {} | 0) { if (v) return 1; return { v } }",
+            checker: "1 | { v: 0 | {}; }",
+            rendered: "Union(1 | { v: Union({  } | 0) })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // An unresolved operator carrier (`keyof T` over an open `T`)
+        // has an UNDECIDED domain: the checker keeps it, the narrow
+        // keeps it too, and the undecided fact records the typed guard
+        // gap — the result never warms.
+        Case {
+            id: "truthy3_undecided_carrier_keeps_arm_and_degrades",
+            script: "export function f<T>(v: keyof T | 0) { if (v) return 1; return { v } }",
+            checker: "1 | { v: 0 | keyof T; }",
+            rendered: "Union(1 | { v: Union(KeyOf(TypeParam(T)) | 0) })",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        // A type parameter classifies through its CONSTRAINT's domain: a
+        // truthy-only constraint (`"a"`) leaves the falsy edge with no
+        // surviving arm.
+        Case {
+            id: "truthy3_constrained_param_falsy_edge_is_never",
+            script: "export function f<T extends \"a\">(v: T | \"x\") { if (v) return 1; return { v } }",
+            checker: "1 | { v: never; }",
+            rendered: "Union(1 | { v: never })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // An UNCONSTRAINED parameter's domain is `unknown`'s: both edges
+        // keep it, decided, clean and warm.
+        Case {
+            id: "truthy3_unconstrained_param_keeps_both_edges",
+            script: "export function f<T>(v: T | 0) { if (v) return 1; return { v } }",
+            checker: "1 | { v: 0 | T; }",
+            rendered: "Union(1 | { v: Union(TypeParam(T) | 0) })",
+            degradation: Degr::None,
+            warm: true,
+        },
+    ];
+    for case in &cases {
+        let measured = drive_expect_boundary("", case.id, case.script, "f", None);
+        let mut failures = Vec::new();
+        if let Some(rendered) = measured.rendered.as_deref() {
+            if rendered != case.rendered {
+                failures.push(format!(
+                    "value drifted: expected {} (covering checker `{}`), measured {}",
+                    case.rendered, case.checker, rendered
+                ));
+            }
+        } else {
+            failures.push(format!(
+                "the public boundary returned no value: {}",
+                measured.boundary.error.as_deref().unwrap_or("<unset>")
+            ));
+        }
+        if measured.boundary.degradation != Some(case.degradation) {
+            failures.push(format!(
+                "typed degradation drifted: expected {:?}, measured {:?}",
+                case.degradation, measured.boundary.degradation
+            ));
+        }
+        failures.extend(first_call_cold_clauses(&measured.boundary));
+        failures.extend(replay_clauses(case.warm, &measured.boundary));
+        let candidates = flow_return_candidate_count(case.id, case.script);
+        if case.warm {
+            if candidates == 0 {
+                failures.push(
+                    "clean row stored ZERO warm candidates — a complete result must warm"
+                        .to_owned(),
+                );
+            }
+        } else if candidates != 0 {
+            failures.push(format!(
+                "degraded row stored {candidates} warm candidate(s) — a guard-gapped result \
+                 is ReturnOnly and must store NONE"
+            ));
+        }
+        assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
+    }
+}
+
 /// One member-object wrapper for the exact boundary JSON pins below:
 /// `{ v: <ty> }` exactly as the projector serialises a fresh literal
 /// return object with the single member `v`.
