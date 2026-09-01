@@ -32,7 +32,17 @@ The implementer adds the node's ledger row to its implementation patch before sq
 
 The candidate's landed source and tests contain no roadmap identity: no program/revision, DAG, node/block/train ID, phase/stage, implementation sequence, deletion history, or DAG-managed issue/PR citation. Comments and test artifacts state durable behavior. A GitHub issue may be cited only for a specific independently reported defect outside the DAG mappings, and only as a supplement to that behavioral explanation.
 
+Production LOC and file budgets are planning references. The implementer and reviewers compare the actual candidate with them and investigate material divergence without treating the numbers as pass/fail thresholds. A large mismatch, such as one expected production file becoming ten, requires a scope-coherence explanation and may reveal work that needs an ordinary DAG amendment.
+
 The lifecycle has no admission, lease, dispatch receipt, candidate-finalization receipt, review manifest, acceptance receipt, landing receipt, activation transition, amendment digest chain, or runtime root. Review reports may remain ordinary task artifacts; they are not machine-bound to Git identities.
+
+## Train conformance and completion review
+
+The train manager maintains a human coordination count of blocks implemented since the train's last architecture checkpoint. After every 3 to 6 newly implemented blocks, it spawns a fresh Codex Architect conformance review of the train's cumulative implementation. The checkpoint may be chosen after block 3, 4, 5, or 6 according to risk and architectural churn, but it must finish before a seventh block is allowed to extend that unchecked tranche. The reviewer checks that the train is converging on its intended architecture, that block boundaries and ownership remain coherent, and that the implementation conforms to the current DAG, charters, contracts, and all ordinary reviewed amendments effective for the train. Material findings are fixed through the owning block or an ordinary amendment, and affected conformance is rerun before the train proceeds.
+
+When implementing the train's final intended block, the manager also spawns a fresh independent train review against the cumulative implementation, including that final candidate. It checks that every currently intended train outcome is implemented, integrated, and verified as amended. This review is additional to the final block's own review profile and to any Architect checkpoint due for the current tranche; it does not replace either. The final block cannot be accepted or landed until material train-review findings are resolved and the affected cumulative review passes.
+
+These reviews are agent obligations, not implementation state. Their reports may remain ordinary task artifacts; there is no checkpoint row, amendment digest, receipt, or new readiness input.
 
 ## Trust model
 

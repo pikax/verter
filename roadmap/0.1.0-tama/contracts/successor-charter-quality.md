@@ -20,7 +20,7 @@ Every static implementation charter must contain:
 12. **Forbidden designs** — specific ways an implementer could superficially pass while violating architecture.
 13. **Acceptance IDs** — positive and planted-negative proof, incremental/fresh, cancellation/admission, bounded work.
 14. **Performance evidence** — equivalent work, allocation, latency, retained memory, and zero-work states.
-15. **Mandatory rescope/abort conditions** — no heroic implementation after scope contradiction.
+15. **Scope-contradiction rescope/abort conditions** — no heroic implementation after authority or atomicity assumptions are disproved; LOC/file estimates remain planning references.
 16. **Verification and consumers** — targeted commands/fixtures and what the block unlocks.
 17. **Roadmap consistency** — the charter, DAG node, owning contracts, and implementation ledger agree.
 
@@ -36,7 +36,7 @@ A node must be split before dispatch when any of these are true:
 - semantic rename policy is combined with final edit application;
 - authority arbitration is combined with every consumer adapter and terminal deletion;
 - proof/conformance work starts patching missing semantics;
-- target ceilings exceed 800 LOC / 8 files / 2 related packages for M nodes, or one review context cannot understand the complete diff;
+- investigation of material LOC/file/package drift shows hidden independently acceptable work, or one review context cannot understand the complete diff; the estimate alone is not a split trigger;
 - source investigation disproves the named sole owner or predecessor contract.
 
 The revised topology applies these tests explicitly:

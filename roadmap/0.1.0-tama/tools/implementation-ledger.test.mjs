@@ -257,6 +257,19 @@ test("packets add the trusted row before squash and review", () => {
   assert.match(packet, /does not resolve or validate/u);
 });
 
+test("packets carry advisory sizing and train-level review obligations", () => {
+  const authority = loadAuthority();
+  const packet = packetFor(authority, deriveState(authority), "D1");
+
+  assert.match(packet, /LOC and file budgets are planning references/u);
+  assert.match(packet, /one expected production file becomes ten/u);
+  assert.match(packet, /After every 3 to 6 implemented blocks/u);
+  assert.match(packet, /fresh Codex Architect conformance review/u);
+  assert.match(packet, /final intended block/u);
+  assert.match(packet, /fresh train review/u);
+  assert.match(packet, /current amendments/u);
+});
+
 test("strict validation cheaply covers schemas, charters, catalogs, and GitHub nodes", () => {
   const authority = loadAuthority();
   assert.deepEqual(validateAuthority(authority, { strict: true }), []);

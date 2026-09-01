@@ -8,6 +8,8 @@ The same file may contain separate `[[github_issue]]` rows with `node_id`, `gh_i
 
 Each independently landable node uses its own worktree, branch, and candidate by default, plus its own PR when GitHub control is active. A shared multi-node train worktree is an explicit atomic-landing exception, not the normal orchestration shape. With GitHub control active, the reviewed PR is squash-merged through GitHub as the landing path; GitHub is not an after-the-fact mirror of a local landing. For an explicitly directed non-PR landing, the reviewed squash commit body carries one `Closes #<gh_issue>` line per included node so the issues close when that commit reaches the origin default branch.
 
+Production LOC and file budgets are planning references rather than hard acceptance lines; material mismatch is investigated for hidden scope. During train execution, a fresh Codex Architect checks cumulative conformance after each tranche of 3 to 6 implemented blocks. The final intended block additionally receives a fresh cumulative train review against the complete current authority, including reviewed amendments.
+
 There are no commit-SHA, tree, parent, ancestry, receipt, lease, activation-journal, authority-digest, or prompt/report-digest checks in the lifecycle. Agents are trusted to add accurate rows and to obey charters, review profiles, and gates.
 
 `programctl frontier` is only a stateless convenience report. It derives the currently dispatchable nodes from DAG ancestors and ledger-row presence; it does not start, reserve, activate, or write anything. A node with no unimplemented ancestor can start immediately.

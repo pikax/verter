@@ -64,12 +64,21 @@ node roadmap/0.1.0-tama/tools/programctl.mjs packet D1
 2. Create a dedicated branch/worktree for that independently landable node. Do not mix sibling-node changes into it. When GitHub control is active, resolve the node's issue mapping before mutation. For an opt-in mapping, run `githubctl project-status --apply --node <ID> --status in-progress`, including when the work will stay local until landing; a protected mapping remains maintainer-owned. A shared train worktree is allowed only when the user or maintainer explicitly requested one atomic multi-node landing before mutation and the candidate records why the included nodes cannot land independently.
 3. Implement and run proportionate targeted verification. When GitHub control is active, push the first implementation commit and then open a draft PR; keep that PR as the reviewed candidate and eventual landing path.
    Keep the roadmap out of landed source and tests: production file/module names and comments, plus test file/module/test names, comments, fixtures, snapshots, assertion messages, and guard diagnostics, describe durable behavior, never a DAG/node/train/phase or DAG-managed issue/PR. Only an independently reported non-DAG GitHub defect may be cited supplementally.
+   Treat production LOC and file budgets as planning references, not hard limits. Compare the candidate with the estimates and investigate material drift. For example, one expected production file becoming ten is a scope smell that needs a coherent explanation, but the number alone neither rejects the patch nor requires padding or splitting it.
 4. Before squashing or review, add the node's ledger row to the implementation patch. Use the planned squash message, an approximate timezone-bearing date, and the PR number when known.
 5. Squash once using that planned title. For a user- or maintainer-directed non-PR landing, resolve each included node's local issue mapping and add one `Closes #<gh_issue>` line per node to the squash commit body before review.
 6. Run the charter's fresh review profile against the squashed candidate and address findings.
 7. Run the owning final gate. When GitHub control is active, land by squash-merging the reviewed node PR through GitHub; for an opt-in mapping, `squash-land` marks the mapped issue Done after merge and rolls its native parent only when all locally mapped train children are Done. Protected mappings remain maintainer-owned. For an authorized non-PR landing, verify every mapped closing line in the reviewed squash commit body, use the normal repository workflow, and run `project-status --apply --node <ID> --status done` for each opt-in mapping after the commit reaches the origin default branch.
 
 There is no after-commit ledger update, candidate finalization, receipt import, landing record, activation command, runtime root, or SHA restamping. Multiple nodes may share one worktree, squash commit, and PR only under the explicit atomic-train exception above; each included node still gets its own ledger row and the rows may share the same locator hints.
+
+## Train-level conformance
+
+Keep a human coordination count of newly implemented blocks since the train's last architecture checkpoint. After every 3 to 6 blocks, spawn a fresh Codex Architect conformance review over the cumulative train implementation. Choose the checkpoint after block 3, 4, 5, or 6 based on risk and architectural churn, and complete it before a seventh unchecked block proceeds. Review the implementation against the train's intended architecture and the current DAG, charters, contracts, and ordinary reviewed amendments. Resolve material findings and rerun the affected conformance lens before continuing.
+
+When the current candidate is the train's final intended block, also spawn a fresh independent train review over all implemented blocks plus the final candidate. It verifies that the complete amended train intent is implemented, integrated, and covered. This is additional to the block's own review profile and any Architect checkpoint due for the tranche. Do not accept or land the final block until material findings are resolved and the cumulative train review passes.
+
+The checkpoint count and reports are ordinary coordination artifacts, not DAG state. They add no ledger rows, receipts, amendment digests, or readiness inputs.
 
 ## GitHub flow after GH6
 

@@ -29,6 +29,8 @@ If an existing GitHub issue must become DAG work, a maintainer manually authors 
 
 Before implementation, confirm the node is READY, read its packet and charter, enumerate independently landable outcomes, and select proportionate evidence for every acceptance outcome. Split work that combines unrelated authority changes or independently rollbackable concerns. Tests are evidence, not quota; behavioral changes use TDD.
 
+Production LOC and file budgets are planning references, not hard lines. Compare the actual candidate with them and investigate material drift in either direction. If a charter expects one production file and the candidate changes ten, treat that as a scope smell requiring a coherent explanation and a check for hidden independently landable work; do not reject, pad, or split a coherent implementation merely to hit the estimate. `rescope_loc` and `rescope_files` are stronger investigation signals under the same judgment-based rule.
+
 Conflict domains, resources, external requirements, and effort fields are planning instructions. They are not leases or machine-validated authorizations. The maintainer coordinates ownership and ordering.
 
 ## Implementation and worktrees
@@ -45,6 +47,14 @@ In a fresh worktree, run `pnpm install --frozen-lockfile` before JS/TS tests or 
 
 Reviewers should inspect one stable node candidate patch, or the explicitly approved atomic multi-node candidate. The trust model does not require machine enforcement of immutability. Any material fix invalidates affected review conclusions by judgment; rerun the relevant review and verification without restamping identities.
 
+## Train-wide conformance
+
+The train manager keeps a human coordination count of newly implemented blocks since the previous train architecture checkpoint. After every 3 to 6 blocks, spawn a fresh Codex Architect conformance task over the cumulative train implementation. Select the checkpoint after block 3, 4, 5, or 6 based on risk and architectural churn, but complete it before a seventh unchecked block proceeds. Check convergence on the train's intended architecture, block and ownership coherence, and conformance to current DAG authority, charters, contracts, and every ordinary reviewed amendment effective for the train. Resolve material findings through the owning candidate or an ordinary amendment and rerun affected conformance before continuing.
+
+On the train's final intended block, also spawn a fresh independent train-review task over all implemented train blocks plus the final candidate. It verifies that the full amended train intent is implemented, integrated, and evidenced. This cumulative review is additional to the final block's risk-scaled review and to any Architect checkpoint due for the current tranche. Do not accept or land the final block until material findings are resolved and the affected train review passes.
+
+The checkpoint count and review reports remain ordinary coordination artifacts. Do not add ledger rows, receipts, amendment digests, or readiness state for them.
+
 ## Risk-scaled review
 
 - Low/simple: one fresh adversarial reviewer.
@@ -53,7 +63,7 @@ Reviewers should inspect one stable node candidate patch, or the explicitly appr
 
 Reviewers inspect the cumulative patch, proof selection, applicable tests, scope completeness, fail-closed behavior, performance implications, and architecture conformance. The author does not review its own work.
 
-Consolidate all findings once per round. One fix agent addresses the full set and class-wide siblings. Add a regression only for a plausible boundary not already discriminated. Two review/fix cycles are the soft maximum; use a neutral Architect only for real unresolved architecture ambiguity or a justified continuation ruling.
+Consolidate all findings once per round. One fix agent addresses the full set and class-wide siblings. Add a regression only for a plausible boundary not already discriminated. Two review/fix cycles are the soft maximum; outside the scheduled train-conformance role above, use a neutral Architect only for real unresolved architecture ambiguity or a justified continuation ruling.
 
 ## Verification, landing, and cleanup
 
