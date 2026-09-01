@@ -2730,6 +2730,12 @@ mod corpus_suite {
                  trailing `;` terminator",
             ),
             (
+                "X22_switch_break_case_entry",
+                "checker prints `{ v: \"a\"; } | { v: \"b\"; }`; the renderer spells \
+                 the same node `Union({ v: \"a\" } | { v: \"b\" })` — union spelling \
+                 and member terminators differ",
+            ),
+            (
                 "X88_nested_label_inherits_enclosing_suffix_return",
                 "checker prints `\"a\" | \"b\"`; the renderer spells the same node \
                  `Union(\"a\" | \"b\")`",
@@ -3909,11 +3915,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member `label` Literal + member `n` Literal — deepening pins the exact literal value",
     ),
     (
-        "D06_switch_return",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
         "E05_scalar_flow_answer_keeps_tsx_surface",
         Owner::SharedCompilePipeline,
         "root Literal — deepening pins the exact literal value",
@@ -3959,11 +3960,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member `v` Union — deepening pins the exact constituent set",
     ),
     (
-        "X04_try_catch_join",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
         "X09_generic_wrap_return",
         Owner::U6CallResolve,
         "member `box` Literal — deepening pins the exact literal value",
@@ -3979,24 +3975,9 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member `g` Other — a function value; deepening pins the signature (params + return)",
     ),
     (
-        "X15_labelled_block_return",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X16_switch_fallthrough",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
         "X21_satisfies_plain_return",
         Owner::U6ValueInference,
         "member `label` Literal + member `n` Literal — deepening pins the exact literal value",
-    ),
-    (
-        "X22_switch_break_case_entry",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
     ),
     (
         "X23_switch_fallthrough_var",
@@ -4011,7 +3992,7 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
     (
         "X25_try_assertion_catch_scope",
         Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
+        "member `caught` Union — deepening pins the exact constituent set",
     ),
     (
         "X26_switch_assertion_case_scope",
@@ -4054,11 +4035,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "root Union — deepening pins the exact constituent set",
     ),
     (
-        "X35_labeled_break_carries_write_state",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
         "X36_labeled_break_drops_arm_assertion",
         Owner::U6ValueInference,
         "root Union — deepening pins the exact constituent set",
@@ -4075,11 +4051,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
     ),
     (
         "X39_try_catch_throw_point_join",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X44_switch_exhaustive_boolean",
         Owner::U6ValueInference,
         "root Union — deepening pins the exact constituent set",
     ),
@@ -4341,7 +4312,7 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 // text the deep-pin comparer cannot yet parse (a `Record<K, V>` generic
 // in the recorded answer) — see the ledger entry's reason. Burn-down
 // pressure is unchanged: deepening any entry lowers this again.
-const SHALLOW_PINNED_ROWS_CEILING: usize = 89;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 82;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.

@@ -5,12 +5,21 @@
 //!
 //! 1. **The structural comparator** ([`compare_structural`]): semantic
 //!    constituent identity sufficient for canonicalization WITHOUT relying on
-//!    fresh [`SemanticNodeId`] equality. "Scope-insensitive" means ignoring
-//!    ONLY the arena sidecar scope
-//!    ([`SemanticGraphStore::node_scope`]) — scope-bearing semantic PAYLOAD
-//!    fields (`BareRef` scope, declaration identity, value roots,
-//!    infer-binder identity) remain identity. The comparator mirrors
-//!    `SemanticNodeData`'s manual equality rules, recursively replacing child
+//!    fresh [`SemanticNodeId`] equality. Two payload axes are excluded, and
+//!    ONLY those two: the arena sidecar scope
+//!    ([`SemanticGraphStore::node_scope`]) and SOURCE-COORDINATE SPAN
+//!    payloads (`SurfaceMember.spans`, `IndexSignature.spans`,
+//!    `Signature.signature_span` / `return_type_span`, `FunctionParam.span`)
+//!    — two arms that differ only by where they were written are ONE
+//!    constituent, so `T | T = T` fires for object arms produced by
+//!    distinct `return` statements. Scope-bearing semantic PAYLOAD fields
+//!    (`BareRef` scope, declaration identity — `declaration_origin`
+//!    included — value roots, infer-binder identity, signature occurrence)
+//!    remain identity, and declaration-site INTERNING is untouched: spans
+//!    stay arena `Eq`/`Hash` identity, so an identical same-file shape at a
+//!    different source location still interns to a distinct node. The
+//!    comparator mirrors `SemanticNodeData`'s remaining manual equality
+//!    rules, recursively replacing child
 //!    ordinals with child structural identity, and returns
 //!    [`Equal | Distinct | Incomplete`](StructuralIdentity). It is iterative
 //!    (heap worklist, never the Rust call stack) and cycle-safe (a revisited
@@ -55,10 +64,16 @@
 //! `Global` childless nodes), which asserts that instead of threading.
 //!
 //! Memoization discipline: no identity decision outlives one
-//! canonicalization. Wide arm sets narrow pairwise candidates with fresh
-//! depth-0 `structural_hash_of` fingerprints (a hash match is always
+//! canonicalization. Wide arm sets narrow pairwise candidates with the
+//! LOCAL canonical bucket hash ([`arm_bucket_keys`]) — a
+//! per-canonicalization, bounded memo aligned with the comparator's own
+//! identity (`Equal` arms always share a bucket; a bucket match is always
 //! confirmed by the exact cycle-safe comparator, never deduplicated on the
-//! hash alone). No child result is ever spliced into another traversal,
+//! hash alone). `structural_hash_of` is NOT used here: it is the audit
+//! subsystem's fingerprint and deliberately covers spans and
+//! `TypeParam.display_name`, which canonical identity excludes — a finer
+//! bucketing key than the equality it narrows for would silently split
+//! Equal pairs. No child result is ever spliced into another traversal,
 //! and no store-level or global fingerprint/representative cache exists
 //! here.
 
@@ -82,12 +97,11 @@ pub(crate) struct CanonicalMint {
     /// returned `Incomplete`, no bounded scan was skipped for size, no
     /// bounded peek was undecided, no dangling arm was preserved. This
     /// witnesses that the budgeted pipeline ran to its fixed point with no
-    /// explicit incompleteness signal — NOT comparator-complete dedup: the
-    /// structural-prehash candidate narrowing (see the "Known bounded
-    /// divergences" note where it is built) can separate two arms the
-    /// comparator would judge `Equal` into different groups, so they are
-    /// never pairwise-compared and never flip this flag to `false`, yet a
-    /// full pairwise pass would have collapsed them. The mint maps a
+    /// explicit incompleteness signal. Candidate narrowing cannot dilute
+    /// it: the bucketing key ([`arm_bucket_keys`]) is aligned with the
+    /// comparator's identity — an `Equal` pair always shares a bucket and
+    /// reaches the pairwise tier (a tripped bucket-hash cap disables the
+    /// narrowing rather than grouping on partial keys). The mint maps a
     /// `false` value to the at-rest `CanonicalUnproven` category, which the
     /// pre-seal closure's O(1) skip does not accept — a budget-degraded
     /// list resurfacing in a later request pays the full re-close (and its
@@ -111,7 +125,7 @@ impl CanonicalMint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StructuralIdentity {
     /// The two nodes are structurally and payload-scope equal (arena sidecar
-    /// scope ignored).
+    /// scope and source-coordinate span payloads ignored).
     Equal,
     /// The two nodes are structurally distinct (or conservatively treated as
     /// distinct — see the opaque-payload arms). Distinct never collapses.
@@ -257,11 +271,11 @@ const STRUCTURAL_DEDUP_ARM_CAP: usize = 128;
 const ALIAS_PEEK_HOPS: usize = 8;
 
 /// Minimum child-bearing arm count before the pairwise (tier-2) dedup
-/// narrows candidates by structural prehash. Below it, direct pairwise
-/// comparison is cheaper than hashing every arm; above it, hash-distinct
-/// arms skip the pairwise tier entirely, so a wide union of same-shaped
-/// but structurally distinct arms stays within the work budget instead of
-/// being permanently denied warm admission.
+/// narrows candidates by the canonical bucket hash ([`arm_bucket_keys`]).
+/// Below it, direct pairwise comparison is cheaper than hashing every arm;
+/// above it, key-distinct arms skip the pairwise tier entirely, so a wide
+/// union of same-shaped but structurally distinct arms stays within the
+/// work budget instead of being permanently denied warm admission.
 const STRUCTURAL_PREHASH_MIN_ARMS: usize = 8;
 
 /// Push every semantic child id of `data` onto `out`, mirroring the
@@ -596,11 +610,13 @@ fn canonicalize(
     //    Tier 2 (pairwise, budgeted): the recursive comparator over the
     //    CHILD-BEARING survivors only — the arms whose structural identity
     //    can differ from payload identity (children interned under
-    //    different scopes). Wide arm sets first narrow candidates by
-    //    structural prehash (`structural_hash_of`, sanctioned for candidate
-    //    narrowing only — a hash MATCH is always confirmed by the exact
-    //    cycle-safe comparator, never deduplicated on the hash alone), so
-    //    hash-distinct arms skip the pairwise tier. First occurrence
+    //    different scopes, payloads differing only by source spans). Wide
+    //    arm sets first narrow candidates by the canonical bucket hash
+    //    (`arm_bucket_keys`, aligned with the comparator's identity so an
+    //    Equal pair always shares a bucket — a bucket MATCH is still
+    //    confirmed by the exact cycle-safe comparator, never deduplicated
+    //    on the hash alone), so key-distinct arms skip the pairwise tier.
+    //    First occurrence
     //    survives; a discarded duplicate's TRANSITIVE structure roots stay
     //    in the evidence (the identity decision rests on the shared
     //    children); an `Incomplete` comparison (or an over-cap arm set)
@@ -645,40 +661,43 @@ fn canonicalize(
     if child_bearing.len() > STRUCTURAL_DEDUP_ARM_CAP {
         evidence.incomplete = true;
     } else if child_bearing.len() > 1 {
-        // Candidate narrowing for wide arm sets: bucket by structural
-        // prehash so the pairwise tier runs only within equal-hash groups.
-        // Hash-distinct arms are treated as candidates-for-nothing (both
-        // kept — never a collapse), which keeps a wide union of distinct
-        // same-shaped arms off the shared budget entirely. The prehash is
-        // deliberately skipped for small sets, where hashing every arm
-        // costs more than the direct pairwise walk. Known bounded
-        // divergences (both a missed dedup, never a wrong collapse): (a)
-        // the prehash includes `TypeParam.display_name`, which canonical
-        // identity excludes — a pair equal-except-display-name would
-        // narrow into different groups and stay two arms; `display_name`
-        // is derived from the declaration identity the hash also covers,
-        // so the pair cannot arise from one coherent generation. (b) two
-        // arms the comparator's coinductive rule (`compare_structural`,
-        // below) would judge `Equal` as a bisimulation can still prehash
-        // apart when they are self-referential cycles of different unroll
-        // periods: `structural_hash_of`'s `TAG_CYCLE` fires on a
-        // single-node descent-path revisit, so its position depends on
-        // interning topology (which nodes happen to be hash-consed
-        // together), not on the comparator's pairwise coinductive
-        // assumption — two topologically different but bisimulation-equal
-        // cycles can prehash to different groups and never reach the
-        // pairwise tier.
-        let prehash_groups: Option<FxHashMap<crate::types::Hash16, Vec<usize>>> =
+        // Candidate narrowing for wide arm sets: bucket by the CANONICAL
+        // bucket hash so the pairwise tier runs only within equal-key
+        // groups. Key-distinct arms are treated as candidates-for-nothing
+        // (both kept — never a collapse), which keeps a wide union of
+        // distinct same-shaped arms off the shared budget entirely. The
+        // narrowing is deliberately skipped for small sets, where hashing
+        // every arm costs more than the direct pairwise walk.
+        //
+        // BUCKETING INVARIANT: `compare_structural(a, b) == Equal` implies
+        // `bucket(a) == bucket(b)` — the bucketing is an O(n²)-avoidance
+        // optimization and may be COARSER than canonical identity, never
+        // finer, or an Equal pair is never compared and `T | T = T`
+        // silently stops applying above the threshold. That is why
+        // `structural_hash_of` is NOT the group key: it is the audit
+        // subsystem's fingerprint and correctly covers the source spans
+        // and `TypeParam.display_name` that canonical identity excludes.
+        // The local [`arm_bucket_keys`] hash mirrors the comparator's
+        // identity fields exactly for acyclic arms, folds every
+        // cycle-reaching arm into ONE shared bucket (coinductive equality
+        // is not positionally hashable, and Equal never pairs a cyclic arm
+        // with an acyclic one), and on a tripped node cap DISABLES the
+        // narrowing entirely (one all-arms group) instead of grouping on
+        // partial keys — a slower complete pass, never a missed compare
+        // and never tainted evidence.
+        let prehash_groups: Option<FxHashMap<ArmBucketKey, Vec<usize>>> =
             if child_bearing.len() > STRUCTURAL_PREHASH_MIN_ARMS {
-                let mut groups: FxHashMap<crate::types::Hash16, Vec<usize>> = FxHashMap::default();
-                for (position, (_, data)) in child_bearing.iter().enumerate() {
-                    let hash =
-                        crate::component_meta_audit::footprint_structural_hash::structural_hash_of(
-                            graph, data,
-                        );
-                    groups.entry(hash).or_default().push(position);
-                }
-                Some(groups)
+                let roots: Vec<SemanticNodeId> = child_bearing
+                    .iter()
+                    .map(|(index, _)| kept[*index])
+                    .collect();
+                arm_bucket_keys(graph, &roots).map(|keys| {
+                    let mut groups: FxHashMap<ArmBucketKey, Vec<usize>> = FxHashMap::default();
+                    for (position, key) in keys.into_iter().enumerate() {
+                        groups.entry(key).or_default().push(position);
+                    }
+                    groups
+                })
             } else {
                 None
             };
@@ -979,6 +998,358 @@ fn payload_is_childless(data: &SemanticNodeData) -> bool {
     }
 }
 
+/// Node-visit cap of one canonicalization's bucket-hash phase, shared
+/// across every arm (the memo deduplicates shared subtrees). Generous
+/// relative to the pairwise tier's own budget because hashing is linear in
+/// unique nodes; a tripped cap DISABLES candidate narrowing for the run
+/// (every child-bearing arm lands in one group and the budgeted pairwise
+/// tier decides) — it never taints the evidence and never changes a
+/// verdict.
+const BUCKET_HASH_NODE_CAP: usize = 16_384;
+
+/// Bucket key of one child-bearing arm for the pairwise tier's candidate
+/// narrowing. INVARIANT (the reason this is a separate policy from the
+/// audit fingerprint `structural_hash_of`): `compare_structural(a, b) ==
+/// Equal` implies equal keys — the bucketing may be COARSER than canonical
+/// identity, never finer.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ArmBucketKey {
+    /// The arm's reachable subgraph is acyclic and was hashed over exactly
+    /// the fields the comparator treats as identity — the arena sidecar
+    /// scope, the source-coordinate span payloads, and
+    /// `TypeParam.display_name` are all excluded, mirroring
+    /// [`compare_shallow`].
+    Exact(u64),
+    /// The arm's reachable subgraph contains a cycle. Every cyclic arm
+    /// shares this one bucket: the comparator's coinductive rule can judge
+    /// two cycles of different unroll periods `Equal`, which no positional
+    /// hash can mirror — and `Equal` can never pair a cyclic arm with an
+    /// acyclic one (equality descends the whole graph; the cyclic side is
+    /// child-bearing at every level while the acyclic side bottoms out),
+    /// so the shared bucket is sound and the acyclic buckets stay exact.
+    Cyclic,
+}
+
+#[derive(Clone, Copy)]
+enum BucketSlot {
+    InProgress,
+    Done(u64),
+    Cyclic,
+}
+
+/// Compute one bucket key per arm, sharing a memo across arms (bounded and
+/// per-canonicalization — nothing outlives the run). `None` means the node
+/// cap tripped: the caller must disable candidate narrowing for this
+/// canonicalization rather than group on partial keys — an Equal pair
+/// split across a hashed and an unhashed arm would otherwise never meet.
+fn arm_bucket_keys(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+) -> Option<Vec<ArmBucketKey>> {
+    let mut memo: FxHashMap<SemanticNodeId, BucketSlot> = FxHashMap::default();
+    let mut visits: usize = 0;
+    let mut keys = Vec::with_capacity(arms.len());
+    for &arm in arms {
+        keys.push(bucket_hash_of(graph, arm, &mut memo, &mut visits)?);
+    }
+    Some(keys)
+}
+
+/// Iterative post-order canonical-identity hash of one arm. Cycle-safe: a
+/// combine step that still sees an `InProgress` child observed a back edge
+/// (the child is an open ancestor on the current path), and cyclicity
+/// propagates upward through `Cyclic` child slots. `None` = node cap
+/// tripped.
+fn bucket_hash_of(
+    graph: &SemanticGraphStore,
+    root: SemanticNodeId,
+    memo: &mut FxHashMap<SemanticNodeId, BucketSlot>,
+    visits: &mut usize,
+) -> Option<ArmBucketKey> {
+    use std::hash::{Hash, Hasher};
+    let mut stack: Vec<(SemanticNodeId, bool)> = vec![(root, false)];
+    let mut children: Vec<SemanticNodeId> = Vec::new();
+    while let Some((node, combine)) = stack.pop() {
+        if !combine {
+            match memo.get(&node) {
+                Some(BucketSlot::Done(_) | BucketSlot::Cyclic) => continue,
+                // A pending duplicate frame of a node whose expansion is
+                // already open deeper in the stack: skip — its own combine
+                // frame settles it.
+                Some(BucketSlot::InProgress) => continue,
+                None => {}
+            }
+            *visits += 1;
+            if *visits > BUCKET_HASH_NODE_CAP {
+                return None;
+            }
+            let Some(data) = graph.node_data(node) else {
+                // A dangling node: any deterministic key keeps the
+                // invariant — the comparator returns `Incomplete` (never
+                // `Equal`) for a dangling pair, so no Equal verdict rests
+                // on this slot.
+                memo.insert(node, BucketSlot::Done(u64::MAX));
+                continue;
+            };
+            memo.insert(node, BucketSlot::InProgress);
+            stack.push((node, true));
+            children.clear();
+            if bucket_children(&data, &mut children) {
+                for &child in children.iter() {
+                    if !memo.contains_key(&child) {
+                        stack.push((child, false));
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(data) = graph.node_data(node) else {
+            memo.insert(node, BucketSlot::Done(u64::MAX));
+            continue;
+        };
+        children.clear();
+        let descend = bucket_children(&data, &mut children);
+        let mut cyclic = false;
+        if descend {
+            for child in children.iter() {
+                match memo.get(child) {
+                    // An `InProgress` child at COMBINE time is an open
+                    // ancestor — a genuine back edge, so this node is on a
+                    // cycle. (A merely-duplicated child frame completed
+                    // before this combine popped and reads `Done`.)
+                    Some(BucketSlot::InProgress) | Some(BucketSlot::Cyclic) | None => {
+                        cyclic = true;
+                        break;
+                    }
+                    Some(BucketSlot::Done(_)) => {}
+                }
+            }
+        }
+        if cyclic {
+            memo.insert(node, BucketSlot::Cyclic);
+            continue;
+        }
+        let mut hasher = rustc_hash::FxHasher::default();
+        (data.discriminant_index() as u8).hash(&mut hasher);
+        if !descend || payload_is_childless(&data) {
+            // Opaque composition payloads (`ObjectSpreadProgram`,
+            // `DeferredCallable`) and childless payloads: comparator
+            // equality is exactly arena payload equality (the `dx == dy`
+            // fast path admits equal pairs; unequal opaque pairs are
+            // `Distinct`), and the arena `Hash` is coherent with that `Eq`
+            // (it excludes `TypeParam.display_name` just as the manual
+            // `Eq` does), so the whole-payload hash is exact.
+            data.hash(&mut hasher);
+        } else {
+            hash_shallow_identity(&data, &mut hasher);
+            for child in children.iter() {
+                match memo.get(child) {
+                    Some(BucketSlot::Done(child_hash)) => child_hash.hash(&mut hasher),
+                    _ => unreachable!("cyclic children were handled above"),
+                }
+            }
+        }
+        memo.insert(node, BucketSlot::Done(hasher.finish()));
+    }
+    match memo.get(&root) {
+        Some(BucketSlot::Done(hash)) => Some(ArmBucketKey::Exact(*hash)),
+        // `Cyclic`, and the defensively-unreachable open slot, both land in
+        // the shared coarse bucket.
+        _ => Some(ArmBucketKey::Cyclic),
+    }
+}
+
+/// The bucket hash's child topology. `true` = descend the pushed children
+/// (exactly the comparator's descent set, via [`push_child_ids`]); `false`
+/// = the payload is OPAQUE to the comparator (`ObjectSpreadProgram`,
+/// `DeferredCallable`: equality is payload-`Eq` only, never a descent), so
+/// the bucket hashes the whole payload instead.
+fn bucket_children(data: &SemanticNodeData, out: &mut Vec<SemanticNodeId>) -> bool {
+    use SemanticNodeData as D;
+    match data {
+        D::ObjectSpreadProgram(_) | D::DeferredCallable(_) => false,
+        _ => push_child_ids(data, out),
+    }
+}
+
+/// Hash the non-child identity fields of one child-bearing payload —
+/// exactly the fields [`compare_shallow`] compares before descending, so
+/// `compare_shallow` passing its shallow checks implies both payloads
+/// produce identical writes here. Spans, the arena sidecar scope (not a
+/// payload field at all), and `TypeParam.display_name` are excluded;
+/// presence/branch markers are written wherever the comparator branches on
+/// an `Option` pairing so `(Some, Some)` and `(None, None)` shapes hash
+/// apart. EXHAUSTIVE over the child-bearing variants (no `_` wildcard on
+/// them): a new variant fails to compile here until its bucket identity is
+/// written down. Childless and opaque payloads never reach this function —
+/// they are whole-payload hashed by the caller.
+fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: &mut H) {
+    use std::hash::Hash;
+    use SemanticNodeData as D;
+    fn hash_member<H: std::hash::Hasher>(
+        member: &crate::semantic_query::SurfaceMember,
+        hasher: &mut H,
+    ) {
+        use std::hash::Hash;
+        member.optional.hash(hasher);
+        member.readonly.hash(hasher);
+        member.method_kind.hash(hasher);
+        member.has_implementation_body.hash(hasher);
+        member.visibility.hash(hasher);
+        member.declaration_origin.hash(hasher);
+        member.declared_in_macro_type_arg.hash(hasher);
+        member.merge_role.hash(hasher);
+        member.excess_origin.hash(hasher);
+        match authored_property_key_child(&member.key) {
+            Some(_) => true.hash(hasher),
+            None => {
+                false.hash(hasher);
+                member.key.hash(hasher);
+            }
+        }
+    }
+    fn hash_index_signature<H: std::hash::Hasher>(
+        signature: &crate::semantic_query::IndexSignature,
+        hasher: &mut H,
+    ) {
+        use std::hash::Hash;
+        signature.readonly.hash(hasher);
+        signature.declaration_origin.hash(hasher);
+    }
+    match data {
+        D::Alias(_) | D::KeyOf { .. } => {}
+        D::Object(view) => {
+            view.entries.len().hash(hasher);
+            for entry in view.entries.iter() {
+                match entry {
+                    SurfaceEntry::Member(member) => {
+                        0u8.hash(hasher);
+                        hash_member(member, hasher);
+                    }
+                    SurfaceEntry::CallSignature(_) => 1u8.hash(hasher),
+                    SurfaceEntry::ConstructSignature(_) => 2u8.hash(hasher),
+                    SurfaceEntry::IndexSignature(signature) => {
+                        3u8.hash(hasher);
+                        hash_index_signature(signature, hasher);
+                    }
+                }
+            }
+            view.positive_members().len().hash(hasher);
+            for member in view.positive_members() {
+                hash_member(member, hasher);
+            }
+            view.call_signatures.len().hash(hasher);
+            view.construct_signatures.len().hash(hasher);
+            view.index_signatures.len().hash(hasher);
+            for signature in view.index_signatures.iter() {
+                hash_index_signature(signature, hasher);
+            }
+            view.keyspace.is_some().hash(hasher);
+            view.closed().has_index_signature().hash(hasher);
+        }
+        D::Union(members) => members.len().hash(hasher),
+        D::Intersection(members) => members.len().hash(hasher),
+        D::Array { readonly, .. } => readonly.hash(hasher),
+        D::Tuple { elements, readonly } => {
+            readonly.hash(hasher);
+            elements.len().hash(hasher);
+            for element in elements.iter() {
+                element.label.hash(hasher);
+                element.optional.hash(hasher);
+                element.rest.hash(hasher);
+            }
+        }
+        D::TemplateLiteral { quasis, .. } => quasis.hash(hasher),
+        D::IndexedAccess { index, .. } => match authored_property_key_child(index) {
+            Some(_) => true.hash(hasher),
+            None => {
+                false.hash(hasher);
+                index.hash(hasher);
+            }
+        },
+        D::Mapped { mapper, .. } => {
+            mapper.optionality.hash(hasher);
+            mapper.readonly.hash(hasher);
+            mapper.kind.hash(hasher);
+            mapper.name_remap.is_some().hash(hasher);
+        }
+        carrier @ (D::TypeOf(_) | D::BareRef(_) | D::ImportType(_)) => {
+            carrier.typeof_head().hash(hasher);
+            carrier.bare_ref_head().hash(hasher);
+            carrier.import_type_head().hash(hasher);
+            carrier.carrier_type_args().len().hash(hasher);
+        }
+        D::TypeParam {
+            decl,
+            param_index,
+            constraint,
+            default,
+            // Excluded from identity, mirroring the manual Eq (F11).
+            display_name: _,
+        } => {
+            decl.hash(hasher);
+            param_index.hash(hasher);
+            constraint.is_some().hash(hasher);
+            default.is_some().hash(hasher);
+        }
+        D::Conditional { distributive, .. } => distributive.hash(hasher),
+        D::Signature {
+            kind,
+            params,
+            type_parameters,
+            occurrence,
+            return_carrier,
+            // Spans are excluded from derived-composite constituent
+            // identity.
+            signature_span: _,
+            return_type_span: _,
+            return_type: _,
+        } => {
+            kind.hash(hasher);
+            occurrence.hash(hasher);
+            params.len().hash(hasher);
+            for param in params.iter() {
+                param.name.hash(hasher);
+                param.optional.hash(hasher);
+                param.rest.hash(hasher);
+            }
+            type_parameters.len().hash(hasher);
+            for decl in type_parameters.iter() {
+                decl.name.hash(hasher);
+                decl.is_const.hash(hasher);
+                decl.constraint.is_some().hash(hasher);
+                decl.default.is_some().hash(hasher);
+            }
+            match return_carrier {
+                SignatureReturnCarrier::Declared(_) => 0u8.hash(hasher),
+                SignatureReturnCarrier::Function(source) => {
+                    1u8.hash(hasher);
+                    source.hash(hasher);
+                }
+            }
+        }
+        D::MergedDecl { contributors } => contributors.len().hash(hasher),
+        D::SyntheticBinding { id, .. } => id.hash(hasher),
+        D::InstantiationRef { base, args } => {
+            base.hash(hasher);
+            args.len().hash(hasher);
+        }
+        // Childless payloads (whole-payload hashed by the caller before
+        // this function is ever reached) and the opaque payloads (same):
+        // deliberately unreachable here, hashed as their full payload for
+        // defense in depth.
+        D::Primitive(_)
+        | D::Literal(_)
+        | D::Opaque(_)
+        | D::RawFallback { .. }
+        | D::Infer { .. }
+        | D::InferRef { .. }
+        | D::DeclRef { .. }
+        | D::ObjectSpreadProgram(_)
+        | D::DeferredCallable(_) => data.hash(hasher),
+    }
+}
+
 /// Single-pass equivalent of "∃ arm pair with [`tag_level_disjoint`] =
 /// true" over the whole arm set: the intersection's scalar tag-level
 /// domain is PROVABLY empty. Non-scalar arms contribute nothing (they are
@@ -1106,7 +1477,10 @@ pub(crate) fn compare_structural(
 
 /// Shallow identity of one [`SurfaceEntry::Member`] / positive-member pair:
 /// every non-child `SurfaceMember` field compares per the manual `Eq`
-/// (12/12) and the key/value children descend structurally.
+/// EXCEPT the source-coordinate `spans` payload — a member written at a
+/// different offset is the same constituent (spans stay interning identity
+/// and freshness evidence, never derived-composite identity) — and the
+/// key/value children descend structurally.
 fn compare_surface_member(
     ma: &crate::semantic_query::SurfaceMember,
     mb: &crate::semantic_query::SurfaceMember,
@@ -1117,7 +1491,6 @@ fn compare_surface_member(
         || ma.method_kind != mb.method_kind
         || ma.has_implementation_body != mb.has_implementation_body
         || ma.visibility != mb.visibility
-        || ma.spans != mb.spans
         || ma.declaration_origin != mb.declaration_origin
         || ma.declared_in_macro_type_arg != mb.declared_in_macro_type_arg
         || ma.merge_role != mb.merge_role
@@ -1141,16 +1514,15 @@ fn compare_surface_member(
     true
 }
 
-/// Shallow identity of one [`crate::semantic_query::IndexSignature`] pair.
+/// Shallow identity of one [`crate::semantic_query::IndexSignature`] pair —
+/// the source-coordinate `spans` payload is excluded exactly as it is for
+/// members.
 fn compare_index_signature(
     ia: &crate::semantic_query::IndexSignature,
     ib: &crate::semantic_query::IndexSignature,
     work: &mut Vec<(SemanticNodeId, SemanticNodeId)>,
 ) -> bool {
-    if ia.readonly != ib.readonly
-        || ia.spans != ib.spans
-        || ia.declaration_origin != ib.declaration_origin
-    {
+    if ia.readonly != ib.readonly || ia.declaration_origin != ib.declaration_origin {
         return false;
     }
     work.push((ia.key_type, ib.key_type));
@@ -1502,8 +1874,10 @@ fn compare_shallow(
                 type_parameters: ta,
                 occurrence: oa,
                 return_carrier: ca,
-                signature_span: sa,
-                return_type_span: rsa,
+                // Source-coordinate spans are excluded from derived-composite
+                // constituent identity (they stay interning identity).
+                signature_span: _,
+                return_type_span: _,
             },
             D::Signature {
                 kind: kb,
@@ -1512,19 +1886,14 @@ fn compare_shallow(
                 type_parameters: tb,
                 occurrence: ob,
                 return_carrier: cb,
-                signature_span: sb,
-                return_type_span: rsb,
+                signature_span: _,
+                return_type_span: _,
             },
         ) => {
-            // Spans, occurrence and the return-carrier discriminant all
-            // participate in identity (provenance-aware interning).
-            if ka != kb
-                || oa != ob
-                || sa != sb
-                || rsa != rsb
-                || pa.len() != pb.len()
-                || ta.len() != tb.len()
-            {
+            // Occurrence and the return-carrier discriminant participate in
+            // identity (declaration/position identity, not a raw source
+            // coordinate); the span payloads do not.
+            if ka != kb || oa != ob || pa.len() != pb.len() || ta.len() != tb.len() {
                 return false;
             }
             match (ca, cb) {
@@ -1539,11 +1908,7 @@ fn compare_shallow(
                 _ => return false,
             }
             for (fa, fb) in pa.iter().zip(pb.iter()) {
-                if fa.name != fb.name
-                    || fa.optional != fb.optional
-                    || fa.rest != fb.rest
-                    || fa.span != fb.span
-                {
+                if fa.name != fb.name || fa.optional != fb.optional || fa.rest != fb.rest {
                     return false;
                 }
                 work.push((fa.ty, fb.ty));

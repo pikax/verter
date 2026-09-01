@@ -3651,7 +3651,13 @@ pub struct SurfaceMember {
     /// file. Spans are content-version facts: BOTH `spans` and
     /// `declaration_origin` participate in node interning / graph identity
     /// (eq + hash) — an identical same-file shape at a different source location
-    /// interns to a distinct node — but never enter `parse_stable_hash`. `None`
+    /// interns to a distinct node — but never enter `parse_stable_hash`.
+    /// Interning identity is as far as spans reach: derived-composite
+    /// CONSTITUENT identity (the canonical algebra's structural comparator)
+    /// deliberately excludes them, so two union/intersection arms that
+    /// differ only by source location collapse under `T | T = T` while the
+    /// discarded arm's spans stay recoverable through the arena node and
+    /// the normalization origin edge. `None`
     /// components for genuinely synthetic members (union common-members,
     /// mapped-produced members) with no single source site.
     pub spans: verter_type_expr::MemberSpans,

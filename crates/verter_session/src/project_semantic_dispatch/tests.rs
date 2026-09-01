@@ -2233,6 +2233,251 @@ fn canonical_algebra_collapses_only_proven_facts() {
     }
 }
 
+/// Derived-composite constituent identity ignores source-coordinate span
+/// payloads: two arms that differ ONLY by where they were written collapse
+/// under `T | T = T` / `T & T = T`, while declaration-site interning keeps
+/// them distinct arena nodes (an identical same-file shape at a different
+/// source location still interns to a distinct node), and a pair that
+/// differs in a SEMANTIC field never collapses.
+///
+/// Two `return { label: "…" }` statements in one function produce
+/// byte-identical widened object arms whose only difference is
+/// `MemberSpans` — without the span exclusion the inferred return union
+/// keeps both arms forever and the canonical idempotence law can never
+/// fire for multi-return functions.
+#[test]
+fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() {
+    use crate::project_semantic_dispatch::canonical_algebra;
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    let member_span_object = |span_start: u32, value: SemanticNodeId| -> SemanticNodeId {
+        let member = SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string("label"),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: verter_type_expr::MemberSpans {
+                declaration: Some(verter_span::Span::new(span_start, span_start + 10)),
+                name: Some(verter_span::Span::new(span_start, span_start + 5)),
+                type_annotation: None,
+            },
+            declaration_origin: None,
+        };
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+            members: Arc::from(vec![member].into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }))
+    };
+
+    // Declaration-site interning is span-bearing and UNCHANGED: the same
+    // shape at two source locations is two arena nodes. This assertion
+    // fails if the span exclusion is over-applied to arena `Eq`.
+    let at_62 = member_span_object(62, string);
+    let at_94 = member_span_object(94, string);
+    assert_ne!(
+        at_62, at_94,
+        "member spans participate in arena interning identity — two source \
+         locations must intern to two nodes"
+    );
+
+    // Derived-composite constituent identity is span-insensitive: the union
+    // of the two collapses to the first retained arm, complete and
+    // warm-eligible.
+    let union = canonical_algebra::canonical_union(&graph, &[at_62, at_94]);
+    assert_eq!(
+        union.node,
+        at_62,
+        "arms that differ only by source coordinates collapse under T | T = T \
+         (first occurrence survives); got {:?}",
+        graph.node_data(union.node)
+    );
+    assert!(
+        !union.evidence.incomplete,
+        "a span-only collapse is a completed comparison, never Incomplete"
+    );
+    let intersection = canonical_algebra::canonical_intersection(&graph, &[at_62, at_94]);
+    assert_eq!(
+        intersection.node, at_62,
+        "the intersection twin collapses under T & T = T"
+    );
+
+    // Boundary control: a SEMANTIC field difference (the member's value
+    // type) keeps both arms even when the spans are identical — the span
+    // exclusion must not widen into value identity.
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let number_at_62 = member_span_object(62, number);
+    let distinct = canonical_algebra::canonical_union(&graph, &[at_62, number_at_62]);
+    assert!(
+        matches!(
+            graph.node_data(distinct.node).as_deref(),
+            Some(SemanticNodeData::Union(m)) if m.len() == 2
+        ),
+        "value-distinct arms never collapse; got {:?}",
+        graph.node_data(distinct.node)
+    );
+
+    // Index-signature spans are excluded the same way.
+    let index_span_object = |span_start: u32| -> SemanticNodeId {
+        let signature = IndexSignature {
+            key_type: string,
+            value_type: string,
+            readonly: false,
+            spans: verter_type_expr::IndexSignatureSpans {
+                declaration: Some(verter_span::Span::new(span_start, span_start + 12)),
+                key: Some(verter_span::Span::new(span_start + 1, span_start + 4)),
+                value: None,
+            },
+            declaration_origin: None,
+        };
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(vec![signature].into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: true,
+        }))
+    };
+    let index_a = index_span_object(10);
+    let index_b = index_span_object(200);
+    assert_ne!(
+        index_a, index_b,
+        "index-signature spans stay arena identity"
+    );
+    let index_union = canonical_algebra::canonical_union(&graph, &[index_a, index_b]);
+    assert_eq!(
+        index_union.node, index_a,
+        "index-signature-span-only arms collapse"
+    );
+
+    // Signature spans (whole-signature + return-type + per-param) are
+    // excluded too; the occurrence and return-carrier identities remain.
+    let signature_node = |span_start: u32| -> SemanticNodeId {
+        graph.intern_node(SemanticNodeData::Signature {
+            kind: crate::semantic_query::SignatureKind::Call,
+            params: Arc::from(
+                vec![crate::semantic_query::FunctionParam {
+                    name: Some("p".into()),
+                    ty: string,
+                    optional: false,
+                    rest: false,
+                    span: Some(verter_span::Span::new(span_start + 1, span_start + 2)),
+                }]
+                .into_boxed_slice(),
+            ),
+            return_type: string,
+            type_parameters: Arc::from(
+                Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
+            ),
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string),
+            signature_span: Some(verter_span::Span::new(span_start, span_start + 20)),
+            return_type_span: Some(verter_span::Span::new(span_start + 15, span_start + 20)),
+        })
+    };
+    let sig_a = signature_node(30);
+    let sig_b = signature_node(300);
+    assert_ne!(sig_a, sig_b, "signature spans stay arena identity");
+    let sig_union = canonical_algebra::canonical_union(&graph, &[sig_a, sig_b]);
+    assert_eq!(
+        sig_union.node, sig_a,
+        "signature-span-only arms collapse under T | T = T"
+    );
+}
+
+/// The pairwise tier's candidate-narrowing bucket hash must never be FINER
+/// than canonical identity: `compare_structural(a, b) == Equal` implies
+/// `bucket(a) == bucket(b)`, or the pair is never compared and `T | T = T`
+/// silently stops applying above the narrowing threshold. The discriminating
+/// shape is a union with MORE than `STRUCTURAL_PREHASH_MIN_ARMS`
+/// child-bearing arms where two arms are equal except for their source
+/// spans: a span-sensitive bucketing hash narrows the pair into different
+/// groups and both arms survive, so the below-threshold tests all pass
+/// while wide unions keep the duplicate.
+#[test]
+fn span_only_duplicates_collapse_above_prehash_narrowing_threshold() {
+    use crate::project_semantic_dispatch::canonical_algebra;
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    let spanned_object = |name: &str, span_start: u32| -> SemanticNodeId {
+        let member = SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
+            value: string,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: verter_type_expr::MemberSpans {
+                declaration: Some(verter_span::Span::new(span_start, span_start + 10)),
+                name: Some(verter_span::Span::new(span_start, span_start + 5)),
+                type_annotation: None,
+            },
+            declaration_origin: None,
+        };
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+            members: Arc::from(vec![member].into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }))
+    };
+
+    // Ten structurally DISTINCT child-bearing arms (distinct member names)
+    // plus one span-variant duplicate of the first — 11 child-bearing arms,
+    // above the narrowing threshold, so the pairwise tier runs over bucket
+    // groups rather than directly.
+    let mut arms: Vec<SemanticNodeId> = (0..10)
+        .map(|index| spanned_object(&format!("k{index}"), 100 + index * 50))
+        .collect();
+    let duplicate = spanned_object("k0", 9000);
+    assert_ne!(arms[0], duplicate, "the duplicate differs only by spans");
+    arms.push(duplicate);
+
+    let union = canonical_algebra::canonical_union(&graph, &arms);
+    match graph.node_data(union.node).as_deref() {
+        Some(SemanticNodeData::Union(members)) => {
+            assert_eq!(
+                members.len(),
+                10,
+                "the span-only duplicate must collapse above the narrowing \
+                 threshold exactly as it does below it"
+            );
+            assert!(
+                members.contains(&arms[0]) && !members.contains(&duplicate),
+                "first occurrence survives; the span-variant duplicate is discarded"
+            );
+        }
+        other => panic!("expected a ten-arm union, got {other:?}"),
+    }
+    assert!(
+        !union.evidence.incomplete,
+        "bucketed narrowing must stay complete — distinct arms skip the \
+         pairwise tier without consuming budget"
+    );
+}
+
 /// TypeScript interns `0` and `-0` as ONE numeric literal type (SameValueZero
 /// keying — verified against the pinned checker: `0 & -0` is `0`, NOT `never`;
 /// `0 | -0` is a single arm; `-0` is assignable to `0`). Bit identity over the
