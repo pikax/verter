@@ -839,29 +839,13 @@ fn svelte_custom_element_descriptor(
                         SvelteCustomElementPropDescriptor {
                             attribute,
                             reflect,
-                            prop_type: prop_type.map(svelte_custom_element_prop_type),
+                            prop_type,
                         },
                     )
                 },
             )
             .collect(),
     }
-}
-
-/// The wire's closed prop-type vocabulary rendered as the official Svelte
-/// spelling the canonical descriptor carries. Total by construction: the
-/// domain is closed at decode, so there is nothing to refuse here, and a
-/// variant added to the wire enum is a non-exhaustive-match compile error
-/// rather than a spelling this boundary invents.
-fn svelte_custom_element_prop_type(prop_type: FfiSvelteCustomElementPropType) -> String {
-    match prop_type {
-        FfiSvelteCustomElementPropType::String => "String",
-        FfiSvelteCustomElementPropType::Boolean => "Boolean",
-        FfiSvelteCustomElementPropType::Number => "Number",
-        FfiSvelteCustomElementPropType::Array => "Array",
-        FfiSvelteCustomElementPropType::Object => "Object",
-    }
-    .to_string()
 }
 
 pub fn ffi_virtual_query_to_host(

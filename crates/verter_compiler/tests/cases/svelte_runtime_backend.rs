@@ -6,13 +6,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use verter_compiler::compile_request::svelte::{
-    SvelteCssRequest, SvelteCustomElementDescriptor, SvelteCustomElementPropDescriptor,
-    SvelteNamespaceRequest, SvelteOption,
+    AdmittedSvelteCustomElementDescriptor, SvelteCssRequest, SvelteCustomElementDescriptor,
+    SvelteCustomElementPropDescriptor, SvelteCustomElementPropType, SvelteNamespaceRequest,
+    SvelteOption,
 };
 use verter_compiler::compile_request::{
     AnalysisProductRequest, CompileProduct, CompileRequest, CompileRequestError,
     FrameworkCompileRequest, FrameworkOption, IdeProductRequest, ProductKind,
-    RuntimeProductRequest, SvelteCompileRequest, VueCompileRequest,
+    RuntimeProductRequest, SvelteCompileRequest, SvelteOptionAttempt, VueCompileRequest,
 };
 use verter_compiler::framework_common::{
     CarrierCompiler, CatalogCapability, CatalogRow, FrameworkEpoch, FrameworkParseArtifact,
@@ -842,21 +843,38 @@ fn wrong_dialect_prepared_styles(source: &str) -> Vec<Option<PreparedStyleIr>> {
     vec![Some(PreparedStyleIr::new(ir))]
 }
 
-fn tagged_ce_descriptor() -> SvelteCustomElementDescriptor {
+/// The tagged custom-element descriptor, admitted from the caller-facing
+/// spelling `spelling` through the one admission authority. Every test
+/// below reaches the admitted descriptor this way rather than fabricating
+/// one, so what they compile is exactly what a caller can obtain.
+fn admit_tagged_ce_descriptor(
+    spelling: &str,
+) -> Result<AdmittedSvelteCustomElementDescriptor, CompileRequestError> {
     let mut props = BTreeMap::new();
     props.insert(
         "count".to_string(),
         SvelteCustomElementPropDescriptor {
             attribute: Some("data-count".to_string()),
             reflect: Some(true),
-            prop_type: Some("Number".to_string()),
+            prop_type: Some(spelling.to_string()),
         },
     );
-    SvelteCustomElementDescriptor {
-        tag: Some("x-props".to_string()),
-        shadow: Some(false),
-        props,
-    }
+    let attempt = SvelteOptionAttempt {
+        custom_element_descriptor: Some(SvelteCustomElementDescriptor {
+            tag: Some("x-props".to_string()),
+            shadow: Some(false),
+            props,
+        }),
+        ..Default::default()
+    };
+    Ok(attempt
+        .into_request()?
+        .custom_element_descriptor
+        .expect("the admitted request keeps the descriptor"))
+}
+
+fn tagged_ce_descriptor() -> AdmittedSvelteCustomElementDescriptor {
+    admit_tagged_ce_descriptor("Number").expect("`Number` is an admitted spelling")
 }
 
 fn assert_malformed_custom_element(err: SvelteRuntimeError, option: SvelteOption, value: &str) {
@@ -961,7 +979,7 @@ fn custom_element_descriptor_emits_tagged_create_with_shadow_none_and_prop_field
 #[test]
 fn empty_custom_element_descriptor_emits_untagged_create_without_define() {
     let svelte = SvelteCompileRequest {
-        custom_element_descriptor: Some(SvelteCustomElementDescriptor::default()),
+        custom_element_descriptor: Some(AdmittedSvelteCustomElementDescriptor::default()),
         ..Default::default()
     };
     let output = compile_backend_and_core(SIMPLE, "App.svelte", svelte, &default_inputs())
@@ -980,7 +998,7 @@ fn empty_custom_element_descriptor_emits_untagged_create_without_define() {
 #[test]
 fn invalid_custom_element_tag_refuses_before_emission() {
     let svelte = SvelteCompileRequest {
-        custom_element_descriptor: Some(SvelteCustomElementDescriptor {
+        custom_element_descriptor: Some(AdmittedSvelteCustomElementDescriptor {
             tag: Some("Div".to_string()),
             ..Default::default()
         }),
@@ -1001,35 +1019,95 @@ fn invalid_custom_element_tag_refuses_before_emission() {
     }
 }
 
+/// The prop-type vocabulary is decided at request construction, so an
+/// unrecognised spelling never reaches emission: it cannot be placed on a
+/// [`SvelteCompileRequest`] at all. The refusal identity and the offending
+/// value are the ones the emission-stage check used to report.
 #[test]
-fn invalid_custom_element_prop_type_refuses_before_emission() {
-    let mut props = BTreeMap::new();
-    props.insert(
-        "count".to_string(),
-        SvelteCustomElementPropDescriptor {
-            prop_type: Some("Nope".to_string()),
-            ..Default::default()
-        },
-    );
-    let svelte = SvelteCompileRequest {
-        custom_element_descriptor: Some(SvelteCustomElementDescriptor {
-            tag: Some("x-props".to_string()),
-            props,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let artifact = svelte_artifact("file:///App.svelte", SIMPLE);
-    let request = svelte_request("App.svelte", svelte);
-    let err = compile_via_backend(SIMPLE, &artifact, &request)
-        .expect_err("an invalid custom-element prop type must refuse");
-    assert_malformed_custom_element(err, SvelteOption::CustomElementPropsType, "Nope");
+fn invalid_custom_element_prop_type_refuses_at_request_construction() {
+    match admit_tagged_ce_descriptor("Nope")
+        .expect_err("an unrecognised prop type must refuse at admission")
+    {
+        CompileRequestError::MalformedOptionValue {
+            option: FrameworkOption::Svelte(option),
+            value,
+        } => {
+            assert_eq!(option, SvelteOption::CustomElementPropsType);
+            assert_eq!(value, "Nope");
+        }
+        other => panic!("expected MalformedOptionValue, got {other:?}"),
+    }
+}
+
+/// Every casing outside the ten admitted spellings is refused, including
+/// casings of an otherwise-valid word: admission is a closed set of
+/// spellings, not a case-insensitive comparison.
+#[test]
+fn custom_element_prop_type_casing_outside_the_admitted_set_refuses() {
+    for spelling in [
+        "NUMBER", "nUmBeR", "sTring", "OBJECT", "Arrays", "symbol", "",
+    ] {
+        let err = admit_tagged_ce_descriptor(spelling)
+            .err()
+            .unwrap_or_else(|| panic!("`{spelling}` is not an admitted spelling"));
+        match err {
+            CompileRequestError::MalformedOptionValue {
+                option: FrameworkOption::Svelte(option),
+                value,
+            } => {
+                assert_eq!(option, SvelteOption::CustomElementPropsType);
+                assert_eq!(value, spelling);
+            }
+            other => panic!("expected MalformedOptionValue for `{spelling}`, got {other:?}"),
+        }
+    }
+}
+
+/// Both admitted spellings of every prop type render the SAME Svelte
+/// backend spelling, so the emitted custom-element registration is
+/// byte-identical whichever one the caller wrote.
+///
+/// The cases are derived from the canonical vocabulary, so a sixth prop
+/// type added to that one list is covered here without editing this test.
+#[test]
+fn both_admitted_spellings_of_every_prop_type_render_identical_output() {
+    for prop_type in SvelteCustomElementPropType::ALL {
+        let capitalised = prop_type.as_svelte_name();
+        let expected = format!(
+            "customElements.define('x-props', $.create_custom_element(App, {{ count: {{ \
+             attribute: 'data-count', reflect: true, type: '{capitalised}' }} }}, [], []));"
+        );
+        let mut rendered = Vec::new();
+        for spelling in [capitalised.to_string(), capitalised.to_ascii_lowercase()] {
+            let svelte = SvelteCompileRequest {
+                custom_element_descriptor: Some(
+                    admit_tagged_ce_descriptor(&spelling)
+                        .unwrap_or_else(|e| panic!("`{spelling}` must be admitted, got {e:?}")),
+                ),
+                custom_element: Some(false),
+                ..Default::default()
+            };
+            let output =
+                compile_backend_and_core(CE_PROPS, "App.svelte", svelte, &default_inputs())
+                    .unwrap_or_else(|e| panic!("`{spelling}` must compile, got {e:?}"));
+            let js = client_js(&output).to_string();
+            assert!(
+                js.contains(&expected),
+                "`{spelling}` must render `type: '{capitalised}'`:\n{js}"
+            );
+            rendered.push(js);
+        }
+        assert_eq!(
+            rendered[0], rendered[1],
+            "`{capitalised}` and its lowercase spelling must emit byte-identical output"
+        );
+    }
 }
 
 #[test]
 fn inline_custom_element_tag_wins_over_a_conflicting_request_descriptor() {
     let svelte = SvelteCompileRequest {
-        custom_element_descriptor: Some(SvelteCustomElementDescriptor {
+        custom_element_descriptor: Some(AdmittedSvelteCustomElementDescriptor {
             tag: Some("request-el".to_string()),
             ..Default::default()
         }),

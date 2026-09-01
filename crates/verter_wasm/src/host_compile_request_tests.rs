@@ -528,16 +528,24 @@ fn a_value_outside_a_closed_vocabulary_is_refused_at_decode() {
         );
     }
 
-    let message = schema_refusal(svelte(
+    // The custom-element prop-type vocabulary is decided by the canonical
+    // request constructor, not the wire schema: an unrecognised spelling
+    // reaches the canonical arm, naming the option row and the value.
+    match canonical_refusal(svelte(
         json!([analysis_product()]),
         json!({ "customElementDescriptor": {
             "props": { "label": { "propType": "Symbol" } },
         }}),
-    ));
-    assert!(
-        message.contains("unknown variant") && message.contains("Symbol"),
-        "propType: expected an unknown-variant refusal naming `Symbol`, got: {message}"
-    );
+    )) {
+        CompileRequestError::MalformedOptionValue { option, value } => {
+            assert_eq!(
+                option,
+                FrameworkOption::Svelte(SvelteOption::CustomElementPropsType)
+            );
+            assert_eq!(value, "Symbol");
+        }
+        other => panic!("propType: expected MalformedOptionValue, got {other:?}"),
+    }
 }
 
 #[test]

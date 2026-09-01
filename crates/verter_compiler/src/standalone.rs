@@ -3096,8 +3096,18 @@ fn svelte_malformed_option(option: SvelteOption, value: impl Into<String>) -> Di
     })
 }
 
+/// Renders an ALREADY-ADMITTED canonical descriptor into the parser-side
+/// shape the backend emits from.
+///
+/// The prop-type vocabulary is decided once, at canonical request
+/// construction ([`crate::compile_request::SvelteOptionAttempt::into_request`]),
+/// and the request carries the closed
+/// [`crate::compile_request::svelte::SvelteCustomElementPropType`] rather
+/// than a spelling. There is therefore nothing to check here and no
+/// prop-type refusal this function can emit: it only renders. The tag is a
+/// different option row and is still validated here.
 fn normalize_svelte_custom_element_descriptor(
-    canonical: &crate::compile_request::svelte::SvelteCustomElementDescriptor,
+    canonical: &crate::compile_request::svelte::AdmittedSvelteCustomElementDescriptor,
 ) -> Result<CustomElementDescriptor, DirectCompileError> {
     if let Some(tag) = canonical.tag.as_deref() {
         if validate_custom_element_tag(Some(tag)).is_some() {
@@ -3105,26 +3115,18 @@ fn normalize_svelte_custom_element_descriptor(
         }
     }
 
-    let mut props = Vec::with_capacity(canonical.props.len());
-    for (name, prop) in &canonical.props {
-        if let Some(prop_type) = prop.prop_type.as_deref() {
-            if !matches!(
-                prop_type,
-                "String" | "Number" | "Boolean" | "Array" | "Object"
-            ) {
-                return Err(svelte_malformed_option(
-                    SvelteOption::CustomElementPropsType,
-                    prop_type,
-                ));
-            }
-        }
-        props.push(CustomElementProp {
+    let props = canonical
+        .props
+        .iter()
+        .map(|(name, prop)| CustomElementProp {
             name: name.clone(),
             attribute: prop.attribute.clone(),
             reflect: prop.reflect.unwrap_or(false),
-            type_hint: prop.prop_type.clone(),
-        });
-    }
+            type_hint: prop
+                .prop_type
+                .map(|prop_type| prop_type.as_svelte_name().to_string()),
+        })
+        .collect();
 
     Ok(CustomElementDescriptor {
         tag: canonical.tag.clone(),

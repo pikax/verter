@@ -196,7 +196,7 @@ fn every_svelte_option_slot() -> FfiSvelteCompileOptions {
                 FfiSvelteCustomElementProp {
                     attribute: Some("value".to_string()),
                     reflect: Some(true),
-                    prop_type: Some(FfiSvelteCustomElementPropType::Number),
+                    prop_type: Some("number".to_string()),
                 },
             )]
             .into_iter()
@@ -964,12 +964,29 @@ fn a_spelling_outside_a_closed_vocabulary_is_refused() {
         );
     }
 
-    let message = refusal(svelte_request_json(
+    // The custom-element prop-type vocabulary is NOT a decode-boundary
+    // vocabulary: the wire carries the caller's spelling verbatim and the
+    // canonical request constructor is the one place that decides
+    // membership, so an unrecognised spelling decodes here and is refused
+    // one stage later, naming the option row and the offending value.
+    let request = decode(svelte_request_json(
         json!([analysis_product_json()]),
         json!({ "customElementDescriptor": { "props": { "v": { "propType": "symbol" } } } }),
     ));
-    assert!(
-        message.contains("unknown variant `symbol`"),
-        "expected an unknown-variant refusal naming `symbol`, got: {message}"
-    );
+    match ffi_host_compile_request_to_compile_request(
+        napi_host_compile_request_to_ffi(request),
+        &HostResolvedCompileProfiles {
+            semantic: None,
+            output: None,
+            presentation: None,
+            serialization: None,
+        },
+    )
+    .expect_err("an unrecognised prop type is refused at canonical admission")
+    {
+        CompileRequestError::MalformedOptionValue { value, .. } => {
+            assert_eq!(value, "symbol", "the offending spelling is preserved")
+        }
+        other => panic!("expected MalformedOptionValue naming `symbol`, got {other:?}"),
+    }
 }

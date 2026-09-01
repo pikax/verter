@@ -3,8 +3,8 @@
 //! cross-framework fields, malformed values, and capability refusals.
 
 use verter_compiler::compile_request::svelte::{
-    SvelteCompileRequest, SvelteCssRequest, SvelteFragmentsRequest, SvelteNamespaceRequest,
-    SvelteRunesRequest,
+    SvelteCompileRequest, SvelteCssRequest, SvelteCustomElementPropType, SvelteFragmentsRequest,
+    SvelteNamespaceRequest, SvelteRunesRequest,
 };
 use verter_compiler::compile_request::vue::{
     VueAssetUrlTransform, VueCompileRequest, VueCssModuleLocalsConvention,
@@ -519,7 +519,7 @@ fn every_supported_svelte_option_reaches_the_canonical_request() {
             FfiSvelteCustomElementProp {
                 attribute: Some("value".to_string()),
                 reflect: Some(true),
-                prop_type: Some(FfiSvelteCustomElementPropType::Number),
+                prop_type: Some("number".to_string()),
             },
         )]
         .into_iter()
@@ -555,7 +555,7 @@ fn every_supported_svelte_option_reaches_the_canonical_request() {
     let prop = descriptor.props.get("value").expect("prop descriptor");
     assert_eq!(prop.attribute.as_deref(), Some("value"));
     assert_eq!(prop.reflect, Some(true));
-    assert_eq!(prop.prop_type.as_deref(), Some("Number"));
+    assert_eq!(prop.prop_type, Some(SvelteCustomElementPropType::Number));
     assert_eq!(s.namespace, Some(SvelteNamespaceRequest::MathMl));
     assert_eq!(s.css, Some(SvelteCssRequest::External));
     assert_eq!(s.preserve_comments, Some(true));
@@ -1165,80 +1165,119 @@ fn delimiters_of_the_wrong_arity_are_a_typed_malformed_value_refusal() {
     }
 }
 
-/// The custom-element prop-type domain is closed on the WIRE, so an
-/// unrecognised spelling never reaches the conversion: it is an unknown
-/// enum variant at decode. The boundary keeps no allowlist of its own, so
-/// it cannot drift from the canonical domain the compiler enforces.
+/// The wire owns no membership over the custom-element prop-type
+/// vocabulary, so an unrecognised spelling DECODES — and is refused one
+/// stage later, at canonical request construction, by the same decision
+/// the direct canonical entry point makes. The refusal identity and the
+/// offending value survive the move.
 #[test]
-fn a_custom_element_prop_type_outside_the_official_domain_is_refused_at_decode() {
+fn a_custom_element_prop_type_outside_the_admitted_vocabulary_is_refused_at_admission() {
     let json = SVELTE_WIRE.replace(r#""propType": "number""#, r#""propType": "nonsense""#);
-    let err = decode(&json).expect_err("an unrecognised prop type is not guessed at");
-    assert!(
-        err.to_string().contains("nonsense"),
-        "the refusal names the offending spelling: {err}"
-    );
+    let decoded = decode(&json).expect("the wire carries the caller's spelling verbatim");
+    match ffi_host_compile_request_to_compile_request(decoded, &no_profiles())
+        .expect_err("an unrecognised prop type is refused at canonical admission")
+    {
+        CompileRequestError::MalformedOptionValue { option, value } => {
+            assert_eq!(
+                option,
+                FrameworkOption::Svelte(SvelteOption::CustomElementPropsType),
+                "the refusal names the customElement.props.type row"
+            );
+            assert_eq!(value, "nonsense", "the offending value is preserved");
+        }
+        other => panic!("expected MalformedOptionValue, got {other:?}"),
+    }
 }
 
-/// Every wire prop type, paired with the official spelling the canonical
-/// descriptor must carry. The `reached` array is widened by an exhaustive
-/// match over the wire enum, so a sixth variant fails this test until it
-/// is listed with its canonical spelling.
+/// Every casing outside the ten admitted spellings is refused through the
+/// wire route too — there is no case-normalisation rule the transport
+/// could apply on its own.
 #[test]
-fn every_wire_custom_element_prop_type_maps_to_its_official_spelling() {
-    const CASES: [(FfiSvelteCustomElementPropType, &str); 5] = [
-        (FfiSvelteCustomElementPropType::String, "String"),
-        (FfiSvelteCustomElementPropType::Boolean, "Boolean"),
-        (FfiSvelteCustomElementPropType::Number, "Number"),
-        (FfiSvelteCustomElementPropType::Array, "Array"),
-        (FfiSvelteCustomElementPropType::Object, "Object"),
-    ];
-    let mut reached = [false; 5];
-    for (wire, official) in CASES {
-        reached[match wire {
-            FfiSvelteCustomElementPropType::String => 0,
-            FfiSvelteCustomElementPropType::Boolean => 1,
-            FfiSvelteCustomElementPropType::Number => 2,
-            FfiSvelteCustomElementPropType::Array => 3,
-            FfiSvelteCustomElementPropType::Object => 4,
-        }] = true;
-
-        let mut options = svelte_options();
-        options.custom_element_descriptor = Some(FfiSvelteCustomElementDescriptor {
-            tag: None,
-            shadow: None,
-            props: [(
-                "value".to_string(),
-                FfiSvelteCustomElementProp {
-                    attribute: None,
-                    reflect: None,
-                    prop_type: Some(wire),
-                },
-            )]
-            .into_iter()
-            .collect(),
-        });
-        let request = ffi_host_compile_request_to_compile_request(
-            svelte(
-                vec![FfiRequestedProduct::RuntimeClient(runtime_product())],
-                options,
-            ),
-            &no_profiles(),
-        )
-        .unwrap_or_else(|e| panic!("{wire:?} is an official prop type, got {e:?}"));
-        assert_eq!(
-            request
-                .svelte()
-                .and_then(|s| s.custom_element_descriptor.as_ref())
-                .and_then(|d| d.props.get("value"))
-                .and_then(|p| p.prop_type.as_deref()),
-            Some(official),
-            "{wire:?} must carry the official spelling into the canonical descriptor"
+fn wire_casing_outside_the_admitted_vocabulary_is_refused() {
+    for spelling in ["STRING", "nUmBeR", "Symbol", "sTring", "OBJECT", "arrays"] {
+        let json = SVELTE_WIRE.replace(
+            r#""propType": "number""#,
+            &format!(r#""propType": "{spelling}""#),
         );
+        let decoded = decode(&json).expect("the wire forwards any spelling");
+        let err = ffi_host_compile_request_to_compile_request(decoded, &no_profiles())
+            .err()
+            .unwrap_or_else(|| panic!("`{spelling}` is not an admitted spelling"));
+        match err {
+            CompileRequestError::MalformedOptionValue { option, value } => {
+                assert_eq!(
+                    option,
+                    FrameworkOption::Svelte(SvelteOption::CustomElementPropsType)
+                );
+                assert_eq!(value, spelling);
+            }
+            other => panic!("expected MalformedOptionValue for `{spelling}`, got {other:?}"),
+        }
     }
-    assert!(
-        reached.iter().all(|hit| *hit),
-        "every wire prop type must be covered: {reached:?}"
-    );
+}
+
+/// A capitalised spelling is admitted through a real JSON decode, not only
+/// through a hand-built struct.
+///
+/// The derived test below builds `FfiSvelteCustomElementProp` directly, so it
+/// proves the conversion admits both cases but never exercises the decoder on
+/// one. Every other JSON fixture here spells the prop type lowercase, which is
+/// what the wire accepted before the vocabulary was unified — so without this
+/// case a decoder that rejected the capitalised half would still pass.
+#[test]
+fn a_capitalised_spelling_is_admitted_through_a_json_decode() {
+    let json = SVELTE_WIRE.replace(r#""propType": "number""#, r#""propType": "Number""#);
+    let decoded = decode(&json).expect("the wire forwards a capitalised spelling");
+    ffi_host_compile_request_to_compile_request(decoded, &no_profiles())
+        .expect("`Number` is an admitted spelling at the wire entry");
+}
+
+/// Every admitted spelling reaches its canonical variant through the wire.
+///
+/// The cases are DERIVED from the canonical vocabulary itself
+/// ([`SvelteCustomElementPropType::ALL`]) rather than restated here, so a
+/// sixth prop type added to that one list is covered by this test without
+/// editing it — and a wire route that stopped forwarding, or started
+/// re-deciding, a spelling fails here.
+#[test]
+fn every_admitted_spelling_reaches_its_canonical_variant_through_the_wire() {
+    for expected in SvelteCustomElementPropType::ALL {
+        let capitalised = expected.as_svelte_name();
+        for spelling in [capitalised.to_string(), capitalised.to_ascii_lowercase()] {
+            let mut options = svelte_options();
+            options.custom_element_descriptor = Some(FfiSvelteCustomElementDescriptor {
+                tag: None,
+                shadow: None,
+                props: [(
+                    "value".to_string(),
+                    FfiSvelteCustomElementProp {
+                        attribute: None,
+                        reflect: None,
+                        prop_type: Some(spelling.clone()),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            });
+            let request = ffi_host_compile_request_to_compile_request(
+                svelte(
+                    vec![FfiRequestedProduct::RuntimeClient(runtime_product())],
+                    options,
+                ),
+                &no_profiles(),
+            )
+            .unwrap_or_else(|e| panic!("`{spelling}` is an admitted spelling, got {e:?}"));
+            assert_eq!(
+                request
+                    .svelte()
+                    .and_then(|s| s.custom_element_descriptor.as_ref())
+                    .and_then(|d| d.props.get("value"))
+                    .and_then(|p| p.prop_type),
+                Some(*expected),
+                "`{spelling}` must admit as {expected:?}"
+            );
+        }
+    }
 }
 
 // ── refusals: options, capabilities, product set ─────────────────────────
@@ -1528,8 +1567,8 @@ fn the_baseline_wire_payloads_decode_and_convert() {
             .svelte()
             .and_then(|s| s.custom_element_descriptor.as_ref())
             .and_then(|d| d.props.get("value"))
-            .and_then(|p| p.prop_type.as_deref()),
-        Some("Number")
+            .and_then(|p| p.prop_type),
+        Some(SvelteCustomElementPropType::Number)
     );
 }
 

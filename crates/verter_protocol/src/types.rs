@@ -364,27 +364,18 @@ pub enum FfiSvelteCss {
     External,
 }
 
-/// The closed custom-element prop-type vocabulary. Being an enum, an
-/// unrecognised spelling is an unknown variant refused at DECODE, so the
-/// boundary performs no membership check of its own and cannot drift from
-/// the canonical domain: a sixth prop type is a compile error, not a
-/// second allowlist to keep in sync.
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum FfiSvelteCustomElementPropType {
-    String,
-    Boolean,
-    Number,
-    Array,
-    Object,
-}
-
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FfiSvelteCustomElementProp {
     pub attribute: Option<String>,
     pub reflect: Option<bool>,
-    pub prop_type: Option<FfiSvelteCustomElementPropType>,
+    /// The caller's prop-type spelling, carried verbatim. The wire owns no
+    /// membership over the custom-element prop-type vocabulary: an
+    /// unrecognised spelling decodes fine here and is refused at canonical
+    /// request construction, the one place that decides the vocabulary, so
+    /// this boundary cannot drift from it or refuse at a different stage
+    /// than the direct canonical entry point does.
+    pub prop_type: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
