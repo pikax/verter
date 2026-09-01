@@ -34,3 +34,13 @@ test("compile-contract cache belongs to the required standalone runner job", () 
   assert.doesNotMatch(rustJob, /target\/tests\/trybuild/);
   assert.match(successJob, /^\s*- compiler-contracts\s*$/m);
 });
+
+test("compile-contract runner fetches the locked workspace before trybuild goes offline", () => {
+  const runner = readFileSync(join(REPO_ROOT, "scripts", "compile-contracts.mjs"), "utf8");
+  const fetch = runner.indexOf('["fetch", "--locked"]');
+  const firstOwner = runner.indexOf("for (const owner of OWNERS)");
+
+  assert.notEqual(fetch, -1, "the runner must fetch the locked dependency graph");
+  assert.notEqual(firstOwner, -1, "the runner must execute every compile-contract owner");
+  assert.ok(fetch < firstOwner, "the fetch must finish before trybuild starts any owner");
+});

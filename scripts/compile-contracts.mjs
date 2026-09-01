@@ -14,6 +14,23 @@ const OWNERS = Object.freeze([
   "workspace",
 ]);
 
+process.stderr.write("\nCOMPILE CONTRACTS: fetch locked workspace\n");
+const fetch = spawnSync("cargo", ["fetch", "--locked"], {
+  stdio: "inherit",
+  windowsHide: true,
+});
+if (fetch.error) {
+  process.stderr.write(`COMPILE CONTRACTS: could not start cargo: ${fetch.error.message}\n`);
+  process.exit(1);
+}
+if (fetch.signal) {
+  process.stderr.write(`COMPILE CONTRACTS: cargo was killed by ${fetch.signal}\n`);
+  process.exit(1);
+}
+if (fetch.status !== 0) {
+  process.exit(fetch.status ?? 1);
+}
+
 let failed = false;
 for (const owner of OWNERS) {
   process.stderr.write(`\nCOMPILE CONTRACTS: ${owner}\n`);
