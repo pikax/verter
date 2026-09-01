@@ -98,9 +98,10 @@ impl MetaSession {
     }
 
     /// Test-only observation of the per-item TYPED completeness at the
-    /// payload boundary. The wire envelope deliberately carries no compute
-    /// completeness (it is session bookkeeping, not wire data), so the
-    /// batch-partiality tests arm this probe to observe
+    /// payload boundary. The wire envelope now publishes the same merged
+    /// completeness, but the probe observes it BESIDE
+    /// `synthesis_should_suppress` and independently of a successful
+    /// encode, so the batch-partiality tests arm this probe to observe
     /// `(final_completeness.is_partial(), synthesis_should_suppress)` per
     /// canonical on the ACTUAL fixed-view batch path. A `Mutex`-guarded map
     /// (not a thread-local) because batch jobs run on pool worker threads.
@@ -257,13 +258,16 @@ impl MetaSession {
         );
         // ONE merged admission signal: the resolve-phase completeness merged
         // with the whole-extract scope (macro-DTO read + fallthrough compute).
-        let final_completeness = resolved.completeness.merge(extract_completeness);
+        let final_completeness = crate::meta_resolve::PublishedCompleteness::merged(
+            resolved.completeness,
+            extract_completeness,
+        );
         #[cfg(test)]
         if let Some(map) = PAYLOAD_ITEM_COMPLETENESS_PROBE.lock().unwrap().as_mut() {
             map.insert(
                 canonical.to_string(),
                 (
-                    final_completeness.is_partial(),
+                    final_completeness.get().is_partial(),
                     resolved.synthesis_should_suppress,
                 ),
             );
@@ -300,6 +304,13 @@ impl MetaSession {
                         canonical.as_str(),
                         analysis,
                         Some(seed),
+                        // The SAME merged signal the payload-write fence below
+                        // refuses on. The resolve term alone drops the whole
+                        // extract scope (the pre-choke macro-DTO read and the
+                        // fallthrough compute), which would serialize this
+                        // payload as complete while the fence permanently
+                        // declines to warm it.
+                        final_completeness,
                     )
                 },
             );
@@ -362,7 +373,7 @@ impl MetaSession {
         if output_facts_admissible
             && !output_non_cacheable
             && fixed.payload_promotion_admissible(host)
-            && !final_completeness.is_partial()
+            && !final_completeness.get().is_partial()
         {
             // Stamp from the FLIGHT-CAPTURED generation (the fixed
             // view's captured token), never the live counter: a project

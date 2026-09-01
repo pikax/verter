@@ -934,3 +934,97 @@ function outer(shadowed: string) {
         "the frame inventory keeps every same-name binder, in source order"
     );
 }
+
+/// A nested namespace member's locator carries EVERY namespace descent
+/// step from the contributing statement to the function: `N.M.make`
+/// steps into `N`'s block, then into `M`'s, then to the declaration.
+/// A locator rebuilt from the INNER ordinal alone applies that ordinal to
+/// the OUTER block and resolves `N.make`'s body under the inner
+/// function's key — the served body must be the one the entry was
+/// discovered from, for the function, initializer, and class-member
+/// spellings alike.
+#[test]
+fn nested_namespace_locators_resolve_the_inner_declaration() {
+    let source = r#"
+namespace N {
+  function make() { return 111 }
+  const arrow = () => 111;
+  class K { m() { return 111 } }
+
+  namespace M {
+    function make() { return "x" }
+    const arrow = () => "x";
+    class K { m() { return "x" } }
+  }
+}
+"#;
+    let allocator = oxc_allocator::Allocator::default();
+    let ret = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    assert!(
+        ret.errors.is_empty(),
+        "fixture must parse: {:?}",
+        ret.errors
+    );
+    let owners = TopLevelOwnerTable::ordinary_file(ret.program.body.len());
+    let index = build_function_program_index(&ret.program, source, &owners, Arc::from("/test.ts"));
+    let offset =
+        |needle: &str| u32::try_from(source.find(needle).expect("fixture needle")).unwrap();
+    let resolved_start = |entry: &FunctionProgramEntry| {
+        let resolved = resolve_function_node(&ret.program, &entry.locator)
+            .unwrap_or_else(|| panic!("{} must resolve", entry.key.declaration.name));
+        match resolved.node {
+            FunctionNode::Function(func) => func.span.start,
+            FunctionNode::Arrow(arrow) => arrow.span.start,
+        }
+    };
+
+    let inner = entry_of(&index, "N.M.make");
+    assert_eq!(
+        inner.locator.descent.as_ref(),
+        &[
+            FunctionDescentStep::NamespaceMember {
+                statement_ordinal: 3
+            },
+            FunctionDescentStep::NamespaceMember {
+                statement_ordinal: 0
+            },
+            FunctionDescentStep::FunctionDeclaration,
+        ],
+        "the inner function's locator descends through BOTH namespace blocks"
+    );
+    assert_eq!(
+        resolved_start(inner),
+        offset("function make() { return \"x\" }"),
+        "the inner function's locator resolves the inner body"
+    );
+    assert_eq!(
+        resolved_start(inner),
+        inner.span.start,
+        "the locator resolves the node the entry was discovered from"
+    );
+    let outer = entry_of(&index, "N.make");
+    assert_eq!(
+        resolved_start(outer),
+        offset("function make() { return 111 }"),
+        "the outer function's locator still resolves the outer body"
+    );
+
+    let inner_arrow = entry_of(&index, "N.M.arrow");
+    assert_eq!(resolved_start(inner_arrow), offset("() => \"x\""));
+    assert_eq!(
+        resolved_start(entry_of(&index, "N.arrow")),
+        offset("() => 111")
+    );
+
+    // A method's function node begins at its parameter list, one byte
+    // past the member key.
+    let inner_method = member_entry_of(&index, "N.M.K", 0);
+    assert_eq!(
+        resolved_start(inner_method),
+        offset("m() { return \"x\" }") + 1
+    );
+    assert_eq!(
+        resolved_start(member_entry_of(&index, "N.K", 0)),
+        offset("m() { return 111 }") + 1
+    );
+}

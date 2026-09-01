@@ -493,13 +493,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     };
                     expected.push(value);
                 }
-                expected.dedup();
-                let expected_node = match expected.as_slice() {
-                    [single] => *single,
-                    _ => graph.intern_node(SemanticNodeData::Union(Arc::from(
-                        expected.into_boxed_slice(),
-                    ))),
-                };
+                // Canonical construction: the union-target expected-value
+                // union routes through the one authority (structural dedup,
+                // never raw-ordinal identity).
+                let expected_node = self.intern_normalized_union_or_intersection(&expected, true);
                 match self.relate_member(
                     candidate.value,
                     expected_node,
@@ -937,7 +934,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 ArmKnows::No
             }
-            Some(SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms)) => {
+            Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
+                let arms = composite.composite_members().expect("composite arm");
                 let arms = arms.clone();
                 let mut any_undecidable = false;
                 for inner in arms.iter() {
@@ -1044,13 +1042,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 for inner in arms.iter() {
                     values.push(self.arm_property_or_index_value(*inner, key)?);
                 }
-                values.dedup();
-                Some(match values.as_slice() {
-                    [single] => *single,
-                    _ => graph.intern_node(SemanticNodeData::Union(Arc::from(
-                        values.into_boxed_slice(),
-                    ))),
-                })
+                // Canonical construction: the per-arm property/index value
+                // union routes through the one authority.
+                Some(self.intern_normalized_union_or_intersection(&values, true))
             }
             Some(SemanticNodeData::Intersection(arms)) => {
                 // First declaring part wins (bounded approximation of the

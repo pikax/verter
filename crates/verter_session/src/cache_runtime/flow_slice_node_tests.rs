@@ -80,7 +80,18 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
     }
 }
 
-fn function_key(canonical: &str, name: &str, body_hash_tag: u8) -> FlowSliceFunctionKey {
+/// A content-pinned key with a REAL parse identity derived from `source`
+/// under the TypeScript script language row — the same derivation the
+/// production `FileArtifactKey::for_source_identity` performs.
+fn function_key(
+    canonical: &str,
+    name: &str,
+    body_hash_tag: u8,
+    source: &str,
+) -> FlowSliceFunctionKey {
+    let file_language = FileLanguage::script(verter_language::ScriptSourceType::Ts);
+    let (_, parse_key) = verter_language::default_parse_identity_for(source, &file_language)
+        .expect("a script fixture derives a real parse identity");
     FlowSliceFunctionKey {
         canonical_id: Arc::from(canonical),
         function: FunctionProgramKey {
@@ -95,15 +106,157 @@ fn function_key(canonical: &str, name: &str, body_hash_tag: u8) -> FlowSliceFunc
         flow_body_stable_hash: [body_hash_tag; 16],
         flow_body_exact_hash: [body_hash_tag; 16],
         parse_env_hash: [0u8; 16],
+        parse_key,
+        file_language,
         build_toolchain_fingerprint:
             crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
     }
 }
 
+/// The exact parse identity and the runtime language row are key AXES:
+/// changing either one (and nothing else) yields a distinct function key.
+#[test]
+fn parse_key_and_language_are_function_key_axes() {
+    let baseline = function_key("/axes.ts", "myType", 7, MYTYPE_FIXTURE);
+    // Only the parse key changes: a real parse identity of DIFFERENT
+    // content under the same language row.
+    let other_parse_key = verter_language::default_parse_identity_for(
+        "// unrelated content\n",
+        &FileLanguage::script(verter_language::ScriptSourceType::Ts),
+    )
+    .expect("a script fixture derives a real parse identity")
+    .1;
+    let parse_key_changed = FlowSliceFunctionKey {
+        parse_key: other_parse_key,
+        ..baseline.clone()
+    };
+    assert_ne!(baseline, parse_key_changed);
+    // Only the language row changes.
+    let language_changed = FlowSliceFunctionKey {
+        file_language: FileLanguage::script(verter_language::ScriptSourceType::Tsx),
+        ..baseline.clone()
+    };
+    assert_ne!(baseline, language_changed);
+    assert_ne!(parse_key_changed, language_changed);
+    // Both axes enter the graph-key hash: the two variants address
+    // distinct memoized bundles.
+    let rig = rig(
+        vec![
+            (baseline.clone(), MYTYPE_FIXTURE),
+            (parse_key_changed.clone(), MYTYPE_FIXTURE),
+            (language_changed.clone(), MYTYPE_FIXTURE),
+        ],
+        FlowSliceBudget::default(),
+    );
+    let ctx: &dyn ResolverContext = &rig.host;
+    for key in [&baseline, &parse_key_changed, &language_changed] {
+        lookup(rig.hash_node.as_ref(), hash_key(key.clone(), &["b"]), ctx).expect("build");
+    }
+    assert_eq!(
+        rig.graphs.build_count(),
+        3,
+        "parse-key and language variants never share a memoized graph"
+    );
+}
+
+/// The production skeleton source verifies the exact parse identity and
+/// the runtime language row in addition to the body hashes: a key whose
+/// parse key or language row does not match the serving artifact is a
+/// typed miss, never a skeleton of a different source identity.
+#[test]
+fn skeleton_source_verifies_parse_key_and_language() {
+    use crate::types::UpsertRequest;
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/ws/source-identity.ts";
+    let source =
+        "export function myType() { const a = new Mytype(); const b = 1; return { a, b }; }\n";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let ctx: &dyn ResolverContext = &host;
+    let serve = ctx
+        .ensure_indexed_ready_serve(canonical)
+        .expect("the fixture file is served");
+    let index = serve
+        .indexed
+        .shallow_state
+        .decl_bodies()
+        .function_program_index();
+    let entry = index
+        .matches_named("myType")
+        .next()
+        .map(|matched| matched.entry())
+        .expect("myType is a served function position");
+    let source_key = crate::file_artifact_store::FileArtifactKey::for_source_identity(
+        Arc::from(canonical),
+        serve.indexed.whole_hash,
+        serve.indexed.raw_source.as_ref(),
+        serve.indexed.file_language.clone(),
+        serve.indexed.framework_parse.as_deref(),
+        serve.indexed.parse_env_hash,
+    )
+    .expect("a served script file has an exact source identity");
+    let env = host.host_view_env_hashes_for(canonical);
+    let key = FlowSliceFunctionKey {
+        canonical_id: Arc::from(canonical),
+        function: entry.key.clone(),
+        flow_body_stable_hash: entry.flow_body_stable_hash,
+        flow_body_exact_hash: entry
+            .flow_body_exact_hash
+            .expect("a served function position addresses its own bytes"),
+        parse_env_hash: env.parse_env_hash,
+        parse_key: source_key.parse_key.clone(),
+        file_language: source_key.file_language_id.clone(),
+        build_toolchain_fingerprint:
+            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+    };
+    let stores = ctx.project_type_store().flow_slice();
+
+    // The exact key serves.
+    assert!(
+        stores.skeleton_for(&key, ctx).is_some(),
+        "the key whose source axes match the served artifact is served"
+    );
+
+    // Only the parse key changes: a real parse identity of other content.
+    let foreign_parse_key = FlowSliceFunctionKey {
+        parse_key: verter_language::default_parse_identity_for(
+            "// unrelated content\n",
+            &source_key.file_language_id,
+        )
+        .expect("a script fixture derives a real parse identity")
+        .1,
+        ..key.clone()
+    };
+    assert!(
+        stores.skeleton_for(&foreign_parse_key, ctx).is_none(),
+        "a parse key the serving artifact does not carry is a typed miss"
+    );
+
+    // Only the language row changes.
+    let foreign_language = FlowSliceFunctionKey {
+        file_language: FileLanguage::script(verter_language::ScriptSourceType::Tsx),
+        ..key.clone()
+    };
+    assert!(
+        stores.skeleton_for(&foreign_language, ctx).is_none(),
+        "a language row the serving artifact does not carry is a typed miss"
+    );
+    // Neither refusal populated the memoized store under the foreign keys.
+    assert!(stores.graphs().peek(&foreign_parse_key).is_none());
+    assert!(stores.graphs().peek(&foreign_language).is_none());
+}
+
 #[test]
 fn flow_slice_identity_uses_only_the_shared_build_fingerprint() {
-    let baseline = function_key("/same.ts", "same", 7);
-    let repeated = function_key("/same.ts", "same", 7);
+    let baseline = function_key("/same.ts", "same", 7, MYTYPE_FIXTURE);
+    let repeated = function_key("/same.ts", "same", 7, MYTYPE_FIXTURE);
     let changed = FlowSliceFunctionKey {
         build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(0x9a),
         ..baseline.clone()
@@ -123,8 +276,9 @@ fn flow_slice_identity_uses_only_the_shared_build_fingerprint() {
         FlowSliceBudget::default(),
     );
     let ctx: &dyn ResolverContext = &rig.host;
-    lookup(&rig.hash_node, hash_key(baseline, &["b"]), ctx).expect("baseline build");
-    lookup(&rig.hash_node, hash_key(changed, &["b"]), ctx).expect("fingerprint-changed build");
+    lookup(rig.hash_node.as_ref(), hash_key(baseline, &["b"]), ctx).expect("baseline build");
+    lookup(rig.hash_node.as_ref(), hash_key(changed, &["b"]), ctx)
+        .expect("fingerprint-changed build");
     assert_eq!(
         rig.graphs.build_count(),
         2,
@@ -153,7 +307,7 @@ struct Rig {
     host: VerterHost,
     graphs: Arc<FunctionFlowGraphStore>,
     source: Arc<FixtureSkeletonSource>,
-    hash_node: FlowSliceHashNode,
+    hash_node: Arc<FlowSliceHashNode>,
     lowered_node: FlowSliceLoweredBodyNode,
 }
 
@@ -163,13 +317,16 @@ fn rig(fixtures: Vec<(FlowSliceFunctionKey, &'static str)>, budget: FlowSliceBud
     let source = Arc::new(FixtureSkeletonSource::new(fixtures));
     let skeletons: Arc<dyn FlowBodySkeletonSource> = Arc::clone(&source) as _;
     let budget: FlowSliceBudgetCell = Arc::new(parking_lot::RwLock::new(budget));
-    let hash_node = FlowSliceHashNode::new(
+    let hash_node = Arc::new(FlowSliceHashNode::new(
         Arc::clone(&graphs),
         Arc::clone(&skeletons),
         Arc::clone(&budget),
+    ));
+    let lowered_node = FlowSliceLoweredBodyNode::new(
+        Arc::clone(&graphs),
+        Arc::clone(&skeletons),
+        Arc::clone(&hash_node),
     );
-    let lowered_node =
-        FlowSliceLoweredBodyNode::new(Arc::clone(&graphs), Arc::clone(&skeletons), budget);
     Rig {
         host,
         graphs,
@@ -184,7 +341,7 @@ fn rig(fixtures: Vec<(FlowSliceFunctionKey, &'static str)>, budget: FlowSliceBud
 /// primitive: a non-blocking read that must NEVER drive a build.
 #[test]
 fn peek_reports_none_before_build_and_the_memoized_skeleton_after() {
-    let key = function_key("/peek.ts", "myType", 1);
+    let key = function_key("/peek.ts", "myType", 1, MYTYPE_FIXTURE);
     let rig = rig(
         vec![(key.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
@@ -222,7 +379,7 @@ fn peek_reports_none_before_build_and_the_memoized_skeleton_after() {
 /// real host/indexed artifact.
 #[test]
 fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
-    let key = function_key("/peek-store.ts", "myType", 2);
+    let key = function_key("/peek-store.ts", "myType", 2, MYTYPE_FIXTURE);
     let graphs = Arc::new(FunctionFlowGraphStore::new());
     let source = Arc::new(FixtureSkeletonSource::new(vec![(
         key.clone(),
@@ -231,21 +388,22 @@ fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
     let skeletons: Arc<dyn FlowBodySkeletonSource> = Arc::clone(&source) as _;
     let budget: FlowSliceBudgetCell =
         Arc::new(parking_lot::RwLock::new(FlowSliceBudget::default()));
-    let hash_node = FlowSliceHashNode::new(
+    let hash_node = Arc::new(FlowSliceHashNode::new(
         Arc::clone(&graphs),
         Arc::clone(&skeletons),
         Arc::clone(&budget),
-    );
+    ));
     let lowered_node = FlowSliceLoweredBodyNode::new(
         Arc::clone(&graphs),
         Arc::clone(&skeletons),
-        Arc::clone(&budget),
+        Arc::clone(&hash_node),
     );
     let stores = FlowSliceStores {
         graphs: Arc::clone(&graphs),
         skeletons: Arc::clone(&skeletons),
         hash_node,
         lowered_node,
+        demand_plans: std::sync::atomic::AtomicU64::new(0),
         #[cfg(test)]
         budget,
     };
@@ -271,7 +429,7 @@ fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
 
 fn planned(outcome: FlowSliceHashOutcome) -> FlowSliceHash {
     match outcome {
-        FlowSliceHashOutcome::Planned(slice_hash) => slice_hash,
+        FlowSliceHashOutcome::Planned(planned) => planned.hash(),
         FlowSliceHashOutcome::BudgetExceeded(exceeded) => {
             panic!("expected a planned slice, got budget refusal {exceeded:?}")
         }
@@ -299,8 +457,9 @@ fn planned(outcome: FlowSliceHashOutcome) -> FlowSliceHash {
 #[test]
 pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
     use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash_thread_invocations;
+    use verter_semantic::analysis::flow::peeker::return_path_peeker_plan_thread_invocations;
 
-    let function = function_key("/fixtures/my-type.ts", "myType", 1);
+    let function = function_key("/fixtures/my-type.ts", "myType", 1, MYTYPE_FIXTURE);
     let rig = rig(
         vec![(function.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
@@ -309,7 +468,8 @@ pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
 
     let key = hash_key(function, &["b"]);
     let invocations_before_hash = compute_flow_slice_hash_thread_invocations();
-    let outcome = lookup(&rig.hash_node, key.clone(), ctx).expect("hash lookup");
+    let plans_before_hash = return_path_peeker_plan_thread_invocations();
+    let outcome = lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("hash lookup");
     let planned = planned(outcome);
     assert_eq!(
         compute_flow_slice_hash_thread_invocations(),
@@ -317,19 +477,31 @@ pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
         "the hash node's cold compute performs exactly one slice-hash \
          computation (the counter binding is live, not vacuous)"
     );
+    assert_eq!(
+        return_path_peeker_plan_thread_invocations(),
+        plans_before_hash + 1,
+        "the hash node's cold compute plans the demand slice exactly once"
+    );
 
     let lowered_key = FlowSliceLoweredKey {
         hash_key: key.clone(),
         slice_hash: planned,
     };
     let invocations_before_lowered = compute_flow_slice_hash_thread_invocations();
+    let plans_before_lowered = return_path_peeker_plan_thread_invocations();
     let ir = lookup(&rig.lowered_node, lowered_key, ctx).expect("lowered lookup");
     assert_eq!(
         compute_flow_slice_hash_thread_invocations(),
         invocations_before_lowered,
         "the lowered-body compute performs ZERO slice-hash computations \
-         (hash-then-lower: it re-plans and lowers only — it never \
+         (hash-then-lower: it lowers the retained plan — it never \
          re-derives the slice identity)"
+    );
+    assert_eq!(
+        return_path_peeker_plan_thread_invocations(),
+        plans_before_lowered,
+        "the lowered-body compute performs ZERO re-plans: the hash node's \
+         retained plan IS the plan it lowers"
     );
 
     // The IR covers exactly the demanded member: one `b` entry, one
@@ -367,7 +539,7 @@ pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
 /// (`GuardId::FunctionFlowGraphBuiltOncePerFunctionSkeleton`).
 #[test]
 pub(crate) fn two_demands_one_function_flow_graph_build() {
-    let function = function_key("/fixtures/my-type.ts", "myType", 1);
+    let function = function_key("/fixtures/my-type.ts", "myType", 1, MYTYPE_FIXTURE);
     let rig = rig(
         vec![(function.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
@@ -376,8 +548,8 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
 
     let key_a = hash_key(function.clone(), &["a"]);
     let key_b = hash_key(function, &["b"]);
-    let planned_a = planned(lookup(&rig.hash_node, key_a.clone(), ctx).expect("a"));
-    let planned_b = planned(lookup(&rig.hash_node, key_b.clone(), ctx).expect("b"));
+    let planned_a = planned(lookup(rig.hash_node.as_ref(), key_a.clone(), ctx).expect("a"));
+    let planned_b = planned(lookup(rig.hash_node.as_ref(), key_b.clone(), ctx).expect("b"));
     assert_ne!(
         planned_a, planned_b,
         "distinct demands select distinct slices"
@@ -424,7 +596,7 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
 /// retry recomputes cold and still publishes nothing.
 #[test]
 fn budget_exceeded_admits_nothing_at_any_layer() {
-    let function = function_key("/fixtures/my-type.ts", "myType", 1);
+    let function = function_key("/fixtures/my-type.ts", "myType", 1, MYTYPE_FIXTURE);
     let tiny = FlowSliceBudget {
         max_return_sites: 256,
         max_selected_nodes: 1,
@@ -434,7 +606,7 @@ fn budget_exceeded_admits_nothing_at_any_layer() {
 
     let key = hash_key(function, &["b"]);
     for _ in 0..2 {
-        let outcome = lookup(&rig.hash_node, key.clone(), ctx)
+        let outcome = lookup(rig.hash_node.as_ref(), key.clone(), ctx)
             .expect("a budget refusal is RETURNED, never a silent None");
         let FlowSliceHashOutcome::BudgetExceeded(exceeded) = outcome else {
             panic!("a one-node budget cannot hold this slice");
@@ -460,7 +632,7 @@ fn budget_exceeded_admits_nothing_at_any_layer() {
 /// recompute and no second graph build.
 #[test]
 fn warm_hash_hit_reuses_planned_value_without_recompute() {
-    let function = function_key("/fixtures/my-type.ts", "myType", 1);
+    let function = function_key("/fixtures/my-type.ts", "myType", 1, MYTYPE_FIXTURE);
     let rig = rig(
         vec![(function.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
@@ -468,8 +640,8 @@ fn warm_hash_hit_reuses_planned_value_without_recompute() {
     let ctx: &dyn ResolverContext = &rig.host;
 
     let key = hash_key(function, &["b"]);
-    let first = planned(lookup(&rig.hash_node, key.clone(), ctx).expect("cold"));
-    let second = planned(lookup(&rig.hash_node, key, ctx).expect("warm"));
+    let first = planned(lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("cold"));
+    let second = planned(lookup(rig.hash_node.as_ref(), key, ctx).expect("warm"));
     assert_eq!(
         first, second,
         "the warm hit serves the published slice identity, not a recompute"
@@ -489,8 +661,18 @@ fn warm_hash_hit_reuses_planned_value_without_recompute() {
 /// (`FlowSliceFunctionKey` carries no `parse_stable_hash`).
 #[test]
 pub(crate) fn distinct_content_versions_key_distinct_artifacts() {
-    let v1 = function_key("/fixtures/lit.ts", "lit", 1);
-    let v2 = function_key("/fixtures/lit.ts", "lit", 2);
+    let v1 = function_key(
+        "/fixtures/lit.ts",
+        "lit",
+        1,
+        "function lit() { return { b: 1 } }",
+    );
+    let v2 = function_key(
+        "/fixtures/lit.ts",
+        "lit",
+        2,
+        "function lit() { return { b: 2 } }",
+    );
     let rig = rig(
         vec![
             (v1.clone(), "function lit() { return { b: 1 } }"),
@@ -502,8 +684,8 @@ pub(crate) fn distinct_content_versions_key_distinct_artifacts() {
 
     let key_v1 = hash_key(v1, &["b"]);
     let key_v2 = hash_key(v2, &["b"]);
-    let planned_v1 = planned(lookup(&rig.hash_node, key_v1.clone(), ctx).expect("v1"));
-    let planned_v2 = planned(lookup(&rig.hash_node, key_v2.clone(), ctx).expect("v2"));
+    let planned_v1 = planned(lookup(rig.hash_node.as_ref(), key_v1.clone(), ctx).expect("v1"));
+    let planned_v2 = planned(lookup(rig.hash_node.as_ref(), key_v2.clone(), ctx).expect("v2"));
 
     // The slice SELECTION is identical across the literal edit — the
     // content difference is pinned by `flow_body_stable_hash` in the
@@ -531,7 +713,7 @@ pub(crate) fn distinct_content_versions_key_distinct_artifacts() {
 /// identity is never a warm-validity oracle.
 #[test]
 fn published_entries_carry_empty_fact_rail() {
-    let function = function_key("/fixtures/my-type.ts", "myType", 1);
+    let function = function_key("/fixtures/my-type.ts", "myType", 1, MYTYPE_FIXTURE);
     let rig = rig(
         vec![(function.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
@@ -539,7 +721,7 @@ fn published_entries_carry_empty_fact_rail() {
     let ctx: &dyn ResolverContext = &rig.host;
 
     let key = hash_key(function, &["b"]);
-    let _ = lookup(&rig.hash_node, key.clone(), ctx).expect("hash");
+    let _ = lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("hash");
     let entry = rig.hash_node.published_entry(&key).expect("published");
     assert!(
         entry.signature.facts.is_empty(),
@@ -552,7 +734,7 @@ fn published_entries_carry_empty_fact_rail() {
 /// canonical; the next demand rebuilds once.
 #[test]
 fn graph_store_remove_canonical_evicts_bundles() {
-    let function = function_key("/fixtures/my-type.ts", "myType", 1);
+    let function = function_key("/fixtures/my-type.ts", "myType", 1, MYTYPE_FIXTURE);
     let rig = rig(
         vec![(function.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
@@ -560,13 +742,13 @@ fn graph_store_remove_canonical_evicts_bundles() {
     let ctx: &dyn ResolverContext = &rig.host;
 
     let key = hash_key(function, &["b"]);
-    let _ = lookup(&rig.hash_node, key.clone(), ctx).expect("cold");
+    let _ = lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("cold");
     assert_eq!(rig.graphs.build_count(), 1);
     rig.graphs.remove_canonical("/fixtures/my-type.ts");
     // A different demand misses the hash store and rebuilds the bundle
     // once more.
     let key2 = hash_key(key.function.clone(), &["a"]);
-    let _ = lookup(&rig.hash_node, key2, ctx).expect("recold");
+    let _ = lookup(rig.hash_node.as_ref(), key2, ctx).expect("recold");
     assert_eq!(rig.graphs.build_count(), 2);
 }
 
@@ -610,6 +792,15 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
         .map(|matched| matched.entry())
         .expect("myType is a served function position");
     let env = host.host_view_env_hashes_for(canonical);
+    let source_key = crate::file_artifact_store::FileArtifactKey::for_source_identity(
+        Arc::from(canonical),
+        serve.indexed.whole_hash,
+        serve.indexed.raw_source.as_ref(),
+        serve.indexed.file_language.clone(),
+        serve.indexed.framework_parse.as_deref(),
+        serve.indexed.parse_env_hash,
+    )
+    .expect("a served script file has an exact source identity");
     let key = FlowSliceHashKey {
         function: FlowSliceFunctionKey {
             canonical_id: Arc::from(canonical),
@@ -619,6 +810,8 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
                 .flow_body_exact_hash
                 .expect("a served function position addresses its own bytes"),
             parse_env_hash: env.parse_env_hash,
+            parse_key: source_key.parse_key,
+            file_language: source_key.file_language_id,
             build_toolchain_fingerprint:
                 crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
         },
@@ -936,14 +1129,14 @@ pub(crate) fn flow_slice_ir_detaches_from_oxc_arena() {
     assert_detached::<verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan>();
     assert_detached::<verter_semantic::analysis::flow::hashing::FlowSliceHash>();
 
-    let function = function_key("/fixtures/my-type.ts", "myType", 1);
+    let function = function_key("/fixtures/my-type.ts", "myType", 1, MYTYPE_FIXTURE);
     let rig = rig(
         vec![(function.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
     );
     let ctx: &dyn ResolverContext = &rig.host;
     let key = hash_key(function, &["b"]);
-    let slice_hash = planned(lookup(&rig.hash_node, key.clone(), ctx).expect("hash"));
+    let slice_hash = planned(lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("hash"));
     let ir = lookup(
         &rig.lowered_node,
         FlowSliceLoweredKey {
@@ -1014,6 +1207,8 @@ fn flow_return_of(
         context: dispatch.flow_return_context_for(canonical),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract:
+            crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
     };
     match dispatch.execute(crate::semantic_query::SemanticQueryKey::FlowReturn(
         Box::new(key),

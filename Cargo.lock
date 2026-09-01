@@ -3694,6 +3694,7 @@ dependencies = [
  "oxc_parser",
  "oxc_sourcemap",
  "oxc_span",
+ "oxc_syntax",
  "parking_lot",
  "proc-macro2",
  "prost",

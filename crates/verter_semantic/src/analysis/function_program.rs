@@ -75,7 +75,12 @@ pub enum FunctionDescentStep {
     /// The object-literal method at `member_ordinal` inside an
     /// `export default { … }` object expression.
     ExportDefaultObjectMember { member_ordinal: u32 },
-    /// The statement at `statement_ordinal` inside a namespace block.
+    /// The statement at `statement_ordinal` inside a namespace block —
+    /// ONE step per nesting level, so a nested namespace's member carries
+    /// every enclosing block's step in order (`N.M.make` descends into
+    /// `N`'s block, then `M`'s). A descent that kept only the innermost
+    /// ordinal would resolve it in the OUTER block and serve a different
+    /// declaration's body.
     NamespaceMember { statement_ordinal: u32 },
     /// The statement at `statement_ordinal` inside the enclosing
     /// function's body (a hoisted nested function declaration).
@@ -1605,7 +1610,7 @@ fn discover_statement(
                         discover_namespaced_statement(
                             inner,
                             contributor_index,
-                            statement_ordinal,
+                            &[namespace_member_step(statement_ordinal)],
                             &prefix,
                             overload_tracker,
                             ctx,
@@ -1618,10 +1623,24 @@ fn discover_statement(
     }
 }
 
+/// The descent step selecting statement `statement_ordinal` of a
+/// namespace block.
+fn namespace_member_step(statement_ordinal: usize) -> FunctionDescentStep {
+    FunctionDescentStep::NamespaceMember {
+        statement_ordinal: u32::try_from(statement_ordinal).unwrap_or(u32::MAX),
+    }
+}
+
+/// Discover the served positions of one statement inside a namespace
+/// block. `descent` is the FULL namespace descent from the contributing
+/// top-level statement to `stmt` — one [`FunctionDescentStep::NamespaceMember`]
+/// per enclosing block, the innermost last — and every locator minted
+/// below extends it, so a nested namespace's member resolves through the
+/// same blocks it was discovered in.
 fn discover_namespaced_statement(
     stmt: &Statement<'_>,
     contributor_index: usize,
-    statement_ordinal: usize,
+    descent: &[FunctionDescentStep],
     namespace: &str,
     overload_tracker: &mut OverloadTracker,
     ctx: &mut DiscoveryCtx<'_>,
@@ -1634,7 +1653,7 @@ fn discover_namespaced_statement(
                         discover_namespaced_function(
                             func,
                             contributor_index,
-                            statement_ordinal,
+                            descent,
                             namespace,
                             overload_tracker,
                             ctx,
@@ -1644,19 +1663,13 @@ fn discover_namespaced_statement(
                         discover_variable_declaration_ns(
                             var_decl,
                             contributor_index,
-                            statement_ordinal,
+                            descent,
                             namespace,
                             ctx,
                         );
                     }
                     oxc_ast::ast::Declaration::ClassDeclaration(class) => {
-                        discover_class_ns(
-                            class,
-                            contributor_index,
-                            statement_ordinal,
-                            namespace,
-                            ctx,
-                        );
+                        discover_class_ns(class, contributor_index, descent, namespace, ctx);
                     }
                     _ => {}
                 }
@@ -1666,23 +1679,17 @@ fn discover_namespaced_statement(
             discover_namespaced_function(
                 func,
                 contributor_index,
-                statement_ordinal,
+                descent,
                 namespace,
                 overload_tracker,
                 ctx,
             );
         }
         Statement::VariableDeclaration(var_decl) => {
-            discover_variable_declaration_ns(
-                var_decl,
-                contributor_index,
-                statement_ordinal,
-                namespace,
-                ctx,
-            );
+            discover_variable_declaration_ns(var_decl, contributor_index, descent, namespace, ctx);
         }
         Statement::ClassDeclaration(class) => {
-            discover_class_ns(class, contributor_index, statement_ordinal, namespace, ctx);
+            discover_class_ns(class, contributor_index, descent, namespace, ctx);
         }
         Statement::TSModuleDeclaration(module) => {
             if let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &module.id {
@@ -1691,11 +1698,12 @@ fn discover_namespaced_statement(
                     module.body.as_ref()
                 {
                     for (inner_ordinal, inner) in block.body.iter().enumerate() {
-                        let _ = inner_ordinal;
+                        let mut inner_descent = descent.to_vec();
+                        inner_descent.push(namespace_member_step(inner_ordinal));
                         discover_namespaced_statement(
                             inner,
                             contributor_index,
-                            inner_ordinal,
+                            &inner_descent,
                             &prefix,
                             overload_tracker,
                             ctx,
@@ -1711,7 +1719,7 @@ fn discover_namespaced_statement(
 fn discover_namespaced_function(
     func: &Function<'_>,
     contributor_index: usize,
-    statement_ordinal: usize,
+    descent: &[FunctionDescentStep],
     namespace: &str,
     overload_tracker: &mut OverloadTracker,
     ctx: &mut DiscoveryCtx<'_>,
@@ -1719,17 +1727,14 @@ fn discover_namespaced_function(
     if let Some(id) = func.id.as_ref() {
         let qualified = format!("{namespace}.{}", id.name);
         let overload_ordinal = overload_tracker.next_function_ordinal(&qualified);
+        let mut full_descent = descent.to_vec();
+        full_descent.push(FunctionDescentStep::FunctionDeclaration);
         discover_function_inner(
             func,
             &qualified,
             FunctionPartIdentity::DeclarationBody,
             contributor_index,
-            vec![
-                FunctionDescentStep::NamespaceMember {
-                    statement_ordinal: u32::try_from(statement_ordinal).unwrap_or(u32::MAX),
-                },
-                FunctionDescentStep::FunctionDeclaration,
-            ],
+            full_descent,
             overload_ordinal,
             ctx,
         );
@@ -2106,7 +2111,7 @@ fn discover_top_level_callable(
 fn discover_variable_declaration_ns(
     var_decl: &VariableDeclaration<'_>,
     contributor_index: usize,
-    statement_ordinal: usize,
+    descent: &[FunctionDescentStep],
     namespace: &str,
     ctx: &mut DiscoveryCtx<'_>,
 ) {
@@ -2119,12 +2124,8 @@ fn discover_variable_declaration_ns(
             continue;
         };
         let declarator_ordinal = u32::try_from(declarator_ordinal).unwrap_or(u32::MAX);
-        let base = vec![
-            FunctionDescentStep::NamespaceMember {
-                statement_ordinal: u32::try_from(statement_ordinal).unwrap_or(u32::MAX),
-            },
-            FunctionDescentStep::VariableInitializer { declarator_ordinal },
-        ];
+        let mut base = descent.to_vec();
+        base.push(FunctionDescentStep::VariableInitializer { declarator_ordinal });
         if let Some(anchor) = ctx.anchor(contributor_index) {
             ctx.expressions.push(ProgramExpressionRecord {
                 point: ProgramExpressionIdentity {
@@ -2186,7 +2187,7 @@ fn discover_class(
 fn discover_class_ns(
     class: &Class<'_>,
     contributor_index: usize,
-    statement_ordinal: usize,
+    descent: &[FunctionDescentStep],
     namespace: &str,
     ctx: &mut DiscoveryCtx<'_>,
 ) {
@@ -2194,15 +2195,7 @@ fn discover_class_ns(
         return;
     };
     let name = format!("{namespace}.{}", id.name);
-    discover_class_members(
-        class,
-        &name,
-        contributor_index,
-        vec![FunctionDescentStep::NamespaceMember {
-            statement_ordinal: u32::try_from(statement_ordinal).unwrap_or(u32::MAX),
-        }],
-        ctx,
-    );
+    discover_class_members(class, &name, contributor_index, descent.to_vec(), ctx);
 }
 
 fn discover_class_members(

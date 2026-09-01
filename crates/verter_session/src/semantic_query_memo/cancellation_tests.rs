@@ -629,6 +629,7 @@ fn post_admission_cancellation_keeps_parent_and_prefix_backfill() {
                         satisfied_projection: MaterializedSet::single(
                             super::family::requested_point_for_key(&parent_for_worker),
                         ),
+                        flow_completion: None,
                     }
                 },
             )

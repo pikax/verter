@@ -125,9 +125,11 @@ pub(crate) fn node_contains_reducible_operator(
         SemanticNodeData::Alias(inner) => recur(*inner),
         SemanticNodeData::Array { element, .. } => recur(*element),
         SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
-        SemanticNodeData::Union(members)
-        | SemanticNodeData::Intersection(members)
-        | SemanticNodeData::MergedDecl {
+        composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+            let members = composite.composite_members().expect("composite arm");
+            members.iter().any(|&m| recur(m))
+        }
+        SemanticNodeData::MergedDecl {
             contributors: members,
         } => members.iter().any(|&m| recur(m)),
         SemanticNodeData::Object(surface) => {

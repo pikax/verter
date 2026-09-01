@@ -236,6 +236,89 @@ fn an_open_rest_props_destructure_publishes_no_closed_surface() {
     );
 }
 
+/// An UNRESOLVABLE `$props()` type must not publish zero props as a
+/// SUPPORTED/exact surface. The import cannot resolve, so the surface the
+/// component actually declares is unknown — the outcome names that
+/// (PARTIAL), instead of publishing an empty props set byte-identical to a
+/// component that declares no props.
+#[test]
+fn an_unresolvable_props_type_publishes_partial_not_supported_empty() {
+    let outcome = runes_props_surface(
+        "/UnresolvableProps.svelte",
+        "<script lang=\"ts\">\n  import type { P } from './missing';\n  let { x }: P = $props();\n</script>\n\n<p>{x}</p>\n",
+    );
+    assert!(
+        matches!(outcome, ResolvedOutcome::Partial { .. }),
+        "an unresolvable `$props()` type must resolve PARTIAL, not supported-empty: {outcome:?}"
+    );
+}
+
+/// THE DISCRIMINATION CONTROL: a `$props()` type that RESOLVES to a
+/// genuinely empty object surface still publishes the SUPPORTED empty props
+/// surface — complete and exact. A fix that marks every empty surface
+/// partial passes the test above and fails this one.
+#[test]
+fn a_resolved_empty_props_type_still_publishes_supported_empty() {
+    let outcome = runes_props_surface(
+        "/EmptyProps.svelte",
+        "<script lang=\"ts\">\n  interface Empty {}\n  let { }: Empty = $props();\n</script>\n\n<p>ok</p>\n",
+    );
+    let ResolvedOutcome::Resolved(value) = &outcome else {
+        panic!("a genuinely empty resolved props type stays SUPPORTED-empty: {outcome:?}");
+    };
+    let props = value.props.as_ref().expect("a present props surface");
+    assert!(
+        props.fields.is_empty(),
+        "the empty interface declares no props"
+    );
+}
+
+/// An UNRESOLVABLE callback-prop event source (`$props()` typed by a missing
+/// import) must not publish an EMPTY emits surface as SUPPORTED/exact — the
+/// `on*` callback inventory could not be enumerated at all.
+#[test]
+fn an_unresolvable_callback_event_source_publishes_partial_not_supported_empty() {
+    let (host, view) = host_with_svelte(
+        "/UnresolvableEvents.svelte",
+        "<script lang=\"ts\">\n  import type { P } from './missing';\n  let { onsave }: P = $props();\n</script>\n\n<p>ok</p>\n",
+    );
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let outcome = resolve_svelte_surface(
+        &host,
+        &ctx,
+        "/UnresolvableEvents.svelte",
+        SvelteSurfaceSource::CallbackPropEvents,
+    );
+    assert!(
+        matches!(outcome, ResolvedOutcome::Partial { .. }),
+        "an unresolvable callback-event source must resolve PARTIAL: {outcome:?}"
+    );
+}
+
+/// CONTROL: a resolvable `$props()` type with NO `on*` callback members still
+/// publishes the SUPPORTED, present-but-empty EMITS surface.
+#[test]
+fn a_resolved_props_type_with_no_callbacks_publishes_supported_empty_events() {
+    let (host, view) = host_with_svelte(
+        "/NoCallbackEvents.svelte",
+        "<script lang=\"ts\">\n  let { label }: { label: string } = $props();\n</script>\n\n<p>{label}</p>\n",
+    );
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let outcome = resolve_svelte_surface(
+        &host,
+        &ctx,
+        "/NoCallbackEvents.svelte",
+        SvelteSurfaceSource::CallbackPropEvents,
+    );
+    let ResolvedOutcome::Resolved(value) = &outcome else {
+        panic!("a callback-less props type stays SUPPORTED-empty for events: {outcome:?}");
+    };
+    let emits = value.emits.as_ref().expect("a present emits surface");
+    assert!(emits.fields.is_empty(), "no `on*` members ⇒ no events");
+}
+
 #[test]
 fn unavailable_script_facts_surface_is_partial_not_missing() {
     let canonical = "/UnavailableFacts.svelte";
@@ -553,6 +636,65 @@ fn public_api_resolves_local_dispatcher_interface_through_shared_surface() {
     );
 }
 
+/// An UNRESOLVABLE `createEventDispatcher<E>` event map must not publish an
+/// EMPTY emits surface as SUPPORTED/exact — the event inventory could not
+/// be enumerated. CONTROL: a genuinely empty event map (`{}`) stays the
+/// SUPPORTED empty emits surface.
+#[test]
+fn an_unresolvable_dispatcher_event_map_publishes_partial_not_supported_empty() {
+    let svelte_pkg: &[(&str, &str)] = &[
+        (
+            "/workspace/node_modules/svelte/package.json",
+            r#"{"name":"svelte","version":"5.56.10","types":"index.d.ts"}"#,
+        ),
+        (
+            "/workspace/node_modules/svelte/index.d.ts",
+            "export declare function createEventDispatcher<E>(): (name: keyof E, detail: E[keyof E]) => void;\n",
+        ),
+    ];
+    let drive = |canonical: &str, source: &str| -> ResolvedMacroPayload {
+        let (host, view) = workspace_host_with_svelte(canonical, source, svelte_pkg);
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(canonical.to_string()),
+                input_id: canonical.to_string(),
+                source: Arc::from(source),
+                file_language: verter_language::FileLanguage::svelte(),
+                aliases: Vec::new(),
+            })
+            .expect("load the component");
+        let view = crate::typeinfo::current_store_view_for_query(&host).unwrap_or(view);
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+        resolve_svelte_surface(
+            &host,
+            &ctx,
+            canonical,
+            SvelteSurfaceSource::LegacyDispatcher,
+        )
+    };
+
+    let outcome = drive(
+        "/workspace/MissingMap.svelte",
+        "<script lang=\"ts\">\n  import { createEventDispatcher } from 'svelte';\n  import type { M } from './missing';\n  const dispatch = createEventDispatcher<M>();\n  void dispatch;\n</script>\n<button>go</button>\n",
+    );
+    assert!(
+        matches!(outcome, ResolvedOutcome::Partial { .. }),
+        "an unresolvable dispatcher event map must resolve PARTIAL: {outcome:?}"
+    );
+
+    // CONTROL: a genuinely empty event map stays SUPPORTED-empty.
+    let outcome = drive(
+        "/workspace/EmptyMap.svelte",
+        "<script lang=\"ts\">\n  import { createEventDispatcher } from 'svelte';\n  interface NoEvents {}\n  const dispatch = createEventDispatcher<NoEvents>();\n  void dispatch;\n</script>\n<button>go</button>\n",
+    );
+    let ResolvedOutcome::Resolved(value) = &outcome else {
+        panic!("a genuinely empty event map stays SUPPORTED-empty: {outcome:?}");
+    };
+    let emits = value.emits.as_ref().expect("a present emits surface");
+    assert!(emits.fields.is_empty(), "no declared events");
+}
+
 #[test]
 fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
     // IMPL-VERIFY (discriminating): confirm the ACTUAL realized shape
@@ -593,8 +735,9 @@ fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let row_member = surface
         .members
         .iter()
@@ -608,6 +751,7 @@ fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
             crate::semantic_query::ProjectionMode::Navigate,
         ),
     )
+    .resolved_for_tests()
     .unwrap_or(row_member.value);
     let value = dispatch
         .materialize_output_type_expr_for_test(realized)
@@ -1025,9 +1169,11 @@ fn snippet_union_arms_combine_by_index_into_intersection_binding() {
         &graph,
         vec![ntuple(&graph, vec![(Some("x"), b_ty), (Some("b"), extra)])],
     );
-    let union = graph.intern_node(crate::semantic_query::SemanticNodeData::Union(Arc::from(
-        vec![arm_a, arm_b].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(crate::semantic_query::SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![arm_a, arm_b].into_boxed_slice(),
+        )),
+    ));
 
     let params = CallableNodeView::new(&dispatch, union)
         .validated_snippet_positional_params(nav_context())
@@ -1042,15 +1188,15 @@ fn snippet_union_arms_combine_by_index_into_intersection_binding() {
         Some("a"),
         "the FIRST arm's label names the position"
     );
+    // The combined position intersects both arms; `string & number` is
+    // PROVABLY disjoint at tag level, so the canonical intersection reduces
+    // it to `never` (checker-confirmed: `IsNever<string & number>` is
+    // `true`) — never a first-arm override.
     match node_data_for(dispatch.ctx, params[0].ty).as_deref() {
-        Some(crate::semantic_query::SemanticNodeData::Intersection(arms)) => {
-            assert_eq!(
-                arms.as_ref(),
-                &[a_ty, b_ty][..],
-                "the combined position type intersects both arms' exact nodes, in arm order"
-            );
-        }
-        other => panic!("the combined position type is an `Intersection` node, got {other:?}"),
+        Some(crate::semantic_query::SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Never,
+        )) => {}
+        other => panic!("the disjoint combined position reduces to `never`, got {other:?}"),
     }
 
     let bindings = materialize_snippet_slot_bindings(
@@ -1062,7 +1208,7 @@ fn snippet_union_arms_combine_by_index_into_intersection_binding() {
     assert_eq!(bindings[0].name, "a");
     assert_eq!(
         bindings[0].type_annotation.as_deref(),
-        Some("string & number"),
+        Some("never"),
         "the published binding type is the intersection of both arms, got {:?}",
         bindings[0].type_annotation
     );
@@ -1336,6 +1482,7 @@ fn assert_callback_row_param_resolves_precisely(
         .as_ref()
         .expect("props type payload");
     let props_surface = navigate_param_to_object_surface(ctx, canonical, props_type)
+        .resolved_for_tests()
         .expect("the `$props` object surface resolves");
     let member = props_surface
         .members
@@ -1362,6 +1509,7 @@ fn assert_callback_row_param_resolves_precisely(
             ),
             None,
         )
+        .resolved_for_tests()
         .expect("`Row` resolves to an object surface in its declaring scope");
     assert!(
         resolved
@@ -1853,8 +2001,9 @@ fn svelte_snippet_slots_normalizer_publishes_node_domain_bindings() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let filtered = retain_test_snippet_members(&surface, &["row"]);
     let resolved = macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, component);
 
@@ -1923,8 +2072,9 @@ fn snippet_declref_tuple_params_resolve_to_ordered_dto_bindings() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let row = surface
         .members
         .iter()
@@ -2041,8 +2191,9 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     // the demand-time `ImportRoute` fact rail (asserted end-to-end below),
     // not by a blanket partial.
     let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let completeness = crate::request_context::current_cold_compute_completeness();
     assert!(
         !completeness.is_partial(),
@@ -2177,6 +2328,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         .expect("props type");
     let recovered_surface =
         navigate_param_to_object_surface(&recovered_ctx, component, recovered_props)
+            .resolved_for_tests()
             .expect("props surface after recovery");
     let recovered_filtered = retain_test_snippet_members(&recovered_surface, &["bad", "good"]);
     let recovered_resolved = macro_surface_shell(
@@ -2252,8 +2404,9 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     assert_eq!(
         crate::request_context::current_cold_compute_completeness(),
         crate::semantic_query::ResultCompleteness::Complete,
@@ -2372,9 +2525,11 @@ fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
 
     // Fold None: a present-but-unraisable composite fails the fold — the
     // seam notes the loss before returning `None`, completeness Complete.
-    let union_absent = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![str_id, absent].into_boxed_slice(),
-    )));
+    let union_absent = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![str_id, absent].into_boxed_slice(),
+        )),
+    ));
     let _scope = ColdComputeCompletenessScope::enter();
     let (_raised, facts) = host
         .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {

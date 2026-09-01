@@ -31,7 +31,7 @@ use crate::verter::v1::{
     UnionNode, UnknownNode, UnresolvedBranchReason, UnresolvedRootTargetReason, VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 10;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 11;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -230,6 +230,7 @@ fn component_meta_body_to_proto(
             builder,
             &meta.component_public_contract,
         )),
+        result_completeness: Some(result_completeness_to_proto(&meta.result_completeness)),
     }
 }
 
@@ -2506,6 +2507,68 @@ fn expansion_reason_to_proto(value: &str) -> proto::ExpansionStopReason {
     }
 }
 
+fn result_completeness_to_proto(value: &FfiResultCompleteness) -> proto::ResultCompleteness {
+    match value {
+        FfiResultCompleteness::Complete => proto::ResultCompleteness {
+            kind: proto::ResultCompletenessKind::Complete as i32,
+            partial_reasons: Vec::new(),
+        },
+        FfiResultCompleteness::Partial { reasons } => proto::ResultCompleteness {
+            kind: proto::ResultCompletenessKind::Partial as i32,
+            partial_reasons: reasons
+                .iter()
+                .map(|reason| surface_partial_reason_to_proto(*reason) as i32)
+                .collect(),
+        },
+    }
+}
+
+fn surface_partial_reason_to_proto(value: FfiSurfacePartialReason) -> proto::SurfacePartialReason {
+    match value {
+        FfiSurfacePartialReason::BudgetExceeded => proto::SurfacePartialReason::BudgetExceeded,
+        FfiSurfacePartialReason::Cancelled => proto::SurfacePartialReason::Cancelled,
+        FfiSurfacePartialReason::SupersededGeneration => {
+            proto::SurfacePartialReason::SupersededGeneration
+        }
+        FfiSurfacePartialReason::UnstableState => proto::SurfacePartialReason::UnstableState,
+        FfiSurfacePartialReason::SamePathRecursion => {
+            proto::SurfacePartialReason::SamePathRecursion
+        }
+        FfiSurfacePartialReason::WalkerFatal => proto::SurfacePartialReason::WalkerFatal,
+        FfiSurfacePartialReason::Propagated => proto::SurfacePartialReason::Propagated,
+        FfiSurfacePartialReason::DeferredEvaluationLimit => {
+            proto::SurfacePartialReason::DeferredEvaluationLimit
+        }
+        FfiSurfacePartialReason::StructuralFactDemandLimit => {
+            proto::SurfacePartialReason::StructuralFactDemandLimit
+        }
+        FfiSurfacePartialReason::SemanticQueryFault => {
+            proto::SurfacePartialReason::SemanticQueryFault
+        }
+        FfiSurfacePartialReason::MissingSemanticNodeData => {
+            proto::SurfacePartialReason::MissingSemanticNodeData
+        }
+        FfiSurfacePartialReason::ProjectionWorkLimit => {
+            proto::SurfacePartialReason::ProjectionWorkLimit
+        }
+        FfiSurfacePartialReason::ConnectedQueryDepthLimit => {
+            proto::SurfacePartialReason::ConnectedQueryDepthLimit
+        }
+        FfiSurfacePartialReason::MissingDependency => {
+            proto::SurfacePartialReason::MissingDependency
+        }
+        FfiSurfacePartialReason::FlowReturnUninferred => {
+            proto::SurfacePartialReason::FlowReturnUninferred
+        }
+        FfiSurfacePartialReason::FlowReturnUnverified => {
+            proto::SurfacePartialReason::FlowReturnUnverified
+        }
+        FfiSurfacePartialReason::FlowReturnNoSurface => {
+            proto::SurfacePartialReason::FlowReturnNoSurface
+        }
+    }
+}
+
 fn accepted_surface_completeness_to_proto(
     value: &FfiAcceptedSurfaceCompleteness,
 ) -> proto::AcceptedSurfaceCompleteness {
@@ -2592,6 +2655,7 @@ fn build_test_meta() -> FfiComponentMeta {
     }));
 
     FfiComponentMeta {
+        result_completeness: FfiResultCompleteness::Complete,
         component_public_contract: FfiComponentContractAvailability::Supported {
             contract: FfiComponentPublicContract {
                 adapter_id: "vue".to_string(),
@@ -2825,6 +2889,125 @@ mod tests {
     };
     use verter_type_expr::TypeExpr;
 
+    /// The surface-partial reason taxonomy has three hand-written mirrors —
+    /// the serialized Rust enum, the proto enum, and the TypeScript decoder's
+    /// native names — and only the serde spelling is mechanically derived
+    /// (`rename_all = "camelCase"` off the variant name). Nothing pinned the
+    /// serde spelling to the proto value it encodes as, so a `#[serde(rename)]`
+    /// on one variant, or a proto value renamed on its own, silently ships two
+    /// different public names for one reason.
+    ///
+    /// The closed loop this test completes:
+    ///
+    /// - A new Rust variant is a COMPILE error in
+    ///   `surface_partial_reason_to_proto` (exhaustive match).
+    /// - A new proto value with no Rust variant fails the coverage assertion:
+    ///   the mapped proto numbers must be exactly the contiguous `1..=N` the
+    ///   schema declares.
+    /// - A renamed serde spelling, or a renamed proto value, fails the
+    ///   name-parity assertion — the serde name must be the lowerCamelCase of
+    ///   the proto value's own name with the shared prefix removed.
+    ///
+    /// The expected name is DERIVED from `as_str_name()`, never hand-listed,
+    /// so this is a generated-enum-driven check rather than a second copy of
+    /// the taxonomy.
+    #[test]
+    fn surface_partial_reason_serde_and_proto_names_agree() {
+        use crate::types::FfiSurfacePartialReason as R;
+
+        // The one hand-written list in this test. It is validated for
+        // completeness below against the generated proto enum, so it cannot
+        // silently omit a reason.
+        const ALL: &[R] = &[
+            R::BudgetExceeded,
+            R::Cancelled,
+            R::SupersededGeneration,
+            R::UnstableState,
+            R::SamePathRecursion,
+            R::WalkerFatal,
+            R::Propagated,
+            R::DeferredEvaluationLimit,
+            R::StructuralFactDemandLimit,
+            R::SemanticQueryFault,
+            R::MissingSemanticNodeData,
+            R::ProjectionWorkLimit,
+            R::ConnectedQueryDepthLimit,
+            R::MissingDependency,
+            R::FlowReturnUninferred,
+            R::FlowReturnUnverified,
+            R::FlowReturnNoSurface,
+        ];
+
+        // `SURFACE_PARTIAL_REASON_UNSPECIFIED` -> the shared prefix, derived
+        // rather than spelled, so a schema-wide rename does not need a test
+        // edit to keep discriminating.
+        let prefix = proto::SurfacePartialReason::Unspecified
+            .as_str_name()
+            .strip_suffix("UNSPECIFIED")
+            .expect("the zero value names itself unspecified")
+            .to_string();
+
+        let mut mapped_numbers: Vec<i32> = Vec::with_capacity(ALL.len());
+        for reason in ALL {
+            let proto_value = super::surface_partial_reason_to_proto(*reason);
+            mapped_numbers.push(proto_value as i32);
+
+            let expected = lower_camel_case(
+                proto_value
+                    .as_str_name()
+                    .strip_prefix(prefix.as_str())
+                    .expect("every reason shares the taxonomy prefix"),
+            );
+            // The serialized form is the public JSON name the FFI lane emits.
+            let serialized = serde_json::to_string(reason).expect("a reason serializes");
+            assert_eq!(
+                serialized,
+                format!("\"{expected}\""),
+                "the serde spelling of {reason:?} must be the lowerCamelCase of its proto value \
+                 name ({}) — the FFI JSON lane and the proto lane are two public names for one \
+                 reason and must not diverge",
+                proto_value.as_str_name(),
+            );
+        }
+
+        // COVERAGE: every DECLARED non-zero proto tag must map onto exactly
+        // one Rust variant — keyed on the declared set itself, not on
+        // contiguity, so retiring a reason under the never-reuse rule (a
+        // `reserved` tag leaving a hole) stays a legal change while an
+        // added-but-unmapped tag still fails. The declared set is probed
+        // through the generated `TryFrom` well past the mapped maximum, so
+        // a new tag above the current ceiling cannot hide either.
+        mapped_numbers.sort_unstable();
+        let max_mapped = *mapped_numbers.last().expect("at least one reason maps");
+        let declared_numbers: Vec<i32> = (1..=max_mapped + 256)
+            .filter(|tag| proto::SurfacePartialReason::try_from(*tag).is_ok())
+            .collect();
+        assert_eq!(
+            mapped_numbers, declared_numbers,
+            "every declared `SurfacePartialReason` tag must have exactly one Rust variant mapped \
+             onto it — a declared tag missing from the mapped set is a reason the Rust taxonomy \
+             cannot express, and a mapped tag missing from the declared set is a stale variant"
+        );
+    }
+
+    /// `SCREAMING_SNAKE` -> `lowerCamel`, the transform `serde`'s
+    /// `rename_all = "camelCase"` performs on a `PascalCase` variant name.
+    fn lower_camel_case(screaming_snake: &str) -> String {
+        let mut out = String::with_capacity(screaming_snake.len());
+        let mut upper_next = false;
+        for ch in screaming_snake.chars() {
+            if ch == '_' {
+                upper_next = true;
+            } else if upper_next {
+                out.push(ch);
+                upper_next = false;
+            } else {
+                out.extend(ch.to_lowercase());
+            }
+        }
+        out
+    }
+
     /// A6-06 wire half: an EXACT whole-return wrapper role and a TYPED
     /// degradation both survive the real encoder plus a prost decode, and stay
     /// DISTINGUISHABLE from each other and from an undemanded binding.
@@ -3033,28 +3216,41 @@ mod tests {
         assert!(!proto.events[0].is_inline);
         assert!(proto.events[0].modifier_ids.is_empty());
 
-        // SCHEMA bump landed (typed property keys replaced the
-        // string-only `ObjectMember.name_id` (field 2, now reserved) with the
-        // `property_key` oneof (string / canonical number / unique symbol /
-        // computed node), plus authored method-kind and body facts).
-        // The wire schema version the encoder stamps and the TS decoder gate
-        // (`GRAPH_FORMAT_VERSION`, exact equality) demand in lockstep.
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 10);
+        // SCHEMA bump landed (the payload carries the typed
+        // `result_completeness` position, so a degraded surface can no longer
+        // be read as an exact empty one). The wire schema version the encoder
+        // stamps and the TS decoder gate (`GRAPH_FORMAT_VERSION`, exact
+        // equality) demand in lockstep: a decoder that trusts the
+        // completeness position must never accept a payload old enough to
+        // omit it.
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 11);
     }
 
     #[test]
-    fn schema10_full_body_uses_tag_26_and_roundtrips_supported_contract() {
+    fn full_body_roundtrips_supported_contract_and_completeness_tags() {
         let payload = build_test_payload();
-        assert_eq!(payload.schema_version, 10);
+        assert_eq!(payload.schema_version, 11);
         let encoded = payload.encode_to_vec();
         let decoded =
             ComponentMetaPayload::decode(encoded.as_slice()).expect("full payload decodes");
-        assert_eq!(decoded.schema_version, 10);
+        assert_eq!(decoded.schema_version, 11);
         let body = decoded.body.expect("component-meta body");
         let bytes = body.encode_to_vec();
         assert!(
             bytes.windows(2).any(|window| window == [0xd2, 0x01]),
             "field 26 wire key must be present"
+        );
+        assert!(
+            bytes.windows(2).any(|window| window == [0xda, 0x01]),
+            "field 27 wire key must be present"
+        );
+        assert_eq!(
+            body.result_completeness
+                .as_ref()
+                .expect("completeness position is always encoded")
+                .kind,
+            proto::ResultCompletenessKind::Complete as i32,
+            "a complete payload states so rather than leaving the position              at its unset default"
         );
         let availability = body
             .component_public_contract

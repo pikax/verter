@@ -1,0 +1,51 @@
+error[E0451]: fields `basis`, `subject`, `structural_selection`, `required_domains`, `required_fact_families`, `registry_closure`, `coverage_obligations`, `initial_obligations`, `expanded_obligations`, `work_order`, `tie_break`, `convergence`, `resources` and `obligation_specs` of struct `FlowDemandPlan` are private
+  --> tests/cases/compile-fail/flow_solve_plan_and_spec_no_struct_literal.rs:16:9
+   |
+15 |     let _ = FlowDemandPlan {
+   |             -------------- in this type
+16 |         basis: todo!(),
+   |         ^^^^^ private field
+17 |         subject: todo!(),
+   |         ^^^^^^^ private field
+18 |         structural_selection: todo!(),
+   |         ^^^^^^^^^^^^^^^^^^^^ private field
+19 |         required_domains: todo!(),
+   |         ^^^^^^^^^^^^^^^^ private field
+20 |         required_fact_families: todo!(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^ private field
+21 |         registry_closure: todo!(),
+   |         ^^^^^^^^^^^^^^^^ private field
+22 |         coverage_obligations: todo!(),
+   |         ^^^^^^^^^^^^^^^^^^^^ private field
+23 |         initial_obligations: todo!(),
+   |         ^^^^^^^^^^^^^^^^^^^ private field
+24 |         expanded_obligations: todo!(),
+   |         ^^^^^^^^^^^^^^^^^^^^ private field
+25 |         work_order: todo!(),
+   |         ^^^^^^^^^^ private field
+26 |         tie_break: todo!(),
+   |         ^^^^^^^^^ private field
+27 |         convergence: todo!(),
+   |         ^^^^^^^^^^^ private field
+28 |         resources: todo!(),
+   |         ^^^^^^^^^ private field
+29 |         obligation_specs: todo!(),
+   |         ^^^^^^^^^^^^^^^^ private field
+
+error[E0451]: fields `id`, `requirement`, `origin`, `basis`, `expected_dependencies` and `expected_suboperations` of struct `FlowObligationSpec` are private
+  --> tests/cases/compile-fail/flow_solve_plan_and_spec_no_struct_literal.rs:35:9
+   |
+34 |     let _ = FlowObligationSpec {
+   |             ------------------ in this type
+35 |         id: todo!(),
+   |         ^^ private field
+36 |         requirement: todo!(),
+   |         ^^^^^^^^^^^ private field
+37 |         origin: todo!(),
+   |         ^^^^^^ private field
+38 |         basis: todo!(),
+   |         ^^^^^ private field
+39 |         expected_dependencies: todo!(),
+   |         ^^^^^^^^^^^^^^^^^^^^^ private field
+40 |         expected_suboperations: todo!(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^ private field

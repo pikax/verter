@@ -899,13 +899,27 @@ impl SemanticGraphStore {
     /// Intern a rebuilt shell `data` while preserving the scope of
     /// an `origin` shell.
     ///
-    /// **Invariant.** When a rebuilt shell `X'` is derived from `X`
+    /// **Invariant.** When a rebuilt SHELL `X'` is derived from `X`
     /// with substituted sub-expressions,
     /// `node_scope(X') == node_scope(X)`. Used by
     /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`]
     /// and any other shell-rebuild site that would otherwise call
     /// the scope-less `intern_node` and drop the origin scope under
     /// the compound `(payload, scope)` interning.
+    ///
+    /// **Deliberate exception — derived composites.** A substituted
+    /// union (and a provably order-safe substituted intersection) is a
+    /// DERIVED composite: it routes through the canonical authority,
+    /// NOT through this helper, and a multi-arm canonical result
+    /// interns under [`NodeScopeId::Global`] — a derived composite has
+    /// no lexical scope, contributors retain their own scopes, and the
+    /// file dependence rides the canonical evidence / observed
+    /// self-roots rather than `NodeScopeId`. Overload-ordered
+    /// (possibly-callable) substituted intersections still preserve
+    /// scope through this helper. Copying the origin `File` scope onto
+    /// a canonical composite would re-split canonical identity by
+    /// scope, re-creating the cross-scope duplicate class the algebra
+    /// exists to collapse.
     ///
     /// Falls back to [`NodeScopeId::Global`] when `origin`'s sidecar
     /// is empty (`origin` is out of bounds) — these cases are
@@ -2733,6 +2747,7 @@ impl SemanticGraphStore {
             self_root_canonicals,
             pending_prefix_backfills,
             satisfied_projection,
+            flow_completion,
         } = build_output;
         let result = prepared::enforce_projection_value_shape(prepared.key(), result);
         // §3.4 default: a non-path build (`Instantiate`, `KeyOf`,
@@ -2844,8 +2859,41 @@ impl SemanticGraphStore {
             "§1 invariant violated at memo admission: result_is_partial \
              without cache_suppress would launder a partial into the family memo"
         );
+        // The flow-proof admission gate: a `FlowReturn` build admits ONLY
+        // with the finalizer's proof token, and the token must name THIS
+        // key (the key embeds the result contract, so a contract mismatch
+        // is a key mismatch) and THIS value. The token is the sole
+        // positive completeness authority; this fence may veto (a foreign
+        // or mismatched token refuses), never promote.
+        let flow_proof_ok = match prepared.key() {
+            SemanticQueryKey::FlowReturn(key) => match (&flow_completion, &result) {
+                (Some(proof), QueryResult::Value(SemanticQueryValue::FlowReturn(value))) => {
+                    proof.key() == key.as_ref() && proof.value() == value.as_ref()
+                }
+                _ => false,
+            },
+            _ => true,
+        };
+        // A vetoed value is UNPROVEN, not merely unpublished: force the
+        // partial/suppression rails onto the read so the winner's returned
+        // `CacheRead` — and every joiner's inherited in-flight state —
+        // propagates the taint instead of the build's original clean
+        // flags. Without this a parent memo could warm around the veto.
+        // A build that already admitted partiality keeps its OWN precise
+        // reason classes — the veto adds nothing to say over them.
+        let (cache_suppress, result_is_partial, partial_reasons) =
+            if !flow_proof_ok && !result_is_partial && matches!(result, QueryResult::Value(_)) {
+                (
+                    true,
+                    true,
+                    partial_reasons
+                        .union(crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+                )
+            } else {
+                (cache_suppress, result_is_partial, partial_reasons)
+            };
         let publish_carrier: Option<&crate::fact_signature_helpers::ReadSetSignature> =
-            if cache_suppress || result_is_partial {
+            if cache_suppress || result_is_partial || !flow_proof_ok {
                 None
             } else {
                 Some(&broadcast_carrier)

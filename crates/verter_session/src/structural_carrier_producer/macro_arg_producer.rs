@@ -853,9 +853,22 @@ fn lower_union_or_intersection(
     } else if ids.len() == 1 {
         ids[0]
     } else if is_union {
-        graph.intern_node_with_scope(SemanticNodeData::Union(ids), scope.clone())
+        // Structural shell lowering: authored order and scope — "no set
+        // normalization (dedup / absorption) is performed" is this
+        // shell's contract, so the mint is the authored-shell bypass.
+        graph.intern_node_with_scope(
+            SemanticNodeData::Union(
+                crate::semantic_query::composite::CompositeList::authored_shell(ids),
+            ),
+            scope.clone(),
+        )
     } else {
-        graph.intern_node_with_scope(SemanticNodeData::Intersection(ids), scope.clone())
+        graph.intern_node_with_scope(
+            SemanticNodeData::Intersection(
+                crate::semantic_query::composite::CompositeList::authored_shell(ids),
+            ),
+            scope.clone(),
+        )
     })
 }
 

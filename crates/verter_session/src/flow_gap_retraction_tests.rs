@@ -62,6 +62,8 @@ fn candidate_count(host: &Arc<VerterHost>, canonical: &str, function: &str) -> u
         context: dispatch.flow_return_context_for(canonical),
         demand: ReturnProjectionDemand::whole_return(),
         input: FlowInputContext::empty(),
+        result_contract:
+            crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
     };
     dispatch
         .graph()
@@ -112,7 +114,12 @@ fn run_on(host: &Arc<VerterHost>, canonical: &str, function: &str) -> Trace {
 fn run(id: &str, script: &str, function: &str) -> Trace {
     let host = make_audit_host();
     let canonical = format!("/flow-gap-retraction/{id}.ts");
-    upsert(&host, &canonical, script, FileLanguage::script_ts());
+    upsert(
+        &host,
+        &canonical,
+        &super::module_script(script),
+        FileLanguage::script_ts(),
+    );
     run_on(&host, &canonical, function)
 }
 
@@ -212,16 +219,6 @@ fn assert_complete_warm(trace: &Trace, expected_json: Option<&str>) {
 #[test]
 fn flow_gap_known_gap_results_are_typed_partial_and_never_warm() {
     let fixtures = [
-        (
-            "g1",
-            "function makeProps(x: string) { if (typeof x === \"number\") return \"dead\" as const; return \"live\" as const }",
-            FlowGap::GuardNarrowing,
-        ),
-        (
-            "g2",
-            "type A = { kind: \"a\" }; type B = { kind: \"b\" }\nfunction isA(x: A | B): x is A { return x.kind === \"a\" }\nfunction isB(x: A | B): x is B { return x.kind === \"b\" }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? { dead: true } : \"ok\") : \"no\" } }",
-            FlowGap::GuardNarrowing,
-        ),
         (
             "g3",
             "declare const A_KIND: unique symbol; declare const B_KIND: unique symbol;\ntype A = { kind: typeof A_KIND; a: number }; type B = { kind: typeof B_KIND; b: number };\nfunction isA(x: A | B): x is A { return x.kind === A_KIND }\nfunction isB(x: A | B): x is B { return x.kind === B_KIND }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? x : \"ok\") : \"no\" } }",
@@ -631,7 +628,9 @@ fn flow_gap_partial_propagates_through_consumer_and_scc_gates() {
     upsert(
         &host,
         canonical,
-        "function left(flag: boolean) { if (flag) return right(flag); return (0, () => \"a\" as const) } function right(flag: boolean) { return left(flag) }",
+        &super::module_script(
+            "function left(flag: boolean) { if (flag) return right(flag); return (0, () => \"a\" as const) } function right(flag: boolean) { return left(flag) }",
+        ),
         FileLanguage::script_ts(),
     );
     for function in ["left", "right"] {
@@ -648,6 +647,21 @@ fn flow_gap_false_refusal_controls_remain_complete_and_warm() {
             "impossible_typeof_exact_subject_read",
             "function makeProps(x: string) { if (typeof x === \"number\") return x; return \"live\" as const }",
             Some(r#"{"kind":"literal","literalKind":"string","value":"live"}"#),
+        ),
+        // A guard edge no arm survives stays ALIVE with its subject read
+        // as `never` — a contributor on that edge that reads a DIFFERENT
+        // value keeps its own type (measured: the checker counts the
+        // `"dead"` return of the uninhabited `typeof` edge, and the dead
+        // predicate arm's object value, in the joined return type).
+        (
+            "impossible_typeof_non_subject_read",
+            "function makeProps(x: string) { if (typeof x === \"number\") return \"dead\" as const; return \"live\" as const }",
+            Some(r#"{"kind":"union","types":[{"kind":"literal","literalKind":"string","value":"dead"},{"kind":"literal","literalKind":"string","value":"live"}]}"#),
+        ),
+        (
+            "impossible_predicate_non_subject_value",
+            "type A = { kind: \"a\" }; type B = { kind: \"b\" }\nfunction isA(x: A | B): x is A { return x.kind === \"a\" }\nfunction isB(x: A | B): x is B { return x.kind === \"b\" }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? { dead: true } : \"ok\") : \"no\" } }",
+            None,
         ),
         ("n23", "function makeProps(x: string | number | boolean) { if (!((typeof x === \"string\" && typeof x === \"number\") || typeof x === \"number\" || typeof x === \"boolean\")) throw 0; return { v: x } }", None),
         ("x70", "declare function sink(cb: () => void): void\nfunction makeProps() { let x: \"a\" | \"b\" = \"a\"; do { sink(() => { x = \"b\" }) } while (false); return x }", Some(r#"{"kind":"literal","literalKind":"string","value":"a"}"#)),

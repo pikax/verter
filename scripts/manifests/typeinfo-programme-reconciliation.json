@@ -19,6 +19,11 @@
       ]
     },
     {
+      "block": "U2.CANONICAL_TYPE_ALGEBRA",
+      "status": "pending",
+      "evidence": []
+    },
+    {
       "block": "U2.BINDER_IDENTITY_FACTS",
       "status": "landing_unverified",
       "evidence": [

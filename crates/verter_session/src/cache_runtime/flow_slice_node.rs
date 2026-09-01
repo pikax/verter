@@ -8,15 +8,17 @@
 //! so no caller can reach the lowered store without the slice hash
 //! having been computed first. The hash node's compute runs the demand
 //! planner (graph reachability over the shared per-function
-//! [`FunctionFlowGraph`]) and hashes the selected subgraph; the lowered
-//! node's compute re-plans (cheap, deterministic over the same pinned
-//! content) and lowers ONLY the plan — it never computes a slice hash.
+//! [`FunctionFlowGraph`]) ONCE per cold demand, hashes the selected
+//! subgraph, and RETAINS the plan on the published outcome
+//! ([`PlannedFlowSlice`]); the lowered node's compute lowers exactly that
+//! retained plan — it never re-plans and never computes a slice hash.
 //!
 //! Both nodes are CONTENT-ADDRESSED memory-side [`ArtifactNode`]s: the
 //! key pins the canonical, the five-axis function identity, the
 //! body-sensitive / cosmetic-insensitive `flow_body_stable_hash`, the
-//! EXACT per-function byte hash, the parse-env hash, the parse key,
-//! and the demand identity, so key identity IS validity and no fact rail
+//! EXACT per-function byte hash, the parse-env hash, the exact parse
+//! identity, the runtime-authoritative file language row, and the
+//! demand identity, so key identity IS validity and no fact rail
 //! is required — the entries' signatures stay EMPTY, and no slice
 //! identity ever enters `ReadSetSignature.facts` (slice hashes and
 //! selected IDs are never a warm-validity oracle). Their PERSISTENT
@@ -53,8 +55,9 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
+use verter_language::{FileLanguage, ParseKey};
 use verter_semantic::analysis::flow::flow_graph::{build_function_flow_graph, FunctionFlowGraph};
-use verter_semantic::analysis::flow::flow_ir::FlowSliceIR;
+use verter_semantic::analysis::flow::flow_ir::{FlowSliceIR, ReturnSlicePlan};
 use verter_semantic::analysis::flow::hashing::{compute_flow_slice_hash, FlowSliceHash};
 use verter_semantic::analysis::flow::lower::lower_slice_plan;
 use verter_semantic::analysis::flow::peeker::{
@@ -80,8 +83,11 @@ pub(crate) mod tests;
 /// on: the canonical, the five-axis served-function identity, the
 /// body-sensitive `flow_body_stable_hash` (NOT `parse_stable_hash` —
 /// `return {{ b: 1 }}` vs `return {{ b: 2 }}` key distinct slices), the
-/// EXACT per-function byte hash, the parse-env hash, and the parser
-/// version.
+/// EXACT per-function byte hash, the parse-env hash, the exact parse
+/// identity ([`ParseKey`]) and runtime-authoritative language row
+/// ([`FileLanguage`]) of the serving file — the same source axes
+/// [`crate::file_artifact_store::FileArtifactKey`] carries — and the
+/// parser version.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct FlowSliceFunctionKey {
     /// Canonical id of the file serving the function.
@@ -110,6 +116,14 @@ pub(crate) struct FlowSliceFunctionKey {
     pub flow_body_exact_hash: Hash16,
     /// Parse-domain env hash.
     pub parse_env_hash: Hash16,
+    /// The exact parse identity (source bytes, language, compatibility
+    /// domain/epoch, syntax profile) of the serving file — taken from the
+    /// request-bound artifact identity, never reclassified from the path.
+    pub parse_key: ParseKey,
+    /// The runtime-authoritative [`FileLanguage`] row the serving file was
+    /// parsed under — taken from the request-bound `IndexedReady`, never
+    /// reclassified from the path.
+    pub file_language: FileLanguage,
     /// Parser version.
     pub build_toolchain_fingerprint: crate::build_toolchain_fingerprint::BuildToolchainFingerprint,
 }
@@ -171,7 +185,12 @@ pub(crate) trait FlowBodySkeletonSource: Send + Sync {
 /// `DeclBodyMemo` lease-only retained-snapshot run) and builds the
 /// skeleton for exactly the content version the key pins. A live entry
 /// whose `flow_body_stable_hash` no longer matches the pinned key is a
-/// typed miss — never a skeleton of a different content version.
+/// typed miss — never a skeleton of a different content version. The
+/// source axes are verified too: the serving artifact's exact parse
+/// identity and runtime language row (recomputed from the request-bound
+/// `IndexedReady` through the canonical
+/// [`crate::file_artifact_store::FileArtifactKey`] identity) must equal
+/// the key's, or the serve is a typed miss.
 pub(crate) struct RetainedSnapshotSkeletonSource;
 
 impl FlowBodySkeletonSource for RetainedSnapshotSkeletonSource {
@@ -181,7 +200,8 @@ impl FlowBodySkeletonSource for RetainedSnapshotSkeletonSource {
         resolver: &dyn ResolverContext,
     ) -> Option<FunctionBodySkeleton> {
         let serve = resolver.ensure_indexed_ready_serve(key.canonical_id.as_ref())?;
-        let decl_bodies = serve.indexed.shallow_state.decl_bodies();
+        let indexed = serve.indexed;
+        let decl_bodies = indexed.shallow_state.decl_bodies();
         let index = decl_bodies.function_program_index();
         let entry = index.get(&key.function)?.entry();
         // `None` on the ENTRY is a typed miss (its own bytes could not be
@@ -194,6 +214,23 @@ impl FlowBodySkeletonSource for RetainedSnapshotSkeletonSource {
             // The live content version is not the pinned one: the
             // content-addressed key can only be served by its own
             // version.
+            return None;
+        }
+        // Source-identity verification: the serving artifact's exact parse
+        // identity and runtime language row must be the key's. Recomputed
+        // from the served `IndexedReady` through the ONE canonical artifact
+        // identity — a key naming another parse key or language row is a
+        // typed miss, even at equal body hashes.
+        let source_key = crate::file_artifact_store::FileArtifactKey::for_source_identity(
+            Arc::clone(&key.canonical_id),
+            indexed.whole_hash,
+            indexed.raw_source.as_ref(),
+            indexed.file_language.clone(),
+            indexed.framework_parse.as_deref(),
+            indexed.parse_env_hash,
+        )?;
+        if source_key.parse_key != key.parse_key || source_key.file_language_id != key.file_language
+        {
             return None;
         }
         decl_bodies.function_body_skeleton(entry)
@@ -210,9 +247,45 @@ pub(crate) struct FlowGraphBundle {
     pub graph: Arc<FunctionFlowGraph>,
 }
 
+/// The ONE bundle construction: the graph derives from the skeleton
+/// ALONE. Every path that produces a bundle — the memoizing store and
+/// the hermetic mint below — goes through here.
+fn build_bundle(skeleton: FunctionBodySkeleton) -> FlowGraphBundle {
+    let graph = build_function_flow_graph(&skeleton);
+    FlowGraphBundle {
+        skeleton: Arc::new(skeleton),
+        graph: Arc::new(graph),
+    }
+}
+
+/// A flow graph bundle SEALED to the store key it was built for. Fields
+/// are private and the sole constructors are [`FunctionFlowGraphStore`]
+/// methods, so a consumer can never plan over one graph while naming
+/// another's body identity. This is the completeness-proof layer's graph
+/// handle: the production demand preparation mints it from the memoized
+/// bundle ([`FunctionFlowGraphStore::bound_graph`]); the gated test mint
+/// below serves the hermetic fixtures.
+pub(crate) struct BoundFlowGraph {
+    key: FlowSliceFunctionKey,
+    bundle: Arc<FlowGraphBundle>,
+}
+
+impl BoundFlowGraph {
+    /// The content-pinned function identity the bundle was built for.
+    pub(crate) fn key(&self) -> &FlowSliceFunctionKey {
+        &self.key
+    }
+
+    /// The memoized bundle the key names.
+    pub(crate) fn bundle(&self) -> &FlowGraphBundle {
+        &self.bundle
+    }
+}
+
 /// The once-per-content-version graph store: `FunctionFlowGraph` (and
 /// its skeleton) is built ONCE per `(canonical, function,
-/// flow_body_stable_hash, parse_env_hash, parse_key)` and every
+/// flow_body_stable_hash, flow_body_exact_hash, parse_env_hash,
+/// parse_key, file_language, toolchain)` and every
 /// subsequent demand only re-plans reachability over the memoized
 /// graph. Memory-side; evicted per canonical through
 /// [`Self::remove_canonical`].
@@ -248,15 +321,46 @@ impl FunctionFlowGraphStore {
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 let skeleton = source.build_skeleton(key, resolver)?;
                 self.builds.fetch_add(1, Ordering::Relaxed);
-                let graph = build_function_flow_graph(&skeleton);
-                let bundle = Arc::new(FlowGraphBundle {
-                    skeleton: Arc::new(skeleton),
-                    graph: Arc::new(graph),
-                });
+                let bundle = Arc::new(build_bundle(skeleton));
                 vacant.insert(Arc::clone(&bundle));
                 Some(bundle)
             }
         }
+    }
+
+    /// Seal the ALREADY-MEMOIZED bundle for `key` into a bound graph —
+    /// the production admission seam for the demand planner. `None` when
+    /// no bundle is memoized for the key: the hash node's cold compute is
+    /// the only builder, so a miss here is a torn view between the hash
+    /// node and the graph store, never a reason to build.
+    pub(crate) fn bound_graph(&self, key: &FlowSliceFunctionKey) -> Option<BoundFlowGraph> {
+        self.peek(key).map(|bundle| BoundFlowGraph {
+            key: key.clone(),
+            bundle,
+        })
+    }
+
+    /// Mint the bound graph for `key` over `skeleton` — the hermetic
+    /// fixture path. The bundle is built through the SAME construction
+    /// the memoizing path uses ([`build_bundle`]) and sealed with the
+    /// key, so a demand plan can only ever name the graph it actually
+    /// planned over.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn mint_bound_flow_graph(
+        &self,
+        key: FlowSliceFunctionKey,
+        skeleton: FunctionBodySkeleton,
+    ) -> BoundFlowGraph {
+        let bundle = match self.entries.entry(key.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(occupied) => Arc::clone(occupied.get()),
+            dashmap::mapref::entry::Entry::Vacant(vacant) => {
+                self.builds.fetch_add(1, Ordering::Relaxed);
+                let bundle = Arc::new(build_bundle(skeleton));
+                vacant.insert(Arc::clone(&bundle));
+                bundle
+            }
+        };
+        BoundFlowGraph { key, bundle }
     }
 
     /// Non-blocking peek at the already-memoized bundle for `key` — the
@@ -290,16 +394,53 @@ impl FunctionFlowGraphStore {
 
 // ── Hash node ─────────────────────────────────────────────────────────
 
+/// The one retained structural plan of a cold demand: the minted slice
+/// identity plus the [`ReturnSlicePlan`] it was minted from. Planning runs
+/// exactly once per cold demand (the hash node's compute); the lowered
+/// node and the demand-plan assembly both consume THIS retained plan
+/// instead of re-planning. Fields are private — immutable views only.
+///
+/// `pub` only so the hermetic test surface (`crate::for_tests`) can name
+/// the carrier; the module path stays crate-private, so production code
+/// outside this module tree cannot reach it.
+pub struct PlannedFlowSlice {
+    /// The planner-produced slice identity (the lowered-lookup key input).
+    hash: FlowSliceHash,
+    /// The structural selection the hash covers.
+    selection: ReturnSlicePlan,
+}
+
+impl PlannedFlowSlice {
+    /// Seal a minted slice identity to the selection it was minted from.
+    /// The hash itself is unforgeable (only `compute_flow_slice_hash`
+    /// mints one); pairing an identity with a selection it does not cover
+    /// is exactly the adversarial input the demand planner and the
+    /// lowered node reject.
+    #[must_use]
+    pub fn new(hash: FlowSliceHash, selection: ReturnSlicePlan) -> Self {
+        Self { hash, selection }
+    }
+
+    /// The minted slice identity.
+    pub fn hash(&self) -> FlowSliceHash {
+        self.hash
+    }
+
+    /// The retained structural selection (planned once).
+    pub fn selection(&self) -> &ReturnSlicePlan {
+        &self.selection
+    }
+}
+
 /// The hash node's caller-visible value. Only [`Self::Planned`] is ever
 /// admitted; a budget trip rides `ReturnOnly` and is never published.
-/// The planned arm carries EXACTLY the slice identity — the plan itself
-/// is not retained on the artifact (the lowered node re-plans
-/// deterministically over the same pinned content; hash-then-lower).
+/// The planned arm carries the minted slice identity AND the retained
+/// plan it was minted from, so lowering and demand planning share the one
+/// cold planning run (hash-then-lower without a re-plan).
 #[derive(Clone)]
 pub(crate) enum FlowSliceHashOutcome {
-    /// The planned slice's minted identity — the lowered-lookup key
-    /// input.
-    Planned(FlowSliceHash),
+    /// The planned slice: minted identity plus the retained plan.
+    Planned(Arc<PlannedFlowSlice>),
     /// The typed budget refusal — a genuine partial: returned, never
     /// admitted, and carrying NO slice hash, so the lowered store cannot
     /// even be addressed for it.
@@ -363,6 +504,24 @@ impl FlowSliceHashNode {
     ) -> Option<Arc<CacheEntry<FlowSliceHashOutcome>>> {
         self.entries.get(key).map(|entry| Arc::clone(entry.value()))
     }
+
+    /// The retained plan of the published `Planned` outcome for `key`,
+    /// when its minted hash still matches `slice_hash`. `None` when the
+    /// entry is absent, evicted (`remove_canonical`), or names another
+    /// plan — the lowered node fails closed on each, never re-planning.
+    pub(crate) fn retained_plan(
+        &self,
+        key: &FlowSliceHashKey,
+        slice_hash: FlowSliceHash,
+    ) -> Option<Arc<PlannedFlowSlice>> {
+        let entry = self.entries.get(key)?;
+        match &entry.value {
+            FlowSliceHashOutcome::Planned(planned) if planned.hash == slice_hash => {
+                Some(Arc::clone(planned))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl ArtifactNode for FlowSliceHashNode {
@@ -398,7 +557,9 @@ impl ArtifactNode for FlowSliceHashNode {
             Ok(plan) => {
                 let slice_hash = compute_flow_slice_hash(&plan, &bundle.graph, &bundle.skeleton);
                 CacheAdmission::Cacheable {
-                    value: FlowSliceHashOutcome::Planned(slice_hash),
+                    value: FlowSliceHashOutcome::Planned(Arc::new(PlannedFlowSlice::new(
+                        slice_hash, plan,
+                    ))),
                     // Content-addressed: the key pins every input, so the
                     // fact rail stays EMPTY — no slice identity ever
                     // enters `ReadSetSignature.facts`.
@@ -412,7 +573,8 @@ impl ArtifactNode for FlowSliceHashNode {
 
     /// Content-addressed warm validity: the key pins the canonical, the
     /// function identity, the body content hash, the parse env, the
-    /// parse key, and the demand — key identity IS validity, so a
+    /// exact parse identity and file language row, and the demand — key
+    /// identity IS validity, so a
     /// published entry serves across generations (like every
     /// content-addressed artifact family).
     fn validate(
@@ -429,32 +591,34 @@ impl ArtifactNode for FlowSliceHashNode {
 
 /// The lowered-slice node: lowers ONLY the planned slice into
 /// [`FlowSliceIR`]. Keyed additionally on the opaque slice hash, so it
-/// is unreachable until the hash node produced one; its compute
-/// re-plans over the memoized graph (never a rebuild) and NEVER
-/// computes a slice hash.
+/// is unreachable until the hash node produced one; its compute lowers
+/// the hash node's RETAINED plan (the one cold planning run — it never
+/// re-plans) and NEVER computes a slice hash.
 pub(crate) struct FlowSliceLoweredBodyNode {
     entries: DashMap<FlowSliceLoweredKey, Arc<CacheEntry<Arc<FlowSliceIR>>>>,
     inflight: InflightTable<QueryFlightKey<FlowSliceLoweredKey>>,
     graphs: Arc<FunctionFlowGraphStore>,
     skeletons: Arc<dyn FlowBodySkeletonSource>,
-    budget: FlowSliceBudgetCell,
+    /// The hash node: the retained plan of the one cold planning run lives
+    /// on its published outcome, keyed by this node's `hash_key`.
+    hash_node: Arc<FlowSliceHashNode>,
 }
 
 impl FlowSliceLoweredBodyNode {
     /// A node over the SAME `graphs` store as its hash sibling (one
-    /// graph build serves both) and the same shared budget cell (the
-    /// re-plan is deterministic over the pinned content).
+    /// graph build serves both) and the SAME hash node (its retained
+    /// plans are this node's lowering input).
     pub(crate) fn new(
         graphs: Arc<FunctionFlowGraphStore>,
         skeletons: Arc<dyn FlowBodySkeletonSource>,
-        budget: FlowSliceBudgetCell,
+        hash_node: Arc<FlowSliceHashNode>,
     ) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             graphs,
             skeletons,
-            budget,
+            hash_node,
         }
     }
 
@@ -493,26 +657,25 @@ impl ArtifactNode for FlowSliceLoweredBodyNode {
                 reason: NonAdmissionReason::ComputeFailed,
             };
         };
-        let demand = SliceDemand::for_return_projection(
-            &bundle.skeleton,
-            &key.hash_key.demand.projection_path,
-        );
-        // Re-plan reachability over the memoized graph. The key's
-        // content pins (flow_body_stable_hash + parse env + parser
-        // version) guarantee the same plan the hash covered; no slice
-        // hash is computed here (hash-then-lower).
-        let peeker = ReturnPathPeeker::new(&bundle.graph);
-        let budget = *self.budget.read();
-        match peeker.plan(&demand, &budget) {
-            Err(_) => CacheAdmission::Failed {
-                reason: NonAdmissionReason::BudgetExceeded,
-            },
-            Ok(plan) => CacheAdmission::Cacheable {
-                value: Arc::new(lower_slice_plan(&plan, &bundle.graph, &bundle.skeleton)),
-                signature: ReadSetSignature::empty(),
-                self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
-                validated_at_generation: cx.generation(),
-            },
+        // Lower EXACTLY the plan the hash node planned and retained on its
+        // published outcome: planning runs once per cold demand, so this
+        // node never re-plans and never computes a slice hash. An absent
+        // or evicted retained plan is a torn view — a typed miss, never a
+        // re-plan under a different demand.
+        let Some(planned) = self.hash_node.retained_plan(&key.hash_key, key.slice_hash) else {
+            return CacheAdmission::Failed {
+                reason: NonAdmissionReason::ComputeFailed,
+            };
+        };
+        CacheAdmission::Cacheable {
+            value: Arc::new(lower_slice_plan(
+                planned.selection(),
+                &bundle.graph,
+                &bundle.skeleton,
+            )),
+            signature: ReadSetSignature::empty(),
+            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            validated_at_generation: cx.generation(),
         }
     }
 
@@ -543,8 +706,12 @@ pub(crate) struct FlowSliceStores {
     /// can read the SAME memoized skeleton the plan resolved against
     /// (one lexical authority, one build per content version).
     skeletons: Arc<dyn FlowBodySkeletonSource>,
-    hash_node: FlowSliceHashNode,
+    hash_node: Arc<FlowSliceHashNode>,
     lowered_node: FlowSliceLoweredBodyNode,
+    /// Number of demand plans built against this store (observability;
+    /// the once-per-cold-demand fixture asserts warm replay and non-flow
+    /// dispatch add zero).
+    demand_plans: AtomicU64,
     /// The shared budget cell's store-side handle — held so a
     /// constrained test host can re-arm the budget the nodes read.
     #[cfg(test)]
@@ -559,13 +726,16 @@ impl FlowSliceStores {
         let skeletons: Arc<dyn FlowBodySkeletonSource> = Arc::new(RetainedSnapshotSkeletonSource);
         let budget: FlowSliceBudgetCell =
             Arc::new(parking_lot::RwLock::new(FlowSliceBudget::default()));
-        let hash_node = FlowSliceHashNode::new(
+        let hash_node = Arc::new(FlowSliceHashNode::new(
             Arc::clone(&graphs),
             Arc::clone(&skeletons),
             Arc::clone(&budget),
+        ));
+        let lowered_node = FlowSliceLoweredBodyNode::new(
+            Arc::clone(&graphs),
+            Arc::clone(&skeletons),
+            Arc::clone(&hash_node),
         );
-        let lowered_node =
-            FlowSliceLoweredBodyNode::new(graphs.clone(), Arc::clone(&skeletons), budget.clone());
         #[cfg(not(test))]
         drop(budget);
         Self {
@@ -573,9 +743,22 @@ impl FlowSliceStores {
             skeletons,
             hash_node,
             lowered_node,
+            demand_plans: AtomicU64::new(0),
             #[cfg(test)]
             budget,
         }
+    }
+
+    /// Record one demand plan built against this store.
+    pub(crate) fn note_demand_planned(&self) {
+        self.demand_plans.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Number of demand plans built (observability; the
+    /// once-per-cold-demand fixture asserts on it).
+    #[cfg(test)]
+    pub(crate) fn demand_plan_count(&self) -> u64 {
+        self.demand_plans.load(Ordering::Relaxed)
     }
 
     /// The memoized [`FunctionBodySkeleton`] of one function content
@@ -611,6 +794,14 @@ impl FlowSliceStores {
         self.graphs
             .peek(key)
             .map(|bundle| Arc::clone(&bundle.skeleton))
+    }
+
+    /// The store-minted bound graph of one function content version — the
+    /// completeness-proof layer's graph handle, sealed to the memoized
+    /// bundle. `None` when the bundle is not yet built (the caller's
+    /// hash-node lookup is the builder; a miss is a torn view).
+    pub(crate) fn bound_graph_for(&self, key: &FlowSliceFunctionKey) -> Option<BoundFlowGraph> {
+        self.graphs.bound_graph(key)
     }
 
     /// The slice-identity node (plan + hash; the fourth budget layer's

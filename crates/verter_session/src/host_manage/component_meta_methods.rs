@@ -920,17 +920,34 @@ impl VerterHost {
             audit_timings.solver_ms = started.elapsed().as_secs_f64() * 1000.0;
         }
         let mut parts = parts;
-        // Graph-native slot-binding synthesis accumulators. Both
-        // call sites OR-fold their `SynthesisResult` into
-        // `synthesis_should_suppress` and append diagnostics into
-        // `synthesis_diagnostics`; the merged result is propagated
-        // through `ResolvedComponentMetaState` so the cache-write
-        // gate (`!synthesis_should_suppress`) and audit-payload
-        // emission both observe the same state.
+        // Graph-native slot-binding synthesis accumulators. Both call sites
+        // fold their `SynthesisResult`'s SEALED completeness claim into
+        // `synthesis_suppression` and append diagnostics into
+        // `synthesis_diagnostics`; the merged result is propagated through
+        // `ResolvedComponentMetaState` so the cache-write gate and
+        // audit-payload emission both observe the same state. The sink
+        // consumes the sealed proof-bearing claim, never a forgeable bool:
+        // a synthesis walk that reverted to boolean suppression could not
+        // feed this fold.
         let mut synthesis_diagnostics: Vec<
             verter_semantic::analysis::component_meta::MacroExpansionDiagnostics,
         > = Vec::new();
-        let mut synthesis_should_suppress = false;
+        let mut synthesis_suppression: Option<
+            crate::typeinfo::surface_resolution::NonEmptyReasons,
+        > = None;
+        let fold_synthesis_claim =
+            |suppression: &mut Option<crate::typeinfo::surface_resolution::NonEmptyReasons>,
+             result: slot_binding_graph::SynthesisResult| {
+                match result.completeness() {
+                    slot_binding_graph::SynthesisCompleteness::Complete => {}
+                    slot_binding_graph::SynthesisCompleteness::Suppressed(reasons) => {
+                        *suppression = Some(match *suppression {
+                            Some(acc) => acc.union(reasons),
+                            None => reasons,
+                        });
+                    }
+                }
+            };
         if let Some(evaluated_types) = parts.evaluated_types.as_mut() {
             let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
             let result = slot_binding_graph::resolve_slot_bindings_graph_native(
@@ -941,7 +958,7 @@ impl VerterHost {
                 evaluated_types,
                 &mut synthesis_diagnostics,
             );
-            synthesis_should_suppress |= result.should_suppress;
+            fold_synthesis_claim(&mut synthesis_suppression, result);
         }
         let registry_before = parts.resolved_type_registry.len();
         let append_start = Instant::now();
@@ -1047,7 +1064,7 @@ impl VerterHost {
                         &mut evaluated_types,
                         &mut synthesis_diagnostics,
                     );
-                    synthesis_should_suppress |= result.should_suppress;
+                    fold_synthesis_claim(&mut synthesis_suppression, result);
                     crate::meta_resolve::projectors::reduce_published_field_types(
                         canonical,
                         verter_type_expr::TopLevelOwnerId::instance(0),
@@ -1145,33 +1162,42 @@ impl VerterHost {
         let surface_identities = parts.surface_identities;
         let surface_identities_for_export = surface_identities.clone();
 
-        // P0 #1 — Cache-suppression propagation: OR-fold the
-        // request-scoped sticky flag set by reducer / materializer paths
-        // (raise.rs reduce_one, field_types::materialize_*) into the
-        // final synthesis-suppress signal so the `ComponentMetaResultDb`
-        // admission gate at `cache_component_meta` /
+        // Cache-suppression propagation: fold the request-scoped sticky
+        // flag set by reducer / materializer paths (raise.rs reduce_one,
+        // field_types::materialize_*) into the final typed completeness so
+        // the `ComponentMetaResultDb` admission gate at
+        // `cache_component_meta` /
         // `component_meta_entry::write_published_component_meta` refuses
         // any partial whose reducer / materializer pipeline observed a
-        // budget-exceeded (or other fatal `QueryError`) read. Without
-        // this OR-fold, a `cache_suppress=true` from field-type
-        // materialization would warm the final-result cache and a
-        // subsequent identical request would replay the poisoned partial
-        // instead of re-running the cold compute against the fresh
-        // budget.
-        let synthesis_should_suppress = synthesis_should_suppress
-            || crate::request_context::current_request_result_is_partial();
+        // budget-exceeded (or other fatal `QueryError`) read. Without this
+        // fold, a `cache_suppress=true` from field-type materialization
+        // would warm the final-result cache and a subsequent identical
+        // request would replay the poisoned partial instead of re-running
+        // the cold compute against the fresh budget.
+        //
         // Typed per-result completeness: the partial signal is the union of
-        // the synthesis-suppress producer signal and the request-result
-        // partiality accumulator (a partial macro DTO surface / budget-tripped
-        // materialize read folds in here). `synthesis_should_suppress` is the
-        // bool projection of this — keep the two in lock-step.
-        let completeness = if synthesis_should_suppress {
-            crate::semantic_query::ResultCompleteness::partial(
+        // the synthesis walk's SEALED suppression claim (with its own typed
+        // reasons) and the request-result partiality accumulator (a partial
+        // macro DTO surface / budget-tripped materialize read folds in
+        // here, carrying the downstream `PROPAGATED` class).
+        // `synthesis_should_suppress` is the bool projection of this — keep
+        // the two in lock-step.
+        let request_result_partial = crate::request_context::current_request_result_is_partial();
+        let completeness = match (synthesis_suppression, request_result_partial) {
+            (Some(reasons), true) => crate::semantic_query::ResultCompleteness::partial(
+                reasons
+                    .get()
+                    .union(crate::semantic_query::PartialReasonSet::PROPAGATED),
+            ),
+            (Some(reasons), false) => {
+                crate::semantic_query::ResultCompleteness::partial(reasons.get())
+            }
+            (None, true) => crate::semantic_query::ResultCompleteness::partial(
                 crate::semantic_query::PartialReasonSet::PROPAGATED,
-            )
-        } else {
-            crate::semantic_query::ResultCompleteness::Complete
+            ),
+            (None, false) => crate::semantic_query::ResultCompleteness::Complete,
         };
+        let synthesis_should_suppress = completeness.is_partial();
 
         let state = ResolvedComponentMetaState {
             snapshot,

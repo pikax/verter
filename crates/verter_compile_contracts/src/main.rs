@@ -120,8 +120,20 @@ fn main() {
         fixtures.retain(|path| {
             !matches!(
                 path.file_name().and_then(|name| name.to_str()),
+                // These fixtures import `verter_session::for_tests`, which
+                // exists only under `cfg(test)` or the `test-support`
+                // feature. This runner is a plain binary, so trybuild cannot
+                // infer that feature from a test binary's fingerprint and the
+                // import fails to resolve — the pinned privacy diagnostics
+                // become `E0432 unresolved import` and every one mismatches.
+                // They still run, and still hold their seals, under the
+                // canonical gate where the feature is on.
                 Some("instantiate_key_context_not_extractable.rs")
                     | Some("scanners_replacement_raw_parser_public.rs")
+                    | Some("complete_flow_result_constructor_is_private.rs")
+                    | Some("flow_solve_sealed_witnesses_not_constructible.rs")
+                    | Some("flow_solve_plan_and_spec_no_struct_literal.rs")
+                    | Some("flow_solve_plan_and_spec_are_sealed.rs")
             )
         });
     }

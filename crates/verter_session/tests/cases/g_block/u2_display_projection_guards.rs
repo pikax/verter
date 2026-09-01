@@ -349,8 +349,12 @@ fn precedence_is_structural_not_string_sniffing() {
     let c = declref(&store, "C");
     let d = declref(&store, "D");
 
-    let union_ab = store.intern_node(SemanticNodeData::Union(Arc::from([a, b])));
-    let inter_ab = store.intern_node(SemanticNodeData::Intersection(Arc::from([a, b])));
+    let union_ab = store.intern_node(SemanticNodeData::Union(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([a, b])),
+    ));
+    let inter_ab = store.intern_node(SemanticNodeData::Intersection(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([a, b])),
+    ));
     let cond = store.intern_node(SemanticNodeData::Conditional {
         check: a,
         extends: b,
@@ -405,20 +409,31 @@ fn precedence_is_structural_not_string_sniffing() {
     // P3 DISCRIMINATING: a same-kind nested arm must NOT over-parenthesise. A
     // union arm that is itself a union (`A | (B | C)`) needs no parens — the
     // over-tight `min_prec` impl wraps it as `A | (B | C)`.
-    let union_bc = store.intern_node(SemanticNodeData::Union(Arc::from([b, c])));
-    let union_nested = store.intern_node(SemanticNodeData::Union(Arc::from([a, union_bc])));
+    let union_bc = store.intern_node(SemanticNodeData::Union(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([b, c])),
+    ));
+    let union_nested = store.intern_node(SemanticNodeData::Union(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([a, union_bc])),
+    ));
     assert_eq!(render(&store, union_nested), "A | B | C");
 
-    let inter_bc = store.intern_node(SemanticNodeData::Intersection(Arc::from([b, c])));
-    let inter_nested = store.intern_node(SemanticNodeData::Intersection(Arc::from([a, inter_bc])));
+    let inter_bc = store.intern_node(SemanticNodeData::Intersection(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([b, c])),
+    ));
+    let inter_nested = store.intern_node(SemanticNodeData::Intersection(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([a, inter_bc])),
+    ));
     assert_eq!(render(&store, inter_nested), "A & B & C");
 
     // Cross-kind precedence is preserved: an intersection arm of a union needs
     // no parens (`&` binds tighter), but a union arm of an intersection does.
-    let inter_in_union = store.intern_node(SemanticNodeData::Union(Arc::from([a, inter_bc])));
+    let inter_in_union = store.intern_node(SemanticNodeData::Union(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([a, inter_bc])),
+    ));
     assert_eq!(render(&store, inter_in_union), "A | B & C");
-    let union_in_inter =
-        store.intern_node(SemanticNodeData::Intersection(Arc::from([a, union_bc])));
+    let union_in_inter = store.intern_node(SemanticNodeData::Intersection(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([a, union_bc])),
+    ));
     assert_eq!(render(&store, union_in_inter), "A & (B | C)");
 }
 
@@ -461,7 +476,9 @@ fn conditional_operands_apply_precedence() {
     );
 
     // DISCRIMINATING: a UNION check parenthesises.
-    let union_ab = store.intern_node(SemanticNodeData::Union(Arc::from([a, b])));
+    let union_ab = store.intern_node(SemanticNodeData::Union(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([a, b])),
+    ));
     assert_eq!(
         render(&store, cond(union_ab, x, t, f)),
         "(A | B) extends X ? T : F"
@@ -499,7 +516,9 @@ fn method_member_with_non_function_value_renders_property_style() {
     let store = SemanticGraphStore::new();
     let a = declref(&store, "A");
     let b = declref(&store, "B");
-    let inter = store.intern_node(SemanticNodeData::Intersection(Arc::from([a, b])));
+    let inter = store.intern_node(SemanticNodeData::Intersection(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([a, b])),
+    ));
 
     // is_method = true, but the value is an Intersection (merged overloads).
     let obj = object(&store, vec![member("foo", inter, true)], vec![], vec![]);
@@ -875,7 +894,9 @@ fn declaration_analysis_contributors_apply_intersection_precedence() {
     let a = declref(&store, "A");
     let b = declref(&store, "B");
     let c = declref(&store, "C");
-    let union_ab = store.intern_node(SemanticNodeData::Union(Arc::from([a, b])));
+    let union_ab = store.intern_node(SemanticNodeData::Union(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([a, b])),
+    ));
     let value = SemanticQueryValue::DeclarationAnalysis(DeclarationAnalysisValue {
         contributors: Arc::from([union_ab, c]),
     });
@@ -1022,7 +1043,9 @@ fn merged_decl_display_preserves_heritage_arms_like_graph_reduction() {
     let own = object(&store, vec![member("x", number_id, false)], vec![], vec![]);
     // `interface Foo extends Base { x: number }` lowers to an Intersection of
     // the heritage reference arm and the own-body object arm.
-    let contributor = store.intern_node(SemanticNodeData::Intersection(Arc::from([base_ref, own])));
+    let contributor = store.intern_node(SemanticNodeData::Intersection(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([base_ref, own])),
+    ));
     let contributors = [contributor];
     let merged = store.intern_node(SemanticNodeData::MergedDecl {
         contributors: Arc::from(contributors),
@@ -1044,6 +1067,39 @@ fn merged_decl_display_preserves_heritage_arms_like_graph_reduction() {
         "display heritage surface must match the canonical reduced Intersection"
     );
     assert_eq!(display_render, "Base & { x: number }");
+}
+
+/// The heritage-arm sequence the graph reducer builds is the AUTHORED order
+/// (`extends A, B` → `[a_ref, b_ref, own_object]`), never a re-sorted one — a
+/// `sort_by_key(node id)` reordering is just as much a regression as an
+/// outright reversal, and either is invisible to a reader that only checks
+/// membership. `b_ref` is interned BEFORE `a_ref` so `B`'s node id is LOWER
+/// than `A`'s: an authored-order-preserving reducer renders `"A & B & …"`
+/// regardless, while a canonical-sort-by-id reducer would visibly swap them
+/// to `"B & A & …"` — a mutation a same-shape two-arm fixture (whose single
+/// heritage ref has no sibling to swap past) cannot expose.
+#[test]
+fn merged_decl_reduction_preserves_authored_multi_heritage_arm_order() {
+    let store = SemanticGraphStore::new();
+    let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    // Interned in REVERSE of authored order so `B`'s id < `A`'s id.
+    let b_ref = declref(&store, "B");
+    let a_ref = declref(&store, "A");
+    let own = object(&store, vec![member("x", number_id, false)], vec![], vec![]);
+    // `interface Foo extends A, B { x: number }`.
+    let contributor = store.intern_node(SemanticNodeData::Intersection(
+        verter_session::for_tests::composite_fixture_for_tests(Arc::from([a_ref, b_ref, own])),
+    ));
+    let contributors = [contributor];
+
+    let reduced =
+        verter_session::for_tests::reduce_merged_decl_to_graph_node(&store, &contributors);
+    assert_eq!(
+        render(&store, reduced),
+        "A & B & { x: number }",
+        "heritage arms must render in AUTHORED order (`extends A, B`), not \
+         re-sorted by node id or otherwise reordered"
+    );
 }
 
 #[test]

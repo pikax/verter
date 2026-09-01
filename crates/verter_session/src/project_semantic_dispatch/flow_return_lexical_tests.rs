@@ -1079,6 +1079,10 @@ export function gcFlowInferred() {
   return gcFlowT("a");
 }
 
+export function gcFlowAsConst() {
+  return gcFlowT("a" as const);
+}
+
 export function gcBareExplicit() {
   return gcBareT<string>();
 }
@@ -1846,6 +1850,7 @@ fn r5_key_part(
         context: dispatch.flow_return_context_for(R5_CANONICAL),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
 
@@ -3813,11 +3818,10 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
     }
 
     // Argument inference from a literal instantiates the clause; the
-    // fresh-literal return widens at the caller's return join for the
-    // DECLARED-carrier callee, while the body-derived carrier keeps the
-    // bare literal today (its freshness does not yet reach the join) —
-    // the un-widened literal of the checker's `string`, never the
-    // callee's binder either way.
+    // fresh-literal return widens at the caller's return join for BOTH
+    // carriers — the declared annotation and the body-derived flow
+    // return close on the same fresh-preserved literal — and never
+    // publishes the callee's binder.
     let name = "gcDeclInferred";
     r5_node(
         &host,
@@ -3950,7 +3954,8 @@ fn reachable_type_param_names(
             SemanticNodeData::TypeParam { display_name, .. } => {
                 names.push(display_name.to_string());
             }
-            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let members = composite.composite_members().expect("composite arm");
                 stack.extend(members.iter().copied());
             }
             SemanticNodeData::Array { element, .. } => stack.push(*element),
@@ -4264,8 +4269,27 @@ fn flow_return_callee_clause_shadowing_a_file_scope_declaration_still_instantiat
         |dispatch, node| {
             assert_eq!(
                 node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::String),
+                "a body-derived callee's naked return closes on the fresh-preserved \
+                 literal argument, and the caller's return join widens it — the \
+                 checker's `string`, never the bare literal and never the binder"
+            );
+        },
+    );
+
+    // CONTROL — an `as const` argument deposits as AUTHORED: no fresh
+    // provenance, so the instantiated literal stays pinned exactly as
+    // the checker keeps a constrained `("a" as const)` call at `"a"`.
+    r5_node(
+        &host,
+        "gcFlowAsConst",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
                 NodeShape::Other("Literal(String(\"a\"))".to_string()),
-                "the body-derived carrier keeps the bare literal today (its                  freshness does not yet reach the join) — never the binder"
+                "an `as const` argument is not a fresh literal source: the naked \
+                 return keeps the authored literal, never widens to `string`"
             );
         },
     );
@@ -4524,14 +4548,11 @@ fn flow_return_resolved_overload_never_publishes_a_fabricated_any() {
 fn flow_return_callee_clause_default_applies_only_when_inference_has_no_candidate() {
     let host = make_r5_host();
 
-    // Inference HAS a candidate: the inferred type — the un-widened
-    // literal for a literal argument, the explicit type argument when
-    // authored — never the declared default.
+    // Inference HAS a candidate: the inferred type — the fresh literal's
+    // widened primitive for a bare literal argument, the explicit type
+    // argument when authored — never the declared default.
     for (name, expected) in [
-        (
-            "zzMismACall",
-            NodeShape::Other("Literal(Number(1.0))".to_string()),
-        ),
+        ("zzMismACall", NodeShape::Primitive(PrimitiveKind::Number)),
         ("zzMismBCall", NodeShape::Primitive(PrimitiveKind::Boolean)),
         (
             "zpExplicitCall",
@@ -4539,7 +4560,7 @@ fn flow_return_callee_clause_default_applies_only_when_inference_has_no_candidat
         ),
         (
             "rvDefaultedFlowCall",
-            NodeShape::Other("Literal(Number(1.0))".to_string()),
+            NodeShape::Primitive(PrimitiveKind::Number),
         ),
     ] {
         r5_node(
@@ -5355,8 +5376,10 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
     // the same descent the content half performs.
     for (name, expected) in [
         ("ctObj", "{a:number}|2"),
-        // The recorded dedup divergence: the checker publishes ONE arm.
-        ("ctObjBoth", "{a:number}|{a:number}"),
+        // Two branches returning the same object shape are ONE arm, exactly
+        // as the checker publishes it: the arms differ only in where they
+        // were written, and source coordinates are not constituent identity.
+        ("ctObjBoth", "{a:number}"),
         ("ctObjDisjoint", "{a:number}|{b:number}"),
         ("ctObjLocalRead", "2|{a:number}"),
         ("ctObjMethod", "2|{m():number}"),
@@ -5715,7 +5738,14 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// tnGenericMember    string            fails closed ← composes a call
 /// tnAmbSequence      "TA"              fails closed ← call position
 /// tnAmbNonNull       "TA"              fails closed ← call position
-/// tnAmbAs            "TA"              "TA"         ← exact
+/// tnAmbAs            "TA"              "TA"         ← exact value, but
+///                                                     DEGRADED and never
+///                                                     warm: the folded
+///                                                     call's callee is an
+///                                                     exported overload
+///                                                     pair, unprovable
+///                                                     under the per-callee
+///                                                     certification
 /// tnStrTernary       "a" | "b"         "a" | "b"    ← exact
 /// tnGenericBare      string            string       ← exact: the explicit
 ///                                                     type argument
@@ -5728,8 +5758,8 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// None`; dropping `SequenceExpression` / the type-carrier recursion
 /// from `value_is_unmodeled_call` flips the two call-position rows the
 /// same way; making the gate unconditional on the form (dropping the
-/// `embeds_any` conjunct) flips `tnAmbAs` / `tnStrTernary` to fail
-/// closed, which is the over-refusal direction.
+/// `embeds_any` conjunct) flips `tnAmbAs` / `tnStrTernary` to full
+/// fail-closed marker values, which is the over-refusal direction.
 #[test]
 fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     let host = make_r5_host();
@@ -5753,7 +5783,25 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     // The two rows that ARE exact, and the explicit-type-argument row the
     // executor now resolves exactly: they discriminate the `any` rows
     // above from "everything answers `any`".
-    assert_clean_warm(&host, "tnAmbAs", string_lit("TA"));
+    //
+    // `tnAmbAs`: the carrier pins the value — `"TA"` is the carrier's own
+    // exact answer, and the call's result is genuinely discarded — but the
+    // call under the carrier is certified decided-above ONLY when the
+    // callee provably establishes no narrowing, and `tnAmb` is an
+    // EXPORTED, OVERLOADED ambient pair: its checker-visible signature set
+    // is not enumerable from this file (a merged `declare module` overload
+    // could carry an `asserts` predicate). The value still publishes
+    // exact, DEGRADED through the typed guard-narrowing gap, never warm.
+    let tn_amb_as = r5_eval(&host, "tnAmbAs").expect("tnAmbAs must produce a value");
+    assert_eq!(tn_amb_as.ty, string_lit("TA"), "tnAmbAs return type");
+    assert_eq!(
+        tn_amb_as.degradation,
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        )),
+        "tnAmbAs: the unprovable carrier-folded call degrades to the typed gap"
+    );
+    assert_eq!(tn_amb_as.candidates, 0, "tnAmbAs never warms");
     assert_clean_warm(
         &host,
         "tnStrTernary",
@@ -6053,6 +6101,14 @@ const R1_CANONICAL: &str = "/ws/flow-r1fix.ts";
 const R1_FIXTURE: &str = r#"
 export declare function mayThrow(): void;
 
+// The MODULE-LOCAL twin. An exported binding is augmentable, so its
+// checker-visible signature set is not enumerable from this file and a
+// statement-position call to it is unproven — it could assert about a
+// frame binding, and it could diverge. The unexported ambient
+// declaration IS enumerable: one declaration, an authored `void` return,
+// no export spelling to augment through.
+declare function mayThrowClosed(): void;
+
 // The predicate helpers stay UNEXPORTED: the same-file predicate scan
 // reads direct function declarations, and an `export` wrapper is a
 // different statement shape (the corpus's scripts, spliced into a
@@ -6130,11 +6186,23 @@ export function r1SwitchCaseNarrows(u: A | B) {
 
 export function r1ThrowPointJoin(s: string) {
   let x: string | number = 0;
+  try { x = s; mayThrowClosed(); x = 0 } catch { return x }
+  return x
+}
+
+export function r1ThrowPointJoinOpenCallee(s: string) {
+  let x: string | number = 0;
   try { x = s; mayThrow(); x = 0 } catch { return x }
   return x
 }
 
 export function r1FinallyWrite() {
+  let x: string | number | boolean = true;
+  try { mayThrowClosed() } finally { x = 1 }
+  return x
+}
+
+export function r1FinallyWriteOpenCallee() {
   let x: string | number | boolean = true;
   try { mayThrow() } finally { x = 1 }
   return x
@@ -6184,6 +6252,7 @@ fn r1_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
             context: dispatch.flow_return_context_for(R1_CANONICAL),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::FlowReturn(result),
@@ -6432,7 +6501,10 @@ fn flow_return_destructured_default_strips_aliased_undefined() {
 const R2_CANONICAL: &str = "/ws/flow-r2fix.ts";
 const R2_FIXTURE: &str = r#"
 export declare function mayThrow(): void;
-export declare function maybeOk(): boolean;
+// The control-test callee stays UNEXPORTED: an exported binding is
+// augmentable, so only a module-local single declaration is a provably
+// closed (certifiable) callee of an `if` test.
+declare function maybeOk(): boolean;
 
 export function r2SwitchFallthroughChain(x: "a" | "b" | "c") {
   switch (x) { case "a": case "b": return x; default: return "z" }
@@ -6513,6 +6585,7 @@ fn r2_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
             context: dispatch.flow_return_context_for(R2_CANONICAL),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::FlowReturn(result),

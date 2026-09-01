@@ -23,7 +23,7 @@ fn host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
 }
 
-fn occurrence(name: &str, ordinal: u32) -> SignatureNodeOccurrence {
+pub(super) fn occurrence(name: &str, ordinal: u32) -> SignatureNodeOccurrence {
     SignatureNodeOccurrence {
         function: FlowFunctionReturnIdentity {
             anchor: AuthoredAnchor {
@@ -39,7 +39,7 @@ fn occurrence(name: &str, ordinal: u32) -> SignatureNodeOccurrence {
     }
 }
 
-fn signature(
+pub(super) fn signature(
     dispatch: &ProjectSemanticDispatch<'_>,
     name: &str,
     ordinal: u32,
@@ -217,7 +217,7 @@ fn abandon_provisional_call_members(dispatch: &ProjectSemanticDispatch<'_>) {
     }
 }
 
-fn callable(
+pub(super) fn callable(
     dispatch: &ProjectSemanticDispatch<'_>,
     calls: Vec<SemanticNodeId>,
     constructs: Vec<SemanticNodeId>,
@@ -234,7 +234,7 @@ fn callable(
     ))
 }
 
-fn call_key(
+pub(super) fn call_key(
     dispatch: &ProjectSemanticDispatch<'_>,
     callee: SemanticNodeId,
     kind: CallKind,
@@ -271,7 +271,7 @@ fn call_key(
     }
 }
 
-fn eager(ty: SemanticNodeId) -> CallArgKey {
+pub(super) fn eager(ty: SemanticNodeId) -> CallArgKey {
     CallArgKey::Eager {
         ty,
         spread: false,
@@ -891,6 +891,96 @@ fn body_derived_return_uses_the_final_substitution() {
         result,
         ResolvedCallResult::Selected { return_type, .. } if return_type == number
     ));
+}
+
+/// A body-derived callee return whose INLINE flow evaluation is degraded
+/// (an unapplied write effect) must not launder into a warm-admissible
+/// call: the inline close's unproven verdict folds into the enclosing
+/// build's partial/ReturnOnly rails — the inline path produces no memo
+/// read for the universal read funnel to carry them — so the call returns
+/// its usable value but the `ResolveCall` slot stays cold. The
+/// clean-callee control warms. Mutation: drop the inline fold — the
+/// degraded leg admits.
+#[test]
+fn degraded_inline_flow_return_never_warms_the_enclosing_call() {
+    let host = host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(CANONICAL.to_string()),
+        input_id: CANONICAL.to_string(),
+        source: Arc::from(
+            "export function degraded(x: string | number) { return { a: (x = \"s\"), b: x }; }\nexport function clean() { return 1; }",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let graph = dispatch.graph();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+    let degraded_identity = occurrence("degraded", 0).function;
+    let degraded_sig = signature_with_carrier(
+        &dispatch,
+        "degraded",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, number, false, false)],
+        Vec::new(),
+        number,
+        SignatureReturnCarrier::Function(verter_type_expr::facts::FunctionReturnSource::Flow(
+            degraded_identity,
+        )),
+    );
+    let degraded_callee = callable(&dispatch, vec![degraded_sig], Vec::new());
+    let degraded_key = call_key(
+        &dispatch,
+        degraded_callee,
+        CallKind::Call,
+        None,
+        vec![eager(number)],
+    );
+    let step = dispatch.execute_resolve_call(degraded_key.clone());
+    assert!(
+        matches!(step, super::call_resolve::ResolveCallStep::Complete(_)),
+        "the degraded value stays usable at the call, got {step:?}"
+    );
+    assert_eq!(
+        graph
+            .slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(degraded_key))),
+        0,
+        "an unproven inline flow return must not warm the enclosing call"
+    );
+
+    // Control: a clean body-derived callee's enclosing call warms.
+    let clean_identity = occurrence("clean", 0).function;
+    let clean_sig = signature_with_carrier(
+        &dispatch,
+        "clean",
+        0,
+        SignatureKind::Call,
+        Vec::new(),
+        Vec::new(),
+        number,
+        SignatureReturnCarrier::Function(verter_type_expr::facts::FunctionReturnSource::Flow(
+            clean_identity,
+        )),
+    );
+    let clean_callee = callable(&dispatch, vec![clean_sig], Vec::new());
+    let clean_key = call_key(&dispatch, clean_callee, CallKind::Call, None, Vec::new());
+    let step = dispatch.execute_resolve_call(clean_key.clone());
+    assert!(
+        matches!(step, super::call_resolve::ResolveCallStep::Complete(_)),
+        "the clean call resolves, got {step:?}"
+    );
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(clean_key))),
+        1,
+        "a proven inline flow return keeps the enclosing call warm"
+    );
 }
 
 /// The candidate-open cap is runtime state, not key identity: a trip abandons
@@ -1876,6 +1966,7 @@ fn source_flow_type(
         context: dispatch.flow_return_context_for(canonical),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
     };
     let QueryResult::Value(SemanticQueryOutput {
         value: SemanticQueryValue::FlowReturn(result),
@@ -2962,9 +3053,11 @@ fn union_callee(
     dispatch: &ProjectSemanticDispatch<'_>,
     arms: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
-    dispatch
-        .graph()
-        .intern_node(SemanticNodeData::Union(Arc::from(arms.into_boxed_slice())))
+    dispatch.graph().intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            arms.into_boxed_slice(),
+        )),
+    ))
 }
 
 /// `(() => 1) | (() => 2)` selects a first-applicable signature in EVERY

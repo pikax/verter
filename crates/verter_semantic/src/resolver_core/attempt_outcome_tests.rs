@@ -383,3 +383,29 @@ fn observation_unavailable_discriminates_by_observation_kind() {
     // could not tell these two capability gaps apart.
     assert_ne!(missing_project_generation, missing_env_hashes);
 }
+
+/// The attempt failure stays small enough that `Result<T, AttemptFailure>`
+/// costs the SUCCESS path nothing. Every resolver entry point returns that
+/// `Result`, and a `Result` is sized `max(T, E)` — so a failure variant that
+/// inlines a whole [`InputKey`] (128 bytes on its own) widens every resolved
+/// answer in the hot path to pay for an error that is rarely constructed. The
+/// two single-key terminals therefore hold their key behind a pointer.
+///
+/// Pinned rather than merely asserted-small: the regression this catches is a
+/// future variant inlining a large payload again, which is invisible at the
+/// call sites and shows up only as a wider `Result` everywhere.
+#[test]
+fn attempt_failure_stays_pointer_sized_for_its_single_key_terminals() {
+    let failure = std::mem::size_of::<AttemptFailure>();
+    let key = std::mem::size_of::<InputKey>();
+    assert!(
+        failure < key,
+        "AttemptFailure ({failure} bytes) must not inline an InputKey ({key} bytes) — \
+         every Result<T, AttemptFailure> in the resolver pays this on its success path"
+    );
+    assert!(
+        failure <= 48,
+        "AttemptFailure grew to {failure} bytes; the widest payload should be a \
+         Vec (24 bytes) plus discriminant and one scalar"
+    );
+}

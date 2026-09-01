@@ -470,6 +470,81 @@ fn real_svelte_snippet_is_classified_snippet_typed() {
     }
 }
 
+/// A PARTIAL props-surface recovery keeps the callable-role
+/// classification at the component-meta boundary: when nested reads are
+/// partial (every build tainted), the recovered `Snippet` prop still
+/// publishes the SAME snippet role the complete run classifies — the
+/// partial recovery degrades COMPLETENESS (warm admission is refused),
+/// never the faithfulness of the members it still publishes. A recovered
+/// snippet prop regressing to the analysis-unavailable default would
+/// silently drop its slot identity on exactly the degraded results.
+#[test]
+fn partial_props_recovery_keeps_snippet_callable_role() {
+    let source = "<script lang=\"ts\">\n  import type { Snippet } from 'svelte';\n  let { row }: { row: Snippet } = $props();\n  void row;\n</script>\n";
+    let host = workspace_host_with_svelte(
+        "/workspace/PartialRole.svelte",
+        source,
+        &[
+            (
+                "/workspace/node_modules/svelte/package.json",
+                r#"{"name":"svelte","version":"5.56.10","types":"index.d.ts"}"#,
+            ),
+            (
+                "/workspace/node_modules/svelte/index.d.ts",
+                "export type Snippet<Params extends unknown[] = []> = \
+                 (...args: Params) => { rendered: true };\n",
+            ),
+        ],
+    );
+    upsert_svelte(&host, "/workspace/PartialRole.svelte", source);
+
+    // Control: the COMPLETE resolution classifies the snippet role.
+    let (meta, _, _) = host
+        .get_component_meta_output("/workspace/PartialRole.svelte")
+        .expect("component meta query")
+        .expect("component meta output")
+        .into_parts();
+    let row = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "row")
+        .expect("row prop");
+    let complete_role = row.callable_role.clone();
+    assert!(
+        matches!(
+            complete_role,
+            verter_type_expr::PropCallableRole::SvelteSnippet { .. }
+        ),
+        "control: the complete resolution classifies the snippet, got {complete_role:?}"
+    );
+
+    // Forced-partial nested reads demote the props-surface resolution to an
+    // incomplete claim with a usable subset; the recovered subset must keep
+    // the role mapping.
+    host.test_force
+        .force_result_partial_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let recovered = host
+        .get_component_meta_output("/workspace/PartialRole.svelte")
+        .expect("component meta query under forced partial")
+        .expect("component meta output under forced partial")
+        .into_parts()
+        .0;
+    host.test_force
+        .force_result_partial_for_tests
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let row = recovered
+        .props
+        .iter()
+        .find(|prop| prop.name == "row")
+        .expect("row prop survives the partial recovery");
+    assert_eq!(
+        row.callable_role, complete_role,
+        "the partial recovery publishes the SAME role classification the \
+         complete arm applies — never the analysis-unavailable default"
+    );
+}
+
 // ── Test 7: Deferred-surface intermediate state ─────────────────────────
 
 fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphRequest {

@@ -139,6 +139,9 @@ pub fn display(
                 display_type_node(store, return_type, needs, MAX_DISPLAY_DEPTH, &mut Vec::new()).0,
             )
         }
+        SemanticQueryValue::TruthinessDomain(domain) => {
+            DisplayString(format!("{domain:?}"))
+        }
         // §14.1: the reserved native-checker seam. No producer constructs it,
         // so reaching it here is a logic error. Matched explicitly — NOT via a
         // `_` wildcard — so any future live `SemanticQueryValue` arm forces a

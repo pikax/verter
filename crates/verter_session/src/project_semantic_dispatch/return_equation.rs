@@ -179,10 +179,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .dispatch_txn
                     .borrow()
                     .flow
-                    .completed_members
+                    .closed_values
                     .iter()
-                    .find(|member| &member.key == key)
-                    .map(|member| member.result.return_type())
+                    .find(|(member_key, _)| member_key == key)
+                    .map(|(_, result)| result.return_type())
                 {
                     return Some((result, Vec::new()));
                 }
@@ -236,18 +236,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
 }
 
 /// The return node of a resolved call plus its fresh-literal set (the
-/// closed result's return when it closed fresh).
+/// closed result's return when it closed fresh). Only a WHOLE-return
+/// fresh literal enters the set: a union-carried deposit stays inside
+/// its union constituent here — the equation's flow positions widen the
+/// checker's whole-value freshness, never a constituent.
 fn resolved_call_fresh_target(
     result: &crate::semantic_query::ResolvedCallResult,
 ) -> (SemanticNodeId, Vec<SemanticNodeId>) {
     match result {
         crate::semantic_query::ResolvedCallResult::Selected {
             return_type,
-            fresh_literal_return,
+            fresh_literal_returns,
             ..
         } => (
             *return_type,
-            if *fresh_literal_return {
+            if fresh_literal_returns.contains(return_type) {
                 vec![*return_type]
             } else {
                 Vec::new()

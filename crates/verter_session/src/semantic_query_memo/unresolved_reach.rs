@@ -163,7 +163,8 @@ impl SemanticGraphStore {
             SemanticNodeData::ObjectSpreadProgram(program) => {
                 children.extend(program.child_nodes());
             }
-            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let members = composite.composite_members().expect("composite arm");
                 children.extend_from_slice(members);
             }
             SemanticNodeData::Array { element, .. } => children.push(*element),

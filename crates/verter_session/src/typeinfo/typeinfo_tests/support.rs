@@ -576,9 +576,11 @@ pub(crate) fn template_literal_reduce_read(
             if members.len() == 1 {
                 members[0]
             } else {
-                graph.intern_node(SemanticNodeData::Union(Arc::from(
-                    members.into_boxed_slice(),
-                )))
+                graph.intern_node(SemanticNodeData::Union(
+                    crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                        members.into_boxed_slice(),
+                    )),
+                ))
             }
         })
         .collect();

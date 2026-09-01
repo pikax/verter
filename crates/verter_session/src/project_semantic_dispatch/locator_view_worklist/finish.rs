@@ -137,34 +137,70 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             SemanticNodeData::Union(arms) => {
+                let category = arms.origin_category();
                 let ids: Vec<_> = arms
                     .iter()
                     .map(|arm| projected(memo, *arm, context))
                     .collect();
+                if ids.as_slice() == &***arms {
+                    // Identity projection: nothing to rebuild and nothing to
+                    // re-decide — the original carrier (its category, order
+                    // and interned identity) stays exactly itself.
+                    return node;
+                }
                 if ids.is_empty() {
                     graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
                 } else if ids.len() == 1 {
                     ids[0]
+                } else if self.composite_rebuild_re_decides(category, &ids, true) {
+                    // The projection of a canonical/authored composite is a
+                    // DERIVED result — route it through the canonical
+                    // authority (the authored shell stays recoverable via
+                    // `node`); a derived multi-arm composite interns Global.
+                    self.intern_normalized_union_or_intersection(&ids, true)
                 } else {
+                    // Order- and scope-preserving projection rebuild for the
+                    // carrier categories whose arm order is semantics.
                     graph.intern_preserving_scope(
                         node,
-                        SemanticNodeData::Union(Arc::from(ids.into_boxed_slice())),
+                        SemanticNodeData::Union(
+                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                                Arc::from(ids.into_boxed_slice()),
+                            ),
+                        ),
                     )
                 }
             }
             SemanticNodeData::Intersection(arms) => {
+                let category = arms.origin_category();
                 let ids: Vec<_> = arms
                     .iter()
                     .map(|arm| projected(memo, *arm, context))
                     .collect();
+                if ids.as_slice() == &***arms {
+                    // Identity projection — see the Union arm.
+                    return node;
+                }
                 if ids.is_empty() {
                     graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
                 } else if ids.len() == 1 {
                     ids[0]
+                } else if self.composite_rebuild_re_decides(category, &ids, false) {
+                    // Derived projection result (and provably order-safe:
+                    // no rebuilt arm may contribute call signatures) —
+                    // canonical authority, Global intern.
+                    self.intern_normalized_union_or_intersection(&ids, false)
                 } else {
+                    // Order- and scope-preserving projection rebuild: an
+                    // ordered heritage/overload carrier (or a possibly-
+                    // callable rebuilt arm set) keeps its verbatim order.
                     graph.intern_preserving_scope(
                         node,
-                        SemanticNodeData::Intersection(Arc::from(ids.into_boxed_slice())),
+                        SemanticNodeData::Intersection(
+                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                                Arc::from(ids.into_boxed_slice()),
+                            ),
+                        ),
                     )
                 }
             }

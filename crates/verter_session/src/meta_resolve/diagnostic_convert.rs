@@ -28,6 +28,7 @@ use verter_semantic::analysis::type_expand::{
 /// | `UnionArmEmpty`             | `EmptyUnionArm`            |
 /// | `UnresolvedSurfaceArm`      | `UnresolvedReference`      |
 /// | `OpenSpreadProgram`         | `IndeterminateConditional` |
+/// | `PendingFlowRoot`           | `UnsupportedOperator`      |
 ///
 /// Variant payload data (node ids, declaration identities, error
 /// details) is preserved through `ExpansionDiagnostic.context` —
@@ -106,6 +107,14 @@ pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnos
                 owner_canonical, owner, name
             ),
             property_name: Some(name.to_string()),
+        },
+        // A flow root whose reducer is still pending: the operation-specific
+        // typed gap rides the context; the stop reason is the closest
+        // existing "this operation has no producer" class.
+        ShallowDiagnostic::PendingFlowRoot { gap } => ExpansionDiagnostic {
+            reason: ExpansionStopReason::UnsupportedOperator,
+            context: format!("pending-flow-root::{gap:?}"),
+            property_name: None,
         },
     }
 }

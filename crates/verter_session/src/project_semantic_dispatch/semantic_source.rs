@@ -354,10 +354,18 @@ impl ProjectSemanticDispatch<'_> {
             }
             SemanticTypeSource::Closed(fact) => match fact {
                 ClosedTypeFact::Leaf(leaf) => self.raise_leaf_fact(leaf, &ctx).into(),
-                // A closed leaf-union composes directly: each leaf lowers
-                // through the shared in-scope lowerer and the ordered union
-                // node is interned as data (a decided result — no
-                // re-resolution, no normalization pass).
+                // A closed leaf-union is the DECIDED result of a fully
+                // closed reduction — a DERIVED composite, not authored
+                // syntax and not a locator-shape shell. Each leaf lowers
+                // through the shared in-scope lowerer, and the union
+                // constructs through the canonical authority with the
+                // multi-arm result re-anchored to the owning fact scope
+                // (see [`Self::raise_closed_leaf_union`]): duplicate
+                // decided leaves collapse, a singleton unwraps to its
+                // member, and the evidence funnel roots any file-scoped
+                // inspected arm. Display never reads this node's arm
+                // order — the output sink renders `Closed(LeafUnion)`
+                // from the FACT's ordered leaves directly.
                 ClosedTypeFact::LeafUnion(leaves) => {
                     let scope = self.raise_scope(&ctx);
                     let members: Vec<SemanticNodeId> = leaves
@@ -375,10 +383,7 @@ impl ProjectSemanticDispatch<'_> {
                         })
                         .collect();
                     SourceRaiseOutcome::Raised(HotTypeRef::new(
-                        self.graph().intern_node_with_scope(
-                            SemanticNodeData::Union(Arc::from(members.into_boxed_slice())),
-                            scope,
-                        ),
+                        self.raise_closed_leaf_union(&members, &scope),
                     ))
                 }
                 ClosedTypeFact::Object(object) => {
@@ -857,7 +862,11 @@ impl ProjectSemanticDispatch<'_> {
                 None => return SourceRaiseOutcome::Absent,
             }
         } else {
-            let Some(realized_root) = view.realized_callable_root(context) else {
+            // A genuinely non-callable root is ABSENT (the complete negative
+            // answer). An UNRESOLVED root records its typed reason before the
+            // absent outcome — the raise's emptiness is then never mistaken
+            // for a callable-less occurrence.
+            let Some(realized_root) = view.realized_callable_root(context).recorded() else {
                 return SourceRaiseOutcome::Absent;
             };
             let combine = match super::node_data_for(self.ctx, realized_root).as_deref() {
@@ -1012,7 +1021,8 @@ impl ProjectSemanticDispatch<'_> {
                 // the shared heap worklist. Validation therefore inspects the
                 // resulting graph directly; it never recursively re-demands
                 // each suffix (which would be both stackful and quadratic).
-                SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms) => {
+                composite @ (SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_)) => {
+                    let arms = composite.composite_members().expect("composite arm");
                     pending.extend(arms.iter().copied());
                 }
                 _ if super::raise::node_is_unknown_materializing_failure(self, current) => {

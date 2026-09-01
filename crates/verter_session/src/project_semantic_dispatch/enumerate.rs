@@ -260,7 +260,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 results.push(KeyNamesArm::Names(names));
             }
             SemanticNodeData::Intersection(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let n = arms.len();
                 if n == 0 {
@@ -273,7 +273,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             SemanticNodeData::Union(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let n = arms.len();
                 if n == 0 {
@@ -552,6 +552,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if let Some(names) = self.key_names_from_base_node(*base) {
                     return Some(KeyDomainKey::from_keys(names));
                 }
+                // A `DeclRef` carrier as the keyof BASE (`keyof Q` in a
+                // utility key argument before Q's surface materialises —
+                // `Pick<Q, keyof Q>` at the macro boundary). The base-node
+                // enumerator deliberately does not unwrap decl carriers
+                // (mapped-surface synthesis depends on that to reach its
+                // modifier-carrying source projection), so the KEY-DOMAIN
+                // route expands the base here instead: one shared
+                // `Instantiate`, then enumerate the produced surface.
+                // `keyof Q` over a closed declaration is a CLOSED key
+                // domain; a base that does not instantiate to a distinct
+                // node stays unenumerated — never a fabricated empty set.
+                if let Some(SemanticNodeData::DeclRef { identity }) =
+                    self.graph().node_data(*base).as_deref()
+                {
+                    let read =
+                        self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
+                            crate::semantic_query::InstantiateKey::new(
+                                self.type_slot_for(
+                                    Arc::clone(&identity.canonical_id),
+                                    identity.owner,
+                                    Arc::clone(&identity.decl_name),
+                                ),
+                                Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                                self.instantiate_context_for(
+                                    &identity.canonical_id,
+                                    crate::semantic_query::ProjectionReductionContext::published(
+                                        crate::semantic_query::ProjectionMode::Expanded,
+                                    ),
+                                ),
+                            ),
+                        ));
+                    // A2 signal-split: fold a genuinely-incomplete keyspace
+                    // instantiation onto the request's sticky partial flag.
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    if let crate::semantic_query::QueryResult::Value(instantiated) = read.value {
+                        if instantiated != *base {
+                            if let Some(names) = self.key_names_from_base_node(instantiated) {
+                                return Some(KeyDomainKey::from_keys(names));
+                            }
+                        }
+                    }
+                }
                 // Key-domain enumeration needs the literal KEY UNION of `keyof
                 // base`, NOT the member VALUES of `base`. Resolve the `keyof`
                 // under the publication SHALLOW context (NOT `Expanded`): the
@@ -763,7 +805,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // refute. A single `None` arm makes the whole union
             // inconclusive.
             SemanticNodeData::Union(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let mut any_admits = false;
                 let mut all_refuted = true;
@@ -949,7 +991,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::Intersection(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let mut any_admits = false;
                 let mut any_inconclusive = false;
@@ -978,7 +1020,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Union(arms) => {
                 // `keyof (A | B)` is the INTERSECTION of A's and B's
                 // keysets. The needle admits iff EVERY arm admits.
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let mut all_admit = true;
                 let mut any_inconclusive = false;

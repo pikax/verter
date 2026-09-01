@@ -308,6 +308,12 @@ enum TypeInfoParityBlockId {
     // U2.QUERY_VALUE_DOMAIN owns the 2 index-signature publication lifts.
     U0ManifestSubstrate,
     U2QueryValueDomain,
+    // The canonical union/intersection algebra closure: a sub-block of the
+    // value-domain foundation that already owns the normalization queries.
+    // It closes CONSTRUCTION over that authority (an explicit raw-constructor
+    // allowlist with bypass proof for authored and ordered carriers); it is
+    // not a second normalization system and owns no `IgnoredTestRow`s.
+    U2CanonicalTypeAlgebra,
     // The pre-reducer binder-identity substrate (family-A
     // `BinderIdentityFacts`): demand-produced from `IndexedReady`, consumed
     // by the U2 reducers — owns no `IgnoredTestRow`s.
@@ -451,6 +457,7 @@ semantic_query_names! {
     ClassifyMaterializationCycleGate,
     FlowReturn,
     ResolveCall,
+    ClassifyTruthinessDomain,
 }
 
 /// Deterministic identifier for a generated TS7 oracle snapshot. Closed
@@ -506,6 +513,7 @@ enum MechanismId {
     // Zero-row substrate mechanisms.
     LedgerCoverageGate,
     QueryValueDomainFoundation,
+    CanonicalTypeAlgebraClosure,
     BinderIdentityFactsSubstrate,
     WireSurfaceClosure,
     ExporterPublication,
@@ -740,6 +748,10 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
         // a sealed classifier family whose `Decided` verdicts admit
         // through the family singleflight.
         ClassifyMaterializationCycleGate => U2QueryValueDomain,
+        // The demand-scoped truthiness-domain classifier is the canonical
+        // type algebra's own key: the algebra layer owns truthiness-domain
+        // classification, and the flow narrowing frames CONSUME the fact.
+        ClassifyTruthinessDomain => U2CanonicalTypeAlgebra,
     }
 }
 
@@ -752,6 +764,7 @@ fn mechanism_owning_block(mech: MechanismId) -> TypeInfoParityBlockId {
     match mech {
         LedgerCoverageGate => U0ManifestSubstrate,
         QueryValueDomainFoundation => U2QueryValueDomain,
+        CanonicalTypeAlgebraClosure => U2CanonicalTypeAlgebra,
         BinderIdentityFactsSubstrate => U2BinderIdentityFacts,
         WireSurfaceClosure => U8WireSurfaceClosure,
         ExporterPublication => U12Exporter,
@@ -2060,6 +2073,11 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         // admit through the singleflight like every other value-domain
         // family.
         (ClassifyMaterializationCycleGate, U2QueryValueDomain),
+        // The demand-scoped truthiness-domain classifier at
+        // U2.CANONICAL_TYPE_ALGEBRA — the canonical algebra layer owns
+        // truthiness-domain classification; the flow narrowing
+        // truthiness frame consumes the fact and holds no private rule.
+        (ClassifyTruthinessDomain, U2CanonicalTypeAlgebra),
     ];
 
     // DISCRIMINATING per-key pin: a wrong `key_owning_block` arm FAILS here.
@@ -4309,6 +4327,7 @@ fn block_trailer_token(block: TypeInfoParityBlockId) -> &'static str {
     match block {
         U0ManifestSubstrate => "U0.MANIFEST_SUBSTRATE",
         U2QueryValueDomain => "U2.QUERY_VALUE_DOMAIN",
+        U2CanonicalTypeAlgebra => "U2.CANONICAL_TYPE_ALGEBRA",
         U2BinderIdentityFacts => "U2.BINDER_IDENTITY_FACTS",
         U8WireSurfaceClosure => "U8.WIRE_SURFACE_CLOSURE",
         U12Exporter => "U12.EXPORTER",

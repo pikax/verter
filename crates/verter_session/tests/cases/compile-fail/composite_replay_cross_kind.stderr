@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/cases/compile-fail/composite_replay_cross_kind.rs:24:44
+   |
+24 |             SemanticNodeData::Intersection(payload)
+   |             ------------------------------ ^^^^^^^ expected `CompositeList<IntersectionKind>`, found `CompositeList<UnionKind>`
+   |             |
+   |             arguments to this enum variant are incorrect
+   |
+   = note: expected struct `CompositeList<IntersectionKind>`
+              found struct `CompositeList<UnionKind>`
+note: tuple variant defined here
+  --> src/semantic_query.rs
+   |
+   |     Intersection(composite::CompositeList<composite::IntersectionKind>),
+   |     ^^^^^^^^^^^^

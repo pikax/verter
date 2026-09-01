@@ -254,8 +254,6 @@ pub struct TypeInfoSurface {
     pub entries: Arc<[TypeInfoSurfaceEntry]>,
     /// Named members in declaration order.
     pub members: Arc<[TypeInfoSurfaceMember]>,
-    /// Whether `members` is the complete named-member domain.
-    pub members_complete: bool,
     /// Call signatures in declaration order.
     pub call_signatures: Arc<[TypeInfoSurfaceSignature]>,
     /// Construct signatures in declaration order.
@@ -279,7 +277,6 @@ impl TypeInfoSurface {
         Self {
             entries: Arc::from([]),
             members: Arc::from(Vec::new().into_boxed_slice()),
-            members_complete: true,
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -297,19 +294,6 @@ impl TypeInfoSurface {
     /// type is re-resolved.
     #[must_use]
     pub fn build(graph: &SemanticGraphStore, view: &SurfaceView) -> Self {
-        Self::build_with_completeness(graph, view, true)
-    }
-
-    /// [`Self::build`] with an explicit completeness verdict: a partial
-    /// projection read (open-spread evidence, budget, cycles) keeps the
-    /// positive members but must report `members_complete = false` —
-    /// omission from this surface is then never absence evidence.
-    #[must_use]
-    pub fn build_with_completeness(
-        graph: &SemanticGraphStore,
-        view: &SurfaceView,
-        members_complete: bool,
-    ) -> Self {
         let entries = view
             .entries
             .iter()
@@ -329,19 +313,13 @@ impl TypeInfoSurface {
                 }
             })
             .collect();
-        Self::from_ordered_entries(
-            entries,
-            view.keyspace,
-            view.has_known_index_signature(),
-            members_complete,
-        )
+        Self::from_ordered_entries(entries, view.keyspace, view.has_known_index_signature())
     }
 
     fn from_ordered_entries(
         entries: Vec<TypeInfoSurfaceEntry>,
         keyspace: Option<SemanticNodeId>,
         has_index_signature: bool,
-        members_complete: bool,
     ) -> Self {
         let mut members = Vec::new();
         let mut call_signatures = Vec::new();
@@ -364,7 +342,6 @@ impl TypeInfoSurface {
         Self {
             entries: Arc::from(entries.into_boxed_slice()),
             members: Arc::from(members.into_boxed_slice()),
-            members_complete,
             call_signatures: Arc::from(call_signatures.into_boxed_slice()),
             construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
             index_signatures: Arc::from(index_signatures.into_boxed_slice()),
@@ -377,8 +354,9 @@ impl TypeInfoSurface {
     /// gathered by recursing an open carrier (`Union` / `Intersection` /
     /// `Conditional` branches — the walker's typed open evidence for
     /// compound roots containing open programs). Named members only
-    /// (signatures / index facts are not recovered from open carriers);
-    /// `members_complete` is always `false` — omission is not absence.
+    /// (signatures / index facts are not recovered from open carriers).
+    /// Presence-only: the producer publishes the result through the
+    /// open-presence resolution arm — omission is not absence evidence.
     #[must_use]
     pub fn from_presence_members(
         graph: &SemanticGraphStore,
@@ -395,54 +373,58 @@ impl TypeInfoSurface {
                 .collect(),
             None,
             false,
-            false,
         )
     }
 
     /// Join a spread-program projection into one shallow surface.
     ///
-    /// A single closed alternative yields the exact complete surface — the
-    /// closed witness is the only completeness proof. Every other shape (open
-    /// residuals, correlated multi-branch formulas) joins POSITIVE members
-    /// only and reports `members_complete = false`: omission from the joined
-    /// view is never absence evidence, and the joined view is typeinfo output
-    /// that never re-enters binary semantic relation.
-    #[must_use]
-    pub fn from_spread_projection(
+    /// A single closed alternative yields the exact complete surface
+    /// (`Resolved`) — the closed witness is the only completeness proof.
+    /// Every other shape (open residuals, correlated multi-branch formulas)
+    /// joins POSITIVE members only and returns `OpenPresence`: omission from
+    /// the joined view is never absence evidence, and the joined view is
+    /// typeinfo output that never re-enters binary semantic relation. A
+    /// closed witness whose view cannot be built is `Incomplete` — never an
+    /// empty success.
+    pub(crate) fn from_spread_projection(
         graph: &SemanticGraphStore,
         formula: &crate::semantic_query::ObjectProjectionFormula,
-    ) -> Option<Self> {
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    ) -> crate::typeinfo::surface_resolution::SurfaceResolution<Self> {
         use crate::semantic_query::{
             AuthoredPropertyKey, ObjectSignatureKind, PositiveKeyPresence, ProjectionEvidence,
             PropertyKey,
         };
 
-        fn union_value(graph: &SemanticGraphStore, values: Vec<SemanticNodeId>) -> SemanticNodeId {
-            let mut arms: Vec<SemanticNodeId> = Vec::new();
-            for value in values {
-                match graph.node_data(value).as_deref() {
-                    Some(SemanticNodeData::Union(nested)) => {
-                        for arm in nested.iter().copied() {
-                            if !arms.contains(&arm) {
-                                arms.push(arm);
-                            }
-                        }
-                    }
-                    _ if !arms.contains(&value) => arms.push(value),
-                    _ => {}
-                }
-            }
-            match arms.as_slice() {
-                [only] => *only,
-                _ => graph.intern_node(SemanticNodeData::Union(Arc::from(arms))),
-            }
+        fn union_value(
+            graph: &SemanticGraphStore,
+            values: Vec<SemanticNodeId>,
+            evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+        ) -> SemanticNodeId {
+            // Canonical construction: the joined per-alternative value union
+            // routes through the one authority (recursive flatten +
+            // structural dedup replace the hand-rolled one-level splice);
+            // the evidence threads to the caller's disposition boundary.
+            let composite = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+                graph, &values,
+            );
+            evidence.absorb(composite.evidence);
+            composite.node
         }
 
         let alternatives = formula.alternatives();
         if let [only] = alternatives {
             if let Some(closed) = only.closed() {
-                let view = closed.to_closed_surface_view()?;
-                return Some(Self::build(graph, &view));
+                let Some(view) = closed.to_closed_surface_view() else {
+                    return crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(
+                        crate::typeinfo::surface_resolution::NonEmptyReasons::of(
+                            crate::semantic_query::PartialReason::SemanticQueryFault,
+                        ),
+                    );
+                };
+                return crate::typeinfo::surface_resolution::SurfaceResolution::resolved(
+                    Self::build(graph, &view),
+                );
             }
         }
 
@@ -543,7 +525,7 @@ impl TypeInfoSurface {
                         crate::semantic_query::QueryError::OpenSurface,
                     ))
                 } else {
-                    union_value(graph, join.values)
+                    union_value(graph, join.values, evidence)
                 };
                 build_member(
                     graph,
@@ -578,7 +560,7 @@ impl TypeInfoSurface {
             .filter(|(.., values, _)| !values.is_empty())
             .map(|(_, key_type, values, readonly)| TypeInfoIndexSignature {
                 key_type,
-                value_type: union_value(graph, values),
+                value_type: union_value(graph, values, evidence),
                 key_span: None,
                 value_span: None,
                 declaration_span: None,
@@ -586,30 +568,31 @@ impl TypeInfoSurface {
             })
             .collect();
         let has_index_signature = !index_signatures.is_empty();
-        Some(Self::from_ordered_entries(
-            members
-                .into_iter()
-                .map(TypeInfoSurfaceEntry::Member)
-                .chain(
-                    call_signatures
-                        .into_iter()
-                        .map(TypeInfoSurfaceEntry::CallSignature),
-                )
-                .chain(
-                    construct_signatures
-                        .into_iter()
-                        .map(TypeInfoSurfaceEntry::ConstructSignature),
-                )
-                .chain(
-                    index_signatures
-                        .into_iter()
-                        .map(TypeInfoSurfaceEntry::IndexSignature),
-                )
-                .collect(),
-            None,
-            has_index_signature,
-            false,
-        ))
+        crate::typeinfo::surface_resolution::SurfaceResolution::open_presence(
+            Self::from_ordered_entries(
+                members
+                    .into_iter()
+                    .map(TypeInfoSurfaceEntry::Member)
+                    .chain(
+                        call_signatures
+                            .into_iter()
+                            .map(TypeInfoSurfaceEntry::CallSignature),
+                    )
+                    .chain(
+                        construct_signatures
+                            .into_iter()
+                            .map(TypeInfoSurfaceEntry::ConstructSignature),
+                    )
+                    .chain(
+                        index_signatures
+                            .into_iter()
+                            .map(TypeInfoSurfaceEntry::IndexSignature),
+                    )
+                    .collect(),
+                None,
+                has_index_signature,
+            ),
+        )
     }
 
     /// Enrich each member AND each call / construct signature with its
@@ -706,12 +689,7 @@ impl TypeInfoSurface {
             entries.push(enriched);
         }
 
-        Self::from_ordered_entries(
-            entries,
-            self.keyspace,
-            self.has_index_signature,
-            self.members_complete,
-        )
+        Self::from_ordered_entries(entries, self.keyspace, self.has_index_signature)
     }
 }
 

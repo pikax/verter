@@ -218,9 +218,11 @@ fn run_deep_structural_validation_child() {
     let mut root = leaf;
     // bounded-loop: fixed finite structural-validation fixture depth.
     for _ in 0..STRUCTURAL_VALIDATION_DEPTH {
-        root = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-            vec![leaf, root].into_boxed_slice(),
-        )));
+        root = graph.intern_node(SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                vec![leaf, root].into_boxed_slice(),
+            )),
+        ));
     }
 
     let worker_host = Arc::clone(&host);

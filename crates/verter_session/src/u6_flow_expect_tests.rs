@@ -68,13 +68,14 @@ pub(crate) const PROFILE_STAMP: &str = "VerterHost standalone { analysis_level: 
 // The recursive expectation
 
 /// Exact literal expectation. Not total over [`LiteralValue`]: only
-/// variants a corpus row or control exercises. Re-add `Bool` / `BigInt`
+/// variants a corpus row or control exercises. Re-add `BigInt`
 /// only together with a control.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Lit {
     Str(&'static str),
     Num(f64),
+    Bool(bool),
 }
 
 /// Recursive graph-node expectation.
@@ -95,6 +96,9 @@ pub(crate) enum ExpectedNode {
     /// (order-insensitive, exact). Duplicate expectations need distinct
     /// constituents.
     Union(&'static [ExpectedNode]),
+    /// `SemanticNodeData::Array` (mutable — `readonly T[]` is distinct
+    /// and matches nothing here) with this element type.
+    Array(&'static ExpectedNode),
     /// `SemanticNodeData::Intersection` with these arms, in source order.
     Intersection(&'static [ExpectedNode]),
     /// `SemanticNodeData::Signature` with `SignatureKind::Call`, exact
@@ -137,6 +141,7 @@ fn lit_matches(expected: &Lit, got: &LiteralValue) -> bool {
     match (expected, got) {
         (Lit::Str(e), LiteralValue::String(g)) => *e == g.as_str(),
         (Lit::Num(e), LiteralValue::Number(g)) => e.to_bits() == g.to_bits(),
+        (Lit::Bool(e), LiteralValue::Boolean(g)) => e == g,
         _ => false,
     }
 }
@@ -199,6 +204,9 @@ pub(crate) fn node_matches(
         (ExpectedNode::Primitive(kind), SemanticNodeData::Primitive(got)) => kind == got,
         (ExpectedNode::Union(exp), SemanticNodeData::Union(members)) => {
             set_matches(dispatch, members, exp, depth + 1)
+        }
+        (ExpectedNode::Array(exp), SemanticNodeData::Array { element, readonly }) => {
+            !readonly && node_matches(dispatch, *element, exp, depth + 1)
         }
         (ExpectedNode::Intersection(exp), SemanticNodeData::Intersection(members)) => {
             members.len() == exp.len()
@@ -538,7 +546,12 @@ pub(crate) fn drive_expect_boundary(
         );
     }
     let canonical = format!("{dir}/{id}.ts");
-    upsert(&host, &canonical, script, FileLanguage::script_ts());
+    upsert(
+        &host,
+        &canonical,
+        &crate::u6_flow_shape_corpus_tests::module_script(script),
+        FileLanguage::script_ts(),
+    );
     let ident = identity(&canonical, function);
 
     let first =
@@ -703,7 +716,12 @@ pub(crate) fn with_live_flow_node<R>(
         );
     }
     let canonical = format!("{dir}/{id}.ts");
-    upsert(&host, &canonical, script, FileLanguage::script_ts());
+    upsert(
+        &host,
+        &canonical,
+        &crate::u6_flow_shape_corpus_tests::module_script(script),
+        FileLanguage::script_ts(),
+    );
     let carrier = host.get_flow_return_type_with_audit(
         &identity(&canonical, function),
         ReturnProjectionDemand::whole_return(),
@@ -846,8 +864,9 @@ pub(crate) fn check_boundary_refusal(
 /// semantic equality.
 ///
 /// Grammar: string/number literals, primitives, bare names, `A | B`,
-/// `A & B`, `{ name: T; }`, `(p: T, …) => T`. Unsupported text is a
-/// loud parse error — never a silent exemption.
+/// `A & B`, `T[]` (mutable arrays only), `{ name: T; }`,
+/// `(p: T, …) => T`. Unsupported text is a loud parse error — never a
+/// silent exemption.
 ///
 /// Unions are order-insensitive exact sets; intersections are source-
 /// ordered; objects are exact member sets; a function print is a Call
@@ -863,9 +882,11 @@ pub(crate) mod checker_syntax {
     pub(crate) enum CheckerType {
         StringLit(String),
         NumberLit(f64),
+        BoolLit(bool),
         Primitive(PrimitiveKind),
         Ref(String),
         Union(Vec<CheckerType>),
+        Array(Box<CheckerType>),
         Intersection(Vec<CheckerType>),
         Object(Vec<(String, CheckerType)>),
         Function {
@@ -940,15 +961,31 @@ pub(crate) mod checker_syntax {
         }
 
         fn intersection(&mut self) -> Result<CheckerType, String> {
-            let mut parts = vec![self.atom()?];
+            let mut parts = vec![self.postfix()?];
             while self.eat('&') {
-                parts.push(self.atom()?);
+                parts.push(self.postfix()?);
             }
             Ok(if parts.len() == 1 {
                 parts.pop().expect("one part")
             } else {
                 CheckerType::Intersection(parts)
             })
+        }
+
+        /// Postfix `[]` binds tighter than `&` / `|` in the checker's
+        /// print (`string[]`, `(A | B)[]`). `readonly T[]` is not
+        /// modelled — it fails the identifier lookup loudly.
+        fn postfix(&mut self) -> Result<CheckerType, String> {
+            let mut inner = self.atom()?;
+            loop {
+                self.skip_ws();
+                if self.rest().starts_with("[]") {
+                    self.pos += 2;
+                    inner = CheckerType::Array(Box::new(inner));
+                } else {
+                    return Ok(inner);
+                }
+            }
         }
 
         fn ident(&mut self) -> Result<String, String> {
@@ -1027,14 +1064,8 @@ pub(crate) mod checker_syntax {
                         "unknown" => CheckerType::Primitive(PrimitiveKind::Unknown),
                         "any" => CheckerType::Primitive(PrimitiveKind::Any),
                         "object" => CheckerType::Primitive(PrimitiveKind::Object),
-                        "true" | "false" => {
-                            return Err(format!(
-                                "boolean literal prints are not modelled (`{}`) — add the \
-                                 variant WITH its comparison rule and control when a deep \
-                                 row needs it",
-                                self.text
-                            ));
-                        }
+                        "true" => CheckerType::BoolLit(true),
+                        "false" => CheckerType::BoolLit(false),
                         _ => CheckerType::Ref(name),
                     })
                 }
@@ -1125,6 +1156,9 @@ pub(crate) mod checker_syntax {
             (CheckerType::NumberLit(e), SemanticNodeData::Literal(LiteralValue::Number(g))) => {
                 e.to_bits() == g.to_bits()
             }
+            (CheckerType::BoolLit(e), SemanticNodeData::Literal(LiteralValue::Boolean(g))) => {
+                e == g
+            }
             (CheckerType::Primitive(e), SemanticNodeData::Primitive(g)) => e == g,
             // A reference name matches a resolved `DeclRef` only.
             // `BareRef` / `TypeParam` reach `_ => false` (fail-closed).
@@ -1163,6 +1197,9 @@ pub(crate) mod checker_syntax {
                 }
                 let mut used = vec![false; members.len()];
                 assign(dispatch, members, exp, &mut used, 0, depth + 1)
+            }
+            (CheckerType::Array(elem), SemanticNodeData::Array { element, readonly }) => {
+                !readonly && matches_node(dispatch, *element, elem, depth + 1)
             }
             (CheckerType::Intersection(exp), SemanticNodeData::Intersection(members)) => {
                 members.len() == exp.len()
@@ -2405,6 +2442,47 @@ mod expectation_controls {
                     )
                     .is_empty(),
                     "a number literal must NOT satisfy the widened primitive pin"
+                );
+            },
+        );
+        with_flow_node(
+            "function makeProps() { return true as const }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    check_node(dispatch, node, &ExpectedNode::Literal(Lit::Bool(true))).is_empty(),
+                    "the measured BOOLEAN literal must satisfy its own exact pin (measured {})",
+                    render_node(dispatch, node, 0)
+                );
+                assert!(
+                    !check_node(dispatch, node, &ExpectedNode::Literal(Lit::Bool(false)))
+                        .is_empty(),
+                    "a boolean pin must reject the OTHER truth value — the equality clause \
+                     is the comparison under control here"
+                );
+                assert!(
+                    !check_node(
+                        dispatch,
+                        node,
+                        &ExpectedNode::Primitive(PrimitiveKind::Boolean)
+                    )
+                    .is_empty(),
+                    "a boolean literal must NOT satisfy the widened primitive pin"
+                );
+                let parsed = checker_syntax::parse("true").expect("`true` parses");
+                assert!(
+                    checker_syntax::matches_node(dispatch, node, &parsed, 0),
+                    "the checker-syntax boolean literal must match the live boolean node"
+                );
+                let other = checker_syntax::parse("false").expect("`false` parses");
+                assert!(
+                    !checker_syntax::matches_node(dispatch, node, &other, 0),
+                    "the checker-syntax boolean comparison must reject the OTHER truth value"
+                );
+                let widened = checker_syntax::parse("boolean").expect("`boolean` parses");
+                assert!(
+                    !checker_syntax::matches_node(dispatch, node, &widened, 0),
+                    "the checker-syntax boolean literal must NOT satisfy the primitive print"
                 );
             },
         );
@@ -3912,4 +3990,1407 @@ mod expectation_controls {
             "the stamped demand point must BE the whole-return demand"
         );
     }
+}
+
+/// A control test written INSIDE a nested function value, over a binding
+/// an ENCLOSING frame declares, establishes a narrowing the checker
+/// applies to every read that follows it in that nested body. The
+/// lowering carries no such fact, so the demanded answer is a SUPERSET —
+/// and a superset is only ever admissible behind the typed gap.
+///
+/// A captured binding is a landing slot like any other here: the
+/// evaluator resolves the nested read against the enclosing frame's
+/// binding, so classifying it as "no slot to land on" would be a POSITIVE
+/// claim of inertness that the checker contradicts.
+///
+/// The controls are what make this discriminating rather than a blanket
+/// refusal of closures: a nested value narrowing its OWN parameter still
+/// publishes complete and warm, an outer-frame guard is untouched, and a
+/// closure that never mentions the capture keeps its clean result.
+#[test]
+fn narrowing_over_a_captured_binding_degrades_and_never_warms() {
+    let degraded = [
+        (
+            "a `typeof` guard inside a returned arrow",
+            "export {};\nfunction makeProps(x: string | number) { return () => { if (typeof x === \"string\") return x; return 0 } }",
+        ),
+        (
+            "a truthiness guard inside a returned arrow",
+            "export {};\nfunction makeProps(x?: string) { return () => { if (x) return x; return 0 } }",
+        ),
+        (
+            "a guard inside an immediately invoked value",
+            "export {};\nfunction makeProps(x: string | number) { return (() => { if (typeof x === \"string\") return x; return 0 })() }",
+        ),
+    ];
+    for (case, script) in degraded {
+        let measured = drive_expect_boundary("", "cap_deg", script, "makeProps", None);
+        assert_eq!(
+            measured.boundary.degradation,
+            Some(Degr::FlowGap(FlowGap::GuardNarrowing)),
+            "{case}: the uncarried narrowing takes the typed gap"
+        );
+        assert!(
+            !measured.boundary.second_from_cache,
+            "{case}: a degraded result is never served warm"
+        );
+    }
+
+    let clean = [
+        (
+            "a nested value narrowing its OWN parameter",
+            "export {};\nfunction makeProps() { return (y: string | number) => { if (typeof y === \"string\") return y; return 0 } }",
+        ),
+        (
+            "the same guard one frame out",
+            "export {};\nfunction makeProps(x: string | number) { if (typeof x === \"string\") return x; return 0 }",
+        ),
+        (
+            "a closure that never mentions the capture",
+            "export {};\nfunction makeProps(x: string | number) { return () => 1 }",
+        ),
+    ];
+    for (case, script) in clean {
+        let measured = drive_expect_boundary("", "cap_ok", script, "makeProps", None);
+        assert_eq!(
+            measured.boundary.degradation,
+            Some(Degr::None),
+            "{case}: a carried or absent fact stays complete"
+        );
+        assert!(
+            measured.boundary.second_from_cache,
+            "{case}: and replays warm"
+        );
+    }
+}
+
+/// A union arm the graph cannot classify against a runtime guard test
+/// (`any`, `unknown`) stays possible on BOTH edges of the test: the
+/// checker narrows such an arm, so dropping it fabricates a dead branch
+/// and loses that branch's return contributor from a result then
+/// certified complete and warm. The sound public outcome is the
+/// retained superset carrying the typed `FlowGap::GuardNarrowing`
+/// degradation — `ReturnOnly`, two cold computes, zero warm candidates —
+/// while a fully classified union keeps its exact, warm, gap-free
+/// narrow. Covers the positive and negated `typeof` spellings and the
+/// `instanceof` spelling.
+#[test]
+fn unclassifiable_guard_arms_remain_possible_degrade_and_never_warm() {
+    struct Case {
+        id: &'static str,
+        script: &'static str,
+        /// tsc `--strict` checker verdict for the row: the lower bound
+        /// the retained superset must cover.
+        checker: &'static str,
+        rendered: &'static str,
+        degradation: Degr,
+        /// `true`: clean row — exact value, warm replay, stored
+        /// candidate. `false`: degraded row — ReturnOnly, second call
+        /// cold again, zero stored candidates.
+        warm: bool,
+    }
+    let cases = [
+        Case {
+            id: "guard_unclassified_typeof_unknown_positive",
+            script: "export function f(x: unknown) { if (typeof x === \"string\") return x; return 0; }",
+            checker: "string | 0",
+            rendered: "unknown",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "guard_unclassified_typeof_any_positive",
+            script: "export function f(x: any) { if (typeof x === \"string\") return x; return 0; }",
+            checker: "string | 0",
+            rendered: "any",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "guard_unclassified_typeof_unknown_negated",
+            script: "export function f(x: unknown) { if (typeof x !== \"string\") return 0; return x; }",
+            checker: "0 | string",
+            rendered: "unknown",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "guard_unclassified_instanceof_unknown",
+            script: "class C { m(): number { return 1; } }\nexport function f(x: unknown) { if (x instanceof C) return x; return 0; }",
+            checker: "C | 0",
+            rendered: "unknown",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "guard_unclassified_instanceof_any",
+            script: "class C { m(): number { return 1; } }\nexport function f(x: any) { if (x instanceof C) return x; return 0; }",
+            checker: "C | 0",
+            rendered: "any",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "guard_classified_union_control",
+            script: "export function f(x: string | number) { if (typeof x === \"string\") return x; return 0; }",
+            checker: "string | 0",
+            rendered: "Union(string | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+    ];
+    for case in &cases {
+        let measured = drive_expect_boundary("", case.id, case.script, "f", None);
+        let mut failures = Vec::new();
+        if let Some(rendered) = measured.rendered.as_deref() {
+            if rendered != case.rendered {
+                failures.push(format!(
+                    "value drifted: expected {} (a sound cover of checker `{}`), measured {}",
+                    case.rendered, case.checker, rendered
+                ));
+            }
+        } else {
+            failures.push(format!(
+                "the public boundary returned no value: {}",
+                measured.boundary.error.as_deref().unwrap_or("<unset>")
+            ));
+        }
+        if measured.boundary.degradation != Some(case.degradation) {
+            failures.push(format!(
+                "typed degradation drifted: expected {:?}, measured {:?}",
+                case.degradation, measured.boundary.degradation
+            ));
+        }
+        failures.extend(first_call_cold_clauses(&measured.boundary));
+        failures.extend(replay_clauses(case.warm, &measured.boundary));
+        let candidates = flow_return_candidate_count(case.id, case.script);
+        if case.warm {
+            if candidates == 0 {
+                failures.push(
+                    "clean row stored ZERO warm candidates — a complete result must warm"
+                        .to_owned(),
+                );
+            }
+        } else if candidates != 0 {
+            failures.push(format!(
+                "degraded row stored {candidates} warm candidate(s) — a guard-gapped result \
+                 is ReturnOnly and must store NONE"
+            ));
+        }
+        assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
+    }
+}
+
+/// Warm-candidate count for one program's `FlowReturn` slot after two
+/// public boundary calls on a fresh host.
+fn flow_return_candidate_count(id: &str, script: &str) -> usize {
+    let host = make_audit_host();
+    let canonical = format!("/wb/{id}__slots.ts");
+    upsert(
+        &host,
+        &canonical,
+        &crate::u6_flow_shape_corpus_tests::module_script(script),
+        FileLanguage::script_ts(),
+    );
+    let ident = identity(&canonical, "f");
+    for _ in 0..2 {
+        let _ =
+            host.get_flow_return_type_with_audit(&ident, ReturnProjectionDemand::whole_return());
+    }
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let key = crate::semantic_query::FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(canonical.as_str()),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("f"),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(&canonical),
+        demand: ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract:
+            crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+    };
+    dispatch.graph().slot_candidate_count_for_tests(
+        &crate::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
+    )
+}
+
+/// `"key" in x` over a union arm whose key set the graph cannot decide
+/// (a type parameter, an index-signature surface, an unresolvable
+/// carrier) must keep that arm possible on BOTH edges. Retention is
+/// either EXACT or a typed-gap SUPERSET, and which one the checker
+/// gives depends on the edge and on whether a SIBLING arm settles the
+/// key:
+///
+/// - Where the checker also keeps the arm (the index-signature negated
+///   edge), reading "cannot decide" as "does not carry the key" would
+///   fabricate a dead edge and LOSE a return contributor from a result
+///   then certified complete and warm — the subset direction, the one
+///   that is never acceptable.
+/// - Where the checker resolves the union by a sibling arm that DOES
+///   declare the key (`T | { k: number }` on the positive edge, whose
+///   measured tsc 7.0.2 verdict is `0 | { k: number; }` — the `T` arm
+///   is dropped, NOT intersected with `Record<"k", unknown>`; that
+///   intersection is what a NON-union `in` subject gets), retaining the
+///   undecidable arm is a deliberate SUPERSET. It is admissible only
+///   behind the typed `FlowGap::GuardNarrowing`, which forces
+///   `ReturnOnly` and never warms — so a later exact decision cannot be
+///   shadowed by a cached wide answer.
+///
+/// An OPTIONAL member is decided per edge: its arm is retained EXACTLY
+/// on the negated edge (a value may lack the key) and retained as a
+/// degraded superset on the positive edge (the checker refines the key
+/// present). `Impossible`
+/// needs positive proof: only a closed surface's required member drops
+/// an arm on the negated edge, only a closed key-absent surface on the
+/// positive edge — those controls stay exact, gap-free, and warm.
+#[test]
+fn unclassifiable_in_guard_arms_remain_possible_degrade_and_never_warm() {
+    struct Case {
+        id: &'static str,
+        script: &'static str,
+        /// tsc `--strict` checker verdict: the lower bound the result
+        /// must cover.
+        checker: &'static str,
+        rendered: &'static str,
+        degradation: Degr,
+        warm: bool,
+    }
+    let cases = [
+        // The type parameter is bounded by `object` so the fixture is a
+        // program the checker ACCEPTS: `"k" in x` requires an `object`
+        // right-hand side, and an unconstrained `T` makes the whole row a
+        // rejected program (`TS2322: Type 'T | { k: number; }' is not
+        // assignable to type 'object'`) whose "checker verdict" would be a
+        // reading off an errored compile. The bound does not change the
+        // verdict — both spellings measure `0 | { k: number; }` — it only
+        // makes the measurement legitimate.
+        //
+        // SUPERSET row: the checker drops the `T` arm here (the sibling
+        // `{ k: number }` settles the key for the union), while the graph
+        // cannot decide whether `T` carries `"k"` and keeps it. Admissible
+        // only behind the typed guard gap, ReturnOnly — the checker-exact
+        // rows below it carry `Degr::None` and warm.
+        Case {
+            id: "in_unclassified_type_param_positive",
+            script: "export function f<T extends object>(x: T | { k: number }) { if (\"k\" in x) return x; return 0; }",
+            checker: "0 | { k: number; }",
+            rendered: "Union(TypeParam(T) | { k: number } | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        // The OPTIONAL arm is not an unclassifiable arm: retention is
+        // EXACT on both edges (the checker keeps an optional arm
+        // unchanged — measured: the negated edge keeps `A | B`, and the
+        // positive fall-through edge keeps `A` with no value refinement),
+        // so this row is the optional-retention positive control — clean
+        // and warm beside its genuinely unclassifiable siblings.
+        Case {
+            id: "in_optional_member_negated",
+            script: "type A = { k?: number }; type B = { m: string };\nexport function f(x: A | B) { if (!(\"k\" in x)) return x; return 0; }",
+            checker: "A | B | 0",
+            rendered: "Union(DeclRef(A) | DeclRef(B) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "in_index_signature_arm_keeps_contributor",
+            script: "export function f(x: { [s: string]: number } | { m: string }) { if (!(\"k\" in x)) return x; return 0; }",
+            checker: "{ [s: string]: number } | { m: string } | 0",
+            rendered: "Union({  } | { m: string } | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "in_required_member_positive_control",
+            script: "type A = { k: number }; type B = { m: string };\nexport function f(x: A | B) { if (\"k\" in x) return x; return 0; }",
+            checker: "A | 0",
+            rendered: "Union(DeclRef(A) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "in_required_member_negated_control",
+            script: "type A = { k: number }; type B = { m: string };\nexport function f(x: A | B) { if (!(\"k\" in x)) return x; return 0; }",
+            checker: "B | 0",
+            rendered: "Union(DeclRef(B) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+    ];
+    for case in &cases {
+        let measured = drive_expect_boundary("", case.id, case.script, "f", None);
+        let mut failures = Vec::new();
+        if let Some(rendered) = measured.rendered.as_deref() {
+            if rendered != case.rendered {
+                failures.push(format!(
+                    "value drifted: expected {} (a sound cover of checker `{}`), measured {}",
+                    case.rendered, case.checker, rendered
+                ));
+            }
+        } else {
+            failures.push(format!(
+                "the public boundary returned no value: {}",
+                measured.boundary.error.as_deref().unwrap_or("<unset>")
+            ));
+        }
+        if measured.boundary.degradation != Some(case.degradation) {
+            failures.push(format!(
+                "typed degradation drifted: expected {:?}, measured {:?}",
+                case.degradation, measured.boundary.degradation
+            ));
+        }
+        failures.extend(first_call_cold_clauses(&measured.boundary));
+        failures.extend(replay_clauses(case.warm, &measured.boundary));
+        let candidates = flow_return_candidate_count(case.id, case.script);
+        if case.warm {
+            if candidates == 0 {
+                failures.push(
+                    "clean row stored ZERO warm candidates — a complete result must warm"
+                        .to_owned(),
+                );
+            }
+        } else if candidates != 0 {
+            failures.push(format!(
+                "degraded row stored {candidates} warm candidate(s) — a guard-gapped result \
+                 is ReturnOnly and must store NONE"
+            ));
+        }
+        assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
+    }
+}
+
+/// `instanceof` narrows by the checker's measured arm rule and
+/// degrades whenever a needed relation is unprovable. Positive edge:
+/// nullish arms strip first; an arm IDENTICAL to the instance type
+/// survives, and any survivor drops every unrelated arm; when NO arm
+/// is related in either direction the WHOLE remaining subject
+/// intersects the instance type (the checker keeps such a branch
+/// ALIVE — measured `0 | ({ name: string } & Unrel)` from the pinned
+/// tsc, not a dead branch). An arm assignable to the instance type
+/// without BEING it — or one the instance type is assignable to (the
+/// downcast direction) — is underivable structurally: a genuine
+/// subclass and a same-shape underived constructor are
+/// indistinguishable, and guessing either way can publish a subset or
+/// an ungapped superset, so the subject stays UNCHANGED behind the
+/// typed guard gap, ReturnOnly. Negated edge: only an arm proved to BE
+/// the tested class (node identity with the instance type) drops;
+/// structural assignability alone cannot prove derivation (the checker
+/// KEEPS a same-shape underived arm), so such an arm is retained with
+/// the typed guard gap. A generic-class arm the relation oracle cannot
+/// decide and a construct-signature-typed right-hand side stay
+/// retained + gapped — sound supersets, never warm, never a fabricated
+/// dead edge.
+#[test]
+fn instanceof_narrows_by_the_checker_rule_and_gaps_only_unproven_arms() {
+    struct Case {
+        id: &'static str,
+        script: &'static str,
+        /// tsc 7.0.2 `--strict --emitDeclarationOnly` verdict.
+        checker: &'static str,
+        rendered: &'static str,
+        degradation: Degr,
+        warm: bool,
+    }
+    let cases = [
+        Case {
+            // The downcast direction is underivable from structure
+            // alone: the subject stays `Base` behind the typed gap
+            // where the checker downcasts to `Sub` — an honest
+            // ReturnOnly superset, never an unproven exact answer.
+            id: "instanceof_downcast_positive",
+            script: "class Base { name = \"\" }\nclass Sub extends Base { extra = 1 }\nexport function f(x: Base) { if (x instanceof Sub) return x; return 0; }",
+            checker: "0 | Sub",
+            rendered: "Union(DeclRef(Base) | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            // The double-negated spelling rides the same positive edge
+            // and gaps identically.
+            id: "instanceof_downcast_negated",
+            script: "class Base { name = \"\" }\nclass Sub extends Base { extra = 1 }\nexport function f(x: Base) { if (!(x instanceof Sub)) return 0; return x; }",
+            checker: "0 | Sub",
+            rendered: "Union(DeclRef(Base) | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            // An interface subject under an implementing-class test is
+            // the same underivable downcast direction.
+            id: "instanceof_interface_subject_implementing_class",
+            script: "interface Animal { name: string }\nclass Dog implements Animal { name: string = \"\"; bark(): void { } }\nexport function f(x: Animal) { if (x instanceof Dog) return x; return 0; }",
+            checker: "0 | Dog",
+            rendered: "Union(DeclRef(Animal) | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "instanceof_unrelated_structural_arm_intersects_alive",
+            script: "class Unrel { tag = 1 }\nexport function f(x: { name: string }) { if (x instanceof Unrel) return x; return 0; }",
+            checker: "0 | ({ name: string; } & Unrel)",
+            rendered: "Union(Intersection({ name: string } & DeclRef(Unrel)) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "instanceof_negated_identity_arm_drops_proved",
+            script: "class Base { name = \"\" }\nclass Sub extends Base { extra = 1 }\nexport function f(x: Sub | string) { if (!(x instanceof Sub)) return x; return 1; }",
+            checker: "string | 1",
+            rendered: "Union(string | 1)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "instanceof_negated_assignable_underived_arm_retained_gapped",
+            script: "interface Doglike { name: string; bark(): void }\nclass Dog { name = \"\"; bark(): void { } }\nexport function f(x: Doglike | number) { if (!(x instanceof Dog)) return x; return 1; }",
+            checker: "number | Doglike",
+            rendered: "Union(DeclRef(Doglike) | number)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "instanceof_generic_class_arm_retained_gapped",
+            script: "class Box<T> { v!: T }\nexport function f(x: Box<number>) { if (x instanceof Box) return x; return 0; }",
+            checker: "0 | Box<number>",
+            rendered: "Union(InstantiationRef(Box) | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "instanceof_construct_signature_rhs_stays_gapped",
+            script: "class Dog { name = \"\"; bark(): void { } }\nconst D: new () => Dog = Dog;\nexport function f(x: { name: string }) { if (x instanceof D) return x; return 0; }",
+            checker: "0 | Dog",
+            rendered: "Union({ name: string } | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+    ];
+    for case in &cases {
+        let measured = drive_expect_boundary("", case.id, case.script, "f", None);
+        let mut failures = Vec::new();
+        if let Some(rendered) = measured.rendered.as_deref() {
+            if rendered != case.rendered {
+                failures.push(format!(
+                    "value drifted: expected {} (covering checker `{}`), measured {}",
+                    case.rendered, case.checker, rendered
+                ));
+            }
+        } else {
+            failures.push(format!(
+                "the public boundary returned no value: {}",
+                measured.boundary.error.as_deref().unwrap_or("<unset>")
+            ));
+        }
+        if measured.boundary.degradation != Some(case.degradation) {
+            failures.push(format!(
+                "typed degradation drifted: expected {:?}, measured {:?}",
+                case.degradation, measured.boundary.degradation
+            ));
+        }
+        failures.extend(first_call_cold_clauses(&measured.boundary));
+        failures.extend(replay_clauses(case.warm, &measured.boundary));
+        let candidates = flow_return_candidate_count(case.id, case.script);
+        if case.warm {
+            if candidates == 0 {
+                failures.push(
+                    "clean row stored ZERO warm candidates — a complete result must warm"
+                        .to_owned(),
+                );
+            }
+        } else if candidates != 0 {
+            failures.push(format!(
+                "degraded row stored {candidates} warm candidate(s) — a guard-gapped result \
+                 is ReturnOnly and must store NONE"
+            ));
+        }
+        assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
+    }
+}
+
+/// A narrow's iteration domain enumerates THROUGH identity carriers: a
+/// subject typed by a union type ALIAS (`type Tag = ... | ...`), an
+/// alias of an alias, or a generic alias instantiation contributes the
+/// aliased union's arms — the checker's own reading — never ONE opaque
+/// arm. Treating the carrier as a single arm made every narrow over an
+/// alias-typed subject find nothing to filter and publish the WHOLE
+/// alias (a superset of the checker's type, e.g. a switch default edge
+/// still carrying the matched case's arm) complete and warm. Every
+/// guard family iterates the same domain, so the switch dispatch /
+/// remainder / exhaustiveness edges, `===`/`!==` literal equality,
+/// `typeof`, `instanceof`, `in`, and truthiness all narrow alias-typed
+/// subjects exactly as their inline-union spellings do; the inline
+/// control pins that the non-carrier domain is unchanged. Alias arms
+/// that are THEMSELVES aliases of non-union bodies stay the authored
+/// carrier (`DeclRef(A)`), matching the checker's published name. An
+/// alias to `boolean` decomposes into its literal arms for switch
+/// coverage exactly as the authored primitive does.
+#[test]
+fn alias_union_subjects_enumerate_and_narrow_like_the_checker() {
+    struct Case {
+        id: &'static str,
+        script: &'static str,
+        /// tsc 7.0.2 `--strict --emitDeclarationOnly` verdict.
+        checker: &'static str,
+        rendered: &'static str,
+        degradation: Degr,
+        warm: bool,
+    }
+    let cases = [
+        Case {
+            id: "alias_switch_template_default",
+            script: "type Tag = `item-${string}` | \"none\";\nexport function f(t: Tag) { switch (t) { case \"none\": return { v: 0 }; default: return { v: t } } }",
+            checker: "{ v: number; } | { v: `item-${string}`; }",
+            rendered: "Union({ v: number } | { v: TemplateLiteral(…) })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "alias_switch_matched_arm",
+            script: "type Tag = \"a\" | \"b\" | \"c\";\nexport function f(t: Tag) { switch (t) { case \"a\": return t; default: return 0 } }",
+            checker: "\"a\" | 0",
+            rendered: "Union(\"a\" | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "alias_switch_default_remainder",
+            script: "type Tag = \"a\" | \"b\" | \"c\";\nexport function f(t: Tag) { switch (t) { case \"a\": return 0; default: return t } }",
+            checker: "\"b\" | \"c\" | 0",
+            rendered: "Union(\"b\" | \"c\" | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "alias_switch_exhaustive_no_default",
+            script: "type Tag = \"a\" | \"b\";\nexport function f(t: Tag) { switch (t) { case \"a\": return 0; case \"b\": return \"s\" } }",
+            checker: "\"s\" | 0",
+            rendered: "Union(0 | \"s\")",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "boolean_alias_switch_exhaustive",
+            script: "type B = boolean;\nexport function f(t: B) { switch (t) { case true: return 1; case false: return \"s\" } }",
+            checker: "\"s\" | 1",
+            rendered: "Union(1 | \"s\")",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "alias_disc_union_object_arm",
+            script: "type U = { kind: \"a\"; v: number } | { kind: \"b\"; w: string };\ntype A = U;\nexport function f(u: A) { if (u.kind === \"a\") return u; return 0 }",
+            checker: "0 | { kind: \"a\"; v: number; }",
+            rendered: "Union({ kind: \"a\", v: number } | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "alias_arms_are_aliases_disc",
+            script: "type A = { kind: \"a\"; v: number };\ntype B = { kind: \"b\"; w: string };\ntype U = A | B;\nexport function f(u: U) { if (u.kind === \"a\") return u; return 0 }",
+            checker: "0 | A",
+            rendered: "Union(DeclRef(A) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "alias_of_alias_negated_eq",
+            script: "type Inner = \"a\" | \"b\";\ntype Outer = Inner | \"c\";\nexport function f(t: Outer) { if (t !== \"c\") return t; return 0 }",
+            checker: "0 | Inner",
+            rendered: "Union(\"a\" | \"b\" | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "generic_alias_instantiation_eq",
+            script: "type Wrap<T> = T | \"none\";\nexport function f(t: Wrap<\"a\">) { if (t !== \"none\") return t; return 0 }",
+            checker: "\"a\" | 0",
+            rendered: "Union(\"a\" | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "maybe_generic_alias_undefined_negated",
+            script: "type Maybe<T> = T | undefined;\nexport function f(t: Maybe<string>) { if (t !== undefined) return t; return 0 }",
+            checker: "string | 0",
+            rendered: "Union(string | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "typeof_over_alias_subject",
+            script: "type SN = string | number;\ntype T = SN;\nexport function f(t: T) { if (typeof t === \"string\") return t; return t }",
+            checker: "string | number",
+            rendered: "Union(string | number)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "instanceof_alias_negated_identity",
+            script: "class Base { name = \"\" }\nclass Sub extends Base { extra = 1 }\ntype U = Sub | string;\nexport function f(x: U) { if (!(x instanceof Sub)) return x; return 1 }",
+            checker: "string | 1",
+            rendered: "Union(string | 1)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "in_over_alias_subject",
+            script: "type U = { a: number } | { b: string };\nexport function f(x: U) { if (\"a\" in x) return x; return 0 }",
+            checker: "0 | { a: number; }",
+            rendered: "Union({ a: number } | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "truthy_alias_positive_edge",
+            script: "type T = 0 | 1;\nexport function f(t: T) { if (t) return t; return 9 }",
+            checker: "1 | 9",
+            rendered: "Union(1 | 9)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "non_alias_inline_union_control",
+            script: "export function f(t: `item-${string}` | \"none\") { switch (t) { case \"none\": return { v: 0 }; default: return { v: t } } }",
+            checker: "{ v: number; } | { v: `item-${string}`; }",
+            rendered: "Union({ v: number } | { v: TemplateLiteral(…) })",
+            degradation: Degr::None,
+            warm: true,
+        },
+    ];
+    for case in &cases {
+        let measured = drive_expect_boundary("", case.id, case.script, "f", None);
+        let mut failures = Vec::new();
+        if let Some(rendered) = measured.rendered.as_deref() {
+            if rendered != case.rendered {
+                failures.push(format!(
+                    "value drifted: expected {} (covering checker `{}`), measured {}",
+                    case.rendered, case.checker, rendered
+                ));
+            }
+        } else {
+            failures.push(format!(
+                "the public boundary returned no value: {}",
+                measured.boundary.error.as_deref().unwrap_or("<unset>")
+            ));
+        }
+        if measured.boundary.degradation != Some(case.degradation) {
+            failures.push(format!(
+                "typed degradation drifted: expected {:?}, measured {:?}",
+                case.degradation, measured.boundary.degradation
+            ));
+        }
+        failures.extend(first_call_cold_clauses(&measured.boundary));
+        failures.extend(replay_clauses(case.warm, &measured.boundary));
+        let candidates = flow_return_candidate_count(case.id, case.script);
+        if case.warm {
+            if candidates == 0 {
+                failures.push(
+                    "clean row stored ZERO warm candidates — a complete result must warm"
+                        .to_owned(),
+                );
+            }
+        } else if candidates != 0 {
+            failures.push(format!(
+                "degraded row stored {candidates} warm candidate(s) — a guard-gapped result \
+                 is ReturnOnly and must store NONE"
+            ));
+        }
+        assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
+    }
+}
+
+/// A guard over a property PATH lands its fact at the reference the
+/// checker narrows — never deeper-rooted. Measured against the pinned
+/// checker: `===` / `!==` (and the switch dispatch, remainder, and
+/// exhaustiveness edges) narrow the PARENT reference of the tested
+/// property — the root only when the path is one segment deep; at depth
+/// two the ROOT keeps every constituent, and selecting a root arm there
+/// DROPPED a real contributor (a SUBSET published complete and warm —
+/// strictly worse than widening). Truthiness narrows BOTH the tested
+/// reference and its parent (per-arm member truthiness, both edges,
+/// keeping a broad member on the falsy edge). `typeof`, `instanceof`,
+/// and `in` narrow ONLY the tested reference: their root stays whole at
+/// every depth, pinned by the controls. Switch coverage relates the
+/// parent's projected member per LEAF, so a nested boolean or a
+/// member-union discriminant proves exhaustiveness exactly as the
+/// checker does.
+#[test]
+fn deep_path_guards_narrow_the_parent_reference_not_the_root() {
+    struct Case {
+        id: &'static str,
+        script: &'static str,
+        /// tsc 7.0.2 `--strict --emitDeclarationOnly` verdict.
+        checker: &'static str,
+        rendered: &'static str,
+        degradation: Degr,
+        warm: bool,
+    }
+    let cases = [
+        Case {
+            id: "eq2_root_keeps_every_constituent",
+            script: "type M1 = { meta: { kind: \"one\" }, a: string };\ntype M2 = { meta: { kind: \"two\" }, b: number };\nexport function f(m: M1 | M2) { if (m.meta.kind === \"one\") { return m } return 0 }",
+            checker: "0 | M1 | M2",
+            rendered: "Union(DeclRef(M1) | DeclRef(M2) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "eq2_parent_reference_narrows",
+            script: "type M1 = { meta: { kind: \"one\" }, a: string };\ntype M2 = { meta: { kind: \"two\" }, b: number };\nexport function f(m: M1 | M2) { if (m.meta.kind === \"one\") { return m.meta } return 0 }",
+            checker: "0 | { kind: \"one\"; }",
+            rendered: "Union({ kind: \"one\" } | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "eq2_negated_parent_reference_narrows",
+            script: "type M1 = { meta: { kind: \"one\" }, a: string };\ntype M2 = { meta: { kind: \"two\" }, b: number };\nexport function f(m: M1 | M2) { if (m.meta.kind !== \"one\") { return m.meta } return 0 }",
+            checker: "0 | { kind: \"two\"; }",
+            rendered: "Union({ kind: \"two\" } | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "eq1_root_discriminant_control",
+            script: "type Q1 = { kind: \"one\", a: string };\ntype Q2 = { kind: \"two\", b: number };\nexport function f(m: Q1 | Q2) { if (m.kind === \"one\") { return m } return 0 }",
+            checker: "0 | Q1",
+            rendered: "Union(DeclRef(Q1) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "switch2_root_keeps_every_constituent",
+            script: "type M1 = { meta: { kind: \"one\" }, a: string };\ntype M2 = { meta: { kind: \"two\" }, b: number };\nexport function f(m: M1 | M2) { switch (m.meta.kind) { case \"one\": return m; default: return 0 } }",
+            checker: "0 | M1 | M2",
+            rendered: "Union(DeclRef(M1) | DeclRef(M2) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "switch2_parent_dispatch_edges",
+            script: "type M1 = { meta: { kind: \"one\" }, a: string };\ntype M2 = { meta: { kind: \"two\" }, b: number };\nexport function f(m: M1 | M2) { switch (m.meta.kind) { case \"one\": return m.meta; default: return m.meta } }",
+            checker: "{ kind: \"one\"; } | { kind: \"two\"; }",
+            rendered: "Union({ kind: \"two\" } | { kind: \"one\" })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "switch2_exhaustive_no_default",
+            script: "type M1 = { meta: { kind: \"one\" }, a: string };\ntype M2 = { meta: { kind: \"two\" }, b: number };\nexport function f(m: M1 | M2) { switch (m.meta.kind) { case \"one\": return 1; case \"two\": return \"s\" } }",
+            checker: "\"s\" | 1",
+            rendered: "Union(1 | \"s\")",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "switch2_nested_boolean_exhaustive",
+            script: "type W1 = { meta: { flag: true } };\ntype W2 = { meta: { flag: false } };\nexport function f(m: W1 | W2) { switch (m.meta.flag) { case true: return 1; case false: return \"s\" } }",
+            checker: "\"s\" | 1",
+            rendered: "Union(1 | \"s\")",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "switch1_member_union_exhaustive",
+            script: "type X = { kind: \"a\" | \"b\" };\nexport function f(u: X) { switch (u.kind) { case \"a\": return 1; case \"b\": return \"s\" } }",
+            checker: "\"s\" | 1",
+            rendered: "Union(1 | \"s\")",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "truthy1_literal_discriminant_root",
+            script: "type V1 = { ok: true, a: 1 };\ntype V2 = { ok: false, b: 2 };\nexport function f(m: V1 | V2) { if (m.ok) { return m } return 0 }",
+            checker: "0 | V1",
+            rendered: "Union(DeclRef(V1) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "truthy1_literal_discriminant_negated_root",
+            script: "type V1 = { ok: true, a: 1 };\ntype V2 = { ok: false, b: 2 };\nexport function f(m: V1 | V2) { if (m.ok) { return 0 } return m }",
+            checker: "0 | V2",
+            rendered: "Union(DeclRef(V2) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "truthy1_broad_member_root",
+            script: "type Y1 = { v: string, a: 1 };\ntype Y2 = { v: undefined, b: 2 };\nexport function f(m: Y1 | Y2) { if (m.v) { return m } return 0 }",
+            checker: "0 | Y1",
+            rendered: "Union(DeclRef(Y1) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "truthy1_broad_member_negated_keeps_both",
+            script: "type Y1 = { v: string, a: 1 };\ntype Y2 = { v: undefined, b: 2 };\nexport function f(m: Y1 | Y2) { if (m.v) { return 0 } return m }",
+            checker: "0 | Y1 | Y2",
+            rendered: "Union(DeclRef(Y1) | DeclRef(Y2) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "truthy2_parent_reference_narrows",
+            script: "type U1 = { meta: { v: string }, a: 1 };\ntype U2 = { meta: { v: undefined }, b: 2 };\nexport function f(m: U1 | U2) { if (m.meta.v) { return m.meta } return 0 }",
+            checker: "0 | { v: string; }",
+            rendered: "Union({ v: string } | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "typeof2_root_untouched_control",
+            script: "type N1 = { meta: { v: string }, a: 1 };\ntype N2 = { meta: { v: number }, b: 2 };\nexport function f(m: N1 | N2) { if (typeof m.meta.v === \"string\") { return m } return 0 }",
+            checker: "0 | N1 | N2",
+            rendered: "Union(DeclRef(N1) | DeclRef(N2) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "typeof2_leaf_reference_narrows_control",
+            script: "type N1 = { meta: { v: string }, a: 1 };\ntype N2 = { meta: { v: number }, b: 2 };\nexport function f(m: N1 | N2) { if (typeof m.meta.v === \"string\") { return m.meta.v } return 0 }",
+            checker: "string | 0",
+            rendered: "Union(string | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "in2_parent_reference_narrows_control",
+            script: "type R1 = { meta: { x: 1 }, a: 1 };\ntype R2 = { meta: { y: 2 }, b: 2 };\nexport function f(m: R1 | R2) { if (\"x\" in m.meta) { return m.meta } return 0 }",
+            checker: "0 | { x: 1; }",
+            rendered: "Union({ x: 1 } | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "inst2_leaf_reference_narrows_control",
+            script: "class C { c = 1 }\ntype S1 = { meta: { v: C }, a: 1 };\ntype S2 = { meta: { v: string }, b: 2 };\nexport function f(m: S1 | S2) { if (m.meta.v instanceof C) { return m.meta.v } return 0 }",
+            checker: "0 | C",
+            rendered: "Union(DeclRef(C) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+    ];
+    for case in &cases {
+        let measured = drive_expect_boundary("", case.id, case.script, "f", None);
+        let mut failures = Vec::new();
+        if let Some(rendered) = measured.rendered.as_deref() {
+            if rendered != case.rendered {
+                failures.push(format!(
+                    "value drifted: expected {} (covering checker `{}`), measured {}",
+                    case.rendered, case.checker, rendered
+                ));
+            }
+        } else {
+            failures.push(format!(
+                "the public boundary returned no value: {}",
+                measured.boundary.error.as_deref().unwrap_or("<unset>")
+            ));
+        }
+        if measured.boundary.degradation != Some(case.degradation) {
+            failures.push(format!(
+                "typed degradation drifted: expected {:?}, measured {:?}",
+                case.degradation, measured.boundary.degradation
+            ));
+        }
+        failures.extend(first_call_cold_clauses(&measured.boundary));
+        failures.extend(replay_clauses(case.warm, &measured.boundary));
+        let candidates = flow_return_candidate_count(case.id, case.script);
+        if case.warm {
+            if candidates == 0 {
+                failures.push(
+                    "clean row stored ZERO warm candidates — a complete result must warm"
+                        .to_owned(),
+                );
+            }
+        } else if candidates != 0 {
+            failures.push(format!(
+                "degraded row stored {candidates} warm candidate(s) — a guard-gapped result \
+                 is ReturnOnly and must store NONE"
+            ));
+        }
+        assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
+    }
+}
+
+/// A bare truthiness guard consumes the shared demand-scoped
+/// truthiness-domain fact (`ClassifyTruthinessDomain`) per enumerated
+/// arm: an arm with NO inhabitant on the tested edge leaves the edge, an
+/// arm with a proven inhabitant stays, and an edge with NO surviving arm
+/// narrows the subject to `never` WITHOUT deleting the branch's
+/// syntactic return contributor — the checker keeps `return { v }` as
+/// `{ v: never }` (measured), so a dead-branch reading that drops the
+/// return publishes a subset of the checker's type. An arm whose domain
+/// the authority cannot decide (an unresolved operator carrier) stays on
+/// both edges, records the typed guard gap, and never warms. Every
+/// `checker` column is measured against the pinned tsc 7.0.2
+/// (`--strict --declaration --emitDeclarationOnly`).
+#[test]
+fn truthiness_domain_facts_narrow_like_the_checker() {
+    struct Case {
+        id: &'static str,
+        script: &'static str,
+        /// tsc 7.0.2 `--strict --emitDeclarationOnly` verdict.
+        checker: &'static str,
+        rendered: &'static str,
+        degradation: Degr,
+        warm: bool,
+    }
+    let cases = [
+        // The certified falsy-edge fact defect: a template-literal type
+        // with a non-empty literal prefix has NO falsy inhabitant, so
+        // neither `Tag` arm survives the falsy edge — yet the syntactic
+        // `return { v }` still contributes, typed `{ v: never }`.
+        Case {
+            id: "truthy3_template_prefix_falsy_edge_is_never",
+            script: "type Tag = `item-${string}` | \"none\";\nexport function f(v: Tag) { if (v) return 1; return { v } }",
+            checker: "1 | { v: never; }",
+            rendered: "Union(1 | { v: never })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // The negated spelling consumes the same falsy bit on the
+        // then-edge — a swapped truthy/falsy mapping fails exactly here.
+        Case {
+            id: "truthy3_template_prefix_negated_edge_is_never",
+            script: "type Tag = `item-${string}` | \"none\";\nexport function f(v: Tag) { if (!v) return { v }; return 1 }",
+            checker: "1 | { v: never; }",
+            rendered: "Union({ v: never } | 1)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // `${number}` renders only non-empty strings ("0", "NaN", …):
+        // no falsy inhabitant even though every quasi is empty.
+        Case {
+            id: "truthy3_number_template_falsy_edge_is_never",
+            script: "export function f(v: `${number}`) { if (v) return 1; return { v } }",
+            checker: "1 | { v: never; }",
+            rendered: "Union(1 | { v: never })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // `${string}` contains `""`: the falsy edge keeps the arm. This
+        // is the overreach control for the non-empty-prefix rule.
+        Case {
+            id: "truthy3_string_template_keeps_falsy_edge",
+            script: "export function f(v: `${string}`) { if (v) return 1; return { v } }",
+            checker: "1 | { v: string; }",
+            rendered: "Union(1 | { v: TemplateLiteral(…) })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // A bare broad `string` has both a truthy and a falsy inhabitant
+        // (`""`): both edges keep it, unrefined, clean and warm — the
+        // discriminating pair's second half.
+        Case {
+            id: "truthy3_bare_string_keeps_both_edges",
+            script: "export function f(v: string) { if (v) return 1; return { v } }",
+            checker: "1 | { v: string; }",
+            rendered: "Union(1 | { v: string })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // OVER-NARROW CONTROL. A postfix non-null assertion is
+        // transparent to REFERENCE IDENTITY — `v!.y` names `v.y` — but
+        // the truthiness fact must not travel UP to the parent: `y` is
+        // not a discriminant, and unlike `v?.y` (which is truthy only
+        // when `v` is non-nullish) the assertion proves nothing about
+        // `v` on the edge. The checker keeps `undefined` in `v`
+        // (measured: `v!.y` emits `{ v: { y: number; } | undefined; }`,
+        // `v?.y` emits `{ v: { y: number; }; }`), and the published
+        // value here EQUALS it. Dropping `undefined` would be the SUBSET
+        // direction — a real contributor deleted — so this row is the
+        // fence on the reference peel leaking into parent-arm selection.
+        // The undecidable `undefined` arm still records the typed guard
+        // gap, so the result is ReturnOnly and never warms.
+        Case {
+            id: "truthy3_non_null_asserted_member_keeps_parent_union",
+            script: "export function f(v: { y: number } | undefined) { if (v!.y) return { v }; return 1 }",
+            checker: "1 | { v: { y: number; } | undefined; }",
+            rendered: "Union({ v: Union({ y: number } | undefined) } | 1)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        // An intersection with an object arm has no falsy inhabitant
+        // (every inhabitant would inhabit the always-truthy arm), so the
+        // falsy edge drops it while `number` stays.
+        Case {
+            id: "truthy3_object_intersection_falsy_edge_dropped",
+            script: "export function f(v: ({ a: 1 } & { b: 2 }) | number) { if (v) return 1; return { v } }",
+            checker: "1 | { v: number; }",
+            rendered: "Union(1 | { v: number })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // A branded primitive intersection (`string & {x: 1}`) keeps
+        // BOTH edges: the branded `""` inhabits the falsy bucket, so the
+        // buckets compose by per-bucket OR — the arm survives the truthy
+        // edge too (a fold that absorbs into uninhabited drops it there).
+        Case {
+            id: "truthy3_branded_string_intersection_keeps_both_edges",
+            script: "export function f(v: (string & { x: 1 }) | number) { if (v) return { v }; return 1 }",
+            checker: "1 | { v: number | (string & { x: 1; }); }",
+            rendered: "Union(1 | { v: Union(Intersection(string & { x: 1 }) | number) })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // The MEMBERLESS `{}` admits primitives (`""`, `0`, `false` are
+        // all assignable), so BOTH edges keep it — a surface with any
+        // member (even optional) stays object-only instead.
+        Case {
+            id: "truthy3_empty_object_surface_keeps_both_edges",
+            script: "export function f(v: {} | 0) { if (v) return 1; return { v } }",
+            checker: "1 | { v: 0 | {}; }",
+            rendered: "Union(1 | { v: Union({  } | 0) })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // An unresolved operator carrier (`keyof T` over an open `T`)
+        // has an UNDECIDED domain: the checker keeps it, the narrow
+        // keeps it too, and the undecided fact records the typed guard
+        // gap — the result never warms.
+        Case {
+            id: "truthy3_undecided_carrier_keeps_arm_and_degrades",
+            script: "export function f<T>(v: keyof T | 0) { if (v) return 1; return { v } }",
+            checker: "1 | { v: 0 | keyof T; }",
+            rendered: "Union(1 | { v: Union(KeyOf(TypeParam(T)) | 0) })",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        // A type parameter classifies through its CONSTRAINT's domain: a
+        // truthy-only constraint (`"a"`) leaves the falsy edge with no
+        // surviving arm.
+        Case {
+            id: "truthy3_constrained_param_falsy_edge_is_never",
+            script: "export function f<T extends \"a\">(v: T | \"x\") { if (v) return 1; return { v } }",
+            checker: "1 | { v: never; }",
+            rendered: "Union(1 | { v: never })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        // An UNCONSTRAINED parameter's domain is `unknown`'s: both edges
+        // keep it, decided, clean and warm.
+        Case {
+            id: "truthy3_unconstrained_param_keeps_both_edges",
+            script: "export function f<T>(v: T | 0) { if (v) return 1; return { v } }",
+            checker: "1 | { v: 0 | T; }",
+            rendered: "Union(1 | { v: Union(TypeParam(T) | 0) })",
+            degradation: Degr::None,
+            warm: true,
+        },
+    ];
+    for case in &cases {
+        let measured = drive_expect_boundary("", case.id, case.script, "f", None);
+        let mut failures = Vec::new();
+        if let Some(rendered) = measured.rendered.as_deref() {
+            if rendered != case.rendered {
+                failures.push(format!(
+                    "value drifted: expected {} (covering checker `{}`), measured {}",
+                    case.rendered, case.checker, rendered
+                ));
+            }
+        } else {
+            failures.push(format!(
+                "the public boundary returned no value: {}",
+                measured.boundary.error.as_deref().unwrap_or("<unset>")
+            ));
+        }
+        if measured.boundary.degradation != Some(case.degradation) {
+            failures.push(format!(
+                "typed degradation drifted: expected {:?}, measured {:?}",
+                case.degradation, measured.boundary.degradation
+            ));
+        }
+        failures.extend(first_call_cold_clauses(&measured.boundary));
+        failures.extend(replay_clauses(case.warm, &measured.boundary));
+        let candidates = flow_return_candidate_count(case.id, case.script);
+        if case.warm {
+            if candidates == 0 {
+                failures.push(
+                    "clean row stored ZERO warm candidates — a complete result must warm"
+                        .to_owned(),
+                );
+            }
+        } else if candidates != 0 {
+            failures.push(format!(
+                "degraded row stored {candidates} warm candidate(s) — a guard-gapped result \
+                 is ReturnOnly and must store NONE"
+            ));
+        }
+        assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
+    }
+}
+
+/// One member-object wrapper for the exact boundary JSON pins below:
+/// `{ v: <ty> }` exactly as the projector serialises a fresh literal
+/// return object with the single member `v`.
+#[cfg(test)]
+fn single_v_object_json(ty: &str) -> String {
+    format!(
+        r#"{{"kind":"object","properties":[{{"excessOrigin":"freshOwn","key":{{"kind":"string","value":"v"}},"memberKind":"property","optional":false,"readonly":false,"ty":{ty}}}]}}"#
+    )
+}
+
+/// `as const` literal identity through EVOLVING-variable assignments and
+/// joins (checker-measured, tsgo 7.0.2 `--strict`): an assignment into a
+/// binding with no declared authority widens EXACTLY the fresh
+/// positions — a bare literal, a fresh ternary arm, a read of a
+/// widening-literal `const` — and preserves every pinned one — a
+/// const-asserted literal, a pinned-const read, a callee's literal
+/// return. `switch`, `if`/`else`, straight-line reassignment and ternary
+/// RHS all route through the ONE assignment authority; a fresh and a
+/// pinned spelling of the SAME literal collapse to the pinned literal
+/// (measured: `c ? 1 : 1 as const` reads `1`, never `number`). The
+/// `if`/`else` twin keeps its sound `ConditionalVarDefinition`
+/// fail-close (the substrate cannot yet prove the never-assigned path
+/// empty), but its VALUE now carries the pinned literals.
+#[test]
+fn as_const_literal_identity_survives_evolving_assignments_and_joins() {
+    let lit_s = |v: &str| format!(r#"{{"kind":"literal","literalKind":"string","value":"{v}"}}"#);
+    let lit_n = |v: &str| format!(r#"{{"kind":"literal","literalKind":"number","value":{v}}}"#);
+    let prim = |name: &str| format!(r#"{{"kind":"primitive","name":"{name}"}}"#);
+    let union2 = |a: &str, b: &str| format!(r#"{{"kind":"union","types":[{a},{b}]}}"#);
+    let union3 = |a: &str, b: &str, c: &str| format!(r#"{{"kind":"union","types":[{a},{b},{c}]}}"#);
+    let cases: [(&str, &str, String, Degr, bool); 12] = [
+        (
+            "switch_asconst_join",
+            "function f(n: number) { let v; switch (n) { case 1: v = \"r\" as const; break; case 2: v = 2 as const; break; default: v = true as const } return { v } }",
+            single_v_object_json(&union3(
+                &lit_s("r"),
+                &lit_n("2.0"),
+                r#"{"kind":"literal","literalKind":"boolean","value":true}"#,
+            )),
+            Degr::None,
+            true,
+        ),
+        (
+            "ifelse_asconst_join_keeps_conditional_fail_close",
+            "function f(n: number) { let v; if (n > 0) { v = \"p\" as const } else { v = 1 as const } return { v } }",
+            single_v_object_json(&union2(&lit_s("p"), &lit_n("1.0"))),
+            Degr::ConditionalVarDefinition,
+            false,
+        ),
+        (
+            "straightline_reassign_last_pinned_write_wins",
+            "function f() { let v; v = \"r\" as const; v = 2 as const; return { v } }",
+            single_v_object_json(&lit_n("2.0")),
+            Degr::None,
+            true,
+        ),
+        (
+            "pinned_const_read_stays_pinned",
+            "function f() { const w = 1 as const; let v; v = w; return { v } }",
+            single_v_object_json(&lit_n("1.0")),
+            Degr::None,
+            true,
+        ),
+        (
+            "widening_const_read_still_widens",
+            "function f() { const w = 1; let v; v = w; return { v } }",
+            single_v_object_json(&prim("number")),
+            Degr::None,
+            true,
+        ),
+        (
+            "callee_literal_return_is_not_fresh",
+            "function g() { return 1 as const }\nfunction f() { let v; v = g(); return { v } }",
+            single_v_object_json(&lit_n("1.0")),
+            Degr::None,
+            true,
+        ),
+        (
+            "ternary_fresh_arms_widen",
+            "function f(n: number) { let v; v = n > 0 ? \"r\" : 2; return { v } }",
+            single_v_object_json(&union2(&prim("string"), &prim("number"))),
+            Degr::None,
+            true,
+        ),
+        (
+            "ternary_pinned_arms_stay",
+            "function f(n: number) { let v; v = n > 0 ? \"r\" as const : 2 as const; return { v } }",
+            single_v_object_json(&union2(&lit_s("r"), &lit_n("2.0"))),
+            Degr::None,
+            true,
+        ),
+        (
+            "ternary_mixed_arms_split_per_arm",
+            "function f(n: number) { let v; v = n > 0 ? (\"r\" as const) : 2; return { v } }",
+            single_v_object_json(&union2(&lit_s("r"), &prim("number"))),
+            Degr::None,
+            true,
+        ),
+        (
+            "same_literal_fresh_and_pinned_collapse_to_pinned",
+            "function f(c: boolean) { let v; v = c ? 1 : 1 as const; return { v } }",
+            single_v_object_json(&lit_n("1.0")),
+            Degr::None,
+            true,
+        ),
+        (
+            "satisfies_preserves_freshness",
+            "function f() { let v; v = \"r\" satisfies string; return { v } }",
+            single_v_object_json(&prim("string")),
+            Degr::None,
+            true,
+        ),
+        (
+            "switch_bare_literals_still_widen",
+            "function f(n: number) { let v; switch (n) { case 1: v = \"r\"; break; case 2: v = 2; break; default: v = true } return { v } }",
+            single_v_object_json(&union3(
+                &prim("string"),
+                &prim("number"),
+                &prim("boolean"),
+            )),
+            Degr::None,
+            true,
+        ),
+    ];
+    let mut report = Vec::new();
+    for (case, script, json, degradation, warm) in &cases {
+        let measured = drive_expect_boundary("", "evolve_fresh", script, "f", None);
+        let failures = check_boundary(json, *degradation, *warm, &measured.boundary);
+        if !failures.is_empty() {
+            report.push(format!(
+                "== {case}:\n{}\nrendered: {}",
+                failures.join("\n"),
+                measured.rendered.as_deref().unwrap_or("<none>")
+            ));
+        }
+    }
+    assert!(report.is_empty(), "\n{}", report.join("\n"));
+}
+
+/// `"k" in x` models KEY PRESENCE separately from value
+/// non-`undefined`-ness, and a member VALUE READ carries the optional
+/// member's own absent-key `undefined` (checker-measured, tsgo 7.0.2
+/// `--strict`, `exactOptionalPropertyTypes` NOT in the oracle profile):
+/// the positive edge keeps an optional arm UNCHANGED — the checker does
+/// not refine the value to non-`undefined` (`if ("k" in x) x.k` reads
+/// `string | undefined`, byte-identical to the guard-free read) — so
+/// retention is exact and publishes clean and warm; a REQUIRED member
+/// gains no fabricated `undefined`; an explicit `| undefined` gains no
+/// duplicate; an arm whose key set the graph cannot decide (an
+/// index-signature surface) still fails closed with the typed guard gap
+/// and never warms.
+#[test]
+fn in_guard_presence_is_separate_from_value_undefined() {
+    let obj_v = |ty: &str| single_v_object_json(ty);
+    let str_or_undef = r#"{"kind":"union","types":[{"kind":"primitive","name":"string"},{"kind":"primitive","name":"undefined"}]}"#;
+    // `return { v: 0 }`'s member literal widens at the member position
+    // (fresh-literal object member) — the checker's own `{ v: number }`.
+    let num = r#"{"kind":"primitive","name":"number"}"#;
+    let union2 = |a: &str, b: &str| format!(r#"{{"kind":"union","types":[{a},{b}]}}"#);
+    let cases: [(&str, &str, String, Degr, bool); 8] = [
+        (
+            "optional_member_positive_edge_keeps_undefined",
+            "type T = { k?: string }\nfunction f(x: T) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
+            union2(&obj_v(str_or_undef), &obj_v(num)),
+            Degr::None,
+            true,
+        ),
+        (
+            "union_optional_arm_selected_keeps_undefined",
+            "type A = { k?: string }; type B = { n: number }\nfunction f(x: A | B) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
+            union2(&obj_v(str_or_undef), &obj_v(num)),
+            Degr::None,
+            true,
+        ),
+        (
+            "negated_edge_keeps_optional_arm_and_undefined",
+            "type T = { k?: string }\nfunction f(x: T) { if (\"k\" in x) { return { v: 0 } } return { v: x.k } }",
+            union2(&obj_v(num), &obj_v(str_or_undef)),
+            Degr::None,
+            true,
+        ),
+        (
+            "mixed_optional_and_required_arms_union_their_reads",
+            "type A = { k?: string }; type B = { k: number }\nfunction f(x: A | B) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
+            union2(
+                &obj_v(r#"{"kind":"union","types":[{"kind":"primitive","name":"string"},{"kind":"primitive","name":"number"},{"kind":"primitive","name":"undefined"}]}"#),
+                &obj_v(num),
+            ),
+            Degr::None,
+            true,
+        ),
+        (
+            "guard_free_optional_read_carries_undefined",
+            "type T = { k?: string }\nfunction f(x: T) { return { v: x.k } }",
+            obj_v(str_or_undef),
+            Degr::None,
+            true,
+        ),
+        (
+            "terminal_hop_after_required_hop_carries_undefined",
+            "type Inner = { k?: string }; type T = { a: Inner }\nfunction f(x: T) { return { v: x.a.k } }",
+            obj_v(str_or_undef),
+            Degr::None,
+            true,
+        ),
+        // The two rows below sit on a REQUIRED single-arm subject, whose
+        // negated `in` edge no arm survives. That edge stays ALIVE with
+        // the subject read as `never`, so the fall-through
+        // `return { v: 0 }` — which never reads the subject — keeps its
+        // own contribution (measured: `{ v: string; } | { v: number; }`),
+        // and the kept arm's value stays EXACT: no fabricated
+        // `undefined` on a required member, no duplicate `undefined` on
+        // an explicit one.
+        (
+            "required_member_gains_no_undefined",
+            "type T = { k: string }\nfunction f(x: T) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
+            union2(
+                &obj_v(r#"{"kind":"primitive","name":"string"}"#),
+                &obj_v(num),
+            ),
+            Degr::None,
+            true,
+        ),
+        (
+            "explicit_undefined_gains_no_duplicate",
+            "type T = { k: string | undefined }\nfunction f(x: T) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
+            union2(&obj_v(str_or_undef), &obj_v(num)),
+            Degr::None,
+            true,
+        ),
+    ];
+    let mut report = Vec::new();
+    for (case, script, json, degradation, warm) in &cases {
+        let measured = drive_expect_boundary("", "in_presence", script, "f", None);
+        let failures = check_boundary(json, *degradation, *warm, &measured.boundary);
+        if !failures.is_empty() {
+            report.push(format!(
+                "== {case}:\n{}\nrendered: {}",
+                failures.join("\n"),
+                measured.rendered.as_deref().unwrap_or("<none>")
+            ));
+        }
+    }
+    assert!(report.is_empty(), "\n{}", report.join("\n"));
+
+    // An arm whose runtime key set the graph cannot decide — an
+    // index-signature surface — still fails closed: the typed guard gap
+    // rides the result and it NEVER warms (the fold refuses to claim a
+    // surface it cannot prove).
+    let measured = drive_expect_boundary(
+        "",
+        "in_presence_unknown",
+        "type T = { [key: string]: number }\nfunction f(x: T) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
+        "f",
+        None,
+    );
+    assert_eq!(
+        measured.boundary.degradation,
+        Some(Degr::FlowGap(FlowGap::GuardNarrowing)),
+        "an undecidable key set keeps the typed guard gap"
+    );
+    assert!(
+        !measured.boundary.second_from_cache,
+        "an undecidable key set is never admitted warm"
+    );
 }

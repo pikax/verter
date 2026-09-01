@@ -16,14 +16,20 @@ use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     ArgumentLiteralMode, CallArgKey, CallKind, CanonicalTypeSubstitution, ConstParamPolicy,
     ContextualInferenceMode, FreshnessKey, FunctionParam, InferenceCandidatePriority,
-    InferencePassKind, NoInferMask, PrimitiveKind, QueryError, QueryResult, ResolveCallFailure,
-    ResolveCallKey, ResolvedCallResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SemanticQueryValue, SignatureKind, SignatureRef, SignatureReturnCarrier, VariancePhase,
+    InferencePassKind, NoInferMask, PrimitiveKind, ProjectionReductionContext, QueryError,
+    QueryResult, ResolveCallFailure, ResolveCallKey, ResolvedCallResult, SemanticNodeData,
+    SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SignatureKind, SignatureRef,
+    SignatureReturnCarrier, VariancePhase,
 };
 
 pub(super) const MAX_CANDIDATES_STARTED: usize = 64;
 const MAX_APPLICABILITY_RELATIONS: usize = 1_024;
 const MAX_INFERENCE_DEPOSITS: usize = 1_024;
+/// Recursion bound for the call-boundary deposit walk: top-level union /
+/// intersection constituents plus one-level alias-instantiation
+/// expansions. Running out answers NOT-top-level (the deposit widens —
+/// the superset direction).
+const DEPOSIT_WALK_FUEL: u8 = 16;
 
 #[derive(Debug, Clone)]
 pub(crate) enum ResolveCallStep {
@@ -37,6 +43,10 @@ enum ResolveCallRootClose {
         ResolvedCallResult,
         Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     ),
+    /// A complete result whose mixed component consumed UNPROVEN
+    /// flow-member values: the value flows to the caller, the build is
+    /// cache-suppressed — never queued, never warm.
+    CompleteReturnOnly(ResolvedCallResult),
     Degraded(ResolveCallFailure),
 }
 
@@ -162,7 +172,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let outcome = self.run_resolve_call(&key);
         match self.resolve_call_frame_pop(idx, outcome, false) {
             ResolveCallFramePop::Provisional(step) => step,
-            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, _)) => {
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, _))
+            | ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(result)) => {
                 ResolveCallStep::Complete(result)
             }
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure)) => {
@@ -214,6 +225,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let idx = self.resolve_call_frame_open(key);
         let outcome = self.run_resolve_call(key);
+        #[cfg(any(test, feature = "test-support"))]
+        self.inject_unproven_flow_member_for_tests(idx);
         match self.resolve_call_frame_pop(idx, outcome, true) {
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, self_roots)) => {
                 // A rootless winner has no stable occurrence to key a
@@ -226,6 +239,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ))
                 .with_observed_self_roots(self_roots);
                 output.cache_suppress |= !admits;
+                output
+            }
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(result)) => {
+                // ReturnOnly-but-public: the value was composed around a
+                // mixed component whose flow members finalized UNPROVEN —
+                // the caller receives it, the memo refuses admission, and
+                // the frame close already marked the request partial.
+                let mut output: QueryBuildOutput<SemanticQueryValue> = (
+                    QueryResult::Value(SemanticQueryValue::ResolveCall(Arc::new(result))),
+                    fence,
+                )
+                    .into();
+                output.cache_suppress = true;
                 output
             }
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure)) => {
@@ -387,11 +413,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     flow_members.push(super::relation::DrainedFlowReturnMember {
                         key,
                         outcome: state.outcome,
+                        plan_refusal: state.plan_refusal,
                         inline_flight: state.inline_flight,
                         holds: state.holds,
                         self_roots: state.self_roots,
                         materialized: state.materialized,
                         fresh_seed: state.fresh_seed,
+                        flow_demand: state.flow_demand,
+                        discharge: state.discharge,
+                        provenance: state.provenance,
                     });
                 }
                 PendingObligationDomain::ResolveCall(state) => {
@@ -490,6 +520,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut root_result = None;
         let mut call_results = Vec::new();
         let mut converged = false;
+        // The observed convergence of the joint fixed point: every
+        // flow-side pass the discharge runs, accumulated across passes.
+        let mut observed_iterations: u32 = 0;
         for _pass in 0..bound {
             if !flow_members.is_empty() {
                 let mut entries: Vec<super::dispatch_txn::FlowDischargeEntry> =
@@ -502,7 +535,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         fresh_seed: member.fresh_seed,
                     });
                 }
-                self.discharge_flow_component_to_fixed_point(&mut entries, &call_value_map);
+                let observed =
+                    self.discharge_flow_component_to_fixed_point(&mut entries, &call_value_map);
+                observed_iterations = observed_iterations.saturating_add(observed.iterations);
                 for (member, entry) in flow_members.iter_mut().zip(entries) {
                     member.outcome = entry.outcome;
                 }
@@ -536,7 +571,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             > = flow_members
                 .iter()
                 .filter_map(|member| match &member.outcome {
-                    super::dispatch_txn::FlowReturnPendingOutcome::Complete(result) => {
+                    super::dispatch_txn::FlowReturnPendingOutcome::EvaluatedValue(result) => {
                         Some((member.key.clone(), result.return_type()))
                     }
                     super::dispatch_txn::FlowReturnPendingOutcome::NoValue { .. } => None,
@@ -673,19 +708,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some((root_key.clone(), root_result.clone(), root.staged_session)),
             call_results,
             cyclic,
+            &super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence {
+                iterations: observed_iterations,
+                stable: true,
+            },
         );
-        if let Err(cap) = discharge {
-            if let Some(session) = root.staged_session {
-                self.abandon_session(session);
+        let discharge = match discharge {
+            Ok(outcome) => outcome,
+            Err(cap) => {
+                if let Some(session) = root.staged_session {
+                    self.abandon_session(session);
+                }
+                self.resolve_call_abort_inline_flight(root.inline_flight.as_ref());
+                return ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(
+                    if cap.is_some() {
+                        ResolveCallFailure::Budget
+                    } else {
+                        ResolveCallFailure::Undecidable
+                    },
+                ));
+            }
+        };
+        if discharge.flow_batch_unproven {
+            // The root's return equation consumed UNPROVEN flow-member
+            // values (the member batch was refused at the proof gate):
+            // the call's value still flows to the caller, but the root is
+            // NON-ADMISSIBLE — never queued, never warm — and the
+            // enclosing build/request take the same rails the inline
+            // flow-root refusal folds.
+            self.fold_cache_read_rails(
+                true,
+                true,
+                crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED
+                    .union(discharge.flow_batch_partial_reasons),
+            );
+            if machinery_root {
+                return ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(
+                    root_result,
+                ));
             }
             self.resolve_call_abort_inline_flight(root.inline_flight.as_ref());
-            return ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(
-                if cap.is_some() {
-                    ResolveCallFailure::Budget
-                } else {
-                    ResolveCallFailure::Undecidable
-                },
-            ));
+            return ResolveCallFramePop::Provisional(ResolveCallStep::Complete(root_result));
         }
 
         if !machinery_root {
@@ -1021,8 +1084,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                         selected,
                                         selected_signature,
                                         substitution,
-                                        return_type: inner_return,
-                                        fresh_literal_return,
+                                        return_type: _,
+                                        fresh_literal_returns,
                                     } => ResolveCallSelection::Selected {
                                         selected,
                                         selected_signature:
@@ -1030,11 +1093,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                                 selected_signature,
                                             ),
                                         substitution,
-                                        fresh_literal_returns: if fresh_literal_return {
-                                            vec![inner_return]
-                                        } else {
-                                            Vec::new()
-                                        },
+                                        fresh_literal_returns: fresh_literal_returns.to_vec(),
                                     },
                                     ResolvedCallResult::UnionSelected { selections, .. } => {
                                         ResolveCallSelection::UnionSelected {
@@ -1599,14 +1658,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if generic_rest.is_some_and(|(_, rest_start)| index >= rest_start) {
                 continue;
             }
-            let Some(target) = mapped_parameter_type(
+            let mut canonical_evidence =
+                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+            let mapped = mapped_parameter_type(
                 ordinary_params,
                 rest,
                 index,
                 arguments.len(),
                 *argument,
                 graph,
-            ) else {
+                &mut canonical_evidence,
+            );
+            self.deposit_canonical_evidence(canonical_evidence);
+            let Some(target) = mapped else {
                 self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
@@ -1889,14 +1953,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if deferred_generic_rest.is_some_and(|(_, rest_start)| index >= rest_start) {
                 continue;
             }
-            let Some(target) = mapped_parameter_type(
+            let mut canonical_evidence =
+                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+            let mapped = mapped_parameter_type(
                 ordinary_params,
                 substituted_rest,
                 index,
                 arguments.len(),
                 *argument,
                 graph,
-            ) else {
+                &mut canonical_evidence,
+            );
+            self.deposit_canonical_evidence(canonical_evidence);
+            let Some(target) = mapped else {
                 self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
@@ -1952,30 +2021,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut fresh_literal_returns = Vec::new();
         match &candidate.return_carrier {
             SignatureReturnCarrier::Declared(declared) => {
-                let seed = self.substitute_canonical(*declared, &substitution);
-                concrete_seeds.push(seed);
-                // Freshness provenance: a NAKED declared return (the raw
-                // annotation IS one of the clause's own binders) whose
-                // fixed bound is a FRESH-preserved bare literal closes on
-                // a fresh literal — the caller's return position widens
-                // it; a value position keeps it.
-                let declared_is_naked_binding = bindings
-                    .iter()
-                    .any(|binding| binding.param == *declared && binding.bound == seed);
-                if declared_is_naked_binding
-                    && self
-                        .dispatch_txn
-                        .borrow()
-                        .relation
-                        .sessions
-                        .iter()
-                        .any(|session| {
-                            session.id == session_id
-                                && session.fresh_literal_deposit(*declared, seed)
-                        })
-                {
-                    fresh_literal_returns.push(seed);
-                }
+                // Per-binder freshness at the call boundary (the checker's
+                // inference-widening rule, measured against the pinned
+                // checker): a FRESH literal deposit widens at the call
+                // UNLESS its binder appears at TOP LEVEL of the declared
+                // return — the binder itself, or a union / intersection
+                // constituent (`dwrap<T>(v: T): { box: T }` widens
+                // `dwrap("x")` to `{ box: string }`; `unionD<T>(x: T):
+                // T | null` keeps `unionD("x")` as `"x" | null`; a
+                // conditional-embedded binder widens at every depth). A
+                // kept deposit reaching the return through UNION structure
+                // stays FRESH for the caller's value positions, while
+                // intersection reduction pins it (`andD<T>(x: T): T & {}`
+                // keeps `"x"` pinned everywhere). The declared annotation
+                // still carries the binder, so top-levelness is read off
+                // the binder occurrence — an authored sibling arm
+                // spelling the deposit's literal value never matches.
+                self.collect_union_top_level_fresh_bounds(
+                    session_id,
+                    *declared,
+                    &substitution,
+                    &mut fresh_literal_returns,
+                );
+                let widened = self.fresh_widened_substitution_outside_top_level(
+                    session_id,
+                    &substitution,
+                    Some(*declared),
+                );
+                concrete_seeds.push(
+                    self.substitute_canonical(*declared, widened.as_ref().unwrap_or(&substitution)),
+                );
             }
             SignatureReturnCarrier::Function(source) => match source {
                 verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
@@ -2009,20 +2084,161 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         {
                             let seed =
                                 self.substitute_canonical(result.return_type(), &substitution);
-                            if key.args.iter().any(|argument| {
-                                matches!(
-                                    argument,
-                                    crate::semantic_query::CallArgKey::Eager {
-                                        ty,
-                                        literal_mode:
-                                            crate::semantic_query::ArgumentLiteralMode::Literal,
-                                        ..
-                                    } if *ty == seed
-                                )
-                            }) {
-                                fresh_literal_returns.push(seed);
+                            // Per-binder freshness at the call boundary,
+                            // exactly as the declared-annotation arm: a
+                            // fresh deposit KEPT at top level of the
+                            // callee's flow return (the whole return, or
+                            // a union / intersection constituent) stays
+                            // — the whole-return case is fresh at the
+                            // caller's return join, a union-carried one at
+                            // the caller's value positions. A deposit
+                            // fixed INSIDE the return's structure widens
+                            // at the call boundary itself (`wrap("x")` for
+                            // `wrap<T>(v: T) { return { box: v } }` is
+                            // `{ box: string }` at every observed
+                            // position): the callee's flow return is
+                            // re-taken under the WIDENED bindings, because
+                            // the instantiated flow result carries the
+                            // literal with no binder left to substitute.
+                            // An `as const` or explicit-type-argument
+                            // binding deposits as authored, so neither
+                            // path fires for it and the literal stays
+                            // pinned.
+                            //
+                            // Top-levelness is read off the callee's
+                            // UNINSTANTIATED flow return — the
+                            // substitution-occurrence provenance. The
+                            // instantiated result interns literals by
+                            // value, so an authored literal in the
+                            // callee's own return (`if (c) { return
+                            // "error" } return { value: v }` called with
+                            // `"error"`) is indistinguishable from the
+                            // substituted deposit there; the binder-
+                            // bearing structure is the only sound walk
+                            // subject. A binder probe that does not close
+                            // independently answers None and every fresh
+                            // deposit widens — the superset direction —
+                            // with the widened re-take below still
+                            // keeping the literal seed when it cannot
+                            // close. The probe runs ONLY when a fresh
+                            // literal deposit exists to adjudicate: with
+                            // none, nothing widens and nothing collects,
+                            // and a recursive component's callees are
+                            // never re-demanded for a question that does
+                            // not arise.
+                            let has_fresh_literal_deposit =
+                                substitution.bindings().iter().any(|(param, bound)| {
+                                    matches!(
+                                        self.graph().node_data(*bound).as_deref(),
+                                        Some(SemanticNodeData::Literal(_))
+                                    ) && self.binding_is_fresh_literal_deposit(
+                                        session_id, *param, *bound,
+                                    )
+                                });
+                            let binder_structure = if !has_fresh_literal_deposit {
+                                None
+                            } else {
+                                let binder_key = self.flow_return_key_for(identity);
+                                let binder_pending_before = self
+                                    .dispatch_txn
+                                    .borrow()
+                                    .obligations
+                                    .pending()
+                                    .pending_len();
+                                match self.execute_flow_return(binder_key) {
+                                    crate::semantic_query::FlowReturnStep::Complete(binder)
+                                        if self
+                                            .dispatch_txn
+                                            .borrow()
+                                            .obligations
+                                            .pending()
+                                            .pending_len()
+                                            == binder_pending_before =>
+                                    {
+                                        Some(binder.return_type())
+                                    }
+                                    _ => None,
+                                }
+                            };
+                            if let Some(binder_structure) = binder_structure {
+                                self.collect_union_top_level_fresh_bounds(
+                                    session_id,
+                                    binder_structure,
+                                    &substitution,
+                                    &mut fresh_literal_returns,
+                                );
                             }
-                            concrete_seeds.push(seed);
+                            // The callee's OWN authored fresh literal
+                            // arms (its sealed per-constituent freshness)
+                            // stay fresh across the call boundary exactly
+                            // as a kept deposit does: a caller value
+                            // position widens them, the caller's return
+                            // join keeps them, a `const` binding records
+                            // them as widening membership. Substitution
+                            // never rewrites an authored literal, so the
+                            // sealed ids stay valid on the instantiated
+                            // seed; the sealed set is already
+                            // pinned-wins-folded and top-level-filtered
+                            // by its constructor.
+                            for arm in result.fresh_literal_arms().iter() {
+                                if !fresh_literal_returns.contains(arm) {
+                                    fresh_literal_returns.push(*arm);
+                                }
+                            }
+                            if let Some(widened_substitution) = self
+                                .fresh_widened_substitution_outside_top_level(
+                                    session_id,
+                                    &substitution,
+                                    binder_structure,
+                                )
+                            {
+                                let widened_args: Vec<SemanticNodeId> = raw_type_params
+                                    .iter()
+                                    .map(|decl| {
+                                        widened_substitution
+                                            .bindings()
+                                            .iter()
+                                            .find_map(|(param, bound)| {
+                                                (*param == decl.param).then_some(*bound)
+                                            })
+                                            .unwrap_or(unknown)
+                                    })
+                                    .collect();
+                                let widened_key = self.flow_return_key_for_instantiation(
+                                    identity,
+                                    Arc::from(widened_args.as_slice()),
+                                    widened_substitution.clone(),
+                                );
+                                let widened_pending_before = self
+                                    .dispatch_txn
+                                    .borrow()
+                                    .obligations
+                                    .pending()
+                                    .pending_len();
+                                match self.execute_flow_return(widened_key) {
+                                    crate::semantic_query::FlowReturnStep::Complete(widened)
+                                        if self
+                                            .dispatch_txn
+                                            .borrow()
+                                            .obligations
+                                            .pending()
+                                            .pending_len()
+                                            == widened_pending_before =>
+                                    {
+                                        concrete_seeds.push(self.substitute_canonical(
+                                            widened.return_type(),
+                                            &widened_substitution,
+                                        ));
+                                    }
+                                    // The widened instantiation did not
+                                    // close independently (a hold, a
+                                    // refusal): keep the literal seed —
+                                    // never narrower than before.
+                                    _ => concrete_seeds.push(seed),
+                                }
+                            } else {
+                                concrete_seeds.push(seed);
+                            }
                         }
                         crate::semantic_query::FlowReturnStep::Complete(_)
                         | crate::semantic_query::FlowReturnStep::Hold(_) => {
@@ -2101,6 +2317,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         excess_property_check: bool,
     ) -> RelationStep {
         if !budget.relation() {
+            self.dispatch_txn.borrow_mut().call.undecided_relations += 1;
             return RelationStep::BudgetExceeded(crate::semantic_query::RecursionOrBudgetCap {
                 kind: crate::semantic_query::BudgetExceededKind::CallResolutionBudget,
                 limit: MAX_APPLICABILITY_RELATIONS as u32,
@@ -2110,14 +2327,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key.source_freshness = self.freshness_for_source_node(freshness_origin);
         key.policy.excess_property_check =
             excess_property_check && key.source_freshness == FreshnessKey::Fresh;
-        if binding_enabled {
+        let step = if binding_enabled {
             self.execute_relate(key)
         } else {
             self.dispatch_txn.borrow_mut().begin_binding_disabled();
             let step = self.execute_relate(key);
             self.dispatch_txn.borrow_mut().end_binding_disabled();
             step
+        };
+        // An undecided relation outcome the call consumed: the flow
+        // evaluator's per-call snapshot reads this to refuse claiming a
+        // relation obligation whose judgement was never decided.
+        if matches!(
+            step,
+            RelationStep::Unknown | RelationStep::BudgetExceeded(_)
+        ) {
+            self.dispatch_txn.borrow_mut().call.undecided_relations += 1;
         }
+        step
     }
 
     /// The transaction's monotonic accepted-deposit counter (bumped at
@@ -2167,8 +2394,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match graph.node_data(node).as_deref() {
                 Some(SemanticNodeData::TypeParam { .. }) => out.push(node),
                 Some(SemanticNodeData::Alias(inner)) => stack.push(*inner),
-                Some(SemanticNodeData::Union(members))
-                | Some(SemanticNodeData::Intersection(members)) => {
+                Some(
+                    composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
+                ) => {
+                    let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());
                 }
                 _ => {}
@@ -2334,6 +2563,269 @@ impl<'a> ProjectSemanticDispatch<'a> {
         node
     }
 
+    /// Whether one collecting session recorded `(param, bound)` as a
+    /// FRESH-preserved literal deposit — the inference-time provenance
+    /// distinguishing a bare-literal (or widening-`const`-read) argument
+    /// from an authored pin (`as const`, an explicit type argument),
+    /// which deposits as authored and never records one.
+    fn binding_is_fresh_literal_deposit(
+        &self,
+        session_id: SessionId,
+        param: SemanticNodeId,
+        bound: SemanticNodeId,
+    ) -> bool {
+        self.dispatch_txn
+            .borrow()
+            .relation
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id && session.fresh_literal_deposit(param, bound))
+    }
+
+    /// Whether one fresh-literal deposit is KEPT at the call boundary:
+    /// its BINDER appears at TOP LEVEL of the binder-bearing return
+    /// structure — the node itself, or a union / intersection
+    /// constituent, walked through alias instantiations, recursively.
+    /// This is the checker's inference-widening exemption boundary
+    /// (measured against the pinned checker): a binder reachable only
+    /// through deeper structure — an object member, an array element, a
+    /// CONDITIONAL branch at any depth — widens at the call boundary.
+    ///
+    /// The match is binder identity, NEVER the deposited literal's value:
+    /// scalar literals intern by value, so an authored sibling arm
+    /// spelling the same literal (`run<T>(v: T): { status: "ok";
+    /// value: T } | "error"` called with `"error"`) would otherwise
+    /// borrow the deposit's freshness and pin the member (`value:
+    /// "error"`) where the checker widens it (`value: string`). Callers
+    /// therefore always hand this walk a structure the binder still
+    /// occurs in — the declared annotation, or the callee's
+    /// uninstantiated flow return — never an instantiated result.
+    fn deposit_at_top_level(&self, structure: SemanticNodeId, param: SemanticNodeId) -> bool {
+        self.deposit_walk_reaches_binder(structure, param, false, DEPOSIT_WALK_FUEL)
+    }
+
+    /// The shared walk behind [`Self::deposit_at_top_level`] and
+    /// [`Self::deposit_at_union_top_level`]. `union_only` excludes
+    /// intersection constituents (the union half's measured rule). An
+    /// alias instantiation at top level is TRANSPARENT: `type UA<T> =
+    /// T | undefined` keeps `fu<T>(v: T): UA<T>`'s deposit exactly as
+    /// the spelled-out union does (measured), so the walk expands one
+    /// level through the shared `Instantiate` demand and continues.
+    /// `fuel` bounds alias chains and degenerate structures; running out
+    /// answers NOT-top-level, which widens — the superset direction.
+    fn deposit_walk_reaches_binder(
+        &self,
+        structure: SemanticNodeId,
+        param: SemanticNodeId,
+        union_only: bool,
+        fuel: u8,
+    ) -> bool {
+        if self.nodes_are_same_binder(structure, param) {
+            return true;
+        }
+        let Some(fuel) = fuel.checked_sub(1) else {
+            return false;
+        };
+        match self.graph().node_data(structure).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members
+                .iter()
+                .any(|member| self.deposit_walk_reaches_binder(*member, param, union_only, fuel)),
+            Some(SemanticNodeData::Intersection(members)) if !union_only => members
+                .iter()
+                .any(|member| self.deposit_walk_reaches_binder(*member, param, union_only, fuel)),
+            Some(SemanticNodeData::InstantiationRef { .. }) => self
+                .expand_alias_instantiation_one_level(structure)
+                .is_some_and(|expanded| {
+                    self.deposit_walk_reaches_binder(expanded, param, union_only, fuel)
+                }),
+            _ => false,
+        }
+    }
+
+    /// Whether `structure` IS the deposit's binder. Node identity first;
+    /// otherwise two `TypeParam` nodes naming the SAME declaration slot
+    /// are the same binder. The signature environment and the flow-return
+    /// environment intern the declaration's parameter under two minting
+    /// modes: the signature clause anchors the owning symbol into
+    /// `decl_name` while the flow binder env mints the bare parameter
+    /// name — so besides full `(decl, param_index)` equality, a flow-env
+    /// bare mint (its `decl_name` IS its display name) matches the
+    /// signature param when every remaining declaration coordinate
+    /// (canonical file, owner, whole hash, clause ordinal, declared
+    /// parameter name) agrees. The composed identity is never parsed
+    /// back out of the anchored mint, and this is declaration
+    /// provenance, never a value match: distinct files, versions, clause
+    /// positions, or parameter names never compare equal.
+    fn nodes_are_same_binder(&self, structure: SemanticNodeId, param: SemanticNodeId) -> bool {
+        if structure == param {
+            return true;
+        }
+        let graph = self.graph();
+        let structure_data = graph.node_data(structure);
+        let param_data = graph.node_data(param);
+        match (structure_data.as_deref(), param_data.as_deref()) {
+            (
+                Some(SemanticNodeData::TypeParam {
+                    decl: structure_decl,
+                    param_index: structure_index,
+                    display_name: structure_display,
+                    ..
+                }),
+                Some(SemanticNodeData::TypeParam {
+                    decl: param_decl,
+                    param_index: param_index_value,
+                    display_name: param_display,
+                    ..
+                }),
+            ) => {
+                structure_index == param_index_value
+                    && (structure_decl == param_decl
+                        || (structure_decl.canonical_id == param_decl.canonical_id
+                            && structure_decl.owner == param_decl.owner
+                            && structure_decl.whole_hash == param_decl.whole_hash
+                            && structure_display == param_display
+                            && structure_decl.decl_name == *structure_display))
+            }
+            _ => false,
+        }
+    }
+
+    /// One-level alias-instantiation expansion, through the shared
+    /// `Instantiate` demand (the same one-level materialisation the
+    /// relation authority uses) — never a private resolver. Serves the
+    /// call-boundary deposit walk (an alias to a union is transparent to
+    /// the top-level exemption) and the flow return join's union
+    /// flattening. `None` when the demand does not produce a distinct
+    /// node; callers keep the carrier (the walk answers NOT-top-level
+    /// and the deposit widens).
+    pub(super) fn expand_alias_instantiation_one_level(
+        &self,
+        structure: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let data = graph.node_data(structure);
+        let Some(SemanticNodeData::InstantiationRef { base, args }) = data.as_deref() else {
+            return None;
+        };
+        let oracle_demand = ProjectionReductionContext::structural_transit_with_mode(
+            crate::semantic_query::ProjectionMode::Navigate,
+        );
+        let owner_canonical = Arc::clone(&base.canonical_id);
+        let slot = self.type_slot_for(
+            Arc::clone(&base.canonical_id),
+            base.owner,
+            Arc::clone(&base.decl_name),
+        );
+        let args = Arc::clone(args);
+        let read = self.execute_read(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                slot,
+                args,
+                self.instantiate_context_for(&owner_canonical, oracle_demand),
+            ),
+        ));
+        crate::request_context::observe_component_meta_read_suppress(&read);
+        match read.value {
+            QueryResult::Value(id) if id != structure => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Collect the fresh-literal deposits whose BINDER reaches
+    /// `structure`'s top level through UNION structure only (the binder
+    /// itself, or a union constituent, walked through alias
+    /// instantiations, recursively) into `fresh_literal_returns`. These
+    /// stay FRESH on the call's return: a caller's value (member)
+    /// position widens them, and the return join widens the whole return
+    /// when it IS one of them. Intersection constituents are
+    /// deliberately excluded — the checker's intersection reduction pins
+    /// the literal (measured: `{ a: andD("x") }` for `andD<T>(x: T):
+    /// T & {}` keeps `"x"` where `{ a: unionD("x") }` for
+    /// `unionD<T>(x: T): T | null` widens to `string | null`).
+    fn collect_union_top_level_fresh_bounds(
+        &self,
+        session_id: SessionId,
+        structure: SemanticNodeId,
+        substitution: &CanonicalTypeSubstitution,
+        fresh_literal_returns: &mut Vec<SemanticNodeId>,
+    ) {
+        let graph = self.graph();
+        for (param, bound) in substitution.bindings() {
+            if !matches!(
+                graph.node_data(*bound).as_deref(),
+                Some(SemanticNodeData::Literal(_))
+            ) {
+                continue;
+            }
+            if !self.binding_is_fresh_literal_deposit(session_id, *param, *bound) {
+                continue;
+            }
+            if self.deposit_at_union_top_level(structure, *param)
+                && !fresh_literal_returns.contains(bound)
+            {
+                fresh_literal_returns.push(*bound);
+            }
+        }
+    }
+
+    /// The UNION-only half of [`Self::deposit_at_top_level`] — the same
+    /// binder-identity walk, excluding intersection constituents.
+    fn deposit_at_union_top_level(&self, structure: SemanticNodeId, param: SemanticNodeId) -> bool {
+        self.deposit_walk_reaches_binder(structure, param, true, DEPOSIT_WALK_FUEL)
+    }
+
+    /// The substitution with every FRESH-deposited literal binding the
+    /// checker widens at the call boundary widened to its primitive —
+    /// every fresh deposit whose binder does NOT appear at top level of
+    /// `return_structure` (see [`Self::deposit_at_top_level`]):
+    /// `wrap("x")` for `wrap<T>(v: T) { return { box: v } }` reads
+    /// `{ box: string }` at every observed position (the caller's return,
+    /// a binding initializer, a member value, a member read of the call
+    /// expression). Bindings without a fresh deposit — authored pins,
+    /// explicit type arguments, outer-context bindings — and deposits
+    /// kept at top level stay unchanged; `None` when nothing widens.
+    ///
+    /// `return_structure` is the BINDER-BEARING structure (the declared
+    /// annotation, or the callee's uninstantiated flow return). A caller
+    /// with no binder-bearing structure passes `None`: every fresh
+    /// deposit then widens — the superset direction, never a value-match
+    /// against an instantiated result.
+    fn fresh_widened_substitution_outside_top_level(
+        &self,
+        session_id: SessionId,
+        substitution: &CanonicalTypeSubstitution,
+        return_structure: Option<SemanticNodeId>,
+    ) -> Option<CanonicalTypeSubstitution> {
+        let graph = self.graph();
+        let mut any_widened = false;
+        let widened_bindings: Vec<(SemanticNodeId, SemanticNodeId)> = substitution
+            .bindings()
+            .iter()
+            .map(|(param, bound)| {
+                let widened = match graph.node_data(*bound).as_deref() {
+                    Some(SemanticNodeData::Literal(value))
+                        if self.binding_is_fresh_literal_deposit(session_id, *param, *bound)
+                            && !return_structure.is_some_and(|structure| {
+                                self.deposit_at_top_level(structure, *param)
+                            }) =>
+                    {
+                        let primitive = match value {
+                            verter_type_expr::LiteralValue::String(_) => PrimitiveKind::String,
+                            verter_type_expr::LiteralValue::Number(_) => PrimitiveKind::Number,
+                            verter_type_expr::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
+                            verter_type_expr::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
+                        };
+                        graph.intern_node(SemanticNodeData::Primitive(primitive))
+                    }
+                    _ => *bound,
+                };
+                any_widened |= widened != *bound;
+                (*param, widened)
+            })
+            .collect();
+        any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings))
+    }
+
     pub(super) fn call_inference_candidate(
         &self,
         node: SemanticNodeId,
@@ -2417,9 +2909,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .iter()
                     .map(|member| self.call_shape_transform(*member, policy, memo))
                     .collect::<Vec<_>>();
+                // Order- and scope-preserving rebuild: an intersection
+                // reaching call-shape transformation may be an
+                // overload-ordered carrier, so the transformed arms keep
+                // their declaration order verbatim.
                 graph.intern_preserving_scope(
                     node,
-                    SemanticNodeData::Intersection(Arc::from(members.into_boxed_slice())),
+                    SemanticNodeData::Intersection(
+                        crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                            Arc::from(members.into_boxed_slice()),
+                        ),
+                    ),
                 )
             }
             Some(SemanticNodeData::Object(surface)) => {
@@ -2599,6 +3099,7 @@ fn mapped_parameter_type(
     argument_count: usize,
     argument: CallArgument,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
+    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Option<SemanticNodeId> {
     // An INDEFINITE spread supplies an unknown-length tail, so it never
     // maps onto a positional slot — it relates against the rest parameter's
@@ -2606,7 +3107,7 @@ fn mapped_parameter_type(
     if !argument.indefinite_spread {
         if let Some(param) = params.get(index) {
             if !param.rest {
-                return Some(optional_parameter_target(param, graph));
+                return Some(optional_parameter_target(param, graph, evidence));
             }
         }
     }
@@ -2669,6 +3170,7 @@ fn mapped_parameter_type(
 fn optional_parameter_target(
     param: &FunctionParam,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
+    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> SemanticNodeId {
     if !param.optional {
         return param.ty;
@@ -2677,20 +3179,16 @@ fn optional_parameter_target(
     if param.ty == undefined {
         return param.ty;
     }
-    match graph.node_data(param.ty).as_deref() {
-        Some(SemanticNodeData::Union(members)) => {
-            if members.contains(&undefined) {
-                param.ty
-            } else {
-                let mut arms = members.to_vec();
-                arms.push(undefined);
-                graph.intern_node(SemanticNodeData::Union(Arc::from(arms.into_boxed_slice())))
-            }
-        }
-        _ => graph.intern_node(SemanticNodeData::Union(Arc::from(
-            vec![param.ty, undefined].into_boxed_slice(),
-        ))),
-    }
+    // Canonical construction: the optional-parameter relation target
+    // (`T | undefined`) routes through the one authority (which also
+    // flattens a union-typed `T`); the evidence threads to the caller's
+    // disposition boundary.
+    let composite = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+        graph,
+        &[param.ty, undefined],
+    );
+    evidence.absorb(composite.evidence);
+    composite.node
 }
 
 /// The relation target for an indefinite spread landing at `offset` inside
@@ -2720,7 +3218,8 @@ fn tuple_suffix_target(
     }
 }
 
-fn union_self_roots(
+/// Union `source`'s self-roots into `target`, one root per canonical.
+pub(super) fn union_self_roots(
     target: &mut Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     source: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
 ) {

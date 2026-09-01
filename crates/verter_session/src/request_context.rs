@@ -206,6 +206,60 @@ pub fn current_cold_compute_completeness() -> ResultCompleteness {
         .unwrap_or(ResultCompleteness::Complete)
 }
 
+thread_local! {
+    /// Depth of active [`DeferredPartialStickyScope`]s on this thread.
+    /// While non-zero, the `mark_request_result_partial*` /
+    /// `fold_result_completeness` helpers still fold partiality into the
+    /// active per-cold-compute scope but DEFER the request-level sticky
+    /// store to the scope's owner.
+    static DEFERRED_PARTIAL_STICKY_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// RAII scope deferring the REQUEST-level partial sticky for the reads it
+/// encloses — the observation shield for a read whose result the caller
+/// may structurally DECLINE (a probe with a fall-through route that
+/// re-derives the authoritative answer and its own rails).
+///
+/// While active, partiality observed by the enclosed reads folds into the
+/// active per-cold-compute scope exactly as usual, but the request sticky
+/// (`RequestContext::request_result_is_partial`) is NOT stored — the
+/// sticky has no un-mark (it is a cross-thread accumulator, so a restore
+/// would erase a concurrent genuine mark), so a discarded probe's
+/// partiality must never reach it in the first place. The owner MUST pair
+/// this with a fresh [`ColdComputeCompletenessScope`] capturing the same
+/// reads, and after dropping BOTH scopes either re-apply the captured
+/// completeness via [`fold_result_completeness`] (the probe's result was
+/// consumed) or drop it (the probe was declined and a fall-through route
+/// owns the answer) — deferred partiality is never silently lost.
+#[must_use]
+pub(crate) struct DeferredPartialStickyScope {
+    _private: (),
+}
+
+impl DeferredPartialStickyScope {
+    pub(crate) fn enter() -> Self {
+        DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self { _private: () }
+    }
+}
+
+impl Drop for DeferredPartialStickyScope {
+    fn drop(&mut self) {
+        DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Store the request-level partial sticky — unless an active
+/// [`DeferredPartialStickyScope`] defers it to the probe owner.
+fn store_request_sticky_partial() {
+    if DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.get() > 0) {
+        return;
+    }
+    if let Some(ctx) = current_request_context() {
+        ctx.request_result_is_partial.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Snapshot the request-result completeness signal as a boolean.
 ///
 /// This is the REQUEST-level (cross-thread) partiality accumulator. For
@@ -254,9 +308,7 @@ pub fn mark_request_result_partial() {
 /// `PROPAGATED` to an already-partial scope changes no `is_partial()`
 /// answer — only the reason set — so nothing else observes the difference.
 pub fn mark_request_result_partial_from_read_with(reasons: PartialReasonSet) {
-    if let Some(ctx) = current_request_context() {
-        ctx.request_result_is_partial.store(true, Ordering::Relaxed);
-    }
+    store_request_sticky_partial();
     if !reasons.is_empty() {
         fold_cold_compute_completeness(ResultCompleteness::partial(reasons));
         return;
@@ -275,34 +327,13 @@ pub(crate) fn mark_request_result_inference_budget_exceeded() {
     mark_request_result_partial_with(PartialReasonSet::BUDGET_EXCEEDED);
 }
 
-/// Mark the active result partial under an EXPLICIT reason set — the
-/// classifying producers' entry.
-///
-/// The flow-return consumer entry is the caller, over three classes that
-/// differ in what a value-reading consumer can still do with the result. A
-/// degraded success whose published surface is FAITHFUL rides
-/// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`], and one whose member set
-/// is complete but whose member types may be wrong rides
-/// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`] — both leave a COMPLETE
-/// member set, so both are contained by every Vue macro codegen consumer.
-/// Every NO-VALUE outcome rides
-/// [`PartialReasonSet::FLOW_RETURN_NO_SURFACE`], which has no member set
-/// at all: contained only by the consumers that splice the AUTHORED
-/// declaration for an external checker, and faulting for the ones that
-/// DERIVE an option object from the value.
-pub(crate) fn mark_request_result_partial_with_reasons(reasons: PartialReasonSet) {
-    mark_request_result_partial_with(reasons);
-}
-
 /// Mark the active result partial for the exact cancellation reason.
 pub(crate) fn mark_request_result_cancelled() {
     mark_request_result_partial_with(PartialReasonSet::CANCELLED);
 }
 
 fn mark_request_result_partial_with(reasons: PartialReasonSet) {
-    if let Some(ctx) = current_request_context() {
-        ctx.request_result_is_partial.store(true, Ordering::Relaxed);
-    }
+    store_request_sticky_partial();
     fold_cold_compute_completeness(ResultCompleteness::partial(reasons));
 }
 
@@ -322,9 +353,7 @@ pub fn fold_result_completeness(joined: ResultCompleteness) {
     if !joined.is_partial() {
         return;
     }
-    if let Some(ctx) = current_request_context() {
-        ctx.request_result_is_partial.store(true, Ordering::Relaxed);
-    }
+    store_request_sticky_partial();
     fold_cold_compute_completeness(joined);
 }
 

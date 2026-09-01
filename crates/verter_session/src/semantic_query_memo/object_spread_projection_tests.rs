@@ -482,6 +482,7 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
                     self_root_canonicals: Arc::from([Arc::<str>::from(keyed_canonical)]),
                     pending_prefix_backfills: Vec::new(),
                     satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+                    flow_completion: None,
                 }
             },
         )

@@ -20,6 +20,14 @@
 //! evaluator can apply in source order — a whole-binding `=` write and a
 //! same-file assertion call.
 //!
+//! Elided and unmodeled positions still EXECUTE, so each is scanned for
+//! the runtime effects that could alter what the frame later evaluates —
+//! an `asserts` call with a frame-owned subject, a whole-binding write
+//! the slice's effect ledger cannot see — under one fail-closed
+//! discipline: a provably inert effect is certified decided-above, any
+//! other flags the enclosing statement's typed `GuardNarrowing` gap, and
+//! an effect-free position (a pure literal initializer) stays silent.
+//!
 //! Control semantics: sequential region evaluation (a terminal return or
 //! throw ends the region; statements after it are unreachable and
 //! dropped), an `if` whose arms both terminate cannot fall through, blocks
@@ -68,7 +76,7 @@ use verter_semantic::analysis::flow::{
 };
 use verter_semantic::analysis::function_program::{
     for_each_call_expression, inventory_statement_list, resolve_function_node,
-    FunctionControlRegion, FunctionNode, FunctionProgramEntry,
+    FunctionControlRegion, FunctionDescentStep, FunctionNode, FunctionProgramEntry,
 };
 use verter_semantic::analysis::type_eval_build::{
     embeds_call_return_carrier, infer_declaration_expression_type,
@@ -156,6 +164,27 @@ pub struct SliceContent {
     /// reachability filter. The evaluator subtracts them from unapplied write
     /// effects exactly as it subtracts writes it applies in source order.
     pub inert_write_spans: FxHashSet<FrameSpan>,
+    /// The authored call / construct spans this lowering DECIDED ABOVE
+    /// the call: a call folded into a surviving decided leaf
+    /// ([`SliceExpr::Type`] — the fabricated-value gate proves the leaf's
+    /// type does not derive from any call inside it, e.g. a
+    /// type-replacing `as T` / `<T>x` carrier or a form the shallow pass
+    /// models without the call's return), and a call in a CONTROL
+    /// position (an `if` / ternary test) ONLY when its result provably
+    /// cannot control the arms' narrowing — a `new` construct, or a
+    /// module-local, unexported, single-declaration same-file callee
+    /// with an authored non-predicate return annotation (the provably
+    /// closed callee: a script global's or an exported binding's
+    /// checker-visible signature set may hold a predicate overload this
+    /// file never shows). A predicate call in a test CONTROLS narrowing
+    /// and is never recorded here: it takes real evaluator evidence at
+    /// guard application, or its obligations stay unclaimed. Each span is
+    /// a call occurrence whose type position this run decided without the
+    /// call — the containment evidence the discharge-report producer
+    /// accepts for a call obligation the evaluator's call sink never
+    /// reached. Absolute spans: the report rebases them onto the frame
+    /// anchor when pairing against the skeleton footprint.
+    pub decided_above_call_spans: Vec<verter_span::Span>,
 }
 
 /// One formal parameter.
@@ -213,13 +242,15 @@ pub enum SliceStatement {
     Return {
         /// The lowered return argument, when present.
         argument: Option<SliceExpr>,
-        /// Whether the argument is a FRESH literal source (a bare
-        /// literal expression with no const assertion). tsc widens a
-        /// fresh literal return only when it is the function's SOLE
-        /// return contributor; a multi-contributor join keeps every
-        /// literal, so the widening decision belongs to the join, not
-        /// to this position.
-        widening_literal: bool,
+        /// The argument's freshness mirror ([`SliceFreshness::Fresh`] =
+        /// a bare literal expression with no const assertion; a ternary
+        /// recurses per arm). tsc widens a fresh literal return only
+        /// when it is the function's SOLE return contributor — a
+        /// multi-contributor join keeps every literal — so the widening
+        /// decision belongs to the join, not to this position; the
+        /// per-arm tree additionally tells the evaluator WHICH kept
+        /// constituents stay fresh on the sealed return.
+        freshness: SliceFreshness,
     },
     /// An `if` statement. Each arm is its own region; the test lowers to
     /// a [`SliceGuard`] — never to value content, since the evaluator
@@ -259,6 +290,9 @@ pub enum SliceStatement {
         span: FrameSpan,
         /// The lowered right-hand side.
         value: Box<SliceExpr>,
+        /// The right-hand side's top-level freshness shape, aligned with
+        /// `value` — the evaluator's evolving-target widening input.
+        freshness: SliceFreshness,
     },
     /// A same-file assertion call at statement position
     /// (`assertStr(u);`): the callee's declared return is
@@ -375,14 +409,18 @@ pub enum SliceStatement {
         /// body-local type declarations ARE in scope in it, so it always
         /// carries the frame gate's verdict.
         declared: Option<GatedType>,
-        /// Whether the binding carries a WIDENING literal type: an
-        /// unannotated `const` whose initializer is a bare literal
-        /// expression with no const assertion (`const b = 1`). Reads of
-        /// such a binding widen to the literal's primitive at
-        /// return-object member positions and at the return join —
-        /// `1 as const` / an annotated `const b: 1` stay non-widening
-        /// and preserve the literal.
-        widening_literal: bool,
+        /// The initializer's FRESHNESS shape for an unannotated `const` —
+        /// the evaluator's widening-membership input, mirroring the
+        /// lowered value tree exactly as an assignment's does. An
+        /// all-fresh tree (`const b = 1`, `f ? 1 : "s"`) is the classic
+        /// widening-literal binding: reads widen every literal arm at
+        /// return-object member positions and at the return join. A MIXED
+        /// tree carries per-arm verdicts, so the evaluator widens exactly
+        /// the fresh arms and keeps authored pins (`1 as const`, a call,
+        /// a reference). Annotated declarators and `let` / `var` (whose
+        /// bare literal initializers already widened at lowering) stay
+        /// `Pinned`.
+        freshness: SliceFreshness,
     },
     /// A return-free loop with no selected downstream transfer: fall-through
     /// transparent because no captured guard, call, write, or escaping `var`
@@ -409,10 +447,32 @@ pub struct SliceSwitchCase {
     /// A path through the clause exits the switch via `break` (reaching
     /// the statement after the switch).
     pub breaks: bool,
-    /// The case test as a guard literal, when it is one (`case "a":`).
-    /// `None` for the default clause and for a non-literal test — the
-    /// dispatch edge then establishes no discriminant narrow.
-    pub test: Option<SliceGuardLiteral>,
+    /// What the clause's dispatch relation establishes.
+    pub test: SliceSwitchTest,
+}
+
+/// What ONE `switch` clause's dispatch relation establishes.
+///
+/// The default clause and an unrecognized relation are DIFFERENT facts,
+/// and one carrier for both is a wrong VALUE rather than a superset: the
+/// default clause's dispatch edge is "the discriminant minus every
+/// carried test", so routing an unrecognized relation onto it narrows
+/// the clause to a set it was never proven to be reached with, and the
+/// remainder that edge is computed from silently loses the unrecognized
+/// clause's values.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceSwitchTest {
+    /// A `default` clause: no test at all. Its dispatch edge is the
+    /// discriminant minus every carried test.
+    Default,
+    /// `case <literal>:` — the one relation this lowering carries. Its
+    /// dispatch edge narrows the discriminant to the literal.
+    Literal(SliceGuardLiteral),
+    /// A case test whose relation this lowering cannot carry. Its
+    /// dispatch edge applies NO narrow — the clause is reachable for
+    /// discriminant values this half cannot enumerate — and the switch
+    /// carries the typed `GuardNarrowing` gap.
+    Unmodeled,
 }
 
 /// One `catch` clause: its parameter binding (a plain identifier only — a
@@ -514,9 +574,13 @@ pub enum SliceGuardLiteral {
 ///
 /// This is a structural description only: it carries no evaluated types
 /// (the content half has no resolver), so a consumer can never inherit a
-/// narrow the evaluator did not itself compute. A test form this
-/// vocabulary cannot express lowers to [`SliceGuard::None`] — the arms
-/// evaluate unnarrowed, exactly as they did before guards existed.
+/// narrow the evaluator did not itself compute.
+///
+/// [`SliceGuard::None`] means PROVED NON-NARROWING and nothing else. A
+/// test form this vocabulary cannot express never reaches the evaluator
+/// as a bare `None`: the lowering answers with a third disposition and
+/// the construct carries the typed `GuardNarrowing` gap, so an
+/// unnarrowed arm can never be published as a complete answer.
 ///
 /// Composition is De Morgan-complete at LOWERING time (`!` flips leaf
 /// `negated` flags and swaps `And`/`Or`), so the evaluator's branch
@@ -556,7 +620,13 @@ pub enum SliceGuard {
         negated: bool,
     },
     /// `subject instanceof Ctor`, the constructor named by a bare
-    /// identifier (resolved evaluator-side, in owner scope).
+    /// identifier the frame leaves FREE that provably denotes the module's
+    /// single same-file `class` declaration (resolved evaluator-side as
+    /// an owner-scope type reference — that class's instance type). A
+    /// right-hand side the lowering cannot prove (a frame-bound name, a
+    /// namespace-owned site, a non-class value, an import, a member or
+    /// call expression) lowers to [`SliceGuard::None`] behind the typed
+    /// guard-narrowing gap.
     Instanceof {
         /// The tested reference (its root narrows).
         subject: SliceNarrowSubject,
@@ -575,10 +645,14 @@ pub enum SliceGuard {
         /// Whether the test is negated.
         negated: bool,
     },
-    /// `predicate(subject)` — a same-file function whose declared return
-    /// is `x is T`. The target type lowers through the frame gate exactly
-    /// like a declarator annotation; a cross-file callee or a callee
-    /// without the predicate spelling lowers to [`SliceGuard::None`].
+    /// `predicate(subject)` — a module-local, unexported,
+    /// single-declaration same-file function whose declared return is
+    /// `x is T` (the provably closed callee: a module-scoped file, one
+    /// declaration, no export spelling). The target type lowers through
+    /// the frame gate exactly like a declarator annotation; a cross-file
+    /// callee, a script global, an exported binding, an overloaded group,
+    /// or a callee without the predicate spelling lowers to
+    /// [`SliceGuard::None`].
     TypePredicate {
         /// The argument the predicate talks about.
         subject: SliceNarrowSubject,
@@ -586,6 +660,11 @@ pub enum SliceGuard {
         target: GatedType,
         /// Whether this is the predicate's negative reading.
         negated: bool,
+        /// The authored predicate call's span (absolute). A predicate
+        /// call CONTROLS the arms' narrowing, so it is never decided
+        /// above the call: the evaluator records real call evidence at
+        /// guard application against exactly this span.
+        call: verter_span::Span,
     },
     /// A conjunction: every fact applies at once.
     And(Arc<[SliceGuard]>),
@@ -1492,7 +1571,20 @@ pub(crate) fn build_flow_slice_content(
     entry: &FunctionProgramEntry,
     selection: &FlowSliceSelection,
     skeleton: &FunctionBodySkeleton,
+    carrier_module: bool,
 ) -> Option<SliceContent> {
+    let module_scope = carrier_module || program_has_module_syntax(program);
+    // Whether the served function is NAMESPACE-OWNED: its locator descends
+    // through a `namespace` / `module` block. Every call site in its body
+    // (nested function values included) then resolves a bare callee
+    // through that block's scope BEFORE the top level — the same lexical
+    // rule under which the function index binds a namespace-qualified
+    // direct-call target over the file-global one.
+    let namespace_owned = entry
+        .locator
+        .descent
+        .iter()
+        .any(|step| matches!(step, FunctionDescentStep::NamespaceMember { .. }));
     let resolved = resolve_function_node(program, &entry.locator)?;
     let node = resolved.node;
     let self_name = resolved.self_name;
@@ -1532,6 +1624,7 @@ pub(crate) fn build_flow_slice_content(
                 },
                 budget_failure: Some(reason),
                 inert_write_spans: FxHashSet::default(),
+                decided_above_call_spans: Vec::new(),
             });
         }
     };
@@ -1566,13 +1659,20 @@ pub(crate) fn build_flow_slice_content(
         control: Arc::clone(&entry.control),
         direct_calls: &entry.direct_calls,
         program,
+        module_scope,
+        namespace_owned,
         budget_failure: None,
         inert_write_spans: FxHashSet::default(),
+        decided_above_call_spans: Vec::new(),
+        predicate_guard_call_spans: FxHashSet::default(),
+        control_test_gap: false,
+        narrowing_alias_locals: FxHashSet::default(),
         unsafe_invoked_closure_effects: FxHashSet::default(),
         nested_free_writes: FxHashSet::default(),
         active_guard_bindings: Vec::new(),
         active_guard_names: Vec::new(),
         break_targets: Vec::new(),
+        loop_direct_labels: Vec::new(),
         break_target_followed_by_return: Vec::new(),
         current_statement_followed_by_return: false,
     };
@@ -1595,17 +1695,27 @@ pub(crate) fn build_flow_slice_content(
                 can_fall_through: false,
             }
         } else {
-            let widening_literal = expr_is_bare_literal(&expression.expression);
+            let freshness = expression_freshness(&expression.expression);
             let argument = if lowerer.value_span_selected(expression.expression.span()) {
                 lowerer.lower_expr(&expression.expression, ExprMode::Return)
             } else {
                 SliceExpr::Elided
             };
+            // An expression body has no statement loop to drain the
+            // ternary-test gap into: it lands ahead of the synthesized
+            // `return` here.
+            let mut statements = Vec::with_capacity(2);
+            if std::mem::take(&mut lowerer.control_test_gap) {
+                statements.push(SliceStatement::Gap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+            }
+            statements.push(SliceStatement::Return {
+                argument: Some(argument),
+                freshness,
+            });
             SliceRegion {
-                statements: Arc::from([SliceStatement::Return {
-                    argument: Some(argument),
-                    widening_literal,
-                }]),
+                statements: Arc::from(statements.into_boxed_slice()),
                 can_fall_through: false,
             }
         }
@@ -1614,6 +1724,7 @@ pub(crate) fn build_flow_slice_content(
     };
     let budget_failure = lowerer.budget_failure;
     let inert_write_spans = lowerer.inert_write_spans;
+    let decided_above_call_spans = lowerer.decided_above_call_spans;
     Some(SliceContent {
         can_fall_through: region.can_fall_through,
         params: Arc::from(params.into_boxed_slice()),
@@ -1622,6 +1733,30 @@ pub(crate) fn build_flow_slice_content(
         body: region,
         budget_failure,
         inert_write_spans,
+        decided_above_call_spans,
+    })
+}
+
+/// Whether the retained program carries top-level MODULE syntax: an
+/// `import` / `export` declaration of any spelling (including the empty
+/// `export {}`), an `export =` assignment, or an `import x = require(…)`
+/// external-module reference. The proof is ONE-DIRECTIONAL: module syntax
+/// proves module scope; its absence proves nothing (`import.meta`, a
+/// project's module-detection setting, or a carrier projection can still
+/// make the file a module), so a caller treats absence as "not provable"
+/// — never as "script".
+fn program_has_module_syntax(program: &Program<'_>) -> bool {
+    program.body.iter().any(|statement| match statement {
+        Statement::ImportDeclaration(_)
+        | Statement::ExportAllDeclaration(_)
+        | Statement::ExportDefaultDeclaration(_)
+        | Statement::ExportNamedDeclaration(_)
+        | Statement::TSExportAssignment(_) => true,
+        Statement::TSImportEqualsDeclaration(import) => matches!(
+            import.module_reference,
+            oxc_ast::ast::TSModuleReference::ExternalModuleReference(_)
+        ),
+        _ => false,
     })
 }
 
@@ -1634,11 +1769,170 @@ fn node_span(node: &FunctionNode<'_>) -> oxc_span::Span {
     }
 }
 
+/// Whether a same-file predicate's TARGET references a name the CALLEE's
+/// own declaration binds: a type parameter of its clause (`x is T` on
+/// `isSame<T>(x: T)`) or a formal parameter (`x is typeof y`). Such a
+/// target is instantiated by the CALL — `T` from the argument's type — an
+/// inference this half does not perform, so it is not closed over
+/// anything the caller frame's environment can resolve; lowering it there
+/// binds whatever the owner scope holds under the same name.
+fn predicate_target_names_callee_binding<'a>(
+    function: &oxc_ast::ast::Function<'a>,
+    target: &TypeExpr,
+) -> bool {
+    let names = verter_type_expr::referenced_names(target);
+    let names_type_parameter = function.type_parameters.as_ref().is_some_and(|clause| {
+        clause.params.iter().any(|binder| {
+            names
+                .type_names
+                .iter()
+                .any(|occurrence| occurrence.head == binder.name.name.as_str())
+        })
+    });
+    if names_type_parameter {
+        return true;
+    }
+    if names.value_roots.is_empty() {
+        return false;
+    }
+    let mut parameter_names: FxHashSet<&'a str> = FxHashSet::default();
+    for param in &function.params.items {
+        collect_binding_pattern_names(&param.pattern, &mut parameter_names);
+    }
+    if let Some(rest) = &function.params.rest {
+        collect_binding_pattern_names(&rest.rest.argument, &mut parameter_names);
+    }
+    names
+        .value_roots
+        .iter()
+        .any(|root| parameter_names.contains(root.as_str()))
+}
+
+/// Every identifier a binding pattern binds, nested patterns included.
+fn collect_binding_pattern_names<'a>(pattern: &BindingPattern<'a>, out: &mut FxHashSet<&'a str>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => {
+            out.insert(id.name.as_str());
+        }
+        BindingPattern::ObjectPattern(object) => {
+            for property in &object.properties {
+                collect_binding_pattern_names(&property.value, out);
+            }
+            if let Some(rest) = &object.rest {
+                collect_binding_pattern_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(array) => {
+            for element in array.elements.iter().flatten() {
+                collect_binding_pattern_names(element, out);
+            }
+            if let Some(rest) = &array.rest {
+                collect_binding_pattern_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(assignment) => {
+            collect_binding_pattern_names(&assignment.left, out);
+        }
+    }
+}
+
 /// Unwrap a parenthesized expression (the IIFE callee shape).
 fn unwrap_parenthesized<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
     match expression {
         Expression::ParenthesizedExpression(paren) => unwrap_parenthesized(&paren.expression),
         inner => inner,
+    }
+}
+
+/// The reference an expression NAMES, through the wrappers the checker
+/// treats as transparent when it matches a narrowing reference:
+/// parentheses and the postfix non-null assertion.
+///
+/// `satisfies` and the `as` / angle-bracket TYPE ASSERTION are both
+/// deliberately absent, and for the same reason: neither is a matching
+/// reference for narrowing, in a leaf position or around a whole test.
+/// Measured against the checker, `if ((x satisfies string | undefined))`
+/// leaves `undefined` in the result and `typeof (x satisfies string |
+/// number) === "string"` narrows nothing, exactly as their `as` twins
+/// do, while both postfix-`!` spellings narrow. Peeling either one makes
+/// this half narrow where the checker does not — a SUBSET of the
+/// checker's type, which drops a real contributor rather than merely
+/// widening, and is therefore worse than the superset a missing narrow
+/// produces.
+fn unwrap_reference_transparent<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
+    match expression {
+        Expression::ParenthesizedExpression(paren) => {
+            unwrap_reference_transparent(&paren.expression)
+        }
+        Expression::TSNonNullExpression(non_null) => {
+            unwrap_reference_transparent(&non_null.expression)
+        }
+        inner => inner,
+    }
+}
+
+/// Where a narrow established by a control test would LAND, relative to
+/// the slots this half models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NarrowDestination {
+    /// A reference [`Lowerer::narrow_subject_of`] carries.
+    Represented,
+    /// A reference rooted at a modeled slot whose ACCESS this half
+    /// cannot express — a computed member, an optional step, a private
+    /// field. The checker still binds a narrow here.
+    Unrepresented,
+    /// No modeled slot to land on.
+    Absent,
+}
+
+/// What ONE control test establishes, as three mutually exclusive
+/// answers.
+///
+/// The third is the point: a two-answer result cannot separate "the test
+/// provably narrows nothing" from "the test narrows something this
+/// vocabulary cannot spell", and collapsing the two publishes the
+/// unnarrowed arm as a complete answer.
+#[derive(Debug, Clone, PartialEq)]
+enum GuardDisposition {
+    /// A narrowing fact this half CARRIES to the evaluator.
+    Modeled(SliceGuard),
+    /// PROVED to establish no narrowing at any slot this half models.
+    NoNarrowing,
+    /// The checker narrows a modeled slot through a form this
+    /// vocabulary cannot express: the demand degrades through the typed
+    /// `GuardNarrowing` gap.
+    Unexpressible,
+}
+
+impl GuardDisposition {
+    /// The negated reading. Negation is total on all three answers: the
+    /// negation of a proved-inert test is inert, and the negation of an
+    /// unexpressible one is still unexpressible.
+    fn negated(self) -> Self {
+        match self {
+            Self::Modeled(guard) => Self::Modeled(negate_guard(guard)),
+            Self::NoNarrowing => Self::NoNarrowing,
+            Self::Unexpressible => Self::Unexpressible,
+        }
+    }
+
+    fn is_no_narrowing(&self) -> bool {
+        matches!(self, Self::NoNarrowing)
+    }
+
+    fn is_unexpressible(&self) -> bool {
+        matches!(self, Self::Unexpressible)
+    }
+
+    /// The carried guard, with a proved-inert answer becoming the
+    /// explicit [`SliceGuard::None`] alternative the composition
+    /// reducers preserve. Only ever called once the caller has ruled out
+    /// [`Self::Unexpressible`].
+    fn into_guard(self) -> SliceGuard {
+        match self {
+            Self::Modeled(guard) => guard,
+            Self::NoNarrowing | Self::Unexpressible => SliceGuard::None,
+        }
     }
 }
 
@@ -1917,6 +2211,83 @@ fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
     }
 }
 
+/// The top-level FRESHNESS shape of one applied write's right-hand side —
+/// the lowering-time input to the evaluator's evolving-target widening
+/// rule (an assignment into a binding with NO declared authority widens
+/// exactly its FRESH literal positions; every pinned position keeps its
+/// literal — the checker's own fresh/regular literal-type split).
+///
+/// The tree MIRRORS the content lowering's own descent so the per-arm
+/// facts align 1:1 with the lowered [`SliceExpr`]: a parenthesis is the
+/// one wrapper both walks descend through (`value_descent`'s
+/// `Transparent`), and a conditional recurses per branch exactly where
+/// the lowering mints `SliceExpr::Union { arms: [consequent, alternate] }`
+/// (`value_descent`'s `Branches`). Every other form is one leaf verdict
+/// from the shared bare-literal authority — a `satisfies` wrapper stays
+/// fresh (the checker preserves freshness through it), a const assertion
+/// or type assertion pins. A read of a widening-literal `const` is an
+/// EVALUATOR fact (widening-locals membership), never spelled here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceFreshness {
+    /// A bare (fresh) literal position: widens at an evolving target.
+    Fresh,
+    /// Not a fresh literal position: the literal (if any) stays pinned.
+    Pinned,
+    /// A conditional expression: per-branch verdicts, aligned with the
+    /// lowered [`SliceExpr::Union`] arms (`[consequent, alternate]`).
+    PerArm(Arc<[SliceFreshness]>),
+}
+
+impl SliceFreshness {
+    /// Whether EVERY leaf of the tree is fresh (and the tree is
+    /// non-empty) — the classic widening-literal shape.
+    #[must_use]
+    pub fn all_fresh(&self) -> bool {
+        match self {
+            Self::Fresh => true,
+            Self::Pinned => false,
+            Self::PerArm(arms) => !arms.is_empty() && arms.iter().all(Self::all_fresh),
+        }
+    }
+
+    /// Whether ANY leaf of the tree is fresh.
+    #[must_use]
+    pub fn any_fresh(&self) -> bool {
+        match self {
+            Self::Fresh => true,
+            Self::Pinned => false,
+            Self::PerArm(arms) => arms.iter().any(Self::any_fresh),
+        }
+    }
+
+    /// Whether the tree mixes fresh and pinned leaves — the shape whose
+    /// widening decision needs PER-ARM evaluation.
+    #[must_use]
+    pub fn is_mixed(&self) -> bool {
+        self.any_fresh() && !self.all_fresh()
+    }
+}
+
+/// The freshness mirror for one value expression — an assignment or
+/// binding right-hand side, or a `return` argument. See
+/// [`SliceFreshness`] for the alignment contract with `lower_expr`.
+fn expression_freshness(expression: &Expression<'_>) -> SliceFreshness {
+    match expression {
+        Expression::ParenthesizedExpression(paren) => expression_freshness(&paren.expression),
+        Expression::ConditionalExpression(conditional) => SliceFreshness::PerArm(Arc::from([
+            expression_freshness(&conditional.consequent),
+            expression_freshness(&conditional.alternate),
+        ])),
+        _ => {
+            if expr_is_bare_literal(expression) {
+                SliceFreshness::Fresh
+            } else {
+                SliceFreshness::Pinned
+            }
+        }
+    }
+}
+
 /// Whether `statement` declares a function-scoped (`var`) binding, read
 /// from the SAME single inventory walk the index uses (nested function
 /// bodies are never entered, so a `var` inside a nested function value
@@ -1925,6 +2296,131 @@ fn declares_var(statement: &Statement<'_>) -> bool {
     !inventory_statement_list(std::slice::from_ref(statement))
         .var_names
         .is_empty()
+}
+
+/// Whether a labeled statement's body chain terminates at a loop it
+/// DIRECTLY wraps: a chain of labeled statements whose terminal body is
+/// the loop itself, with nothing in between. A `break` naming such a
+/// label is the loop's own exit — the label's continuation IS the loop's
+/// fall-through point — and a `continue` naming it is the loop's own
+/// iteration edge, so neither transfers control past lowered content.
+fn label_directly_wraps_loop(body: &Statement<'_>) -> bool {
+    let mut body = body;
+    loop {
+        match body {
+            Statement::LabeledStatement(labeled) => body = &labeled.body,
+            Statement::DoWhileStatement(_)
+            | Statement::ForInStatement(_)
+            | Statement::ForOfStatement(_)
+            | Statement::ForStatement(_)
+            | Statement::WhileStatement(_) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Whether the loop statement's tree contains a labeled `break` /
+/// `continue` whose target resolves OUTSIDE the loop: the label is
+/// neither defined within the walked tree nor one of `direct_labels`
+/// (the labels directly wrapping the walked loop — see
+/// [`label_directly_wraps_loop`]). Such a jump exits THROUGH the
+/// transparent summary into an enclosing lowered construct: the loop's
+/// body vanishes with the lowering, so the labeled exit edge would
+/// vanish with it — the enclosing `Labeled`'s `may_break` never records
+/// the exit, contributors reachable only through the break are dropped,
+/// and code the break skips is treated reachable (measured:
+/// `outer: { for (;;) { break outer } return 0 } return x` on
+/// `x: string | null` is `string | 0 | null`; transparency published
+/// `number`). The loop takes the typed refusal instead, exactly like a
+/// return-bearing one — this deliberately does not carry the edge.
+///
+/// Nested function/class frames are never entered, and need not be: a
+/// label cannot cross a function boundary, so every labeled jump this
+/// walk can see belongs to the walked frame, and a jump inside a nested
+/// frame can only target a label inside that frame. Unlabeled jumps
+/// always bind within the loop (the loop itself, or a nested
+/// loop/switch) and never escape it.
+fn loop_transfers_to_enclosing_label(
+    loop_statement: &Statement<'_>,
+    direct_labels: &[Arc<str>],
+) -> bool {
+    fn target_escapes(
+        label: Option<&oxc_ast::ast::LabelIdentifier<'_>>,
+        locals: &[&str],
+        direct: &[Arc<str>],
+    ) -> bool {
+        let Some(label) = label else {
+            return false;
+        };
+        let name = label.name.as_str();
+        !locals.contains(&name) && !direct.iter().any(|direct| &**direct == name)
+    }
+    fn walk_statement<'a>(
+        statement: &'a Statement<'a>,
+        locals: &mut Vec<&'a str>,
+        direct: &[Arc<str>],
+    ) -> bool {
+        match statement {
+            Statement::BreakStatement(break_stmt) => {
+                target_escapes(break_stmt.label.as_ref(), locals, direct)
+            }
+            Statement::ContinueStatement(continue_stmt) => {
+                target_escapes(continue_stmt.label.as_ref(), locals, direct)
+            }
+            Statement::LabeledStatement(labeled) => {
+                locals.push(labeled.label.name.as_str());
+                let escapes = walk_statement(&labeled.body, locals, direct);
+                locals.pop();
+                escapes
+            }
+            Statement::BlockStatement(block) => block
+                .body
+                .iter()
+                .any(|statement| walk_statement(statement, locals, direct)),
+            Statement::IfStatement(if_stmt) => {
+                walk_statement(&if_stmt.consequent, locals, direct)
+                    || if_stmt
+                        .alternate
+                        .as_ref()
+                        .is_some_and(|alternate| walk_statement(alternate, locals, direct))
+            }
+            Statement::DoWhileStatement(do_while) => walk_statement(&do_while.body, locals, direct),
+            Statement::WhileStatement(while_stmt) => {
+                walk_statement(&while_stmt.body, locals, direct)
+            }
+            Statement::ForStatement(for_stmt) => walk_statement(&for_stmt.body, locals, direct),
+            Statement::ForInStatement(for_in) => walk_statement(&for_in.body, locals, direct),
+            Statement::ForOfStatement(for_of) => walk_statement(&for_of.body, locals, direct),
+            Statement::SwitchStatement(switch) => switch.cases.iter().any(|case| {
+                case.consequent
+                    .iter()
+                    .any(|statement| walk_statement(statement, locals, direct))
+            }),
+            Statement::TryStatement(try_stmt) => {
+                try_stmt
+                    .block
+                    .body
+                    .iter()
+                    .any(|statement| walk_statement(statement, locals, direct))
+                    || try_stmt.handler.as_ref().is_some_and(|handler| {
+                        handler
+                            .body
+                            .body
+                            .iter()
+                            .any(|statement| walk_statement(statement, locals, direct))
+                    })
+                    || try_stmt.finalizer.as_ref().is_some_and(|finalizer| {
+                        finalizer
+                            .body
+                            .iter()
+                            .any(|statement| walk_statement(statement, locals, direct))
+                    })
+            }
+            Statement::WithStatement(with_stmt) => walk_statement(&with_stmt.body, locals, direct),
+            _ => false,
+        }
+    }
+    walk_statement(loop_statement, &mut Vec::new(), direct_labels)
 }
 
 /// Whether entering this statement guarantees that the current function
@@ -2364,10 +2860,70 @@ struct Lowerer<'a> {
     /// site); a cross-file callee is beyond this channel and lowers to
     /// [`SliceGuard::None`].
     program: &'a Program<'a>,
+    /// Whether the frame's file is PROVABLY module-scoped: the carrier
+    /// projects its script block as a module (a `.vue` / `.svelte` script
+    /// block compiles to one), or the retained program carries top-level
+    /// module syntax. This is the one-directional proof the callee
+    /// closure gate ([`Self::closed_callee_declaration`]) needs: a file
+    /// that is not provably a module is treated as a SCRIPT, whose
+    /// top-level functions are GLOBAL symbols merging with every other
+    /// script's and every `declare global` block's same-name declarations
+    /// — a set this snapshot cannot enumerate — so no callee of such a
+    /// file is ever certified or selected as a predicate.
+    module_scope: bool,
+    /// Whether the frame's function is NAMESPACE-OWNED — lexically inside
+    /// a `namespace` / `module` block (the index locator descends through
+    /// one). A bare callee there binds through the enclosing block scope
+    /// BEFORE the top level: a block-local declaration of the name (a
+    /// function, a `const`, a class, an enum, an `import =`, an exported
+    /// member of a merged sibling block, or a member an augmentation of an
+    /// exported namespace merges in) shadows the top-level one, exactly
+    /// as the function index binds `N.check` over the file-global `check`
+    /// for a direct call. The callee closure gate
+    /// ([`Self::closed_callee_declaration`]) enumerates TOP-LEVEL
+    /// declarations only, so under this flag it would certify — or mint
+    /// the predicate target of — the WRONG declaration; it refuses
+    /// instead. Inherited by every nested frame: a namespace cannot be
+    /// declared inside a function, so the block chain between a call site
+    /// and the top level is fixed by the served function's own position.
+    namespace_owned: bool,
     /// The first budget edge a SELECTED leaf's expression lowering hit.
     budget_failure: Option<verter_type_expr::facts::InferenceUnavailableReason>,
     /// Write effects proven unreachable by a literal control edge.
     inert_write_spans: FxHashSet<FrameSpan>,
+    /// Call / construct spans of decided-above positions — see
+    /// [`SliceContent::decided_above_call_spans`].
+    decided_above_call_spans: Vec<verter_span::Span>,
+    /// The authored call spans whose [`SliceGuard::TypePredicate`] fact
+    /// this lowering MINTED: evidence-backed at guard application, so the
+    /// control-position recorder neither certifies them decided-above nor
+    /// gaps them.
+    predicate_guard_call_spans: FxHashSet<verter_span::Span>,
+    /// A narrowing position lowered inside the CURRENT statement — a
+    /// control-position test, an assertion statement, a sequence's
+    /// discarded operand — carried a fact this half can neither certify
+    /// result-independent nor back with guard evidence (an unprovable
+    /// control call, a predicate target the call site rebinds, an
+    /// unprovable `instanceof` constructor, an unprovable discarded
+    /// call): the
+    /// statement loop drains this into a [`SliceStatement::Gap`]
+    /// (`GuardNarrowing`) AHEAD of the statement — a typed degradation,
+    /// never a silent certification. The `if` statement takes the flag
+    /// itself right after lowering its test, so an arm region's own loop
+    /// cannot drain it INTO the arm.
+    control_test_gap: bool,
+    /// The same-frame `const`-kind locals whose initializer is a form the
+    /// checker can bind a narrowing FACT to (a comparison, an
+    /// `instanceof` / `in` test, a call, a composition of those, or
+    /// another such alias). TypeScript preserves the narrowing of an
+    /// aliased CONDITION, so the truthiness of one of these names is not
+    /// the whole narrowing the checker applies: [`Self::lower_guard`]
+    /// flags the typed gap for it rather than publishing the alias's
+    /// unnarrowed subject. Populated whether or not the declaration is
+    /// value-selected — an elided local is still name-resolvable — and
+    /// only for `const` / `using` declarations, since the checker does
+    /// not preserve an aliased condition through a reassignable binding.
+    narrowing_alias_locals: FxHashSet<Arc<str>>,
     unsafe_invoked_closure_effects: FxHashSet<FrameSpan>,
     nested_free_writes: FxHashSet<SkeletonBindingId>,
     active_guard_bindings: Vec<SkeletonBindingId>,
@@ -2379,6 +2935,17 @@ struct Lowerer<'a> {
     /// accept unlabeled breaks), a labeled one the innermost matching
     /// name. Loop bodies never lower, so a loop is never an entry.
     break_targets: Vec<Option<Arc<str>>>,
+    /// The labels whose statements DIRECTLY wrap the loop currently being
+    /// classified for transparency: a chain of labeled statements whose
+    /// terminal body is the loop itself, with nothing in between. A
+    /// `break`/`continue` naming one of these is the loop's OWN exit or
+    /// iteration edge — the label's continuation IS the loop's
+    /// fall-through point — so it never transfers control past a lowered
+    /// construct and does not defeat transparency. Distinct from
+    /// [`Self::break_targets`], which also carries labels separated from
+    /// the loop by an intervening statement (a block with statements after
+    /// the loop): breaking to THOSE skips lowered content.
+    loop_direct_labels: Vec<Arc<str>>,
     /// For each break target, whether the target statement has a guaranteed
     /// current-function return later in its enclosing statement list. A
     /// pending break contributes implicit `undefined` only when its
@@ -2528,15 +3095,19 @@ impl Lowerer<'_> {
         })
     }
 
-    /// Whether a loop test carries a modelled guard over a downstream-selected
-    /// slot. A bare arithmetic/truthy expression that establishes no narrowing
-    /// fact is inert here; calls and writes are classified independently.
+    /// Whether a loop test carries narrowing over a downstream-selected
+    /// slot. A test PROVED to establish no fact is transparent here; a
+    /// modeled one and one this vocabulary cannot express both count, so
+    /// the loop takes its typed refusal rather than iterating under a
+    /// narrow nothing applied. Calls and writes are classified
+    /// independently. The classification is consulted, not lowered: a
+    /// loop test must not degrade the enclosing statement.
     fn control_test_narrows_downstream_slot(
         &mut self,
         test: &Expression<'_>,
         loop_span: FrameSpan,
     ) -> bool {
-        !matches!(self.lower_guard(test), SliceGuard::None)
+        !self.classify_guard(test).is_no_narrowing()
             && self.span_reads_downstream_slot(self.rebase(test.span()), loop_span)
     }
 
@@ -2866,24 +3437,49 @@ impl Lowerer<'_> {
         let region = self.skeleton.innermost_region_containing(self.rebase(at));
         let mut bindings = Vec::new();
         let mut add_subject = |subject: &SliceNarrowSubject| {
-            let name = match &subject.root {
-                SliceNarrowRoot::Local(name) => Some(name.as_ref()),
-                SliceNarrowRoot::Param(ordinal) => self
-                    .params
-                    .get(*ordinal as usize)
-                    .and_then(|param| param.name.as_deref()),
-            };
-            let Some(name) = name.and_then(|name| self.skeleton.name_id(name)) else {
-                return;
-            };
-            for binding in self.skeleton.bindings_of_name_in_scope(name, region) {
-                if !bindings.contains(&binding) {
-                    bindings.push(binding);
-                }
-            }
+            self.extend_subject_bindings(subject, region, &mut bindings);
         };
         collect_guard_subjects(guard, &mut add_subject);
         bindings
+    }
+
+    /// The skeleton bindings ONE narrow subject's root names at `at` —
+    /// the guarded set a closure created under that narrow captures. A
+    /// `switch` clause is guarded by its dispatch relation exactly as an
+    /// `if` arm is by its test, so both reach the closure-capture rail
+    /// through this one collector.
+    fn subject_bindings(
+        &self,
+        subject: &SliceNarrowSubject,
+        at: oxc_span::Span,
+    ) -> Vec<SkeletonBindingId> {
+        let region = self.skeleton.innermost_region_containing(self.rebase(at));
+        let mut bindings = Vec::new();
+        self.extend_subject_bindings(subject, region, &mut bindings);
+        bindings
+    }
+
+    fn extend_subject_bindings(
+        &self,
+        subject: &SliceNarrowSubject,
+        region: verter_semantic::analysis::flow::SkeletonRegionId,
+        bindings: &mut Vec<SkeletonBindingId>,
+    ) {
+        let name = match &subject.root {
+            SliceNarrowRoot::Local(name) => Some(name.as_ref()),
+            SliceNarrowRoot::Param(ordinal) => self
+                .params
+                .get(*ordinal as usize)
+                .and_then(|param| param.name.as_deref()),
+        };
+        let Some(name) = name.and_then(|name| self.skeleton.name_id(name)) else {
+            return;
+        };
+        for binding in self.skeleton.bindings_of_name_in_scope(name, region) {
+            if !bindings.contains(&binding) {
+                bindings.push(binding);
+            }
+        }
     }
 
     fn predicate_subject_name(&self, test: &Expression<'_>) -> Option<Arc<str>> {
@@ -2893,7 +3489,7 @@ impl Lowerer<'_> {
         let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
             return None;
         };
-        let (ordinal, _) = self.same_file_predicate(callee.name.as_str(), false)?;
+        let (ordinal, _) = self.same_file_predicate(callee.name.as_str(), false, call.span)?;
         let argument = call
             .arguments
             .get(ordinal)
@@ -3466,19 +4062,26 @@ impl Lowerer<'_> {
                 can_fall_through = false;
                 break;
             }
+            let statement_start = out.len();
             match statement {
                 Statement::ReturnStatement(ret) => {
-                    let widening_literal = ret.argument.as_ref().is_some_and(expr_is_bare_literal);
+                    let freshness = ret
+                        .argument
+                        .as_ref()
+                        .map_or(SliceFreshness::Pinned, expression_freshness);
                     let argument = ret.argument.as_ref().map(|arg| {
                         if self.value_span_selected(arg.span()) {
                             self.lower_expr(arg, ExprMode::Return)
                         } else {
+                            // An unselected return argument still RUNS:
+                            // scan its effects like every elided position.
+                            self.scan_unmodeled_position_effects(arg);
                             SliceExpr::Elided
                         }
                     });
                     out.push(SliceStatement::Return {
                         argument,
-                        widening_literal,
+                        freshness,
                     });
                     can_fall_through = false;
                 }
@@ -3497,6 +4100,18 @@ impl Lowerer<'_> {
                     // through the ONE guard authority both control
                     // spellings share.
                     let guard = self.lower_guard(&if_stmt.test);
+                    // A guard form the lowering REFUSED (an unprovable
+                    // `instanceof` constructor) flagged the gap while the
+                    // test lowered. Take it here, ahead of the arms: an arm
+                    // region's own statement loop would otherwise drain it
+                    // INTO the arm.
+                    let unprovable_guard = std::mem::take(&mut self.control_test_gap);
+                    // A call in the TEST is decided above ONLY when its
+                    // result provably cannot control the arms' narrowing;
+                    // a predicate call takes evaluator evidence at guard
+                    // application, and an unprovable callee degrades the
+                    // demand through the typed guard-narrowing gap below.
+                    let unprovable_control_call = self.record_control_position_calls(&if_stmt.test);
                     let active_guard_base = self.active_guard_bindings.len();
                     let active_guard_name_base = self.active_guard_names.len();
                     let guard_bindings = self.guard_bindings(&guard, if_stmt.test.span());
@@ -3539,7 +4154,7 @@ impl Lowerer<'_> {
                     // arm — the test lowers to guard facts only, so the
                     // marker carries the point (ahead of the `if`, where
                     // the test evaluates).
-                    if nested_predicate_gap {
+                    if nested_predicate_gap || unprovable_control_call || unprovable_guard {
                         out.push(SliceStatement::Gap(
                             crate::semantic_query::FlowGap::GuardNarrowing,
                         ));
@@ -3571,9 +4186,23 @@ impl Lowerer<'_> {
                         VariableDeclarationKind::Var => SliceBindingKind::Var,
                     };
                     for declarator in &decl.declarations {
+                        // An eligible alias of a CONDITION or a
+                        // DISCRIMINANT re-establishes its initializer's
+                        // fact at every later test of the bound name,
+                        // whether or not the demand value-selected the
+                        // declaration — the name still resolves either
+                        // way, and a destructured discriminant aliases
+                        // exactly as a whole-binding one does.
+                        self.record_narrowing_aliases(&decl.kind, declarator);
                         let BindingPattern::BindingIdentifier(id) = &declarator.id else {
                             // Destructuring declarators are not simple
-                            // local reaching definitions.
+                            // local reaching definitions — but the
+                            // initializer still RUNS at the statement, so
+                            // its effects take the same fail-closed scan
+                            // every unmodeled position gets.
+                            if let Some(init) = declarator.init.as_ref() {
+                                self.scan_unmodeled_position_effects(init);
+                            }
                             continue;
                         };
                         // A binding OUTSIDE the slice's value-selected
@@ -3586,7 +4215,19 @@ impl Lowerer<'_> {
                         // (declaration-precise), never the name — a
                         // shadowed same-named sibling the plan kept out
                         // must not lower.
+                        //
+                        // The elided initializer still RUNS at the
+                        // statement, though: an assertion call or a
+                        // whole-binding write inside it narrows / retypes
+                        // what follows in the checker while the slice's
+                        // obligations never reach the position — scan it
+                        // with the same fail-closed discipline (a
+                        // pure-literal initializer carries no effect and
+                        // stays silent).
                         if !self.slot_selected(id.span) {
+                            if let Some(init) = declarator.init.as_ref() {
+                                self.scan_unmodeled_position_effects(init);
+                            }
                             continue;
                         }
                         // An ANNOTATED declarator preserves its
@@ -3621,20 +4262,35 @@ impl Lowerer<'_> {
                                 &[],
                             )
                         });
-                        // A WIDENING literal binding: an unannotated
-                        // `const` initialized from a bare literal with no
-                        // const assertion. `let` / `var` initializers
-                        // already widened at `BindingInit` lowering, and
-                        // an annotated `const` takes its declared type.
-                        let widening_literal = kind == SliceBindingKind::Const
-                            && declared.is_none()
-                            && declarator.init.as_ref().is_some_and(expr_is_bare_literal);
+                        // The initializer's FRESHNESS shape for an
+                        // unannotated `const` — the evaluator's widening
+                        // membership input. An all-fresh tree (a bare
+                        // literal, or a conditional whose EVERY leaf is
+                        // one — `f ? 1 : "s"`) is the classic
+                        // widening-literal binding: the checker widens
+                        // every arm at a widening read (`{ label: v }`
+                        // reads `string | number`). A MIXED tree (an
+                        // `as const` arm, a call, a reference beside a
+                        // fresh leaf) carries per-arm verdicts so the
+                        // evaluator widens exactly the fresh arms and
+                        // keeps the authored pins. `let` / `var`
+                        // initializers already widened at `BindingInit`
+                        // lowering, and an annotated `const` takes its
+                        // declared type — both stay `Pinned` here.
+                        let freshness = if kind == SliceBindingKind::Const && declared.is_none() {
+                            declarator
+                                .init
+                                .as_ref()
+                                .map_or(SliceFreshness::Pinned, expression_freshness)
+                        } else {
+                            SliceFreshness::Pinned
+                        };
                         out.push(SliceStatement::Binding {
                             name: Arc::from(id.name.as_str()),
                             kind,
                             init,
                             declared,
-                            widening_literal,
+                            freshness,
                         });
                     }
                 }
@@ -3647,13 +4303,24 @@ impl Lowerer<'_> {
                 // narrowing persists.
                 Statement::ExpressionStatement(expression) => {
                     if let Some(statement) = self.lower_effect_statement(&expression.expression) {
+                        // A statement-position call to a callee proven
+                        // never to return ends the path exactly as an
+                        // authored `throw` does: the statements after it
+                        // are unreachable and contribute nothing.
+                        if matches!(statement, SliceStatement::Throw) {
+                            can_fall_through = false;
+                        }
                         out.push(statement);
                     }
                 }
                 // A `throw` terminates the region path without contributing
                 // a return arm; the marker carries the throw POINT to the
-                // evaluator (a `catch` is entered from it too).
-                Statement::ThrowStatement(_) => {
+                // evaluator (a `catch` is entered from it too). The
+                // argument still EVALUATES first: an effect there runs
+                // before the region ends, so it takes the same fail-closed
+                // scan.
+                Statement::ThrowStatement(throw_stmt) => {
+                    self.scan_unmodeled_position_effects(&throw_stmt.argument);
                     out.push(SliceStatement::Throw);
                     can_fall_through = false;
                 }
@@ -3663,13 +4330,18 @@ impl Lowerer<'_> {
                 | Statement::ForStatement(_)
                 | Statement::WhileStatement(_) => {
                     // A return-free loop is fall-through TRANSPARENT only
-                    // while it binds nothing that outlives it and carries no
+                    // while it binds nothing that outlives it, transfers
+                    // no control past a lowered construct, and carries no
                     // unmodelled transfer for a downstream-selected slot. A
-                    // `var` declaration escapes the loop; a selected guard,
-                    // call/assertion, or write depends on iteration flow.
-                    // Either shape takes the existing typed loop refusal.
+                    // `var` declaration escapes the loop; a `break`/
+                    // `continue` naming an enclosing label exits an edge
+                    // the vanished body can no longer record; a selected
+                    // guard, call/assertion, or write depends on iteration
+                    // flow. Every shape takes the existing typed loop
+                    // refusal.
                     if self.control_has_return(statement)
                         || declares_var(statement)
+                        || loop_transfers_to_enclosing_label(statement, &self.loop_direct_labels)
                         || self.loop_has_selected_transfer(statement)
                     {
                         out.push(SliceStatement::Unsupported(SliceUnsupported::Loop));
@@ -3688,7 +4360,18 @@ impl Lowerer<'_> {
                     self.break_targets.push(Some(Arc::clone(&label)));
                     self.break_target_followed_by_return
                         .push(self.current_statement_followed_by_return);
+                    // A label chain directly wrapping a loop names the
+                    // loop's own exit/iteration edge: record it so the
+                    // loop's transparency classification treats a jump to
+                    // it as local rather than an escaping transfer.
+                    let direct_wrap = label_directly_wraps_loop(&labeled.body);
+                    if direct_wrap {
+                        self.loop_direct_labels.push(Arc::clone(&label));
+                    }
                     let child = self.lower_arm(&labeled.body);
+                    if direct_wrap {
+                        self.loop_direct_labels.pop();
+                    }
                     self.break_targets.pop();
                     self.break_target_followed_by_return.pop();
                     let mut absorbed = false;
@@ -3725,16 +4408,79 @@ impl Lowerer<'_> {
                     // evaluator can narrow it per dispatch edge, and each
                     // literal case test rides its clause for the same
                     // purpose (a non-literal test narrows nothing).
+                    //
+                    // Both positions still EXECUTE, so their effects take
+                    // the fail-closed scan: the discriminant's value feeds
+                    // the dispatch but never the demanded answer (the
+                    // discarded-operand discipline — only an `asserts`
+                    // callee narrows what follows), and each case TEST is
+                    // a control position exactly as an `if` test is —
+                    // `switch (true) { case isString(x): … }` narrows `x`
+                    // inside the clause in the checker.
+                    //
+                    // The scan alone is NOT completeness evidence, because
+                    // a case relation narrows with no call and no write at
+                    // all: `switch (true) { case typeof x === "string": }`
+                    // narrows `x` inside the clause, `case K:` against a
+                    // literal-typed `const` narrows the discriminant, and a
+                    // bare-identifier test aliasing a narrowing expression
+                    // narrows through the alias. The MODELED
+                    // dispatch is therefore exactly one shape — a
+                    // represented discriminant against a LITERAL case
+                    // relation, the only pair this lowering carries to the
+                    // evaluator — and every other clause with a test mints
+                    // the typed gap.
+                    //
+                    // The gap belongs AHEAD of the switch: a case test
+                    // evaluates whether or not its clause is entered, so
+                    // the flag must not drain into a clause region's own
+                    // statement loop.
+                    let mut unprovable_switch_effect =
+                        self.record_discarded_operand_calls(&switch.discriminant);
                     let has_default = switch.cases.iter().any(|case| case.test.is_none());
                     let discriminant = self.narrow_subject_of(&switch.discriminant);
                     self.break_targets.push(None);
                     self.break_target_followed_by_return.push(false);
+                    // A clause body evaluates under the dispatch narrow
+                    // of the discriminant, so a closure created there
+                    // captures a reading the evaluator cannot reproduce
+                    // at the capture's own evaluation — the same rail the
+                    // `if` arms and the ternary's arms take.
+                    let active_guard_base = self.active_guard_bindings.len();
+                    if let Some(subject) = discriminant.as_ref() {
+                        let bindings = self.subject_bindings(subject, switch.discriminant.span());
+                        self.active_guard_bindings.extend(bindings);
+                    }
                     let mut cases = Vec::with_capacity(switch.cases.len());
                     for case in &switch.cases {
-                        let test = case
-                            .test
-                            .as_ref()
-                            .and_then(|test| guard_literal_of(test, self.source));
+                        if let Some(test) = case.test.as_ref() {
+                            unprovable_switch_effect |= self.record_control_position_calls(test);
+                        }
+                        // The MODELED dispatch is exactly one pair: a
+                        // represented discriminant against a LITERAL case
+                        // relation. Anything else — a `typeof` or
+                        // equality relation under a non-reference
+                        // discriminant, a case test naming a constant, a
+                        // template case, a discriminant this half cannot
+                        // represent — establishes a clause narrow the
+                        // checker applies and this lowering carries
+                        // nothing for, so the switch degrades. The
+                        // unrecognized clause keeps its OWN carrier: it
+                        // must never be dispatched as the default edge.
+                        let test = match case.test.as_ref() {
+                            None => SliceSwitchTest::Default,
+                            Some(test) => {
+                                match guard_literal_of(test, self.source)
+                                    .filter(|_| discriminant.is_some())
+                                {
+                                    Some(literal) => SliceSwitchTest::Literal(literal),
+                                    None => {
+                                        unprovable_switch_effect = true;
+                                        SliceSwitchTest::Unmodeled
+                                    }
+                                }
+                            }
+                        };
                         let lowered = self.lower_region(&case.consequent);
                         hit_unsupported |= lowered.hit_unsupported;
                         let mut breaks = false;
@@ -3750,6 +4496,7 @@ impl Lowerer<'_> {
                             test,
                         });
                     }
+                    self.active_guard_bindings.truncate(active_guard_base);
                     self.break_targets.pop();
                     self.break_target_followed_by_return.pop();
                     // Past the switch is reachable when no `default`
@@ -3761,6 +4508,11 @@ impl Lowerer<'_> {
                             .last()
                             .is_some_and(|case| case.region.can_fall_through)
                         || cases.iter().any(|case| case.breaks);
+                    if unprovable_switch_effect {
+                        out.push(SliceStatement::Gap(
+                            crate::semantic_query::FlowGap::GuardNarrowing,
+                        ));
+                    }
                     out.push(SliceStatement::Switch {
                         discriminant,
                         cases: Arc::from(cases.into_boxed_slice()),
@@ -3952,18 +4704,76 @@ impl Lowerer<'_> {
                     hit_unsupported = true;
                     can_fall_through = false;
                 }
+                // A class declaration is NOT a no-op: its decorators,
+                // `super_class` heritage expression, computed member keys,
+                // member decorators, static blocks, and static property /
+                // accessor initializers evaluate in THIS frame at the
+                // statement. The ONE class discipline the leaf path applies
+                // to a class EXPRESSION answers for it: provably
+                // non-narrowing calls are decided above, every other call
+                // flags the enclosing statement's typed gap, and a
+                // whole-binding WRITE to a frame-owned target — invisible
+                // to the slice's effect ledger, which the skeleton never
+                // feeds from the class subtree — takes the same typed gap.
+                // Deferred bodies (a method runs when called, an instance
+                // property initializer at construction) keep the
+                // nested-frame blanket treatment.
+                Statement::ClassDeclaration(class) => {
+                    let mut scanner = LeafCallScanner::default();
+                    scanner.visit_class(class);
+                    self.drain_leaf_call_scanner(scanner);
+                }
                 // Declaration / no-op statements: transparent (no return
-                // contribution, no content statement).
+                // contribution, no content statement) — EXCEPT the enum:
+                // a non-ambient enum's member initializers EVALUATE in
+                // this frame at the statement (`enum E { A =
+                // (assertString(x), 1) }` narrows `x` for every read that
+                // follows in the checker), so its effectful initializers
+                // take the same fail-closed scan every unmodeled position
+                // gets. A `declare`d enum is ambient: nothing runs.
+                Statement::TSEnumDeclaration(enumeration) => {
+                    if !enumeration.declare {
+                        for member in &enumeration.body.members {
+                            if let Some(initializer) = member.initializer.as_ref() {
+                                self.scan_unmodeled_position_effects(initializer);
+                            }
+                        }
+                    }
+                }
+                // Declaration / no-op statements: transparent (no return
+                // contribution, no content statement) — EXCEPT the
+                // executable declarations: a non-ambient namespace body
+                // RUNS its statements at this statement.
+                Statement::TSModuleDeclaration(module) => {
+                    // A string-named `module "…"` block is an ambient
+                    // module augmentation: it evaluates nothing.
+                    if !module.declare
+                        && matches!(
+                            module.id,
+                            oxc_ast::ast::TSModuleDeclarationName::Identifier(_)
+                        )
+                    {
+                        self.scan_module_declaration_effects(module);
+                    }
+                }
                 Statement::DebuggerStatement(_)
                 | Statement::EmptyStatement(_)
                 | Statement::FunctionDeclaration(_)
-                | Statement::ClassDeclaration(_)
                 | Statement::TSTypeAliasDeclaration(_)
                 | Statement::TSInterfaceDeclaration(_)
-                | Statement::TSEnumDeclaration(_)
-                | Statement::TSModuleDeclaration(_)
                 | Statement::TSGlobalDeclaration(_)
                 | Statement::TSImportEqualsDeclaration(_) => {}
+            }
+            // A ternary test lowered INSIDE this statement carried a
+            // control call this half could neither certify nor evidence:
+            // the typed guard-narrowing gap lands AHEAD of the statement,
+            // so a terminal statement (a `return` of the ternary) cannot
+            // strand it unreachable.
+            if std::mem::take(&mut self.control_test_gap) {
+                out.insert(
+                    statement_start,
+                    SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+                );
             }
             if hit_unsupported {
                 can_fall_through = false;
@@ -3997,56 +4807,239 @@ impl Lowerer<'_> {
     ///
     /// The output is a structural description of the narrowing facts the
     /// test establishes; it evaluates nothing (this half has no
-    /// resolver). A form the [`SliceGuard`] vocabulary cannot express
-    /// lowers to [`SliceGuard::None`], which applies no narrow at all —
-    /// the exact behaviour the arms had before guards existed. Negation
-    /// is pushed to the leaves at lowering time (De Morgan), so the
-    /// evaluator only ever asks a guard for its positive or its negated
-    /// reading.
+    /// resolver). Negation is pushed to the leaves at lowering time (De
+    /// Morgan), so the evaluator only ever asks a guard for its positive
+    /// or its negated reading.
+    ///
+    /// [`SliceGuard::None`] means PROVED NON-NARROWING, and nothing else:
+    /// it is what the evaluator applies when the test establishes no fact
+    /// at all. A form this vocabulary cannot express is therefore never
+    /// spelled as `None` alone — [`Self::classify_guard`] answers with the
+    /// third disposition, and this conversion flags
+    /// [`Lowerer::control_test_gap`] so the caller emits the typed
+    /// `GuardNarrowing` gap ahead of the construct: a degraded success,
+    /// `ReturnOnly`, never a silently published superset.
     fn lower_guard(&mut self, test: &Expression<'_>) -> SliceGuard {
-        match unwrap_parenthesized(test) {
+        match self.classify_guard(test) {
+            GuardDisposition::Modeled(guard) => guard,
+            GuardDisposition::NoNarrowing => SliceGuard::None,
+            GuardDisposition::Unexpressible => {
+                self.control_test_gap = true;
+                SliceGuard::None
+            }
+        }
+    }
+
+    /// The tri-state classification behind [`Self::lower_guard`] — the
+    /// ONE authority over what a control test establishes. Every
+    /// composing form (`!`, `&&`, `||`, `??`, a conditional, a sequence,
+    /// an assignment, parentheses) recurses through THIS function and
+    /// composes the disposition; none of them collapses an unexpressible
+    /// operand into "no narrowing".
+    ///
+    /// The vocabulary is deliberately smaller than the checker's, so the
+    /// classification is positional: a form that establishes a narrow at
+    /// a slot this half MODELS — a parameter or a modelable same-frame
+    /// local, with or without an access path under it — is
+    /// [`GuardDisposition::Unexpressible`] when the vocabulary cannot
+    /// carry it. A form that reaches no such slot narrows nothing this
+    /// half could have applied and is
+    /// [`GuardDisposition::NoNarrowing`].
+    ///
+    /// This function has no gap side effect: it is also the probe the
+    /// loop-transparency rule consults, which must classify a test
+    /// WITHOUT degrading the enclosing statement.
+    fn classify_guard(&mut self, test: &Expression<'_>) -> GuardDisposition {
+        // The whole test rides the same reference-transparent wrappers a
+        // leaf reference does — parentheses and the postfix non-null
+        // assertion ONLY: `(typeof x === "string")!` still establishes
+        // the inner fact, so the entry must peel them before dispatching
+        // or the composing forms behind one collapse to a proved absence
+        // of narrowing. `satisfies` and the `as` / angle-bracket type
+        // assertion are deliberately NOT peeled: neither is a matching
+        // reference for narrowing (measured, `typeof (x satisfies string
+        // | number) === "string"` narrows nothing), and peeling one would
+        // narrow where the checker does not — a SUBSET of the checker's
+        // type, which drops a real contributor. See
+        // [`unwrap_reference_transparent`].
+        match unwrap_reference_transparent(test) {
             Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
-                let inner = self.lower_guard(&unary.argument);
-                negate_guard(inner)
+                self.classify_guard(&unary.argument).negated()
             }
             Expression::LogicalExpression(logical) => {
-                let left = self.lower_guard(&logical.left);
-                let right = self.lower_guard(&logical.right);
+                let left = self.classify_guard(&logical.left);
+                let right = self.classify_guard(&logical.right);
                 match logical.operator {
-                    LogicalOperator::And => and_guard(left, right),
-                    LogicalOperator::Or => or_guard(left, right),
-                    // `a ?? b` tests nullishness of `a`, but its result is
-                    // the OPERAND's value, not a boolean fact over the
-                    // branch arms — a narrow from it would apply to the
-                    // wrong reference. No guard.
-                    LogicalOperator::Coalesce => SliceGuard::None,
+                    // A conjunct / disjunct this half PROVED inert stays
+                    // in the tree as an explicit `None` alternative (the
+                    // false edge of `a && b` is a disjunction of
+                    // negations, so an inert operand blocks the other's
+                    // negation there); an UNEXPRESSIBLE operand degrades
+                    // the whole test.
+                    LogicalOperator::And | LogicalOperator::Or => {
+                        if left.is_unexpressible() || right.is_unexpressible() {
+                            return GuardDisposition::Unexpressible;
+                        }
+                        if left.is_no_narrowing() && right.is_no_narrowing() {
+                            return GuardDisposition::NoNarrowing;
+                        }
+                        let composed = if logical.operator == LogicalOperator::And {
+                            and_guard(left.into_guard(), right.into_guard())
+                        } else {
+                            or_guard(left.into_guard(), right.into_guard())
+                        };
+                        GuardDisposition::Modeled(composed)
+                    }
+                    // `a ?? b` tests nullishness of `a`, but its result
+                    // is the OPERAND's value, not a boolean fact over the
+                    // arms — a narrow taken from either operand would
+                    // apply to the wrong reference, and this half has no
+                    // branch/merge composition to prove which survives.
+                    // Silence is owed only when NEITHER operand carries a
+                    // fact at all.
+                    LogicalOperator::Coalesce => {
+                        if left.is_no_narrowing() && right.is_no_narrowing() {
+                            GuardDisposition::NoNarrowing
+                        } else {
+                            GuardDisposition::Unexpressible
+                        }
+                    }
                 }
             }
-            Expression::BinaryExpression(binary) => self.lower_binary_guard(binary),
-            Expression::CallExpression(call) => self.lower_predicate_guard(call),
-            other => self
-                .narrow_subject_of(other)
-                .map(|subject| SliceGuard::Truthy {
-                    subject,
-                    negated: false,
-                })
-                .unwrap_or(SliceGuard::None),
+            Expression::BinaryExpression(binary) => self.classify_binary_guard(binary),
+            // A call's narrowing lives in its CALLEE's declared return,
+            // and the control-position call rail owns it entirely
+            // ([`Self::record_control_position_calls`] certifies a
+            // provably non-narrowing callee and degrades every other).
+            // Answering `Unexpressible` here would degrade the very tests
+            // that rail proves silent and destroy the certification.
+            Expression::CallExpression(call) => match self.lower_predicate_guard(call) {
+                SliceGuard::None => GuardDisposition::NoNarrowing,
+                guard => GuardDisposition::Modeled(guard),
+            },
+            // The test's VALUE is one of the branches; this half carries
+            // no branch/merge composition for a guard, so a branch that
+            // establishes anything degrades the test.
+            Expression::ConditionalExpression(conditional) => {
+                let consequent = self.classify_guard(&conditional.consequent);
+                let alternate = self.classify_guard(&conditional.alternate);
+                if consequent.is_no_narrowing() && alternate.is_no_narrowing() {
+                    GuardDisposition::NoNarrowing
+                } else {
+                    GuardDisposition::Unexpressible
+                }
+            }
+            // A sequence's VALUE is its last operand, and the checker
+            // narrows through it; the earlier operands are discarded and
+            // take the discarded-operand rail. This half carries no guard
+            // for the form, so a value-carrying last operand degrades.
+            Expression::SequenceExpression(sequence) => match sequence.expressions.last() {
+                Some(last) => match self.classify_guard(last) {
+                    GuardDisposition::NoNarrowing => GuardDisposition::NoNarrowing,
+                    _ => GuardDisposition::Unexpressible,
+                },
+                None => GuardDisposition::NoNarrowing,
+            },
+            // An assignment used as a test narrows the binding it WROTE
+            // (the checker takes the target as the reference and the
+            // right-hand side's truthiness as the fact). Neither half is
+            // expressible here.
+            Expression::AssignmentExpression(assignment) => {
+                let target_reaches_slot = match &assignment.left {
+                    oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(target) => self
+                        .identifier_roots_a_narrow_destination(target.name.as_str(), target.span),
+                    other => other
+                        .as_member_expression()
+                        .is_some_and(|member| self.member_root_is_represented(member)),
+                };
+                if target_reaches_slot || !self.classify_guard(&assignment.right).is_no_narrowing()
+                {
+                    GuardDisposition::Unexpressible
+                } else {
+                    GuardDisposition::NoNarrowing
+                }
+            }
+            // `#field in obj` is the private-name brand check: the
+            // checker selects the subject's union arms by whether the
+            // class installed the field, exactly as the string-key form
+            // does. This vocabulary carries only a string key, so a
+            // subject reaching a modeled slot degrades.
+            Expression::PrivateInExpression(private_in) => {
+                match self.narrow_destination_of(&private_in.right) {
+                    NarrowDestination::Absent => GuardDisposition::NoNarrowing,
+                    _ => GuardDisposition::Unexpressible,
+                }
+            }
+            other => self.classify_truthiness_guard(other),
+        }
+    }
+
+    /// The bare-truthiness classification: the test's own value decides
+    /// the arms, so the fact lands on the reference the expression NAMES.
+    ///
+    /// The reference is read through the checker's transparent wrappers
+    /// only — parentheses and the postfix non-null assertion.
+    /// `satisfies` and the `as` / angle-bracket type assertion are NOT
+    /// among them: neither is a matching reference for narrowing
+    /// (measured — `if ((x satisfies string | undefined))` leaves
+    /// `undefined` in the result, exactly like its `as` twin), so a test
+    /// behind one establishes nothing and is proved inert rather than
+    /// degraded. Peeling either would narrow where the checker does not —
+    /// a SUBSET of the checker's type, worse than the superset a missing
+    /// narrow produces. See [`unwrap_reference_transparent`].
+    fn classify_truthiness_guard(&mut self, expression: &Expression<'_>) -> GuardDisposition {
+        let reference = unwrap_reference_transparent(expression);
+        match self.narrow_subject_of(reference) {
+            Some(subject) => {
+                if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
+                    GuardDisposition::Unexpressible
+                } else {
+                    GuardDisposition::Modeled(SliceGuard::Truthy {
+                        subject,
+                        negated: false,
+                    })
+                }
+            }
+            None => match self.narrow_destination_of(reference) {
+                NarrowDestination::Absent => GuardDisposition::NoNarrowing,
+                // A reference rooted at a slot this half models whose
+                // ACCESS it cannot express — a computed member, an
+                // optional step, a private field — still has a narrowing
+                // destination: the checker binds the fact there.
+                // (`Represented` cannot reach this arm — the subject
+                // lowering above already answered for it.)
+                NarrowDestination::Represented | NarrowDestination::Unrepresented => {
+                    GuardDisposition::Unexpressible
+                }
+            },
         }
     }
 
     /// The binary-operator guard forms: strict (in)equality — including
     /// the `typeof x === "kind"` spelling — `instanceof`, and `in`.
-    fn lower_binary_guard(&mut self, binary: &oxc_ast::ast::BinaryExpression<'_>) -> SliceGuard {
+    ///
+    /// Each family models an EXACT pair and degrades everything else that
+    /// still reaches a modeled slot: an equality between two references,
+    /// against a named constant, against a `typeof` this half cannot
+    /// resolve, or wrapping a nested guard in a boolean comparison; an
+    /// `in` with a non-literal key or an inexpressible subject access; an
+    /// `instanceof` over an inexpressible subject or an unprovable
+    /// constructor. Relational and arithmetic operators establish no
+    /// narrowing in the checker and are proved inert.
+    fn classify_binary_guard(
+        &mut self,
+        binary: &oxc_ast::ast::BinaryExpression<'_>,
+    ) -> GuardDisposition {
         use oxc_ast::ast::BinaryOperator;
         match binary.operator {
             BinaryOperator::StrictEquality | BinaryOperator::StrictInequality => {
                 let negated = matches!(binary.operator, BinaryOperator::StrictInequality);
                 // `typeof x === "string"` (either operand order).
                 if let Some(guard) = self.typeof_guard(&binary.left, &binary.right, negated) {
-                    return guard;
+                    return GuardDisposition::Modeled(guard);
                 }
                 if let Some(guard) = self.typeof_guard(&binary.right, &binary.left, negated) {
-                    return guard;
+                    return GuardDisposition::Modeled(guard);
                 }
                 // `subject === literal` (either operand order).
                 for (subject_side, literal_side) in
@@ -4058,41 +5051,334 @@ impl Lowerer<'_> {
                     let Some(literal) = guard_literal_of(literal_side, self.source) else {
                         continue;
                     };
-                    return SliceGuard::EqLiteral {
+                    // An aliased DISCRIMINANT carries its own fact: the
+                    // checker re-establishes what the alias's initializer
+                    // decided, on the reference that initializer named,
+                    // which this relation never mentions.
+                    if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
+                        return GuardDisposition::Unexpressible;
+                    }
+                    return GuardDisposition::Modeled(SliceGuard::EqLiteral {
                         subject,
                         literal,
                         negated,
-                    };
+                    });
                 }
-                SliceGuard::None
+                self.classify_unexpressible_comparison(binary)
+            }
+            // Loose (in)equality is a narrowing operator with its own
+            // semantics — `x == null` selects BOTH nullish arms — which
+            // this vocabulary does not carry, so it never lowers through
+            // the strict literal relation.
+            BinaryOperator::Equality | BinaryOperator::Inequality => {
+                self.classify_unexpressible_comparison(binary)
             }
             BinaryOperator::Instanceof => {
                 let Some(subject) = self.narrow_subject_of(&binary.left) else {
-                    return SliceGuard::None;
+                    // A subject whose ACCESS this half cannot express is
+                    // still a narrowing destination; one with no
+                    // represented root has none.
+                    return match self.narrow_destination_of(&binary.left) {
+                        NarrowDestination::Absent => GuardDisposition::NoNarrowing,
+                        _ => GuardDisposition::Unexpressible,
+                    };
                 };
+                // The right-hand side is the VALUE the test compares
+                // against at run time, and the evaluator lowers its NAME
+                // as an owner-scope TYPE reference — which is that value's
+                // instance type ONLY when the bare name provably denotes
+                // the module's single same-file `class` declaration at
+                // this call site ([`Self::closed_instanceof_constructor`]).
+                // Every other spelling — a frame-bound name, a
+                // namespace-owned site, a non-class value, an import, a
+                // member or call expression — names a constructor this
+                // half cannot prove, so the test degrades rather than
+                // narrowing through the wrong binding.
                 match unwrap_parenthesized(&binary.right) {
-                    Expression::Identifier(ctor) => SliceGuard::Instanceof {
-                        subject,
-                        ctor: Arc::from(ctor.name.as_str()),
-                        negated: false,
-                    },
-                    _ => SliceGuard::None,
+                    Expression::Identifier(ctor)
+                        if self.closed_instanceof_constructor(ctor.name.as_str(), ctor.span) =>
+                    {
+                        GuardDisposition::Modeled(SliceGuard::Instanceof {
+                            subject,
+                            ctor: Arc::from(ctor.name.as_str()),
+                            negated: false,
+                        })
+                    }
+                    _ => GuardDisposition::Unexpressible,
                 }
             }
             BinaryOperator::In => {
-                let Expression::StringLiteral(key) = unwrap_parenthesized(&binary.left) else {
-                    return SliceGuard::None;
+                let key = match unwrap_parenthesized(&binary.left) {
+                    Expression::StringLiteral(key) => Some(Arc::<str>::from(key.value.as_str())),
+                    _ => None,
                 };
-                let Some(subject) = self.narrow_subject_of(&binary.right) else {
-                    return SliceGuard::None;
-                };
-                SliceGuard::In {
-                    key: Arc::from(key.value.as_str()),
-                    subject,
-                    negated: false,
+                match (key, self.narrow_subject_of(&binary.right)) {
+                    (Some(key), Some(subject)) => {
+                        if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
+                            return GuardDisposition::Unexpressible;
+                        }
+                        GuardDisposition::Modeled(SliceGuard::In {
+                            key,
+                            subject,
+                            negated: false,
+                        })
+                    }
+                    // Anything outside that exact pair — a computed or
+                    // dynamic key, a private name, an inexpressible
+                    // subject access — still selects the subject's union
+                    // arms in the checker whenever the subject reaches a
+                    // modeled slot.
+                    _ => match self.narrow_destination_of(&binary.right) {
+                        NarrowDestination::Absent => GuardDisposition::NoNarrowing,
+                        _ => GuardDisposition::Unexpressible,
+                    },
                 }
             }
-            _ => SliceGuard::None,
+            _ => GuardDisposition::NoNarrowing,
+        }
+    }
+
+    /// Classify an (in)equality this vocabulary could not express.
+    ///
+    /// The detection is RECURSIVE, not a direct operand match: a relation
+    /// degrades when either side names a narrowing destination (a
+    /// represented reference, an access rooted at one, or the `typeof` of
+    /// either), OR when a nested guard is wrapped in a boolean comparison
+    /// (`(typeof x === "string") === true`, which the checker unwraps and
+    /// this half does not). A relation between two positions that reach
+    /// no modeled slot narrows nothing it could have applied.
+    fn classify_unexpressible_comparison(
+        &mut self,
+        binary: &oxc_ast::ast::BinaryExpression<'_>,
+    ) -> GuardDisposition {
+        for (side, other) in [(&binary.left, &binary.right), (&binary.right, &binary.left)] {
+            if self.operand_reaches_narrow_subject(side) {
+                return GuardDisposition::Unexpressible;
+            }
+            if literal_boolean_value(other).is_some()
+                && !self.classify_guard(side).is_no_narrowing()
+            {
+                return GuardDisposition::Unexpressible;
+            }
+        }
+        GuardDisposition::NoNarrowing
+    }
+
+    /// Whether one COMPARISON operand names a position a narrow could
+    /// land on: a narrowing destination, or the `typeof` of one. Both
+    /// spellings put a modeled slot on the relation.
+    fn operand_reaches_narrow_subject(&self, expression: &Expression<'_>) -> bool {
+        let operand = unwrap_reference_transparent(expression);
+        let destination = match operand {
+            Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Typeof => {
+                self.narrow_destination_of(&unary.argument)
+            }
+            other => self.narrow_destination_of(other),
+        };
+        !matches!(destination, NarrowDestination::Absent)
+    }
+
+    /// Where a narrow established by a test would LAND.
+    fn narrow_destination_of(&self, expression: &Expression<'_>) -> NarrowDestination {
+        if self.narrow_subject_of(expression).is_some() {
+            NarrowDestination::Represented
+        } else if self.reference_root_is_represented(expression) {
+            NarrowDestination::Unrepresented
+        } else {
+            NarrowDestination::Absent
+        }
+    }
+
+    /// Whether an expression is a REFERENCE route — the transparent
+    /// wrappers, static / computed / private member steps, and
+    /// optional-chain steps — whose ROOT is a parameter or modelable
+    /// same-frame local.
+    ///
+    /// It never descends into a call's ARGUMENTS or a computed member's
+    /// KEY: those are separate positions with their own owners (the call
+    /// rail, the key's own lowering), and treating them as narrowing
+    /// destinations would degrade every test that merely mentions a
+    /// frame binding.
+    fn reference_root_is_represented(&self, expression: &Expression<'_>) -> bool {
+        match unwrap_reference_transparent(expression) {
+            Expression::Identifier(identifier) => self
+                .identifier_roots_a_narrow_destination(identifier.name.as_str(), identifier.span),
+            Expression::StaticMemberExpression(member) => {
+                self.reference_root_is_represented(&member.object)
+            }
+            Expression::ComputedMemberExpression(member) => {
+                self.reference_root_is_represented(&member.object)
+            }
+            Expression::PrivateFieldExpression(member) => {
+                self.reference_root_is_represented(&member.object)
+            }
+            Expression::ChainExpression(chain) => chain_element_root_identifier(&chain.expression)
+                .is_some_and(|root| {
+                    self.identifier_roots_a_narrow_destination(root.name.as_str(), root.span)
+                }),
+            _ => false,
+        }
+    }
+
+    /// [`Self::reference_root_is_represented`] for an assignment target's
+    /// member form.
+    fn member_root_is_represented(&self, member: &oxc_ast::ast::MemberExpression<'_>) -> bool {
+        self.reference_root_is_represented(member.object())
+    }
+
+    /// Whether a bare name at `span` roots a reference a narrow could
+    /// land on — the same lexical authority
+    /// [`Self::narrow_subject_of`] applies to a chain's root, PLUS the
+    /// narrowing aliases.
+    ///
+    /// An alias is included even when this frame cannot otherwise model
+    /// the binding (a destructured discriminant is not a simple reaching
+    /// definition, so the name resolves to no modeled slot): the checker
+    /// still re-establishes the aliased fact on the reference the
+    /// initializer named, and that reference IS modeled — so the
+    /// destination exists even though this half cannot express the
+    /// route to it.
+    fn identifier_roots_a_narrow_destination(&self, name: &str, span: oxc_span::Span) -> bool {
+        matches!(
+            self.resolve_name(name, span),
+            // A CAPTURED binding is a landing slot like any other: the
+            // evaluator resolves a nested read of an enclosing frame's
+            // binding, and this half already WRITES through captured
+            // names. A guard over one therefore establishes a fact the
+            // checker applies and this lowering does not carry, so it is
+            // unrepresented rather than proved absent.
+            NameBinding::Param(_) | NameBinding::Local(_) | NameBinding::Captured
+        ) || self.narrowing_alias_locals.contains(name)
+    }
+
+    /// Whether a modeled subject's ROOT carries a narrowing fact the
+    /// guard over it never mentions — two sources, one consequence.
+    ///
+    /// An ALIAS local: TypeScript re-establishes the fact the alias's
+    /// initializer decided, on the reference that initializer named, so
+    /// a guard over the alias carries strictly less than the checker
+    /// applies at any access path under it.
+    ///
+    /// A CORRELATED DESTRUCTURED PARAMETER ELEMENT: when the parameter's
+    /// declared type could be a discriminated union, a relation over one
+    /// element selects the OBJECT's arms and retypes the element's
+    /// SIBLINGS — `f({ kind, payload }: P) { if (kind === "a") return
+    /// payload }` publishes `payload`'s whole union while the checker
+    /// publishes the `"a"` arm's. This half narrows neither the object
+    /// nor the siblings, so the relation degrades.
+    fn subject_root_carries_an_unmentioned_narrowing(&self, subject: &SliceNarrowSubject) -> bool {
+        match &subject.root {
+            SliceNarrowRoot::Local(name) => {
+                self.narrowing_alias_locals.contains(name)
+                    || self.destructured_element_may_correlate(name)
+            }
+            SliceNarrowRoot::Param(_) => false,
+        }
+    }
+
+    /// Whether a name is a destructured element of a parameter whose
+    /// declared type could make its elements CORRELATED.
+    ///
+    /// Correlation is a property of the parameter's TYPE, not of the
+    /// pattern: only a discriminated union ties one element's narrow to
+    /// its siblings' types. A parameter whose annotation lowers to a
+    /// single object (or an intersection of objects, or a primitive /
+    /// literal) cannot be one, so narrowing an element there retypes
+    /// exactly that element — which this half already models. A union,
+    /// or any annotation whose shape this half cannot see (a bare name,
+    /// an unresolved form), leaves correlation possible.
+    fn destructured_element_may_correlate(&self, name: &str) -> bool {
+        self.params.iter().any(|param| {
+            param
+                .destructured
+                .iter()
+                .any(|element| element.name.as_ref() == name)
+                && !param_type_forbids_correlation(param.ty.ty())
+        })
+    }
+
+    /// Record every name one declarator binds as a narrowing ALIAS, when
+    /// the declaration is one the checker preserves a narrowing through.
+    ///
+    /// Eligibility mirrors the checker's own alias rule and is decided
+    /// from PROVEN disqualifications only — the declaration must be a
+    /// constant binding (`const` / `using`), it must carry an
+    /// initializer, and it must have NO type annotation (an annotated
+    /// declaration takes its declared type and the alias is not
+    /// inlined). Anything not positively disqualified, and whose
+    /// initializer carries a fact, is treated as an alias. Both the
+    /// whole-binding and the destructured spellings bind aliases: a
+    /// destructured discriminant re-establishes its source's fact
+    /// exactly as a named one does.
+    fn record_narrowing_aliases(
+        &mut self,
+        kind: &VariableDeclarationKind,
+        declarator: &oxc_ast::ast::VariableDeclarator<'_>,
+    ) {
+        if !matches!(
+            kind,
+            VariableDeclarationKind::Const
+                | VariableDeclarationKind::Using
+                | VariableDeclarationKind::AwaitUsing
+        ) {
+            return;
+        }
+        if declarator.type_annotation.is_some() {
+            return;
+        }
+        let Some(init) = declarator.init.as_ref() else {
+            return;
+        };
+        if !self.initializer_carries_a_narrowing(init) {
+            return;
+        }
+        let mut names: FxHashSet<&str> = FxHashSet::default();
+        collect_binding_pattern_names(&declarator.id, &mut names);
+        for name in names {
+            self.narrowing_alias_locals.insert(Arc::from(name));
+        }
+    }
+
+    /// Whether a declarator initializer is a form the checker can bind a
+    /// narrowing FACT to, so that an eligible `const` alias of it
+    /// re-establishes that fact at every later test of the name.
+    ///
+    /// This classifies a DECLARATION, not a control test, and it is
+    /// deliberately PURE: it decides the FORM and never lowers the
+    /// expression, because lowering a guard has effects (it records
+    /// predicate call spans) that a declaration position must not
+    /// acquire. A CALL counts unconditionally — a type-predicate callee
+    /// is syntactically indistinguishable from any other at this
+    /// altitude, and the value-free certification the initializer
+    /// position takes proves only that a DISCARDED result narrows
+    /// nothing, which an alias's retained result is not. A REFERENCE
+    /// counts too: that is the aliased-discriminant form. Literals,
+    /// arithmetic and structural values carry no fact.
+    fn initializer_carries_a_narrowing(&self, expression: &Expression<'_>) -> bool {
+        use oxc_ast::ast::BinaryOperator;
+        match unwrap_reference_transparent(expression) {
+            Expression::BinaryExpression(binary) => matches!(
+                binary.operator,
+                BinaryOperator::StrictEquality
+                    | BinaryOperator::StrictInequality
+                    | BinaryOperator::Equality
+                    | BinaryOperator::Inequality
+                    | BinaryOperator::Instanceof
+                    | BinaryOperator::In
+            ),
+            Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
+                self.initializer_carries_a_narrowing(&unary.argument)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.initializer_carries_a_narrowing(&logical.left)
+                    || self.initializer_carries_a_narrowing(&logical.right)
+            }
+            Expression::ConditionalExpression(conditional) => {
+                self.initializer_carries_a_narrowing(&conditional.consequent)
+                    || self.initializer_carries_a_narrowing(&conditional.alternate)
+            }
+            Expression::CallExpression(_) => true,
+            other => !matches!(self.narrow_destination_of(other), NarrowDestination::Absent),
         }
     }
 
@@ -4134,10 +5420,15 @@ impl Lowerer<'_> {
 
     /// The user-defined type predicate form: `isStr(u)`, where the
     /// narrowing fact lives in the CALLEE's declared return (`x is T`),
-    /// not at the use site. Only a same-file function declaration carries
-    /// its authored signature through this channel — a frame-local shadow
-    /// names a different function, and a cross-file callee's annotation
-    /// is beyond the retained snapshot this half reads.
+    /// not at the use site. Only a callee with a PROVABLY CLOSED
+    /// same-file declaration ([`Self::closed_callee_declaration`])
+    /// carries its authored signature through this channel — a
+    /// frame-local shadow names a different function, a cross-file
+    /// callee's annotation is beyond the retained snapshot this half
+    /// reads, a script global or an exported binding has a
+    /// checker-visible signature set this file cannot enumerate, and a
+    /// namespace-owned call site binds its callee through a block scope
+    /// the gate does not enumerate.
     fn lower_predicate_guard(&mut self, call: &oxc_ast::ast::CallExpression<'_>) -> SliceGuard {
         let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
             return SliceGuard::None;
@@ -4146,7 +5437,7 @@ impl Lowerer<'_> {
         if !matches!(self.resolve_name(name, callee.span), NameBinding::Free) {
             return SliceGuard::None;
         }
-        let Some((ordinal, Some(target))) = self.same_file_predicate(name, false) else {
+        let Some((ordinal, Some(target))) = self.same_file_predicate(name, false, call.span) else {
             return SliceGuard::None;
         };
         let Some(argument) = call
@@ -4159,60 +5450,452 @@ impl Lowerer<'_> {
         let Some(subject) = self.narrow_subject_of(argument) else {
             return SliceGuard::None;
         };
+        let span: verter_span::Span = call.span.into();
+        self.predicate_guard_call_spans.insert(span);
         SliceGuard::TypePredicate {
             subject,
             target,
             negated: false,
+            call: span,
         }
+    }
+
+    /// THE constructor-closure gate for `instanceof`: whether the bare
+    /// right-hand side `name`, referenced at `span`, provably denotes the
+    /// module's ONE same-file top-level `class` declaration — so that the
+    /// owner-scope type reference the evaluator lowers for it (the class's
+    /// instance type) IS the instance type of the value the test compares
+    /// against. The frame's lexical authority binds first (a parameter
+    /// `A: typeof B` or a body-local `const A = B` shadows the owner-scope
+    /// class, and the checker narrows to `B`); a namespace-owned call site
+    /// binds through its block scope before the top level; a script's
+    /// top-level declaration set is not enumerable from one file; and a
+    /// non-class top-level value (`const A = B`, an import) is a
+    /// constructor whose instance type no same-name type reference
+    /// yields. A class's VALUE meaning cannot be merged away by an
+    /// augmentation (a second class of the name is a duplicate
+    /// identifier), so the export spelling does not matter here.
+    fn closed_instanceof_constructor(&self, name: &str, span: oxc_span::Span) -> bool {
+        if !self.module_scope || self.namespace_owned {
+            return false;
+        }
+        if !matches!(self.resolve_name(name, span), NameBinding::Free) {
+            return false;
+        }
+        let declarations = self.same_file_class_declarations(name);
+        let [class] = declarations.as_slice() else {
+            return false;
+        };
+        self.class_static_side_provably_plain(class, &mut Vec::new())
+    }
+
+    /// Whether a same-file top-level class's STATIC side provably declares
+    /// no `[Symbol.hasInstance]` — the one static member that changes what
+    /// `instanceof` narrows to. A static method, property or accessor of
+    /// that key whose type is a type predicate makes the checker narrow to
+    /// the PREDICATE's target instead of the class's instance type, and the
+    /// static side is inherited through the heritage chain. Any static
+    /// COMPUTED key can spell it (`static [key]` over `const key =
+    /// Symbol.hasInstance`), so a class declaring one is not provably
+    /// plain; nor is a class whose superclass is anything but a provably
+    /// plain same-file top-level class (a value binding, an import, a call
+    /// expression, an unresolvable heritage cycle). A top-level class name
+    /// is a duplicate identifier against any other same-name top-level
+    /// value, so "exactly one same-file class declaration" is the whole
+    /// binding proof at the top level.
+    fn class_static_side_provably_plain(
+        &self,
+        class: &oxc_ast::ast::Class<'_>,
+        visited: &mut Vec<oxc_span::Span>,
+    ) -> bool {
+        use oxc_ast::ast::ClassElement;
+        if visited.contains(&class.span) {
+            return false;
+        }
+        visited.push(class.span);
+        let own_side_plain = class.body.body.iter().all(|element| match element {
+            ClassElement::MethodDefinition(method) => !(method.r#static && method.computed),
+            ClassElement::PropertyDefinition(property) => !(property.r#static && property.computed),
+            ClassElement::AccessorProperty(accessor) => !(accessor.r#static && accessor.computed),
+            ClassElement::StaticBlock(_) | ClassElement::TSIndexSignature(_) => true,
+        });
+        if !own_side_plain {
+            return false;
+        }
+        match class.super_class.as_ref().map(unwrap_parenthesized) {
+            None => true,
+            Some(Expression::Identifier(base)) => {
+                let bases = self.same_file_class_declarations(base.name.as_str());
+                match bases.as_slice() {
+                    [base_class] => self.class_static_side_provably_plain(base_class, visited),
+                    _ => false,
+                }
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// Every same-file top-level `class` DECLARATION with `name`, in
+    /// source order, across the direct, `export class`, and `export
+    /// default class` spellings.
+    fn same_file_class_declarations(&self, name: &str) -> Vec<&oxc_ast::ast::Class<'_>> {
+        self.program
+            .body
+            .iter()
+            .filter_map(|statement| match statement {
+                Statement::ClassDeclaration(class) => Some(&**class),
+                Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                    Some(oxc_ast::ast::Declaration::ClassDeclaration(class)) => Some(&**class),
+                    _ => None,
+                },
+                Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                    oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                        Some(&**class)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .filter(|class| class.id.as_ref().map(|id| id.name.as_str()) == Some(name))
+            .collect()
+    }
+
+    /// Every same-file top-level function DECLARATION with `name`, in
+    /// source order — the direct spelling, the `export function` spelling,
+    /// and the `export default function` spelling all count, because the
+    /// group SIZE is a semantic fact (an overload group's signature
+    /// selection) that must not depend on export syntax.
+    fn same_file_function_declarations(&self, name: &str) -> Vec<&oxc_ast::ast::Function<'_>> {
+        self.program
+            .body
+            .iter()
+            .filter_map(|statement| match statement {
+                Statement::FunctionDeclaration(function) => Some(&**function),
+                Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                    Some(oxc_ast::ast::Declaration::FunctionDeclaration(function)) => {
+                        Some(&**function)
+                    }
+                    _ => None,
+                },
+                Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                    oxc_ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                        Some(&**function)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .filter(|function| function.id.as_ref().map(|id| id.name.as_str()) == Some(name))
+            .collect()
+    }
+
+    /// Whether ANY top-level export spelling exposes the module-local
+    /// binding `name` on the module's export surface: `export function
+    /// name`, `export default function name`, a local specifier `export {
+    /// name }` / `export { name as other }` (never a re-export from
+    /// another module, whose specifiers name that module's bindings),
+    /// `export default name`, or `export = name`. An exposed binding is
+    /// AUGMENTABLE — a `declare module "…"` block in any file merges
+    /// further declarations into the export symbol, and the checker
+    /// resolves even a same-file reference to an `export`-modified
+    /// declaration through that merged symbol — so its declaration
+    /// closure is not provable from this file's text.
+    fn top_level_name_is_exported(&self, name: &str) -> bool {
+        let names_binding = |expression: &Expression<'_>| matches!(unwrap_parenthesized(expression), Expression::Identifier(id) if id.name.as_str() == name);
+        self.program.body.iter().any(|statement| match statement {
+            Statement::ExportNamedDeclaration(export) => {
+                let declares = match &export.declaration {
+                    Some(oxc_ast::ast::Declaration::FunctionDeclaration(function)) => {
+                        function.id.as_ref().map(|id| id.name.as_str()) == Some(name)
+                    }
+                    _ => false,
+                };
+                declares
+                    || (export.source.is_none()
+                        && export
+                            .specifiers
+                            .iter()
+                            .any(|specifier| specifier.local.name().as_str() == name))
+            }
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                oxc_ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                    function.id.as_ref().map(|id| id.name.as_str()) == Some(name)
+                }
+                declaration => declaration.as_expression().is_some_and(names_binding),
+            },
+            Statement::TSExportAssignment(export) => names_binding(&export.expression),
+            _ => false,
+        })
+    }
+
+    /// THE callee-closure gate shared by the predicate channel and the
+    /// control-call certification: the ONE same-file function declaration
+    /// of `name` when the callee's CHECKER-VISIBLE declaration set is
+    /// provably that single declaration from this file's text alone —
+    /// `None` whenever the closure cannot be proven, which establishes no
+    /// fact (the caller emits the typed `GuardNarrowing` gap instead).
+    ///
+    /// The proof needs all four of:
+    /// - the file is provably MODULE-scoped ([`Self::module_scope`]): a
+    ///   script's top-level function is a global symbol merging with
+    ///   every other script's and every `declare global` block's
+    ///   same-name declarations, a set no single snapshot enumerates;
+    /// - EXACTLY ONE same-file declaration: an overload group's
+    ///   signature selection is overload/applicability resolution this
+    ///   half does not perform, and the first declaration's annotation
+    ///   can be the WRONG one;
+    /// - the binding is NOT exported by any spelling
+    ///   ([`Self::top_level_name_is_exported`]): an exported binding is
+    ///   augmentable through `declare module`, so further signatures can
+    ///   merge into it from any file;
+    /// - the call site is NOT namespace-owned ([`Self::namespace_owned`]):
+    ///   inside a `namespace` / `module` block a bare name binds through
+    ///   the block scope before the top level, and the block-local
+    ///   declaration set (every declaration kind, plus merged sibling
+    ///   blocks and augmentations of an exported namespace) is one this
+    ///   gate does not enumerate — a top-level match there names the
+    ///   WRONG declaration.
+    ///
+    /// A module-local, unexported binding called from a top-level scope is
+    /// closed: augmentations merge only into a module's exports, and a
+    /// module's locals shadow every global — so the file's own text is the
+    /// whole declaration set.
+    fn closed_callee_declaration(&self, name: &str) -> Option<&oxc_ast::ast::Function<'_>> {
+        if !self.module_scope || self.namespace_owned {
+            return None;
+        }
+        let group = self.same_file_function_declarations(name);
+        let [function] = group.as_slice() else {
+            return None;
+        };
+        if self.top_level_name_is_exported(name) {
+            return None;
+        }
+        Some(function)
+    }
+
+    /// Classify one STATEMENT-POSITION call — see
+    /// [`StatementCallEffect`].
+    ///
+    /// Only a bare-identifier callee resolving FREE to a PROVABLY CLOSED
+    /// same-file declaration can be proven at all. A member callee, an
+    /// import, an exported binding, a script global, an overload group,
+    /// a call on a call result: each has a checker-visible signature set
+    /// this file cannot enumerate, so it could assert or could diverge.
+    fn statement_call_effect(
+        &self,
+        call: &oxc_ast::ast::CallExpression<'_>,
+    ) -> StatementCallEffect {
+        let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
+            return StatementCallEffect::Unprovable;
+        };
+        let name = callee.name.as_str();
+        if !matches!(self.resolve_name(name, callee.span), NameBinding::Free) {
+            return StatementCallEffect::Unprovable;
+        }
+        let Some(function) = self.closed_callee_declaration(name) else {
+            return StatementCallEffect::Unprovable;
+        };
+        let annotation = function.return_type.as_deref();
+        // An assertion signature narrows every read that follows. The
+        // modeled arm already answered when it could apply the narrow;
+        // reaching here means it could not.
+        if annotation.is_some_and(|annotation| {
+            matches!(
+                &annotation.type_annotation,
+                TSType::TSTypePredicate(predicate) if predicate.asserts
+            )
+        }) {
+            return StatementCallEffect::Unprovable;
+        }
+        if annotation.is_some_and(|annotation| {
+            matches!(annotation.type_annotation, TSType::TSNeverKeyword(_))
+        }) {
+            return StatementCallEffect::NeverReturns;
+        }
+        if self.closed_callee_provably_returns(function) {
+            StatementCallEffect::Inert
+        } else {
+            StatementCallEffect::Unprovable
+        }
+    }
+
+    /// Whether a closed same-file callee provably COMPLETES — the proof a
+    /// statement-position call needs before the path may continue past
+    /// it.
+    ///
+    /// An authored annotation whose syntax cannot denote `never` settles
+    /// it. Otherwise the inferred return decides, and a function infers
+    /// `never` exactly when it never returns: a body whose statement list
+    /// is EMPTY completes at once, and a body carrying a `return` in its
+    /// own frame can complete. Anything else — a bodiless signature, a
+    /// body whose every path might diverge — is unproven.
+    fn closed_callee_provably_returns(&self, function: &oxc_ast::ast::Function<'_>) -> bool {
+        if function
+            .return_type
+            .as_deref()
+            .is_some_and(|annotation| annotation_provably_not_never(&annotation.type_annotation))
+        {
+            return true;
+        }
+        let Some(body) = function.body.as_deref() else {
+            return false;
+        };
+        if body.statements.is_empty() {
+            return true;
+        }
+        let mut finder = OwnFrameReturnFinder::default();
+        for statement in &body.statements {
+            finder.visit_statement(statement);
+        }
+        finder.found
     }
 
     /// Read a SAME-FILE function declaration's return-type predicate:
     /// `x is T` (`asserts` false) or `asserts x is T` / a targetless
-    /// `asserts x` (`asserts` true). Returns the ordinal of the parameter
-    /// the predicate talks about and the target type lowered through the
-    /// frame gate (a BODY position — the frame's own type declarations are
-    /// in scope there, exactly like a declarator annotation); the target
-    /// is `None` for the targetless assertion spelling. `None` for the
-    /// whole read for any other signature spelling.
-    fn same_file_predicate(&self, name: &str, asserts: bool) -> Option<(usize, Option<GatedType>)> {
-        for statement in &self.program.body {
-            let Statement::FunctionDeclaration(function) = statement else {
-                continue;
-            };
-            if function.id.as_ref().map(|id| id.name.as_str()) != Some(name) {
-                continue;
-            }
-            let annotation = function.return_type.as_ref()?;
-            let TSType::TSTypePredicate(predicate) = &annotation.type_annotation else {
-                return None;
-            };
-            if predicate.asserts != asserts {
-                return None;
-            }
-            let target = predicate.type_annotation.as_ref().map(|target| {
-                self.gate(
-                    lower_ts_type(&target.type_annotation, self.source),
-                    annotation.span,
-                    &[],
-                )
-            });
-            // A non-`asserts` predicate without a target type is not a
-            // predicate spelling at all.
-            if !asserts && target.is_none() {
-                return None;
-            }
-            let oxc_ast::ast::TSTypePredicateName::Identifier(parameter) =
-                &predicate.parameter_name
-            else {
-                return None;
-            };
-            let ordinal = function.params.items.iter().position(|param| {
-                matches!(&param.pattern, BindingPattern::BindingIdentifier(id)
-                    if id.name.as_str() == parameter.name.as_str())
-            })?;
-            return Some((ordinal, target));
+    /// `asserts x` (`asserts` true), consumed at the call site `site`.
+    /// Returns the ordinal of the parameter the predicate talks about and
+    /// the target type lowered through the frame gate (a BODY position —
+    /// the frame's own type declarations are in scope there, exactly like
+    /// a declarator annotation); the target is `None` for the targetless
+    /// assertion spelling. `None` for the whole read for any other
+    /// signature spelling.
+    ///
+    /// The channel serves EXACTLY ONE PROVABLY CLOSED declaration
+    /// ([`Self::closed_callee_declaration`]). An overload group (two or
+    /// more same-name declarations) is refused outright: which signature
+    /// applies is overload/applicability resolution, which this half does
+    /// not perform, and the first declaration's predicate target can be
+    /// the WRONG one — narrowing on it would publish a checker-divergent
+    /// type. A script global or an exported binding is refused for the
+    /// same reason one level up: its checker-visible signature set may
+    /// hold overloads this file never shows. A refused callee establishes
+    /// no fact.
+    fn same_file_predicate(
+        &self,
+        name: &str,
+        asserts: bool,
+        site: oxc_span::Span,
+    ) -> Option<(usize, Option<GatedType>)> {
+        let (function, predicate, annotation_span) = self.closed_predicate_annotation(name)?;
+        if predicate.asserts != asserts {
+            return None;
         }
-        None
+        let target = match predicate.type_annotation.as_ref() {
+            Some(target) => {
+                let lowered = lower_ts_type(&target.type_annotation, self.source);
+                // The target is authored in the CALLEE's declaration scope
+                // and consumed in the CALLER's frame, so it must be closed
+                // over names BOTH resolve identically — the module scope.
+                // A target naming a binding of the CALLEE's own declaration
+                // is instantiated by the CALL — `T` of `isSame<T>(x: T): x
+                // is T` binds to the argument's type; `typeof y` names the
+                // callee's own parameter — an inference this half does not
+                // perform. A target naming a binding of the CALLER's frame
+                // (its own or an enclosing `<T>`, a body-local `type T`, a
+                // local `y` under a `typeof y` root) would REBIND at the
+                // call site: the caller's binder environment and lexical
+                // authority answer before the module's `type T = number`.
+                // Either way the channel refuses it: no fact, and the call
+                // takes the typed guard-narrowing gap at its consumer.
+                if predicate_target_names_callee_binding(function, &lowered)
+                    || self.predicate_target_names_caller_binding(&lowered, site)
+                {
+                    return None;
+                }
+                Some(self.gate(lowered, annotation_span, &[]))
+            }
+            None => None,
+        };
+        // A non-`asserts` predicate without a target type is not a
+        // predicate spelling at all.
+        if !asserts && target.is_none() {
+            return None;
+        }
+        let oxc_ast::ast::TSTypePredicateName::Identifier(parameter) = &predicate.parameter_name
+        else {
+            return None;
+        };
+        let ordinal = function.params.items.iter().position(|param| {
+            matches!(&param.pattern, BindingPattern::BindingIdentifier(id)
+                if id.name.as_str() == parameter.name.as_str())
+        })?;
+        Some((ordinal, target))
+    }
+
+    /// The type-predicate return annotation of the PROVABLY CLOSED
+    /// same-file callee `name` ([`Self::closed_callee_declaration`]): the
+    /// declaration, its predicate, and the annotation's span. `None` for
+    /// a refused callee or a non-predicate return.
+    fn closed_predicate_annotation(
+        &self,
+        name: &str,
+    ) -> Option<(
+        &oxc_ast::ast::Function<'_>,
+        &oxc_ast::ast::TSTypePredicate<'_>,
+        oxc_span::Span,
+    )> {
+        let function = self.closed_callee_declaration(name)?;
+        let annotation = function.return_type.as_ref()?;
+        let TSType::TSTypePredicate(predicate) = &annotation.type_annotation else {
+            return None;
+        };
+        Some((function, predicate, annotation.span))
+    }
+
+    /// Whether the provably closed same-file callee `name` declares an
+    /// `asserts x is T` whose target the predicate channel REFUSES — as
+    /// call-instantiated ([`predicate_target_names_callee_binding`]) or
+    /// as rebound at the call site `site`
+    /// ([`Self::predicate_target_names_caller_binding`]). The checker
+    /// narrows the rest of the region through that assertion and this
+    /// half cannot apply it, so the statement degrades through the typed
+    /// guard-narrowing gap instead of lowering as a bare throw point that
+    /// leaves the subject silently unnarrowed.
+    fn assertion_target_is_refused(&self, name: &str, site: oxc_span::Span) -> bool {
+        let Some((function, predicate, _)) = self.closed_predicate_annotation(name) else {
+            return false;
+        };
+        predicate.asserts
+            && predicate.type_annotation.as_ref().is_some_and(|target| {
+                let lowered = lower_ts_type(&target.type_annotation, self.source);
+                predicate_target_names_callee_binding(function, &lowered)
+                    || self.predicate_target_names_caller_binding(&lowered, site)
+            })
+    }
+
+    /// Whether a same-file predicate's TARGET, consumed at the call site
+    /// `site` of THIS frame, references a name the frame's own environment
+    /// binds — so that lowering it here would rebind it away from the
+    /// callee's declaration scope. A value root (`typeof y`) is rebound by
+    /// any frame binding of `y` (a parameter, a local, a capture); a type
+    /// name is rebound by a type parameter of this frame or any enclosing
+    /// frame (the composed binder environment interns those ahead of every
+    /// owner-scope alias), or by a frame-owned declaration in either
+    /// type-space meaning. A value-only local of a type name's spelling
+    /// binds nothing in type space and is transparent here.
+    fn predicate_target_names_caller_binding(
+        &self,
+        target: &TypeExpr,
+        site: oxc_span::Span,
+    ) -> bool {
+        let names = verter_type_expr::referenced_names(target);
+        if names
+            .value_roots
+            .iter()
+            .any(|root| !matches!(self.resolve_name(root, site), NameBinding::Free))
+        {
+            return true;
+        }
+        names.type_names.iter().any(|occurrence| {
+            let head = occurrence.head.as_str();
+            self.type_param_names
+                .iter()
+                .any(|binder| binder.as_ref() == head)
+                || self.captures.binder_names.contains(head)
+                || self.name_is_frame_bound(head, site, NameMeaning::Type, &[])
+                || self.name_is_frame_bound(head, site, NameMeaning::Namespace, &[])
+        })
     }
 
     /// The narrowable reference an expression NAMES: a static member
@@ -4221,14 +5904,31 @@ impl Lowerer<'_> {
     /// Anything else — a call result, a computed member, a captured or
     /// free root — is not positionally substitutable, so no narrow can
     /// land on it.
+    ///
+    /// Every step reads through [`unwrap_reference_transparent`], so the
+    /// wrappers the checker treats as transparent to reference identity —
+    /// parentheses and the postfix non-null assertion — name the SAME
+    /// subject as the bare spelling, at the root and at every member step:
+    /// `typeof x! === "string"` narrows `x`, `u!.kind === "a"` selects on
+    /// `u.kind`, and `typeof a.b!` narrows `a.b` (all measured). Reading
+    /// through parentheses ALONE left those spellings reference-less, so a
+    /// guard over one was classified unrecognized and the whole result
+    /// degraded behind a typed gap instead of narrowing.
+    ///
+    /// `satisfies` and the `as` / angle-bracket type assertion are
+    /// deliberately NOT transparent here: neither is a matching reference
+    /// for narrowing, so peeling one would narrow where the checker does
+    /// not — a SUBSET of the checker's type, which drops a real
+    /// contributor and is worse than the superset a missing narrow
+    /// produces.
     fn narrow_subject_of(&self, expression: &Expression<'_>) -> Option<SliceNarrowSubject> {
         let mut segments: Vec<Arc<str>> = Vec::new();
-        let mut current = unwrap_parenthesized(expression);
+        let mut current = unwrap_reference_transparent(expression);
         let identifier = loop {
             match current {
                 Expression::StaticMemberExpression(member) => {
                     segments.push(Arc::from(member.property.name.as_str()));
-                    current = unwrap_parenthesized(&member.object);
+                    current = unwrap_reference_transparent(&member.object);
                 }
                 Expression::Identifier(identifier) => break identifier,
                 _ => return None,
@@ -4266,6 +5966,17 @@ impl Lowerer<'_> {
     /// write, a member-path write, and a write whose value the slice did
     /// not select all keep the typed unapplied-write degradation rather
     /// than acquiring a second, divergent verdict here.
+    ///
+    /// The fallthrough is still SCANNED
+    /// ([`Self::scan_unmodeled_statement_effects`]): a call nested where
+    /// the two modeled forms never look — a discarded sequence operand, a
+    /// `void` operand, a template interpolation, an unselected
+    /// right-hand side — executes at the statement and can carry an
+    /// `asserts` narrowing of a frame-owned binding, and a class subtree
+    /// hides writes from the skeleton entirely. The scan gaps only
+    /// frame-reaching effects: the statement's own value is discarded,
+    /// and its skeleton-visible writes already ride the unapplied-write
+    /// ledger.
     fn lower_effect_statement(&mut self, expression: &Expression<'_>) -> Option<SliceStatement> {
         match unwrap_parenthesized(expression) {
             Expression::AssignmentExpression(assignment)
@@ -4274,77 +5985,165 @@ impl Lowerer<'_> {
                     oxc_ast::ast::AssignmentOperator::Assign
                 ) =>
             {
-                let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) =
-                    &assignment.left
-                else {
-                    return None;
-                };
-                let name = identifier.name.as_str();
-                let root = match self.resolve_name(name, identifier.span) {
-                    NameBinding::Param(ordinal) => SliceNarrowRoot::Param(ordinal),
-                    NameBinding::Local(_) => SliceNarrowRoot::Local(Arc::from(name)),
-                    NameBinding::Captured => SliceNarrowRoot::Local(Arc::from(name)),
-                    NameBinding::Free | NameBinding::NestedFunction | NameBinding::Unmodeled => {
-                        return None
-                    }
-                };
-                if !self.value_span_selected(assignment.right.span()) {
-                    return None;
+                if let Some(statement) = self.modeled_assignment_statement(assignment) {
+                    return Some(statement);
                 }
-                let value = self.lower_expr(
-                    &assignment.right,
-                    ExprMode::BindingInit {
-                        // Preserve the RHS until the evaluator can reduce it
-                        // against the target's authored declared type. It
-                        // widens the literal itself when the target has no
-                        // annotation.
-                        preserve_literal: true,
-                    },
-                );
-                Some(SliceStatement::Assignment {
-                    target: SliceNarrowSubject {
-                        root,
-                        path: Arc::from(Vec::new().into_boxed_slice()),
-                    },
-                    // The span identity matches the slice's typed write
-                    // effect, which the skeleton records at the TARGET
-                    // IDENTIFIER — never the whole assignment expression.
-                    span: self.rebase(identifier.span),
-                    value: Box::new(value),
-                })
+                self.scan_unmodeled_statement_effects(expression)
             }
             Expression::CallExpression(call) => {
                 // A bare call is a THROW POINT regardless of what it
                 // resolves to; a same-file assertion call additionally
                 // narrows. The marker keeps the throw point even when the
                 // assertion path below does not recognise the callee.
-                let assertion = (|| {
-                    let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
-                        return None;
-                    };
-                    let name = callee.name.as_str();
-                    if !matches!(self.resolve_name(name, callee.span), NameBinding::Free) {
-                        return None;
+                let free_callee = match unwrap_parenthesized(&call.callee) {
+                    Expression::Identifier(callee)
+                        if matches!(
+                            self.resolve_name(callee.name.as_str(), callee.span),
+                            NameBinding::Free
+                        ) =>
+                    {
+                        Some(callee.name.as_str())
                     }
-                    let (ordinal, target) = self.same_file_predicate(name, true)?;
+                    _ => None,
+                };
+                let assertion = free_callee.and_then(|name| {
+                    let (ordinal, target) = self.same_file_predicate(name, true, call.span)?;
                     let argument = call
                         .arguments
                         .get(ordinal)
                         .and_then(|argument| argument.as_expression())?;
                     let subject = self.narrow_subject_of(argument)?;
                     Some(SliceStatement::Assertion { subject, target })
-                })();
-                Some(assertion.unwrap_or(SliceStatement::ThrowPoint))
+                });
+                // A closed same-file assertion whose target the predicate
+                // channel refuses (`asserts x is T` on `assertSame<T>`, or
+                // over a `T` this frame rebinds) narrows in the checker but
+                // cannot be applied here: the statement degrades through
+                // the typed gap rather than lowering as a throw point that
+                // leaves the subject silently unnarrowed.
+                if assertion.is_none()
+                    && free_callee
+                        .is_some_and(|name| self.assertion_target_is_refused(name, call.span))
+                {
+                    self.control_test_gap = true;
+                }
+                // The statement's own call is the modeled boundary above;
+                // the effects NESTED in its callee expression and
+                // arguments are separate positions the slice never selects
+                // (`foo((assertString(x), 0));` narrows `x` in the
+                // checker) — scan them without re-scanning the call
+                // itself.
+                let mut scanner = LeafCallScanner::default();
+                scanner.visit_expression(&call.callee);
+                for argument in &call.arguments {
+                    if let Some(argument) = argument.as_expression() {
+                        scanner.visit_expression(argument);
+                    }
+                }
+                if self.drain_scanned_same_frame_effects(
+                    scanner,
+                    CertificationMode::ValueFree,
+                    WritePolicy::SkeletonHiddenOnly,
+                ) {
+                    self.control_test_gap = true;
+                }
+                if let Some(assertion) = assertion {
+                    return Some(assertion);
+                }
+                // The statement's OWN call takes the same prove-or-degrade
+                // discipline every other result-independent position takes,
+                // PLUS the reachability half no other position needs: a
+                // callee that never returns ends the path, and treating it
+                // as a plain throw point publishes the following
+                // statements' contributions the checker drops.
+                match self.statement_call_effect(call) {
+                    StatementCallEffect::Inert => {
+                        self.decided_above_call_spans.push(call.span.into());
+                        Some(SliceStatement::ThrowPoint)
+                    }
+                    StatementCallEffect::NeverReturns => Some(SliceStatement::Throw),
+                    StatementCallEffect::Unprovable => {
+                        self.control_test_gap = true;
+                        Some(SliceStatement::ThrowPoint)
+                    }
+                }
             }
-            // Every other value-neutral statement still carries its throw
-            // points: a `new`, and a call nested anywhere the value
-            // descent never reaches (a template literal's interpolation,
-            // a sequence's operand, a conditional's arm, a member chain)
-            // executes — and can throw — whether or not its value is
-            // consumed. The ONE shared scanner answers for every form.
-            other => verter_semantic::analysis::flow::expression_contains_call(other)
-                .then_some(SliceStatement::ThrowPoint),
+            other => self.scan_unmodeled_statement_effects(other),
         }
+    }
+
+    /// The modeled whole-binding-write statement form, when the
+    /// assignment's target is a parameter or modelable local AND the slice
+    /// value-selected the right-hand side.
+    fn modeled_assignment_statement(
+        &mut self,
+        assignment: &oxc_ast::ast::AssignmentExpression<'_>,
+    ) -> Option<SliceStatement> {
+        let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) =
+            &assignment.left
+        else {
+            return None;
+        };
+        let name = identifier.name.as_str();
+        let root = match self.resolve_name(name, identifier.span) {
+            NameBinding::Param(ordinal) => SliceNarrowRoot::Param(ordinal),
+            NameBinding::Local(_) => SliceNarrowRoot::Local(Arc::from(name)),
+            NameBinding::Captured => SliceNarrowRoot::Local(Arc::from(name)),
+            NameBinding::Free | NameBinding::NestedFunction | NameBinding::Unmodeled => {
+                return None
+            }
+        };
+        if !self.value_span_selected(assignment.right.span()) {
+            return None;
+        }
+        let value = self.lower_expr(
+            &assignment.right,
+            ExprMode::BindingInit {
+                // Preserve the RHS until the evaluator can reduce it
+                // against the target's authored declared type. When the
+                // target has no declared authority the evaluator widens
+                // exactly the FRESH positions, directed by the
+                // `freshness` mirror below.
+                preserve_literal: true,
+            },
+        );
+        Some(SliceStatement::Assignment {
+            target: SliceNarrowSubject {
+                root,
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            },
+            // The span identity matches the slice's typed write
+            // effect, which the skeleton records at the TARGET
+            // IDENTIFIER — never the whole assignment expression.
+            span: self.rebase(identifier.span),
+            value: Box::new(value),
+            freshness: expression_freshness(&assignment.right),
+        })
+    }
+
+    /// Scan one UNMODELED expression statement's effects: the statement's
+    /// value is discarded, so a call certifies unless it could carry an
+    /// `asserts` narrowing of a frame-owned binding
+    /// ([`CertificationMode::ValueFree`]), and only SKELETON-HIDDEN writes
+    /// (a class subtree) gap — a visible write already rides the typed
+    /// unapplied-write ledger. The throw-point marker is unchanged: a call
+    /// nested anywhere in the statement executes — and can throw —
+    /// whether or not its value is consumed.
+    fn scan_unmodeled_statement_effects(
+        &mut self,
+        expression: &Expression<'_>,
+    ) -> Option<SliceStatement> {
+        let mut scanner = LeafCallScanner::default();
+        scanner.visit_expression(expression);
+        if self.drain_scanned_same_frame_effects(
+            scanner,
+            CertificationMode::ValueFree,
+            WritePolicy::SkeletonHiddenOnly,
+        ) {
+            self.control_test_gap = true;
+        }
+        verter_semantic::analysis::flow::expression_contains_call(expression)
+            .then_some(SliceStatement::ThrowPoint)
     }
 
     /// Lower one expression. Parameter and in-scope local identifiers
@@ -4369,9 +6168,18 @@ impl Lowerer<'_> {
                     Some(root) if self.optional_chain_root_has_prior_flow_change(root) => {
                         SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression)
                     }
-                    Some(root) => SliceExpr::OptionalAnyChain {
-                        root: Box::new(self.lower_identifier_read(root, mode)),
-                    },
+                    Some(root) => {
+                        // The chain's value derives from the ROOT's
+                        // `any`-ness (the evaluator admits it only while
+                        // the reaching root is still `any`), never from
+                        // resolving the chain's terminal call: decided
+                        // above. A non-`any` root degrades at evaluation,
+                        // which blocks the seal regardless.
+                        self.record_optional_any_chain_calls(expr, chain);
+                        SliceExpr::OptionalAnyChain {
+                            root: Box::new(self.lower_identifier_read(root, mode)),
+                        }
+                    }
                     None => self.lower_leaf(expr, mode),
                 }
             }
@@ -4501,6 +6309,13 @@ impl Lowerer<'_> {
             // sequence through the leaf lowering answered a fabricated
             // `any` for it, clean and warm. Any other sequence keeps the
             // leaf lowering.
+            //
+            // A DISCARDED operand's call still RUNS, and an assertion
+            // call among them narrows the read that follows
+            // (`(assertString(x), x)` is `string`). Such a call is
+            // certified decided-above only when it provably establishes
+            // no narrowing; every other one flags the enclosing
+            // statement's guard-narrowing gap.
             Expression::SequenceExpression(sequence)
                 if sequence
                     .expressions
@@ -4511,6 +6326,11 @@ impl Lowerer<'_> {
                     .expressions
                     .last()
                     .expect("the guard proved a last operand");
+                for discarded in &sequence.expressions[..sequence.expressions.len() - 1] {
+                    if self.record_discarded_operand_calls(discarded) {
+                        self.control_test_gap = true;
+                    }
+                }
                 self.lower_expr(last, mode)
             }
             // ── THE shared value-structural descent ──────────────────
@@ -4574,8 +6394,32 @@ impl Lowerer<'_> {
                 // warm.
                 ValueDescent::Branches(conditional) => {
                     let guard = self.lower_guard(&conditional.test);
+                    // The ternary's TEST is a control position exactly as
+                    // the `if` twin's: only its provably result-independent
+                    // calls are decided above; an unprovable one flags the
+                    // enclosing statement's guard-narrowing gap.
+                    if self.record_control_position_calls(&conditional.test) {
+                        self.control_test_gap = true;
+                    }
+                    // The ternary's arms are GUARDED exactly as the `if`
+                    // statement's are: a closure created inside one
+                    // captures the guarded reading of the guard's
+                    // subject, and a later write to that subject makes
+                    // the capture unsound. The two control spellings must
+                    // reach the closure-capture rail with the same active
+                    // guard set, or the same source degrades under `if`
+                    // and seals clean under `?:`.
+                    let active_guard_base = self.active_guard_bindings.len();
+                    let active_guard_name_base = self.active_guard_names.len();
+                    let guard_bindings = self.guard_bindings(&guard, conditional.test.span());
+                    let guard_name = self.predicate_subject_name(&conditional.test);
+                    self.active_guard_bindings
+                        .extend(guard_bindings.iter().copied());
+                    self.active_guard_names.extend(guard_name.iter().cloned());
                     let consequent = self.lower_expr(&conditional.consequent, mode);
                     let alternate = self.lower_expr(&conditional.alternate, mode);
+                    self.active_guard_bindings.truncate(active_guard_base);
+                    self.active_guard_names.truncate(active_guard_name_base);
                     SliceExpr::Union {
                         arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
                         guard,
@@ -4703,6 +6547,9 @@ impl Lowerer<'_> {
                     let source = if self.value_span_selected(source.span()) {
                         self.lower_expr(source, mode)
                     } else {
+                        // The elided spread source still RUNS: scan its
+                        // effects with the unmodeled-position discipline.
+                        self.scan_unmodeled_position_effects(source);
                         SliceExpr::Elided
                     };
                     entries.push(SliceObjectEntry::Spread { source });
@@ -4749,8 +6596,12 @@ impl Lowerer<'_> {
             // A member value OUTSIDE the demand selection never
             // lowers — the elided sibling rides the typed carrier
             // (present in the member LIST so missing-member
-            // detection stays static, content-free forever).
+            // detection stays static, content-free forever). The value
+            // still RUNS at the object literal's evaluation, so its
+            // effects take the same fail-closed scan every elided
+            // position gets.
             if !self.value_span_selected(value_expression.span()) {
+                self.scan_unmodeled_position_effects(value_expression);
                 entries.push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
                     key,
                     value: SliceExpr::Elided,
@@ -4973,13 +6824,20 @@ impl Lowerer<'_> {
             control,
             direct_calls: self.direct_calls,
             program: self.program,
+            module_scope: self.module_scope,
+            namespace_owned: self.namespace_owned,
             budget_failure: None,
             inert_write_spans: FxHashSet::default(),
+            decided_above_call_spans: Vec::new(),
+            predicate_guard_call_spans: FxHashSet::default(),
+            control_test_gap: false,
+            narrowing_alias_locals: FxHashSet::default(),
             unsafe_invoked_closure_effects: FxHashSet::default(),
             nested_free_writes: FxHashSet::default(),
             active_guard_bindings: Vec::new(),
             active_guard_names: Vec::new(),
             break_targets: Vec::new(),
+            loop_direct_labels: Vec::new(),
             break_target_followed_by_return: Vec::new(),
             current_statement_followed_by_return: false,
         };
@@ -5011,24 +6869,29 @@ impl Lowerer<'_> {
                     .map(|statement| match statement {
                         Statement::ExpressionStatement(expression) => (
                             nested.lower_expr(&expression.expression, ExprMode::Return),
-                            expr_is_bare_literal(&expression.expression),
+                            expression_freshness(&expression.expression),
                         ),
                         _ => (
                             SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression),
-                            false,
+                            SliceFreshness::Pinned,
                         ),
                     });
+                // The expression body's ternary-test gap lands ahead of
+                // the synthesized `return` (no statement loop drains it).
+                let mut statements = Vec::with_capacity(2);
+                if std::mem::take(&mut nested.control_test_gap) {
+                    statements.push(SliceStatement::Gap(
+                        crate::semantic_query::FlowGap::GuardNarrowing,
+                    ));
+                }
+                statements.extend(
+                    argument.map(|(argument, freshness)| SliceStatement::Return {
+                        argument: Some(argument),
+                        freshness,
+                    }),
+                );
                 SliceRegion {
-                    statements: Arc::from(
-                        argument
-                            .map(|(argument, widening_literal)| SliceStatement::Return {
-                                argument: Some(argument),
-                                widening_literal,
-                            })
-                            .into_iter()
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    ),
+                    statements: Arc::from(statements.into_boxed_slice()),
                     can_fall_through: false,
                 }
             }
@@ -5044,6 +6907,11 @@ impl Lowerer<'_> {
         if let Some(reason) = nested.budget_failure {
             self.budget_failure.get_or_insert(reason);
         }
+        // Absolute spans concatenate across frames: a call a NESTED
+        // body's lowering decided above is still a decided call of this
+        // run.
+        self.decided_above_call_spans
+            .append(&mut nested.decided_above_call_spans);
         SliceExpr::NestedFunctionValue {
             gap,
             params: Arc::from(params.into_boxed_slice()),
@@ -5088,13 +6956,397 @@ impl Lowerer<'_> {
             {
                 SliceExpr::UnreducedCallValue
             }
-            LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::SemanticAny,
-            LeafLowering::Free(ty) => SliceExpr::Type(GatedLeaf(ty)),
-            LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
-                inner: Box::new(SliceExpr::Type(GatedLeaf(ty))),
-                shadowed,
-            },
+            // A semantically complete `any` is WARM-ADMISSIBLE — so it is
+            // exactly the arm that cannot skip the leaf call scanner: the
+            // leaf still RUNS (a class static block inside it executes at
+            // class evaluation), and an `asserts` callee there narrows
+            // what follows in the checker. The calls take the same
+            // per-callee certification the modelled arms apply; an
+            // unprovable one flags the enclosing statement's typed gap.
+            LeafLowering::Free(ty) if is_any(&ty) => {
+                self.record_decided_above_calls(expr);
+                SliceExpr::SemanticAny
+            }
+            LeafLowering::Free(ty) => {
+                self.record_decided_above_calls(expr);
+                SliceExpr::Type(GatedLeaf(ty))
+            }
+            LeafLowering::FrameShadowed { ty, shadowed } => {
+                self.record_decided_above_calls(expr);
+                SliceExpr::FrameShadowed {
+                    inner: Box::new(SliceExpr::Type(GatedLeaf(ty))),
+                    shadowed,
+                }
+            }
         }
+    }
+
+    /// Record the authored call / construct spans of one DECIDED-ABOVE
+    /// position — see [`SliceContent::decided_above_call_spans`]. Called
+    /// only by positions whose produced type PROVABLY does not derive
+    /// from any call inside the expression: the leaf arms that passed
+    /// the fabricated-value gate. (The optional-`any`-chain carrier takes
+    /// [`Self::record_optional_any_chain_calls`] — its terminal call is
+    /// decided on the chain's own account, not this one's.)
+    ///
+    /// "The produced type does not derive from the calls" is NOT "the
+    /// calls cannot narrow": the shallow pass folds control-flow-bearing
+    /// forms into one leaf answer WITHOUT visiting them (`[isString(x) ?
+    /// x : false]`, `(assertString(x) as void)`, `((0, assertString(x))
+    /// as unknown)`), so a call inside a leaf can still narrow a read of
+    /// this frame — through a nested test's branch narrowing or through
+    /// an `asserts` callee in ANY same-frame position — and a class
+    /// static block inside a leaf RUNS at class evaluation. Every
+    /// same-frame call / construct of the lowered expression therefore
+    /// takes the SAME per-callee certification the control-position and
+    /// discarded-operand arms apply ([`Self::certify_result_independent_calls`]):
+    /// a nested control position (a ternary test, a `&&` / `||` left
+    /// operand, a statement test inside an immediately-evaluated static
+    /// block) certifies under [`ResultIndependentPosition::ControlTest`],
+    /// every other same-frame position under [`ResultIndependentPosition::
+    /// DiscardedOperand`] (a value position's predicate narrows nothing;
+    /// only an `asserts` callee narrows what follows). A call that
+    /// provably establishes no narrowing is decided above; every other
+    /// one flags the enclosing statement's typed `GuardNarrowing` gap.
+    ///
+    /// A nested function / class body is its OWN frame — its names never
+    /// resolve against this frame's skeleton and its calls run at ITS
+    /// evaluation, never in this statement — so its calls keep the
+    /// blanket decided-above treatment they always had. The exceptions
+    /// evaluate in the ENCLOSING frame and take the same-frame
+    /// discipline: a class's decorators, `super_class` heritage
+    /// expression, computed member keys, member decorators, STATIC BLOCKS,
+    /// and static property / accessor initializers (enclosing-frame-
+    /// immediate at class evaluation — unlike methods, which run when
+    /// called, and instance initializers, which run at construction).
+    fn record_decided_above_calls(&mut self, expr: &Expression<'_>) {
+        let mut scanner = LeafCallScanner::default();
+        scanner.visit_expression(expr);
+        self.drain_leaf_call_scanner(scanner);
+    }
+
+    /// Scan one UNMODELED position whose expressions still EXECUTE at the
+    /// enclosing statement — an elided (unselected) or destructured
+    /// declarator's initializer, an enum member initializer: the demand
+    /// slice never selected the position, so no call obligation reaches it
+    /// and nothing lowers it, yet an assertion call narrows and a
+    /// whole-binding write retypes what follows in the checker. The ONE
+    /// shared scanner answers for it, under
+    /// [`CertificationMode::ValueFree`]: the position's own value feeds no
+    /// read, so a call certifies unless it could carry an `asserts`
+    /// narrowing of a FRAME-OWNED binding (an exported callee's merged
+    /// signature set can hide one — [`Lowerer::closed_callee_declaration`]
+    /// decides), and any frame-owned whole-binding write is unprovable.
+    /// Anything unprovable flags the enclosing statement's typed
+    /// `GuardNarrowing` gap (through [`Lowerer::control_test_gap`], which
+    /// the statement loop drains AHEAD of the statement). A position with
+    /// no frame-reaching effect — a pure literal, a call with no
+    /// frame-owned subject, a nested-frame-only initializer — stays
+    /// silent.
+    fn scan_unmodeled_position_effects(&mut self, expr: &Expression<'_>) {
+        let mut scanner = LeafCallScanner::default();
+        scanner.visit_expression(expr);
+        self.decided_above_call_spans.append(&mut scanner.decided);
+        if self.drain_scanned_same_frame_effects(
+            scanner,
+            CertificationMode::ValueFree,
+            WritePolicy::All,
+        ) {
+            self.control_test_gap = true;
+        }
+    }
+
+    /// Scan the body statements of one executable namespace / module
+    /// declaration: the block RUNS at the declaration statement, in this
+    /// frame, while no content lowers for it — the same fail-closed
+    /// discipline every unmodeled position takes. The skeleton indexes the
+    /// block's statements (only nested function / class subtrees are its
+    /// own frames), so visible writes keep their ledger verdict and only
+    /// class-hidden ones gap. A nested `namespace A.B` chain executes with
+    /// its outermost block; an ambient inner declaration runs nothing.
+    fn scan_module_declaration_effects(&mut self, module: &oxc_ast::ast::TSModuleDeclaration<'_>) {
+        let mut scanner = LeafCallScanner::default();
+        let mut body = module.body.as_ref();
+        while let Some(current) = body {
+            match current {
+                oxc_ast::ast::TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
+                    if nested.declare
+                        || !matches!(
+                            nested.id,
+                            oxc_ast::ast::TSModuleDeclarationName::Identifier(_)
+                        )
+                    {
+                        return;
+                    }
+                    body = nested.body.as_ref();
+                }
+                oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block) => {
+                    for statement in &block.body {
+                        scanner.visit_statement(statement);
+                    }
+                    body = None;
+                }
+            }
+        }
+        self.decided_above_call_spans.append(&mut scanner.decided);
+        if self.drain_scanned_same_frame_effects(
+            scanner,
+            CertificationMode::ValueFree,
+            WritePolicy::SkeletonHiddenOnly,
+        ) {
+            self.control_test_gap = true;
+        }
+    }
+
+    /// Record the call / construct spans of one admitted OPTIONAL-`any`
+    /// CHAIN. The chain's TERMINAL call is decided above on the chain's
+    /// own account: the evaluator admits the [`SliceExpr::OptionalAnyChain`]
+    /// carrier only while the reaching root is still `any` (a non-`any`
+    /// root degrades at evaluation), and a call on an `any`-typed callee
+    /// resolves no signature — it cannot carry an `asserts` predicate, so
+    /// it narrows nothing. Every OTHER call the route carries — inside
+    /// the terminal call's ARGUMENTS or a computed member key
+    /// (`a?.b(assertString(x))` narrows `x` in the checker whether or not
+    /// the receiver is `any`) — is an ordinary same-frame position and
+    /// takes the per-callee certification of [`Self::record_decided_above_calls`].
+    fn record_optional_any_chain_calls(
+        &mut self,
+        whole: &Expression<'_>,
+        chain: &oxc_ast::ast::ChainExpression<'_>,
+    ) {
+        let mut scanner = LeafCallScanner::default();
+        if let oxc_ast::ast::ChainElement::CallExpression(call) = &chain.expression {
+            // The route admits at most one call, the terminal element;
+            // the callee route itself holds none (only computed keys,
+            // which the scanner reaches as ordinary expressions).
+            self.decided_above_call_spans.push(call.span.into());
+            scanner.visit_expression(&call.callee);
+            for argument in &call.arguments {
+                if let Some(expression) = argument.as_expression() {
+                    scanner.visit_expression(expression);
+                }
+            }
+        } else {
+            scanner.visit_expression(whole);
+        }
+        self.drain_leaf_call_scanner(scanner);
+    }
+
+    /// Discharge one walked [`LeafCallScanner`] whose nested-frame
+    /// (`decided`) calls ARE this run's decided-above positions — the leaf
+    /// path, where a folded leaf's nested-frame calls keep the blanket
+    /// certification they always had. Any unprovable same-frame effect
+    /// flags the enclosing statement's typed gap.
+    fn drain_leaf_call_scanner(&mut self, mut scanner: LeafCallScanner<'_>) {
+        self.decided_above_call_spans.append(&mut scanner.decided);
+        if self.drain_scanned_same_frame_effects(
+            scanner,
+            CertificationMode::Strict,
+            WritePolicy::All,
+        ) {
+            self.control_test_gap = true;
+        }
+    }
+
+    /// Discharge the same-frame channels of one walked
+    /// [`LeafCallScanner`]: the `control` / `discarded` channels certify
+    /// per-callee under `mode`, and a collected same-frame WRITE admitted
+    /// by `write_policy` whose target this frame OWNS is unprovable — the
+    /// write runs at the enclosing statement but never enters the slice's
+    /// effect ledger (the flow skeleton skips the class subtree), so
+    /// neither this half nor the evaluator can model the retype the
+    /// checker applies: a degraded success, never a silently certified
+    /// superset. A FREE target writes no binding this frame tracks and
+    /// stays silent. Returns whether anything was unprovable; the caller
+    /// decides where the typed gap lands. The scanner's `decided` channel
+    /// is NOT consumed here — whether a nested-frame call is recorded
+    /// decided-above is the caller's position's rule, not this
+    /// discharge's.
+    fn drain_scanned_same_frame_effects(
+        &mut self,
+        scanner: LeafCallScanner<'_>,
+        mode: CertificationMode,
+        write_policy: WritePolicy,
+    ) -> bool {
+        let control_unprovable = self.certify_result_independent_calls(
+            scanner.control,
+            ResultIndependentPosition::ControlTest,
+            mode,
+        );
+        let discarded_unprovable = self.certify_result_independent_calls(
+            scanner.discarded,
+            ResultIndependentPosition::DiscardedOperand,
+            mode,
+        );
+        let unmodelled_write = scanner
+            .writes
+            .into_iter()
+            .any(|(name, span, skeleton_hidden)| {
+                (matches!(write_policy, WritePolicy::All) || skeleton_hidden)
+                    && !matches!(self.resolve_name(name, span), NameBinding::Free)
+            });
+        control_unprovable || discarded_unprovable || unmodelled_write
+    }
+
+    /// Record the RESULT-INDEPENDENT call / construct spans of one
+    /// CONTROL-POSITION test (an `if` / ternary test). The demanded
+    /// value never consumes a test's VALUE, but a test call's RESULT can
+    /// still decide the narrowing the arms evaluate under — a
+    /// type-predicate callee — so a control call is decided above ONLY
+    /// when the callee provably establishes no narrowing:
+    /// - a `new` construct (a construct signature cannot be a type
+    ///   predicate, and the checker derives no narrowing from one);
+    /// - a bare-identifier callee resolving FREE to a PROVABLY CLOSED
+    ///   same-file declaration ([`Self::closed_callee_declaration`]: a
+    ///   module-scoped file, a call site outside every namespace block,
+    ///   exactly one declaration, not exported by any
+    ///   spelling) whose authored return annotation exists and is NOT a
+    ///   type predicate (an inferred boolean return can be an inferred
+    ///   predicate, so an unannotated declaration never qualifies; an
+    ///   overload group's signature selection is beyond this half; a
+    ///   script global's or an exported binding's checker-visible
+    ///   signature set may hold a predicate overload this file never
+    ///   shows).
+    ///
+    /// A call that minted a [`SliceGuard::TypePredicate`] fact takes
+    /// REAL evaluator evidence at guard application instead. Every OTHER
+    /// control call is one this half can neither certify nor evidence —
+    /// the callee could be a predicate whose narrowing the checker
+    /// applies and this substrate does not — so the test returns `true`
+    /// and the caller emits the typed `GuardNarrowing` gap: a degraded
+    /// success, `ReturnOnly`, never a silently certified superset.
+    fn record_control_position_calls(&mut self, test: &Expression<'_>) -> bool {
+        self.record_result_independent_calls(test, ResultIndependentPosition::ControlTest)
+    }
+
+    /// Record the RESULT-INDEPENDENT call / construct spans of one
+    /// DISCARDED sequence operand. The sequence's value never consumes
+    /// the operand, but the checker binds a call in that position into
+    /// the control flow (the left-hand side of a comma expression is a
+    /// potential assertion): an `asserts` callee narrows every read that
+    /// follows it. A discarded call is decided above ONLY when the
+    /// callee provably establishes no narrowing:
+    /// - a `new` construct (a construct signature is never an assertion);
+    /// - a bare-identifier callee resolving FREE to a PROVABLY CLOSED
+    ///   same-file declaration ([`Self::closed_callee_declaration`])
+    ///   whose return annotation is absent or is not an `asserts`
+    ///   predicate — assertion signatures are never inferred, so an
+    ///   unannotated closed declaration cannot assert, and a plain `x is
+    ///   T` predicate narrows nothing when its result is discarded.
+    ///
+    /// Every other discarded call — an imported, exported, script-global
+    /// or member callee, a closed `asserts` callee — is one this half can
+    /// neither certify nor evidence, so the operand returns `true` and
+    /// the caller flags the enclosing statement's typed `GuardNarrowing`
+    /// gap: a degraded success, never a silently certified superset.
+    fn record_discarded_operand_calls(&mut self, operand: &Expression<'_>) -> bool {
+        self.record_result_independent_calls(operand, ResultIndependentPosition::DiscardedOperand)
+    }
+
+    /// The shared scanner behind [`Self::record_control_position_calls`]
+    /// and [`Self::record_discarded_operand_calls`]: the ONE
+    /// [`LeafCallScanner`] walks the expression (the same channel split,
+    /// the same class phase split, and the same whole-binding WRITE
+    /// collection the leaf path applies — a write hiding in a discarded
+    /// operand's class static block runs at the enclosing statement
+    /// exactly as a leaf's does), then the channels discharge through the
+    /// position's rule: the whole expression takes `position` for its
+    /// top-level calls (a control test seeds the control nesting; a
+    /// discarded operand starts discarded), and nested control positions
+    /// split exactly as the leaf path's. A nested frame's calls are not
+    /// this frame's: the scanner's blanket `decided` channel is DROPPED
+    /// here, never recorded — a call that runs only when the nested value
+    /// is called has nothing to certify on this frame's account. Returns
+    /// whether any effect was unprovable.
+    fn record_result_independent_calls(
+        &mut self,
+        expr: &Expression<'_>,
+        position: ResultIndependentPosition,
+    ) -> bool {
+        let mut scanner = LeafCallScanner::default();
+        if matches!(position, ResultIndependentPosition::ControlTest) {
+            scanner.control_nesting = 1;
+        }
+        scanner.visit_expression(expr);
+        self.drain_scanned_same_frame_effects(
+            scanner,
+            CertificationMode::Strict,
+            WritePolicy::SkeletonHiddenOnly,
+        )
+    }
+
+    /// Certify one collected set of result-independent calls: each is
+    /// either pushed decided-above or reported unprovable (`true`). A call
+    /// whose [`SliceGuard::TypePredicate`] fact this lowering minted is
+    /// evidence-backed at guard application instead — neither certified
+    /// nor gapped.
+    ///
+    /// `mode` decides how hard an unprovable-by-closure call is chased.
+    /// [`CertificationMode::Strict`] is the rule for every position whose
+    /// evaluation the demand can observe: any call that is not certified
+    /// under `position`'s rule is unprovable. [`CertificationMode::ValueFree`]
+    /// is the rule for a position whose VALUE nothing consumes (an elided
+    /// declaration position): the call's own result feeds no read, so the
+    /// one effect that can still change what the frame later evaluates is
+    /// an `asserts` narrowing of a FRAME-OWNED binding — a call with no
+    /// frame-owned reference among its assertion-subject roots cannot
+    /// carry one and certifies outright, and one that could still
+    /// certifies exactly when its callee is a provably closed same-file
+    /// declaration whose return provably is not an `asserts` predicate
+    /// (the [`ResultIndependentPosition::DiscardedOperand`] rule).
+    fn certify_result_independent_calls(
+        &mut self,
+        calls: Vec<ControlCall>,
+        position: ResultIndependentPosition,
+        mode: CertificationMode,
+    ) -> bool {
+        let mut unprovable = false;
+        for call in calls {
+            let span = match call {
+                ControlCall::Construct(span) => span,
+                ControlCall::Call {
+                    span,
+                    callee,
+                    assertion_subject_roots,
+                } => {
+                    if self.predicate_guard_call_spans.contains(&span) {
+                        // Evidence-backed at guard application: neither
+                        // certified here nor gapped.
+                        continue;
+                    }
+                    let closed_non_narrowing = |position: ResultIndependentPosition| {
+                        callee.as_ref().is_some_and(|(name, callee_span)| {
+                            matches!(self.resolve_name(name, *callee_span), NameBinding::Free)
+                                && self
+                                    .closed_callee_declaration(name)
+                                    .is_some_and(|function| {
+                                        position.certifies_closed_return(
+                                            function.return_type.as_deref(),
+                                        )
+                                    })
+                        })
+                    };
+                    let certified = match mode {
+                        CertificationMode::Strict => closed_non_narrowing(position),
+                        CertificationMode::ValueFree => {
+                            let frame_subject =
+                                assertion_subject_roots.iter().any(|(name, span)| {
+                                    !matches!(self.resolve_name(name, *span), NameBinding::Free)
+                                });
+                            !frame_subject
+                                || closed_non_narrowing(ResultIndependentPosition::DiscardedOperand)
+                        }
+                    };
+                    if !certified {
+                        unprovable = true;
+                        continue;
+                    }
+                    span
+                }
+            };
+            self.decided_above_call_spans.push(span);
+        }
+        unprovable
     }
 
     /// THE root-identifier gate, half one: the names in the leaf
@@ -5221,6 +7473,712 @@ impl Lowerer<'_> {
     }
 }
 
+/// Whether a parameter's declared type provably cannot be a discriminated
+/// union — the only shape whose destructured elements are correlated with
+/// one another.
+fn param_type_forbids_correlation(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Object(_) | TypeExpr::Primitive(_) | TypeExpr::Literal(_) => true,
+        TypeExpr::Intersection(arms) => arms.iter().all(param_type_forbids_correlation),
+        _ => false,
+    }
+}
+
+/// What ONE STATEMENT-POSITION call establishes.
+///
+/// A bare call statement feeds no value, but two of its effects reach the
+/// demand and neither is visible at the call site: an `asserts` callee
+/// narrows every read that follows, and a callee that never returns ENDS
+/// the path — the statements after it are unreachable and the checker
+/// drops their contributions. So the callee must be PROVEN, exactly as a
+/// control test's is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatementCallEffect {
+    /// The callee provably establishes no narrowing AND provably
+    /// returns: the call is decided above and the path continues.
+    Inert,
+    /// A closed same-file callee whose authored return is `never`: the
+    /// statement ends the path exactly as an authored `throw` does.
+    NeverReturns,
+    /// The callee could narrow what follows or could end the path, and
+    /// this half can prove neither.
+    Unprovable,
+}
+
+/// Whether a return-type annotation's SYNTAX cannot denote `never`.
+///
+/// A name is never provable here — `type Fail = never` makes `Foo` a
+/// `never` return with no syntactic tell — and neither is a conditional,
+/// indexed-access, mapped, intersection or `keyof` form, whose result
+/// this half does not compute. A union is provable through any single
+/// member that is: a union with a non-`never` member is not `never`.
+fn annotation_provably_not_never(ty: &TSType<'_>) -> bool {
+    match ty {
+        TSType::TSAnyKeyword(_)
+        | TSType::TSBigIntKeyword(_)
+        | TSType::TSBooleanKeyword(_)
+        | TSType::TSNullKeyword(_)
+        | TSType::TSNumberKeyword(_)
+        | TSType::TSObjectKeyword(_)
+        | TSType::TSStringKeyword(_)
+        | TSType::TSSymbolKeyword(_)
+        | TSType::TSThisType(_)
+        | TSType::TSUndefinedKeyword(_)
+        | TSType::TSUnknownKeyword(_)
+        | TSType::TSVoidKeyword(_)
+        | TSType::TSLiteralType(_)
+        | TSType::TSTemplateLiteralType(_)
+        | TSType::TSTupleType(_)
+        | TSType::TSArrayType(_)
+        | TSType::TSTypeLiteral(_)
+        | TSType::TSFunctionType(_)
+        | TSType::TSConstructorType(_) => true,
+        TSType::TSParenthesizedType(inner) => annotation_provably_not_never(&inner.type_annotation),
+        TSType::TSUnionType(union) => union.types.iter().any(annotation_provably_not_never),
+        _ => false,
+    }
+}
+
+/// Whether a statement list contains a `return` in ITS OWN frame — a
+/// nested function or class body is a different frame and its returns
+/// say nothing about this one.
+#[derive(Default)]
+struct OwnFrameReturnFinder {
+    nested_frame_nesting: u32,
+    found: bool,
+}
+
+impl<'a> Visit<'a> for OwnFrameReturnFinder {
+    fn visit_return_statement(&mut self, it: &oxc_ast::ast::ReturnStatement<'a>) {
+        if self.nested_frame_nesting == 0 {
+            self.found = true;
+        }
+        walk::walk_return_statement(self, it);
+    }
+    fn visit_function(
+        &mut self,
+        it: &oxc_ast::ast::Function<'a>,
+        flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+        self.nested_frame_nesting += 1;
+        walk::walk_function(self, it, flags);
+        self.nested_frame_nesting -= 1;
+    }
+    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
+        self.nested_frame_nesting += 1;
+        walk::walk_arrow_function_expression(self, it);
+        self.nested_frame_nesting -= 1;
+    }
+    fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
+        self.nested_frame_nesting += 1;
+        walk::walk_class(self, it);
+        self.nested_frame_nesting -= 1;
+    }
+}
+
+/// A position whose calls never feed the demanded value, with the rule
+/// under which a PROVABLY CLOSED same-file callee's authored return
+/// annotation certifies a call there as establishing no narrowing.
+#[derive(Clone, Copy)]
+enum ResultIndependentPosition {
+    /// An `if` / ternary test — including one folded inside a
+    /// leaf-lowered expression: a predicate callee CONTROLS the arms'
+    /// narrowing, and an inferred boolean return can be an inferred
+    /// predicate, so only an authored NON-predicate annotation certifies.
+    ControlTest,
+    /// A sequence's discarded operand, or any other position whose VALUE
+    /// the demanded answer provably does not consume (a call folded into
+    /// a leaf-lowered expression, a statement inside an immediately
+    /// evaluated class static block): only an `asserts` callee narrows
+    /// what follows, and assertion signatures are never inferred, so an
+    /// absent annotation or any non-`asserts` annotation certifies.
+    DiscardedOperand,
+}
+
+impl ResultIndependentPosition {
+    fn certifies_closed_return(
+        self,
+        annotation: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
+    ) -> bool {
+        match self {
+            Self::ControlTest => annotation.is_some_and(|annotation| {
+                !matches!(annotation.type_annotation, TSType::TSTypePredicate(_))
+            }),
+            Self::DiscardedOperand => !annotation.is_some_and(|annotation| {
+                matches!(
+                    &annotation.type_annotation,
+                    TSType::TSTypePredicate(predicate) if predicate.asserts
+                )
+            }),
+        }
+    }
+}
+
+/// How hard the per-callee certification chases a call it cannot prove
+/// closed — see [`Lowerer::certify_result_independent_calls`].
+#[derive(Clone, Copy)]
+enum CertificationMode {
+    /// The position's evaluation is observable by the demand (a control
+    /// test, a discarded operand of a lowered expression, a leaf, an
+    /// immediately evaluated class position): an unprovable call gaps.
+    Strict,
+    /// The position's VALUE is never consumed (an elided declaration
+    /// initializer): only an effect that could narrow a FRAME-OWNED
+    /// binding — an `asserts` call with a frame-owned subject — is
+    /// unprovable; every other call's result feeds no read and certifies.
+    ValueFree,
+}
+
+/// Which collected whole-binding writes a scan flags.
+#[derive(Clone, Copy)]
+enum WritePolicy {
+    /// Every frame-owned write: the scanned position is one the slice's
+    /// effect ledger cannot reach (a folded leaf answer, a class subtree,
+    /// an elided declaration initializer), so no other rail covers it.
+    All,
+    /// Only SKELETON-HIDDEN writes (under a class subtree): the position
+    /// itself is a statement the skeleton indexes, so its visible writes
+    /// already ride the typed unapplied-write ledger — including its
+    /// demand-selection discipline, which a scan cannot reproduce (a
+    /// write to a binding nothing reads degrades nothing).
+    SkeletonHiddenOnly,
+}
+
+/// One call / construct collected for the result-independent discipline:
+/// its authored span plus, for a call, the bare-identifier callee (name +
+/// span) when the callee spells one and the ROOT identifiers an `asserts`
+/// effect could narrow (every argument that is a reference, plus a member
+/// callee's receiver root — `asserts this`).
+enum ControlCall {
+    Construct(verter_span::Span),
+    Call {
+        span: verter_span::Span,
+        callee: Option<(String, oxc_span::Span)>,
+        assertion_subject_roots: Vec<(String, oxc_span::Span)>,
+    },
+}
+
+/// The root identifier a reference expression is rooted at, through
+/// parenthesized / TS wrappers and static member chains — the only
+/// expression shape an `asserts` narrowing can land on. Any other base (a
+/// call result, a literal) is not a reference and narrows nothing.
+fn expression_root_identifier(expression: &Expression<'_>) -> Option<(String, oxc_span::Span)> {
+    match unwrap_parenthesized(expression) {
+        Expression::Identifier(identifier) => {
+            Some((identifier.name.as_str().to_owned(), identifier.span))
+        }
+        Expression::StaticMemberExpression(member) => expression_root_identifier(&member.object),
+        Expression::TSAsExpression(inner) => expression_root_identifier(&inner.expression),
+        Expression::TSSatisfiesExpression(inner) => expression_root_identifier(&inner.expression),
+        Expression::TSNonNullExpression(inner) => expression_root_identifier(&inner.expression),
+        Expression::TSTypeAssertion(inner) => expression_root_identifier(&inner.expression),
+        _ => None,
+    }
+}
+
+impl ControlCall {
+    fn of_call(call: &oxc_ast::ast::CallExpression<'_>) -> Self {
+        let callee_expression = unwrap_parenthesized(&call.callee);
+        let callee = match callee_expression {
+            Expression::Identifier(identifier) => {
+                Some((identifier.name.as_str().to_owned(), identifier.span))
+            }
+            _ => None,
+        };
+        let mut assertion_subject_roots: Vec<(String, oxc_span::Span)> = Vec::new();
+        if let Expression::StaticMemberExpression(member) = callee_expression {
+            if let Some(root) = expression_root_identifier(&member.object) {
+                assertion_subject_roots.push(root);
+            }
+        }
+        for argument in &call.arguments {
+            if let Some(root) = argument
+                .as_expression()
+                .and_then(expression_root_identifier)
+            {
+                assertion_subject_roots.push(root);
+            }
+        }
+        ControlCall::Call {
+            span: call.span.into(),
+            callee,
+            assertion_subject_roots,
+        }
+    }
+}
+
+/// The call collector behind [`Lowerer::record_decided_above_calls`]:
+/// every call / construct of a leaf-lowered expression lands in exactly
+/// one of three channels, and the DEFAULT is fail-closed — there is no
+/// blanket same-frame certification. A call inside a same-frame CONTROL
+/// position (a ternary test, a `&&` / `||` left operand, a statement test
+/// inside an immediately-evaluated class static block) is `control` (its
+/// result can decide the narrowing a branch evaluates under, so it takes
+/// the [`ResultIndependentPosition::ControlTest`] rule); every other
+/// same-frame call is `discarded` (the leaf answer provably does not
+/// derive from it, so only an `asserts` callee narrows what follows — the
+/// [`ResultIndependentPosition::DiscardedOperand`] rule). Both channels
+/// certify per-callee through
+/// [`Lowerer::certify_result_independent_calls`]; an unprovable call
+/// flags the enclosing statement's typed `GuardNarrowing` gap.
+///
+/// A nested function / class body is its OWN frame — its names never
+/// resolve against this frame's skeleton and its calls run at ITS
+/// evaluation (a method when called, an instance property / accessor
+/// initializer at construction), never in this statement — so its calls
+/// keep the blanket `decided` treatment they always had. The
+/// class-evaluation-time positions are NOT deferred: a class's
+/// decorators, `super_class` heritage expression, computed member keys,
+/// member decorators, STATIC BLOCKS, and static property / accessor
+/// initializers evaluate in the ENCLOSING frame, so they are visited
+/// outside the nested-frame guard and their control positions split like
+/// any other same-frame position.
+///
+/// The same positions can also WRITE a frame binding: `class C { static {
+/// x = "s"; } }` retypes `x` in the checker for every read that follows,
+/// but the flow skeleton skips the whole class subtree, so the write
+/// never enters the slice's effect ledger and the evaluator's
+/// unapplied-write gate never sees it. The scanner therefore collects
+/// every same-frame WHOLE-BINDING write target (a plain `=` assignment, a
+/// compound-operator write, an update — identifier and destructuring
+/// targets; a member write is a projection under its root and never
+/// retypes the binding itself), and the drain resolves each against this
+/// frame's lexical authority: a target the frame OWNS flags the enclosing
+/// statement's typed `GuardNarrowing` gap, a FREE target stays silent.
+#[derive(Default)]
+struct LeafCallScanner<'a> {
+    decided: Vec<verter_span::Span>,
+    discarded: Vec<ControlCall>,
+    control: Vec<ControlCall>,
+    /// Same-frame whole-binding write targets: `(name, identifier span,
+    /// skeleton-hidden)`. A write is SKELETON-HIDDEN when it sits under a
+    /// class subtree, which the flow skeleton never indexes: the slice's
+    /// effect ledger cannot see it. A skeleton-VISIBLE write instead rides
+    /// the typed unapplied-write ledger, which applies the demand-selection
+    /// discipline (a write to a binding nothing reads degrades nothing).
+    writes: Vec<(&'a str, oxc_span::Span, bool)>,
+    control_nesting: usize,
+    nested_frame_nesting: usize,
+    /// Class-subtree nesting: the flow skeleton never indexes inside a
+    /// class, so a write collected under one is invisible to the slice's
+    /// effect ledger. Unlike `nested_frame_nesting` this is NOT dropped
+    /// for the class-evaluation-time positions (a static block runs here,
+    /// but the skeleton still never saw it).
+    class_nesting: usize,
+}
+
+impl<'a> LeafCallScanner<'a> {
+    /// Visit one same-frame CONTROL-position expression: every call it
+    /// holds (transitively, until a nested frame) takes the
+    /// [`ResultIndependentPosition::ControlTest`] rule.
+    fn visit_control_expression(&mut self, expr: &Expression<'a>) {
+        self.control_nesting += 1;
+        self.visit_expression(expr);
+        self.control_nesting -= 1;
+    }
+
+    /// Record one same-frame whole-binding write target, marking whether
+    /// the flow skeleton can see it (it never indexes inside a class
+    /// subtree, so a write under `class_nesting` is invisible to the
+    /// slice's effect ledger).
+    fn push_write(&mut self, name: &'a str, span: oxc_span::Span) {
+        self.writes.push((name, span, self.class_nesting > 0));
+    }
+
+    /// Collect the WHOLE-BINDING write targets of one assignment target:
+    /// an identifier target writes its binding, a destructuring pattern
+    /// writes every element it binds, and a TS wrapper forwards to its
+    /// inner expression. A member write is a projection under its root —
+    /// it never retypes the binding itself — so it collects nothing.
+    fn collect_write_targets(&mut self, target: &oxc_ast::ast::AssignmentTarget<'a>) {
+        use oxc_ast::ast::AssignmentTarget;
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+                self.push_write(identifier.name.as_str(), identifier.span);
+            }
+            AssignmentTarget::TSAsExpression(as_expression) => {
+                self.collect_expression_write_target(&as_expression.expression);
+            }
+            AssignmentTarget::TSSatisfiesExpression(satisfies) => {
+                self.collect_expression_write_target(&satisfies.expression);
+            }
+            AssignmentTarget::TSNonNullExpression(non_null) => {
+                self.collect_expression_write_target(&non_null.expression);
+            }
+            AssignmentTarget::TSTypeAssertion(assertion) => {
+                self.collect_expression_write_target(&assertion.expression);
+            }
+            AssignmentTarget::ArrayAssignmentTarget(array) => {
+                for element in array.elements.iter().flatten() {
+                    self.collect_maybe_default_write_target(element);
+                }
+                if let Some(rest) = array.rest.as_ref() {
+                    self.collect_write_targets(&rest.target);
+                }
+            }
+            AssignmentTarget::ObjectAssignmentTarget(object) => {
+                use oxc_ast::ast::AssignmentTargetProperty;
+                for property in &object.properties {
+                    match property {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(
+                            identifier,
+                        ) => {
+                            self.push_write(
+                                identifier.binding.name.as_str(),
+                                identifier.binding.span,
+                            );
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+                            self.collect_maybe_default_write_target(&property.binding);
+                        }
+                    }
+                }
+                if let Some(rest) = object.rest.as_ref() {
+                    self.collect_write_targets(&rest.target);
+                }
+            }
+            AssignmentTarget::StaticMemberExpression(_)
+            | AssignmentTarget::ComputedMemberExpression(_)
+            | AssignmentTarget::PrivateFieldExpression(_) => {}
+        }
+    }
+
+    fn collect_maybe_default_write_target(
+        &mut self,
+        target: &oxc_ast::ast::AssignmentTargetMaybeDefault<'a>,
+    ) {
+        match target {
+            oxc_ast::ast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(
+                with_default,
+            ) => {
+                self.collect_write_targets(&with_default.binding);
+            }
+            _ => self.collect_write_targets(target.to_assignment_target()),
+        }
+    }
+
+    /// Peel parser-legal wrappers recursively: a write through
+    /// `((x) as any) = v` still retypes `x`.
+    fn collect_expression_write_target(&mut self, expression: &Expression<'a>) {
+        match expression {
+            Expression::Identifier(identifier) => {
+                self.push_write(identifier.name.as_str(), identifier.span);
+            }
+            Expression::ParenthesizedExpression(inner) => {
+                self.collect_expression_write_target(&inner.expression);
+            }
+            Expression::TSAsExpression(inner) => {
+                self.collect_expression_write_target(&inner.expression);
+            }
+            Expression::TSSatisfiesExpression(inner) => {
+                self.collect_expression_write_target(&inner.expression);
+            }
+            Expression::TSNonNullExpression(inner) => {
+                self.collect_expression_write_target(&inner.expression);
+            }
+            Expression::TSTypeAssertion(inner) => {
+                self.collect_expression_write_target(&inner.expression);
+            }
+            _ => {}
+        }
+    }
+
+    /// The WRITE targets of a `for … in` / `for … of` loop head: an
+    /// assignment-target left side (`for (x of xs)`) writes that binding
+    /// once per iteration — the same whole-binding vocabulary
+    /// [`Self::collect_write_targets`] applies. A DECLARATION left side
+    /// (`for (const y of xs)`) binds a fresh binding: nothing this frame
+    /// owns is written, and the walk never mistakes the declarator for a
+    /// write on its own.
+    fn collect_for_left_writes(&mut self, left: &oxc_ast::ast::ForStatementLeft<'a>) {
+        if let Some(target) = left.as_assignment_target() {
+            self.collect_write_targets(target);
+        }
+    }
+}
+
+impl<'a> Visit<'a> for LeafCallScanner<'a> {
+    fn visit_assignment_expression(&mut self, it: &oxc_ast::ast::AssignmentExpression<'a>) {
+        // A same-frame assignment RUNS at the enclosing statement: a
+        // whole-binding write to a frame-owned target retypes the binding
+        // in the checker while the slice's effect ledger never sees it
+        // (the skeleton skips the class subtree). Collect it for the
+        // drain's fail-closed gap; the walk still descends for nested
+        // calls and writes in computed keys and the right-hand side.
+        if self.nested_frame_nesting == 0 {
+            self.collect_write_targets(&it.left);
+        }
+        walk::walk_assignment_expression(self, it);
+    }
+    fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
+        if self.nested_frame_nesting == 0 {
+            // A parser-legal TS wrapper still writes its inner binding:
+            // `(x as any)++` retypes `x` exactly as `x++` does.
+            use oxc_ast::ast::SimpleAssignmentTarget as T;
+            match &it.argument {
+                T::AssignmentTargetIdentifier(identifier) => {
+                    self.push_write(identifier.name.as_str(), identifier.span);
+                }
+                T::TSAsExpression(inner) => {
+                    self.collect_expression_write_target(&inner.expression);
+                }
+                T::TSSatisfiesExpression(inner) => {
+                    self.collect_expression_write_target(&inner.expression);
+                }
+                T::TSNonNullExpression(inner) => {
+                    self.collect_expression_write_target(&inner.expression);
+                }
+                T::TSTypeAssertion(inner) => {
+                    self.collect_expression_write_target(&inner.expression);
+                }
+                _ => {}
+            }
+        }
+        walk::walk_update_expression(self, it);
+    }
+    fn visit_conditional_expression(&mut self, it: &oxc_ast::ast::ConditionalExpression<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_conditional_expression(self, it);
+            return;
+        }
+        // The ternary's TEST is a control position exactly as the
+        // statement-level `if` twin's: a predicate call there narrows the
+        // branch reads even when the whole conditional folds into a leaf.
+        self.visit_control_expression(&it.test);
+        self.visit_expression(&it.consequent);
+        self.visit_expression(&it.alternate);
+    }
+    fn visit_logical_expression(&mut self, it: &oxc_ast::ast::LogicalExpression<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_logical_expression(self, it);
+            return;
+        }
+        // The left operand decides whether the right evaluates and under
+        // which narrowing (`isString(x) && x` reads `x` as `string` in
+        // the checker) — a control position, conservatively for `??` too.
+        self.visit_control_expression(&it.left);
+        self.visit_expression(&it.right);
+    }
+    // Statement TESTS are control positions. Statements are reachable
+    // inside a leaf-lowered expression only through an immediately
+    // evaluated class static block; everywhere else a nested-frame guard
+    // has already routed the whole subtree to the blanket channel.
+    fn visit_if_statement(&mut self, it: &oxc_ast::ast::IfStatement<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_if_statement(self, it);
+            return;
+        }
+        self.visit_control_expression(&it.test);
+        self.visit_statement(&it.consequent);
+        if let Some(alternate) = &it.alternate {
+            self.visit_statement(alternate);
+        }
+    }
+    fn visit_while_statement(&mut self, it: &oxc_ast::ast::WhileStatement<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_while_statement(self, it);
+            return;
+        }
+        self.visit_control_expression(&it.test);
+        self.visit_statement(&it.body);
+    }
+    fn visit_do_while_statement(&mut self, it: &oxc_ast::ast::DoWhileStatement<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_do_while_statement(self, it);
+            return;
+        }
+        self.visit_statement(&it.body);
+        self.visit_control_expression(&it.test);
+    }
+    fn visit_for_statement(&mut self, it: &oxc_ast::ast::ForStatement<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_for_statement(self, it);
+            return;
+        }
+        if let Some(init) = &it.init {
+            self.visit_for_statement_init(init);
+        }
+        if let Some(test) = &it.test {
+            self.visit_control_expression(test);
+        }
+        if let Some(update) = &it.update {
+            self.visit_expression(update);
+        }
+        self.visit_statement(&it.body);
+    }
+    fn visit_for_in_statement(&mut self, it: &oxc_ast::ast::ForInStatement<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_for_in_statement(self, it);
+            return;
+        }
+        self.collect_for_left_writes(&it.left);
+        walk::walk_for_in_statement(self, it);
+    }
+    fn visit_for_of_statement(&mut self, it: &oxc_ast::ast::ForOfStatement<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_for_of_statement(self, it);
+            return;
+        }
+        self.collect_for_left_writes(&it.left);
+        walk::walk_for_of_statement(self, it);
+    }
+    // A `switch` in a scanned position (a statement inside an immediately
+    // evaluated class static block): the discriminant's value never feeds
+    // the demanded answer (discarded), while each case TEST is a control
+    // position exactly as an `if` test is — a call there can control the
+    // clause's narrowing.
+    fn visit_switch_statement(&mut self, it: &oxc_ast::ast::SwitchStatement<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_switch_statement(self, it);
+            return;
+        }
+        self.visit_expression(&it.discriminant);
+        for case in &it.cases {
+            if let Some(test) = case.test.as_ref() {
+                self.visit_control_expression(test);
+            }
+            for statement in &case.consequent {
+                self.visit_statement(statement);
+            }
+        }
+    }
+    fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
+        if self.nested_frame_nesting > 0 {
+            self.decided.push(call.span.into());
+        } else if self.control_nesting > 0 {
+            self.control.push(ControlCall::of_call(call));
+        } else {
+            self.discarded.push(ControlCall::of_call(call));
+        }
+        walk::walk_call_expression(self, call);
+    }
+    fn visit_new_expression(&mut self, new: &oxc_ast::ast::NewExpression<'a>) {
+        if self.nested_frame_nesting > 0 {
+            self.decided.push(new.span.into());
+        } else if self.control_nesting > 0 {
+            self.control.push(ControlCall::Construct(new.span.into()));
+        } else {
+            self.discarded.push(ControlCall::Construct(new.span.into()));
+        }
+        walk::walk_new_expression(self, new);
+    }
+    // Nested function / arrow / class bodies are their own frames.
+    fn visit_function(
+        &mut self,
+        it: &oxc_ast::ast::Function<'a>,
+        flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+        self.nested_frame_nesting += 1;
+        walk::walk_function(self, it, flags);
+        self.nested_frame_nesting -= 1;
+    }
+    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
+        self.nested_frame_nesting += 1;
+        walk::walk_arrow_function_expression(self, it);
+        self.nested_frame_nesting -= 1;
+    }
+    fn visit_static_block(&mut self, it: &oxc_ast::ast::StaticBlock<'a>) {
+        // A static block runs at CLASS EVALUATION — one frame out from
+        // the body guard `visit_class` applied, and never deferred the
+        // way a method body or property initializer is. Drop exactly the
+        // class's own guard level (a genuinely enclosing nested frame's
+        // guard stays: a class inside a nested function evaluates with
+        // THAT function, not with this statement).
+        self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+        walk::walk_static_block(self, it);
+        self.nested_frame_nesting += 1;
+    }
+    fn visit_method_definition(&mut self, it: &oxc_ast::ast::MethodDefinition<'a>) {
+        // Member decorators and a computed key evaluate at CLASS
+        // DEFINITION — enclosing-frame immediate, exactly as the class's
+        // own decorators do. The method's VALUE is a function whose body
+        // runs when CALLED: `visit_function` re-arms the nested-frame
+        // guard for exactly the deferred body.
+        self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+        walk::walk_method_definition(self, it);
+        self.nested_frame_nesting += 1;
+    }
+    fn visit_property_definition(&mut self, it: &oxc_ast::ast::PropertyDefinition<'a>) {
+        // Member decorators and a computed key evaluate at CLASS
+        // DEFINITION, and a STATIC initializer runs at class evaluation —
+        // the same enclosing-frame discipline as a static block. An
+        // INSTANCE property initializer is deferred to construction and
+        // keeps the body guard.
+        self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+        self.visit_decorators(&it.decorators);
+        self.visit_property_key(&it.key);
+        self.nested_frame_nesting += 1;
+        if let Some(type_annotation) = &it.type_annotation {
+            self.visit_ts_type_annotation(type_annotation);
+        }
+        if let Some(value) = &it.value {
+            if it.r#static {
+                self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+                self.visit_expression(value);
+                self.nested_frame_nesting += 1;
+            } else {
+                self.visit_expression(value);
+            }
+        }
+    }
+    fn visit_accessor_property(&mut self, it: &oxc_ast::ast::AccessorProperty<'a>) {
+        // The same phase split as a property definition: decorators and a
+        // computed key evaluate at class definition; a STATIC
+        // auto-accessor initializer runs at class evaluation; an INSTANCE
+        // one is deferred to construction and keeps the body guard.
+        self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+        self.visit_decorators(&it.decorators);
+        self.visit_property_key(&it.key);
+        self.nested_frame_nesting += 1;
+        if let Some(type_annotation) = &it.type_annotation {
+            self.visit_ts_type_annotation(type_annotation);
+        }
+        if let Some(value) = &it.value {
+            if it.r#static {
+                self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+                self.visit_expression(value);
+                self.nested_frame_nesting += 1;
+            } else {
+                self.visit_expression(value);
+            }
+        }
+    }
+    fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
+        // Decorators and the `super_class` heritage expression evaluate in
+        // the ENCLOSING frame — before the class body exists — so they are
+        // visited OUTSIDE the nested-frame guard and their calls take the
+        // same-frame discipline. Only the class BODY is guarded — and
+        // inside it the member visitors drop the guard again for every
+        // class-evaluation-time position (computed keys, member
+        // decorators, static blocks, static property / accessor
+        // initializers). (`walk_class` visits children in exactly this
+        // order; the name binding, type parameters, and implements clause
+        // carry no runtime expressions.)
+        //
+        // The skeleton never indexes ANY of the class subtree, so every
+        // write under this visit — heritage included — is skeleton-hidden.
+        self.class_nesting += 1;
+        self.visit_decorators(&it.decorators);
+        if let Some(super_class) = &it.super_class {
+            self.visit_expression(super_class);
+        }
+        self.nested_frame_nesting += 1;
+        if let Some(id) = &it.id {
+            self.visit_binding_identifier(id);
+        }
+        if let Some(type_parameters) = &it.type_parameters {
+            self.visit_ts_type_parameter_declaration(type_parameters);
+        }
+        if let Some(super_type_arguments) = &it.super_type_arguments {
+            self.visit_ts_type_parameter_instantiation(super_type_arguments);
+        }
+        self.visit_ts_class_implements_list(&it.implements);
+        self.visit_class_body(&it.body);
+        self.nested_frame_nesting -= 1;
+        self.class_nesting -= 1;
+    }
+}
+
 /// The root-identifier gate's verdict on one leaf lowering.
 enum LeafLowering {
     Unmodeled,
@@ -5290,10 +8248,12 @@ fn negate_guard(guard: SliceGuard) -> SliceGuard {
             subject,
             target,
             negated,
+            call,
         } => SliceGuard::TypePredicate {
             subject,
             target,
             negated: !negated,
+            call,
         },
         SliceGuard::And(parts) => SliceGuard::Or(Arc::from(
             parts

@@ -42,6 +42,11 @@ fn workspace_root() -> PathBuf {
 // caller outside the crate cannot name its return type without them. Six
 // names do not fit one 100-column line; the payload types all live in the
 // `compile` submodule and only the re-export is irreducibly here.
+// +5 for the per-host `flow_fault_injection` fault-slot field: a root
+// `VerterHost` struct field is irreducibly declared here (the knob
+// STRUCT and every arming/reading site live in
+// `project_semantic_dispatch::flow_return`), and the fully-qualified
+// type does not fit the field line.
 // +4 for the `pub use host_resolve::native_host_binding::{...}` re-export
 // (the sealed request-scoped `BoundNativeHostRequest` binding substrate).
 // The types must be nameable outside the crate so the trybuild seal
@@ -49,7 +54,7 @@ fn workspace_root() -> PathBuf {
 // not fit one 100-column line, and every payload type lives in the
 // `host_resolve::native_host_binding` submodule — only the re-export is
 // irreducibly here.
-const LIB_RS_LINE_CEILING: usize = 861;
+const LIB_RS_LINE_CEILING: usize = 866;
 
 #[test]
 fn lib_rs_stays_under_line_ceiling() {

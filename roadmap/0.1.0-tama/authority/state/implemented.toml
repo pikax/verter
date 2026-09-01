@@ -420,6 +420,41 @@ node_id = "CCA1O1B"
 commit_message = "feat(*): execute a caller-supplied canonical compile request"
 commit_date = "2026-09-01T18:00:00+01:00"
 
+[[implemented]]
+node_id = "D1"
+commit_message = "feat(session): add private hermetic flow completeness foundation"
+commit_date = "2026-08-29T20:05:00+01:00"
+
+[[implemented]]
+node_id = "D2A"
+commit_message = "feat(session): canonical flow demand and proof substrate"
+commit_date = "2026-08-30T09:46:00+01:00"
+
+[[implemented]]
+node_id = "D2B"
+commit_message = "feat(session): route flow-return admission through the sole completeness proof"
+commit_date = "2026-08-30T17:32:00+01:00"
+
+[[implemented]]
+node_id = "TA1A"
+commit_message = "feat(session): canonical union and intersection algebra with structural constituent identity"
+commit_date = "2026-08-31T18:30:00+01:00"
+
+[[implemented]]
+node_id = "TA1B"
+commit_message = "feat(session): flip the composite payload opaque and close every construction site"
+commit_date = "2026-08-31T23:30:00+01:00"
+
+[[implemented]]
+node_id = "TA2"
+commit_message = "feat(session): demand-scoped truthiness domain authority consumed by flow"
+commit_date = "2026-09-01T04:00:00+01:00"
+
+[[implemented]]
+node_id = "D2D"
+commit_message = "feat(session): make every surface producer return a typed resolution outcome"
+commit_date = "2026-09-01T19:15:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
@@ -771,12 +806,12 @@ gh_issue = 173
 sync_to_github = true
 
 [[github_issue]]
-node_id = "D2"
+node_id = "D2B"
 gh_issue = 174
 sync_to_github = true
 
 [[github_issue]]
-node_id = "D3"
+node_id = "D3C"
 gh_issue = 175
 sync_to_github = true
 

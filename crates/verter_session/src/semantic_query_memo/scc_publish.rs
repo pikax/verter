@@ -47,10 +47,10 @@
 //!    the batch accumulates, so adding a member cannot reintroduce a
 //!    per-member admission without deleting that contract outright.
 //!
-//! Only decided, non-degraded results publish. A degraded flow success is
-//! `ReturnOnly` by contract and a non-binary relation outcome has no
-//! value-domain form — either one refuses the WHOLE batch here rather
-//! than admitting a torn component.
+//! Only decided results publish: a flow member is proof-typed at this
+//! boundary (its payload is extracted from the finalizer's token), and a
+//! non-binary relation outcome has no value-domain form — the batch
+//! refuses WHOLE rather than admitting a torn component.
 
 use super::inflight::InflightState;
 use super::relation_memo::relation_satisfied_projection;
@@ -114,8 +114,11 @@ pub(crate) struct PendingRelationMember {
 pub(crate) struct PendingFlowReturnMember {
     /// The member's full flow-return identity.
     pub(crate) key: crate::semantic_query::FlowReturnKey,
-    /// The complete whole-function result its inline compute produced.
-    pub(crate) result: crate::semantic_query::FlowReturnResult,
+    /// The member's completeness proof — the ONLY way a flow member is
+    /// representable at this boundary. The published payload is extracted
+    /// from the token; the batch refuses (a veto, never a promotion) when
+    /// the token names another key.
+    pub(crate) result: crate::project_semantic_dispatch::flow_solve::CompleteFlowResult,
     /// The point set that compute ACTUALLY materialised (§3.4) —
     /// recorded by the compute, never re-derived from the nominal key.
     pub(crate) materialized: MaterializedSet,
@@ -210,14 +213,11 @@ impl SemanticGraphStore {
         //    is duplicate-free by construction, so the bound is exact in
         //    practice and costs no set allocation on the publish path.
         //
-        // 2. DEGRADED FLOW SUCCESS. A usable value, but `ReturnOnly` by
-        //    contract — no memo entry, no fact signature, no
-        //    reverse-index metadata. Under a MIXED component this is not
-        //    free: a relation machinery root's verdict is binary and
-        //    carries no degradation channel, so one degraded flow member
-        //    costs the clean relation siblings their warmth too. That is
-        //    a cold-recompute cost, never a wrong value — the alternative
-        //    (admitting the clean siblings) is the torn component.
+        // 2. FLOW PROOF COHERENCE. A flow member is proof-typed at this
+        //    boundary (a degraded or unproven outcome is unrepresentable
+        //    here — the close never queues it), so the only check left is
+        //    that the proof names the member's own key. A mismatch is a
+        //    store-level veto: the WHOLE batch refuses.
         //
         // 3. NON-BINARY RELATION OUTCOME. `Unknown` / `BudgetExceeded`
         //    have no value-domain form and must never enter the memo
@@ -230,7 +230,7 @@ impl SemanticGraphStore {
         let inadmissible = footprint > self.memo_budget.cap()
             || flow_members
                 .iter()
-                .any(|member| member.result.degradation().is_some())
+                .any(|member| member.result.key() != &member.key)
             || relation_members.iter().any(|member| {
                 !matches!(
                     member.payload.outcome,
@@ -284,8 +284,10 @@ impl SemanticGraphStore {
             let family = FamilyKey::FlowReturn {
                 key: Box::new(member.key),
             };
+            // The published payload is extracted from the proof token —
+            // the member's value is admissible only as the proven one.
             let entry = self.stage_entry(
-                SemanticQueryValue::FlowReturn(Arc::new(member.result)),
+                SemanticQueryValue::FlowReturn(Arc::new(member.result.value().clone())),
                 member.materialized,
                 carrier,
                 self_root_canonicals,

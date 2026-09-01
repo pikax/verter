@@ -26,6 +26,7 @@ preserved by a named equivalent-or-stronger successor row).
 | --- | --- | --- | --- | --- | --- |
 | U0.MANIFEST_SUBSTRATE | 0 | 0 | 0 | 0 | 0 |
 | U2.QUERY_VALUE_DOMAIN | 22 | 0 | 0 | 22 | 0 |
+| U2.CANONICAL_TYPE_ALGEBRA | 0 | 0 | 0 | 0 | 0 |
 | U2.BINDER_IDENTITY_FACTS | 0 | 0 | 0 | 0 | 0 |
 | U8.WIRE_SURFACE_CLOSURE | 0 | 0 | 0 | 0 | 0 |
 | U12.EXPORTER | 0 | 0 | 0 | 0 | 0 |

@@ -1371,7 +1371,19 @@ impl TypeExpr {
     }
 
     /// Create a number literal type.
+    ///
+    /// TypeScript interns numeric literal types by SameValueZero, so `-0`
+    /// IS the literal type `0` (and displays as `0`). Bit identity — the
+    /// [`LiteralValue`] equality/hash rule — diverges from that exactly at
+    /// the signed zero, so the constructor normalizes `-0.0` to `0.0`:
+    /// the two spellings produce one literal value, and downstream
+    /// equality, interning, and display all match the checker.
     pub fn number_literal(n: f64) -> Self {
+        let n = if n == 0.0 && n.is_sign_negative() {
+            0.0
+        } else {
+            n
+        };
         Self::Literal(LiteralValue::Number(n))
     }
 

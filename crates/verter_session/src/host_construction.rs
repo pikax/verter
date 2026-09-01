@@ -604,6 +604,9 @@ impl VerterHost {
             relation_knobs: RelationHostKnobs::default(),
             #[cfg(any(test, feature = "test-support"))]
             augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            flow_fault_injection:
+                crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs::default(),
             #[cfg(test)]
             test_force,
             #[cfg(test)]

@@ -513,9 +513,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else if arm_ids.len() == 1 {
                     arm_ids[0]
                 } else {
+                    // Order- and scope-preserving rebuild of the heritage
+                    // carrier's projected arms: own-body-last order is
+                    // topology and display fidelity.
                     self.graph().intern_preserving_scope(
                         body,
-                        SemanticNodeData::Intersection(Arc::from(arm_ids.into_boxed_slice())),
+                        SemanticNodeData::Intersection(
+                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                                Arc::from(arm_ids.into_boxed_slice()),
+                            ),
+                        ),
                     )
                 }
             }

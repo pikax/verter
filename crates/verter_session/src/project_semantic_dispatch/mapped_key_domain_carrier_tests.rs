@@ -851,11 +851,11 @@ fn object_one_member(
 
 /// An `Intersection` over the given arms.
 fn intersection(dispatch: &ProjectSemanticDispatch<'_>, arms: &[SemanticNodeId]) -> SemanticNodeId {
-    dispatch
-        .graph()
-        .intern_node(SemanticNodeData::Intersection(Arc::from(
+    dispatch.graph().intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             arms.to_vec().into_boxed_slice(),
-        )))
+        )),
+    ))
 }
 
 /// A nullary `Function` `() => <return_type>` (no params, no type parameters).
