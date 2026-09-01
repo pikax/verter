@@ -310,6 +310,13 @@ pub(crate) struct FlowReturnFrameState {
     /// the demand could not be planned — the evaluation still runs, but
     /// no proof can mint, so the close finalizes unproven.
     pub(crate) flow_demand: Option<flow_obligation_state::FlowDemandCarrier>,
+    /// WHY the preparation installed no demand, when it refused —
+    /// consumed by the frame close to classify the unproven outcome onto
+    /// its partial class (a budget edge and a torn view fault consumers
+    /// an unplannable demand's contained class does not). `None` whenever
+    /// `flow_demand` is `Some`, and also for the deliberate
+    /// refused-member-batch close (which keeps the contained class).
+    pub(crate) plan_refusal: Option<flow_obligation_state::FlowPlanRefusal>,
 }
 
 /// The call-resolution-domain payload of one in-flight frame.
@@ -1339,6 +1346,39 @@ pub(crate) mod flow_obligation_state {
             e.field_u64(3, self.runtime_identity);
             e.field_u64(4, self.demand_ordinal);
         }
+    }
+
+    /// WHY one cold flow demand installed no proof layer — recorded by the
+    /// demand preparation when it refuses, and read by the frame close to
+    /// classify the unproven outcome onto the right partial class. The
+    /// three causes are one verdict (`ReturnOnly`, no proof, no warm
+    /// admission) but DIFFERENT statements, and the partial classes they
+    /// map onto part ways at the Vue macro projection lanes: a budget edge
+    /// is a statement about the REQUEST and must fault every lane, a torn
+    /// view is a transient-state statement and must fault them too, while
+    /// an unplannable demand is a statement about this declaration's
+    /// verifiability that value-tolerant consumers may contain.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum FlowPlanRefusal {
+        /// A typed budget refusal on the demand's planning inputs — the
+        /// obligation-set cap, or the structural slice budget surfacing
+        /// through the retained-plan read. Classified
+        /// `BUDGET_EXCEEDED`, the same class the adjacent slice-budget
+        /// axis records, so both budget edges fault the same consumers.
+        Budget,
+        /// The prepare-time store read did not hold the demand's retained
+        /// artifacts (no retained plan outcome, no bound graph, a
+        /// retained selection that does not match the bound graph) while
+        /// the evaluation still produced a value — a torn intermediate
+        /// view, non-deterministic by nature. Classified
+        /// `UNSTABLE_STATE`.
+        TornView,
+        /// The demand itself is not plannable: no derivable demand site,
+        /// an unregistered or non-enabled-root operation, an
+        /// unrepresentable demand subject. Deterministic; the evaluated
+        /// value stays usable and unverified — classified
+        /// `FLOW_RETURN_UNVERIFIED`.
+        Unplannable,
     }
 
     /// The per-demand proof carrier: the installed demand's handle, its

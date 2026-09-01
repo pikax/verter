@@ -1129,6 +1129,63 @@ fn function_return_helper_degraded_and_absent_arms() {
     });
 }
 
+/// An INLINE no-value close folds the no-surface rails into the enclosing
+/// build, exactly like the machinery root's build output and the
+/// consumer-side hold arm: the inline path produces no memo read, so
+/// without the close-site fold the universal read funnel never sees the
+/// failure and the request-partial sticky is lost to any composition that
+/// absorbs the typed failure into a usable answer.
+///
+/// The fixture composes it naturally: evaluating `subObservesBrokenInit`
+/// as the machinery root opens its frame, and its binding initializer's
+/// callee (`subLoopReturn`, a return-bearing loop — a typed no-value
+/// failure) evaluates INLINE under that open frame and closes as its own
+/// failed component root. The OUTER build degrades positionally
+/// (`FLOW_RETURN_UNINFERRED` — its member set is faithful); the observed
+/// completeness must ALSO carry the inner failure's
+/// `FLOW_RETURN_NO_SURFACE` class. Mutation: removing the inline
+/// close-site fold keeps every other assertion green and loses exactly
+/// the no-surface class.
+#[test]
+fn inline_no_value_close_folds_the_no_surface_rails() {
+    use crate::semantic_query::PartialReasonSet;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let key = flow_key(
+            dispatch,
+            "subObservesBrokenInit",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let read = dispatch
+            .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+        let observed = crate::request_context::current_cold_compute_completeness();
+        scope.discard();
+        assert!(
+            matches!(read.value, QueryResult::Value(_)),
+            "the outer's degraded success stays usable, got {:?}",
+            read.value
+        );
+        assert!(
+            observed
+                .reasons()
+                .contains(PartialReasonSet::FLOW_RETURN_NO_SURFACE),
+            "the inner inline no-value close folds its class into the enclosing build, \
+             got {:?}",
+            observed.reasons()
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an answer composed around the inline failure never warms"
+        );
+    });
+}
+
 /// A mixed relation <-> flow component's batched member publish rides the
 /// UNION carrier: the published flow member's family entry self-roots on
 /// every component file — its own file AND the files of the relation
@@ -5236,6 +5293,75 @@ fn flow_root_proof_gate_veto_marks_the_read_partial() {
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
             0,
             "the vetoed build never admits"
+        );
+    });
+}
+
+/// An obligation-budget planning refusal is a statement about the
+/// REQUEST — the same axis as the slice budget — and must take the
+/// faulting `BUDGET_EXCEEDED` class, never the contained degraded-success
+/// `FLOW_RETURN_UNVERIFIED` class it previously merged into with the
+/// unplannable-demand cause. The distinction is consumer-observable:
+/// every Vue macro projection lane CONTAINS the unverified class (its
+/// member set is complete by definition), so a budget refusal landing
+/// there let a value-deriving lane publish `type: null` for every member,
+/// compute an empty residual, read Complete, and warm-admit the codegen
+/// artifact — while the sibling slice-budget axis faulted the same lanes
+/// for the same user-visible cause.
+///
+/// The production cap is a fixed constant (1024 obligations), so the
+/// refusal is exercised through the refuse-only zero-budget fault slot:
+/// the planner returns its typed `ObligationBudget` error through the
+/// EXACT production preparation path, just under a shrunk constant.
+/// Mutation: collapsing `plan_refusal_reason_class` back to the merged
+/// `FLOW_RETURN_UNVERIFIED` fails the two class assertions while the
+/// value, suppression, and zero-candidate assertions still pass.
+#[test]
+fn obligation_budget_refusal_takes_the_faulting_request_class() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use crate::semantic_query::PartialReasonSet;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _zero = inject::Guard::arm(&host.flow_fault_injection.zero_obligation_budget);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let read = dispatch
+            .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+        assert!(
+            matches!(read.value, QueryResult::Value(_)),
+            "the usable value still flows to the caller, got {:?}",
+            read.value
+        );
+        assert!(
+            read.result_is_partial && read.cache_suppress,
+            "the budget refusal marks the read partial + suppressed"
+        );
+        assert!(
+            read.partial_reasons
+                .contains(PartialReasonSet::BUDGET_EXCEEDED),
+            "a budget edge is a statement about the request and takes the faulting class, \
+             got {:?}",
+            read.partial_reasons
+        );
+        assert!(
+            !read
+                .partial_reasons
+                .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "the refusal must not ride the contained degraded-success class every macro \
+             projection lane publishes through, got {:?}",
+            read.partial_reasons
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "the refused build never admits"
         );
     });
 }

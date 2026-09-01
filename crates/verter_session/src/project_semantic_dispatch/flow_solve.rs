@@ -1542,6 +1542,25 @@ impl FlowSolveOutcome {
 /// runtime-observed convergence matches the plan's policy. Every gap,
 /// stale basis, cancellation, budget exhaustion, panic marker, internal
 /// failure, non-convergence, or degraded value is a typed partial.
+///
+/// VISIBILITY is crate-internal by design, and deliberately wider than
+/// the sole production caller (`finalize_flow_demand`). The mint is not
+/// held by this function's reachability but by what it consumes: a
+/// production build can obtain a `SealedFlowCompletion` only through the
+/// runtime's seal over the one-shot evaluation outcome
+/// `evaluate_flow_return` mints (provenance-triangulated at the dispatch
+/// finalizer against the installed carrier and the CURRENT freshness
+/// mint), `CompleteFlowResult` construction is confined to this module,
+/// and the sealed-witness/proof constructors are compile-time private —
+/// held by `production_flow_proof_has_evaluator_origin`,
+/// `foreign_flow_value_provenance_is_rejected`, and the
+/// `complete_flow_result_constructor_is_private` /
+/// `flow_solve_sealed_witnesses_not_constructible` compile-fail
+/// fixtures. Crate-internal code that drove a synthetic runtime
+/// lifecycle to a proof would still produce evidence bearing its OWN
+/// runtime's identity, which the dispatch-side triangulation refuses on
+/// any real demand; narrowing this symbol further would only re-house
+/// the dispatch finalizer without strengthening that gate.
 #[rustfmt::skip]
 pub fn finalize_flow_solve(
     runtime: &ObligationRuntime, handle: FlowDemandHandle, plan: &FlowDemandPlan, completion: SealedFlowCompletion,

@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use super::call_resolve::union_self_roots;
 use super::dispatch_txn::flow_obligation_state::{
-    FlowDemandCarrier, FlowEvaluationProvenance, ObservedFlowConvergence,
+    FlowDemandCarrier, FlowEvaluationProvenance, FlowPlanRefusal, ObservedFlowConvergence,
 };
 use super::dispatch_txn::{
     CompletedFlowReturnMember, FlowReturnPendingOutcome, FlowReturnPendingState,
@@ -154,6 +154,34 @@ const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_NO
 /// [`FlowReturnDegradation`] a written frame reports and when the
 /// evaluator first observes it, so it belongs with the work that APPLIES
 /// write effects rather than beside it.
+/// The partial class of a verdict-less close: the demand installed no
+/// proof layer, so the evaluated value flows unproven. The class follows
+/// the recorded CAUSE, because the causes sit on opposite sides of the
+/// consumer containment axis:
+///
+/// - a BUDGET refusal (the obligation-set cap, or the slice budget read
+///   through the retained plan) is a statement about the REQUEST — the
+///   same axis as the adjacent slice-budget refusal — and takes
+///   [`PartialReasonSet::BUDGET_EXCEEDED`], which every Vue macro
+///   projection lane refuses to contain. Landing it on the contained
+///   degraded-success class let a value-deriving lane publish `type:
+///   null` for every member while reporting Complete;
+/// - a TORN prepare-time view (the retained artifacts were missing at
+///   preparation while the evaluation still produced a value) is a
+///   transient-state statement, non-deterministic by nature, and takes
+///   [`PartialReasonSet::UNSTABLE_STATE`];
+/// - an UNPLANNABLE demand — and the deliberate refused-member-batch
+///   close, which records no cause — keeps the contained
+///   [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`]: the member set is
+///   complete and the value usable, merely unverified.
+fn plan_refusal_reason_class(refusal: Option<FlowPlanRefusal>) -> PartialReasonSet {
+    match refusal {
+        Some(FlowPlanRefusal::Budget) => PartialReasonSet::BUDGET_EXCEEDED,
+        Some(FlowPlanRefusal::TornView) => PartialReasonSet::UNSTABLE_STATE,
+        Some(FlowPlanRefusal::Unplannable) | None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+    }
+}
+
 fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReasonSet {
     match degradation {
         FlowReturnDegradation::FlowGap(_) => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
@@ -222,6 +250,15 @@ pub(crate) mod flow_admission_fault_injection {
         /// demand carrier with a provenance from another store/generation
         /// — modelling a demand handle and value pair minted elsewhere.
         pub(crate) stale_demand_carrier: AtomicBool,
+
+        /// When armed, `prepare_flow_return_demand` plans under a ZERO
+        /// obligation budget, so the demand planner returns its typed
+        /// budget refusal before constructing a single obligation —
+        /// modelling a real demand whose obligation set exceeds the
+        /// request's resource policy without authoring a function large
+        /// enough to trip the production cap. Refuse-only: no demand
+        /// installs, no proof can mint, nothing can warm.
+        pub(crate) zero_obligation_budget: AtomicBool,
 
         /// When armed, `finalize_flow_demand` sees convergence evidence
         /// with ZERO observed iterations — modelling a caller-fabricated
@@ -336,6 +373,11 @@ struct EvaluatedFlowRoot {
     scc_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     materialized: crate::semantic_query::demand::MaterializedSet,
     verdict: Option<super::flow_solve::FlowSolveOutcome>,
+    /// The recorded preparation refusal when `verdict` is `None` because
+    /// no demand installed — the close classifies the unproven outcome by
+    /// this cause ([`plan_refusal_reason_class`]). `None` for the
+    /// refused-member-batch withholding, which keeps the contained class.
+    plan_refusal: Option<FlowPlanRefusal>,
 }
 
 /// The shared demand-site of one flow demand — derived ONCE by
@@ -1285,6 +1327,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scc_self_roots,
                     materialized,
                     verdict,
+                    plan_refusal,
                 } = *root;
                 // The no-value verdict cannot arise on the
                 // evaluated-value close arm (the evaluation failed →
@@ -1336,13 +1379,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
                         };
                     }
-                    // The demand could not be planned at all (a typed
-                    // planning refusal — an over-budget obligation set or
-                    // an unrepresentable demand): unproven, ReturnOnly.
+                    // The demand could not be planned at all, or a
+                    // refused member batch withheld the root's proof:
+                    // unproven, ReturnOnly. The partial class follows the
+                    // recorded CAUSE — a budget refusal takes the faulting
+                    // request class its sibling slice-budget axis takes, a
+                    // torn prepare-time view takes the unstable-state
+                    // class, and only a genuinely unplannable demand (or
+                    // the member-batch withholding, which records no
+                    // cause) keeps the contained degraded-success class.
                     None => {
                         output.cache_suppress = true;
                         output.result_is_partial = true;
-                        output.partial_reasons = PartialReasonSet::FLOW_RETURN_UNVERIFIED;
+                        output.partial_reasons = plan_refusal_reason_class(plan_refusal);
                     }
                     // Handled above.
                     Some(FlowSolveOutcome::NoValue(_)) => unreachable!(),
@@ -1408,7 +1457,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             FlowFramePop::Provisional(step) => step,
             FlowFramePop::RootClose(close) => match close {
                 FlowRootClose::EvaluatedValue(root) => FlowReturnStep::Complete(root.result),
-                FlowRootClose::NoValue(failure) => FlowReturnStep::NoValue(failure),
+                FlowRootClose::NoValue(failure) => {
+                    // The inline path produces NO memo read, so the
+                    // universal read funnel never sees this failure: fold
+                    // its rails into the ENCLOSING build here — exactly as
+                    // the machinery root's build output does and the
+                    // consumer-side hold arm does — so the request-partial
+                    // sticky survives even a lenient composition that
+                    // absorbs the typed failure into a usable answer. The
+                    // typed failure itself still rides the returned step.
+                    self.fold_cache_read_rails(true, true, NO_VALUE_REASON_CLASS);
+                    FlowReturnStep::NoValue(failure)
+                }
             },
         }
     }
@@ -1722,6 +1782,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn prepare_flow_return_demand(&self, key: &FlowReturnKey, frame_idx: usize) {
         use super::flow_solve::{build_flow_demand_plan, FlowDemandRequest, FlowResourcePolicy};
         let Ok(site) = self.flow_slice_demand_site(key) else {
+            self.record_flow_plan_refusal(frame_idx, FlowPlanRefusal::Unplannable);
             return;
         };
         let flow_slice = self.ctx.project_type_store().flow_slice();
@@ -1736,12 +1797,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(planned)) => {
                 planned
             }
-            // An over-budget plan or a torn view installs no demand: the
-            // evaluation's own hash-node lookup reaches the same outcome
-            // and fails closed with the typed failure.
-            _ => return,
+            // The slice-budget refusal installs no demand: the
+            // evaluation's own hash-node lookup normally reaches the same
+            // typed failure, and if a racing recompute hands the
+            // evaluation a planned slice instead, the close still
+            // classifies the unproven value as the budget edge it is.
+            Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::BudgetExceeded(
+                _,
+            )) => {
+                self.record_flow_plan_refusal(frame_idx, FlowPlanRefusal::Budget);
+                return;
+            }
+            // No retained outcome at all: a torn prepare-time view — the
+            // evaluation may still find one, so the close classifies the
+            // unproven value as unstable state, never as a verified-shape
+            // degradation.
+            None => {
+                self.record_flow_plan_refusal(frame_idx, FlowPlanRefusal::TornView);
+                return;
+            }
         };
         let Some(bound) = flow_slice.bound_graph_for(&site.slice_key_function) else {
+            self.record_flow_plan_refusal(frame_idx, FlowPlanRefusal::TornView);
             return;
         };
         // The demand-unique axis of this demand's provenance: the ledger
@@ -1775,17 +1852,51 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             provenance
         };
+        let resources = FlowResourcePolicy::default();
+        #[cfg(any(test, feature = "test-support"))]
+        let resources = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .zero_obligation_budget
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            FlowResourcePolicy {
+                max_obligations: 0,
+                ..resources
+            }
+        } else {
+            resources
+        };
         let request = FlowDemandRequest {
             query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
             // The in-flight observation identity of this demand: derived
             // from the SAME provenance mint the carrier and the evaluation
             // outcome bear — never a cache-candidate axis.
             input_basis: verter_identity::identity::InputBasisId::from_canonical(&provenance),
-            resources: FlowResourcePolicy::default(),
+            resources,
             additional_requirements: Arc::from([]),
         };
-        let Ok(plan) = build_flow_demand_plan(request, &bound, &planned, &site.inventory) else {
-            return;
+        let plan = match build_flow_demand_plan(request, &bound, &planned, &site.inventory) {
+            Ok(plan) => plan,
+            Err(error) => {
+                use super::flow_solve::FlowDemandPlanError as E;
+                let refusal = match error {
+                    // Both budget axes are statements about the REQUEST.
+                    E::SliceBudget(_) | E::ObligationBudget { .. } => FlowPlanRefusal::Budget,
+                    // Retained artifacts that do not match the demand's
+                    // bound graph: a torn intermediate view.
+                    E::BasisKeyMismatch
+                    | E::SelectionOutOfRange
+                    | E::SelectionDemandMismatch
+                    | E::SelectionProvenanceMismatch => FlowPlanRefusal::TornView,
+                    E::UnregisteredOperation | E::NotAnEnabledRoot | E::UnrepresentableDemand => {
+                        FlowPlanRefusal::Unplannable
+                    }
+                };
+                self.record_flow_plan_refusal(frame_idx, refusal);
+                return;
+            }
         };
         flow_slice.note_demand_planned();
         let plan = Arc::new(plan);
@@ -1806,6 +1917,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 plan,
                 provenance,
             });
+        }
+    }
+
+    /// Record WHY the demand preparation installed no proof layer on the
+    /// open frame, so the frame close classifies the unproven outcome onto
+    /// the cause's partial class rather than the one merged
+    /// degraded-success class ([`plan_refusal_reason_class`]).
+    fn record_flow_plan_refusal(&self, frame_idx: usize, refusal: FlowPlanRefusal) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        if let Some(state) = txn
+            .reentry_mut()
+            .frame_mut_for_update(frame_idx)
+            .and_then(super::dispatch_txn::ObligationFrame::flow_return_mut)
+        {
+            state.plan_refusal = Some(refusal);
         }
     }
 
@@ -2208,6 +2334,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // open. It rides the deferral so the component close finalizes the
         // member against EXACTLY its own demand.
         let flow_demand = flow_state.flow_demand;
+        // The recorded preparation refusal, when the demand could not be
+        // planned — the close classifies a verdict-less unproven outcome
+        // by this cause.
+        let plan_refusal = flow_state.plan_refusal;
         // Tagged holds recorded against this frame by indexed call
         // evaluation while it was active ride into the close with the
         // evaluator's own holds — a resolved-call dependency joins the
@@ -2588,6 +2718,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scc_self_roots,
                             materialized,
                             verdict,
+                            plan_refusal,
                         },
                     )))
                 } else {
@@ -2629,6 +2760,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                         None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
                                     }
                                 }
+                                // Verdict-less: classify by the recorded
+                                // preparation refusal — a budget edge and
+                                // a torn view fault consumers the merged
+                                // degraded-success class is contained by.
+                                None => plan_refusal_reason_class(plan_refusal),
                                 _ => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
                             };
                             self.fold_cache_read_rails(true, true, reasons);
@@ -6552,60 +6688,38 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// or two structural surfaces with the same required member carrying
     /// conflicting concrete tags. Different object key sets can overlap and
     /// therefore are never declared disjoint here.
+    ///
+    /// The tag-level half DELEGATES to the crate's sole proven-disjoint
+    /// authority ([`super::canonical_algebra::tag_level_disjoint`] — TS
+    /// literal identity with SameValueZero numbers, the `undefined`/`void`
+    /// widening pair, conservative `false` for every undecided shape), so
+    /// this consumer cannot drift from the canonical intersection collapse
+    /// and the relation engine. This site adds ONLY the nominal-identity
+    /// axis the authority does not model: a `symbol` operand has no
+    /// tag-level identity to compare, so a narrow over one is undecidable
+    /// here rather than provably anything.
     fn nodes_provably_disjoint(
         &self,
         left: SemanticNodeId,
         right: SemanticNodeId,
     ) -> NodeDisjointness {
-        fn tag_disjoint(left: &SemanticNodeData, right: &SemanticNodeData) -> NodeDisjointness {
-            fn literal_base(value: &crate::semantic_query::LiteralValue) -> PrimitiveKind {
-                match value {
-                    crate::semantic_query::LiteralValue::String(_) => PrimitiveKind::String,
-                    crate::semantic_query::LiteralValue::Number(_) => PrimitiveKind::Number,
-                    crate::semantic_query::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
-                    crate::semantic_query::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
-                }
-            }
-            fn concrete(kind: PrimitiveKind) -> bool {
-                !matches!(
-                    kind,
-                    PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Never
+        let graph = self.dispatch.graph();
+        let tag_relation = |a: SemanticNodeId, b: SemanticNodeId| -> NodeDisjointness {
+            let is_symbol = |id: SemanticNodeId| {
+                matches!(
+                    graph.node_data(id).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol))
                 )
-            }
-            let nominal_identity_missing = matches!(
-                (left, right),
-                (SemanticNodeData::Primitive(PrimitiveKind::Symbol), _)
-                    | (_, SemanticNodeData::Primitive(PrimitiveKind::Symbol))
-            );
-            let provably_disjoint = match (left, right) {
-                (SemanticNodeData::Primitive(a), SemanticNodeData::Primitive(b)) => {
-                    let widening_pair = matches!(
-                        (*a, *b),
-                        (PrimitiveKind::Undefined, PrimitiveKind::Void)
-                            | (PrimitiveKind::Void, PrimitiveKind::Undefined)
-                    );
-                    concrete(*a) && concrete(*b) && a != b && !widening_pair
-                }
-                (SemanticNodeData::Literal(a), SemanticNodeData::Literal(b)) => a != b,
-                (SemanticNodeData::Literal(literal), SemanticNodeData::Primitive(primitive))
-                | (SemanticNodeData::Primitive(primitive), SemanticNodeData::Literal(literal)) => {
-                    concrete(*primitive) && literal_base(literal) != *primitive
-                }
-                _ => false,
             };
             NodeDisjointness {
-                provably_disjoint,
-                nominal_identity_missing,
+                provably_disjoint: super::canonical_algebra::tag_level_disjoint(graph, a, b),
+                nominal_identity_missing: is_symbol(a) || is_symbol(b),
             }
-        }
+        };
 
-        let graph = self.dispatch.graph();
-        if let (Some(left_data), Some(right_data)) = (graph.node_data(left), graph.node_data(right))
-        {
-            let relation = tag_disjoint(&left_data, &right_data);
-            if relation.provably_disjoint || relation.nominal_identity_missing {
-                return relation;
-            }
+        let relation = tag_relation(left, right);
+        if relation.provably_disjoint || relation.nominal_identity_missing {
+            return relation;
         }
         let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
         let (Some(left_view), Some(right_view)) = (
@@ -6630,13 +6744,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if right_member.optional {
                 continue;
             }
-            let member_relation = match (
-                graph.node_data(left_member.value),
-                graph.node_data(right_member.value),
-            ) {
-                (Some(left_data), Some(right_data)) => tag_disjoint(&left_data, &right_data),
-                _ => NodeDisjointness::default(),
-            };
+            let member_relation = tag_relation(left_member.value, right_member.value);
             relation.nominal_identity_missing |= member_relation.nominal_identity_missing;
             if member_relation.provably_disjoint {
                 relation.provably_disjoint = true;
@@ -10885,5 +10993,43 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.call_return_of_callee_node(callee_node, site)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_refusal_class_tests {
+    use super::*;
+
+    /// The three preparation-refusal causes map onto three
+    /// consumer-distinct partial classes, and the split is load-bearing:
+    /// the two REQUEST/STATE causes must fault the Vue macro projection
+    /// lanes (which refuse to contain `BUDGET_EXCEEDED` and
+    /// `UNSTABLE_STATE`), while only the unplannable-demand cause — and
+    /// the cause-less member-batch withholding — may keep the contained
+    /// degraded-success class. The torn-view arm is a RACE (the
+    /// prepare-time read missing what the evaluation then finds) with no
+    /// deterministic public-boundary fixture, so its routing is pinned
+    /// here; the budget arm additionally has the public-boundary proof
+    /// (`obligation_budget_refusal_takes_the_faulting_request_class`).
+    /// Mutation: merging either faulting arm back onto
+    /// `FLOW_RETURN_UNVERIFIED` fails its assertion.
+    #[test]
+    fn plan_refusal_classes_split_by_cause() {
+        assert_eq!(
+            plan_refusal_reason_class(Some(FlowPlanRefusal::Budget)),
+            PartialReasonSet::BUDGET_EXCEEDED,
+        );
+        assert_eq!(
+            plan_refusal_reason_class(Some(FlowPlanRefusal::TornView)),
+            PartialReasonSet::UNSTABLE_STATE,
+        );
+        assert_eq!(
+            plan_refusal_reason_class(Some(FlowPlanRefusal::Unplannable)),
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        );
+        assert_eq!(
+            plan_refusal_reason_class(None),
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        );
     }
 }

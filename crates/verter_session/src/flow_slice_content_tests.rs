@@ -381,6 +381,89 @@ fn selected_loop_transfers_are_unsupported_but_inert_loops_stay_transparent() {
     );
 }
 
+/// Whether any statement of `region` — recursing through the lowered
+/// containers the fixtures below nest loops under — is the typed loop
+/// refusal.
+fn region_contains_unsupported_loop(region: &SliceRegion) -> bool {
+    region.statements.iter().any(|statement| match statement {
+        SliceStatement::Unsupported(SliceUnsupported::Loop) => true,
+        SliceStatement::Labeled { body, .. } => region_contains_unsupported_loop(body),
+        SliceStatement::Block(body) => region_contains_unsupported_loop(body),
+        SliceStatement::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            region_contains_unsupported_loop(consequent)
+                || alternate
+                    .as_deref()
+                    .is_some_and(region_contains_unsupported_loop)
+        }
+        _ => false,
+    })
+}
+
+/// A `break <label>` targeting an ENCLOSING lowered construct is a control
+/// transfer the transparent loop summary cannot carry: the loop's body
+/// vanishes with the lowering, the labeled exit edge vanishes with it, the
+/// enclosing `Labeled`'s `may_break` never records the exit — so
+/// contributors reachable only through the break are dropped and code the
+/// break skips is treated reachable. Measured against the checker,
+/// `outer: { for (;;) { break outer } return 0 } return x` on
+/// `x: string | null` is `string | 0 | null` (transparency published
+/// `number`), and the guarded twin is `0 | null`. Such a loop takes the
+/// typed refusal, exactly like a return-bearing one.
+///
+/// The escaping fixtures are deliberately OUTSIDE the selected-transfer
+/// nets: an unconditional break, and one whose path condition reads a slot
+/// with no downstream-selected read inside the loop — neither a guard, a
+/// call, a write, nor an invoked closure catches them.
+///
+/// The refusal is about the TARGET, not the label: a label chain DIRECTLY
+/// wrapping the loop names the loop's own exit — its continuation IS the
+/// loop's fall-through point — so those shapes keep the transparent path
+/// (measured: every direct-wrap control below stays `string | null`).
+#[test]
+fn loop_break_to_enclosing_label_refuses_while_direct_wrap_labels_stay_transparent() {
+    for source in [
+        // Unconditional break out of a labeled BLOCK: skips `return 0`.
+        "export {};\nfunction f(x: string | null) { outer: { for (;;) { break outer } return 0 } return x }",
+        // The path condition reads `x`, but no read inside the loop
+        // reaches a downstream-selected slot: the guard net stays silent.
+        "export {};\nfunction f(x: string | null) { outer: { if (x === null) { for (;;) { break outer } } return 0 } return x }",
+    ] {
+        let node = content_for(source, "f");
+        assert!(
+            region_contains_unsupported_loop(&node.body),
+            "a break to an enclosing lowered target must refuse the loop: {source}"
+        );
+    }
+
+    // Positive controls: a label chain directly wrapping the loop is the
+    // loop's own exit, and a break/continue from a NESTED loop to the
+    // classified outer loop's direct label stays inside the transparent
+    // summary's continuation.
+    for source in [
+        "export {};\nfunction f(x: string | null) { outer: for (;;) { break outer } return x }",
+        "export {};\nfunction f(x: string | null) { a: b: for (;;) { break a } return x }",
+        "export {};\nfunction f(x: string | null) { outer: for (;;) { for (;;) { break outer } } return x }",
+        "export {};\nfunction f(x: string | null) { outer: for (;;) { for (;;) { continue outer } } return x }",
+    ] {
+        let node = content_for(source, "f");
+        assert!(
+            !region_contains_unsupported_loop(&node.body),
+            "a direct-wrap label is the loop's own exit and must stay transparent: {source}"
+        );
+        assert!(
+            node.body.statements.iter().any(|statement| matches!(
+                statement,
+                SliceStatement::Labeled { .. } | SliceStatement::TransparentLoop
+            )),
+            "the transparent lowering must survive: {source}"
+        );
+    }
+}
+
 /// @ai-generated - unknown logical operands stay explicit so the evaluator
 /// can derive the positive and negative edges asymmetrically.
 #[test]

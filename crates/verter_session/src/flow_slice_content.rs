@@ -1666,6 +1666,7 @@ pub(crate) fn build_flow_slice_content(
         active_guard_bindings: Vec::new(),
         active_guard_names: Vec::new(),
         break_targets: Vec::new(),
+        loop_direct_labels: Vec::new(),
         break_target_followed_by_return: Vec::new(),
         current_statement_followed_by_return: false,
     };
@@ -2260,6 +2261,131 @@ fn declares_var(statement: &Statement<'_>) -> bool {
         .is_empty()
 }
 
+/// Whether a labeled statement's body chain terminates at a loop it
+/// DIRECTLY wraps: a chain of labeled statements whose terminal body is
+/// the loop itself, with nothing in between. A `break` naming such a
+/// label is the loop's own exit — the label's continuation IS the loop's
+/// fall-through point — and a `continue` naming it is the loop's own
+/// iteration edge, so neither transfers control past lowered content.
+fn label_directly_wraps_loop(body: &Statement<'_>) -> bool {
+    let mut body = body;
+    loop {
+        match body {
+            Statement::LabeledStatement(labeled) => body = &labeled.body,
+            Statement::DoWhileStatement(_)
+            | Statement::ForInStatement(_)
+            | Statement::ForOfStatement(_)
+            | Statement::ForStatement(_)
+            | Statement::WhileStatement(_) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Whether the loop statement's tree contains a labeled `break` /
+/// `continue` whose target resolves OUTSIDE the loop: the label is
+/// neither defined within the walked tree nor one of `direct_labels`
+/// (the labels directly wrapping the walked loop — see
+/// [`label_directly_wraps_loop`]). Such a jump exits THROUGH the
+/// transparent summary into an enclosing lowered construct: the loop's
+/// body vanishes with the lowering, so the labeled exit edge would
+/// vanish with it — the enclosing `Labeled`'s `may_break` never records
+/// the exit, contributors reachable only through the break are dropped,
+/// and code the break skips is treated reachable (measured:
+/// `outer: { for (;;) { break outer } return 0 } return x` on
+/// `x: string | null` is `string | 0 | null`; transparency published
+/// `number`). The loop takes the typed refusal instead, exactly like a
+/// return-bearing one — this deliberately does not carry the edge.
+///
+/// Nested function/class frames are never entered, and need not be: a
+/// label cannot cross a function boundary, so every labeled jump this
+/// walk can see belongs to the walked frame, and a jump inside a nested
+/// frame can only target a label inside that frame. Unlabeled jumps
+/// always bind within the loop (the loop itself, or a nested
+/// loop/switch) and never escape it.
+fn loop_transfers_to_enclosing_label(
+    loop_statement: &Statement<'_>,
+    direct_labels: &[Arc<str>],
+) -> bool {
+    fn target_escapes(
+        label: Option<&oxc_ast::ast::LabelIdentifier<'_>>,
+        locals: &[&str],
+        direct: &[Arc<str>],
+    ) -> bool {
+        let Some(label) = label else {
+            return false;
+        };
+        let name = label.name.as_str();
+        !locals.contains(&name) && !direct.iter().any(|direct| &**direct == name)
+    }
+    fn walk_statement<'a>(
+        statement: &'a Statement<'a>,
+        locals: &mut Vec<&'a str>,
+        direct: &[Arc<str>],
+    ) -> bool {
+        match statement {
+            Statement::BreakStatement(break_stmt) => {
+                target_escapes(break_stmt.label.as_ref(), locals, direct)
+            }
+            Statement::ContinueStatement(continue_stmt) => {
+                target_escapes(continue_stmt.label.as_ref(), locals, direct)
+            }
+            Statement::LabeledStatement(labeled) => {
+                locals.push(labeled.label.name.as_str());
+                let escapes = walk_statement(&labeled.body, locals, direct);
+                locals.pop();
+                escapes
+            }
+            Statement::BlockStatement(block) => block
+                .body
+                .iter()
+                .any(|statement| walk_statement(statement, locals, direct)),
+            Statement::IfStatement(if_stmt) => {
+                walk_statement(&if_stmt.consequent, locals, direct)
+                    || if_stmt
+                        .alternate
+                        .as_ref()
+                        .is_some_and(|alternate| walk_statement(alternate, locals, direct))
+            }
+            Statement::DoWhileStatement(do_while) => walk_statement(&do_while.body, locals, direct),
+            Statement::WhileStatement(while_stmt) => {
+                walk_statement(&while_stmt.body, locals, direct)
+            }
+            Statement::ForStatement(for_stmt) => walk_statement(&for_stmt.body, locals, direct),
+            Statement::ForInStatement(for_in) => walk_statement(&for_in.body, locals, direct),
+            Statement::ForOfStatement(for_of) => walk_statement(&for_of.body, locals, direct),
+            Statement::SwitchStatement(switch) => switch.cases.iter().any(|case| {
+                case.consequent
+                    .iter()
+                    .any(|statement| walk_statement(statement, locals, direct))
+            }),
+            Statement::TryStatement(try_stmt) => {
+                try_stmt
+                    .block
+                    .body
+                    .iter()
+                    .any(|statement| walk_statement(statement, locals, direct))
+                    || try_stmt.handler.as_ref().is_some_and(|handler| {
+                        handler
+                            .body
+                            .body
+                            .iter()
+                            .any(|statement| walk_statement(statement, locals, direct))
+                    })
+                    || try_stmt.finalizer.as_ref().is_some_and(|finalizer| {
+                        finalizer
+                            .body
+                            .iter()
+                            .any(|statement| walk_statement(statement, locals, direct))
+                    })
+            }
+            Statement::WithStatement(with_stmt) => walk_statement(&with_stmt.body, locals, direct),
+            _ => false,
+        }
+    }
+    walk_statement(loop_statement, &mut Vec::new(), direct_labels)
+}
+
 /// Whether entering this statement guarantees that the current function
 /// reaches an authored return before normal completion. This is deliberately
 /// stricter than the control inventory's `has_return`: a conditional return
@@ -2772,6 +2898,17 @@ struct Lowerer<'a> {
     /// accept unlabeled breaks), a labeled one the innermost matching
     /// name. Loop bodies never lower, so a loop is never an entry.
     break_targets: Vec<Option<Arc<str>>>,
+    /// The labels whose statements DIRECTLY wrap the loop currently being
+    /// classified for transparency: a chain of labeled statements whose
+    /// terminal body is the loop itself, with nothing in between. A
+    /// `break`/`continue` naming one of these is the loop's OWN exit or
+    /// iteration edge — the label's continuation IS the loop's
+    /// fall-through point — so it never transfers control past a lowered
+    /// construct and does not defeat transparency. Distinct from
+    /// [`Self::break_targets`], which also carries labels separated from
+    /// the loop by an intervening statement (a block with statements after
+    /// the loop): breaking to THOSE skips lowered content.
+    loop_direct_labels: Vec<Arc<str>>,
     /// For each break target, whether the target statement has a guaranteed
     /// current-function return later in its enclosing statement list. A
     /// pending break contributes implicit `undefined` only when its
@@ -4138,13 +4275,18 @@ impl Lowerer<'_> {
                 | Statement::ForStatement(_)
                 | Statement::WhileStatement(_) => {
                     // A return-free loop is fall-through TRANSPARENT only
-                    // while it binds nothing that outlives it and carries no
+                    // while it binds nothing that outlives it, transfers
+                    // no control past a lowered construct, and carries no
                     // unmodelled transfer for a downstream-selected slot. A
-                    // `var` declaration escapes the loop; a selected guard,
-                    // call/assertion, or write depends on iteration flow.
-                    // Either shape takes the existing typed loop refusal.
+                    // `var` declaration escapes the loop; a `break`/
+                    // `continue` naming an enclosing label exits an edge
+                    // the vanished body can no longer record; a selected
+                    // guard, call/assertion, or write depends on iteration
+                    // flow. Every shape takes the existing typed loop
+                    // refusal.
                     if self.control_has_return(statement)
                         || declares_var(statement)
+                        || loop_transfers_to_enclosing_label(statement, &self.loop_direct_labels)
                         || self.loop_has_selected_transfer(statement)
                     {
                         out.push(SliceStatement::Unsupported(SliceUnsupported::Loop));
@@ -4163,7 +4305,18 @@ impl Lowerer<'_> {
                     self.break_targets.push(Some(Arc::clone(&label)));
                     self.break_target_followed_by_return
                         .push(self.current_statement_followed_by_return);
+                    // A label chain directly wrapping a loop names the
+                    // loop's own exit/iteration edge: record it so the
+                    // loop's transparency classification treats a jump to
+                    // it as local rather than an escaping transfer.
+                    let direct_wrap = label_directly_wraps_loop(&labeled.body);
+                    if direct_wrap {
+                        self.loop_direct_labels.push(Arc::clone(&label));
+                    }
                     let child = self.lower_arm(&labeled.body);
+                    if direct_wrap {
+                        self.loop_direct_labels.pop();
+                    }
                     self.break_targets.pop();
                     self.break_target_followed_by_return.pop();
                     let mut absorbed = false;
@@ -4643,10 +4796,17 @@ impl Lowerer<'_> {
     /// WITHOUT degrading the enclosing statement.
     fn classify_guard(&mut self, test: &Expression<'_>) -> GuardDisposition {
         // The whole test rides the same reference-transparent wrappers a
-        // leaf reference does: `(typeof x === "string")!` and its
-        // `satisfies` twin still establish the inner fact, so the entry
-        // must peel them before dispatching or the composing forms behind
-        // one collapse to a proved absence of narrowing.
+        // leaf reference does — parentheses and the postfix non-null
+        // assertion ONLY: `(typeof x === "string")!` still establishes
+        // the inner fact, so the entry must peel them before dispatching
+        // or the composing forms behind one collapse to a proved absence
+        // of narrowing. `satisfies` and the `as` / angle-bracket type
+        // assertion are deliberately NOT peeled: neither is a matching
+        // reference for narrowing (measured, `typeof (x satisfies string
+        // | number) === "string"` narrows nothing), and peeling one would
+        // narrow where the checker does not — a SUBSET of the checker's
+        // type, which drops a real contributor. See
+        // [`unwrap_reference_transparent`].
         match unwrap_reference_transparent(test) {
             Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
                 self.classify_guard(&unary.argument).negated()
@@ -4763,11 +4923,15 @@ impl Lowerer<'_> {
     /// the arms, so the fact lands on the reference the expression NAMES.
     ///
     /// The reference is read through the checker's transparent wrappers
-    /// only — parentheses, the postfix non-null assertion and
-    /// `satisfies`. An `as` / angle-bracket type assertion is NOT one of
-    /// them: it is not a matching reference for narrowing, so a test
+    /// only — parentheses and the postfix non-null assertion.
+    /// `satisfies` and the `as` / angle-bracket type assertion are NOT
+    /// among them: neither is a matching reference for narrowing
+    /// (measured — `if ((x satisfies string | undefined))` leaves
+    /// `undefined` in the result, exactly like its `as` twin), so a test
     /// behind one establishes nothing and is proved inert rather than
-    /// degraded.
+    /// degraded. Peeling either would narrow where the checker does not —
+    /// a SUBSET of the checker's type, worse than the superset a missing
+    /// narrow produces. See [`unwrap_reference_transparent`].
     fn classify_truthiness_guard(&mut self, expression: &Expression<'_>) -> GuardDisposition {
         let reference = unwrap_reference_transparent(expression);
         match self.narrow_subject_of(reference) {
@@ -6601,6 +6765,7 @@ impl Lowerer<'_> {
             active_guard_bindings: Vec::new(),
             active_guard_names: Vec::new(),
             break_targets: Vec::new(),
+            loop_direct_labels: Vec::new(),
             break_target_followed_by_return: Vec::new(),
             current_statement_followed_by_return: false,
         };
