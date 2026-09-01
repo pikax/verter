@@ -27,4 +27,4 @@ help: you might have meant to use an associated function to build this type
 18 -     CompositeList { core }
 18 +     CompositeList::preserving_rebuild(_)
    |
-   = and 2 other candidates
+   = and 1 other candidate
