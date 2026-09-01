@@ -17,9 +17,11 @@ import type {
   NativeOriginGraph,
   NativePublicationReason,
   NativeResolutionProvenance,
+  NativeResultCompleteness,
   NativeRootBranch,
   NativeRootReachability,
   NativeRootTargetRef,
+  NativeSurfacePartialReason,
   NativeTerminalTypeDisplay,
   NativeTypePublication,
   NativeTypePublicationFailure,
@@ -179,6 +181,28 @@ const EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT = 14;
 
 const ACCEPTED_SURFACE_COMPLETENESS_EXACT = 1;
 const ACCEPTED_SURFACE_COMPLETENESS_LOWER_BOUND = 2;
+
+const RESULT_COMPLETENESS_COMPLETE = 1;
+const RESULT_COMPLETENESS_PARTIAL = 2;
+const SURFACE_PARTIAL_REASONS: readonly NativeSurfacePartialReason[] = [
+  "budgetExceeded",
+  "cancelled",
+  "supersededGeneration",
+  "unstableState",
+  "samePathRecursion",
+  "walkerFatal",
+  "propagated",
+  "deferredEvaluationLimit",
+  "structuralFactDemandLimit",
+  "semanticQueryFault",
+  "missingSemanticNodeData",
+  "projectionWorkLimit",
+  "connectedQueryDepthLimit",
+  "missingDependency",
+  "flowReturnUninferred",
+  "flowReturnUnverified",
+  "flowReturnNoSurface",
+];
 
 const ACCEPTED_PROP_KIND_DECLARED_PROP = 1;
 const ACCEPTED_PROP_KIND_ATTR = 2;
@@ -670,6 +694,9 @@ function decodeComponentMetaBody(
     ),
     acceptedSurfaceCompleteness: decodeAcceptedSurfaceCompleteness(
       Number(body.acceptedSurfaceCompleteness ?? 0),
+    ),
+    resultCompleteness: decodeResultCompleteness(
+      requireProtoMessage(body.resultCompleteness as ProtoRecord | undefined, "result completeness"),
     ),
     ...maybe("rootInfo", rootInfo),
     rootReachability,
@@ -2267,6 +2294,32 @@ function decodeExpansionStopReason(
     default:
       throw graphError(`component-meta graph payload has unknown expansion stop reason ${value}`);
   }
+}
+
+/**
+ * The published surface's completeness. Fails closed on an unset or unknown
+ * kind: a payload that cannot state whether its surface is whole must never
+ * be read as whole.
+ */
+function decodeResultCompleteness(message: ProtoRecord): NativeResultCompleteness {
+  const kind = Number(message.kind ?? 0);
+  if (kind === RESULT_COMPLETENESS_COMPLETE) {
+    return { kind: "complete" };
+  }
+  if (kind !== RESULT_COMPLETENESS_PARTIAL) {
+    throw graphError(`component-meta payload has unknown result completeness ${kind}`);
+  }
+  const reasons = ((message.partialReasons as number[] | undefined) ?? []).map((value) => {
+    const reason = SURFACE_PARTIAL_REASONS[Number(value) - 1];
+    if (!reason) {
+      throw graphError(`component-meta payload has unknown surface partial reason ${value}`);
+    }
+    return reason;
+  });
+  if (reasons.length === 0) {
+    throw graphError("component-meta partial surface carries no reason");
+  }
+  return { kind: "partial", reasons };
 }
 
 function decodeAcceptedSurfaceCompleteness(value: number): "exact" | "lowerBound" {

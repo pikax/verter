@@ -402,6 +402,7 @@ impl VerterHost {
                             canonical.as_str(),
                             cached.analysis.clone(),
                             seed,
+                            cached.resolution_template.completeness,
                         )
                     });
             return output.map(Some);
@@ -448,6 +449,7 @@ impl VerterHost {
                         canonical.as_str(),
                         meta,
                         seed,
+                        resolved.completeness,
                     )
                 },
             );

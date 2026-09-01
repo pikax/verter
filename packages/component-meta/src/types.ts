@@ -6,6 +6,7 @@ import type { TypeDescriptor } from "@verter/type-ir";
 import type {
   NativeComponentContractAvailability,
   NativeOriginGraph,
+  NativeResultCompleteness,
 } from "./native-component-meta.js";
 
 /** Structured metadata extracted from a Vue Single File Component. */
@@ -18,6 +19,14 @@ export interface ComponentMeta {
   optionsApi: boolean;
   /** Mandatory structured Vue/Svelte public-contract availability. */
   componentPublicContract: NativeComponentContractAvailability;
+  /**
+   * Whether this metadata is the component's FULL surface, or a partial one
+   * whose resolution degraded. An empty-because-degraded result is otherwise
+   * indistinguishable from an empty-because-nothing-is-declared result. A
+   * `partial` result never carries `componentPublicContract.exactness ===
+   * "exact"`.
+   */
+  resultCompleteness: NativeResultCompleteness;
   /** Props declared via `defineProps` or Options API `props`. */
   props: PropMeta[];
   /** Events declared via `defineEmits` or Options API `emits`. */

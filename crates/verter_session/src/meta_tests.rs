@@ -28150,6 +28150,7 @@ defineEmits<{ change: [value: number]; close: [] }>()
         "/App.vue",
         analysis.clone(),
         None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect("the untampered analysis must materialize");
     let (_a, _r, ok_types) = ok.into_parts();
@@ -28179,7 +28180,11 @@ defineEmits<{ change: [value: number]; close: [] }>()
     );
 
     let err = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", tampered, None,
+        host,
+        "/App.vue",
+        tampered,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect_err(
         "a present-but-unraisable payload source must FAIL the output with a typed \
@@ -28259,7 +28264,11 @@ defineEmits<{ (event: 'change', value: number): boolean }>()
         ));
 
     let err = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect_err("a failed callable return must fail output materialization");
     assert_eq!(
@@ -29258,7 +29267,11 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
     };
 
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect("None sources never fail materialization");
     let (analysis, _resolution, types) = output.into_parts();
@@ -29341,7 +29354,11 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
             declared_in_macro_type_arg: true,
         });
     let err = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect_err("an unraisable present source must FAIL the output");
     assert_eq!(
@@ -29398,7 +29415,11 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
             ],
         };
     let err = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect_err("an unraisable fallthrough source must FAIL the output");
     assert_eq!(
@@ -29450,6 +29471,7 @@ fn component_meta_output_recovers_after_missing_dependency_is_available() {
         "/App.vue",
         analysis.clone(),
         None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect_err("the dependency file does not exist yet — the output must fail typed");
     assert_eq!(err.lane, crate::meta_resolve::ComponentMetaOutputLane::Prop);
@@ -29459,7 +29481,11 @@ fn component_meta_output_recovers_after_missing_dependency_is_available() {
         .unwrap();
 
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect("the SAME source succeeds once the dependency is available");
     let lanes = output.into_parts().2.into_lanes();
@@ -29511,7 +29537,13 @@ fn build_output_with_prop_source(
             tags: Vec::new(),
             declared_in_macro_type_arg: false,
         });
-    crate::meta_resolve::projectors::build_component_meta_output(host, "/App.vue", analysis, None)
+    crate::meta_resolve::projectors::build_component_meta_output(
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
+    )
 }
 
 /// FIX-3 regression: a failed INTERIOR required locator inside a
@@ -30390,6 +30422,7 @@ defineProps<{ own: SharedAlias }>()
         "/Parent.vue",
         analysis,
         None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect("the nested composite inherited source materializes under its producing scope");
     let lanes = output.into_parts().2.into_lanes();
@@ -30505,7 +30538,11 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
     );
 
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect("closed sources materialize");
     let calls =
@@ -30596,7 +30633,11 @@ fn output_memo_hash_work_is_one_traversal_per_lane_slot() {
     }
 
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect("the repeated composite source materializes");
     let calls =
@@ -30738,9 +30779,14 @@ const cond = true
             },
         ],
     };
-    let output =
-        crate::meta_resolve::projectors::build_component_meta_output(host, "/App.vue", probe, None)
-            .expect("the closed inherited source materializes");
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
+        host,
+        "/App.vue",
+        probe,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
+    )
+    .expect("the closed inherited source materializes");
     let calls =
         crate::meta_resolve::projectors::LAST_OUTPUT_MATERIALIZE_CALLS.with(std::cell::Cell::get);
     assert_eq!(
@@ -30813,6 +30859,7 @@ fn output_registry_overlay_finalize_replaces_in_place_and_appends() {
         "/App.vue",
         analysis,
         Some(seed),
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect("closed registry sources materialize");
     let (analysis, resolution, types) = output.into_parts();
@@ -31681,6 +31728,7 @@ defineEmits<{ save: [id: number] }>()
         "/App.vue",
         analysis.clone(),
         None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect("a present source materializes");
     let (_analysis, _resolution, types) = output.into_parts();
@@ -31696,7 +31744,11 @@ defineEmits<{ save: [id: number] }>()
         verter_type_expr::facts::SourcePosition::unannotated(),
     );
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", absent, None,
+        host,
+        "/App.vue",
+        absent,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect("schema absence keeps materializing the output");
     let (_analysis, _resolution, types) = output.into_parts();
@@ -31716,10 +31768,15 @@ defineEmits<{ save: [id: number] }>()
         ),
     );
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", failed, None,
+        host,
+        "/App.vue",
+        failed,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect("a typed failed publication remains an occurrence-owned output row");
-    let (_analysis, _resolution, types, contract) = output.into_parts_with_contract();
+    let (_analysis, _resolution, types, contract, _completeness) =
+        output.into_parts_with_contract();
     let lanes = types.into_lanes();
     assert!(matches!(
         lanes.events[0].payload.publication(),

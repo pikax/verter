@@ -271,12 +271,19 @@ pub(crate) fn unsupported_from_output_error(
 }
 
 /// The sole analysis/materialized-lanes to public-contract projector.
+///
+/// `completeness` is the RESULT-level completeness of the component-meta
+/// compute that produced `lanes`. It participates in the aggregate exactness
+/// so a structurally incomplete result can never publish an exact contract:
+/// per-member degradation only knows about members the projector could SEE,
+/// and a partial result is precisely the case where members may be missing.
 pub(crate) fn project_component_public_contract(
     adapter_id: FrameworkAdapterId,
     analysis: &ComponentMetaAnalysis,
     lanes: &MaterializedComponentMetaTypeLanes,
+    completeness: crate::semantic_query::ResultCompleteness,
 ) -> ComponentContractAvailability {
-    match project_supported(adapter_id.clone(), analysis, lanes) {
+    match project_supported(adapter_id.clone(), analysis, lanes, completeness) {
         Ok(contract) => ComponentContractAvailability::Supported(Arc::new(contract)),
         Err((reason, diagnostics)) => {
             ComponentContractAvailability::Unsupported(ComponentContractUnsupported {
@@ -297,6 +304,7 @@ fn project_supported(
     adapter_id: FrameworkAdapterId,
     analysis: &ComponentMetaAnalysis,
     lanes: &MaterializedComponentMetaTypeLanes,
+    completeness: crate::semantic_query::ResultCompleteness,
 ) -> Result<ComponentPublicContract, ProjectionFailure> {
     let mut degradation = Vec::new();
     let mut props = Vec::with_capacity(analysis.props.len());
@@ -428,7 +436,7 @@ fn project_supported(
 
     Ok(ComponentPublicContract {
         adapter_id,
-        exactness: exactness(&degradation),
+        exactness: aggregate_exactness(&degradation, completeness),
         degradation: degradation.into(),
         provenance: ContractProvenance::ComponentMetaOutput,
         props: props.into(),
@@ -475,6 +483,23 @@ fn exactness(degradation: &[ContractDegradation]) -> ContractExactness {
         ContractExactness::Exact
     } else {
         ContractExactness::Degraded
+    }
+}
+
+/// Aggregate exactness. A structurally incomplete result is ALWAYS degraded,
+/// even when every member the projector could see published exactly: the
+/// members it could not see are exactly the ones a partial result is missing,
+/// and an empty degradation list over an incomplete surface is the
+/// wrong-complete outcome — the consumer cannot tell "nothing is declared"
+/// from "we failed to find what is declared".
+fn aggregate_exactness(
+    degradation: &[ContractDegradation],
+    completeness: crate::semantic_query::ResultCompleteness,
+) -> ContractExactness {
+    if completeness.is_partial() {
+        ContractExactness::Degraded
+    } else {
+        exactness(degradation)
     }
 }
 

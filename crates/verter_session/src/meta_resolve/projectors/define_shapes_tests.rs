@@ -323,6 +323,7 @@ defineEmits<{ save: [id: number] }>()
         "/App.vue",
         analysis.clone(),
         None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect("the untampered analysis must materialize");
 
@@ -361,7 +362,11 @@ defineEmits<{ save: [id: number] }>()
         &verter_type_expr::PublicationPolicy::exact_only(),
     );
     let err = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", tampered, None,
+        host,
+        "/App.vue",
+        tampered,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect_err(
         "a member-path projection landing on the interned failed-query node must FAIL \
@@ -399,7 +404,11 @@ defineEmits<{ save: [id: number] }>()
         &verter_type_expr::PublicationPolicy::exact_only(),
     );
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", absent, None,
+        host,
+        "/App.vue",
+        absent,
+        None,
+        crate::semantic_query::ResultCompleteness::Complete,
     )
     .expect("a schema-ABSENT payload position must keep materializing the output");
     let (_analysis, _resolution, types) = output.into_parts();

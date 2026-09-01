@@ -137,7 +137,7 @@ mod tests {
         assert!(CacheClusterSchemaVersion::new(0).is_none());
         let manifest = current_consumer_compatibility_manifest();
         assert_eq!(manifest.cache_cluster_schema_version.get(), 10);
-        assert_eq!(manifest.component_meta_schema_version.get(), 10);
+        assert_eq!(manifest.component_meta_schema_version.get(), 11);
         assert_eq!(manifest.provider_protocol_version.get(), 12);
     }
 }

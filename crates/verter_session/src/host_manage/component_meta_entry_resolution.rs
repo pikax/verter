@@ -383,6 +383,7 @@ impl VerterHost {
                                 canonical.as_str(),
                                 analysis,
                                 Some(seed),
+                                resolution.completeness,
                             )
                         });
                 return output
@@ -433,6 +434,7 @@ impl VerterHost {
                         canonical.as_str(),
                         analysis,
                         Some(seed),
+                        resolved.completeness,
                     )
                 });
         output

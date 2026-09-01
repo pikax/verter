@@ -27,11 +27,12 @@ export type ProtoOriginGraph = ProtoRecord<"verter.v1.OriginGraph"> & RawOriginG
 export type ProtoOriginNode = ProtoRecord<"verter.v1.OriginNode"> & RawOriginNode;
 export type ProtoOriginEdge = ProtoRecord<"verter.v1.OriginEdge"> & RawOriginEdge;
 
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 const PRIMITIVE_STRING = 1;
 const PRIMITIVE_UNDEFINED = 11;
 const OBJECT_MEMBER_PROPERTY = 1;
 const ACCEPTED_SURFACE_COMPLETENESS_EXACT = 1;
+const RESULT_COMPLETENESS_COMPLETE = 1;
 const ROOT_REACHABILITY_NO_FALLTHROUGH = 1;
 const FALLTHROUGH_SURFACE_NONE = 1;
 const NO_FALLTHROUGH_REASON_NO_TEMPLATE = 5;
@@ -178,6 +179,7 @@ export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
       acceptedProps: [],
       acceptedEvents: [],
       acceptedSurfaceCompleteness: ACCEPTED_SURFACE_COMPLETENESS_EXACT,
+      resultCompleteness: { kind: RESULT_COMPLETENESS_COMPLETE, partialReasons: [] },
       rootReachability: {
         kind: ROOT_REACHABILITY_NO_FALLTHROUGH,
         reason: NO_FALLTHROUGH_REASON_NO_TEMPLATE,

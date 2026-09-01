@@ -3274,6 +3274,7 @@ fn component_public_contract_crosses_the_production_ffi_seam_structurally() {
         None,
         Default::default(),
         contract,
+        host::semantic_query::ResultCompleteness::Complete,
     );
     let FfiComponentContractAvailability::Supported { contract } = ffi.component_public_contract
     else {
@@ -3802,5 +3803,278 @@ fn ffi_style_token_fails_closed_for_foreign_artifact_ref() {
     assert_eq!(
         ffi.styles[2].block_token, None,
         "a ref-less row serves no token"
+    );
+}
+
+// ── Published-surface completeness (partial vs exact-empty) ──────────
+
+/// The helper's body-derived return degrades: calling the `number`-typed
+/// parameter is a usable-but-unverified value, so the enclosing
+/// `defineProps<ReturnType<typeof makeProps>>()` surface resolves partially.
+const DEGRADING_HELPER_TS: &str = r#"
+export function makeProps(notFn: number) {
+  return { p: notFn() };
+}
+"#;
+
+const DEGRADING_SFC: &str = r#"<script setup lang="ts">
+import { makeProps } from './degradingHelper'
+defineProps<ReturnType<typeof makeProps>>();
+</script>
+<template><div /></template>
+"#;
+
+/// A component that genuinely declares no props at all.
+const PROPSLESS_SFC: &str = r#"<script setup lang="ts">
+const label = 'hi'
+</script>
+<template><div>{{ label }}</div></template>
+"#;
+
+fn completeness_host() -> host::VerterHost {
+    let session = host::VerterHost::new_standalone(host::HostConfig::default());
+    for (canonical, source, language) in [
+        (
+            "/degradingHelper.ts",
+            DEGRADING_HELPER_TS,
+            host::FileLanguage::script_ts(),
+        ),
+        ("/Degrading.vue", DEGRADING_SFC, host::FileLanguage::vue()),
+        ("/Propsless.vue", PROPSLESS_SFC, host::FileLanguage::vue()),
+    ] {
+        let _ = session
+            .upsert(host::UpsertRequest {
+                canonical_id: Some(canonical.to_string()),
+                input_id: canonical.to_string(),
+                source: Arc::from(source),
+                file_language: language,
+                aliases: Vec::new(),
+            })
+            .expect("registered carrier");
+    }
+    session
+}
+
+fn wire_payload(session: &host::VerterHost, canonical: &str) -> FfiComponentMeta {
+    let (output, _request) = session
+        .get_component_meta_output_with_resolution(canonical)
+        .expect("resolved output");
+    super::component_meta_output_to_ffi(output.expect("component resolves"))
+}
+
+/// The SIDECAR-LESS output lane (the plain WASM `getComponentMeta` entry and
+/// the LSP document-analysis read). It runs the same resolve and only omits
+/// the resolution sidecar, so it degrades identically.
+fn sidecar_less_wire_payload(session: &host::VerterHost, canonical: &str) -> FfiComponentMeta {
+    let output = session
+        .get_component_meta_output(canonical)
+        .expect("materialized output");
+    super::component_meta_output_to_ffi(output.expect("component resolves"))
+}
+
+/// The proto lane's completeness position for a wire payload: the `(kind,
+/// reasons)` pair a NAPI consumer decodes.
+fn proto_completeness(meta: &FfiComponentMeta) -> (i32, Vec<i32>) {
+    let completeness = verter_protocol::component_meta::component_meta_payload(meta)
+        .body
+        .expect("payload body")
+        .result_completeness
+        .expect("completeness position is always encoded");
+    (completeness.kind, completeness.partial_reasons)
+}
+
+/// A component whose prop resolution DEGRADES must not serialize the same
+/// completeness position as a component that genuinely declares no props.
+/// Publishing a degraded surface as complete is the worst direction of
+/// wrongness: the consumer cannot tell "nothing is declared" from "we failed
+/// to find what is declared", and neither the props lane nor the public
+/// contract discriminates the two on its own.
+///
+/// Both wire lanes carry the state — the serde JSON payload (WASM, audit
+/// bundles) and the protobuf payload (NAPI) — and a partial result may never
+/// pair with an exact public contract on either.
+#[test]
+fn ffi_component_meta_distinguishes_partial_from_exact_empty() {
+    let session = completeness_host();
+
+    let degrading = wire_payload(&session, "/Degrading.vue");
+    let propsless = wire_payload(&session, "/Propsless.vue");
+
+    // Fixture premises: the degraded surface still publishes its prop (a
+    // degraded success is a usable value), and the props-less component
+    // genuinely publishes none. Without both, the two payloads would differ
+    // by their props lane and the completeness axis would prove nothing.
+    assert_eq!(
+        degrading
+            .props
+            .iter()
+            .map(|prop| prop.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["p"],
+        "fixture premise: the degraded surface still publishes its prop",
+    );
+    assert!(
+        propsless.props.is_empty(),
+        "fixture premise: the props-less component publishes no props",
+    );
+
+    // ── Typed completeness on the DTO ────────────────────────────────
+    let FfiResultCompleteness::Partial { reasons } = &degrading.result_completeness else {
+        panic!(
+            "a degraded component-meta surface MUST publish a partial \
+             completeness state, never an exact-looking silence (got {:?})",
+            degrading.result_completeness
+        );
+    };
+    assert!(
+        !reasons.is_empty(),
+        "a partial state carries the typed reasons it degraded for — a \
+         reason-less partial is indistinguishable from a complete result",
+    );
+    assert_eq!(
+        propsless.result_completeness,
+        FfiResultCompleteness::Complete,
+        "a genuinely props-less component is COMPLETE and empty",
+    );
+
+    // ── The same state on the serde JSON lane ────────────────────────
+    let degrading_json = serde_json::to_value(&degrading).expect("wire payload serializes");
+    let propsless_json = serde_json::to_value(&propsless).expect("wire payload serializes");
+    assert_eq!(
+        degrading_json["resultCompleteness"]["kind"].as_str(),
+        Some("partial"),
+        "the JSON lane carries the partial state (got {})",
+        degrading_json["resultCompleteness"],
+    );
+    assert!(
+        degrading_json["resultCompleteness"]["reasons"]
+            .as_array()
+            .is_some_and(|reasons| !reasons.is_empty()),
+        "the JSON lane carries the typed reasons (got {})",
+        degrading_json["resultCompleteness"],
+    );
+    assert_eq!(
+        propsless_json["resultCompleteness"]["kind"].as_str(),
+        Some("complete"),
+        "the JSON lane keeps a genuinely-empty surface complete (got {})",
+        propsless_json["resultCompleteness"],
+    );
+
+    // ── The same state on the protobuf lane ──────────────────────────
+    let (degrading_kind, degrading_reasons) = proto_completeness(&degrading);
+    assert_eq!(
+        degrading_kind,
+        verter_protocol::verter::v1::ResultCompletenessKind::Partial as i32,
+        "the protobuf lane carries the partial state",
+    );
+    assert!(
+        !degrading_reasons.is_empty()
+            && !degrading_reasons
+                .contains(&(verter_protocol::verter::v1::SurfacePartialReason::Unspecified as i32)),
+        "every encoded reason is a named class, never the unset default \
+         (got {degrading_reasons:?})",
+    );
+    assert_eq!(
+        proto_completeness(&propsless),
+        (
+            verter_protocol::verter::v1::ResultCompletenessKind::Complete as i32,
+            Vec::new()
+        ),
+        "the protobuf lane keeps a genuinely-empty surface complete with no \
+         reasons",
+    );
+
+    // ── A partial result never claims an exact public contract ───────
+    let FfiComponentContractAvailability::Supported { contract } =
+        &degrading.component_public_contract
+    else {
+        panic!("fixture premise: the degraded component still projects a contract")
+    };
+    assert!(
+        matches!(contract.exactness, FfiContractExactness::Degraded),
+        "a partial result must not pair with an exact public contract — the \
+         members it could not see are exactly the ones it is missing",
+    );
+    let FfiComponentContractAvailability::Supported { contract } =
+        &propsless.component_public_contract
+    else {
+        panic!("fixture premise: the props-less component projects a contract")
+    };
+    assert!(
+        matches!(contract.exactness, FfiContractExactness::Exact),
+        "a complete, genuinely-empty surface stays exact",
+    );
+
+    // ── The sidecar-less lane degrades identically ───────────────────
+    // It omits only the resolution SIDECAR, not the resolve, so reading
+    // completeness off the sidecar would publish every degraded payload on
+    // this lane as complete — the same wrong-complete outcome, on the lane
+    // carrying the fewest other signals.
+    let degrading_plain = sidecar_less_wire_payload(&session, "/Degrading.vue");
+    let propsless_plain = sidecar_less_wire_payload(&session, "/Propsless.vue");
+    assert_eq!(
+        degrading_plain.result_completeness, degrading.result_completeness,
+        "the sidecar-less lane publishes the SAME partial state as the \
+         sidecar-bearing one",
+    );
+    assert_eq!(
+        propsless_plain.result_completeness,
+        FfiResultCompleteness::Complete,
+        "a genuinely props-less component stays complete on the \
+         sidecar-less lane too — here served from the WARM template, which \
+         carries the completeness through the round-trip",
+    );
+
+    // ── The partial stays cold; the complete one warms ───────────────
+    let warm = session.project_type_store().component_meta_results();
+    assert_eq!(
+        warm.len(),
+        1,
+        "only the complete result is warm-admitted: a partial result would \
+         poison the shared final-result cache and replay as complete",
+    );
+    let refreshed = wire_payload(&session, "/Degrading.vue");
+    assert_eq!(
+        refreshed.result_completeness, degrading.result_completeness,
+        "a recomputed partial reproduces the partial state, never a \
+         laundered complete one",
+    );
+    assert_eq!(
+        session.project_type_store().component_meta_results().len(),
+        1,
+        "the partial is still refused warm admission on the second request",
+    );
+}
+
+/// A producer that raises the partial state without naming a class must
+/// still publish a named reason. A `Partial` with an empty reason list is
+/// indistinguishable from a complete result to any consumer that inspects
+/// the reasons — the exact outcome this state exists to prevent — so the
+/// converter projects it as the taxonomy's inherited-partiality class.
+#[test]
+fn reasonless_partial_publishes_the_inherited_partiality_reason() {
+    let ffi = component_meta_parts_with_contract_to_ffi(
+        empty_analysis(),
+        None,
+        Default::default(),
+        host::framework::ComponentContractAvailability::Unsupported(
+            host::framework::ComponentContractUnsupported {
+                adapter_id: host::framework::FrameworkAdapterId::new("vue"),
+                reason: host::framework::ComponentContractUnsupportedReason::AdapterUnavailable,
+                diagnostics: Arc::from([]),
+            },
+        ),
+        host::semantic_query::ResultCompleteness::partial(
+            host::semantic_query::PartialReasonSet::empty(),
+        ),
+    );
+
+    assert_eq!(
+        ffi.result_completeness,
+        FfiResultCompleteness::Partial {
+            reasons: vec![FfiSurfacePartialReason::Propagated],
+        },
+        "an unnamed partial publishes the inherited-partiality class, never \
+         an empty reason list",
     );
 }

@@ -31,7 +31,7 @@ use crate::verter::v1::{
     UnionNode, UnknownNode, UnresolvedBranchReason, UnresolvedRootTargetReason, VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 10;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 11;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -230,6 +230,7 @@ fn component_meta_body_to_proto(
             builder,
             &meta.component_public_contract,
         )),
+        result_completeness: Some(result_completeness_to_proto(&meta.result_completeness)),
     }
 }
 
@@ -2506,6 +2507,68 @@ fn expansion_reason_to_proto(value: &str) -> proto::ExpansionStopReason {
     }
 }
 
+fn result_completeness_to_proto(value: &FfiResultCompleteness) -> proto::ResultCompleteness {
+    match value {
+        FfiResultCompleteness::Complete => proto::ResultCompleteness {
+            kind: proto::ResultCompletenessKind::Complete as i32,
+            partial_reasons: Vec::new(),
+        },
+        FfiResultCompleteness::Partial { reasons } => proto::ResultCompleteness {
+            kind: proto::ResultCompletenessKind::Partial as i32,
+            partial_reasons: reasons
+                .iter()
+                .map(|reason| surface_partial_reason_to_proto(*reason) as i32)
+                .collect(),
+        },
+    }
+}
+
+fn surface_partial_reason_to_proto(value: FfiSurfacePartialReason) -> proto::SurfacePartialReason {
+    match value {
+        FfiSurfacePartialReason::BudgetExceeded => proto::SurfacePartialReason::BudgetExceeded,
+        FfiSurfacePartialReason::Cancelled => proto::SurfacePartialReason::Cancelled,
+        FfiSurfacePartialReason::SupersededGeneration => {
+            proto::SurfacePartialReason::SupersededGeneration
+        }
+        FfiSurfacePartialReason::UnstableState => proto::SurfacePartialReason::UnstableState,
+        FfiSurfacePartialReason::SamePathRecursion => {
+            proto::SurfacePartialReason::SamePathRecursion
+        }
+        FfiSurfacePartialReason::WalkerFatal => proto::SurfacePartialReason::WalkerFatal,
+        FfiSurfacePartialReason::Propagated => proto::SurfacePartialReason::Propagated,
+        FfiSurfacePartialReason::DeferredEvaluationLimit => {
+            proto::SurfacePartialReason::DeferredEvaluationLimit
+        }
+        FfiSurfacePartialReason::StructuralFactDemandLimit => {
+            proto::SurfacePartialReason::StructuralFactDemandLimit
+        }
+        FfiSurfacePartialReason::SemanticQueryFault => {
+            proto::SurfacePartialReason::SemanticQueryFault
+        }
+        FfiSurfacePartialReason::MissingSemanticNodeData => {
+            proto::SurfacePartialReason::MissingSemanticNodeData
+        }
+        FfiSurfacePartialReason::ProjectionWorkLimit => {
+            proto::SurfacePartialReason::ProjectionWorkLimit
+        }
+        FfiSurfacePartialReason::ConnectedQueryDepthLimit => {
+            proto::SurfacePartialReason::ConnectedQueryDepthLimit
+        }
+        FfiSurfacePartialReason::MissingDependency => {
+            proto::SurfacePartialReason::MissingDependency
+        }
+        FfiSurfacePartialReason::FlowReturnUninferred => {
+            proto::SurfacePartialReason::FlowReturnUninferred
+        }
+        FfiSurfacePartialReason::FlowReturnUnverified => {
+            proto::SurfacePartialReason::FlowReturnUnverified
+        }
+        FfiSurfacePartialReason::FlowReturnNoSurface => {
+            proto::SurfacePartialReason::FlowReturnNoSurface
+        }
+    }
+}
+
 fn accepted_surface_completeness_to_proto(
     value: &FfiAcceptedSurfaceCompleteness,
 ) -> proto::AcceptedSurfaceCompleteness {
@@ -2592,6 +2655,7 @@ fn build_test_meta() -> FfiComponentMeta {
     }));
 
     FfiComponentMeta {
+        result_completeness: FfiResultCompleteness::Complete,
         component_public_contract: FfiComponentContractAvailability::Supported {
             contract: FfiComponentPublicContract {
                 adapter_id: "vue".to_string(),
@@ -3033,28 +3097,41 @@ mod tests {
         assert!(!proto.events[0].is_inline);
         assert!(proto.events[0].modifier_ids.is_empty());
 
-        // SCHEMA bump landed (typed property keys replaced the
-        // string-only `ObjectMember.name_id` (field 2, now reserved) with the
-        // `property_key` oneof (string / canonical number / unique symbol /
-        // computed node), plus authored method-kind and body facts).
-        // The wire schema version the encoder stamps and the TS decoder gate
-        // (`GRAPH_FORMAT_VERSION`, exact equality) demand in lockstep.
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 10);
+        // SCHEMA bump landed (the payload carries the typed
+        // `result_completeness` position, so a degraded surface can no longer
+        // be read as an exact empty one). The wire schema version the encoder
+        // stamps and the TS decoder gate (`GRAPH_FORMAT_VERSION`, exact
+        // equality) demand in lockstep: a decoder that trusts the
+        // completeness position must never accept a payload old enough to
+        // omit it.
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 11);
     }
 
     #[test]
-    fn schema10_full_body_uses_tag_26_and_roundtrips_supported_contract() {
+    fn full_body_roundtrips_supported_contract_and_completeness_tags() {
         let payload = build_test_payload();
-        assert_eq!(payload.schema_version, 10);
+        assert_eq!(payload.schema_version, 11);
         let encoded = payload.encode_to_vec();
         let decoded =
             ComponentMetaPayload::decode(encoded.as_slice()).expect("full payload decodes");
-        assert_eq!(decoded.schema_version, 10);
+        assert_eq!(decoded.schema_version, 11);
         let body = decoded.body.expect("component-meta body");
         let bytes = body.encode_to_vec();
         assert!(
             bytes.windows(2).any(|window| window == [0xd2, 0x01]),
             "field 26 wire key must be present"
+        );
+        assert!(
+            bytes.windows(2).any(|window| window == [0xda, 0x01]),
+            "field 27 wire key must be present"
+        );
+        assert_eq!(
+            body.result_completeness
+                .as_ref()
+                .expect("completeness position is always encoded")
+                .kind,
+            proto::ResultCompletenessKind::Complete as i32,
+            "a complete payload states so rather than leaving the position              at its unset default"
         );
         let availability = body
             .component_public_contract

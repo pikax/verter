@@ -36,8 +36,14 @@ use super::string_helpers::{
 pub fn component_meta_output_to_ffi(
     output: verter_session::meta_resolve::ComponentMetaOutput,
 ) -> FfiComponentMeta {
-    let (analysis, resolution, types, contract) = output.into_parts_with_contract();
-    component_meta_parts_with_contract_to_ffi(analysis, resolution, types.into_lanes(), contract)
+    let (analysis, resolution, types, contract, completeness) = output.into_parts_with_contract();
+    component_meta_parts_with_contract_to_ffi(
+        analysis,
+        resolution,
+        types.into_lanes(),
+        contract,
+        completeness,
+    )
 }
 
 /// HARD wire-boundary alignment guard: refuse the conversion loudly when a
@@ -413,6 +419,7 @@ pub(super) fn component_meta_parts_to_ffi(
                 diagnostics: std::sync::Arc::from([]),
             },
         ),
+        verter_session::semantic_query::ResultCompleteness::Complete,
     )
 }
 
@@ -421,6 +428,7 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
     resolution: Option<verter_session::meta_resolve::ComponentMetaResolutionOutput>,
     lanes: verter_session::meta_resolve::MaterializedComponentMetaTypeLanes,
     contract: verter_session::framework::ComponentContractAvailability,
+    completeness: verter_session::semantic_query::ResultCompleteness,
 ) -> FfiComponentMeta {
     let root_info = root_info_to_ffi(&analysis.root_reachability);
     // Sealed-identity wire tokens for style rows: each style's sealed ref is
@@ -514,6 +522,7 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
     );
     FfiComponentMeta {
         component_public_contract: component_contract_to_ffi(contract),
+        result_completeness: result_completeness_to_ffi(completeness),
         // Typed resolution status: honest on every lane — a payload
         // without the resolution sidecar self-describes as
         // `Unavailable(ResolutionProviderAbsent)`.
@@ -1062,6 +1071,71 @@ fn contract_exactness_to_ffi(
     match exactness {
         verter_session::framework::ContractExactness::Exact => FfiContractExactness::Exact,
         verter_session::framework::ContractExactness::Degraded => FfiContractExactness::Degraded,
+    }
+}
+
+/// Project the producer's typed result completeness onto the wire. The
+/// reason projection walks the closed [`PartialReason`] taxonomy, so a new
+/// producer reason class is a compile error here rather than a silently
+/// dropped reason on an otherwise-partial payload.
+///
+/// A producer that raised the partial state without naming a class projects
+/// as `Propagated` — the taxonomy's own "partiality inherited, class not
+/// captured at the propagation site" reason, matching
+/// `CacheRead::partial_reason_classes`. The published reason list is
+/// therefore NEVER empty: a reason-less partial reads as a complete result
+/// to anyone inspecting the reasons, which is the very outcome this state
+/// exists to prevent.
+///
+/// [`PartialReason`]: verter_session::semantic_query::PartialReason
+fn result_completeness_to_ffi(
+    completeness: verter_session::semantic_query::ResultCompleteness,
+) -> FfiResultCompleteness {
+    use verter_session::semantic_query::{PartialReason, PartialReasonSet, ResultCompleteness};
+    match completeness {
+        ResultCompleteness::Complete => FfiResultCompleteness::Complete,
+        ResultCompleteness::Partial(reasons) => FfiResultCompleteness::Partial {
+            reasons: if reasons.is_empty() {
+                PartialReasonSet::PROPAGATED
+            } else {
+                reasons
+            }
+            .iter()
+            .map(|reason| match reason {
+                PartialReason::BudgetExceeded => FfiSurfacePartialReason::BudgetExceeded,
+                PartialReason::Cancelled => FfiSurfacePartialReason::Cancelled,
+                PartialReason::SupersededGeneration => {
+                    FfiSurfacePartialReason::SupersededGeneration
+                }
+                PartialReason::UnstableState => FfiSurfacePartialReason::UnstableState,
+                PartialReason::SamePathRecursion => FfiSurfacePartialReason::SamePathRecursion,
+                PartialReason::WalkerFatal => FfiSurfacePartialReason::WalkerFatal,
+                PartialReason::Propagated => FfiSurfacePartialReason::Propagated,
+                PartialReason::DeferredEvaluationLimit => {
+                    FfiSurfacePartialReason::DeferredEvaluationLimit
+                }
+                PartialReason::StructuralFactDemandLimit => {
+                    FfiSurfacePartialReason::StructuralFactDemandLimit
+                }
+                PartialReason::SemanticQueryFault => FfiSurfacePartialReason::SemanticQueryFault,
+                PartialReason::MissingSemanticNodeData => {
+                    FfiSurfacePartialReason::MissingSemanticNodeData
+                }
+                PartialReason::ProjectionWorkLimit => FfiSurfacePartialReason::ProjectionWorkLimit,
+                PartialReason::ConnectedQueryDepthLimit => {
+                    FfiSurfacePartialReason::ConnectedQueryDepthLimit
+                }
+                PartialReason::MissingDependency => FfiSurfacePartialReason::MissingDependency,
+                PartialReason::FlowReturnUninferred => {
+                    FfiSurfacePartialReason::FlowReturnUninferred
+                }
+                PartialReason::FlowReturnUnverified => {
+                    FfiSurfacePartialReason::FlowReturnUnverified
+                }
+                PartialReason::FlowReturnNoSurface => FfiSurfacePartialReason::FlowReturnNoSurface,
+            })
+            .collect(),
+        },
     }
 }
 

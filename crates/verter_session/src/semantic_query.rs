@@ -4357,6 +4357,109 @@ impl PartialReasonSet {
     pub const fn without(self, other: Self) -> Self {
         Self(self.0 & !other.0)
     }
+
+    /// The recorded reasons as the closed [`PartialReason`] taxonomy, in bit
+    /// order. The projection a consumer that must NAME why a result is
+    /// partial (the component-meta wire boundary) reads instead of testing
+    /// bits one at a time: such a consumer then matches exhaustively over
+    /// [`PartialReason`], so a new reason class cannot reach the wire as a
+    /// silently dropped bit.
+    pub fn iter(self) -> impl Iterator<Item = PartialReason> {
+        PartialReason::ALL
+            .into_iter()
+            .filter(move |reason| self.contains(reason.bit()))
+    }
+}
+
+/// One recorded partial-result reason: the closed per-bit taxonomy of
+/// [`PartialReasonSet`]. Every single-reason constant on that set names
+/// exactly one variant here, so a consumer projecting the set is checked by
+/// the compiler instead of enumerating bits by hand. A new reason class is
+/// added as a constant AND a variant together — the pairing is what
+/// `partial_reason_taxonomy_covers_every_bit_exactly_once` pins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PartialReason {
+    /// [`PartialReasonSet::BUDGET_EXCEEDED`].
+    BudgetExceeded,
+    /// [`PartialReasonSet::CANCELLED`].
+    Cancelled,
+    /// [`PartialReasonSet::SUPERSEDED_GENERATION`].
+    SupersededGeneration,
+    /// [`PartialReasonSet::UNSTABLE_STATE`].
+    UnstableState,
+    /// [`PartialReasonSet::SAME_PATH_RECURSION`].
+    SamePathRecursion,
+    /// [`PartialReasonSet::WALKER_FATAL`].
+    WalkerFatal,
+    /// [`PartialReasonSet::PROPAGATED`].
+    Propagated,
+    /// [`PartialReasonSet::DEFERRED_EVALUATION_LIMIT`].
+    DeferredEvaluationLimit,
+    /// [`PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT`].
+    StructuralFactDemandLimit,
+    /// [`PartialReasonSet::SEMANTIC_QUERY_FAULT`].
+    SemanticQueryFault,
+    /// [`PartialReasonSet::MISSING_SEMANTIC_NODE_DATA`].
+    MissingSemanticNodeData,
+    /// [`PartialReasonSet::PROJECTION_WORK_LIMIT`].
+    ProjectionWorkLimit,
+    /// [`PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT`].
+    ConnectedQueryDepthLimit,
+    /// [`PartialReasonSet::MISSING_DEPENDENCY`].
+    MissingDependency,
+    /// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`].
+    FlowReturnUninferred,
+    /// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`].
+    FlowReturnUnverified,
+    /// [`PartialReasonSet::FLOW_RETURN_NO_SURFACE`].
+    FlowReturnNoSurface,
+}
+
+impl PartialReason {
+    /// Every reason, in [`PartialReasonSet`] bit order.
+    pub const ALL: [Self; 17] = [
+        Self::BudgetExceeded,
+        Self::Cancelled,
+        Self::SupersededGeneration,
+        Self::UnstableState,
+        Self::SamePathRecursion,
+        Self::WalkerFatal,
+        Self::Propagated,
+        Self::DeferredEvaluationLimit,
+        Self::StructuralFactDemandLimit,
+        Self::SemanticQueryFault,
+        Self::MissingSemanticNodeData,
+        Self::ProjectionWorkLimit,
+        Self::ConnectedQueryDepthLimit,
+        Self::MissingDependency,
+        Self::FlowReturnUninferred,
+        Self::FlowReturnUnverified,
+        Self::FlowReturnNoSurface,
+    ];
+
+    /// The single-reason set this variant names.
+    #[must_use]
+    pub const fn bit(self) -> PartialReasonSet {
+        match self {
+            Self::BudgetExceeded => PartialReasonSet::BUDGET_EXCEEDED,
+            Self::Cancelled => PartialReasonSet::CANCELLED,
+            Self::SupersededGeneration => PartialReasonSet::SUPERSEDED_GENERATION,
+            Self::UnstableState => PartialReasonSet::UNSTABLE_STATE,
+            Self::SamePathRecursion => PartialReasonSet::SAME_PATH_RECURSION,
+            Self::WalkerFatal => PartialReasonSet::WALKER_FATAL,
+            Self::Propagated => PartialReasonSet::PROPAGATED,
+            Self::DeferredEvaluationLimit => PartialReasonSet::DEFERRED_EVALUATION_LIMIT,
+            Self::StructuralFactDemandLimit => PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT,
+            Self::SemanticQueryFault => PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            Self::MissingSemanticNodeData => PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
+            Self::ProjectionWorkLimit => PartialReasonSet::PROJECTION_WORK_LIMIT,
+            Self::ConnectedQueryDepthLimit => PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT,
+            Self::MissingDependency => PartialReasonSet::MISSING_DEPENDENCY,
+            Self::FlowReturnUninferred => PartialReasonSet::FLOW_RETURN_UNINFERRED,
+            Self::FlowReturnUnverified => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+            Self::FlowReturnNoSurface => PartialReasonSet::FLOW_RETURN_NO_SURFACE,
+        }
+    }
 }
 
 /// Per-result completeness — whether a computed result is the FULL surface
@@ -9245,6 +9348,50 @@ pub trait SemanticQueryApi {
 mod tests {
     use super::*;
     use verter_type_expr::TopLevelOwnerId;
+
+    /// The `PartialReason` taxonomy and the `PartialReasonSet` bits are two
+    /// halves of one closed vocabulary: every variant must name a DISTINCT
+    /// single bit, and iterating a set must recover exactly the variants that
+    /// built it, in bit order. A variant wired to the wrong constant (or two
+    /// variants sharing one) would publish the wrong reason for a partial
+    /// result — a consumer told "cancelled" for a budget trip acts on it.
+    #[test]
+    fn partial_reason_taxonomy_covers_every_bit_exactly_once() {
+        let mut seen = PartialReasonSet::empty();
+        for reason in PartialReason::ALL {
+            let bit = reason.bit();
+            assert!(
+                !bit.is_empty(),
+                "{reason:?} maps to the empty set instead of its own bit",
+            );
+            assert!(
+                !seen.contains(bit),
+                "{reason:?} shares a bit with an earlier variant",
+            );
+            assert_eq!(
+                bit.iter().collect::<Vec<_>>(),
+                vec![reason],
+                "{reason:?}'s bit must round-trip to exactly itself",
+            );
+            seen = seen.union(bit);
+        }
+
+        assert_eq!(
+            seen.iter().collect::<Vec<_>>(),
+            PartialReason::ALL.to_vec(),
+            "iterating the union of every bit yields the taxonomy in bit order",
+        );
+        assert_eq!(
+            PartialReasonSet::FLOW_RETURN_DEGRADED
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![
+                PartialReason::FlowReturnUninferred,
+                PartialReason::FlowReturnUnverified,
+            ],
+            "the composite degraded-success set projects both of its classes",
+        );
+    }
 
     /// Every `QueryError` variant must own a UNIQUE `u8` discriminant tag:
     /// the tags are hand-assigned, and while the arena resolves hash collisions

@@ -714,8 +714,84 @@ pub struct FfiComponentMeta {
     /// exact/successful-looking silence. Always serialized (additive wire
     /// field; every pre-existing field is unchanged).
     pub resolution_status: FfiComponentMetaResolutionStatus,
+    /// Typed completeness of the PUBLISHED SURFACE: `Complete` when the
+    /// payload is the full surface this component declares, `Partial` (with
+    /// its typed reasons) when the producing compute degraded and members may
+    /// be missing or unverified. Distinct from
+    /// [`Self::accepted_surface_completeness`], which describes only the
+    /// computed call-site accepted surface.
+    ///
+    /// Without it an empty-because-degraded payload is byte-identical to an
+    /// empty-because-nothing-is-declared payload — the wrong-complete
+    /// outcome. A `Partial` payload is also refused warm admission by the
+    /// producer, so an identical follow-up request recomputes.
+    pub result_completeness: FfiResultCompleteness,
     #[serde(skip_serializing_if = "origin_graph_is_empty")]
     pub origin: OriginGraphDto,
+}
+
+/// Typed completeness of a published component-meta surface.
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiResultCompleteness {
+    /// Every demanded position resolved; the payload is the full surface.
+    Complete,
+    /// The producing compute degraded: the payload is structurally
+    /// incomplete and carries the typed reasons why.
+    Partial {
+        /// The recorded reasons, in the producer's stable order. Never
+        /// empty — a partial state without a reason is indistinguishable
+        /// from a complete one.
+        reasons: Vec<FfiSurfacePartialReason>,
+    },
+}
+
+/// Why a published component-meta surface is partial. Closed taxonomy,
+/// one variant per producer-recorded reason class.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiSurfacePartialReason {
+    /// An armed runaway fuse tripped mid-compute.
+    BudgetExceeded,
+    /// The request was cancelled mid-compute.
+    Cancelled,
+    /// The world generation advanced and superseded the compute.
+    SupersededGeneration,
+    /// An unstable / torn intermediate state was observed.
+    UnstableState,
+    /// Same-path recursion produced a non-terminating self-reference.
+    SamePathRecursion,
+    /// The terminal-surface walker hit a fatal diagnostic and contributed
+    /// no surface.
+    WalkerFatal,
+    /// Partiality inherited from a contributing read whose own reason class
+    /// was not captured at the propagation site.
+    Propagated,
+    /// A deferred-evaluation ceiling was reached.
+    DeferredEvaluationLimit,
+    /// A structural-fact demand ceiling was reached.
+    StructuralFactDemandLimit,
+    /// A resolution read returned a query fault that no narrower class
+    /// already describes.
+    SemanticQueryFault,
+    /// A demanded node had no live data in the shared semantic graph.
+    MissingSemanticNodeData,
+    /// The connected demand exceeded its total projection/evaluation work
+    /// envelope.
+    ProjectionWorkLimit,
+    /// A nested cold-query chain exceeded the host-recursion ceiling.
+    ConnectedQueryDepthLimit,
+    /// An exact authored declaration was available but at least one imported
+    /// dependency owner could not be resolved.
+    MissingDependency,
+    /// A body-derived return produced a usable value in which one interior
+    /// position has no modelled type and says so.
+    FlowReturnUninferred,
+    /// A body-derived return produced a usable value the producer could not
+    /// fully verify: every member is present, one may be wrong.
+    FlowReturnUnverified,
+    /// A body-derived demand produced no value at all.
+    FlowReturnNoSurface,
 }
 
 #[derive(Serialize, Clone)]

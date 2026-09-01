@@ -531,6 +531,43 @@ export type NativeMemberAvailability =
 
 export type NativeAcceptedSurfaceCompleteness = "exact" | "lowerBound";
 
+/**
+ * Why a published component surface is partial. Closed taxonomy — one entry
+ * per reason class the producer records.
+ */
+export type NativeSurfacePartialReason =
+  | "budgetExceeded"
+  | "cancelled"
+  | "supersededGeneration"
+  | "unstableState"
+  | "samePathRecursion"
+  | "walkerFatal"
+  | "propagated"
+  | "deferredEvaluationLimit"
+  | "structuralFactDemandLimit"
+  | "semanticQueryFault"
+  | "missingSemanticNodeData"
+  | "projectionWorkLimit"
+  | "connectedQueryDepthLimit"
+  | "missingDependency"
+  | "flowReturnUninferred"
+  | "flowReturnUnverified"
+  | "flowReturnNoSurface";
+
+/**
+ * Typed completeness of a published component surface. Without it an
+ * empty-because-degraded payload is indistinguishable from an
+ * empty-because-nothing-is-declared payload, and a consumer cannot tell
+ * "nothing is declared" from "we failed to find what is declared".
+ *
+ * A `partial` result never pairs with `componentPublicContract.exactness ===
+ * "exact"`, and the producer refuses it warm admission, so an identical
+ * follow-up request recomputes rather than replaying it as complete.
+ */
+export type NativeResultCompleteness =
+  | { kind: "complete" }
+  | { kind: "partial"; reasons: NativeSurfacePartialReason[] };
+
 export type NativeRootReachability =
   | { kind: "noFallthrough"; reason: NativeNoFallthroughReason }
   | { kind: "branches"; branches: NativeRootBranch[] };
@@ -673,6 +710,7 @@ export interface NativeOriginGraph {
 
 export interface NativeComponentMetaResult {
   componentPublicContract: NativeComponentContractAvailability;
+  resultCompleteness: NativeResultCompleteness;
   props: NativePropMeta[];
   events: NativeEventMeta[];
   slots: NativeSlotMeta[];
@@ -740,6 +778,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     componentName: deriveComponentName(meta.filePath),
     optionsApi: meta.optionsApi,
     componentPublicContract: meta.componentPublicContract,
+    resultCompleteness: meta.resultCompleteness,
     props: meta.props.map((prop) => ({
       name: prop.name,
       type: typeExprToDescriptor(requirePublishedType(prop, `prop ${prop.name}`), nativeRegistry),

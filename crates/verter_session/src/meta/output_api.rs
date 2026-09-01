@@ -300,6 +300,7 @@ impl MetaSession {
                         canonical.as_str(),
                         analysis,
                         Some(seed),
+                        resolved.completeness,
                     )
                 },
             );
