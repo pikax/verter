@@ -802,7 +802,9 @@ impl VerterHost {
 /// its compile input.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum BoundCompileRoute {
-    /// The host-backed multi-product route (`compile_entry`).
+    /// The host-backed multi-product route: the profile-derived
+    /// `compile_entry` and the caller-supplied-request seam, which share
+    /// this bound execution.
     HostBacked,
     /// The render-only route (`compile_entry_runtime_render`).
     RuntimeRender,

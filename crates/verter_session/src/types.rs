@@ -2978,6 +2978,152 @@ pub struct IdeResponse {
     pub destructured_block: Option<verter_compiler::compile::types::DestructuredBlockMeta>,
 }
 
+/// One separately addressed output of a compiled runtime product.
+///
+/// A runtime product is not one blob: the carrier's script, its compiled
+/// template, and each style block are distinct modules a consumer loads
+/// and maps independently, and the assembled main module imports them.
+/// Each row therefore keeps its OWN code and its OWN map — the same
+/// payload the per-node cached read serves — rather than collapsing into
+/// a single string a consumer would have to take apart again.
+#[derive(Debug, Clone)]
+pub struct CompiledVirtualNode {
+    /// Which node of the carrier this row is.
+    pub node: VirtualNodeKind,
+    /// Compiled code for this node.
+    pub code: Arc<str>,
+    /// This node's own JSON source map, when the request asked for maps
+    /// and the node has one.
+    pub source_map: Option<Arc<str>>,
+    /// Output language (e.g. `"js"`, `"ts"`, `"css"`, `"scss"`).
+    pub lang: Option<String>,
+    /// Block-specific metadata (scope id, block type, index).
+    pub meta: VirtualMeta,
+}
+
+/// One row of a [`CompileRequestResponse`]'s product list, one-to-one
+/// with a requested product kind and in request order.
+#[derive(Debug, Clone)]
+pub enum CompiledProduct {
+    /// A runtime product (client or server), as its separately addressed
+    /// virtual nodes in stable node order.
+    Runtime {
+        /// Which runtime kind was requested — the client or the server
+        /// product. A request naming both is refused at admission
+        /// (`DualRuntimeKind`), so exactly one runtime row can appear —
+        /// the invariant the node-vec move below relies on.
+        kind: verter_compiler::compile_request::ProductKind,
+        /// The product's virtual nodes: the assembled main module, the
+        /// script, the compiled template, each style block, and each
+        /// custom block, in stable order.
+        nodes: Vec<CompiledVirtualNode>,
+    },
+    /// The IDE companion projection.
+    Ide(IdeResponse),
+    /// The host analysis payload.
+    Analysis(Box<verter_semantic::analysis::template::TemplateAnalysisSnapshot>),
+}
+
+/// The result of executing one caller-supplied canonical compile request.
+///
+/// Complete-only: every requested product the host can produce is present.
+/// There is no partial arm, no null, and no ensure boolean — a refusal at
+/// any stage fails the whole request through [`CompileRequestFailure`]
+/// and publishes no sibling product.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct CompileRequestResponse {
+    /// The canonical id the request executed against, after alias
+    /// resolution.
+    pub canonical_id: String,
+    /// The compile's diagnostics, deduplicated once across every product
+    /// of the single admitted compile — not per-product sets a consumer
+    /// would have to merge.
+    pub diagnostics: DiagnosticsSnapshot,
+    /// One row per requested product kind, in request order.
+    pub products: Vec<CompiledProduct>,
+}
+
+/// Why executing a caller-supplied canonical compile request failed.
+///
+/// All-or-none: each arm ends the whole request, and none of them can
+/// accompany a published product.
+#[derive(Debug)]
+pub enum CompileRequestFailure {
+    /// The request could not reach execution at all: no source is
+    /// registered under the canonical id, the registered snapshot was
+    /// superseded mid-request, a carrier block's content is unavailable,
+    /// or the registered carrier grammar cannot serve the request's own
+    /// template grammar.
+    Host(HostError),
+    /// The request's framework arm names a framework the registered
+    /// carrier is not. Refused, never compiled under the registered
+    /// carrier instead.
+    FrameworkMismatch {
+        /// The canonical id whose registered carrier was consulted.
+        canonical_id: String,
+        /// The framework the request names.
+        requested: &'static str,
+        /// The framework adapter the source is registered under.
+        registered: String,
+    },
+    /// A demanded product kind the bound host integration produces no
+    /// route for — the public-API and declaration kinds, which both host
+    /// integrations refuse at admission. Never an empty success.
+    UnsupportedProduct {
+        /// The canonical id the request executed against.
+        canonical_id: String,
+        /// The product kind with no host production route.
+        kind: verter_compiler::compile_request::ProductKind,
+        /// The refusal's diagnostics, naming the refused kind.
+        diagnostics: DiagnosticsSnapshot,
+    },
+    /// A product kind was ADMITTED and the compile succeeded, but the
+    /// carrier published no payload for it.
+    ///
+    /// Admission and publication are independent: admission proves the
+    /// capability is registered and the demand is routable, not that the
+    /// execution produced bytes. The template-fact producer, for instance,
+    /// fails closed to no payload when the selected `<template src="...">`
+    /// bytes are not the admitted host block's. Complete-only means the
+    /// whole request fails here, naming the kind that produced nothing —
+    /// never a row carrying a fabricated payload, and never a panic in the
+    /// caller's thread.
+    ProductNotProduced {
+        /// The canonical id the request executed against.
+        canonical_id: String,
+        /// The admitted product kind whose payload is absent.
+        kind: verter_compiler::compile_request::ProductKind,
+        /// The compile's diagnostics up to the missing payload.
+        diagnostics: DiagnosticsSnapshot,
+    },
+    /// The requested runtime surface was refused by the carrier. Carries
+    /// the carrier's own structural code and reason; no sibling product
+    /// published.
+    RuntimeSurfaceRefused {
+        /// The canonical id the request executed against.
+        canonical_id: String,
+        /// Structural refusal code.
+        diagnostic_code: String,
+        /// Human-readable refusal reason.
+        message: String,
+        /// Diagnostics collected before the refusal, plus the refusal's
+        /// own reason.
+        diagnostics: DiagnosticsSnapshot,
+    },
+    /// The request was refused at construction, admission, or execution.
+    /// The diagnostics name the exact rule that refused it — an
+    /// unsupported option and its capability cell, an unproducible demand
+    /// shape, a missing capability, or the post-parse resolution refusal
+    /// — never a generic failure.
+    Refused {
+        /// The canonical id the request executed against.
+        canonical_id: String,
+        /// The refusal's diagnostics.
+        diagnostics: DiagnosticsSnapshot,
+    },
+}
+
 // `TscResponse` and its labeled-rendering selectors live in a PRIVATE child
 // module so the two rendering fields are unreadable even from sibling code in
 // THIS file: Rust privacy is per-module including descendants, so declaring

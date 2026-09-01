@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 
 use verter_language::ParseOptions;
 
-use crate::compile_request::ProductKind;
+use crate::compile_request::{CompileRequest, ProductKind};
 
 /// Marker wrapping a capability implementation that is actually present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,5 +323,28 @@ pub trait FrameworkHostIntegrationBackend<E: FrameworkEpoch, HostE: HostEpoch>:
         &self,
         artifact: &Self::ParseArtifact,
         demand: Self::RuntimeRenderDemand,
+    ) -> Result<Self::CompileAdmission, Self::AdmissionRefusal>;
+
+    /// Issue one admission for a CALLER-SUPPLIED canonical
+    /// [`CompileRequest`] over the already-admitted artifact.
+    ///
+    /// The supplied request is the demand document verbatim: this entry
+    /// never re-derives the product set or the framework options from any
+    /// other vocabulary, and never composes a second request beside the
+    /// one it was handed. It applies exactly the validation the demand
+    /// entries apply to the request they compose — the framework arm must
+    /// match this backend, every demanded product's capability must be
+    /// registered for the artifact's epoch, and a demand the bundle
+    /// execution would serve with a dropped or substituted axis refuses
+    /// typed. A request whose framework arm names another framework is a
+    /// typed refusal, never compiled under this backend's carrier.
+    ///
+    /// The issued admission is the SAME consume-once token the demand
+    /// entries issue, admitting the host-backed multi-product demand, so
+    /// it executes through the one existing product-execution entry.
+    fn admit_canonical_request(
+        &self,
+        artifact: &Self::ParseArtifact,
+        request: CompileRequest,
     ) -> Result<Self::CompileAdmission, Self::AdmissionRefusal>;
 }

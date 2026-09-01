@@ -24,6 +24,14 @@ impl FrameworkHostIntegrationBackend<TestEpoch, ()> for HostCapable {
     fn admit_runtime_render(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
         Err(())
     }
+
+    fn admit_canonical_request(
+        &self,
+        _artifact: &(),
+        _request: verter_compiler::compile_request::CompileRequest,
+    ) -> Result<(), ()> {
+        Err(())
+    }
 }
 
 fn main() {

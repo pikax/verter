@@ -38,8 +38,9 @@ use verter_scheduler::stage::Priority;
 
 use crate::hash::hash_16;
 use crate::types::{
-    CompileCacheMode, CompileProfile, DowngradeReason, HostDiagnostic, HostError, HostSeverity,
-    UpsertRequest, VirtualNodeKind, VirtualQuery,
+    CompileCacheMode, CompileProfile, CompileRequestFailure, CompileRequestResponse,
+    DiagnosticsSnapshot, DowngradeReason, HostDiagnostic, HostError, HostSeverity, UpsertRequest,
+    VirtualNodeKind, VirtualQuery,
 };
 use crate::VerterHost;
 
@@ -393,11 +394,24 @@ impl VerterHost {
     /// one function whose entire purpose is that derivation, not slipping a
     /// literal into a request built somewhere else.
     pub(crate) fn batch_upsert_request(&self, input: &CompileBatchInput) -> UpsertRequest {
+        self.source_registration_request(&input.canonical_id, &input.source)
+    }
+
+    /// The ONE source-registration request every batch route builds.
+    ///
+    /// See [`Self::batch_upsert_request`] for why the language is derived
+    /// here and is not a caller argument: every batch route shares this
+    /// derivation, so a new route cannot introduce a fixed carrier.
+    pub(crate) fn source_registration_request(
+        &self,
+        canonical_id: &str,
+        source: &Arc<str>,
+    ) -> UpsertRequest {
         UpsertRequest {
-            canonical_id: Some(input.canonical_id.clone()),
-            input_id: input.canonical_id.clone(),
-            source: Arc::clone(&input.source),
-            file_language: self.language_classifier().classify(&input.canonical_id),
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: Arc::clone(source),
+            file_language: self.language_classifier().classify(canonical_id),
             aliases: Vec::new(),
         }
     }
@@ -995,5 +1009,164 @@ fn compile_panic_entry(
         requested_mode: effective_mode,
         actual_mode: effective_mode,
         downgrade_reason: None,
+    }
+}
+
+/// One input of a typed batch compile call.
+///
+/// The source carrier rides HERE, exactly once, beside the request. It is
+/// not part of the request and is never copied into it: the batch
+/// registers each canonical's source once, and every request for that
+/// canonical then executes against the one stored snapshot.
+pub struct CompileRequestBatchInput {
+    /// The canonical id this input registers and compiles.
+    pub canonical_id: String,
+    /// This input's source carrier bytes.
+    pub source: Arc<str>,
+    /// The canonical compile request to execute for it.
+    pub request: verter_compiler::compile_request::CompileRequest,
+}
+
+/// Caller-configurable options for a typed batch compile call.
+#[derive(Debug, Clone, Default)]
+pub struct CompileRequestBatchOptions {
+    /// Scheduler priority for the batch's single source-registration
+    /// submission. `None` defaults to [`Priority::Background`] (yields to
+    /// concurrent interactive work).
+    pub priority: Option<Priority>,
+}
+
+/// One entry of a typed batch compile result, at its original input
+/// position.
+pub struct CompileRequestBatchEntry {
+    /// The canonical id this entry's input resolved to.
+    pub canonical_id: String,
+    /// This input's own terminal result. A sum: an entry carries a
+    /// complete response OR a typed failure, never both and never a
+    /// partial mix.
+    pub outcome: Result<CompileRequestResponse, CompileRequestFailure>,
+}
+
+impl VerterHost {
+    /// Execute one canonical compile request per input, over sources this
+    /// call registers.
+    ///
+    /// Returns one entry per input, in the ORIGINAL input order. Each
+    /// canonical's source is registered exactly ONCE for the whole batch,
+    /// and a per-input failure isolates to that input's entry — a sibling
+    /// input compiles normally.
+    ///
+    /// Two inputs may name the same canonical with different requests:
+    /// that is one registration and two executions, not two registrations.
+    /// Two inputs naming the same canonical with DIFFERENT bytes is a
+    /// conflict, and both entries report it — the batch never picks a
+    /// winner.
+    ///
+    /// Each execution goes through [`Self::compile_request`], so the whole
+    /// per-input contract is that entry's: the request is the demand
+    /// document, no profile is built from it, and the result is
+    /// complete-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn compile_request_many(
+        &self,
+        inputs: Vec<CompileRequestBatchInput>,
+        options: CompileRequestBatchOptions,
+    ) -> Vec<CompileRequestBatchEntry> {
+        // No pool, no submission, no upsert for an empty batch.
+        if inputs.is_empty() {
+            return Vec::new();
+        }
+
+        // Boundary canonicalization, for the same reason `compile_many`
+        // does it: the registration key, the execution key, and the
+        // per-canonical error key must be ONE identity, or a caller's
+        // variant spelling desyncs them.
+        let inputs: Vec<CompileRequestBatchInput> = inputs
+            .into_iter()
+            .map(|mut input| {
+                input.canonical_id = self.resolve_alias_or_canonical(&input.canonical_id);
+                input
+            })
+            .collect();
+
+        // ── group + one registration per canonical ──
+        // Grouped in ONE pass. HashMap iteration order is
+        // non-deterministic, but nothing position-sensitive is read from
+        // it: the output order comes from `inputs` below.
+        let mut groups: HashMap<&str, Vec<&CompileRequestBatchInput>> =
+            HashMap::with_capacity(inputs.len());
+        for input in &inputs {
+            groups
+                .entry(input.canonical_id.as_str())
+                .or_default()
+                .push(input);
+        }
+
+        let mut group_errors: HashMap<String, String> = HashMap::new();
+        let mut upsert_requests: Vec<UpsertRequest> = Vec::new();
+        for (canonical_id, group) in &groups {
+            let input = group[0];
+            let conflict = group
+                .iter()
+                .skip(1)
+                .any(|other| other.source.as_bytes() != input.source.as_bytes());
+            if conflict {
+                group_errors.insert(
+                    (*canonical_id).to_string(),
+                    "duplicate canonical_id with conflicting source in batch".to_string(),
+                );
+                continue;
+            }
+            // The request is BUILT first and the skip decision reads the
+            // built request, so a canonical already holding these bytes
+            // under a DIFFERENT language is still re-registered.
+            let request = self.source_registration_request(&input.canonical_id, &input.source);
+            if self.scheduler_registration_differs_from(&request) {
+                upsert_requests.push(request);
+            }
+        }
+
+        // ONE atomic registration batch for the whole call.
+        for outcome in self.upsert_many_with_priority(
+            upsert_requests,
+            options.priority.unwrap_or(Priority::Background),
+        ) {
+            if let Err(error) = outcome.result {
+                group_errors
+                    .entry(outcome.canonical_id)
+                    .or_insert_with(|| format!("upsert failed: {error}"));
+            }
+        }
+
+        // ── execute each input's OWN request, in input order ──
+        // Distinct requests for one canonical are distinct compiles; this
+        // route consults and publishes no compile cache slot, so there is
+        // no result to share between them.
+        inputs
+            .into_iter()
+            .map(|input| {
+                let outcome = match group_errors.get(&input.canonical_id) {
+                    Some(error) => Err(CompileRequestFailure::Refused {
+                        canonical_id: input.canonical_id.clone(),
+                        diagnostics: DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                            severity: HostSeverity::Error,
+                            code: "HOST_BATCH_SOURCE_REGISTRATION_FAILED".to_string(),
+                            message: format!(
+                                "source registration failed for '{}': {error}",
+                                input.canonical_id
+                            ),
+                            arguments: Vec::new(),
+                            span: verter_span::Span::new(0, input.source.len() as u32),
+                        }]),
+                    }),
+                    None => self.compile_request(&input.canonical_id, input.request),
+                };
+                CompileRequestBatchEntry {
+                    canonical_id: input.canonical_id,
+                    outcome,
+                }
+            })
+            .collect()
     }
 }

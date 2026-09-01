@@ -128,3 +128,95 @@ impl CompileProduct {
         }
     }
 }
+
+/// A caller-settable request axis the host bundle execution has no
+/// routing channel for — it would either be dropped (no consumer reads
+/// it) or substituted (a consumer overwrites it with a value derived from
+/// the execution inputs).
+///
+/// Framework-neutral: the axes live on the product requests and on the
+/// request itself, not on either framework's option block, so both host
+/// integrations refuse the same rows through the same reader
+/// ([`unroutable_host_request_axis`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnroutableHostRequestAxis {
+    /// An [`AnalysisProductRequest`] with neither axis set: the product
+    /// would be admitted and then publish nothing, so its row could only
+    /// be reported as an unproduced payload after a successful compile.
+    AnalysisProducesNothing,
+    /// [`RuntimeProductRequest::output_profile`]: no execution consumer.
+    RuntimeOutputProfile,
+    /// [`RuntimeProductRequest::serialization`]: no execution consumer.
+    RuntimeSerialization,
+    /// [`IdeProductRequest::ide_chunk_boundaries`]: the carrier bridge
+    /// SUBSTITUTES this axis with one derived from the selected template
+    /// block, so a caller-stated value never reaches codegen.
+    IdeChunkBoundaries,
+    /// [`IdeProductRequest::output_profile`]: no execution consumer.
+    IdeOutputProfile,
+    /// [`IdeProductRequest::diagnostics`]: no execution consumer.
+    IdeDiagnosticsPresentation,
+    /// [`IdeProductRequest::serialization`]: no execution consumer.
+    IdeSerialization,
+    /// [`super::CompileRequest::semantic_profile`]: read only by the
+    /// standalone route, never by the host bundle execution.
+    SemanticProfile,
+}
+
+/// The one reader for [`UnroutableHostRequestAxis`]: the product-set rows
+/// in request order, then the request-level rows. Both host integrations
+/// call it, so neither can drift on which axes it refuses.
+#[must_use]
+pub fn unroutable_host_request_axis(
+    request: &super::CompileRequest,
+) -> Option<UnroutableHostRequestAxis> {
+    for product in request.products() {
+        let axis = match product {
+            CompileProduct::RuntimeClient(runtime) | CompileProduct::RuntimeServer(runtime) => [
+                (
+                    runtime.output_profile.is_some(),
+                    UnroutableHostRequestAxis::RuntimeOutputProfile,
+                ),
+                (
+                    runtime.serialization.is_some(),
+                    UnroutableHostRequestAxis::RuntimeSerialization,
+                ),
+            ]
+            .into_iter()
+            .find_map(|(present, axis)| present.then_some(axis)),
+            CompileProduct::IdeCompanion(ide) => [
+                (
+                    ide.ide_chunk_boundaries,
+                    UnroutableHostRequestAxis::IdeChunkBoundaries,
+                ),
+                (
+                    ide.output_profile.is_some(),
+                    UnroutableHostRequestAxis::IdeOutputProfile,
+                ),
+                (
+                    ide.diagnostics.is_some(),
+                    UnroutableHostRequestAxis::IdeDiagnosticsPresentation,
+                ),
+                (
+                    ide.serialization.is_some(),
+                    UnroutableHostRequestAxis::IdeSerialization,
+                ),
+            ]
+            .into_iter()
+            .find_map(|(present, axis)| present.then_some(axis)),
+            CompileProduct::Analysis(analysis) => (!analysis.want_script_bindings
+                && !analysis.want_template_data)
+                .then_some(UnroutableHostRequestAxis::AnalysisProducesNothing),
+            // Both kinds are refused as unsupported products before any
+            // axis of theirs could be consulted.
+            CompileProduct::PublicApi(_) | CompileProduct::Declarations(_) => None,
+        };
+        if axis.is_some() {
+            return axis;
+        }
+    }
+    request
+        .semantic_profile()
+        .is_some()
+        .then_some(UnroutableHostRequestAxis::SemanticProfile)
+}

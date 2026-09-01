@@ -19,8 +19,9 @@ pub mod vue;
 
 pub use capability::{CapabilityCell, CapabilityDisposition};
 pub use product::{
-    AnalysisProductRequest, CompileProduct, DeclarationProductRequest, IdeProductRequest,
-    ProductKind, PublicApiProductRequest, RuntimeProductRequest,
+    unroutable_host_request_axis, AnalysisProductRequest, CompileProduct,
+    DeclarationProductRequest, IdeProductRequest, ProductKind, PublicApiProductRequest,
+    RuntimeProductRequest, UnroutableHostRequestAxis,
 };
 pub use svelte::{SvelteCompileRequest, SvelteOption, SvelteOptionAttempt, SvelteOptionClass};
 pub use vue::{VueBackendRequest, VueCompileRequest, VueOption, VueOptionAttempt, VueOptionClass};
@@ -214,6 +215,24 @@ impl CompileRequest {
 
     pub fn filename(&self) -> Option<&str> {
         self.filename.as_deref()
+    }
+
+    /// Bind the carrier file name to the source identity this request
+    /// executes against, when the caller stated none.
+    ///
+    /// `filename` is SOURCE identity, not demand: it names the carrier the
+    /// compile runs over, and it reaches the component name, the scoped
+    /// style hash, and every emitted source map's `sources` entry. A
+    /// caller that hands an execution entry a canonical id has already
+    /// stated that identity, so an unset slot is filled from it rather
+    /// than compiled as an anonymous carrier — which would silently yield
+    /// a different component name, a different scope hash, and maps with
+    /// no source. A caller-stated name always wins; this never overwrites
+    /// one.
+    pub fn bind_default_filename(&mut self, canonical_id: &str) {
+        if self.filename.is_none() {
+            self.filename = Some(canonical_id.to_string());
+        }
     }
 
     pub fn component_id(&self) -> Option<&str> {

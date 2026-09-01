@@ -140,6 +140,14 @@ impl FrameworkHostIntegrationBackend<TestEpoch, SessionHostEpoch> for HostCapabl
     fn admit_runtime_render(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
         Err(())
     }
+
+    fn admit_canonical_request(
+        &self,
+        _artifact: &(),
+        _request: verter_compiler::compile_request::CompileRequest,
+    ) -> Result<(), ()> {
+        Err(())
+    }
 }
 
 impl FrameworkHostIntegrationBackend<TestEpoch, HostEpochA> for HostCapable {
@@ -156,6 +164,14 @@ impl FrameworkHostIntegrationBackend<TestEpoch, HostEpochA> for HostCapable {
     fn admit_runtime_render(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
         Err(())
     }
+
+    fn admit_canonical_request(
+        &self,
+        _artifact: &(),
+        _request: verter_compiler::compile_request::CompileRequest,
+    ) -> Result<(), ()> {
+        Err(())
+    }
 }
 
 impl FrameworkHostIntegrationBackend<TestEpoch, HostEpochB> for HostCapable {
@@ -170,6 +186,14 @@ impl FrameworkHostIntegrationBackend<TestEpoch, HostEpochB> for HostCapable {
     }
 
     fn admit_runtime_render(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn admit_canonical_request(
+        &self,
+        _artifact: &(),
+        _request: verter_compiler::compile_request::CompileRequest,
+    ) -> Result<(), ()> {
         Err(())
     }
 }

@@ -103,6 +103,17 @@ pub use virtual_file_pipeline::{
 #[cfg(test)]
 pub(crate) use virtual_file_pipeline::CompileEntryOutcome;
 
+// The caller-supplied canonical-request execution route: the session
+// entry, its lane, and the virtual-node publication both lanes share.
+#[cfg(not(target_arch = "wasm32"))]
+mod compile_request_execute;
+
+// The canonical-request compile seam's own tests, housed with the route
+// they drive.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "../compile_request_seam_tests.rs"]
+mod compile_request_seam_tests;
+
 // The bound host-backed compile lane's own tests, housed with the routes
 // they drive (same `#[path]` pattern as the sibling suites below).
 #[cfg(all(test, not(target_arch = "wasm32")))]

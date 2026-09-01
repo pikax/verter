@@ -418,6 +418,11 @@ node_id = "CCA1O3E"
 commit_message = "test(*): check the committed carrier fixtures against the built wasm host"
 commit_date = "2026-09-01T09:00:00+01:00"
 
+[[implemented]]
+node_id = "CCA1O1B"
+commit_message = "feat(*): execute a caller-supplied canonical compile request"
+commit_date = "2026-09-01T18:00:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

@@ -224,10 +224,10 @@ fn supplied_style_vbind_vars_are_hydrated_for_the_compile_profile() {
     let source_data = source_snapshot
         .downcast_data::<crate::host_executor::HostSourceData>()
         .expect("source snapshot must carry host data");
-    let hydrated = host.capture_compiler_style_content_for_profile(
+    let hydrated = host.capture_compiler_style_content(
         CANONICAL,
         &source_data.parse.style_analyses,
-        &profile,
+        crate::block_content::SuppliedBlockScope::Profile(&profile),
     );
     assert!(hydrated.usage_complete);
     assert_eq!(hydrated.analyses.len(), 1);

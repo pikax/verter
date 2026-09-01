@@ -21,8 +21,9 @@ use std::sync::Arc;
 use verter_language::{FrameworkAdapterId, LanguageId, ParseKey};
 
 use crate::compile_request::{
-    CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest, ProductKind,
-    RuntimeProductRequest, SvelteOptionAttempt,
+    unroutable_host_request_axis, CompileProduct, CompileRequest, CompileRequestError,
+    FrameworkCompileRequest, ProductKind, RuntimeProductRequest, SvelteOptionAttempt,
+    UnroutableHostRequestAxis,
 };
 use crate::standalone::registered_runtime_for;
 use crate::svelte::carrier::{svelte_carrier_bundle, SvelteCarrierCompiler};
@@ -183,6 +184,10 @@ pub enum SvelteHostUnproducibleDemand {
     /// token for the foreign namespace, so honoring the demand would
     /// silently substitute the html namespace.
     ForeignNamespace,
+    /// A framework-NEUTRAL request axis the bundle execution would drop or
+    /// substitute. These rows live on the product requests and on the
+    /// request itself, so both host integrations refuse them identically.
+    UnroutableAxis(UnroutableHostRequestAxis),
 }
 
 /// Which demand an admission was issued for. Value-level demand
@@ -438,6 +443,35 @@ impl SvelteHostIntegrationBackend {
             force_js,
         )
         .map_err(SvelteHostAdmissionRefusal::RequestConstructionRefused)?;
+        self.issue_admitted(demand, request, parse, semantic)
+    }
+
+    /// The one issuance tail every entry point shares: producibility
+    /// validation over the CANONICAL request, then the admission token.
+    ///
+    /// Validating here rather than over each entry's own demand vocabulary
+    /// is what lets a caller-supplied canonical request reach exactly the
+    /// same refusals as a composed one — there is one producibility
+    /// authority, reading the one document the execution actually consumes.
+    fn issue_admitted(
+        &self,
+        demand: SvelteAdmittedDemand,
+        request: CompileRequest,
+        parse: SvelteParseAdmission,
+        semantic: SvelteSemanticAdmission,
+    ) -> Result<SvelteCompileAdmission, SvelteHostAdmissionRefusal> {
+        let svelte =
+            request
+                .svelte()
+                .ok_or(SvelteHostAdmissionRefusal::RequestConstructionRefused(
+                    CompileRequestError::FrameworkMismatch {
+                        expected: "svelte",
+                        actual: "vue",
+                    },
+                ))?;
+        refuse_unproducible_products(request.products())?;
+        refuse_unroutable_axes(&request)?;
+        refuse_unproducible_svelte_options(svelte)?;
         Ok(SvelteCompileAdmission {
             demand,
             request,
@@ -447,6 +481,47 @@ impl SvelteHostIntegrationBackend {
             _parse: parse,
             _semantic: semantic,
         })
+    }
+
+    /// Capability presence for every demanded product, in request order.
+    /// Shared by the demand entries and the caller-supplied-request entry
+    /// so the three cannot drift on which capability a product requires.
+    fn refuse_unavailable_capabilities(
+        artifact: &FrameworkParseArtifact,
+        products: &[CompileProduct],
+    ) -> Result<(), SvelteHostAdmissionRefusal> {
+        for product in products {
+            let required = match product.kind() {
+                ProductKind::RuntimeClient | ProductKind::RuntimeServer => {
+                    registered_runtime_for(artifact.adapter_id(), artifact.epoch())
+                        .is_some()
+                        .then_some(())
+                        .ok_or(CatalogCapability::Runtime)
+                }
+                ProductKind::IdeCompanion => {
+                    registered_projection_for(artifact.adapter_id(), artifact.epoch())
+                        .is_some()
+                        .then_some(())
+                        .ok_or(CatalogCapability::Projection)
+                }
+                ProductKind::Analysis => {
+                    registered_semantic_for(artifact.adapter_id(), artifact.epoch())
+                        .is_some()
+                        .then_some(())
+                        .ok_or(CatalogCapability::Semantic)
+                }
+                kind @ (ProductKind::PublicApi | ProductKind::Declarations) => {
+                    return Err(SvelteHostAdmissionRefusal::UnsupportedProduct(kind));
+                }
+            };
+            if let Err(capability) = required {
+                return Err(SvelteHostAdmissionRefusal::CapabilityUnavailable {
+                    product: product.kind(),
+                    capability,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Compile a host-backed multi-product admission through the shared
@@ -557,39 +632,13 @@ impl FrameworkHostIntegrationBackend<SvelteSfc5, NativeHostEpoch> for SvelteHost
         demand: SvelteHostMultiProductDemand,
     ) -> Result<SvelteCompileAdmission, SvelteHostAdmissionRefusal> {
         let (parse, semantic) = self.compose_admissions(artifact)?;
+        // The shared issuance tail re-checks this over the composed
+        // request. Checking the DEMAND first keeps the refusal a caller
+        // sees when a demand is both unproducible and carries an
+        // unsupported option: the product-set refusal wins, as it always
+        // has, rather than the option refusal request construction raises.
         refuse_unproducible_products(&demand.products)?;
-        refuse_unproducible_svelte_options(&demand.svelte_options)?;
-        for product in &demand.products {
-            let required = match product.kind() {
-                ProductKind::RuntimeClient | ProductKind::RuntimeServer => {
-                    registered_runtime_for(artifact.adapter_id(), artifact.epoch())
-                        .is_some()
-                        .then_some(())
-                        .ok_or(CatalogCapability::Runtime)
-                }
-                ProductKind::IdeCompanion => {
-                    registered_projection_for(artifact.adapter_id(), artifact.epoch())
-                        .is_some()
-                        .then_some(())
-                        .ok_or(CatalogCapability::Projection)
-                }
-                ProductKind::Analysis => {
-                    registered_semantic_for(artifact.adapter_id(), artifact.epoch())
-                        .is_some()
-                        .then_some(())
-                        .ok_or(CatalogCapability::Semantic)
-                }
-                kind @ (ProductKind::PublicApi | ProductKind::Declarations) => {
-                    return Err(SvelteHostAdmissionRefusal::UnsupportedProduct(kind));
-                }
-            };
-            if let Err(capability) = required {
-                return Err(SvelteHostAdmissionRefusal::CapabilityUnavailable {
-                    product: product.kind(),
-                    capability,
-                });
-            }
-        }
+        Self::refuse_unavailable_capabilities(artifact, &demand.products)?;
         self.issue(
             SvelteAdmittedDemand::HostMultiProduct,
             demand.products,
@@ -608,7 +657,6 @@ impl FrameworkHostIntegrationBackend<SvelteSfc5, NativeHostEpoch> for SvelteHost
         demand: SvelteHostRuntimeRenderDemand,
     ) -> Result<SvelteCompileAdmission, SvelteHostAdmissionRefusal> {
         let (parse, semantic) = self.compose_admissions(artifact)?;
-        refuse_unproducible_svelte_options(&demand.svelte_options)?;
         // Demand-specific validation: the render lane requires ONLY the
         // runtime capability — projection is never consulted.
         if registered_runtime_for(artifact.adapter_id(), artifact.epoch()).is_none() {
@@ -633,6 +681,31 @@ impl FrameworkHostIntegrationBackend<SvelteSfc5, NativeHostEpoch> for SvelteHost
             demand.filename,
             demand.is_production,
             demand.force_js,
+            parse,
+            semantic,
+        )
+    }
+
+    fn admit_canonical_request(
+        &self,
+        artifact: &FrameworkParseArtifact,
+        request: CompileRequest,
+    ) -> Result<SvelteCompileAdmission, SvelteHostAdmissionRefusal> {
+        let (parse, semantic) = self.compose_admissions(artifact)?;
+        // Same order as the demand entries: the product-set refusal wins
+        // over a capability refusal when a request is both unproducible and
+        // demands an unregistered capability. The shared issuance tail
+        // re-checks both over the same document; a request whose framework
+        // arm is not this backend's skips straight to the tail's typed
+        // mismatch.
+        if request.svelte().is_some() {
+            refuse_unproducible_products(request.products())?;
+            refuse_unroutable_axes(&request)?;
+        }
+        Self::refuse_unavailable_capabilities(artifact, request.products())?;
+        self.issue_admitted(
+            SvelteAdmittedDemand::HostMultiProduct,
+            request,
             parse,
             semantic,
         )
@@ -756,14 +829,33 @@ fn refuse_unproducible_products(
     Ok(())
 }
 
-/// Producibility validation over the demanded SVELTE OPTIONS: every axis
-/// [`derive_admitted_runtime_options`] cannot route into the bundle
-/// execution refuses at issuance instead of being silently dropped or
-/// substituted. (The six unconditionally-unsupported option rows plus the
-/// `SVELTE-MODULE`-gated pair refuse separately, at canonical request
+/// Producibility validation over the request's FRAMEWORK-NEUTRAL axes:
+/// every caller-settable product/request axis the bundle execution has no
+/// routing channel for refuses at issuance rather than being silently
+/// dropped or substituted. The rows and their order are the shared
+/// [`unroutable_host_request_axis`] reader's, so both host integrations
+/// refuse identically.
+fn refuse_unroutable_axes(request: &CompileRequest) -> Result<(), SvelteHostAdmissionRefusal> {
+    match unroutable_host_request_axis(request) {
+        Some(axis) => Err(SvelteHostAdmissionRefusal::UnproducibleDemand(
+            SvelteHostUnproducibleDemand::UnroutableAxis(axis),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Producibility validation over the admitted request's SVELTE OPTIONS:
+/// every axis [`derive_admitted_runtime_options`] cannot route into the
+/// bundle execution refuses at issuance instead of being silently dropped
+/// or substituted. (The six unconditionally-unsupported option rows plus
+/// the `SVELTE-MODULE`-gated pair refuse separately, at canonical request
 /// construction.) Deterministic declaration order.
+///
+/// Reads the CANONICAL request rather than an option attempt, so a
+/// caller-supplied request and a composed one are held to the identical
+/// field set by the identical code.
 fn refuse_unproducible_svelte_options(
-    options: &SvelteOptionAttempt,
+    options: &crate::compile_request::SvelteCompileRequest,
 ) -> Result<(), SvelteHostAdmissionRefusal> {
     use crate::compile_request::svelte::SvelteNamespaceRequest;
     let unroutable: [(bool, SvelteHostUnproducibleDemand); 4] = [
