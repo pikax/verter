@@ -393,6 +393,11 @@ node_id = "CCA1O2H"
 commit_message = "fix(napi): refuse a request key stated as undefined"
 commit_date = "2026-09-01T00:56:27+01:00"
 
+[[implemented]]
+node_id = "CPER0M"
+commit_message = "fix(napi): publish a coherent memory-audit peak and live-bytes pair"
+commit_date = "2026-09-01T01:30:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

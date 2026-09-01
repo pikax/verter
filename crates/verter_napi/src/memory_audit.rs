@@ -9,7 +9,14 @@
 //!   counter updates, no thread-local access, no locks, no env reads.
 //! - **Enabled:** allocation/deallocation counts, total allocated bytes,
 //!   live bytes, and a resettable live-bytes high-water mark are tracked
-//!   with relaxed atomics.
+//!   with lock-free atomics. Live bytes and the high-water mark are two
+//!   separate counters advanced in two steps, so the reader — not the
+//!   record path — is what makes the reported pair coherent: every
+//!   snapshot satisfies `peakLiveBytes >= liveBytes`. Re-arming the mark
+//!   carries in every block still live when it completes; a block
+//!   allocated AND freed entirely inside the re-arm is a transient that
+//!   two separate counters cannot recover, and audit windows are driven
+//!   by a single JS caller, so that case is not a live concern.
 //! - **Enabled + sampling armed (`sampleEvery = N`):** every Nth
 //!   allocating call additionally captures an UNRESOLVED backtrace into a
 //!   bounded call-site table; symbols resolve lazily at
@@ -37,6 +44,10 @@ use napi_derive::napi;
 ///
 /// All values are reported as `f64` for plain JS `number` interop; the
 /// magnitudes involved (audit windows, bytes) stay far below 2^53.
+///
+/// The pair `(peakLiveBytes, liveBytes)` is COHERENT: every returned
+/// snapshot satisfies `peakLiveBytes >= liveBytes`, whatever the
+/// allocator was doing on other threads while it was taken.
 #[napi(object)]
 pub struct NapiMemoryAuditSnapshot {
     /// Total allocating calls (`alloc` / `alloc_zeroed` / `realloc`)
@@ -54,6 +65,14 @@ pub struct NapiMemoryAuditSnapshot {
     pub liveBytes: f64,
     /// High-water mark of `liveBytes` since enable or the last
     /// `memoryAuditResetHighWater()` call.
+    ///
+    /// ALWAYS at least the `liveBytes` of the same snapshot. The reader
+    /// folds the live value it observed into the mark, so this holds even
+    /// when the read lands between the record path's two publication
+    /// steps. The reported value is always a live-bytes total the process
+    /// actually reached — normally one from the current window, though a
+    /// read whose fold lands after a concurrent re-arm can carry a value
+    /// over from the preceding one.
     pub peakLiveBytes: f64,
 }
 
@@ -154,7 +173,13 @@ mod counting {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         ALLOCATED_BYTES_TOTAL.fetch_add(bytes as u64, Ordering::Relaxed);
         let live = LIVE_BYTES.fetch_add(bytes as i64, Ordering::Relaxed) + bytes as i64;
-        PEAK_LIVE_BYTES.fetch_max(live, Ordering::Relaxed);
+        // `Release` publishes the live value that produced this mark: a thread
+        // that acquire-reads the mark is then guaranteed to also observe the
+        // `fetch_add` above. It is defence in depth, not the load-bearing
+        // part — the re-arm's guarantee comes from re-reading live through a
+        // read-modify-write, which needs no pairing — but it keeps the
+        // re-arm's case analysis local to that function.
+        PEAK_LIVE_BYTES.fetch_max(live, Ordering::Release);
         super::sampling::maybe_sample(bytes);
     }
 
@@ -204,21 +229,114 @@ mod counting {
     #[global_allocator]
     static GLOBAL: CountingAllocator = CountingAllocator;
 
+    /// Point-in-time read of the counters.
+    ///
+    /// The record path advances live bytes and the high-water mark in two
+    /// separate atomic steps, so a reader can land between them and find a
+    /// mark the live value has already overtaken. Reading the two counters
+    /// independently — in either order — therefore cannot produce a coherent
+    /// pair: it can only make the gap rarer, never impossible.
+    ///
+    /// Instead the observed live value is folded INTO the mark and the pair is
+    /// reported as `(max(mark, live), live)`. That satisfies
+    /// `peakLiveBytes >= liveBytes` by construction, for every interleaving,
+    /// with no window at all — the relationship is arithmetic on two values
+    /// this thread already holds, not a bet on how the two loads interleaved.
+    /// The reported mark is still a value live bytes actually reached: either
+    /// an earlier high-water mark, or the live value published alongside it.
+    ///
+    /// The fold is written back, so reading MUTATES: it heals the stored mark
+    /// at the instant of the read, and the next allocation reopens the gap
+    /// again between its `fetch_add` and its `fetch_max`. The write-back needs
+    /// no release ordering — nothing precedes it here but loads, so it has
+    /// nothing to publish, and it stays inside any release sequence the record
+    /// path headed.
     pub(super) fn snapshot() -> super::NapiMemoryAuditSnapshot {
+        let alloc_count = ALLOC_COUNT.load(Ordering::Relaxed);
+        let dealloc_count = DEALLOC_COUNT.load(Ordering::Relaxed);
+        let allocated_bytes_total = ALLOCATED_BYTES_TOTAL.load(Ordering::Relaxed);
+        let live = LIVE_BYTES.load(Ordering::Relaxed);
+        let peak = PEAK_LIVE_BYTES.fetch_max(live, Ordering::Relaxed).max(live);
         super::NapiMemoryAuditSnapshot {
-            allocCount: ALLOC_COUNT.load(Ordering::Relaxed) as f64,
-            deallocCount: DEALLOC_COUNT.load(Ordering::Relaxed) as f64,
-            allocatedBytesTotal: ALLOCATED_BYTES_TOTAL.load(Ordering::Relaxed) as f64,
-            liveBytes: LIVE_BYTES.load(Ordering::Relaxed) as f64,
-            peakLiveBytes: PEAK_LIVE_BYTES.load(Ordering::Relaxed) as f64,
+            allocCount: alloc_count as f64,
+            deallocCount: dealloc_count as f64,
+            allocatedBytesTotal: allocated_bytes_total as f64,
+            liveBytes: live as f64,
+            peakLiveBytes: peak as f64,
         }
     }
 
     /// Re-arm the high-water mark at the current live-bytes level so the
-    /// next window measures its own peak. Best-effort under concurrency
-    /// (audit windows are driven by a single JS caller).
+    /// next window measures its own peak.
+    ///
+    /// What the call guarantees, exactly: when it returns, the mark is at
+    /// least the live-bytes total its trailing fold observed, so every block
+    /// still live at that point is inside the new window.
+    ///
+    /// It does NOT guarantee that the new window's mark reaches every height
+    /// live bytes touched while the re-arm ran. A block allocated AND freed
+    /// entirely inside the re-arm raises live only transiently: its own
+    /// `fetch_max` can no-op against the not-yet-lowered pre-reset mark —
+    /// leaving nothing for the exchange below to detect — and by the time the
+    /// fold reads live the block is already gone, so its height is lost.
+    /// Recovering it would mean carrying live bytes and the mark in ONE
+    /// atomic, updated together on the allocator hot path; this module does
+    /// not make that trade. Audit windows are driven by a single JS caller,
+    /// so a re-arm concurrent with allocation is already the exceptional case.
+    ///
+    /// Within that guarantee, this cannot be a `PEAK.store(LIVE.load())`. The
+    /// counters are separate atomics, so a plain load/store pair has two ways
+    /// to drop a still-live block out of the new window: it can read a live
+    /// value that predates an allocation the mark has already absorbed and
+    /// then overwrite that allocation's height, and it can overwrite a mark an
+    /// allocation raised between the load and the store. The exchange loop
+    /// closes both, and the trailing fold covers the third case:
+    ///
+    /// - the live value is read with a read-modify-write, which by definition
+    ///   returns the last value in `LIVE_BYTES`' modification order, so the
+    ///   new baseline can never be a stale live value;
+    /// - the mark is replaced with `compare_exchange`, so an allocation that
+    ///   raised it between the read and the exchange forces a retry against
+    ///   the fresher mark instead of being clobbered;
+    /// - the trailing `fetch_max` re-reads live through the same
+    ///   read-modify-write, so a still-live allocation whose own `fetch_max`
+    ///   no-opped against the pre-reset mark still enters the new window. This
+    ///   fold is what actually carries the guarantee: an RMW against
+    ///   `LIVE_BYTES`' modification order needs no pairing with the record
+    ///   path to be current.
+    ///
+    /// The loop is lock-free rather than bounded: an exchange fails only when
+    /// another thread changed the mark, so every failure is another thread's
+    /// progress. The mark does not move only upward — this function lowers it,
+    /// and a fresh epoch stores zero — so there is no monotonic bound to
+    /// appeal to.
     pub(super) fn reset_high_water() {
-        PEAK_LIVE_BYTES.store(LIVE_BYTES.load(Ordering::Relaxed), Ordering::Relaxed);
+        let mut mark = PEAK_LIVE_BYTES.load(Ordering::Acquire);
+        loop {
+            let live = current_live_bytes();
+            match PEAK_LIVE_BYTES.compare_exchange(mark, live, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(current) => mark = current,
+            }
+        }
+        PEAK_LIVE_BYTES.fetch_max(current_live_bytes(), Ordering::Release);
+    }
+
+    /// Live bytes read as a read-modify-write rather than a load: an RMW
+    /// always reads the last value in the counter's modification order, so the
+    /// caller cannot act on a live value an already-recorded allocation has
+    /// superseded. Only the high-water re-arm needs this; the allocator hot
+    /// path never calls it.
+    ///
+    /// The zero addend is the cheapest way to spell that RMW, and `AcqRel` is
+    /// chosen because release-or-stronger is the one class LLVM's
+    /// idempotent-RMW fold will not rewrite into a plain load. On the pinned
+    /// toolchain no ordering is folded today, so that choice guards against a
+    /// future optimiser rather than describing a current one. Keep it an RMW.
+    #[inline]
+    fn current_live_bytes() -> i64 {
+        LIVE_BYTES.fetch_add(0, Ordering::AcqRel)
     }
 
     /// Fresh-epoch reset, run on the disabled→enabled transition.
@@ -226,8 +344,19 @@ mod counting {
         ALLOC_COUNT.store(0, Ordering::Relaxed);
         DEALLOC_COUNT.store(0, Ordering::Relaxed);
         ALLOCATED_BYTES_TOTAL.store(0, Ordering::Relaxed);
-        LIVE_BYTES.store(0, Ordering::Relaxed);
+        // Clearing is safe because of WHERE this runs, not because of the
+        // order of these two stores: `runtime::enable` calls it on the
+        // false→true transition only, BEFORE the gate is switched on, so in
+        // the ordinary case no record call is in flight against the counters
+        // being cleared. That check-then-act is not atomic, so two concurrent
+        // enables can both clear; the fold below is what makes even that
+        // coherent. Both
+        // stores are relaxed and target different atomics, so nothing forces
+        // an observer to see them in this order — the mark-then-live sequence
+        // is defence in depth, not a closed window — and if a straggler ever
+        // did land, `snapshot`'s fold keeps the reported pair coherent anyway.
         PEAK_LIVE_BYTES.store(0, Ordering::Relaxed);
+        LIVE_BYTES.store(0, Ordering::Relaxed);
     }
 }
 
@@ -580,6 +709,10 @@ pub fn memory_audit_enable(options: Option<NapiMemoryAuditEnableOptions>) -> boo
 
 /// Return the current allocator counters, or `null` while the runtime
 /// audit gate is disabled (the default — one cached branch of overhead).
+///
+/// Reading MUTATES: `peakLiveBytes` is the stored high-water mark folded
+/// with the `liveBytes` of the same read, and that fold is written back,
+/// so a snapshot can advance the mark it reports.
 #[napi]
 pub fn memory_audit_snapshot() -> Option<NapiMemoryAuditSnapshot> {
     runtime::ensure_env_init();
@@ -589,8 +722,12 @@ pub fn memory_audit_snapshot() -> Option<NapiMemoryAuditSnapshot> {
     Some(counting::snapshot())
 }
 
-/// Reset the live-bytes high-water mark to the current live-bytes level.
-/// Returns `false` while the runtime audit gate is disabled.
+/// Reset the live-bytes high-water mark to the current live-bytes level,
+/// starting a fresh measurement window. Every block still live when the
+/// call returns is carried into the new window rather than dropped from
+/// it; a block allocated and freed entirely while the re-arm runs can
+/// still be missed (see `counting::reset_high_water`). Returns `false`
+/// while the runtime audit gate is disabled.
 #[napi]
 pub fn memory_audit_reset_high_water() -> bool {
     runtime::ensure_env_init();
@@ -617,468 +754,6 @@ pub fn memory_audit_sites(top_k: u32) -> Option<String> {
     sampling::sites_json(top_k)
 }
 
-/// Shared serialization + gate windows for the memory-audit tests. The
-/// runtime gate, counters, and site table are process-global, so every
-/// test that touches them serialises on one mutex and restores the
-/// disabled state on drop.
 #[cfg(test)]
-mod audit_test_support {
-    use std::sync::{Mutex, MutexGuard, PoisonError};
-
-    use super::runtime;
-
-    static AUDIT_TEST_SERIAL: Mutex<()> = Mutex::new(());
-
-    fn serial_guard() -> MutexGuard<'static, ()> {
-        AUDIT_TEST_SERIAL
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Serialised window with the gate forced OFF.
-    pub(super) struct DisabledWindow {
-        _serial: MutexGuard<'static, ()>,
-    }
-
-    impl DisabledWindow {
-        pub(super) fn acquire() -> Self {
-            let serial = serial_guard();
-            runtime::disable_for_tests();
-            Self { _serial: serial }
-        }
-    }
-
-    impl Drop for DisabledWindow {
-        fn drop(&mut self) {
-            runtime::disable_for_tests();
-        }
-    }
-
-    /// Serialised window with the audit ENABLED through the production
-    /// enable path (fresh epoch) and sampling armed at `interval`
-    /// (0 = counters only). Disabled again on drop.
-    pub(super) struct EnabledWindow {
-        _serial: MutexGuard<'static, ()>,
-    }
-
-    impl EnabledWindow {
-        pub(super) fn arm(interval: usize) -> Self {
-            let serial = serial_guard();
-            runtime::disable_for_tests();
-            super::memory_audit_enable(Some(super::NapiMemoryAuditEnableOptions {
-                sampleEvery: Some(interval as u32),
-            }));
-            Self { _serial: serial }
-        }
-    }
-
-    impl Drop for EnabledWindow {
-        fn drop(&mut self) {
-            runtime::disable_for_tests();
-        }
-    }
-}
-
-/// Disabled contract (runtime gate off — the default): the exports stay
-/// present but advertise a disabled audit (`null` snapshot, `false`
-/// reset, `null` sites), and `memoryAuditEnable()` flips the runtime
-/// gate on with fresh-epoch counters.
-#[cfg(test)]
-mod disabled_contract_tests {
-    use super::*;
-
-    #[test]
-    fn snapshot_reset_and_sites_advertise_disabled_until_enabled() {
-        let _window = audit_test_support::DisabledWindow::acquire();
-        assert!(
-            memory_audit_snapshot().is_none(),
-            "disabled: memoryAuditSnapshot() must return null so callers \
-             can detect that the runtime audit gate is off"
-        );
-        assert!(
-            !memory_audit_reset_high_water(),
-            "disabled: memoryAuditResetHighWater() must return false"
-        );
-        assert!(
-            memory_audit_sites(50).is_none(),
-            "disabled: memoryAuditSites() must return null"
-        );
-    }
-
-    #[test]
-    fn enable_arms_counters_and_optional_sampling_with_a_fresh_epoch() {
-        let _window = audit_test_support::DisabledWindow::acquire();
-        assert!(
-            memory_audit_enable(Some(NapiMemoryAuditEnableOptions {
-                sampleEvery: Some(5),
-            })),
-            "memoryAuditEnable must report the audit as enabled"
-        );
-        let snapshot =
-            memory_audit_snapshot().expect("enabled: memoryAuditSnapshot() must return counters");
-        // Fresh epoch: enabling resets the counters, so totals reflect
-        // only post-enable activity (a tiny number of allocations can
-        // land between the reset and this snapshot).
-        assert!(
-            snapshot.allocatedBytesTotal < (64 * 1024 * 1024) as f64,
-            "enable must start a fresh counter epoch (allocatedBytesTotal \
-             {} should be near zero right after enabling)",
-            snapshot.allocatedBytesTotal
-        );
-        // Cleanup happens via the window drop.
-    }
-}
-
-#[cfg(test)]
-mod counter_tests {
-    use std::hint::black_box;
-
-    use super::*;
-
-    const PROBE_BYTES: usize = 128 * 1024 * 1024;
-
-    #[test]
-    fn allocations_and_deallocations_move_counters() {
-        let _window = audit_test_support::EnabledWindow::arm(0);
-
-        let before = memory_audit_snapshot().expect("enabled audit must snapshot");
-
-        let probe = black_box(vec![0u8; PROBE_BYTES]);
-        let held = memory_audit_snapshot().expect("enabled audit must snapshot");
-        assert!(
-            held.allocCount > before.allocCount,
-            "an allocation must advance allocCount ({} -> {})",
-            before.allocCount,
-            held.allocCount
-        );
-        assert!(
-            held.allocatedBytesTotal >= before.allocatedBytesTotal + PROBE_BYTES as f64,
-            "allocatedBytesTotal must grow by at least the probe size \
-             ({} -> {}, probe {PROBE_BYTES})",
-            before.allocatedBytesTotal,
-            held.allocatedBytesTotal
-        );
-        assert!(
-            held.liveBytes > before.liveBytes,
-            "liveBytes must grow while the probe is held ({} -> {})",
-            before.liveBytes,
-            held.liveBytes
-        );
-        assert!(
-            held.peakLiveBytes >= held.liveBytes,
-            "peakLiveBytes is a high-water mark and can never trail liveBytes \
-             (peak {}, live {})",
-            held.peakLiveBytes,
-            held.liveBytes
-        );
-
-        drop(black_box(probe));
-        let after = memory_audit_snapshot().expect("enabled audit must snapshot");
-        assert!(
-            after.deallocCount > held.deallocCount,
-            "dropping the probe must advance deallocCount ({} -> {})",
-            held.deallocCount,
-            after.deallocCount
-        );
-        assert!(
-            after.liveBytes <= held.liveBytes - (PROBE_BYTES / 2) as f64,
-            "dropping the {PROBE_BYTES}-byte probe must shrink liveBytes \
-             substantially ({} -> {})",
-            held.liveBytes,
-            after.liveBytes
-        );
-        assert!(
-            after.allocatedBytesTotal >= held.allocatedBytesTotal,
-            "allocatedBytesTotal is monotonic ({} -> {})",
-            held.allocatedBytesTotal,
-            after.allocatedBytesTotal
-        );
-    }
-
-    #[test]
-    fn reset_high_water_drops_peak_to_current_live_and_rearms() {
-        let _window = audit_test_support::EnabledWindow::arm(0);
-
-        // Raise the high-water mark far above steady-state live bytes,
-        // then release the spike.
-        let spike = black_box(vec![0u8; PROBE_BYTES]);
-        drop(black_box(spike));
-
-        let peaked = memory_audit_snapshot().expect("enabled audit must snapshot");
-        assert!(
-            peaked.peakLiveBytes >= peaked.liveBytes + (PROBE_BYTES / 2) as f64,
-            "precondition: after the spike is freed, peak ({}) must sit far \
-             above live ({})",
-            peaked.peakLiveBytes,
-            peaked.liveBytes
-        );
-
-        assert!(
-            memory_audit_reset_high_water(),
-            "enabled audit: memoryAuditResetHighWater() must return true"
-        );
-
-        let reset = memory_audit_snapshot().expect("enabled audit must snapshot");
-        assert!(
-            reset.peakLiveBytes < peaked.peakLiveBytes - (PROBE_BYTES / 2) as f64,
-            "reset must drop the high-water mark from the pre-reset peak \
-             ({} -> {})",
-            peaked.peakLiveBytes,
-            reset.peakLiveBytes
-        );
-        // Post-reset the mark tracks current live bytes (small slack for
-        // sibling-thread churn between the reset and this snapshot).
-        assert!(
-            reset.peakLiveBytes <= reset.liveBytes + (16 * 1024 * 1024) as f64,
-            "reset must pin the high-water mark near current live bytes \
-             (peak {}, live {})",
-            reset.peakLiveBytes,
-            reset.liveBytes
-        );
-
-        // The mark re-arms: a fresh spike raises it again.
-        let respike = black_box(vec![0u8; PROBE_BYTES]);
-        let rearmed = memory_audit_snapshot().expect("enabled audit must snapshot");
-        drop(black_box(respike));
-        assert!(
-            rearmed.peakLiveBytes >= reset.peakLiveBytes + (PROBE_BYTES / 2) as f64,
-            "a post-reset spike must advance the high-water mark again \
-             ({} -> {})",
-            reset.peakLiveBytes,
-            rearmed.peakLiveBytes
-        );
-    }
-}
-
-/// Sampled allocation-site attribution. Arming goes through the
-/// production `memoryAuditEnable` path; every window serialises on the
-/// shared mutex and disarms on drop so armed intervals never leak into
-/// sibling tests.
-#[cfg(test)]
-mod sampling_tests {
-    use std::hint::black_box;
-
-    use super::*;
-
-    /// Named, never-inlined allocation site the tests look for by symbol
-    /// name after lazy read-time resolution. Returns the allocations so
-    /// the optimiser cannot elide them.
-    #[inline(never)]
-    fn allocate_probe_site_for_sampling(iterations: usize) -> Vec<Vec<u8>> {
-        let mut keep = Vec::new();
-        for _ in 0..iterations {
-            keep.push(black_box(vec![0xABu8; 4096]));
-        }
-        keep
-    }
-
-    fn parse_sites(json: &str) -> Vec<serde_json::Value> {
-        let value: serde_json::Value =
-            serde_json::from_str(json).expect("memoryAuditSites must return valid JSON");
-        value
-            .as_array()
-            .expect("memoryAuditSites must return a JSON array")
-            .clone()
-    }
-
-    #[test]
-    fn sites_are_null_while_sampling_is_not_armed() {
-        let _window = audit_test_support::EnabledWindow::arm(0);
-        assert!(
-            memory_audit_sites(50).is_none(),
-            "audit enabled with sampling NOT armed: memoryAuditSites() \
-             must return null (callers treat it as 'no site data')"
-        );
-    }
-
-    #[test]
-    fn sampling_records_named_allocation_site_with_counts_and_bytes() {
-        let window = audit_test_support::EnabledWindow::arm(1);
-        const ITERATIONS: usize = 64;
-
-        let keep = allocate_probe_site_for_sampling(ITERATIONS);
-        let json =
-            memory_audit_sites(4096).expect("armed sampling must produce a sites report, not null");
-        drop(black_box(keep));
-
-        let rows = parse_sites(&json);
-        assert!(
-            !rows.is_empty(),
-            "interval=1 sampling over {ITERATIONS} probe allocations must \
-             record at least one site"
-        );
-        assert!(
-            rows.len() <= 4096,
-            "the site table is capped at 4096 sites (got {})",
-            rows.len()
-        );
-
-        let probe_row = rows
-            .iter()
-            .find(|row| {
-                row["frames"].as_array().is_some_and(|frames| {
-                    frames.iter().any(|frame| {
-                        frame
-                            .as_str()
-                            .is_some_and(|name| name.contains("allocate_probe_site_for_sampling"))
-                    })
-                })
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "no reported site resolved to allocate_probe_site_for_sampling; \
-                     frames must attribute the sampled allocations to their caller. \
-                     report: {json}"
-                )
-            });
-
-        let count = probe_row["count"].as_u64().expect("count must be a u64");
-        let bytes = probe_row["bytes"].as_u64().expect("bytes must be a u64");
-        assert!(
-            count >= ITERATIONS as u64,
-            "interval=1 must sample every probe allocation (count {count} < {ITERATIONS})"
-        );
-        assert!(
-            bytes >= (ITERATIONS * 4096) as u64,
-            "sampled bytes must cover the probe payloads (bytes {bytes})"
-        );
-        assert_eq!(
-            probe_row["estimatedTotalBytes"].as_u64(),
-            Some(bytes),
-            "interval=1: estimatedTotalBytes == bytes * 1"
-        );
-        let frames = probe_row["frames"].as_array().expect("frames array");
-        assert!(
-            !frames.is_empty() && frames.len() <= 8,
-            "reported stacks are 1..=8 frames (got {})",
-            frames.len()
-        );
-        assert!(
-            frames.iter().all(|frame| {
-                frame
-                    .as_str()
-                    .is_some_and(|name| !name.contains("memory_audit::sampling::"))
-            }),
-            "sampler-internal plumbing frames (module path \
-             memory_audit::sampling::*) must be skipped from the reported \
-             leading frames: {frames:?}"
-        );
-        drop(window);
-    }
-
-    #[test]
-    fn estimated_total_bytes_scales_by_the_sampling_interval() {
-        let window = audit_test_support::EnabledWindow::arm(3);
-
-        let keep = allocate_probe_site_for_sampling(300);
-        let json =
-            memory_audit_sites(4096).expect("armed sampling must produce a sites report, not null");
-        drop(black_box(keep));
-
-        let rows = parse_sites(&json);
-        assert!(
-            !rows.is_empty(),
-            "interval=3 over 300 allocations must sample"
-        );
-        for row in &rows {
-            let bytes = row["bytes"].as_u64().expect("bytes must be a u64");
-            assert_eq!(
-                row["estimatedTotalBytes"].as_u64(),
-                Some(bytes * 3),
-                "estimatedTotalBytes must be bytes * interval (interval=3): {row}"
-            );
-        }
-        drop(window);
-    }
-
-    #[test]
-    fn concurrent_sampling_does_not_deadlock_or_recurse() {
-        let window = audit_test_support::EnabledWindow::arm(1);
-
-        // Sampling captures backtraces, and backtrace capture itself
-        // allocates: without the recursion guard this loop would
-        // self-sample unboundedly (stack overflow) or self-deadlock on
-        // the site-table mutex. Completing across threads IS the
-        // regression assertion; nonzero sites prove sampling stayed on.
-        let threads: Vec<_> = (0..4)
-            .map(|seed| {
-                std::thread::spawn(move || {
-                    let mut keep = Vec::new();
-                    for index in 0..1_000usize {
-                        keep.push(black_box(vec![seed as u8; 16 + (index % 512)]));
-                    }
-                    drop(black_box(keep));
-                })
-            })
-            .collect();
-        for thread in threads {
-            thread
-                .join()
-                .expect("sampling worker thread must not panic");
-        }
-
-        // Read-time resolution also allocates while armed; returning
-        // Some proves the read path tolerates an armed sampler too.
-        let json =
-            memory_audit_sites(5).expect("armed sampling must produce a sites report, not null");
-        let rows = parse_sites(&json);
-        assert!(
-            !rows.is_empty(),
-            "concurrent interval=1 allocation storm must record sites"
-        );
-        assert!(
-            rows.len() <= 5,
-            "topK=5 must cap the report (got {})",
-            rows.len()
-        );
-        drop(window);
-    }
-
-    #[test]
-    fn allocator_shim_anchor_matches_release_demangled_names() {
-        // Release LTO builds demangle the allocator entry shims with a
-        // crate-root prefix (`__rustc[<hash>]::__rust_alloc`); debug/test
-        // builds resolve the bare exported name. The anchor predicate
-        // must match BOTH, or release-mode site reports lead with
-        // plumbing frames instead of the semantic caller.
-        for name in [
-            "__rust_alloc",
-            "__rust_realloc",
-            "__rust_alloc_zeroed",
-            "__rustc[d9b87f19e823c0ef]::__rust_alloc",
-            "__rustc[d9b87f19e823c0ef]::__rust_realloc",
-            "__rustc[d9b87f19e823c0ef]::__rust_alloc_zeroed",
-            "__rg_alloc",
-            "_rdl_alloc",
-        ] {
-            assert!(
-                sampling::is_allocator_entry_shim_for_tests(name),
-                "allocator entry shim must be recognised: {name}"
-            );
-        }
-        for name in [
-            "verter_session::meta_resolve::materialize::field_types::reduce",
-            "oxc_allocator::arena::alloc_impl::alloc_layout_slow",
-            "<hashbrown::raw::RawTable<T,A> as core::clone::Clone>::clone",
-        ] {
-            assert!(
-                !sampling::is_allocator_entry_shim_for_tests(name),
-                "semantic caller frames must NOT be classified as shims: {name}"
-            );
-        }
-    }
-
-    #[test]
-    fn sample_interval_parsing_rejects_zero_and_garbage() {
-        assert_eq!(sampling::parse_interval("97").map(|n| n.get()), Some(97));
-        assert_eq!(sampling::parse_interval(" 8 ").map(|n| n.get()), Some(8));
-        assert_eq!(
-            sampling::parse_interval("0"),
-            None,
-            "N=0 must stay disarmed"
-        );
-        assert_eq!(sampling::parse_interval(""), None);
-        assert_eq!(sampling::parse_interval("prime"), None);
-        assert_eq!(sampling::parse_interval("-3"), None);
-    }
-}
+#[path = "memory_audit_tests.rs"]
+mod memory_audit_tests;
