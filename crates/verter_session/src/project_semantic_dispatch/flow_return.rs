@@ -114,7 +114,7 @@ pub(crate) enum FunctionReturnNode {
 /// `tsc_class_inference_budget_is_exact_partial_and_non_cacheable`), and
 /// the typed `FlowReturnFailure` itself is what the flow-return consumers
 /// branch on.
-const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_NO_SURFACE;
+pub(super) const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_NO_SURFACE;
 
 /// The partial class a DEGRADED SUCCESS's typed
 /// [`FlowReturnDegradation`] carries.
@@ -196,6 +196,71 @@ fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReason
         | FlowReturnDegradation::ConditionalVarDefinition
         | FlowReturnDegradation::UnreducedDeclaredUnion => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
     }
+}
+
+/// The partial class of a finalizer PARTIAL verdict: the typed
+/// [`FlowPartialReason`] and the value's own typed degradation, UNIONED —
+/// a cause recorded on either channel must reach the consumer, because
+/// the causes sit on opposite sides of the containment axis. A torn,
+/// stale, foreign, or incoherent proof state (`NoDemandInstalled` /
+/// `StaleBasis` / `ForeignProvenance` / `ObligationSetMismatch`, plus a
+/// stale/panic/internal typed failure) is a transient-state statement and
+/// takes [`PartialReasonSet::UNSTABLE_STATE`]; non-convergence and a
+/// budget-class failure are resource-cap statements and take
+/// [`PartialReasonSet::BUDGET_EXCEEDED`]; a cancellation takes
+/// [`PartialReasonSet::CANCELLED`]. The evidence-shaped causes — a typed
+/// obligation gap, an unprovable operation contract, the degraded-value
+/// echo — keep the contained degraded-success classes, and so does the
+/// bare `IncompleteObligations` echo: an obligation left PENDING is the
+/// close's own withholding signature (a genuinely budget-refused
+/// obligation reaches the ledger as a typed `Failed` budget record and
+/// takes the budget class here). Classifying a faulting cause onto a
+/// contained class would let every Vue macro projection lane publish and
+/// warm around work that never ran.
+///
+/// [`FlowPartialReason`]: super::flow_solve::FlowPartialReason
+pub(super) fn flow_partial_reason_class(
+    reason: &super::flow_solve::FlowPartialReason,
+    degradation: Option<FlowReturnDegradation>,
+) -> PartialReasonSet {
+    use super::flow_solve::{FlowFailureClass, FlowPartialReason};
+    let value_class = match degradation {
+        Some(degradation) => degradation_reason_class(degradation),
+        None => PartialReasonSet::default(),
+    };
+    let reason_class = match reason {
+        // Two ECHO reasons contribute nothing beyond the value's own
+        // class: `DegradedValue` restates the degradation the value
+        // already carries, and a bare pending-obligation echo is the
+        // close's own withholding signature (a genuinely budget-refused
+        // obligation reaches the ledger as a typed `Failed` budget
+        // record instead). Widening either onto the frame-wide class
+        // would erase a positional degradation's faithful siblings; the
+        // frame-wide contained class covers only the degradation-free
+        // spelling.
+        FlowPartialReason::DegradedValue | FlowPartialReason::IncompleteObligations => {
+            match degradation {
+                Some(_) => PartialReasonSet::default(),
+                None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+            }
+        }
+        FlowPartialReason::Gap(_)
+        | FlowPartialReason::OperationNotProvable
+        | FlowPartialReason::ResultContractMismatch => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        FlowPartialReason::NoDemandInstalled
+        | FlowPartialReason::StaleBasis
+        | FlowPartialReason::ForeignProvenance
+        | FlowPartialReason::ObligationSetMismatch => PartialReasonSet::UNSTABLE_STATE,
+        FlowPartialReason::NonConverged => PartialReasonSet::BUDGET_EXCEEDED,
+        FlowPartialReason::Failed(failure) => match failure.class {
+            FlowFailureClass::BudgetExhausted => PartialReasonSet::BUDGET_EXCEEDED,
+            FlowFailureClass::Cancelled => PartialReasonSet::CANCELLED,
+            FlowFailureClass::StaleBasis | FlowFailureClass::Panic | FlowFailureClass::Internal => {
+                PartialReasonSet::UNSTABLE_STATE
+            }
+        },
+    };
+    value_class.union(reason_class)
 }
 
 /// Veto-side fault injection for the flow admission guards' negative
@@ -1423,14 +1488,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // ONCE into the build's own rails (the displaced root
                     // channel). The value still flows to the caller; the
                     // memo refuses admission — the proof gate and the
-                    // boolean rails now agree.
+                    // boolean rails now agree. The class follows BOTH
+                    // recorded causes — the value's degradation AND the
+                    // finalizer's typed reason: a stale basis or an
+                    // undischarged obligation over a non-degraded value
+                    // must fault the lanes, never fall to the contained
+                    // class.
                     Some(FlowSolveOutcome::Partial(partial)) => {
                         output.cache_suppress = true;
                         output.result_is_partial = true;
-                        output.partial_reasons = match partial.value.degradation() {
-                            Some(degradation) => degradation_reason_class(degradation),
-                            None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
-                        };
+                        output.partial_reasons =
+                            flow_partial_reason_class(&partial.reason, partial.value.degradation());
                     }
                     // The demand could not be planned at all, or a
                     // refused member batch withheld the root's proof:
@@ -2839,11 +2907,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // hold arm uses) — an answer composed around an
                             // unproven flow value must not warm.
                             let reasons = match &verdict {
+                                // Both recorded causes — the value's
+                                // degradation and the finalizer's typed
+                                // reason — reach the rails.
                                 Some(FlowSolveOutcome::Partial(partial)) => {
-                                    match partial.value.degradation() {
-                                        Some(degradation) => degradation_reason_class(degradation),
-                                        None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
-                                    }
+                                    flow_partial_reason_class(
+                                        &partial.reason,
+                                        partial.value.degradation(),
+                                    )
                                 }
                                 // Verdict-less: classify by the recorded
                                 // preparation refusal — a budget edge and
@@ -4357,17 +4428,37 @@ fn signature_answer_is_frame_shadowed(
         .any(|name| owner_scope_answers_frame_name(dispatch, binder_env, name))
 }
 
-/// One branch-local narrowing verdict. `Impossible` is distinct from
-/// `Unchanged`: a conjunction whose later fact removes its last survivor is a
-/// dead alternative, not an alternative that contributes the earlier overlay
-/// to an enclosing disjunction.
+/// One branch-local narrowing verdict. There is deliberately no
+/// "impossible branch" variant: the checker's rule for a guard edge no
+/// arm survives is that the SUBJECT reads `never` while the edge stays
+/// ALIVE — narrowing impossibility never removes an edge, so a
+/// contributor on that edge that reads a different binding still
+/// contributes its own narrowed type (measured: `if (typeof x ===
+/// "string" && typeof y === "string")` over `x: number` types `return y`
+/// as `string`, and a conjunction whose later fact removes its last
+/// survivor contributes `never` for that subject to an enclosing
+/// disjunction rather than removing the alternative). Each guard family
+/// converts an empty survivor set ([`ArmFilter::NoSurvivor`]) under its
+/// own measured checker rule.
 enum GuardNarrowing {
     Unchanged,
     Narrowed(
         crate::flow_slice_content::SliceNarrowSubject,
         SemanticNodeId,
     ),
-    Impossible,
+}
+
+/// One union-arm filter verdict, BEFORE the calling guard family applies
+/// its empty-survivor rule. `NoSurvivor` is a positive proof that every
+/// arm is off the tested edge — never "unrecognized" — and the caller
+/// decides what the checker does with it: most filters collapse the
+/// subject to `never` (the edge stays alive), while the two measured
+/// exceptions (a truthiness/equality test through a member that does not
+/// DISCRIMINATE its parent's arms) establish nothing.
+enum ArmFilter {
+    Unchanged,
+    Narrowed(SemanticNodeId),
+    NoSurvivor,
 }
 
 /// One union arm's verdict against a runtime guard test. `NoMatch` is
@@ -4377,8 +4468,8 @@ enum GuardNarrowing {
 /// `Unclassified`: the checker still narrows such an arm, so it stays
 /// possible on BOTH edges of the test and the narrow records the typed
 /// guard gap instead of silently deciding either reading. This is what
-/// keeps [`GuardNarrowing::Impossible`] a positive proof: a branch goes
-/// dead only when every arm is proved off its edge.
+/// keeps an empty survivor set a positive proof: a subject reads `never`
+/// on an edge only when every arm is proved off it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ArmGuardClass {
     Match,
@@ -4442,34 +4533,6 @@ fn slice_expr_is_exact_subject_read(
         ) => name == subject_name,
         _ => false,
     }
-}
-
-fn guard_has_subject_matching(
-    guard: &crate::flow_slice_content::SliceGuard,
-    predicate: &impl Fn(&crate::flow_slice_content::SliceNarrowSubject) -> bool,
-) -> bool {
-    use crate::flow_slice_content::SliceGuard;
-    match guard {
-        SliceGuard::None => false,
-        SliceGuard::Typeof { subject, .. }
-        | SliceGuard::Truthy { subject, .. }
-        | SliceGuard::EqLiteral { subject, .. }
-        | SliceGuard::Instanceof { subject, .. }
-        | SliceGuard::TypePredicate { subject, .. } => predicate(subject),
-        SliceGuard::In { subject, .. } => predicate(subject),
-        SliceGuard::And(parts) | SliceGuard::Or(parts) => parts
-            .iter()
-            .any(|part| guard_has_subject_matching(part, predicate)),
-    }
-}
-
-fn slice_expr_is_exact_guard_subject_read(
-    expr: &crate::flow_slice_content::SliceExpr,
-    guard: &crate::flow_slice_content::SliceGuard,
-) -> bool {
-    guard_has_subject_matching(guard, &|subject| {
-        slice_expr_is_exact_subject_read(expr, subject)
-    })
 }
 
 fn slice_region_has_non_subject_return(
@@ -5463,23 +5526,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if facts.len() == arms.len() =>
                 {
                     for (index, (arm, fact)) in arms.iter().zip(facts.iter()).enumerate() {
-                        let holds_before = self.holds.len();
                         let narrow_len = self.narrowings.len();
-                        let possible = self.apply_guard_scoped(guard, index == 0);
-                        if !possible
-                            && !guard_has_subject_matching(guard, &|subject| {
-                                slice_expr_is_exact_subject_read(arm, subject)
-                            })
-                        {
-                            self.record_degradation(FlowReturnDegradation::FlowGap(
-                                crate::semantic_query::FlowGap::GuardNarrowing,
-                            ));
-                        }
-                        if possible {
-                            self.collect_evolving_parts(arm, fact, parts);
-                        } else {
-                            self.holds.truncate(holds_before);
-                        }
+                        self.apply_guard_scoped(guard, index == 0);
+                        self.collect_evolving_parts(arm, fact, parts);
                         self.narrowings.truncate(narrow_len);
                     }
                     return;
@@ -6906,10 +6955,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         guard: &crate::flow_slice_content::SliceGuard,
         positive: bool,
-    ) -> bool {
+    ) {
         use crate::flow_slice_content::SliceGuard;
         let fact = match guard {
-            SliceGuard::None => return true,
+            SliceGuard::None => return,
             SliceGuard::Typeof {
                 subject,
                 kind,
@@ -6973,43 +7022,36 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             // A conjunction applies every fact at once; its NEGATION is
             // the disjunction of the negated facts (De Morgan — the same
-            // symmetry the lowering's `!` uses).
+            // symmetry the lowering's `!` uses). A later conjunct that
+            // empties its subject pushes that subject's `never` overlay —
+            // the overlay's newest-wins read is the "final alternative
+            // overlay" rule an enclosing disjunction consumes.
             SliceGuard::And(parts) => {
                 if positive {
-                    let base = self.narrowings.len();
                     for part in parts.iter() {
-                        if !self.apply_guard_scoped(part, true) {
-                            self.narrowings.truncate(base);
-                            return false;
-                        }
+                        self.apply_guard_scoped(part, true);
                     }
-                    return true;
                 } else {
-                    return self.apply_guard_union(parts, false);
+                    self.apply_guard_union(parts, false);
                 }
+                return;
             }
             SliceGuard::Or(parts) => {
                 if positive {
-                    return self.apply_guard_union(parts, true);
+                    self.apply_guard_union(parts, true);
                 } else {
-                    let base = self.narrowings.len();
                     for part in parts.iter() {
-                        if !self.apply_guard_scoped(part, false) {
-                            self.narrowings.truncate(base);
-                            return false;
-                        }
+                        self.apply_guard_scoped(part, false);
                     }
-                    return true;
                 }
+                return;
             }
         };
         match fact {
-            GuardNarrowing::Unchanged => true,
+            GuardNarrowing::Unchanged => {}
             GuardNarrowing::Narrowed(subject, node) => {
                 self.narrowings.push((subject, node));
-                true
             }
-            GuardNarrowing::Impossible => false,
         }
     }
 
@@ -7023,7 +7065,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         parts: &[crate::flow_slice_content::SliceGuard],
         positive: bool,
-    ) -> bool {
+    ) {
         let mut alternatives: Vec<
             Vec<(
                 crate::flow_slice_content::SliceNarrowSubject,
@@ -7032,11 +7074,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         > = Vec::with_capacity(parts.len());
         for part in parts.iter() {
             let base = self.narrowings.len();
-            let possible = self.apply_guard_scoped(part, positive);
+            self.apply_guard_scoped(part, positive);
             let applied = self.narrowings.split_off(base);
-            if !possible {
-                continue;
-            }
             let mut final_overlay = Vec::with_capacity(applied.len());
             for (subject, node) in applied {
                 match final_overlay
@@ -7048,9 +7087,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
             alternatives.push(final_overlay);
-        }
-        if alternatives.is_empty() {
-            return false;
         }
         let mut subjects: Vec<crate::flow_slice_content::SliceNarrowSubject> = Vec::new();
         for alternative in &alternatives {
@@ -7083,22 +7119,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .intern_normalized_union_or_intersection(&nodes, true);
             self.narrowings.push((subject, node));
         }
-        true
     }
 
     /// Filter `subject`'s arms by a per-arm predicate, joining the
-    /// survivors back into the narrow's node. An empty survivor set is an
-    /// impossible branch, distinct from an unchanged/undecidable fact, so a
-    /// disjunction can omit the dead alternative without retaining an
-    /// intermediate conjunction overlay.
+    /// survivors back into the narrow's node. An empty survivor set is a
+    /// positive PROOF that every arm is off the tested edge, distinct
+    /// from an unchanged/undecidable fact — the CALLER converts it under
+    /// its guard family's measured checker rule (usually a `never`
+    /// subject on a still-alive edge).
     fn narrow_arms_by(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
-        entry_subject: &crate::flow_slice_content::SliceNarrowSubject,
         mut keep: impl FnMut(&mut Self, SemanticNodeId) -> Option<bool>,
-    ) -> GuardNarrowing {
+    ) -> ArmFilter {
         let Some(current) = self.subject_current_node(subject) else {
-            return GuardNarrowing::Unchanged;
+            return ArmFilter::Unchanged;
         };
         let arms = self.enumerated_union_arms_or_self(current);
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
@@ -7106,19 +7141,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             match keep(self, *arm) {
                 Some(true) => survivors.push(*arm),
                 Some(false) => {}
-                None => return GuardNarrowing::Unchanged,
+                None => return ArmFilter::Unchanged,
             }
         }
         if survivors.is_empty() {
-            return GuardNarrowing::Impossible;
+            return ArmFilter::NoSurvivor;
         }
         if survivors.len() == arms.len() {
-            return GuardNarrowing::Unchanged;
+            return ArmFilter::Unchanged;
         }
         let node = self
             .dispatch
             .intern_normalized_union_or_intersection(&survivors, true);
-        GuardNarrowing::Narrowed(entry_subject.clone(), node)
+        ArmFilter::Narrowed(node)
+    }
+
+    /// The graph's `never` — what a subject reads on a guard edge every
+    /// arm is proved off of. The edge itself stays alive.
+    fn never_node(&self) -> SemanticNodeId {
+        self.dispatch
+            .graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
     }
 
     /// `typeof subject === "kind"`: keep the arms whose runtime type the
@@ -7133,23 +7176,104 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         kind: crate::flow_slice_content::SliceTypeofKind,
         negated: bool,
     ) -> GuardNarrowing {
+        let Some(current) = self.subject_current_node(subject) else {
+            return GuardNarrowing::Unchanged;
+        };
+        let arms = self.enumerated_union_arms_or_self(current);
+        let mut out: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        let mut changed = false;
         let mut unclassified = false;
-        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(match this.arm_typeof_class(arm, kind) {
-                ArmGuardClass::Match => !negated,
-                ArmGuardClass::NoMatch => negated,
+        for arm in &arms {
+            // The non-primitive `object` inhabits BOTH the `"object"` and
+            // the `"function"` runtime kinds (functions are objects), so
+            // the positive `"function"` edge narrows it to the global
+            // `Function` surface (measured: `x: object` reads `Function`
+            // inside `typeof x === "function"`); an unavailable lib
+            // surface keeps the arm possible, degraded. The other edges
+            // keep the plain classification: `"object"` matches on both
+            // edges, scalar kinds are proved off, and the negated
+            // `"function"` edge keeps the arm unchanged — the checker has
+            // no "object minus functions" type to narrow to.
+            if kind == crate::flow_slice_content::SliceTypeofKind::Function
+                && !negated
+                && matches!(
+                    self.dispatch.graph().node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Object))
+                )
+            {
+                match self.lower_global_function_surface() {
+                    Some(function) => {
+                        out.push(function);
+                        changed = true;
+                    }
+                    None => {
+                        out.push(*arm);
+                        unclassified = true;
+                    }
+                }
+                continue;
+            }
+            match self.arm_typeof_class(*arm, kind) {
+                ArmGuardClass::Match => {
+                    if negated {
+                        changed = true;
+                    } else {
+                        out.push(*arm);
+                    }
+                }
+                ArmGuardClass::NoMatch => {
+                    if negated {
+                        out.push(*arm);
+                    } else {
+                        changed = true;
+                    }
+                }
                 ArmGuardClass::Unclassified => {
                     unclassified = true;
-                    true
+                    out.push(*arm);
                 }
-            })
-        });
+            }
+        }
         if unclassified {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 crate::semantic_query::FlowGap::GuardNarrowing,
             ));
         }
-        fact
+        if out.is_empty() {
+            // Every arm is proved off the tested edge: the subject reads
+            // `never` and the edge stays alive.
+            return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
+        }
+        if !changed && out.len() == arms.len() {
+            return GuardNarrowing::Unchanged;
+        }
+        let node = self
+            .dispatch
+            .intern_normalized_union_or_intersection(&out, true);
+        GuardNarrowing::Narrowed(subject.clone(), node)
+    }
+
+    /// The global `Function` surface, lowered through the owner scope the
+    /// way an `instanceof` constructor reference is. `None` when the lib
+    /// surface is unavailable — including a lowering that only reaches an
+    /// UNRESOLVED bare reference or an opaque carrier, which must never
+    /// publish as a resolved narrow — so the caller keeps the arm
+    /// possible, degraded, never proved off an edge.
+    fn lower_global_function_surface(&mut self) -> Option<SemanticNodeId> {
+        let ty = verter_type_expr::TypeExpr::Ref {
+            name: Arc::from("Function"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+            self.canonical,
+            self.owner,
+            &ty,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )?;
+        match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::BareRef(_)) | Some(SemanticNodeData::Opaque(_)) | None => None,
+            _ => Some(node),
+        }
     }
 
     /// One union arm's verdict against the runtime type a `typeof`
@@ -7160,7 +7284,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// the graph cannot place under exactly one runtime kind — `any`,
     /// `unknown`, a memberless `{}` surface (primitives inhabit it), an
     /// unresolved carrier — is `Unclassified`: `NoMatch` means PROVED
-    /// non-inhabitance of the tested edge, never "unrecognized".
+    /// non-inhabitance of the tested edge, never "unrecognized". The one
+    /// dual-kind value domain — the non-primitive `object`, which also
+    /// inhabits `"function"` — is intercepted by [`Self::narrow_typeof`]
+    /// on the positive `"function"` edge before this classification;
+    /// the `Object` mapping here serves the remaining edges, where the
+    /// checker keeps the arm (negated `"function"`, either `"object"`
+    /// edge) or proves it off (scalar kinds).
     fn arm_typeof_class(
         &self,
         arm: SemanticNodeId,
@@ -7254,7 +7384,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .to_vec()
                     .into_boxed_slice(),
             );
-            let parent_fact = self.narrow_arms_by(&parent_subject, &parent_subject, |this, arm| {
+            let parent_fact = self.narrow_arms_by(&parent_subject, |this, arm| {
                 let member = this.project_segments_navigate(arm, &last)?;
                 let leaves = this.enumerated_union_arms_or_self(member);
                 Some(
@@ -7271,24 +7401,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 )
             });
             match parent_fact {
-                // Every parent arm is proved off the tested edge: the
-                // parent reference narrows to `never` — the branch stays
-                // alive and its syntactic returns keep contributing,
-                // exactly as the checker types them.
-                GuardNarrowing::Impossible => {
-                    let never = self
-                        .dispatch
-                        .graph()
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
-                    self.narrowings.push((parent_subject, never));
+                // Every parent arm is proved off the tested edge. The
+                // checker filters a PARENT through a property test only
+                // when the member DISCRIMINATES its arms; a filter that
+                // would empty the parent proves the member's edge verdict
+                // identical across the arms (or the parent non-union),
+                // and the checker then keeps the parent's declared type
+                // unchanged (measured: `{ ok: false }`, and a two-arm
+                // union whose `ok` is `false` in both, keep their types
+                // inside `if (x.ok)`). Only the tested LEAF collapses —
+                // it does below.
+                ArmFilter::NoSurvivor => {}
+                ArmFilter::Narrowed(node) => {
+                    self.narrowings.push((parent_subject, node));
                 }
-                GuardNarrowing::Narrowed(fact_subject, node) => {
-                    self.narrowings.push((fact_subject, node));
-                }
-                GuardNarrowing::Unchanged => {}
+                ArmFilter::Unchanged => {}
             }
         }
-        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+        let fact = self.narrow_arms_by(subject, |this, arm| {
             Some(match this.arm_truthiness_edge(arm, negated) {
                 crate::semantic_query::TruthinessInhabitance::Yes => true,
                 crate::semantic_query::TruthinessInhabitance::No => false,
@@ -7304,14 +7434,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             ));
         }
         match fact {
-            GuardNarrowing::Impossible => {
-                let never = self
-                    .dispatch
-                    .graph()
-                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
-                GuardNarrowing::Narrowed(subject.clone(), never)
-            }
-            other => other,
+            ArmFilter::NoSurvivor => GuardNarrowing::Narrowed(subject.clone(), self.never_node()),
+            ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(subject.clone(), node),
+            ArmFilter::Unchanged => GuardNarrowing::Unchanged,
         }
     }
 
@@ -7377,7 +7502,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // `` `item-${string}` `` edge), so treating "undecided" as
             // "proved unchanged" published a superset clean and warm.
             let mut undecided = false;
-            let narrowed = self.narrow_arms_by(subject, subject, |this, arm| {
+            let narrowed = self.narrow_arms_by(subject, |this, arm| {
                 if matches!(
                     this.dispatch.graph().node_data(arm).as_deref(),
                     Some(SemanticNodeData::Primitive(
@@ -7408,7 +7533,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     crate::semantic_query::FlowGap::GuardNarrowing,
                 ));
             }
-            if matches!(narrowed, GuardNarrowing::Unchanged) && !negated {
+            match narrowed {
+                // No arm overlaps the literal at all: the subject reads
+                // `never` on this edge and the edge stays alive
+                // (measured: `x: "a"` is `never` inside `if (x === "b")`,
+                // and only its own reads collapse — a sibling binding's
+                // contributor keeps its type).
+                ArmFilter::NoSurvivor => {
+                    return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
+                }
+                ArmFilter::Narrowed(node) => {
+                    return GuardNarrowing::Narrowed(subject.clone(), node);
+                }
+                ArmFilter::Unchanged => {}
+            }
+            if !negated {
                 // No arm was filtered. The literal can still be a STRICT
                 // subtype of the subject's whole type — then the literal
                 // IS the narrow (`x: string` guarded by `=== "a"` reads
@@ -7423,7 +7562,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     return GuardNarrowing::Narrowed(subject.clone(), literal_node);
                 }
             }
-            narrowed
+            GuardNarrowing::Unchanged
         } else {
             // The discriminant narrows the tested property's PARENT
             // reference, so the fact lands at the parent subject: a
@@ -7448,8 +7587,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // degrades the result — undecided is never "proved off this
             // edge" nor "proved unchanged".
             let mut undecided = false;
-            let narrowed = self.narrow_arms_by(&parent_subject, &parent_subject, |this, arm| {
+            let mut projected: Vec<SemanticNodeId> = Vec::new();
+            let narrowed = self.narrow_arms_by(&parent_subject, |this, arm| {
                 let member = this.project_segments_navigate(arm, &last)?;
+                projected.push(member);
                 let verdict = if negated {
                     // Excluding one literal removes a parent arm only when
                     // the projected member is wholly that literal. A named
@@ -7474,7 +7615,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     crate::semantic_query::FlowGap::GuardNarrowing,
                 ));
             }
-            narrowed
+            match narrowed {
+                // The checker filters a PARENT through a member test only
+                // when the member DISCRIMINATES its arms. A no-survivor
+                // filter whose projections DIFFER is the genuine
+                // discriminant case with no matching arm: the parent reads
+                // `never` and the edge stays alive (measured:
+                // `{ kind: "a" } | { kind: "c" }` under `x.kind === "b"`).
+                // A non-union parent, or one whose member projects
+                // identically in every arm, is never discriminated — the
+                // checker keeps its declared type — so no fact lands.
+                ArmFilter::NoSurvivor => {
+                    if projected.len() > 1 && projected.windows(2).any(|pair| pair[0] != pair[1]) {
+                        GuardNarrowing::Narrowed(parent_subject, self.never_node())
+                    } else {
+                        GuardNarrowing::Unchanged
+                    }
+                }
+                ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(parent_subject, node),
+                ArmFilter::Unchanged => GuardNarrowing::Unchanged,
+            }
         }
     }
 
@@ -7741,7 +7901,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // instance type. An assignable-but-not-identical arm may or
             // may not be derived: it stays possible, degraded.
             let mut gapped = false;
-            let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+            let fact = self.narrow_arms_by(subject, |this, arm| {
                 if this.instanceof_arm_is_unclassifiable(arm) {
                     gapped = true;
                     return Some(true);
@@ -7767,7 +7927,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     crate::semantic_query::FlowGap::GuardNarrowing,
                 ));
             }
-            return fact;
+            return match fact {
+                // Every arm IS the tested class: excluding it empties the
+                // subject — `never`, on a still-alive edge.
+                ArmFilter::NoSurvivor => {
+                    GuardNarrowing::Narrowed(subject.clone(), self.never_node())
+                }
+                ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(subject.clone(), node),
+                ArmFilter::Unchanged => GuardNarrowing::Unchanged,
+            };
         }
         // The positive edge is the checker's own per-arm rule, the same
         // rule `narrow_to_predicate_target` applies to `x is T`: an arm
@@ -7847,7 +8015,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             ));
         }
         if out.is_empty() {
-            return GuardNarrowing::Impossible;
+            // Every arm is proved off the positive edge: the subject
+            // reads `never` there and the edge stays alive — a
+            // non-subject contributor on it keeps its own type.
+            return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
         }
         if !changed && out.len() == arms.len() {
             return GuardNarrowing::Unchanged;
@@ -7899,38 +8070,93 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// `"key" in subject`: keep the arms proved to carry the member;
-    /// negation keeps the ones proved not to. Proof is per edge and
-    /// per arm ([`InArmPresence`]): a closed surface's REQUIRED member
-    /// proves the arm off the negated edge, a closed surface with the
-    /// key ABSENT proves it off the positive edge, and an OPTIONAL
-    /// member proves EXACT retention on both edges — the checker keeps
-    /// an optional arm unchanged on the positive edge (presence of the
-    /// key is a separate fact from the value's non-`undefined`-ness,
-    /// which the member READ carries), so no gap rides it. An arm whose
-    /// key set the graph cannot decide — a type parameter, an
-    /// index-signature surface, an unresolvable carrier — stays
-    /// possible on BOTH edges and records the typed guard gap: the
-    /// checker narrows such an arm, so dropping it would fabricate a
-    /// dead edge and silently lose that edge's return contributor.
+    /// `"key" in subject` follows the checker's TWO regimes (measured;
+    /// the checker's own `in`-narrowing split):
+    ///
+    /// * a KNOWN key — some arm proves it present, required or optional —
+    ///   filters the arms per edge ([`InArmPresence`]): a REQUIRED member
+    ///   proves the arm off the negated edge, a proven-ABSENT key on a
+    ///   closed surface proves it off the positive edge, and an OPTIONAL
+    ///   member proves EXACT retention on both edges (presence of the key
+    ///   is a separate fact from the value's non-`undefined`-ness, which
+    ///   the member READ carries). A filter no arm survives collapses the
+    ///   subject to `never` on a still-alive edge.
+    /// * an UNKNOWN key — NO arm proves it present — never filters: the
+    ///   checker's positive edge is the WHOLE subject intersected with
+    ///   `Record<key, unknown>`, a carrier the substrate cannot mint, so
+    ///   the subject stays unchanged as a typed superset behind the guard
+    ///   gap — never a dropped edge; the negated edge keeps the subject
+    ///   unchanged exactly.
+    ///
+    /// An arm whose key set the graph cannot decide — a type parameter,
+    /// an index-signature surface, an unresolvable carrier — stays
+    /// possible on BOTH edges, leaves the regime undecided, and records
+    /// the typed guard gap: the checker narrows such an arm, so deciding
+    /// either way would fabricate a dead edge or a clean warm superset.
     fn narrow_in(
         &mut self,
         key: &Arc<str>,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         negated: bool,
     ) -> GuardNarrowing {
+        let Some(current) = self.subject_current_node(subject) else {
+            return GuardNarrowing::Unchanged;
+        };
+        let arms = self.enumerated_union_arms_or_self(current);
+        let presences: Vec<InArmPresence> = arms
+            .iter()
+            .map(|arm| self.arm_in_presence(*arm, key))
+            .collect();
+        let key_is_known = presences
+            .iter()
+            .any(|presence| matches!(presence, InArmPresence::Always | InArmPresence::Optional));
         let mut gapped = false;
-        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(match this.arm_in_presence(arm, key) {
-                InArmPresence::Always => !negated,
-                InArmPresence::Never => negated,
-                InArmPresence::Optional => true,
-                InArmPresence::Unknown => {
-                    gapped = true;
-                    true
+        let fact = if key_is_known {
+            let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+            for (arm, presence) in arms.iter().zip(presences.iter()) {
+                let keep = match presence {
+                    InArmPresence::Always => !negated,
+                    InArmPresence::Never => negated,
+                    InArmPresence::Optional => true,
+                    InArmPresence::Unknown => {
+                        gapped = true;
+                        true
+                    }
+                };
+                if keep {
+                    survivors.push(*arm);
                 }
-            })
-        });
+            }
+            if survivors.is_empty() {
+                // Every arm carries the key and the test excludes it: the
+                // subject reads `never` on the negated edge and the edge
+                // stays alive.
+                GuardNarrowing::Narrowed(subject.clone(), self.never_node())
+            } else if survivors.len() == arms.len() {
+                GuardNarrowing::Unchanged
+            } else {
+                let node = self
+                    .dispatch
+                    .intern_normalized_union_or_intersection(&survivors, true);
+                GuardNarrowing::Narrowed(subject.clone(), node)
+            }
+        } else if !negated {
+            // Unknown key, positive edge: the unmintable
+            // `(subject) & Record<key, unknown>` stays a typed superset.
+            gapped = true;
+            GuardNarrowing::Unchanged
+        } else {
+            // Unknown key, negated edge: the checker keeps the subject
+            // unchanged — exact when every arm's absence is proved; an
+            // undecided arm could flip the regime, so it degrades.
+            if presences
+                .iter()
+                .any(|presence| matches!(presence, InArmPresence::Unknown))
+            {
+                gapped = true;
+            }
+            GuardNarrowing::Unchanged
+        };
         if gapped {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 crate::semantic_query::FlowGap::GuardNarrowing,
@@ -8124,10 +8350,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     consumption,
                 );
             }
-            return (GuardNarrowing::Impossible, consumption);
+            // The target is PROVED disjoint from the whole subject — the
+            // checker's intersection reduces to `never`, so the subject
+            // reads `never` on the positive edge while the edge stays
+            // alive: a contributor there that reads a different binding
+            // keeps its own type.
+            return (
+                GuardNarrowing::Narrowed(subject.clone(), self.never_node()),
+                consumption,
+            );
         }
         let mut undecided = false;
-        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+        let fact = self.narrow_arms_by(subject, |this, arm| {
             match this.assignable(arm, target_node) {
                 Some(kept) => Some(kept != negated),
                 None => {
@@ -8140,6 +8374,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             Consumption::Undecided
         } else {
             Consumption::Decided
+        };
+        let fact = match fact {
+            // The predicate covers the subject entirely: excluding its
+            // target empties the subject — `never`, on a still-alive edge.
+            ArmFilter::NoSurvivor => GuardNarrowing::Narrowed(subject.clone(), self.never_node()),
+            ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(subject.clone(), node),
+            ArmFilter::Unchanged => GuardNarrowing::Unchanged,
         };
         (fact, consumption)
     }
@@ -8334,7 +8575,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // evaluate. The returned fall-through is the lowering's flag
         // ANDed with this — the override only ever narrows downward.
         let mut path_alive = true;
-        for (statement_index, statement) in region.statements.iter().enumerate() {
+        for statement in region.statements.iter() {
             if !path_alive {
                 break;
             }
@@ -8446,21 +8687,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let return_base = self.return_edges.len();
                     let throw_base = self.throw_points.len();
                     self.conditional_arm_nesting += 1;
-                    let consequent_possible = self.apply_guard_scoped(guard, true);
-                    if !consequent_possible
-                        && slice_region_has_non_subject_return(consequent, &|expr| {
-                            slice_expr_is_exact_guard_subject_read(expr, guard)
-                        })
-                    {
-                        self.record_degradation(FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::GuardNarrowing,
-                        ));
-                    }
-                    let (consequent_result, consequent_falls) = if consequent_possible {
-                        self.eval_region(consequent)
-                    } else {
-                        (Ok(Vec::new()), false)
-                    };
+                    self.apply_guard_scoped(guard, true);
+                    let (consequent_result, consequent_falls) = self.eval_region(consequent);
                     self.narrowings.truncate(narrow_len);
                     // Close the arm's lexical scope BEFORE snapshotting its
                     // contribution to the post-if join, and replay the same
@@ -8490,27 +8718,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     };
                     contributors.extend(consequent_contributors);
-                    let mut implicit_alternate_falls = true;
                     let alternate_layers = if let Some(alternate) = alternate {
                         let shadow_base = self.scope_shadows.len();
                         let break_base = self.break_exits.len();
                         let return_base = self.return_edges.len();
                         let throw_base = self.throw_points.len();
-                        let alternate_possible = self.apply_guard_scoped(guard, false);
-                        if !alternate_possible
-                            && slice_region_has_non_subject_return(alternate, &|expr| {
-                                slice_expr_is_exact_guard_subject_read(expr, guard)
-                            })
-                        {
-                            self.record_degradation(FlowReturnDegradation::FlowGap(
-                                crate::semantic_query::FlowGap::GuardNarrowing,
-                            ));
-                        }
-                        let (alternate_result, alternate_falls) = if alternate_possible {
-                            self.eval_region(alternate)
-                        } else {
-                            (Ok(Vec::new()), false)
-                        };
+                        self.apply_guard_scoped(guard, false);
+                        let (alternate_result, alternate_falls) = self.eval_region(alternate);
                         self.narrowings.truncate(narrow_len);
                         let shadows = self.split_scope_shadows_close_exits(
                             shadow_base,
@@ -8544,26 +8758,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             alternate_falls,
                         ))
                     } else {
-                        implicit_alternate_falls = self.apply_guard_scoped(guard, false);
-                        // The IMPLICIT alternate's impossibility takes the
-                        // same fail-close as an explicit arm's: the
-                        // checker keeps a fall-through contribution that
-                        // never reads the subject (narrowing
-                        // impossibility collapses subject READS to
-                        // `never`, it does not remove the edge), so
-                        // dropping the fall-through must ride the typed
-                        // guard gap — degraded, never a silent warm drop.
-                        if !implicit_alternate_falls
-                            && slice_statements_have_non_subject_return(
-                                region.statements.iter().skip(statement_index + 1),
-                                &|expr| slice_expr_is_exact_guard_subject_read(expr, guard),
-                            )
-                        {
-                            self.record_degradation(FlowReturnDegradation::FlowGap(
-                                crate::semantic_query::FlowGap::GuardNarrowing,
-                            ));
-                        }
-                        self.narrowings.truncate(narrow_len);
                         None
                     };
                     self.conditional_arm_nesting -= 1;
@@ -8578,10 +8772,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Some((locals, var, param_writes, falls)) => {
                                 (Some(locals), Some(var), Some(param_writes), *falls)
                             }
-                            // No `else`: the implicit alternate reaches past
-                            // the `if` only when the guard's negated edge is
-                            // possible under the current overlay.
-                            None => (None, None, None, implicit_alternate_falls),
+                            // No `else`: the implicit alternate always
+                            // reaches past the `if` — narrowing
+                            // impossibility collapses subject READS to
+                            // `never`, it never removes the edge.
+                            None => (None, None, None, true),
                         };
                     self.join_arm_writes(
                         &consequent_locals,
@@ -8600,25 +8795,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // rest of the region, exactly where an arm-scoped
                     // truncation does not erase them. (Both arms reaching
                     // establishes nothing; both terminating makes the rest
-                    // of the region unreachable.)
-                    let surviving_edge_possible = if !consequent_falls && alternate_falls {
-                        self.apply_guard_scoped(guard, false)
+                    // of the region unreachable.) An edge no arm survives
+                    // stays alive with its subject narrowed to `never` —
+                    // the application never kills the path.
+                    if !consequent_falls && alternate_falls {
+                        self.apply_guard_scoped(guard, false);
                     } else if consequent_falls && !alternate_falls {
-                        self.apply_guard_scoped(guard, true)
-                    } else {
-                        true
-                    };
-                    path_alive = (consequent_falls || alternate_falls) && surviving_edge_possible;
-                    if !surviving_edge_possible
-                        && slice_statements_have_non_subject_return(
-                            region.statements.iter().skip(statement_index + 1),
-                            &|expr| slice_expr_is_exact_guard_subject_read(expr, guard),
-                        )
-                    {
-                        self.record_degradation(FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::GuardNarrowing,
-                        ));
+                        self.apply_guard_scoped(guard, true);
                     }
+                    path_alive = consequent_falls || alternate_falls;
                 }
                 crate::flow_slice_content::SliceStatement::Switch {
                     discriminant,
@@ -8713,6 +8898,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 crate::flow_slice_content::SliceSwitchTest::Unmodeled => {}
                                 // The dispatch edge: the discriminant IS
                                 // this test.
+                                // A test no discriminant arm matches bakes
+                                // the subject's `never` narrow instead of
+                                // killing the dispatch edge: the checker
+                                // keeps the clause's contributors typed
+                                // through the `never` subject (measured:
+                                // `switch (x) { case "b": return 1 }` over
+                                // `x: "a"` still contributes `1`).
                                 crate::flow_slice_content::SliceSwitchTest::Literal(test) => {
                                     match self.narrow_eq_literal(subject, test, false) {
                                         GuardNarrowing::Narrowed(fact_subject, node) => {
@@ -8721,9 +8913,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                                 &fact_subject,
                                                 node,
                                             );
-                                        }
-                                        GuardNarrowing::Impossible => {
-                                            dead_dispatch = true;
                                         }
                                         GuardNarrowing::Unchanged => {}
                                     }
@@ -9465,17 +9654,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     match fact {
                         GuardNarrowing::Narrowed(subject, node) => {
                             self.narrowings.push((subject, node));
-                        }
-                        GuardNarrowing::Impossible => {
-                            if slice_statements_have_non_subject_return(
-                                region.statements.iter().skip(statement_index + 1),
-                                &|expr| slice_expr_is_exact_subject_read(expr, subject),
-                            ) {
-                                self.record_degradation(FlowReturnDegradation::FlowGap(
-                                    crate::semantic_query::FlowGap::GuardNarrowing,
-                                ));
-                            }
-                            path_alive = false;
                         }
                         GuardNarrowing::Unchanged => {}
                     }
@@ -10274,21 +10452,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // of the union survives, degraded.
                     let holds_before = self.holds.len();
                     let narrow_len = self.narrowings.len();
-                    let possible = self.apply_guard_scoped(guard, index == 0);
-                    if !possible
-                        && !guard_has_subject_matching(guard, &|subject| {
-                            slice_expr_is_exact_subject_read(arm, subject)
-                        })
-                    {
-                        self.record_degradation(FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::GuardNarrowing,
-                        ));
-                    }
-                    let outcome = possible.then(|| self.eval_expr(arm));
+                    self.apply_guard_scoped(guard, index == 0);
+                    let outcome = self.eval_expr(arm);
                     self.narrowings.truncate(narrow_len);
-                    if let Some(outcome) = outcome {
-                        nodes.push(self.settle_composite_part(outcome, holds_before));
-                    }
+                    nodes.push(self.settle_composite_part(outcome, holds_before));
                 }
                 Positional::Value(
                     self.dispatch
@@ -11172,6 +11339,119 @@ mod plan_refusal_class_tests {
         );
         assert_eq!(
             plan_refusal_reason_class(None),
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        );
+    }
+
+    /// The finalizer-partial classifier is the twin of the plan-refusal
+    /// split, applied to the verdict channel: a torn/stale/foreign or
+    /// incoherent proof state faults as UNSTABLE_STATE, undischarged or
+    /// non-converged work as BUDGET_EXCEEDED, a cancellation as
+    /// CANCELLED — while only the evidence-shaped causes (a typed gap,
+    /// an unprovable contract, the degraded-value echo) keep the
+    /// contained classes. Mutation: classifying any faulting reason from
+    /// the value's degradation alone (the dropped-cause default) fails
+    /// the non-degraded rows below.
+    #[test]
+    fn finalizer_partial_classes_split_by_reason() {
+        use super::super::flow_solve::{FlowFailure, FlowFailureClass, FlowPartialReason};
+
+        let faulting = [
+            (
+                FlowPartialReason::StaleBasis,
+                PartialReasonSet::UNSTABLE_STATE,
+            ),
+            (
+                FlowPartialReason::NoDemandInstalled,
+                PartialReasonSet::UNSTABLE_STATE,
+            ),
+            (
+                FlowPartialReason::ForeignProvenance,
+                PartialReasonSet::UNSTABLE_STATE,
+            ),
+            (
+                FlowPartialReason::ObligationSetMismatch,
+                PartialReasonSet::UNSTABLE_STATE,
+            ),
+            (
+                FlowPartialReason::NonConverged,
+                PartialReasonSet::BUDGET_EXCEEDED,
+            ),
+            (
+                FlowPartialReason::Failed(FlowFailure {
+                    class: FlowFailureClass::BudgetExhausted,
+                }),
+                PartialReasonSet::BUDGET_EXCEEDED,
+            ),
+            (
+                FlowPartialReason::Failed(FlowFailure {
+                    class: FlowFailureClass::Cancelled,
+                }),
+                PartialReasonSet::CANCELLED,
+            ),
+            (
+                FlowPartialReason::Failed(FlowFailure {
+                    class: FlowFailureClass::Internal,
+                }),
+                PartialReasonSet::UNSTABLE_STATE,
+            ),
+        ];
+        for (reason, expected) in faulting {
+            // A non-degraded value must not launder the faulting cause
+            // into the contained class.
+            assert_eq!(flow_partial_reason_class(&reason, None), expected);
+            // A degraded value ADDS its own class; the faulting cause
+            // still reaches the consumer.
+            let with_degradation =
+                flow_partial_reason_class(&reason, Some(FlowReturnDegradation::UnmodeledPosition));
+            assert_eq!(
+                with_degradation,
+                expected.union(PartialReasonSet::FLOW_RETURN_UNINFERRED)
+            );
+        }
+
+        // The contained causes: evidence-shaped, not faulting.
+        assert_eq!(
+            flow_partial_reason_class(
+                &FlowPartialReason::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+                None
+            ),
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        );
+        assert_eq!(
+            flow_partial_reason_class(&FlowPartialReason::OperationNotProvable, None),
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        );
+        // The bare pending-obligation echo is the close's own withholding
+        // signature, not a member fault: a genuinely budget-refused
+        // obligation reaches the ledger as a typed `Failed` budget
+        // record (asserted BUDGET_EXCEEDED above) — the two must not
+        // collapse onto one class in either direction. Over a DEGRADED
+        // value the echo adds nothing: widening a positional marker onto
+        // the frame-wide class would erase its faithful siblings.
+        assert_eq!(
+            flow_partial_reason_class(&FlowPartialReason::IncompleteObligations, None),
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        );
+        assert_eq!(
+            flow_partial_reason_class(
+                &FlowPartialReason::IncompleteObligations,
+                Some(FlowReturnDegradation::UnmodeledPosition)
+            ),
+            PartialReasonSet::FLOW_RETURN_UNINFERRED,
+        );
+        // The degraded-value echo classifies from the degradation itself
+        // — a positional marker stays the positional class, never
+        // widened by the echo.
+        assert_eq!(
+            flow_partial_reason_class(
+                &FlowPartialReason::DegradedValue,
+                Some(FlowReturnDegradation::UnmodeledPosition)
+            ),
+            PartialReasonSet::FLOW_RETURN_UNINFERRED,
+        );
+        assert_eq!(
+            flow_partial_reason_class(&FlowPartialReason::DegradedValue, None),
             PartialReasonSet::FLOW_RETURN_UNVERIFIED,
         );
     }

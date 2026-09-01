@@ -1943,17 +1943,54 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         materialized: member.materialized,
                     });
                 }
-                _ => {
+                unproven => {
                     flow_batch_unproven = true;
                     // The member's OWN cause, unioned rather than
                     // ranked: two members refused for different reasons
                     // leave the batch both over budget and unstable, and
                     // picking one would drop a class a consumer needs.
-                    if member_plan_refusal.is_some() {
-                        flow_batch_partial_reasons = flow_batch_partial_reasons.union(
-                            super::flow_return::plan_refusal_reason_class(member_plan_refusal),
-                        );
-                    }
+                    // Both cause channels are read — the recorded plan
+                    // refusal FIRST (it is the member's primary cause and
+                    // the finalizer's undischarged echo must not shadow
+                    // it), then the finalizer's typed partial. Two member
+                    // states deliberately contribute NO class of their
+                    // own: a cleanly-planned member whose obligations
+                    // were merely left pending carries the batch close's
+                    // OWN withholding signature (`IncompleteObligations`
+                    // — a genuinely budget-refused obligation reaches
+                    // here as a typed `Failed` budget record instead),
+                    // and a NO-VALUE member is already represented
+                    // POSITIONALLY in the value the root consumed (its
+                    // typed marker names the exact position; blanketing
+                    // the frame-wide missing-surface class here would
+                    // erase the faithfully-typed sibling members a
+                    // value-deriving consumer can still serve). The batch
+                    // stays unproven either way — nothing warms.
+                    let member_reasons = if member_plan_refusal.is_some() {
+                        super::flow_return::plan_refusal_reason_class(member_plan_refusal)
+                    } else {
+                        match &unproven {
+                            Some(super::flow_solve::FlowSolveOutcome::Partial(partial)) => {
+                                match &partial.reason {
+                                    super::flow_solve::FlowPartialReason::IncompleteObligations => {
+                                        crate::semantic_query::PartialReasonSet::default()
+                                    }
+                                    _ => super::flow_return::flow_partial_reason_class(
+                                        &partial.reason,
+                                        partial.value.degradation(),
+                                    ),
+                                }
+                            }
+                            Some(super::flow_solve::FlowSolveOutcome::NoValue(_)) | None => {
+                                crate::semantic_query::PartialReasonSet::default()
+                            }
+                            // Matched by the arm above.
+                            Some(super::flow_solve::FlowSolveOutcome::Complete(_)) => {
+                                unreachable!()
+                            }
+                        }
+                    };
+                    flow_batch_partial_reasons = flow_batch_partial_reasons.union(member_reasons);
                     self.flow_return_abort_inline_flight(member.inline_flight.as_ref());
                 }
             }

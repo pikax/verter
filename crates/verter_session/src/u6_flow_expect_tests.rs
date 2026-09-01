@@ -5232,30 +5232,29 @@ fn in_guard_presence_is_separate_from_value_undefined() {
             true,
         ),
         // The two rows below sit on a REQUIRED single-arm subject, whose
-        // negated `in` edge the narrow proves impossible. The checker
-        // still counts the fall-through `return { v: 0 }` (measured:
-        // `{ v: string; } | { v: number; }` — narrowing impossibility
-        // never removes a contribution that does not read the subject;
-        // only its subject reads collapse to `never`). Recovering that
-        // exact join needs `never`-in-union absorption, which is an open
-        // canonical-normalization question — so the honest reachable
-        // state pins here: the kept arm's value is EXACT (no fabricated
+        // negated `in` edge no arm survives. That edge stays ALIVE with
+        // the subject read as `never`, so the fall-through
+        // `return { v: 0 }` — which never reads the subject — keeps its
+        // own contribution (measured: `{ v: string; } | { v: number; }`),
+        // and the kept arm's value stays EXACT: no fabricated
         // `undefined` on a required member, no duplicate `undefined` on
-        // an explicit one) and the dropped-contributor edge is a typed
-        // guard gap, ReturnOnly, never warm — never a silent warm drop.
+        // an explicit one.
         (
             "required_member_gains_no_undefined",
             "type T = { k: string }\nfunction f(x: T) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
-            obj_v(r#"{"kind":"primitive","name":"string"}"#),
-            Degr::FlowGap(FlowGap::GuardNarrowing),
-            false,
+            union2(
+                &obj_v(r#"{"kind":"primitive","name":"string"}"#),
+                &obj_v(num),
+            ),
+            Degr::None,
+            true,
         ),
         (
             "explicit_undefined_gains_no_duplicate",
             "type T = { k: string | undefined }\nfunction f(x: T) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
-            obj_v(str_or_undef),
-            Degr::FlowGap(FlowGap::GuardNarrowing),
-            false,
+            union2(&obj_v(str_or_undef), &obj_v(num)),
+            Degr::None,
+            true,
         ),
     ];
     let mut report = Vec::new();

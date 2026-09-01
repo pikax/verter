@@ -1757,6 +1757,26 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "Y03_disjoint_scalar_intersection_member",
         "30f97e989e158f33f9f20ce2af9f7b55bad03e663803b4c6ae336bcbeb290735",
     ),
+    (
+        "N85_uninhabited_conjunct_keeps_sibling_subject_contributor",
+        "04d1f801c7a70decc002101c5e131908ce6746d64d2d5194fab2c6a3b17288c5",
+    ),
+    (
+        "N86_uninhabited_conjunct_keeps_sibling_in_ternary",
+        "3ed99725de4ca09d9646f2061ac4342e02639478dd1808eb08f4b68774142367",
+    ),
+    (
+        "N87_uninhabited_negated_disjunct_keeps_fallthrough",
+        "6283bce4221d024df9396e470284aed4f60e8b26ebde3287ef8618b51d6e48b0",
+    ),
+    (
+        "N89_in_known_key_filters_arms_exactly",
+        "1491c269e3bf8a82857f8c06d2169180b8e21d1536c7ce7da633be31efeaf37a",
+    ),
+    (
+        "N91_typeof_function_over_member_surface_reads_never",
+        "dbd07ccc18231dafc886ff3256758ae19486616b6b4cde25a12ad44400d87b5a",
+    ),
 ];
 
 // The suite
@@ -2683,6 +2703,7 @@ mod corpus_suite {
             "X85_nested_closure_write_updates_captured_binding",
             "X87_read_only_let_capture_keeps_reaching_literal",
             "X106_triple_nested_closure_return",
+            "N91_typeof_function_over_member_surface_reads_never",
         ];
         /// Deep-pinned rows whose `checker` text is NOT byte-comparable
         /// to the renderer, each with the PRESENTATION reason. Semantic
@@ -2911,6 +2932,26 @@ mod corpus_suite {
             (
                 "X115_union_alias_passthrough_keeps_alias",
                 "checker prints `Shape`; the renderer spells the same node `DeclRef(Shape)`",
+            ),
+            (
+                "N85_uninhabited_conjunct_keeps_sibling_subject_contributor",
+                "checker prints `string | 0`; the renderer spells the same node `Union(string | 0)`",
+            ),
+            (
+                "N86_uninhabited_conjunct_keeps_sibling_in_ternary",
+                "checker prints `string | 0`; the renderer spells the same node `Union(string | 0)`",
+            ),
+            (
+                "N87_uninhabited_negated_disjunct_keeps_fallthrough",
+                "checker prints `string | 0`; the renderer spells the same node `Union(string | 0)`",
+            ),
+            (
+                "N89_in_known_key_filters_arms_exactly",
+                "checker prints `0 | { a: number; }`; the renderer spells the same node `Union({ a: number } | 0)`",
+            ),
+            (
+                "N90_typeof_function_over_object_narrows_to_function",
+                "the renderer spells the (KnownOwed-divergent) node `Union(object | 0)` where the checker prints `0 | Function` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
             ),
         ];
         let mut failures = Vec::new();
@@ -3709,10 +3750,11 @@ mod programme_ledgers {
                 row.id
             );
             assert!(
-                matches!(row.flow, Flow::Result { members, .. } if !members.is_empty()),
-                "{}: a narrowing row must pin at least one MEMBER shape — the enclosing node is \
-                 `Object` whether or not the guard applied, so a row without a member \
-                 assertion measures nothing",
+                matches!(row.flow, Flow::Result { members, .. } if !members.is_empty())
+                    || matches!(row.expect, Expect::Node(_)),
+                "{}: a narrowing row must pin at least one MEMBER shape or carry a recursive \
+                 Expect::Node pin — the enclosing node's discriminant alone is the same \
+                 whether or not the guard applied, so a row with neither measures nothing",
                 row.id
             );
             match row.verdict {
@@ -4267,6 +4309,13 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         Owner::U6ValueInference,
         "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
     ),
+    (
+        "N88_in_unknown_key_keeps_subject_as_typed_superset",
+        Owner::U6NarrowLattice,
+        "member Union — the recorded checker answer carries `Record<\"c\", unknown>` generic \
+         syntax the checker-syntax comparer cannot parse yet, so a deep pin cannot be \
+         cross-validated; deepen when the comparer grows generic-argument support",
+    ),
 ];
 
 /// Burn-down ceiling of [`SHALLOW_PINNED_ROWS`]. Lower freely as rows
@@ -4288,7 +4337,11 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 /// the result stays a typed `ReturnOnly` (ConditionalVarDefinition), the
 /// same value-equals-checker class as N81/N84.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 88;
+// Raised from 88 for the one deliberate shallow exception whose CHECKER
+// text the deep-pin comparer cannot yet parse (a `Record<K, V>` generic
+// in the recorded answer) — see the ledger entry's reason. Burn-down
+// pressure is unchanged: deepening any entry lowers this again.
+const SHALLOW_PINNED_ROWS_CEILING: usize = 89;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -4328,6 +4381,16 @@ const OPEN_DEBTS: &[&str] = &[
     // pin — the root `v: Union` member pin could not see it.
     "N25_impossible_predicate_statement_keeps_dead_contributor",
     "N55_in_operator_nonliteral_key",
+    // The checker narrows `"k" in x` for an undeclared key to
+    // `(subject) & Record<key, unknown>` on the positive edge; that
+    // intersection carrier is not mintable, so the subject publishes
+    // unchanged behind the typed guard gap (superset, ReturnOnly).
+    "N88_in_unknown_key_keeps_subject_as_typed_superset",
+    // The positive `typeof x === "function"` edge over `object` narrows to
+    // the checker's global `Function` surface; the flow environment has no
+    // resolvable lib `Function`, so the arm stays `object` behind the
+    // typed guard gap (superset, ReturnOnly).
+    "N90_typeof_function_over_object_narrows_to_function",
     // ── CALL RESOLUTION — context-sensitive callback inference ──────────
     // A callback argument's un-annotated parameter is never contextually
     // typed: withheld from the first inference pass and never re-typed
@@ -4455,11 +4518,11 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6LoopClosure, 6, 1, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
     (Owner::U6FlowReturnSubstrate, 63, 47, 3),
-    (Owner::U6NarrowTypeof, 42, 23, 19),
+    (Owner::U6NarrowTypeof, 44, 24, 20),
     // N25's MatchesChecker label predated the recursive expect pin; the
     // deep measurement showed the dead contributor SURVIVES (wrong-and-
     // warm), so the row is parked against its narrowing block.
-    (Owner::U6NarrowLattice, 27, 14, 13),
+    (Owner::U6NarrowLattice, 32, 18, 14),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 12, 7, 3),
