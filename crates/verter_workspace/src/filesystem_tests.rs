@@ -1454,7 +1454,7 @@ fn assert_filesystem_parsed_edge_terminal_failure_is_cold(with_exact: bool) {
         ResolutionPhase::ParsedEdgePreCommit,
         move || {
             let ordinal = write_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            let target = if ordinal % 2 == 0 { "b" } else { "a" };
+            let target = if ordinal.is_multiple_of(2) { "b" } else { "a" };
             std::fs::write(
                 &manifest_path,
                 format!(r#"{{"name":"pkg","types":"./{target}.d.ts"}}"#),

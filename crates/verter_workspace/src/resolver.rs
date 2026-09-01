@@ -159,7 +159,12 @@ pub enum LoadedResolutionInput {
     },
     PackageManifest {
         key: InputKey,
-        value: Option<crate::types::PackageManifest>,
+        /// Boxed so a manifest probe that finds nothing costs a niche rather
+        /// than the ~400 bytes a parsed manifest occupies — this enum is held
+        /// per loaded input, and the other two variants are an order of
+        /// magnitude smaller. `Option<Box<_>>` rather than `Box<Option<_>>`
+        /// keeps the absent case allocation-free.
+        value: Option<Box<crate::types::PackageManifest>>,
         manifest_path: String,
         directories: Vec<String>,
     },
@@ -413,7 +418,7 @@ pub(crate) fn load_supported_resolution_inputs(
                 directories,
             } => LoadedResolutionInput::PackageManifest {
                 key: key.clone(),
-                value: package_manifest(manifest_path, *present, *raw_bytes, key)?,
+                value: package_manifest(manifest_path, *present, *raw_bytes, key)?.map(Box::new),
                 manifest_path: manifest_path.clone(),
                 directories: directories.clone(),
             },
@@ -814,7 +819,7 @@ impl InputResolutionLedger {
         unresolved: &[InputKey],
     ) -> Result<(), Box<AttemptFailure>> {
         self.staged_loaded_inputs.clear();
-        let prospective = self.churn.checked_add(1).unwrap_or(u32::MAX);
+        let prospective = self.churn.saturating_add(1);
         if prospective > self.budgets.churn() {
             return Err(limit_failure(
                 reader,
@@ -955,7 +960,7 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
             requested.clear();
             last_load_set = None;
         }
-        let prospective_attempts = ledger.attempts.checked_add(1).unwrap_or(u32::MAX);
+        let prospective_attempts = ledger.attempts.saturating_add(1);
         if prospective_attempts > ledger.budgets.attempts() {
             return Err(limit_failure(
                 reader,
@@ -1025,7 +1030,7 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
                     return Err(Box::new(failure));
                 }
 
-                let prospective_depth = ledger.depth.checked_add(1).unwrap_or(u32::MAX);
+                let prospective_depth = ledger.depth.saturating_add(1);
                 if prospective_depth > ledger.budgets.driver_depth() {
                     return Err(limit_failure(
                         reader,
@@ -1045,9 +1050,7 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
                 for key in &delta {
                     if !ledger.unique_keys.contains(key) {
                         new_keys.push(key.clone());
-                        new_key_bytes = new_key_bytes
-                            .checked_add(input_key_spelling_bytes(key))
-                            .unwrap_or(u64::MAX);
+                        new_key_bytes = new_key_bytes.saturating_add(input_key_spelling_bytes(key));
                     }
                 }
                 let prospective_unique = ledger
@@ -1315,9 +1318,10 @@ fn apply_loaded_resolution_inputs(
                     return false;
                 };
                 let fingerprint = value
-                    .as_ref()
+                    .as_deref()
                     .map(crate::resolution_currency::manifest_fingerprint_of);
                 let value = value.map(|manifest| {
+                    let manifest = *manifest;
                     Arc::new(ResolutionPackageManifest {
                         main: manifest.main,
                         module: manifest.module,

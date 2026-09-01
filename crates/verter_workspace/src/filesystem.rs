@@ -1274,7 +1274,7 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
             } = entry
             {
                 self.observations
-                    .record_manifest(manifest_path, value.clone());
+                    .record_manifest(manifest_path, value.as_deref().cloned());
             }
         }
         Ok(loaded)
@@ -1511,7 +1511,7 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
                     self.mark_incomplete();
                     Err(
                         verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
-                            key: key.clone(),
+                            key: Box::new(key.clone()),
                         },
                     )
                 }
@@ -1541,7 +1541,7 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
                         self.mark_incomplete();
                         Err(
                             verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
-                                key: key.clone(),
+                                key: Box::new(key.clone()),
                             },
                         )
                     }
@@ -1843,9 +1843,9 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                     {
                         self.native_fs.probe_path_live(path).map_err(|_| {
                             verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
-                                key: verter_semantic::resolver_core::InputKey::PathProbe {
+                                key: Box::new(verter_semantic::resolver_core::InputKey::PathProbe {
                                     path: path.into(),
-                                },
+                                }),
                             }
                         })?
                     }
@@ -1866,9 +1866,9 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                     {
                         self.native_fs.realpath_live(path).map_err(|_| {
                             verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
-                                key: verter_semantic::resolver_core::InputKey::RealPath {
+                                key: Box::new(verter_semantic::resolver_core::InputKey::RealPath {
                                     path: path.into(),
-                                },
+                                }),
                             }
                         })?
                     }
@@ -1894,7 +1894,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                     {
                         self.native_fs.file_len_live(manifest_path).map_err(|_| {
                             verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
-                                key: key.clone(),
+                                key: Box::new(key.clone()),
                             }
                         })?
                     }
@@ -1942,7 +1942,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                             .read_file_bounded_live(manifest_path, reserved_raw_bytes)
                             .map_err(|_| {
                                 verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
-                                    key: key.clone(),
+                                    key: Box::new(key.clone()),
                                 }
                             })? {
                             crate::native_fs::BoundedFileRead::Missing => None,
