@@ -407,6 +407,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     flow_members.push(super::relation::DrainedFlowReturnMember {
                         key,
                         outcome: state.outcome,
+                        plan_refusal: state.plan_refusal,
                         inline_flight: state.inline_flight,
                         holds: state.holds,
                         self_roots: state.self_roots,
@@ -732,7 +733,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.fold_cache_read_rails(
                 true,
                 true,
-                crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+                crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED
+                    .union(discharge.flow_batch_partial_reasons),
             );
             if machinery_root {
                 return ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(

@@ -1023,6 +1023,7 @@ fn flow_demand_carriers_default_none_and_round_trip() {
 
     // The deferred SCC member carrier.
     let mut pending = FlowReturnPendingState {
+        plan_refusal: None,
         outcome: FlowReturnPendingOutcome::NoValue {
             failure: FlowReturnFailure::Budget(
                 verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,

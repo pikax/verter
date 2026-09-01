@@ -317,6 +317,10 @@ pub(super) struct DrainedRelationMember {
 pub(super) struct DrainedFlowReturnMember {
     pub(super) key: crate::semantic_query::FlowReturnKey,
     pub(super) outcome: super::dispatch_txn::FlowReturnPendingOutcome,
+    /// The refusal recorded when this member's own demand could not be
+    /// planned — the batch reports it so the root classifies by the
+    /// cause that actually refused, not by its own clean preparation.
+    pub(super) plan_refusal: Option<super::dispatch_txn::flow_obligation_state::FlowPlanRefusal>,
     pub(super) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
     /// The coinductive hold targets the member's evaluation met — the SCC
     /// close discharges an empty-cycle member on its targets' admitted
@@ -379,6 +383,13 @@ pub(super) struct RelationDischargeOutcome {
     /// flows to the caller, and nothing warms around an unproven
     /// flow-derived value.
     pub(super) flow_batch_unproven: bool,
+    /// The union of the partiality classes the refused members' recorded
+    /// causes belong to — empty when the batch is proven, or when the
+    /// refusal carried no cause. The root unions this into its own
+    /// class: its consumers must see a member's budget edge or torn view
+    /// as the faulting class it is, not as the contained unverified
+    /// class the root's own clean preparation would report.
+    pub(super) flow_batch_partial_reasons: crate::semantic_query::PartialReasonSet,
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -1249,6 +1260,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     flow_members.push(DrainedFlowReturnMember {
                         key,
                         outcome: state.outcome,
+                        plan_refusal: state.plan_refusal,
                         inline_flight: state.inline_flight,
                         holds: state.holds,
                         self_roots: state.self_roots,
@@ -1446,10 +1458,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // the same funnel primitives the inline flow-root
                     // refusal folds (an answer composed around an
                     // unproven flow value must not warm).
+                    // A member refused for a budget edge or a torn
+                    // view faults consumers the contained unverified
+                    // class does not reach: the root's own preparation
+                    // being clean says nothing about why the batch was
+                    // refused.
                     self.fold_cache_read_rails(
                         true,
                         true,
-                        crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+                        crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED
+                            .union(outcome.flow_batch_partial_reasons),
                     );
                     if let Some(step) = outcome.self_step {
                         return FramePop::Provisional(step);
@@ -1859,7 +1877,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // to the caller but must never warm (`ReturnOnly`).
         let mut proven_flow_members = Vec::with_capacity(flow_members.len());
         let mut flow_batch_unproven = false;
+        let mut flow_batch_partial_reasons = crate::semantic_query::PartialReasonSet::default();
         for member in flow_members {
+            // Read before the outcome moves: the cause survives the
+            // member, because the close is where it is finally needed.
+            let member_plan_refusal = member.plan_refusal;
             // The member's per-key substitution applies BEFORE its value
             // leaves the component: the pop substituted only the
             // caller-return clone, so the value channel, the finalizer's
@@ -1923,6 +1945,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 _ => {
                     flow_batch_unproven = true;
+                    // The member's OWN cause, unioned rather than
+                    // ranked: two members refused for different reasons
+                    // leave the batch both over budget and unstable, and
+                    // picking one would drop a class a consumer needs.
+                    if member_plan_refusal.is_some() {
+                        flow_batch_partial_reasons = flow_batch_partial_reasons.union(
+                            super::flow_return::plan_refusal_reason_class(member_plan_refusal),
+                        );
+                    }
                     self.flow_return_abort_inline_flight(member.inline_flight.as_ref());
                 }
             }
@@ -1939,6 +1970,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self_publish,
                 self_step,
                 flow_batch_unproven: true,
+                flow_batch_partial_reasons,
             });
         }
         let mut rootless_flights = Vec::new();
@@ -1971,6 +2003,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self_publish,
             self_step,
             flow_batch_unproven: false,
+            flow_batch_partial_reasons: crate::semantic_query::PartialReasonSet::default(),
         })
     }
 

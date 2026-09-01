@@ -650,6 +650,13 @@ impl FlowReturnPendingOutcome {
 pub(crate) struct FlowReturnPendingState {
     /// The member's decided outcome at pop.
     pub(crate) outcome: FlowReturnPendingOutcome,
+    /// The refusal recorded when the member's OWN demand could not be
+    /// planned. It rides the deferral because the component close is
+    /// where the cause is finally read: a member refused for a budget
+    /// edge or a torn view must fault the root's consumers, and a cause
+    /// dropped here silently downgrades the whole component to the
+    /// contained unverified class.
+    pub(crate) plan_refusal: Option<flow_obligation_state::FlowPlanRefusal>,
     /// Store-owned admission for this inline member.
     pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
     /// The coinductive hold targets the member's evaluation met (in-flight

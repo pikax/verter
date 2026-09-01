@@ -174,7 +174,7 @@ const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_NO
 ///   close, which records no cause — keeps the contained
 ///   [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`]: the member set is
 ///   complete and the value usable, merely unverified.
-fn plan_refusal_reason_class(refusal: Option<FlowPlanRefusal>) -> PartialReasonSet {
+pub(super) fn plan_refusal_reason_class(refusal: Option<FlowPlanRefusal>) -> PartialReasonSet {
     match refusal {
         Some(FlowPlanRefusal::Budget) => PartialReasonSet::BUDGET_EXCEEDED,
         Some(FlowPlanRefusal::TornView) => PartialReasonSet::UNSTABLE_STATE,
@@ -259,6 +259,28 @@ pub(crate) mod flow_admission_fault_injection {
         /// enough to trip the production cap. Refuse-only: no demand
         /// installs, no proof can mint, nothing can warm.
         pub(crate) zero_obligation_budget: AtomicBool,
+
+        /// When armed, the NEXT demand-site derivation sees the function's
+        /// own file as UNSERVED and refuses — modelling the store read
+        /// that did not serve an artifact the resolved declaration slot
+        /// was minted over. Consumed by that first derivation (one shot),
+        /// so the evaluation's own derivation then succeeds: exactly the
+        /// torn shape the transient class exists for — preparation
+        /// refuses while the evaluation still produces a value. There is
+        /// no way to author this race; the slot presents it. Refuse-only:
+        /// no demand installs, no proof can mint, nothing can warm.
+        pub(crate) unserved_demand_site: AtomicBool,
+
+        /// When armed, the INJECTED unproven member's own demand
+        /// preparation runs under the zero obligation budget, so the
+        /// member records a budget refusal while the enclosing root — of
+        /// any domain, including a flow root that plans a demand of its
+        /// own — prepares normally. Consumed by the injection (one shot).
+        /// It exists because the cause under test must provably come from
+        /// the MEMBER: a globally armed budget slot would refuse the
+        /// root's own preparation too, and the resulting class would say
+        /// nothing about whether a member's cause survives its deferral.
+        pub(crate) refuse_injected_member_demand: AtomicBool,
 
         /// When armed, `finalize_flow_demand` sees convergence evidence
         /// with ZERO observed iterations — modelling a caller-fabricated
@@ -376,8 +398,14 @@ struct EvaluatedFlowRoot {
     /// The recorded preparation refusal when `verdict` is `None` because
     /// no demand installed — the close classifies the unproven outcome by
     /// this cause ([`plan_refusal_reason_class`]). `None` for the
-    /// refused-member-batch withholding, which keeps the contained class.
+    /// refused-member-batch withholding, whose own cause is carried
+    /// separately below.
     plan_refusal: Option<FlowPlanRefusal>,
+    /// The partiality classes the REFUSED MEMBERS' recorded causes belong
+    /// to. The root's own preparation can be spotless while a member's
+    /// budget edge or torn view is what withheld the verdict, so the two
+    /// causes are unioned rather than either one standing alone.
+    member_batch_partial_reasons: PartialReasonSet,
 }
 
 /// The shared demand-site of one flow demand — derived ONCE by
@@ -397,6 +425,28 @@ struct FlowSliceDemandSite {
     /// The frame's binding inventory — the cross-frame binding authority
     /// the demand planner resolves slot identities against.
     inventory: super::flow_solve::FlowBindingInventory,
+}
+
+/// A demand site that could not be derived: the typed no-value failure
+/// the evaluation surfaces, the roots observed before the failure, and
+/// the preparation-refusal class this particular edge belongs to.
+///
+/// The refusal class is decided HERE and not re-derived from `failure`
+/// because the site is the only place that can tell the two apart: a
+/// store read that did not serve the artifact is a TRANSIENT torn view,
+/// while an index lookup that found no such function is a DETERMINISTIC
+/// statement about the program. Both spell
+/// [`FlowReturnFailure::Missing`], so a caller matching on the failure
+/// alone would classify the transient edge as contained and under-fault
+/// every consumer of an unstable read.
+struct FlowSliceDemandSiteError {
+    /// The typed no-value failure the evaluation path surfaces.
+    failure: FlowReturnFailure,
+    /// The roots observed before the failure (empty when the failure
+    /// preceded the serve).
+    self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// The preparation-refusal class this edge belongs to.
+    refusal: FlowPlanRefusal,
 }
 
 /// One flow frame's evaluation result, before the frame closes.
@@ -1328,6 +1378,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     materialized,
                     verdict,
                     plan_refusal,
+                    member_batch_partial_reasons,
                 } = *root;
                 // The no-value verdict cannot arise on the
                 // evaluated-value close arm (the evaluation failed →
@@ -1391,7 +1442,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     None => {
                         output.cache_suppress = true;
                         output.result_is_partial = true;
-                        output.partial_reasons = plan_refusal_reason_class(plan_refusal);
+                        output.partial_reasons = plan_refusal_reason_class(plan_refusal)
+                            .union(member_batch_partial_reasons);
                     }
                     // Handled above.
                     Some(FlowSolveOutcome::NoValue(_)) => unreachable!(),
@@ -1701,7 +1753,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let watermark = txn.obligations.pending().pending_len();
             txn.reentry_mut().push_flow_return(key.clone(), watermark)
         };
+        let knobs = &self.ctx.host_for_fact_tracer_install().flow_fault_injection;
+        let refuse_member = knobs
+            .refuse_injected_member_demand
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        if refuse_member {
+            knobs
+                .zero_obligation_budget
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.prepare_flow_return_demand(&key, idx);
+        if refuse_member {
+            knobs
+                .zero_obligation_budget
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
         let provenance = match self.flow_demand_carrier_of(&key) {
             Some(carrier) => carrier.provenance,
             None => self.current_flow_evaluation_provenance(),
@@ -1781,9 +1847,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// can mint and the close finalizes unproven (`ReturnOnly`).
     pub(super) fn prepare_flow_return_demand(&self, key: &FlowReturnKey, frame_idx: usize) {
         use super::flow_solve::{build_flow_demand_plan, FlowDemandRequest, FlowResourcePolicy};
-        let Ok(site) = self.flow_slice_demand_site(key) else {
-            self.record_flow_plan_refusal(frame_idx, FlowPlanRefusal::Unplannable);
-            return;
+        let site = match self.flow_slice_demand_site(key) {
+            Ok(site) => site,
+            // The SITE classifies its own edge: a store read that did not
+            // serve is transient, an unrepresentable demand is not. A
+            // blanket `Unplannable` here would report every torn
+            // prepare-time read as a contained unverified result.
+            Err(err) => {
+                self.record_flow_plan_refusal(frame_idx, err.refusal);
+                return;
+            }
         };
         let flow_slice = self.ctx.project_type_store().flow_slice();
         // The retained structural plan of the ONE cold planning run (the
@@ -2389,6 +2462,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 identity: ObligationIdentity::FlowReturn(root_key),
                 domain: PendingObligationDomain::FlowReturn(FlowReturnPendingState {
                     outcome,
+                    plan_refusal,
                     inline_flight,
                     holds,
                     self_roots,
@@ -2446,6 +2520,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     flow_members.push(super::relation::DrainedFlowReturnMember {
                         key,
                         outcome: state.outcome,
+                        plan_refusal: state.plan_refusal,
                         inline_flight: state.inline_flight,
                         holds: state.holds,
                         self_roots: state.self_roots,
@@ -2647,6 +2722,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // admission below: the root's fixed point consumed the members'
         // evaluated values, so its verdict may flow but must never warm.
         let mut member_batch_unproven = false;
+        let mut member_batch_partial_reasons = PartialReasonSet::default();
         if !relation_members.is_empty() || !flow_members.is_empty() || !call_results.is_empty() {
             match self.relation_discharge_and_route(
                 false,
@@ -2658,7 +2734,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 cyclic,
                 &convergence,
             ) {
-                Ok(outcome) => member_batch_unproven = outcome.flow_batch_unproven,
+                Ok(outcome) => {
+                    member_batch_unproven = outcome.flow_batch_unproven;
+                    member_batch_partial_reasons = outcome.flow_batch_partial_reasons;
+                }
                 Err(_) => {
                     self.flow_return_abort_inline_flight(inline_flight.as_ref());
                     let _ =
@@ -2719,6 +2798,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             materialized,
                             verdict,
                             plan_refusal,
+                            member_batch_partial_reasons,
                         },
                     )))
                 } else {
@@ -2765,9 +2845,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // a torn view fault consumers the merged
                                 // degraded-success class is contained by.
                                 None => plan_refusal_reason_class(plan_refusal),
-                                _ => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+                                // A no-value verdict cannot arise on this
+                                // arm (a failed evaluation closes through
+                                // the no-value path). Should it ever
+                                // reach here, it takes the SAME class the
+                                // machinery root's twin arm takes — a
+                                // milder class on one of two twins is a
+                                // fail-closed asymmetry, not a saving.
+                                Some(FlowSolveOutcome::NoValue(_)) => NO_VALUE_REASON_CLASS,
+                                // Handled by the arm above.
+                                Some(FlowSolveOutcome::Complete(_)) => unreachable!(),
                             };
-                            self.fold_cache_read_rails(true, true, reasons);
+                            // A refused member batch carries its own
+                            // causes: the root's clean preparation must
+                            // not report a member's budget edge as the
+                            // contained unverified class.
+                            self.fold_cache_read_rails(
+                                true,
+                                true,
+                                reasons.union(member_batch_partial_reasons),
+                            );
                         }
                     }
                     FlowFramePop::Provisional(FlowReturnStep::Complete(result))
@@ -3115,13 +3212,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn flow_slice_demand_site(
         &self,
         key: &FlowReturnKey,
-    ) -> Result<
-        FlowSliceDemandSite,
-        (
-            FlowReturnFailure,
-            Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
-        ),
-    > {
+    ) -> Result<FlowSliceDemandSite, FlowSliceDemandSiteError> {
         // The evaluation models the whole-return point and the
         // single-named-member projection point, both at the empty input
         // point. Any other demand/input point fails CLOSED with a typed
@@ -3129,7 +3220,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // never a sibling materialisation the narrower demand did not ask
         // for.
         if !key.input.is_empty() {
-            return Err((FlowReturnFailure::UnmodeledDemandPoint, Vec::new()));
+            return Err(FlowSliceDemandSiteError {
+                failure: FlowReturnFailure::UnmodeledDemandPoint,
+                self_roots: Vec::new(),
+                refusal: FlowPlanRefusal::Unplannable,
+            });
         }
         let demanded_member: Option<Arc<str>> = if key.demand.is_whole_return() {
             None
@@ -3137,15 +3232,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match flow_demanded_member_name(&key.demand) {
                 Some(name) => Some(name),
                 None => {
-                    return Err((FlowReturnFailure::UnmodeledDemandPoint, Vec::new()));
+                    return Err(FlowSliceDemandSiteError {
+                        failure: FlowReturnFailure::UnmodeledDemandPoint,
+                        self_roots: Vec::new(),
+                        refusal: FlowPlanRefusal::Unplannable,
+                    });
                 }
             }
         };
         let canonical = key.function.declaration_slot.defining_canonical.as_ref();
         let owner = key.function.declaration_slot.owner;
         let name = key.function.declaration_slot.merged_symbol_name.as_ref();
-        let Some(serve) = self.ctx.ensure_indexed_ready_serve(canonical) else {
-            return Err((FlowReturnFailure::Missing, Vec::new()));
+        #[cfg(any(test, feature = "test-support"))]
+        let unserved = self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .unserved_demand_site
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(any(test, feature = "test-support")))]
+        let unserved = false;
+        let served = (!unserved)
+            .then(|| self.ctx.ensure_indexed_ready_serve(canonical))
+            .flatten();
+        let Some(serve) = served else {
+            // The store did not serve the function's own file. The
+            // canonical here came from a RESOLVED declaration slot, so
+            // the file was served when that slot was minted: a later
+            // non-serve is a statement about the store's state, not
+            // about the program. It therefore faults consumers as the
+            // transient read it is, rather than passing as a contained
+            // "we could not verify this" — the class a genuinely absent
+            // function position below takes.
+            return Err(FlowSliceDemandSiteError {
+                failure: FlowReturnFailure::Missing,
+                self_roots: Vec::new(),
+                refusal: FlowPlanRefusal::TornView,
+            });
         };
         let indexed = serve.indexed;
         let self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
@@ -3163,14 +3286,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
             .map(|matched| matched.entry())
         else {
-            return Err((FlowReturnFailure::Missing, self_roots));
+            // The served file genuinely holds no such function position:
+            // a deterministic statement about the program, not a torn
+            // read.
+            return Err(FlowSliceDemandSiteError {
+                failure: FlowReturnFailure::Missing,
+                self_roots,
+                refusal: FlowPlanRefusal::Unplannable,
+            });
         };
         // A body whose own bytes could not be read has no exact-content
         // axis, so no content-addressed key can be built for it: fail
         // closed rather than key on a constant every unreadable body
         // shares.
         let Some(flow_body_exact_hash) = entry.flow_body_exact_hash else {
-            return Err((FlowReturnFailure::Unresolved, self_roots));
+            return Err(FlowSliceDemandSiteError {
+                failure: FlowReturnFailure::Unresolved,
+                self_roots,
+                refusal: FlowPlanRefusal::TornView,
+            });
         };
         // The source axes come from the request-bound artifact identity
         // (the served `IndexedReady` through the canonical
@@ -3186,7 +3320,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             indexed.framework_parse.as_deref(),
             indexed.parse_env_hash,
         ) else {
-            return Err((FlowReturnFailure::Unresolved, self_roots));
+            return Err(FlowSliceDemandSiteError {
+                failure: FlowReturnFailure::Unresolved,
+                self_roots,
+                refusal: FlowPlanRefusal::TornView,
+            });
         };
         let slice_key_function = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
             canonical_id: Arc::from(canonical),
@@ -3292,7 +3430,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // (The gate lives in the shared demand-site derivation.)
         let site = match self.flow_slice_demand_site(key) {
             Ok(site) => site,
-            Err((failure, self_roots)) => return degraded(failure, self_roots),
+            Err(err) => return degraded(err.failure, err.self_roots),
         };
         let FlowSliceDemandSite {
             indexed,

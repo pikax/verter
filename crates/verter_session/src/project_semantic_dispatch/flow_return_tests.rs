@@ -7517,6 +7517,9 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
             outcome: FlowReturnPendingOutcome::EvaluatedValue(
                 crate::semantic_query::FlowReturnResult::new(graph, number, false, None),
             ),
+            // This member PLANNED cleanly and failed at the proof gate,
+            // so it contributes no refusal cause of its own.
+            plan_refusal: None,
             inline_flight: None,
             holds: Vec::new(),
             self_roots: Vec::new(),
@@ -7562,6 +7565,12 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
              outcome non-admissible — the mixed equation consumed the \
              members' evaluated values"
         );
+        assert!(
+            outcome.flow_batch_partial_reasons.is_empty(),
+            "a member that planned cleanly contributes no cause of its own — \
+             the root keeps the contained class, got {:?}",
+            outcome.flow_batch_partial_reasons
+        );
     });
 
     // Control: a PROVEN member batch keeps the root admissible.
@@ -7598,6 +7607,213 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
         assert!(
             outcome.self_publish.is_some() && !outcome.flow_batch_unproven,
             "a component without a refused member batch keeps the root admissible"
+        );
+    });
+}
+
+/// A REFUSED member's own cause reaches the root that consumed its
+/// value — at EVERY root domain that drains a flow member (relation,
+/// call, and flow). The root's preparation can be spotless while a
+/// member was refused for a budget edge or a torn view, and those two
+/// causes fault consumers the contained `FLOW_RETURN_UNVERIFIED` class
+/// does not reach: every Vue macro projection lane contains the
+/// unverified class by definition, so a member's budget refusal
+/// classified as contained let a value-deriving lane publish and warm
+/// around work that never ran. The cause therefore rides the deferral to
+/// the close instead of being dropped at the pop.
+///
+/// The refusal is scoped to the INJECTED MEMBER's own preparation, so
+/// the class under test can only have come from the member — a globally
+/// armed budget slot would also refuse a flow root's own preparation and
+/// prove nothing. The control leaves that slot disarmed: the same member
+/// is still refused (its discharge report is missing), records no cause,
+/// and the root keeps the contained class alone.
+///
+/// Mutation: dropping the member's cause at any of the three drain
+/// sites, or classifying the batch by the root's own refusal, fails the
+/// armed leg's faulting-class assertion for that domain while every
+/// other assertion still passes.
+#[test]
+fn refused_member_cause_reaches_the_root_that_consumed_its_value() {
+    use crate::semantic_query::{CallKind, FunctionParam, PartialReasonSet, SignatureKind};
+
+    #[derive(Clone, Copy)]
+    enum RootDomain {
+        Relation,
+        Call,
+        Flow,
+    }
+
+    for domain in [RootDomain::Relation, RootDomain::Call, RootDomain::Flow] {
+        for armed in [true, false] {
+            let host = make_host();
+            with_dispatch(&host, |dispatch| {
+                let graph = dispatch.graph();
+                let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                let member = flow_key(
+                    dispatch,
+                    "subLiteral",
+                    FunctionPartIdentity::DeclarationBody,
+                    0,
+                );
+                let (label, query_key) = match domain {
+                    RootDomain::Relation => (
+                        "relation root",
+                        dispatch.relate_key_for(number, number).to_query_key(),
+                    ),
+                    RootDomain::Call => {
+                        let declared = super::call_resolve_tests::signature(
+                            dispatch,
+                            "refusedMemberCallRoot",
+                            0,
+                            SignatureKind::Call,
+                            vec![FunctionParam::synthetic(None, number, false, false)],
+                            Vec::new(),
+                            number,
+                        );
+                        let callee = super::call_resolve_tests::callable(
+                            dispatch,
+                            vec![declared],
+                            Vec::new(),
+                        );
+                        (
+                            "call root",
+                            SemanticQueryKey::ResolveCall(Box::new(
+                                super::call_resolve_tests::call_key(
+                                    dispatch,
+                                    callee,
+                                    CallKind::Call,
+                                    None,
+                                    vec![super::call_resolve_tests::eager(number)],
+                                ),
+                            )),
+                        )
+                    }
+                    RootDomain::Flow => (
+                        "flow root",
+                        SemanticQueryKey::FlowReturn(Box::new(flow_key(
+                            dispatch,
+                            "subLiteral",
+                            FunctionPartIdentity::DeclarationBody,
+                            0,
+                        ))),
+                    ),
+                };
+                if armed {
+                    host.flow_fault_injection
+                        .refuse_injected_member_demand
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                arm_unproven_member(&host, &member);
+                let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+                assert!(
+                    unproven_member_slot_consumed(&host),
+                    "{label} armed={armed}: the root build ran and drained the injected member"
+                );
+                assert!(
+                    read.result_is_partial && read.cache_suppress,
+                    "{label} armed={armed}: the refused batch keeps the root non-admissible"
+                );
+                assert_eq!(
+                    read.partial_reasons
+                        .contains(PartialReasonSet::BUDGET_EXCEEDED),
+                    armed,
+                    "{label} armed={armed}: the member's budget refusal must reach the root's \
+                     rails as the faulting class it is — and must not appear when no member \
+                     recorded a cause, got {:?}",
+                    read.partial_reasons
+                );
+                assert!(
+                    read.partial_reasons
+                        .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+                    "{label} armed={armed}: the refused batch always rides the unverified \
+                     class too — the member set is incomplete either way, got {:?}",
+                    read.partial_reasons
+                );
+                assert_eq!(
+                    graph.slot_candidate_count_for_tests(&query_key),
+                    0,
+                    "{label} armed={armed}: nothing composed around an unproven flow value admits"
+                );
+            });
+        }
+    }
+}
+
+/// The demand site classifies its OWN edges: a store read that did not
+/// serve the function's file is a transient statement about the read and
+/// takes the faulting `UNSTABLE_STATE` class, while an unrepresentable
+/// demand point is a deterministic statement about the request and keeps
+/// the contained `FLOW_RETURN_UNVERIFIED` class. Both spell the same
+/// typed no-value failure at the evaluation boundary, so a caller that
+/// classified by the failure alone reported every torn prepare-time read
+/// as contained — under-faulting exactly the consumers a torn view must
+/// reach.
+///
+/// The unserved read is presented through the refuse-only one-shot slot:
+/// the demand PREPARATION sees the file unserved and refuses, the
+/// evaluation's own derivation then serves normally and produces a
+/// value. That pairing — refused preparation, successful evaluation — is
+/// the whole reason the transient class exists, and there is no way to
+/// author it.
+///
+/// Mutation: classifying the unserved edge as `Unplannable` (the blanket
+/// class the site's callers previously applied to every edge) fails the
+/// first leg's class assertions while the value and suppression
+/// assertions still pass.
+#[test]
+fn unserved_demand_site_takes_the_transient_class() {
+    use crate::semantic_query::PartialReasonSet;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        host.flow_fault_injection
+            .unserved_demand_site
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let read = dispatch
+            .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+        assert!(
+            !host
+                .flow_fault_injection
+                .unserved_demand_site
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "the one-shot slot is consumed by the preparation's derivation"
+        );
+        assert!(
+            matches!(read.value, QueryResult::Value(_)),
+            "the evaluation's own derivation served, so the usable value still flows, got {:?}",
+            read.value
+        );
+        assert!(
+            read.result_is_partial && read.cache_suppress,
+            "the refused preparation keeps the read partial + suppressed"
+        );
+        assert!(
+            read.partial_reasons
+                .contains(PartialReasonSet::UNSTABLE_STATE),
+            "a torn prepare-time read is transient and takes the faulting class, got {:?}",
+            read.partial_reasons
+        );
+        assert!(
+            !read
+                .partial_reasons
+                .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "the transient read must not ride the contained class every macro projection \
+             lane publishes through, got {:?}",
+            read.partial_reasons
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "the refused build never admits"
         );
     });
 }
