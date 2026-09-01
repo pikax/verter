@@ -363,17 +363,18 @@ fn upsert_batch_completion_mapping_preserves_error_strings() {
 
     // (2) Ready arm → Ok carrying its canonical.
     match &outcomes[0].result {
-        Ok(update) => assert_eq!(
+        Ok(Some(update)) => assert_eq!(
             update.canonical_id, ids[0],
             "Ready arm must route through finish_upsert_post_commit and \
              carry the request's canonical"
         ),
+        Ok(None) => panic!("full upsert mapping must materialize its update result"),
         Err(e) => panic!("Ready arm must map to Ok, got error: {e}"),
     }
 
     // (3) Each failure arm → its EXACT `upsert failed: {e}` string,
     //     rendered through the same `HostError::Display` Stage B uses.
-    let render = |r: &Result<crate::types::HostUpdateResult, HostError>| match r {
+    let render = |r: &Result<Option<crate::types::HostUpdateResult>, HostError>| match r {
         Ok(_) => panic!("expected an Err arm"),
         Err(e) => format!("upsert failed: {e}"),
     };
@@ -473,7 +474,7 @@ fn upsert_batch_result_indices_map_to_prepared_canonicals() {
             "outcome[{i}].canonical_id must equal the i-th prepared canonical"
         );
         match (&outcome.result, expected_err[i]) {
-            (Ok(update), None) => assert_eq!(
+            (Ok(Some(update)), None) => assert_eq!(
                 update.canonical_id, ids[i],
                 "the Ready post-commit result for index {i} must carry the \
                  SAME canonical — a transposed zip would attach the result \

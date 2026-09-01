@@ -199,6 +199,26 @@ struct ParsedEdgeInputs {
     bare_specifiers: Vec<(String, ResolveRequestKind)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ParsedRelativeBatchScope {
+    /// Outside node_modules, relative source-id resolution is a direct probe;
+    /// the selected context captures the project-specific geometry.
+    SharedContext(ResolveContextId),
+    /// Package-backed resolution also enforces the importer's enclosing
+    /// package boundary, so it must never share a result across importers.
+    PackageImporter(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ParsedRelativeBatchKey {
+    /// Absolute extensionless candidate. For relative imports this captures
+    /// every importer-path input the source-id resolver consumes.
+    joined_stem: String,
+    scope: ParsedRelativeBatchScope,
+    phase: ResolvePhase,
+    kind: ResolveRequestKind,
+}
+
 /// Unforgeable crate-internal proof that a resolver call is owned by Engine's
 /// sealed resolution transaction.
 ///
@@ -456,6 +476,11 @@ pub(crate) struct Engine {
     /// no production build carries the slot or the send.
     #[cfg(any(test, feature = "test-support"))]
     published_tx: Mutex<Vec<std::sync::mpsc::Sender<u64>>>,
+    /// Number of non-memoized relative parsed-edge resolutions performed by
+    /// the bulk recorder. Pins the work bound independently of wall-clock
+    /// timing in workspace tests.
+    #[cfg(test)]
+    parsed_relative_batch_resolution_count: AtomicU64,
 
     /// Per-project ambient TypeScript lib registry.
     ///
@@ -526,6 +551,12 @@ impl Drop for StrictSelfRootTransition<'_> {
 
 impl Engine {
     #[cfg(test)]
+    pub(crate) fn parsed_relative_batch_resolution_count_for_test(&self) -> u64 {
+        self.parsed_relative_batch_resolution_count
+            .load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::new_with_input_resolution_budgets(
             verter_semantic::resolver_core::InputResolutionBudgets::default(),
@@ -576,6 +607,8 @@ impl Engine {
             published_state: ArcSwapOption::new(None),
             #[cfg(any(test, feature = "test-support"))]
             published_tx: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            parsed_relative_batch_resolution_count: AtomicU64::new(0),
             ambient_libs: ArcSwap::from_pointee(AmbientLibsByProject::default()),
             default_resolve_extensions: ArcSwap::from_pointee(initial_extensions),
             workspace_default_env_hashes: ArcSwapOption::new(None),
@@ -1940,6 +1973,51 @@ impl Engine {
             self.record_content_transition_at(canonical_id, generation);
             (result, true)
         })
+    }
+
+    /// Publish one atomically-admitted source batch into the session overlay.
+    /// All changed paths share one immutable-root clone, one fact-propagation
+    /// pass, and one content generation while retaining per-canonical
+    /// transition stamps.
+    pub(crate) fn mutate_overlay_upsert_many(&self, records: &[(String, Arc<str>)]) {
+        if records.is_empty() {
+            return;
+        }
+        crate::probe_scope!(MUTATE_OVERLAY_UPSERT);
+        let _strict_transition = self.strict_self_root_transition();
+        let fingerprint = self.default_resolution_session;
+        self.mutate_resolution_session(fingerprint, |base, session| {
+            let changed_ids = {
+                let mut overlay = self.overlay.write();
+                records
+                    .iter()
+                    .filter_map(|(canonical_id, source)| {
+                        overlay
+                            .set(canonical_id.clone(), Arc::clone(source))
+                            .then(|| canonical_id.clone())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            if changed_ids.is_empty() {
+                return ((), false);
+            }
+            for canonical_id in &changed_ids {
+                self.invalidate_package_manifest(canonical_id);
+                let manifest_fingerprint = self.overlay_manifest_fingerprint(canonical_id);
+                self.update_session_overlay_facts(
+                    base,
+                    session,
+                    fingerprint,
+                    canonical_id,
+                    manifest_fingerprint,
+                );
+            }
+            let generation = self.bump_content_generation_in_world();
+            for canonical_id in changed_ids {
+                self.record_content_transition_at(&canonical_id, generation);
+            }
+            ((), true)
+        });
     }
 
     pub(crate) fn mutate_overlay_close<R>(
@@ -4338,6 +4416,123 @@ impl Engine {
         );
     }
 
+    /// Record the parsed-edge snapshots for one source-admission batch.
+    ///
+    /// Resolution remains owner-scoped (each owner retains its own bounded
+    /// input ledger), but every owner is resolved against one captured world
+    /// and all successful edge replacements share one edge-store lock and one
+    /// resolution-world publication fence. This is the bulk counterpart of
+    /// [`Self::record_parsed_edges`]; it avoids rebuilding and revalidating the
+    /// same immutable world once per file during `compile_many` admission.
+    pub(crate) fn record_parsed_edges_many(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        records: &[(String, Vec<crate::types::ParsedEdge>)],
+    ) -> bool {
+        let mut input_ledgers: Vec<_> = records
+            .iter()
+            .map(|_| crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets))
+            .collect();
+        self.record_parsed_edges_many_in_operation(reader, records, &mut input_ledgers, &|| true)
+    }
+
+    pub(crate) fn record_parsed_edges_many_in_operation(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        records: &[(String, Vec<crate::types::ParsedEdge>)],
+        input_ledgers: &mut [crate::resolver::InputResolutionLedger],
+        final_validate: &dyn Fn() -> bool,
+    ) -> bool {
+        crate::probe_scope!(RECORD_PARSED_EDGES);
+        assert_eq!(
+            records.len(),
+            input_ledgers.len(),
+            "parsed-edge batch requires one resolution ledger per owner"
+        );
+        if records.is_empty() {
+            return true;
+        }
+
+        loop {
+            let population = reader.resolution_population();
+            let Some(captured) = self.capture_stable_resolution_world(population) else {
+                if input_ledgers
+                    .iter_mut()
+                    .any(|ledger| ledger.charge_outer_restart(reader).is_err())
+                {
+                    return false;
+                }
+                continue;
+            };
+
+            let mut resolved = Vec::with_capacity(records.len());
+            let mut relative_results: FxHashMap<ParsedRelativeBatchKey, Option<String>> =
+                FxHashMap::default();
+            for ((canonical_id, edges), ledger) in records.iter().zip(input_ledgers.iter_mut()) {
+                let Ok(inputs) = self.resolve_parsed_edge_inputs_in_world_with_batch_memo(
+                    reader,
+                    canonical_id,
+                    edges,
+                    &captured.world,
+                    ledger,
+                    &mut relative_results,
+                ) else {
+                    return false;
+                };
+                resolved.push(inputs);
+            }
+
+            #[cfg(test)]
+            resolution_test_hooks::fire(
+                resolution_test_hooks::ResolutionPhase::ParsedEdgePreCommit,
+            );
+
+            let committed = self.mutate_resolution_world_if_current(&captured, |world| {
+                if !final_validate() {
+                    return (false, false);
+                }
+
+                let retained = {
+                    let mut edge_store = self.edges.write();
+                    records
+                        .iter()
+                        .zip(resolved)
+                        .map(|((canonical_id, _), inputs)| {
+                            edge_store.replace_parsed_edges(
+                                canonical_id,
+                                inputs.parsed_resolved,
+                                inputs.unresolved_pairs,
+                                inputs.bare_specifiers,
+                            );
+                            (
+                                canonical_id.clone(),
+                                edge_store.exact_resolutions_for_owner(canonical_id),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                let mut changed = false;
+                for (canonical_id, exacts) in retained {
+                    changed |= self.replace_world_exact_resolutions(world, &canonical_id, &exacts);
+                }
+                for ledger in input_ledgers.iter_mut() {
+                    ledger.commit_loaded_inputs(reader);
+                }
+                (true, changed)
+            });
+            if let Ok(committed) = committed {
+                return committed;
+            }
+            if input_ledgers
+                .iter_mut()
+                .any(|ledger| ledger.charge_outer_restart(reader).is_err())
+            {
+                return false;
+            }
+        }
+    }
+
     pub(crate) fn record_parsed_edges_in_operation(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
@@ -4499,6 +4694,44 @@ impl Engine {
         captured_world: &Arc<CapturedResolutionWorld>,
         input_ledger: &mut crate::resolver::InputResolutionLedger,
     ) -> Result<ParsedEdgeInputs, crate::resolution_currency::ResolutionPublicationRefusal> {
+        self.resolve_parsed_edge_inputs_in_world_impl(
+            reader,
+            canonical_id,
+            edges,
+            captured_world,
+            input_ledger,
+            None,
+        )
+    }
+
+    fn resolve_parsed_edge_inputs_in_world_with_batch_memo(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        canonical_id: &str,
+        edges: &[crate::types::ParsedEdge],
+        captured_world: &Arc<CapturedResolutionWorld>,
+        input_ledger: &mut crate::resolver::InputResolutionLedger,
+        relative_results: &mut FxHashMap<ParsedRelativeBatchKey, Option<String>>,
+    ) -> Result<ParsedEdgeInputs, crate::resolution_currency::ResolutionPublicationRefusal> {
+        self.resolve_parsed_edge_inputs_in_world_impl(
+            reader,
+            canonical_id,
+            edges,
+            captured_world,
+            input_ledger,
+            Some(relative_results),
+        )
+    }
+
+    fn resolve_parsed_edge_inputs_in_world_impl(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        canonical_id: &str,
+        edges: &[crate::types::ParsedEdge],
+        captured_world: &Arc<CapturedResolutionWorld>,
+        input_ledger: &mut crate::resolver::InputResolutionLedger,
+        mut relative_results: Option<&mut FxHashMap<ParsedRelativeBatchKey, Option<String>>>,
+    ) -> Result<ParsedEdgeInputs, crate::resolution_currency::ResolutionPublicationRefusal> {
         let mut parsed_resolved: BTreeSet<String> = BTreeSet::new();
         let mut bare_specifiers: Vec<(String, ResolveRequestKind)> = Vec::new();
         let mut unresolved_pairs: Vec<((String, ResolveRequestKind), String)> = Vec::new();
@@ -4510,6 +4743,55 @@ impl Engine {
                         phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
                         kind: *kind,
                     };
+                    let relative_candidate = specifier.starts_with('.').then(|| {
+                        let normalized =
+                            crate::relative_path::normalize_relative_specifier(specifier);
+                        let joined_stem =
+                            crate::relative_path::join_relative(canonical_id, &normalized);
+                        (normalized, joined_stem)
+                    });
+                    let batch_key = relative_results.as_ref().and_then(|_| {
+                        let (_, joined_stem) = relative_candidate.as_ref()?;
+                        let normalized_importer =
+                            verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+                        let scope = if suffix_crosses_node_modules(&normalized_importer) {
+                            ParsedRelativeBatchScope::PackageImporter(normalized_importer)
+                        } else {
+                            ParsedRelativeBatchScope::SharedContext(
+                                selected_context_for_path(
+                                    captured_world.base.as_ref(),
+                                    canonical_id,
+                                )
+                                .ok()?,
+                            )
+                        };
+                        Some(ParsedRelativeBatchKey {
+                            joined_stem: joined_stem.clone(),
+                            scope,
+                            phase: ctx.phase,
+                            kind: ctx.kind,
+                        })
+                    });
+                    if let Some(cached) = batch_key
+                        .as_ref()
+                        .and_then(|key| relative_results.as_ref()?.get(key))
+                    {
+                        if let Some(source_id) = cached {
+                            parsed_resolved.insert(source_id.clone());
+                        } else {
+                            let (normalized, joined_stem) = relative_candidate
+                                .as_ref()
+                                .expect("batch memo keys are relative candidates");
+                            unresolved_pairs
+                                .push(((normalized.clone(), *kind), joined_stem.clone()));
+                        }
+                        continue;
+                    }
+                    #[cfg(test)]
+                    if relative_results.is_some() && relative_candidate.is_some() {
+                        self.parsed_relative_batch_resolution_count
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                     let outcome = self.resolve_parsed_edge_in_world(
                         reader,
                         canonical_id,
@@ -4524,14 +4806,22 @@ impl Engine {
                         {
                             let result =
                                 admitted.into_result().expect("guarded admitted resolution");
+                            if let (Some(key), Some(results)) =
+                                (batch_key, relative_results.as_deref_mut())
+                            {
+                                results.insert(key, Some(result.source_id.clone()));
+                            }
                             parsed_resolved.insert(result.source_id);
                         }
                         crate::ResolutionPublication::Admitted(_) if specifier.starts_with('.') => {
-                            let normalized =
-                                crate::relative_path::normalize_relative_specifier(specifier);
-                            let stem =
-                                crate::relative_path::join_relative(canonical_id, &normalized);
-                            unresolved_pairs.push(((normalized, *kind), stem));
+                            if let (Some(key), Some(results)) =
+                                (batch_key, relative_results.as_deref_mut())
+                            {
+                                results.insert(key, None);
+                            }
+                            let (normalized, joined_stem) = relative_candidate
+                                .expect("relative specifiers have a relative candidate");
+                            unresolved_pairs.push(((normalized, *kind), joined_stem));
                         }
                         crate::ResolutionPublication::Admitted(_) => {}
                         crate::ResolutionPublication::Refused(refusal) => return Err(refusal),

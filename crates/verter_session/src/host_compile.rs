@@ -12,8 +12,10 @@
 //!    id; skip upsert only when the scheduler already holds that
 //!    registration (a byte-identical relabel is still a change: the
 //!    language row re-routes parse dispatch). Submit as one
-//!    [`VerterHost::upsert_many_with_priority`] atomic batch. Stage B
-//!    does not fan out through the batch coordinator.
+//!    [`VerterHost::upsert_many_for_compile`] status-only atomic batch. It
+//!    shares the ordinary upsert engine but does not construct discarded
+//!    public update payloads. Stage B does not fan out through the batch
+//!    coordinator.
 //! 3. Compile each unique canonical+profile once. HostBacked requests and
 //!    public Svelte/other non-Vue RuntimeRender requests use
 //!    [`VerterHost::get_virtual_file`] for `Main`; a Vue RuntimeRender request
@@ -415,6 +417,10 @@ impl VerterHost {
     /// order. Output ordering is fixed by Stage D, not by Stage B/C's
     /// (non-deterministic) HashMap iteration.
     ///
+    /// There is deliberately no lint stage: Stage B admits source and Stage C
+    /// compiles it. Lint is an independent public operation and must never be
+    /// folded into `compile_many` admission or compilation.
+    ///
     /// Per-input panic isolation: if the selected compile worker panics for
     /// one input (`get_virtual_file` for HostBacked or Svelte/other non-Vue
     /// RuntimeRender, or `render_only_main` for Vue RuntimeRender), only that
@@ -574,7 +580,7 @@ impl VerterHost {
         // post-commit on this thread after the single wait. Upsert errors
         // fold into `group_errors`, surfaced to every original input
         // position for that canonical in Stage D.
-        for outcome in self.upsert_many_with_priority(upsert_requests, priority) {
+        for outcome in self.upsert_many_for_compile(upsert_requests, priority) {
             if let Err(e) = outcome.result {
                 group_errors
                     .entry(outcome.canonical_id)

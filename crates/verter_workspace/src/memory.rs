@@ -774,6 +774,14 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         self.engine.record_parsed_edges(self, canonical_id, edges);
     }
 
+    fn record_parsed_edges_many(&self, records: &[(String, Vec<crate::types::ParsedEdge>)]) {
+        if !self.engine.record_parsed_edges_many(self, records) {
+            for (canonical_id, edges) in records {
+                self.engine.record_parsed_edges(self, canonical_id, edges);
+            }
+        }
+    }
+
     fn set_exact_resolutions(
         &self,
         canonical_id: &str,
@@ -826,6 +834,10 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
             }
             ((), changed)
         });
+    }
+
+    fn notify_upsert_many(&self, records: &[(String, Arc<str>)]) {
+        self.engine.mutate_overlay_upsert_many(records);
     }
 
     fn notify_close(&self, canonical_id: &str) {

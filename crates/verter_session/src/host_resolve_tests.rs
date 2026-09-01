@@ -4490,6 +4490,67 @@ fn upsert_syncs_relative_import_edges_to_workspace() {
 }
 
 #[test]
+fn scheduler_resolves_only_macro_type_blockers_during_source_admission() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.add_explicit_project(verter_workspace::VfsProjectConfig {
+        root: "/src".to_string(),
+        rank: verter_workspace::ProjectRank::Explicit,
+        tsconfig_path: None,
+        root_files: vec![],
+        extensions: vec![".vue".to_string(), ".ts".to_string(), ".html".to_string()],
+        workspace_root: "/src".to_string(),
+        workspace_aliases: vec![],
+        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        references: vec![],
+        membership: verter_workspace::configured_membership_match_all_under_root(
+            &verter_workspace::CanonicalPath::new("/src"),
+        ),
+    });
+    for (id, source) in [
+        ("/src/utils.ts", "export const helper = () => 1;"),
+        ("/src/view.html", "<div>external</div>"),
+        ("/src/types.ts", "export interface Props { value: string }"),
+    ] {
+        ws.inject_file(id.to_string(), Arc::from(source));
+    }
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    let ordinary = "/src/Ordinary.vue";
+    crate::host_executor::reset_scheduler_dep_resolution_count_for_test(ordinary);
+    upsert_vue(
+        &host,
+        ordinary,
+        "<script setup lang=\"ts\">import { helper } from './utils'; helper()</script><template src=\"./view.html\"></template>",
+    );
+    assert_eq!(
+        crate::host_executor::scheduler_dep_resolution_count_for_test(ordinary),
+        0,
+        "ordinary imports and external src edges are workspace-owned and must not be resolved again by the scheduler"
+    );
+    assert!(ws
+        .forward_deps_for(ordinary)
+        .contains(&"/src/utils.ts".to_string()));
+    assert!(ws
+        .forward_deps_for(ordinary)
+        .contains(&"/src/view.html".to_string()));
+
+    let macro_owner = "/src/Macro.vue";
+    crate::host_executor::reset_scheduler_dep_resolution_count_for_test(macro_owner);
+    upsert_vue(
+        &host,
+        macro_owner,
+        "<script setup lang=\"ts\">import type { Props } from './types'; defineProps<Props>()</script><template><div /></template>",
+    );
+    assert_eq!(
+        crate::host_executor::scheduler_dep_resolution_count_for_test(macro_owner),
+        1,
+        "macro type dependencies must retain their scheduler Artifact blocker resolution"
+    );
+}
+
+#[test]
 fn upsert_syncs_bare_import_edges_to_workspace() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),

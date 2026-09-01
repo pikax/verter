@@ -218,6 +218,17 @@ request (a no-op when a sweep already drained them), requeues stranded
 waiters after the lock drops, bumps `stale_completion_refusals`, and only
 THEN `debug_assert!`s.
 
+`StageExecutor::extract_deps` is host-specific. The session host returns only
+macro type dependencies as `blocker_ids`, because those are the dependencies
+the scheduler's Artifact gate consumes. Ordinary imports and external `src`
+edges are owned by the workspace parsed-edge graph and MUST NOT be resolved a
+second time merely to populate the session scheduler's unused `forward_deps`;
+session compilation is host-owned rather than `execute_artifact`-owned. The
+generic scheduler still records whatever `forward_deps` another executor
+returns. Priority inheritance for a completion is likewise canonical-local:
+`highest_priority_for_file` reads the DAG canonical reverse-index bucket, never
+the whole node map.
+
 The same single-hold rule applies one stage down:
 `admit_pending_artifacts` holds ONE lock across the profile snapshot and
 every admission it drives, plus a liveness pre-check. Snapshotting,

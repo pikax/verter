@@ -135,6 +135,49 @@ fn submit_dedup_merges_identity_and_upgrades_priority() {
     );
 }
 
+/// Priority inheritance is a per-canonical lookup. A batch can retain
+/// thousands of unrelated DAG nodes while one Source completion asks for its
+/// own urgency; visiting the whole DAG here makes batch completion quadratic.
+#[test]
+fn highest_priority_for_file_visits_only_the_canonical_bucket() {
+    let mut dag = SchedulerDag::new();
+    for i in 0..2048 {
+        let _ = dag.submit_expect(
+            file_stage(&format!("/unrelated/{i}.ts"), 1, FileStageKey::Source),
+            WorkKind::Load,
+            Priority::Interactive,
+            Vec::new(),
+            None,
+        );
+    }
+    let target = canonical("/target.ts");
+    let _ = dag.submit_expect(
+        file_stage(&target, 7, FileStageKey::Source),
+        WorkKind::Load,
+        Priority::Background,
+        Vec::new(),
+        None,
+    );
+    let _ = dag.submit_expect(
+        file_stage(&target, 7, FileStageKey::Analysis),
+        WorkKind::Analysis,
+        Priority::Critical,
+        Vec::new(),
+        None,
+    );
+
+    dag.test_reset_highest_priority_node_visit_count();
+    assert_eq!(
+        dag.highest_priority_for_file(&target, 7),
+        Some(Priority::Critical)
+    );
+    assert_eq!(
+        dag.test_highest_priority_node_visit_count(),
+        2,
+        "priority inheritance must inspect only live nodes indexed to the requested canonical"
+    );
+}
+
 /// Newer generation supersedes older — the cancel path drops the
 /// older node so it never dispatches.
 #[test]

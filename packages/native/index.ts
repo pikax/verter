@@ -713,6 +713,7 @@ export declare class VerterHost {
   /**
    * Compile a batch of carrier inputs through the production host
    * path (scheduler + dispatch + compile_cache).
+   * This does not run lint rules; call `lint` explicitly when wanted.
    *
    * Each input's source language is derived from its `canonicalId`, so
    * the id must carry the carrier's extension: `App.vue` compiles as
