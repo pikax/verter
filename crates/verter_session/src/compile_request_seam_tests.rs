@@ -190,18 +190,9 @@ fn published_node_kinds(response: &crate::types::CompileRequestResponse) -> Vec<
     kinds
 }
 
-/// The legacy profile-derived route's bytes for the SAME demand, read
-/// through its own public entry. The oracle for byte-equivalence.
-fn legacy_virtual_file(
-    host: &VerterHost,
-    canonical_id: &str,
-    node: VirtualNodeKind,
-    profile: &CompileProfile,
-) -> (Arc<str>, Option<Arc<str>>) {
-    let response = legacy_virtual_response(host, canonical_id, node, profile);
-    (response.code, response.source_map)
-}
-
+/// The legacy profile-derived route's response for the SAME demand, read
+/// through its own public entry. The oracle for equivalence — the WHOLE
+/// response, because a node carries more than bytes.
 fn legacy_virtual_response(
     host: &VerterHost,
     canonical_id: &str,
