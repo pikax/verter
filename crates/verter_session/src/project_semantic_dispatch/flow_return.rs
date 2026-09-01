@@ -271,21 +271,17 @@ pub(crate) mod flow_admission_fault_injection {
         /// no demand installs, no proof can mint, nothing can warm.
         pub(crate) unserved_demand_site: AtomicBool,
 
-        /// When armed, the INJECTED unproven member's own demand
-        /// preparation sees its file unserved and refuses, while the
-        /// enclosing root — of any domain, including a flow root that
-        /// plans a demand of its own — prepares normally. Consumed by
-        /// the injection (one shot).
+        /// When armed, the INJECTED unproven member records a
+        /// preparation refusal, while the enclosing root — of any
+        /// domain, including a flow root that plans a demand of its own
+        /// — prepares normally. Consumed by the injection (one shot).
         ///
         /// It exists because the cause under test must provably come
         /// from the MEMBER: a globally armed slot would refuse the
         /// root's own preparation too, and the resulting class would say
         /// nothing about whether a member's cause survives its deferral.
-        /// It refuses at the demand SITE rather than by shrinking a
-        /// budget because a zero budget is satisfied by an empty
-        /// obligation set — the member would then plan cleanly, record
-        /// no cause, and the test would silently depend on how many
-        /// obligations that particular member happens to plan.
+        /// Refuse-only: a recorded refusal withholds proof and can never
+        /// mint, promote, or warm anything.
         pub(crate) refuse_injected_member_demand: AtomicBool,
 
         /// When armed, `finalize_flow_demand` sees convergence evidence
@@ -1763,18 +1759,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let refuse_member = knobs
             .refuse_injected_member_demand
             .swap(false, std::sync::atomic::Ordering::Relaxed);
-        if refuse_member {
-            knobs
-                .unserved_demand_site
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-        }
         self.prepare_flow_return_demand(&key, idx);
-        // The one-shot is consumed by the member's own derivation above;
-        // clear it regardless so an unconsumed arm can never leak into
-        // the enclosing root's later reads.
-        knobs
-            .unserved_demand_site
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if refuse_member {
+            // Recorded DIRECTLY rather than by refusing one of the
+            // preparation's own edges. Which edge a given member's
+            // preparation would refuse on depends on its planning inputs
+            // — a zero budget is satisfied by an empty obligation set,
+            // and a site refusal installs no carrier — so driving the
+            // cause through the planner made this slot's outcome depend
+            // on the member's incidental shape. Those edges have their
+            // own tests; this slot's subject is whether a recorded cause
+            // SURVIVES the member's deferral to the root that consumed
+            // its value, and that is what it presents.
+            self.record_flow_plan_refusal(idx, FlowPlanRefusal::TornView);
+        }
         let provenance = match self.flow_demand_carrier_of(&key) {
             Some(carrier) => carrier.provenance,
             None => self.current_flow_evaluation_provenance(),
