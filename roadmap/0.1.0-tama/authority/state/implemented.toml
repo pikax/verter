@@ -36,6 +36,12 @@ schema = 2
 "BF1" = { status = "implemented", commit_message = "chore(arch): freeze the oracle-manifest enumeration performance cells", commit_date = "2026-08-12T17:05:21+01:00" }
 "BF2" = { status = "implemented", commit_message = "fix(meta): correct three official-invocation option-propagation defects and rebuild the mapping axis on authored-source truthfulness", commit_date = "2026-08-14T19:02:10+01:00" }
 "BF3" = { status = "implemented", commit_message = "docs(arch): record the maintainer act closing the two held-open review items", commit_date = "2026-08-17T12:53:47+01:00" }
+"BND0" = { status = "pending" }
+"BND1" = { status = "pending" }
+"BND2" = { status = "pending" }
+"BND3" = { status = "pending" }
+"BND4" = { status = "pending" }
+"BND5" = { status = "pending" }
 "BR0" = { status = "pending" }
 "BRT0" = { status = "implemented", commit_message = "docs(arch): record the batch carrier-selection landing evidence", commit_date = "2026-08-18T02:34:03+01:00" }
 "BS0" = { status = "implemented", commit_message = "docs(arch): record the Svelte correction block's dispatch packet and evidence", commit_date = "2026-08-18T00:07:04+01:00" }
@@ -308,11 +314,22 @@ schema = 2
 "NCK7" = { status = "pending" }
 "NCK8" = { status = "pending" }
 "NCKF0" = { status = "pending" }
+"NUX0" = { status = "pending" }
+"NUX1" = { status = "pending" }
+"NUX2" = { status = "pending" }
+"NUX3" = { status = "pending" }
 "OPT0" = { status = "pending" }
 "ORC0" = { status = "implemented", commit_message = "fix(orchestration): project trusted successor landings", commit_date = "2026-08-28T13:06:16+01:00" }
 "PAR0" = { status = "pending" }
 "PER0" = { status = "pending" }
 "PGF0" = { status = "implemented", commit_message = "fix(session): separate project-shape and route-publication fences", commit_date = "2026-08-30T14:48:45+01:00" }
+"PM0" = { status = "pending" }
+"PM1" = { status = "pending" }
+"PM2" = { status = "pending" }
+"PM3" = { status = "pending" }
+"PM4" = { status = "pending" }
+"PPR0" = { status = "pending" }
+"PPR1" = { status = "pending" }
 "PRF0" = { status = "pending" }
 "PUB0" = { status = "pending" }
 "RCTP" = { status = "pending" }
@@ -332,7 +349,15 @@ schema = 2
 "SKL1" = { status = "pending" }
 "SKL2" = { status = "pending" }
 "SKL3" = { status = "pending" }
+"SKT0" = { status = "pending" }
+"SKT1" = { status = "pending" }
+"SKT2" = { status = "pending" }
+"SKT3" = { status = "pending" }
 "SLDP" = { status = "pending" }
+"SM0" = { status = "pending" }
+"SM1" = { status = "pending" }
+"SM2" = { status = "pending" }
+"SM3" = { status = "pending" }
 "SST0" = { status = "pending" }
 "SST1" = { status = "pending" }
 "SST2" = { status = "pending" }

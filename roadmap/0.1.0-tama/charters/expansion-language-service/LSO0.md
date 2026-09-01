@@ -62,6 +62,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 - `OccurrenceId`, `OccurrenceRole`, and `OccurrenceSet`
 - `EditIntentId`, `AuthoredEditIntent`, `EditSafetyClass`, and `EditPrecondition`
 - `OperationCapability`, `OperationMaturity`, and exact profile participation masks
+- `CurrentProductOperationInventory` and `OperationObligation::{RequiredCurrent, Required, Optional, Unsupported, ExternalOwner, Removed}`
 - `ProviderObservationRef` as opaque provenance only, never provider JSON or routing state
 
 ## Exact predecessor contracts
@@ -82,6 +83,8 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 - Every edit-producing feature emits typed edit intents first; only LSO8 validates and materializes an authored transaction.
 - No feature accepts nearest-position, current-file-mapper fallback, Range::default, 0:0, or fabricated source anchors.
 - Capabilities are profile/document-selector scoped and dynamically truthful under COX0; installing one conflicting editor extension must not disable unrelated operations.
+- Every operation advertised or implemented by the current Verter product enters the inventory as `RequiredCurrent`. It can leave that class only when a named predecessor explicitly removes/unadvertises the operation and its public capability; `ExternalOwner`, `Unsupported`, or a residual-ledger row cannot satisfy it.
+- External providers may remain observations behind the canonical Verter operation. Provider availability never changes a `RequiredCurrent` operation into external semantic ownership.
 - Interactive leaf operations are demand-bounded and cannot trigger an implicit whole-workspace crawl.
 
 ### Internal subblocks
@@ -95,6 +98,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 - Define navigation, occurrence, rename, completion, presentation, and edit transaction operation families.
 - Name semantic authority versus observation/provider authority for each operation.
 - Separate workspace discovery/index planning from authoritative semantic resolution.
+- Seed the versioned current-product inventory from server capabilities, registered handlers, custom methods, editor/package consumers, and shipped documentation; silent omission is a schema failure.
 
 **Expected changes:**
 

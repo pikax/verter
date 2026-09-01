@@ -58,7 +58,7 @@ The current owner is **scattered feature tests, provider-specific fixtures, lega
 These are expected ownership surfaces, not permission to touch all listed paths. The dispatch packet must bind exact path and symbol sets after reconciling the live tree. A newly discovered owner or unrelated package requires an amendment or rescope.
 - Named API/data boundaries:
 - `LanguageServiceConformanceManifest`, `OperationConformanceRow`, and stable row IDs
-- `OperationCoverage::{Required, Optional, Unsupported, ExternalOwner}`
+- `OperationObligation::{RequiredCurrent, Required, Optional, Unsupported, ExternalOwner, Removed}`
 - `ConformanceExpectation` over targets/occurrences/fragments/intents/outcomes/work
 - `ProviderTopology`, `RecoveryState`, `CoexistenceMode`, and `EncodingProfile`
 - `OperationCertificationReceipt` and generated capability/maturity input
@@ -86,6 +86,8 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 - Recovery/coexistence/encoding/profile dimensions cover exact applicable subsets and zero-work requirements.
 - Performance expectations use equivalent-work counters and bounded allocations/retention, not wall time alone.
 - A green matrix certifies only listed operation/profile rows; unsupported/external ownership remains truthful.
+- Every `RequiredCurrent` row must certify the canonical Verter operation or point to an earlier explicit removal/unadvertising receipt. `ExternalOwner`, `Unsupported`, missing applicability, or a residual row cannot make it green.
+- External providers are permitted as typed observations behind a canonical required operation; they are not semantic owners merely because a provider supplies data.
 - When NCK7 is unopened, diagnostics rows remain external/native-parser/lint according to existing authority and perform zero NCK work.
 
 ### Internal subblocks
@@ -97,7 +99,8 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 **Architecture:**
 
 - Define row dimensions, expected semantic IDs/results/outcomes/work, fixtures, owners, and maturity.
-- Separate required/optional/unsupported/external ownership.
+- Separate `RequiredCurrent`, other required, optional, unsupported, external-owner, and explicitly removed obligations.
+- Import the complete `CurrentProductOperationInventory`; fail generation if a shipped capability/handler/custom method lacks a row or if a required-current row is silently downgraded.
 - Version row changes and prevent silent deletion.
 
 **Expected changes:**
