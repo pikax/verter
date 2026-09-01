@@ -48,6 +48,10 @@ import {
   prepareUpdateRepositoryLabel,
   prepareUpdateRepositoryMilestone,
   prepareRemoveIssueLabel,
+  prepareCreateRuleset,
+  prepareGetRuleset,
+  prepareUpdateRuleset,
+  prepareUpdateRepositorySettings,
   PROJECT_NUMBER,
   selectAiResultLabel,
 } from "./adapter.mjs";
@@ -133,6 +137,10 @@ function cloneCheckRun(row) {
   };
 }
 
+function cloneJson(value) {
+  return structuredClone(value);
+}
+
 export class FakeGitHubAdapter {
   #issues;
   #repositoryLabels;
@@ -145,6 +153,8 @@ export class FakeGitHubAdapter {
   #milestones;
   #checkRuns;
   #merges;
+  #rulesets;
+  #repositorySettings;
 
   constructor(options = {}) {
     bindOwnerRepo(this, options, "FakeGitHubAdapter");
@@ -160,6 +170,7 @@ export class FakeGitHubAdapter {
       projects: options.permissions?.projects !== false,
       projectRead: options.permissions?.projectRead !== false,
       actions: options.permissions?.actions !== false,
+      admin: options.permissions?.admin !== false,
     };
     this.failOnApply = options.failOnApply;
     this.failOnApplyError = options.failOnApplyError;
@@ -174,7 +185,31 @@ export class FakeGitHubAdapter {
     this.repositoryLabelWrites = [];
     this.projectStatusWrites = [];
     this.workflowDispatches = [];
+    this.rulesetWrites = [];
+    this.repositorySettingWrites = [];
     this.#issues = new Map();
+    this.#rulesets = new Map();
+    this.#repositorySettings = {
+      allow_squash_merge: true,
+      allow_merge_commit: true,
+      allow_rebase_merge: true,
+      allow_auto_merge: false,
+      delete_branch_on_merge: false,
+      ...(options.repositorySettings ?? {}),
+    };
+    for (const row of options.rulesets ?? []) {
+      const cloned = cloneJson(row);
+      if (!Number.isSafeInteger(cloned?.id) || cloned.id < 1) {
+        throw new GitHubAdapterError("ruleset id must be a positive safe integer");
+      }
+      if (typeof cloned.name !== "string" || cloned.name.length === 0) {
+        throw new GitHubAdapterError("ruleset name is required");
+      }
+      if (this.#rulesets.has(cloned.id)) {
+        throw new DuplicateError(`ruleset ${cloned.id} already exists`);
+      }
+      this.#rulesets.set(cloned.id, cloned);
+    }
     this.#repositoryLabels = new Map();
     this.#pulls = new Map();
     this.#heads = new Set();
@@ -286,6 +321,7 @@ export class FakeGitHubAdapter {
         this.permissions.projectRead &&
         !this.#projectMissing,
       actions: this.permissions.actions,
+      admin: this.permissions.admin,
     });
   }
 
@@ -1034,5 +1070,64 @@ export class FakeGitHubAdapter {
       workflow: "release-check.yml",
       applied: true,
     };
+  }
+
+  listRulesets() {
+    this.reads.push({ kind: "list-rulesets" });
+    return [...this.#rulesets.values()]
+      .map((row) => cloneJson(row))
+      .sort((left, right) => left.id - right.id);
+  }
+
+  getRuleset(id) {
+    const { id: rulesetId } = prepareGetRuleset(id);
+    this.reads.push({ kind: "get-ruleset", id: rulesetId });
+    const ruleset = this.#rulesets.get(rulesetId);
+    if (!ruleset) throw new NotFoundError(`ruleset ${rulesetId} is missing`);
+    return cloneJson(ruleset);
+  }
+
+  createRuleset(payload) {
+    const body = prepareCreateRuleset(payload);
+    this.#beginApply();
+    if (!this.permissions.admin) throw new PermissionDeniedError("admin permission denied");
+    if ([...this.#rulesets.values()].some((row) => row.name === body.name)) {
+      throw new DuplicateError(`ruleset ${body.name} already exists`);
+    }
+    const id = Math.max(0, ...this.#rulesets.keys()) + 1;
+    const created = { id, ...cloneJson(body) };
+    this.#rulesets.set(id, created);
+    this.rulesetWrites.push({ kind: "create", id, payload: cloneJson(body) });
+    return { kind: "create-ruleset", id, name: created.name, applied: true };
+  }
+
+  updateRuleset(id, payload) {
+    const prepared = prepareUpdateRuleset(id, payload);
+    this.#beginApply();
+    if (!this.permissions.admin) throw new PermissionDeniedError("admin permission denied");
+    const existing = this.#rulesets.get(prepared.id);
+    if (!existing) throw new NotFoundError(`ruleset ${prepared.id} is missing`);
+    const updated = { ...existing, ...cloneJson(prepared.payload), id: prepared.id };
+    this.#rulesets.set(prepared.id, updated);
+    this.rulesetWrites.push({
+      kind: "update",
+      id: prepared.id,
+      payload: cloneJson(prepared.payload),
+    });
+    return { kind: "update-ruleset", id: prepared.id, name: updated.name, applied: true };
+  }
+
+  getRepositorySettings() {
+    this.reads.push({ kind: "get-repository-settings" });
+    return cloneJson(this.#repositorySettings);
+  }
+
+  updateRepositorySettings(patch) {
+    const body = prepareUpdateRepositorySettings(patch);
+    this.#beginApply();
+    if (!this.permissions.admin) throw new PermissionDeniedError("admin permission denied");
+    this.#repositorySettings = { ...this.#repositorySettings, ...body };
+    this.repositorySettingWrites.push({ kind: "patch", patch: cloneJson(body) });
+    return { kind: "update-repository-settings", patch: cloneJson(body), applied: true };
   }
 }

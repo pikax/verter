@@ -18,6 +18,7 @@ import {
   rehearsalIdentity as resolveRehearsalIdentity,
   releasePlan,
 } from "../index.mjs";
+import { writeLedgerFixture } from "./ledger-fixture.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
@@ -46,40 +47,12 @@ function writeWorkflows(repoRoot, checkYaml) {
   fs.writeFileSync(path.join(dir, "release-check.yml"), checkYaml);
 }
 
-function implementedBlock(id) {
-  return `[[implemented]]
-node_id = "${id}"
-commit_message = "test locator ${id}"
-commit_date = "2026-08-28T00:00:00+00:00"
-`;
-}
-
-function mappingBlock(nodeId, issue, syncToGithub) {
-  return `[[github_issue]]
-node_id = "${nodeId}"
-gh_issue = ${issue}
-sync_to_github = ${syncToGithub}
-`;
-}
-
-function trainMappingBlock(train, issue) {
-  return `[[github_train_issue]]
-train = "${train}"
-gh_issue = ${issue}
-`;
-}
-
 function writeLedger(options = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-release-plan-"));
-  const file = path.join(dir, "implemented.toml");
-  const implemented = options.implemented ?? ["A"];
-  const issues = options.issues ?? [];
-  const trainIssues = options.trainIssues ?? [];
-  const parts = ["schema = 1", "", ...implemented.map(implementedBlock)];
-  for (const row of issues) parts.push(mappingBlock(row.node_id, row.gh_issue, row.sync_to_github));
-  for (const row of trainIssues) parts.push(trainMappingBlock(row.train, row.gh_issue));
-  fs.writeFileSync(file, parts.join("\n"));
-  return file;
+  return writeLedgerFixture("githubctl-release-plan-", {
+    implemented: options.implemented ?? ["A"],
+    issues: options.issues ?? [],
+    trains: options.trainIssues ?? [],
+  });
 }
 
 function node(id, extras = {}) {
@@ -300,14 +273,14 @@ test("an unknown train mapping cannot hide a milestone issue", () => {
 
 test("explicitly non-release work does not block its milestone", () => {
   const fx = fixture({
-    nodes: [node("foundation"), node("optional-tuning", { predecessors: ["foundation"] })],
-    implemented: ["foundation"],
-    issues: [{ node_id: "optional-tuning", gh_issue: 10, sync_to_github: true }],
+    nodes: [node("FOUNDATION"), node("OPTIONAL-TUNING", { predecessors: ["FOUNDATION"] })],
+    implemented: ["FOUNDATION"],
+    issues: [{ node_id: "OPTIONAL-TUNING", gh_issue: 10, sync_to_github: true }],
     githubIssues: [
       { number: 10, title: "Optional tuning", body: "optional", milestone: MILESTONE },
     ],
   });
-  fx.authority.nodes.find((row) => row.id === "optional-tuning").release_gating = "non_release";
+  fx.authority.nodes.find((row) => row.id === "OPTIONAL-TUNING").release_gating = "non_release";
 
   const report = plan(fx, { mode: "check" });
   assert.equal(report.ok, true);

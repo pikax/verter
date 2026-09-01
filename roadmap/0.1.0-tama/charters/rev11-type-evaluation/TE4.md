@@ -127,4 +127,4 @@ Apply `semantic-3`: 2 fresh distinct harness tasks covering exactly `adversarial
 
 ## Trusted implementation ledger
 
-Before squashing or review, the implementation patch adds one `[[implemented]]` row to `authority/state/implemented.toml` with the node ID, planned squash commit message, approximate timezone-bearing date, and optional pull-request number. Row presence is authoritative; locator metadata is never validated against Git or GitHub.
+Before squashing or review, the implementation patch transitions this node's predeclared row in `authority/state/implemented.toml` from `status = "pending"` to `status = "implemented"` with the planned squash commit message, approximate date with timezone, and optional pull-request number. The transitioned row is the implementation fact. Row presence is authoritative; locator metadata is never validated against Git or GitHub.

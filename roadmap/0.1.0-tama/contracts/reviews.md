@@ -2,7 +2,7 @@
 
 Use the risk-scaled review profile named by the node charter. Review the squashed candidate patch, consolidate findings, apply fixes, rerun the required review lenses, and run the final gate.
 
-Before review starts, the candidate patch must already contain its `[[implemented]]` ledger row with the planned squash message, approximate timezone-bearing date, and optional PR number. The row is not review proof; it keeps implementation state and the candidate patch together.
+Before review starts, the candidate patch must already have transitioned its predeclared ledger line from pending to implemented with the planned squash message, approximate timezone-bearing date, and optional PR number. The transitioned row is not review proof; it keeps implementation state and the candidate patch together.
 
 Review tasks remain fresh and independent where the profile requires it. They do not need SHA-bound manifests, immutable-tree receipts, prompt/report digests, or runtime registration. A candidate change after review still calls for judgment: rerun affected review and verification in proportion to the change, without restamping identities.
 

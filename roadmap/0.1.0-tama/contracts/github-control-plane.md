@@ -81,7 +81,7 @@ One node/worktree/branch/PR is the default. Multiple nodes may share them only w
 
 `githubctl create-pr --check|--apply --node <ID> --title <final conventional commit> --head <branch>` owns that start flow. Check plans; apply is doctor-gated for `issues` and `pullRequests` (Project 3 is not required). The PR body is ordinary prose plus exactly one `Closes #<n>` produced by `mappedClosingLink`; `Fixes`/`Close` and a second closing link are rejected. Apply never attaches Project 3. `--write-locator` sets `pull_request` on an existing `[[implemented]]` row only; it never invents a row or infers COMPLETE from PR state. If that row already locates a pull request, abort before issue update or PR create, independent of `--write-locator`. Missing mapping, a missing ancestor ledger row, an existing PR for the same head, or the wrong repository abort before PATCH/POST. One node, one PR. Check and apply list open pulls for that head through the shared adapter method `pullsForHead`.
 
-Before squash and review finish, the completing agent adds or updates the node's `[[implemented]]` row with the planned final `commit_message`, approximate timezone-bearing `commit_date`, and known `pull_request`. The row is part of the implementation patch. The PR number remains an unvalidated locator, and no post-merge reconciliation or SHA restamping follows.
+Before squash and review finish, the completing agent transitions the node's predeclared row from pending to implemented with the planned final `commit_message`, approximate timezone-bearing `commit_date`, and known `pull_request`. The transitioned row is part of the implementation patch. The PR number remains an unvalidated locator, and no post-merge reconciliation or SHA restamping follows.
 
 ## Non-PR closing flow
 
@@ -105,7 +105,7 @@ P0/P1 findings block apply and cannot appear on a PASS report. Lower findings ma
 
 Missing required jobs or an unexpected skip of a required job yield `ok: false`. The required set is injected (`--required`) and includes `Tama Roadmap` when tama paths change (`--tama-changed`). A skipped job that is not required is expected. Failed or incomplete conclusions fail `ok`.
 
-`githubctl finalize-ledger --node <ID> --message <title> --date <ISO> --pr <n>` updates an existing `[[implemented]]` row's `commit_message`, timezone-bearing `commit_date`, and `pull_request` only. It never inserts a row. A missing row aborts.
+`githubctl finalize-ledger --node <ID> --message <title> --date <ISO> --pr <n>` updates an existing implemented row's `commit_message`, timezone-bearing `commit_date`, and `pull_request` only. It never inserts a row. A missing implemented row aborts.
 
 `githubctl squash-land --check|--apply --pr <n> --node <ID>` squash-merges through `PUT /repos/{owner}/{repo}/pulls/{n}/merge` with `merge_method: squash`. Check plans. For an opt-in mapped issue, apply is doctor-gated for `pullRequests` and Project 3. It marks the child Done only after merge succeeds and rolls its native parent Done only when every locally mapped child in that train is Done; otherwise the parent remains In Progress. A post-merge status failure is a `PartialFailureError` naming the successful merge and is repaired with `project-status`, never by merging again. Apply aborts when `CiResult` is not ok (P0/P1 would be needed for failed CI). There is no post-merge ledger write, no landing receipt, and no candidate or landed SHA invariant. Closing keywords are not a merge-correctness signal.
 

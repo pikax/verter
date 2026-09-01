@@ -21,7 +21,8 @@ import {
   ProtectedMappingError,
   schedule,
 } from "../index.mjs";
-import { deriveState } from "../../../roadmap/0.1.0-tama/tools/lib.mjs";
+import { deriveState, loadAuthority } from "../../../roadmap/0.1.0-tama/tools/lib.mjs";
+import { writeLedgerFixture } from "./ledger-fixture.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
@@ -39,31 +40,11 @@ function clearanceFor(adapter) {
   return report.clearance;
 }
 
-function implementedBlock(id) {
-  return `[[implemented]]
-node_id = "${id}"
-commit_message = "test locator ${id}"
-commit_date = "2026-08-28T00:00:00+00:00"
-`;
-}
-
-function mappingBlock(nodeId, issue, syncToGithub) {
-  return `[[github_issue]]
-node_id = "${nodeId}"
-gh_issue = ${issue}
-sync_to_github = ${syncToGithub}
-`;
-}
-
 function writeLedger(options = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-schedule-"));
-  const file = path.join(dir, "implemented.toml");
-  const implemented = options.implemented ?? ["A"];
-  const issues = options.issues ?? [];
-  const parts = ["schema = 1", "", ...implemented.map(implementedBlock)];
-  for (const row of issues) parts.push(mappingBlock(row.node_id, row.gh_issue, row.sync_to_github));
-  fs.writeFileSync(file, parts.join("\n"));
-  return file;
+  return writeLedgerFixture("githubctl-schedule-", {
+    implemented: options.implemented ?? ["A"],
+    issues: options.issues ?? [],
+  });
 }
 
 function node(id, extras = {}) {
@@ -806,9 +787,18 @@ test("CLI scheduling fails closed when the mapped issue is missing", () => {
     path.join(REPO_ROOT, "roadmap/0.1.0-tama/authority/state/implemented.toml"),
     "utf8",
   );
+  const authority = loadAuthority();
+  const liveStates = deriveState(authority).states;
+  const readyNode = authority.ledger.github_issue
+    .map((row) => row.node_id)
+    .find((id) => liveStates.get(id)?.status === "READY");
+  assert.notEqual(readyNode, undefined, "expected a READY node with a github_issue mapping");
   fs.writeFileSync(
     ledgerPath,
-    liveLedger.replace(/node_id = "D1"\ngh_issue = \d+/u, 'node_id = "D1"\ngh_issue = 10'),
+    liveLedger.replace(
+      new RegExp(`node_id = "${readyNode}"\\ngh_issue = \\d+`, "u"),
+      `node_id = "${readyNode}"\ngh_issue = 10`,
+    ),
   );
   const check = spawnSync(
     process.execPath,
@@ -818,7 +808,7 @@ test("CLI scheduling fails closed when the mapped issue is missing", () => {
       "--check",
       "--fake",
       "--nodes",
-      "D1",
+      readyNode,
       "--ledger",
       ledgerPath,
       "--owner",
@@ -838,7 +828,7 @@ test("CLI scheduling fails closed when the mapped issue is missing", () => {
       "--apply",
       "--fake",
       "--nodes",
-      "D1",
+      readyNode,
       "--ledger",
       ledgerPath,
       "--owner",

@@ -4,17 +4,13 @@ The decision and historical reason for replacing ORC0's Git-identity control pla
 
 ## The only implementation state
 
-`authority/state/implemented.toml` is the implementation ledger. A row means the node is implemented:
+`authority/state/implemented.toml` is the implementation ledger. Every DAG node is predeclared exactly once under `[implementation]`. A node is implemented when that line is transitioned from pending to implemented:
 
 ```toml
-[[implemented]]
-node_id = "D1"
-commit_message = "refactor(core): move flow analysis into the semantic graph"
-commit_date = "2026-09-03T14:20:00+01:00"
-pull_request = 1234
+"D1" = { status = "implemented", commit_message = "refactor(core): move flow analysis into the semantic graph", commit_date = "2026-09-03T14:20:00+01:00", pull_request = 1234 }
 ```
 
-`pull_request` is optional. `commit_message` should normally be the planned squash subject or another useful search phrase. `commit_date` is an approximate ISO timestamp with timezone. Neither needs to match Git exactly.
+Until then the same predeclared line is `"D1" = { status = "pending" }`. `pull_request` is optional. `commit_message` should normally be the planned squash subject or another useful search phrase. `commit_date` is an approximate ISO timestamp with timezone. Neither needs to match Git exactly. The transitioned row is the implementation fact.
 
 The row itself is authoritative. Tooling never looks up the commit, compares the message or date, contacts GitHub, validates content, checks ancestry, or records a SHA. If several commits match a message search, use the date to choose the closest one; use the PR number when available.
 
@@ -44,7 +40,7 @@ This row identifies the native GitHub parent for all active mapped blocks in tha
 A node is READY when:
 
 - it is dispatchable;
-- every transitive DAG ancestor has an `implemented` row.
+- every transitive DAG ancestor is implemented.
 
 No other lifecycle state is consulted. A recorded direct predecessor cannot hide a missing earlier ancestor. Conflict/resource/external-requirement fields are planning instructions for agents and maintainers, not locks or machine-validated authorizations.
 
@@ -65,12 +61,12 @@ node roadmap/0.1.0-tama/tools/programctl.mjs packet D1
 3. Implement and run proportionate targeted verification. When GitHub control is active, push the first implementation commit and then open a draft PR; keep that PR as the reviewed candidate and eventual landing path.
    Keep the roadmap out of landed source and tests: production file/module names and comments, plus test file/module/test names, comments, fixtures, snapshots, assertion messages, and guard diagnostics, describe durable behavior, never a DAG/node/train/phase or DAG-managed issue/PR. Only an independently reported non-DAG GitHub defect may be cited supplementally.
    Treat production LOC and file budgets as planning references, not hard limits. Compare the candidate with the estimates and investigate material drift. For example, one expected production file becoming ten is a scope smell that needs a coherent explanation, but the number alone neither rejects the patch nor requires padding or splitting it.
-4. Before squashing or review, add the node's ledger row to the implementation patch. Use the planned squash message, an approximate timezone-bearing date, and the PR number when known.
+4. Before squashing or review, transition the node's predeclared ledger line from pending to implemented in the implementation patch. Use the planned squash message, an approximate timezone-bearing date, and the PR number when known.
 5. Squash once using that planned title. For a user- or maintainer-directed non-PR landing, resolve each included node's local issue mapping and add one `Closes #<gh_issue>` line per node to the squash commit body before review.
 6. Run the charter's fresh review profile against the squashed candidate and address findings.
 7. Run the owning final gate. When GitHub control is active, land by squash-merging the reviewed node PR through GitHub; for an opt-in mapping, `squash-land` marks the mapped issue Done after merge and rolls its native parent only when all locally mapped train children are Done. Protected mappings remain maintainer-owned. For an authorized non-PR landing, verify every mapped closing line in the reviewed squash commit body, use the normal repository workflow, and run `project-status --apply --node <ID> --status done` for each opt-in mapping after the commit reaches the origin default branch.
 
-There is no after-commit ledger update, candidate finalization, receipt import, landing record, activation command, runtime root, or SHA restamping. Multiple nodes may share one worktree, squash commit, and PR only under the explicit atomic-train exception above; each included node still gets its own ledger row and the rows may share the same locator hints.
+There is no after-commit ledger update, candidate finalization, receipt import, landing record, activation command, runtime root, or SHA restamping. Multiple nodes may share one worktree, squash commit, and PR only under the explicit atomic-train exception above; each included node still transitions its own predeclared line and the lines may share the same locator hints.
 
 ## Train-level conformance
 
@@ -78,7 +74,7 @@ Keep a human coordination count of newly implemented blocks since the train's la
 
 When the current candidate is the train's final intended block, also spawn a fresh independent train review over all implemented blocks plus the final candidate. It verifies that the complete amended train intent is implemented, integrated, and covered. This is additional to the block's own review profile and any Architect checkpoint due for the tranche. Do not accept or land the final block until material findings are resolved and the cumulative train review passes.
 
-The checkpoint count and reports are ordinary coordination artifacts, not DAG state. They add no ledger rows, receipts, amendment digests, or readiness inputs.
+The checkpoint count and reports are ordinary coordination artifacts, not DAG state. They add no implementation-ledger transitions, receipts, amendment digests, or readiness inputs.
 
 ## GitHub flow after GH6
 
@@ -100,4 +96,4 @@ To represent an existing GitHub issue in the DAG, follow `ManualDagAuthoring`: m
 
 ## Corrections
 
-The ledger is trusted documentation. If a locator hint is unhelpful, correct it with an ordinary patch. The correction does not reopen, invalidate, or re-prove the node. Removing a row deliberately marks the node unimplemented and may block descendants.
+The ledger is trusted documentation. If a locator hint is unhelpful, correct it with an ordinary patch. The correction does not reopen, invalidate, or re-prove the node. Flipping the row back to `status = "pending"` is the deliberate operation that marks a node unimplemented and may block descendants.

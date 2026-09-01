@@ -12,6 +12,7 @@ import {
   validateIssueContentCatalog,
   validateTrainIssueCatalog,
 } from "../index.mjs";
+import { ledgerText } from "./ledger-fixture.mjs";
 
 const MILESTONE = "0.0.2";
 
@@ -92,20 +93,16 @@ function node(id = "WORK") {
   };
 }
 
-function ledgerText({ implemented = ["SYNC_READY"], children = ["WORK"], parent = 20 } = {}) {
-  return [
-    "schema = 1",
-    ...implemented.map(
-      (nodeId) =>
-        `[[implemented]]\nnode_id = "${nodeId}"\ncommit_message = "test locator"\ncommit_date = "2026-08-29T00:00:00+00:00"`,
-    ),
-    ...children.map(
-      (nodeId, index) =>
-        `[[github_issue]]\nnode_id = "${nodeId}"\ngh_issue = ${10 + index}\nsync_to_github = true`,
-    ),
-    `[[github_train_issue]]\ntrain = "fixture.compiler"\ngh_issue = ${parent}`,
-    "",
-  ].join("\n\n");
+function trainLedgerText({ implemented = ["SYNC-READY"], children = ["WORK"], parent = 20 } = {}) {
+  return ledgerText({
+    implemented,
+    issues: children.map((nodeId, index) => ({
+      node_id: nodeId,
+      gh_issue: 10 + index,
+      sync_to_github: true,
+    })),
+    trains: [{ train: "fixture.compiler", gh_issue: parent }],
+  });
 }
 
 function fixture(options = {}) {
@@ -114,7 +111,7 @@ function fixture(options = {}) {
   const nodes = options.nodes ?? [node()];
   fs.writeFileSync(
     ledgerPath,
-    ledgerText({
+    trainLedgerText({
       implemented: options.implemented,
       children: nodes.map((row) => row.id),
       parent: options.parentNumber ?? 20,
@@ -164,7 +161,7 @@ function fixture(options = {}) {
     adapter,
     ledgerPath,
     authority: {
-      nodes: [{ id: "SYNC_READY", train: "fixture.sync", predecessors: [] }, ...nodes],
+      nodes: [{ id: "SYNC-READY", train: "fixture.sync", predecessors: [] }, ...nodes],
       ledgerFile: path.join(dir, "live.toml"),
       packageRoot: dir,
     },
@@ -271,7 +268,7 @@ test("wrong native parent fails the complete sync before mutation", () => {
 });
 
 test("completed mapped children and their parent remain untouched", () => {
-  const fx = fixture({ implemented: ["SYNC_READY", "WORK"] });
+  const fx = fixture({ implemented: ["SYNC-READY", "WORK"] });
   const before = fx.adapter.inspectState();
   const report = run(fx, { mode: "apply", clearance: clearanceFor(fx.adapter) });
   assert.deepEqual(report.selection, []);

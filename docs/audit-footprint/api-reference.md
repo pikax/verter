@@ -14,10 +14,10 @@ diff if the two drift.
 
 ## Substrate vs session split
 
-| Layer                   | Crate            | Owns                                                                                                                                                          |
-| ----------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Substrate (DTOs)        | `verter_audit`   | `RequestAuditRecord` envelope, `RequestKind` / `RequestKindPayload`, all eight payload structs, footprint records, derivation graph DTOs, `StructuredAuditEvent`, `AuditObserver` trait, `AuditEvent`, `NoOpObserver`, `current_observer` TLS, `AuditConfig` + `AuditConsumerFilter` |
-| Session (host runtime)  | `verter_session` | `HostAuditRuntime`, `AuditRecordsStore`, `AuditRequestRegistration` (lifecycle), `RequestContext` + TLS guard, accumulator, footprint miner, peak-RSS sampler, structured-trace macros, `AuditedRequest` test harness                                                                |
+| Layer                  | Crate            | Owns                                                                                                                                                                                                                                                                                 |
+| ---------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Substrate (DTOs)       | `verter_audit`   | `RequestAuditRecord` envelope, `RequestKind` / `RequestKindPayload`, all eight payload structs, footprint records, derivation graph DTOs, `StructuredAuditEvent`, `AuditObserver` trait, `AuditEvent`, `NoOpObserver`, `current_observer` TLS, `AuditConfig` + `AuditConsumerFilter` |
+| Session (host runtime) | `verter_session` | `HostAuditRuntime`, `AuditRecordsStore`, `AuditRequestRegistration` (lifecycle), `RequestContext` + TLS guard, accumulator, footprint miner, peak-RSS sampler, structured-trace macros, `AuditedRequest` test harness                                                                |
 
 The substrate is a leaf — it depends only on `verter_span` and has no
 back-edge to higher crates. Lower crates (`verter_compiler`,
@@ -30,19 +30,19 @@ implementer of that trait.
 
 Top-level envelope and shared sub-records (substrate):
 
-| Rust type (`verter_audit::…`)                | Summary                                                                                |
-| -------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `record::RequestAuditRecord`                 | Top-level envelope. Carries additive `target_identity`, kind + typed payload, timings, store/memory, footprint, scheduler audit, files, waits. |
-| `record::RequestKind`                        | Producer-surface discriminant — `ComponentMeta`, `TypeResolution`, `SemanticAnalysis`, `Compile { target }`, `Workspace { op }`, `Lsp { method }`, `Mcp { tool }`, `BundlerBatch { kind }`, `Custom { name }`. |
-| `record::RequestKindPayload`                 | Strongly-typed payload paired with `RequestKind` (variant tag matches kind discriminant). |
-| `record::RequestPhaseAudit`                  | Per-phase timing record (name + ms).                                                   |
-| `timing::RequestTimingAudit`                 | Phase timings in milliseconds (`f64`).                                                 |
-| `memory::RequestMemoryAudit`                 | RSS + host-cache + workspace byte snapshots.                                           |
-| `store::RequestStoreAudit`                   | Kind-agnostic store/view counters + materialiser counters + cache-layer breakdown.     |
-| `footprint::RequestFootprintAudit`           | Derived footprint — see below.                                                         |
-| `scheduler::SchedulerAudit`                  | Scheduler dispatch facts (worker-pool counts, depths).                                 |
-| `waits::WaitAudit`                           | Lock-wait + queue-wait nanosecond totals (gated on `audit_timing_capture`).            |
-| `files::FileAudit` / `files::FileRole`       | Per-file attribution (Entry / DirectImport / TransitiveImport / TypeDep / IndexedReadyBuild / NotLoaded / ResolverWalk). |
+| Rust type (`verter_audit::…`)          | Summary                                                                                                                                                                                                        |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `record::RequestAuditRecord`           | Top-level envelope. Carries additive `target_identity`, kind + typed payload, timings, store/memory, footprint, scheduler audit, files, waits.                                                                 |
+| `record::RequestKind`                  | Producer-surface discriminant — `ComponentMeta`, `TypeResolution`, `SemanticAnalysis`, `Compile { target }`, `Workspace { op }`, `Lsp { method }`, `Mcp { tool }`, `BundlerBatch { kind }`, `Custom { name }`. |
+| `record::RequestKindPayload`           | Strongly-typed payload paired with `RequestKind` (variant tag matches kind discriminant).                                                                                                                      |
+| `record::RequestPhaseAudit`            | Per-phase timing record (name + ms).                                                                                                                                                                           |
+| `timing::RequestTimingAudit`           | Phase timings in milliseconds (`f64`).                                                                                                                                                                         |
+| `memory::RequestMemoryAudit`           | RSS + host-cache + workspace byte snapshots.                                                                                                                                                                   |
+| `store::RequestStoreAudit`             | Kind-agnostic store/view counters + materialiser counters + cache-layer breakdown.                                                                                                                             |
+| `footprint::RequestFootprintAudit`     | Derived footprint — see below.                                                                                                                                                                                 |
+| `scheduler::SchedulerAudit`            | Scheduler dispatch facts (worker-pool counts, depths).                                                                                                                                                         |
+| `waits::WaitAudit`                     | Lock-wait + queue-wait nanosecond totals (gated on `audit_timing_capture`).                                                                                                                                    |
+| `files::FileAudit` / `files::FileRole` | Per-file attribution (Entry / DirectImport / TransitiveImport / TypeDep / IndexedReadyBuild / NotLoaded / ResolverWalk).                                                                                       |
 
 ### Per-`RequestKind` payload structs
 
@@ -50,16 +50,16 @@ Each variant of `RequestKind` carries a matching `RequestKindPayload`
 arm. The payload structs live under
 [`verter_audit::payloads`](https://github.com/pikax/verter/blob/main/crates/verter_audit/src/payloads/mod.rs):
 
-| Payload (`verter_audit::payloads::…`)        | Paired `RequestKind`              | Notes                                                                                          |
-| -------------------------------------------- | --------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `component_meta::ComponentMetaPayload`       | `ComponentMeta`                   | Materializer-specific store counters + solver counters (only meaningful for component-meta).   |
-| `type_resolution::TypeResolutionPayload`     | `TypeResolution`                  | Per-query-mode counters for `resolver_core`.                                                   |
-| `semantic::SemanticAnalysisPayload`          | `SemanticAnalysis`                | Counters for an `AnalysisReady` build.                                                         |
-| `compile::CompilePayload`                    | `Compile { target }`              | Per-phase compile timings, codegen counts, `code_transform_ops`.                               |
-| `workspace::WorkspacePayload`                | `Workspace { op }`                | `WorkspaceOp` is one of `AuditResolve { specifier, from }`, `DepGraphTraverse { root }`, `ResolverWalk { specifier }`. |
-| `lsp::LspRequestPayload`                     | `Lsp { method }`                  | Per-request LSP method counters; carries `PositionInfo` with the same tagged target identity when applicable. |
-| `mcp::McpToolPayload`                        | `Mcp { tool }`                    | Tool name, arg/result sizes, optional error message. Non-empty host targets are `RegisteredCanonical`; an empty optional target is `NotApplicable`. |
-| `bundler::BundlerBatchPayload`               | `BundlerBatch { kind }`           | Aggregated batch summary; each `SlowRecordSummary` carries additive `target_identity` plus the retained legacy `canonical_id`. |
+| Payload (`verter_audit::payloads::…`)    | Paired `RequestKind`    | Notes                                                                                                                                               |
+| ---------------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `component_meta::ComponentMetaPayload`   | `ComponentMeta`         | Materializer-specific store counters + solver counters (only meaningful for component-meta).                                                        |
+| `type_resolution::TypeResolutionPayload` | `TypeResolution`        | Per-query-mode counters for `resolver_core`.                                                                                                        |
+| `semantic::SemanticAnalysisPayload`      | `SemanticAnalysis`      | Counters for an `AnalysisReady` build.                                                                                                              |
+| `compile::CompilePayload`                | `Compile { target }`    | Per-phase compile timings, codegen counts, `code_transform_ops`.                                                                                    |
+| `workspace::WorkspacePayload`            | `Workspace { op }`      | `WorkspaceOp` is one of `AuditResolve { specifier, from }`, `DepGraphTraverse { root }`, `ResolverWalk { specifier }`.                              |
+| `lsp::LspRequestPayload`                 | `Lsp { method }`        | Per-request LSP method counters; carries `PositionInfo` with the same tagged target identity when applicable.                                       |
+| `mcp::McpToolPayload`                    | `Mcp { tool }`          | Tool name, arg/result sizes, optional error message. Non-empty host targets are `RegisteredCanonical`; an empty optional target is `NotApplicable`. |
+| `bundler::BundlerBatchPayload`           | `BundlerBatch { kind }` | Aggregated batch summary; each `SlowRecordSummary` carries additive `target_identity` plus the retained legacy `canonical_id`.                      |
 
 `RequestKindPayload::None` is used when the producer has not
 populated a typed payload yet — the envelope still carries the
@@ -81,14 +81,14 @@ so the substrate stays decoupled from owning crates' concrete types:
 Six `u64` counters (decimal-string serialized, `string` in TS) on
 `RequestStoreAudit` for the session-layer materialiser:
 
-| Field                              | Meaning                                                                                |
-| ---------------------------------- | -------------------------------------------------------------------------------------- |
-| `materialize_structure_calls`      | Total `materialize_component_meta_structure` invocations during the request.           |
-| `materialize_structure_cache_hits` | Subset satisfied by the materialiser's `MaterializeStructureDb` peek (warm cache).     |
-| `node_arena_lock_acquisitions`     | Lock acquisitions on the per-scope `NodeArena` dedup index.                            |
-| `family_map_lock_acquisitions`     | Lock acquisitions on the family-map dep-signature reverse index.                       |
-| `dep_signature_merges`             | Non-empty dispatch dependency signatures published into the request fact tracer.       |
-| `dep_signature_intern_hits`        | Warm-candidate dependency signatures reused from the store-owned weak interner.         |
+| Field                              | Meaning                                                                            |
+| ---------------------------------- | ---------------------------------------------------------------------------------- |
+| `materialize_structure_calls`      | Total `materialize_component_meta_structure` invocations during the request.       |
+| `materialize_structure_cache_hits` | Subset satisfied by the materialiser's `MaterializeStructureDb` peek (warm cache). |
+| `node_arena_lock_acquisitions`     | Lock acquisitions on the per-scope `NodeArena` dedup index.                        |
+| `family_map_lock_acquisitions`     | Lock acquisitions on the family-map dep-signature reverse index.                   |
+| `dep_signature_merges`             | Non-empty dispatch dependency signatures published into the request fact tracer.   |
+| `dep_signature_intern_hits`        | Warm-candidate dependency signatures reused from the store-owned weak interner.    |
 
 Cache hit rate: `materialize_structure_cache_hits /
 materialize_structure_calls` — should be `> 0` on warm/cold-seq
@@ -102,15 +102,15 @@ independently measures allocations avoided by the content-hash bucketed
 `RequestStoreAudit::cache_outcomes` and
 `StructuredAuditEvent::MaterializeStructureExit`):
 
-| Variant                | Meaning                                                                  |
-| ---------------------- | ------------------------------------------------------------------------ |
-| `Hit`                  | Warm cache hit.                                                          |
-| `Miss`                 | Cache miss (no entry present).                                           |
-| `JoinedWait`           | Joined a peer's in-flight slot and waited.                               |
-| `Sentinel`             | Observed a sentinel (placeholder) entry.                                 |
-| `ColdBuild`            | Performed a cold build from source.                                      |
-| `InflightAbortedRetry` | Retry loop after an in-flight slot was aborted.                          |
-| `ColdAbortSwept`       | Cold entry reaped during generation reconciliation.                      |
+| Variant                | Meaning                                                                                                                                                    |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Hit`                  | Warm cache hit.                                                                                                                                            |
+| `Miss`                 | Cache miss (no entry present).                                                                                                                             |
+| `JoinedWait`           | Joined a peer's in-flight slot and waited.                                                                                                                 |
+| `Sentinel`             | Observed a sentinel (placeholder) entry.                                                                                                                   |
+| `ColdBuild`            | Performed a cold build from source.                                                                                                                        |
+| `InflightAbortedRetry` | Retry loop after an in-flight slot was aborted.                                                                                                            |
+| `ColdAbortSwept`       | Cold entry reaped during generation reconciliation.                                                                                                        |
 | `Tainted`              | Path-dependent outcome (depth-fuse trip, scope-unloaded mid-compute, or `Recursive` sub-call). Non-cacheable; propagates as `MaterializeOutcome::Tainted`. |
 
 ### Materialise-skip-reason enum
@@ -118,15 +118,15 @@ independently measures allocations avoided by the content-hash bucketed
 `origin_graph::MaterializeSkipReason` (carried by
 `StructuredAuditEvent::MaterializeStructurePolicySkip`):
 
-| Variant                                | Meaning                                                                 |
-| -------------------------------------- | ----------------------------------------------------------------------- |
-| `FunctionPropertyAtNested`             | Object-property lookup hit a function-typed property at `Nested` axis.  |
-| `GenericRefWithArgsTopLevel`           | Top-level generic ref carried explicit type arguments (reserved for the `InstantiationRef` arm). |
-| `PackageRefTopLevel`                   | Top-level ref resolved under `node_modules/` — package types stay opaque. |
+| Variant                                | Meaning                                                                                                         |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `FunctionPropertyAtNested`             | Object-property lookup hit a function-typed property at `Nested` axis.                                          |
+| `GenericRefWithArgsTopLevel`           | Top-level generic ref carried explicit type arguments (reserved for the `InstantiationRef` arm).                |
+| `PackageRefTopLevel`                   | Top-level ref resolved under `node_modules/` — package types stay opaque.                                       |
 | `RegistryRouteNotInlineMaterialisable` | Registry-route check rejected the input as not inline-materialisable (e.g. `Pick`/`Omit` over a non-bare root). |
-| `NonStructuralTopLevel`                | Top-level shape is non-structural (primitive, literal, type-param, etc.). |
-| `RegistryRouteCycleGuard`              | Registry-route walk detected a cycle and stopped.                       |
-| `RecursiveHelperCycleGuard`            | Recursive-helper traversal stopped on a cycle.                          |
+| `NonStructuralTopLevel`                | Top-level shape is non-structural (primitive, literal, type-param, etc.).                                       |
+| `RegistryRouteCycleGuard`              | Registry-route walk detected a cycle and stopped.                                                               |
+| `RecursiveHelperCycleGuard`            | Recursive-helper traversal stopped on a cycle.                                                                  |
 
 ### Footprint
 
@@ -279,17 +279,17 @@ Every audited entry-point lives on `VerterHost` and follows the same
 shape: stamp request id, install `RequestContextGuard`, run the
 underlying operation, finalise the registration, return the record:
 
-| Method                                                                  | Purpose                                                                                 |
-| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `get_component_meta_with_audit(canonical_id)`                           | Audited `getComponentMeta` — the original surface.                                      |
-| `resolve_type_with_audit(key, canonical_id)`                            | Single type-resolution query through `ProjectSemanticDispatch`.                         |
-| `compile_with_audit(canonical_id, target)`                              | Compile for the requested codegen target (default options).                             |
-| `compile_with_audit_options(canonical_id, target, force_js)`            | Compile with explicit options (no defaults).                                            |
-| `analyze_with_audit(canonical_id)`                                      | Materialise `AnalysisReady` for the canonical.                                          |
-| `audit_workspace_op(op: WorkspaceOp)`                                   | Drive a workspace traversal under audit (`AuditResolve` / `DepGraphTraverse` / `ResolverWalk`). |
-| `lsp_audit_begin(method, target_identity) -> LspAuditSession`           | Open an audited LSP handler session — the handler drives finalize through the returned session. |
-| `audit_mcp_tool_call(tool_name, canonical_id, args_size, f)`            | Wrap an MCP tool invocation; the closure returns `McpToolOutcome<T>`.                   |
-| `take_audit_record(request_id) -> Option<RequestAuditRecord>`           | Drain a published record by id.                                                         |
+| Method                                                        | Purpose                                                                                         |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `get_component_meta_with_audit(canonical_id)`                 | Audited `getComponentMeta` — the original surface.                                              |
+| `resolve_type_with_audit(key, canonical_id)`                  | Single type-resolution query through `ProjectSemanticDispatch`.                                 |
+| `compile_with_audit(canonical_id, target)`                    | Compile for the requested codegen target (default options).                                     |
+| `compile_with_audit_options(canonical_id, target, force_js)`  | Compile with explicit options (no defaults).                                                    |
+| `analyze_with_audit(canonical_id)`                            | Materialise `AnalysisReady` for the canonical.                                                  |
+| `audit_workspace_op(op: WorkspaceOp)`                         | Drive a workspace traversal under audit (`AuditResolve` / `DepGraphTraverse` / `ResolverWalk`). |
+| `lsp_audit_begin(method, target_identity) -> LspAuditSession` | Open an audited LSP handler session — the handler drives finalize through the returned session. |
+| `audit_mcp_tool_call(tool_name, canonical_id, args_size, f)`  | Wrap an MCP tool invocation; the closure returns `McpToolOutcome<T>`.                           |
+| `take_audit_record(request_id) -> Option<RequestAuditRecord>` | Drain a published record by id.                                                                 |
 
 `get_component_meta_with_resolution` is the canonical
 component-meta entry-point used by tests and consumers; the audit

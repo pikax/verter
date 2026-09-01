@@ -19,7 +19,8 @@ import {
   finalizeLedger,
   squashLand,
 } from "../index.mjs";
-import { parseToml } from "../../../roadmap/0.1.0-tama/tools/lib.mjs";
+import { implementedRows, parseLedgerText } from "../../../roadmap/0.1.0-tama/tools/ledger.mjs";
+import { ledgerText } from "./ledger-fixture.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
@@ -46,50 +47,29 @@ function clearanceFor(adapter, require = ["issues", "pullRequests", "projects"])
   return report.clearance;
 }
 
-function implementedBlock(id, extra = {}) {
-  const locator = extra.pullRequest == null ? "" : `pull_request = ${extra.pullRequest}\n`;
-  const message = extra.message ?? `test locator ${id}`;
-  const date = extra.date ?? "2026-08-28T00:00:00+00:00";
-  return `[[implemented]]
-node_id = "${id}"
-commit_message = "${message}"
-commit_date = "${date}"
-${locator}`;
-}
-
 function writeLedger(options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-ci-land-"));
   const file = path.join(dir, "implemented.toml");
   const implemented = options.implemented ?? ["ORC0", "GH0", "GH1", "GH2", "GH3", "GH4", "GH5"];
-  const locators = options.locators ?? {};
-  const messages = options.messages ?? {};
-  const dates = options.dates ?? {};
   const issueNode = options.issueNode ?? implemented.at(-1);
   const issues = options.issues ?? [{ node_id: issueNode, gh_issue: 4, sync_to_github: false }];
-  const parts = [
-    "schema = 1",
-    "",
-    ...implemented.map((id) =>
-      implementedBlock(id, {
-        pullRequest: locators[id],
-        message: messages[id],
-        date: dates[id],
-      }),
-    ),
-    ...issues.map(
-      (row) => `[[github_issue]]
-node_id = "${row.node_id}"
-gh_issue = ${row.gh_issue}
-sync_to_github = ${row.sync_to_github}
-`,
-    ),
-  ];
-  fs.writeFileSync(file, parts.join("\n"));
+  fs.writeFileSync(
+    file,
+    ledgerText({
+      implemented,
+      pending: options.pending ?? [],
+      locators: options.locators ?? {},
+      messages: options.messages ?? {},
+      dates: options.dates ?? {},
+      issues,
+    }),
+  );
   return file;
 }
 
 function readLedger(file) {
-  return parseToml(fs.readFileSync(file, "utf8"));
+  const parsed = parseLedgerText(fs.readFileSync(file, "utf8"));
+  return { ...parsed, implemented: implementedRows(parsed) };
 }
 
 function seeded(options = {}) {
@@ -301,14 +281,7 @@ test("squash landing refuses a candidate without a mapped issue", () => {
   const ledgerPath = path.join(dir, "implemented.toml");
   fs.writeFileSync(
     ledgerPath,
-    `schema = 1
-
-[[implemented]]
-node_id = "WORK"
-commit_message = "test locator"
-commit_date = "2026-08-29T00:00:00+00:00"
-pull_request = ${PR_NUMBER}
-`,
+    ledgerText({ implemented: ["WORK"], locators: { WORK: PR_NUMBER } }),
   );
   const authority = {
     nodes: [{ id: "WORK", predecessors: [], train: "test" }],
@@ -345,19 +318,11 @@ test("post-merge failure reports both merge and completed child status", () => {
   const ledgerPath = path.join(dir, "implemented.toml");
   fs.writeFileSync(
     ledgerPath,
-    `schema = 1
-
-[[implemented]]
-node_id = "WORK"
-commit_message = "test locator"
-commit_date = "2026-08-29T00:00:00+00:00"
-pull_request = ${PR_NUMBER}
-
-[[github_issue]]
-node_id = "WORK"
-gh_issue = 4
-sync_to_github = true
-`,
+    ledgerText({
+      implemented: ["WORK"],
+      locators: { WORK: PR_NUMBER },
+      issues: [{ node_id: "WORK", gh_issue: 4, sync_to_github: true }],
+    }),
   );
   const authority = {
     nodes: [{ id: "WORK", predecessors: [], train: "test" }],

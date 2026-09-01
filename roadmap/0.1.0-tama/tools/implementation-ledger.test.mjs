@@ -657,7 +657,7 @@ const REPO_ROOT = path.resolve(PACKAGE_ROOT, "../..");
 const GITHUBCTL = path.join(REPO_ROOT, "scripts", "githubctl", "githubctl.mjs");
 const PROGRAMCTL = path.join(PACKAGE_ROOT, "tools", "programctl.mjs");
 const GITHUBCTL_COMMANDS =
-  "doctor, check, inspect, sync-issues, project-status, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan, release-cut";
+  "doctor, check, inspect, sync-issues, project-status, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan, release-cut, protection";
 
 test("FB2-AC1 githubctl has no import-dag command and does not generate DAG authority from GitHub", () => {
   const help = spawnSync(process.execPath, [GITHUBCTL, "--help"], { encoding: "utf8" });
