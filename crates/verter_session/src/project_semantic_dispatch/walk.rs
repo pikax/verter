@@ -5597,6 +5597,21 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // result means neither the source surface nor the key
                     // space enumerated, so the deferred `Mapped` shell owns it.
                     if keys.is_empty() {
+                        // A HOMOMORPHIC mapper (`[K in keyof S]` over this
+                        // same source) inherits per-member modifiers from
+                        // `S`; keyspace-enumerated NAMES alone cannot carry
+                        // them, so with the source projection unavailable
+                        // the deferred `Mapped` shell owns the shape — the
+                        // re-dispatch enumerates keys and modifiers
+                        // together. The fallback stays for the non-source
+                        // keyspaces this branch exists to serve.
+                        let homomorphic_over_source = matches!(
+                            self.graph().node_data(mapper.key_space).as_deref(),
+                            Some(SemanticNodeData::KeyOf { base }) if *base == source
+                        );
+                        if homomorphic_over_source {
+                            return None;
+                        }
                         match self
                             .dispatch
                             .key_literals_from_keyspace_node(mapper.key_space)

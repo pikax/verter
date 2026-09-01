@@ -1533,10 +1533,6 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "8cbaee0ee56f97419445580fcf503d33040fe46e45d7f68eb3424994f8318cc8",
     ),
     (
-        "X55_finally_entry_joins_pending_return",
-        "a6df0726392860562e15dc03905b422d7c33bca188bb8375a4165b69421fcb4d",
-    ),
-    (
         "X56_finally_return_preserves_try_return",
         "149610904ebc89a0d10914f76044acd8db25ea734b139425095ad4d4b1768b7b",
     ),
@@ -1899,6 +1895,34 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "N130_typeof_non_null_asserted_subject_negated",
         "283435a5a2f27ccd85d0e1a4a40f3ccba5266c934b7077a094bbccbf447205da",
+    ),
+    (
+        "N131_declared_union_sentinel_collision_string",
+        "11deffbc123cdcb2f9af62735a12d02b0a1e103afcc8f7a108819a1c2893b78c",
+    ),
+    (
+        "N132_declared_union_distinct_sentinel_control",
+        "a2bd27f56de040d904871b86c3076507b46c198d0bc7088385f7402b3d01e408",
+    ),
+    (
+        "N133_declared_union_second_binder_arm_stays_fresh",
+        "32ebf6e74c3d29a8fd49d7c8d97837c6af109c9928c3bd2754306abb655e628a",
+    ),
+    (
+        "N134_declared_array_arm_sentinel_collision",
+        "d9c75964b8c81535e14f0d68c680cef8075d2240fc65bbb33541108a1548027c",
+    ),
+    (
+        "N135_declared_alias_union_keeps_top_level_deposit",
+        "6c6ba17c4c6d1581cde5408ed767aea883c91827e6d7b35ab1a144e941bd48ea",
+    ),
+    (
+        "N136_flow_union_sentinel_collision_string",
+        "88037706af9a69455133fb9de278e96d08b3ed6a13a7a5d8b0f0fcde3f214013",
+    ),
+    (
+        "N137_declared_union_sentinel_collision_number",
+        "0a1000522c8efa91cd1a60610a7af32c5d38ac1e038b3aa49b17b29f4cf10c31",
     ),
 ];
 
@@ -3258,6 +3282,42 @@ mod corpus_suite {
                 "N124_mixed_fresh_and_call_arm_member_read",
                 "checker prints `{ label: number | boolean; }`; the renderer spells the same node `{ label: Union(number | boolean) }` — union spelling and member terminators differ",
             ),
+            (
+                "X55_finally_entry_joins_pending_return",
+                "the renderer spells the (KnownOwed-divergent) node `Union({ out: number } | { out: Union(string | { b: true }) } | { out: string })` where the checker prints `{ out: number; } | { out: string | { b: true; }; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N131_declared_union_sentinel_collision_string",
+                "checker prints `\"error\" | { status: \"ok\"; value: string; }`; the renderer spells the same node `Union(\"error\" | { status: \"ok\", value: string })` — union spelling and member terminators differ",
+            ),
+            (
+                "N132_declared_union_distinct_sentinel_control",
+                "checker prints `\"other\" | { status: \"ok\"; value: string; }`; the renderer spells the same node `Union(\"other\" | { status: \"ok\", value: string })` — union spelling and member terminators differ",
+            ),
+            (
+                "N133_declared_union_second_binder_arm_stays_fresh",
+                "checker prints `\"s\" | { x: string; }`; the renderer spells the same node `Union(\"s\" | { x: string })` — union spelling and member terminators differ",
+            ),
+            (
+                "N134_declared_array_arm_sentinel_collision",
+                "checker prints `\"x\" | string[]`; the renderer spells the same node `Union(\"x\" | Array(string))` — union and array spellings differ",
+            ),
+            (
+                "N135_declared_alias_union_keeps_top_level_deposit",
+                "checker prints `\"x\" | undefined`; the renderer spells the same node `Union(\"x\" | undefined)`",
+            ),
+            (
+                "N136_flow_union_sentinel_collision_string",
+                "checker prints `\"error\" | { value: string; }`; the renderer spells the same node `Union(\"error\" | { value: string })` — union spelling and member terminators differ",
+            ),
+            (
+                "N137_declared_union_sentinel_collision_number",
+                "checker prints `1 | { a: number; }`; the renderer spells the same node `Union(1 | { a: number })` — union spelling and member terminators differ",
+            ),
+            (
+                "N138_instanceof_matching_union_subject_loses_warm_only",
+                "checker prints `{ v: K | KSub; } | { v: number; }`; the renderer spells the same node `Union({ v: Union(DeclRef(K) | DeclRef(KSub)) } | { v: number })` — union, reference, and member-terminator spellings differ",
+            ),
         ];
         let mut failures = Vec::new();
         for row in CORPUS {
@@ -4154,6 +4214,8 @@ const FRAMEWORK_ONLY_WORKLIST: &[&str] = &[
     "F03_defineslots",
     "F04_defineprops_runtime_spread",
     "F05_defineoptions_runtime_spread",
+    "C16_pick_keyof_closed_interface_publishes_every_key",
+    "C17_pick_aliased_keyof_closed_interface_publishes_every_key",
 ];
 
 /// Value-indistinct rows (the `checker` names a value [`NodeShape`]
@@ -4341,11 +4403,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
     ),
     (
         "X54_switch_live_fallthrough_reaches_default",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X55_finally_entry_joins_pending_return",
         Owner::U6ValueInference,
         "root Union — deepening pins the exact constituent set",
     ),
@@ -4552,7 +4609,7 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 /// rejects), or a recorded CHECKER text the deep-pin comparer cannot yet
 /// parse. Each ledger entry records which class it is in.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 72;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 71;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -4724,6 +4781,7 @@ const OPEN_DEBTS: &[&str] = &[
     "X47_try_catch_sequence_throw_point",
     "X48_try_catch_if_guard_throw_point",
     "X49_try_catch_new_callee_throw_point",
+    "X55_finally_entry_joins_pending_return",
     // ── INTERSECTION-REDUCTION residue, the same extensional-equality
     //    class: the checker reduces a literal intersected with the empty
     //    object to the bare literal; the canonical intersection keeps
@@ -4751,14 +4809,14 @@ const OPEN_DEBTS: &[&str] = &[
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 3, 1, 2),
     (Owner::U2MappedTemplate, 4, 1, 2),
-    (Owner::U6CallResolve, 16, 15, 1),
-    // Eight switch-, try/catch- and reunion-family rows are parked as the
+    (Owner::U6CallResolve, 23, 22, 1),
+    // Nine switch-, try/catch- and reunion-family rows are parked as the
     // SUBTYPE-REUNION class: TypeScript's return-position reunion applies
     // subtype reduction and absorbs a subtype arm into its supertype; the
-    // canonical union keeps both constituents. Extensionally equal, so
+    // canonical union keeps every constituent. Extensionally equal, so
     // the rows stay clean and warm while parked with the value-inference
     // owner.
-    (Owner::U6ValueInference, 93, 74, 16),
+    (Owner::U6ValueInference, 93, 73, 17),
     (Owner::U6LoopClosure, 6, 1, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
     (Owner::U6FlowReturnSubstrate, 63, 47, 3),
@@ -4768,14 +4826,14 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // the assignable-but-unproven-derived arm direction (a subclass test
     // over a base-typed subject, a structural twin constructor) publishes
     // the unnarrowed subject behind the typed guard gap and is parked.
-    (Owner::U6NarrowInstanceof, 4, 3, 1),
+    (Owner::U6NarrowInstanceof, 5, 4, 1),
     // N25's MatchesChecker label predated the recursive expect pin; the
     // deep measurement showed the dead contributor SURVIVES (wrong-and-
     // warm), so the row is parked against its narrowing block.
     (Owner::U6NarrowLattice, 38, 24, 14),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
-    (Owner::SharedTypeResolution, 12, 7, 3),
+    (Owner::SharedTypeResolution, 14, 9, 3),
     (Owner::SharedCompilePipeline, 8, 1, 7),
     (Owner::FrameworkOnly, 7, 5, 0),
 ];

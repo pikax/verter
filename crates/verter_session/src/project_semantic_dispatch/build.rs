@@ -7842,6 +7842,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .collect(),
             )
         };
+        // A HOMOMORPHIC mapper (`[K in keyof S]` over this same source,
+        // `as` remaps included) inherits per-member modifiers from `S`;
+        // enumerated key NAMES alone cannot carry them. When the source
+        // surface has not projected yet, a keyspace-only enumeration
+        // would synthesize every produced member non-optional /
+        // non-readonly, so the build defers exactly as an unenumerable
+        // keyspace does — the re-dispatch enumerates keys AND the
+        // source surface together.
+        let homomorphic_over_unprojected_source = source_members.is_empty()
+            && matches!(
+                graph.node_data(mapper.key_space).as_deref(),
+                Some(SemanticNodeData::KeyOf { base }) if *base == source
+            );
         let keys: Vec<super::enumerate::KeyDomainKey> = if !source_members.is_empty() {
             if self.uses_synthetic_mapped_key_names(&source_members) {
                 match self.key_literals_from_keyspace_node(mapper.key_space) {
@@ -7851,7 +7864,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } else {
                 source_member_keys(&source_members)
             }
-        } else if let Some(keys) = self.key_literals_from_keyspace_node(mapper.key_space) {
+        } else if let Some(keys) = (!homomorphic_over_unprojected_source)
+            .then(|| self.key_literals_from_keyspace_node(mapper.key_space))
+            .flatten()
+        {
             keys
         } else {
             // Change M: `KeyEnumeration::Unresolvable`. Neither the

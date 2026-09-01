@@ -96,6 +96,9 @@ pub(crate) enum ExpectedNode {
     /// (order-insensitive, exact). Duplicate expectations need distinct
     /// constituents.
     Union(&'static [ExpectedNode]),
+    /// `SemanticNodeData::Array` (mutable — `readonly T[]` is distinct
+    /// and matches nothing here) with this element type.
+    Array(&'static ExpectedNode),
     /// `SemanticNodeData::Intersection` with these arms, in source order.
     Intersection(&'static [ExpectedNode]),
     /// `SemanticNodeData::Signature` with `SignatureKind::Call`, exact
@@ -201,6 +204,9 @@ pub(crate) fn node_matches(
         (ExpectedNode::Primitive(kind), SemanticNodeData::Primitive(got)) => kind == got,
         (ExpectedNode::Union(exp), SemanticNodeData::Union(members)) => {
             set_matches(dispatch, members, exp, depth + 1)
+        }
+        (ExpectedNode::Array(exp), SemanticNodeData::Array { element, readonly }) => {
+            !readonly && node_matches(dispatch, *element, exp, depth + 1)
         }
         (ExpectedNode::Intersection(exp), SemanticNodeData::Intersection(members)) => {
             members.len() == exp.len()
@@ -858,8 +864,9 @@ pub(crate) fn check_boundary_refusal(
 /// semantic equality.
 ///
 /// Grammar: string/number literals, primitives, bare names, `A | B`,
-/// `A & B`, `{ name: T; }`, `(p: T, …) => T`. Unsupported text is a
-/// loud parse error — never a silent exemption.
+/// `A & B`, `T[]` (mutable arrays only), `{ name: T; }`,
+/// `(p: T, …) => T`. Unsupported text is a loud parse error — never a
+/// silent exemption.
 ///
 /// Unions are order-insensitive exact sets; intersections are source-
 /// ordered; objects are exact member sets; a function print is a Call
@@ -879,6 +886,7 @@ pub(crate) mod checker_syntax {
         Primitive(PrimitiveKind),
         Ref(String),
         Union(Vec<CheckerType>),
+        Array(Box<CheckerType>),
         Intersection(Vec<CheckerType>),
         Object(Vec<(String, CheckerType)>),
         Function {
@@ -953,15 +961,31 @@ pub(crate) mod checker_syntax {
         }
 
         fn intersection(&mut self) -> Result<CheckerType, String> {
-            let mut parts = vec![self.atom()?];
+            let mut parts = vec![self.postfix()?];
             while self.eat('&') {
-                parts.push(self.atom()?);
+                parts.push(self.postfix()?);
             }
             Ok(if parts.len() == 1 {
                 parts.pop().expect("one part")
             } else {
                 CheckerType::Intersection(parts)
             })
+        }
+
+        /// Postfix `[]` binds tighter than `&` / `|` in the checker's
+        /// print (`string[]`, `(A | B)[]`). `readonly T[]` is not
+        /// modelled — it fails the identifier lookup loudly.
+        fn postfix(&mut self) -> Result<CheckerType, String> {
+            let mut inner = self.atom()?;
+            loop {
+                self.skip_ws();
+                if self.rest().starts_with("[]") {
+                    self.pos += 2;
+                    inner = CheckerType::Array(Box::new(inner));
+                } else {
+                    return Ok(inner);
+                }
+            }
         }
 
         fn ident(&mut self) -> Result<String, String> {
@@ -1173,6 +1197,9 @@ pub(crate) mod checker_syntax {
                 }
                 let mut used = vec![false; members.len()];
                 assign(dispatch, members, exp, &mut used, 0, depth + 1)
+            }
+            (CheckerType::Array(elem), SemanticNodeData::Array { element, readonly }) => {
+                !readonly && matches_node(dispatch, *element, elem, depth + 1)
             }
             (CheckerType::Intersection(exp), SemanticNodeData::Intersection(members)) => {
                 members.len() == exp.len()

@@ -4090,6 +4090,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
             arms.push(contribution.node);
             inference_only.push(contribution.inference_only);
         }
+        // A multi-arm join aggregates over EVALUATED constituents, exactly
+        // as the checker's return aggregation does: an alias-instantiation
+        // contributor whose one-level expansion is a UNION enters the join
+        // as that union, so the canonical union below flattens and dedups
+        // it (`if (c) { return fu("x") } return "x" as const` for
+        // `fu<T>(v: T): UA<T>` with `UA<T> = T | undefined` reads
+        // `"x" | undefined` — the checker's own flatten). A non-union
+        // expansion keeps its shallow carrier (the checker keeps the alias
+        // label for those constituents), and a lone contributor keeps its
+        // carrier untouched — nothing materialises without a join to
+        // normalise.
+        if arms.len() >= 2 {
+            for arm in arms.iter_mut() {
+                if !matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::InstantiationRef { .. })
+                ) {
+                    continue;
+                }
+                if let Some(expanded) = self.expand_alias_instantiation_one_level(*arm) {
+                    if matches!(
+                        graph.node_data(expanded).as_deref(),
+                        Some(SemanticNodeData::Union(_))
+                    ) {
+                        *arm = expanded;
+                    }
+                }
+            }
+        }
         // A recursive HOLD counts as a contributor: the SCC close joins
         // its discharged return into this result, so the join is not a
         // lone contributor. Excluding holds would make widening depend on
