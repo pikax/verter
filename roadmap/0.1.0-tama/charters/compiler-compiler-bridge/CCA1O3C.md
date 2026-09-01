@@ -51,7 +51,7 @@ Outcome: one execution-proven lane inside the canonical gate runs the workspace'
 - Required on every real gate invocation, bare and exhaustive, and not path-filtered inside the gate. The prepare-only invocation is not a gate run.
 - Failure conditions: a missing target, a missing or unpinned runner, zero discovered wasm-target boundary cases, a skipped lane, or an absent terminal result.
 - Discovery is tree- or tool-derived. A hand-maintained list of the currently existing filenames is forbidden.
-- Rewriting the boundary tests themselves, adding new binding behavior, and migrating consumers are excluded.
+- Rewriting the boundary tests themselves, adding new binding behavior, and migrating consumers are excluded, with one recorded exception: the browser binding's closed-shape refusal must also be proven for an own key stated as `undefined`. No `serde_json::Value` fixture can express that value — such a key is simply absent after the round trip — so the existing boundary fixtures cannot state the case at all, and the claim that both bindings converge on it is currently held by reading the source. This node adds that one case to the existing boundary module, built against a real JavaScript object graph rather than a serialised fixture, because it owns both that file and the lane that would execute it. The exception is exactly this: it is not a licence to add binding behaviour, to restate per-option conversion, or to widen the module further.
 
 ## Exact predecessor contract
 

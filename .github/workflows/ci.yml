@@ -338,6 +338,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          # REQUIRED by the gate's wasm JavaScript-boundary lane. Those tests are
+          # `#[cfg(target_arch = "wasm32")]`, so no host-target run can execute
+          # them; without this target the gate's prerequisite preflight fails
+          # loudly rather than skipping them.
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           # Job-scoped by default. The previous shared
@@ -382,6 +388,17 @@ jobs:
         run: node scripts/check-integration-test-layout.mjs
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+      # REQUIRED by the gate's wasm JavaScript-boundary lane, which executes the
+      # workspace's `#[wasm_bindgen_test]` cases through this runner. The runner
+      # and the `wasm-bindgen` library are ONE ABI: a version skew compiles
+      # cleanly and then fails inside generated JavaScript, so the gate derives
+      # the required version from the tree and refuses a mismatched runner. Keep
+      # this pin equal to the `wasm-bindgen` dependency in
+      # `crates/verter_wasm/Cargo.toml` — the same value `wasm-build` pins.
+      - name: Install wasm-bindgen CLI (test runner for the gate's wasm lane)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.122
       # THE canonical Rust gate. Builds the workspace test universe ONCE via
       # `cargo nextest archive` and lists that archive once, then starts two isolated post-list
       # lanes concurrently: archive-backed Surface 1 (nextest process
@@ -400,6 +417,11 @@ jobs:
       # target root isolated from Surface 1, so neither lane serializes behind
       # the other's Cargo target lock. `--exhaustive` changes failure collection
       # only; it does not change commands, filters, profiles, or coverage.
+      #
+      # The gate also owns the wasm JavaScript-boundary lane, which this job
+      # PROVISIONS for (target + pinned runner above) but does not own: the lane
+      # runs inside `gate.mjs` on every real invocation. `wasm-build` keeps its
+      # own artifact responsibilities and does not execute or duplicate it.
       - name: Rust gate (one archive, overlapping isolated lanes)
         env:
           VERTER_REQUIRE_TSGO: "1"

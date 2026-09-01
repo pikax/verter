@@ -792,13 +792,18 @@ fn each_arm_renders_a_message_that_names_which_authority_refused() {
 // or the other framework's option key, must be refused where a browser
 // caller meets it and not merely where a Rust fixture does.
 //
-// Run with `wasm-bindgen-test-runner`; the workspace gate does not execute
-// wasm-target tests.
+// The last three go one step further: a `serde_json::Value` fixture cannot
+// state an own key valued `undefined` — JSON has no such value, so the key
+// vanishes on the round trip — while a browser caller produces one by
+// forwarding an unset variable. Those cases build the object graph
+// directly, because that shape is exactly where a closed schema can be
+// closed on paper and open in practice.
 
 #[cfg(target_arch = "wasm32")]
 mod js_boundary {
     use super::*;
 
+    use js_sys::Reflect;
     use serde::Serialize;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_test::wasm_bindgen_test;
@@ -816,7 +821,14 @@ mod js_boundary {
 
     #[track_caller]
     fn js_refusal(wire: Value) -> String {
-        match host_compile_request_from_js(js(wire), &no_profiles()) {
+        js_refusal_js(js(wire))
+    }
+
+    /// The refusal path for a payload that had to be built as a JS object
+    /// graph rather than serialised from a `Value`.
+    #[track_caller]
+    fn js_refusal_js(payload: JsValue) -> String {
+        match host_compile_request_from_js(payload, &no_profiles()) {
             Ok(request) => panic!(
                 "expected a refusal, got a request for {:?}",
                 request.framework()
@@ -869,6 +881,77 @@ mod js_boundary {
         assert!(
             message.contains("unknown field") && message.contains("runes"),
             "expected an unknown-field refusal naming `runes`, got: {message}"
+        );
+    }
+
+    /// The one payload shape a `serde_json::Value` fixture cannot state: an
+    /// own key whose value is `undefined`. Serialising a `Value` cannot
+    /// produce it — JSON has no such value, so the key is simply absent —
+    /// yet it is trivially what a browser caller writes when it forwards an
+    /// unset variable. This builds the fixture as a real JS object graph and
+    /// then writes `undefined` at `path`/`key` through `Reflect::set`, so the
+    /// key is genuinely own and enumerable when the schema enumerates it.
+    fn js_with_undefined_at(wire: Value, path: &[&str], key: &str) -> JsValue {
+        let root = js(wire);
+        let mut cursor = root.clone();
+        for segment in path {
+            cursor = Reflect::get(&cursor, &JsValue::from_str(segment))
+                .expect("the fixture exposes every path segment");
+            assert!(
+                cursor.is_object(),
+                "fixture drift: `{segment}` is not an object"
+            );
+        }
+        assert!(
+            Reflect::set(&cursor, &JsValue::from_str(key), &JsValue::UNDEFINED)
+                .expect("a plain object accepts an own key"),
+            "the own key was not written"
+        );
+        root
+    }
+
+    /// The control for the two below. Without it a schema that refused every
+    /// payload carrying an `undefined`, or a writer that wrote nothing at
+    /// all, would read as proof. `codegenMode` is a declared optional slot,
+    /// so stating it as `undefined` must stay admissible and be read as
+    /// absent — the same reading a JSON `null` gets.
+    #[wasm_bindgen_test]
+    fn an_optional_slot_stated_as_undefined_stays_admissible() {
+        let request = host_compile_request_from_js(
+            js_with_undefined_at(minimal_vue(), &["vue", "options"], "codegenMode"),
+            &no_profiles(),
+        )
+        .expect("an optional slot stated as undefined is read as absent");
+
+        assert!(matches!(
+            request.framework(),
+            FrameworkCompileRequest::Vue(_)
+        ));
+    }
+
+    #[wasm_bindgen_test]
+    fn an_own_key_stated_as_undefined_is_still_refused_by_name() {
+        let message = js_refusal_js(js_with_undefined_at(
+            minimal_vue(),
+            &["vue", "options"],
+            "runes",
+        ));
+        assert!(
+            message.contains("unknown field") && message.contains("runes"),
+            "expected an unknown-field refusal naming `runes`, got: {message}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn a_required_slot_stated_as_undefined_is_refused_as_a_null_value() {
+        let message = js_refusal_js(js_with_undefined_at(
+            minimal_vue(),
+            &["vue", "options"],
+            "backend",
+        ));
+        assert!(
+            message.contains("invalid type: null"),
+            "expected a null-valued refusal for the required `backend` slot, got: {message}"
         );
     }
 }

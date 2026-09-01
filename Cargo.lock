@@ -3903,6 +3903,7 @@ version = "0.0.1-beta.3"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.4.2",
+ "js-sys",
  "prost",
  "serde",
  "serde-wasm-bindgen",

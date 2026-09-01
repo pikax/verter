@@ -23,7 +23,7 @@
     "test:e2e:single": "pnpm --filter verter-vscode test:e2e",
     "test:lsp:neutral": "cargo build -p verter_lsp -p verter_relay_shim && pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm --filter @verter/dx-harness test:editor-neutral-lsp",
     "test:endurance": "pnpm --filter @verter/dx-harness run test:endurance",
-    "test:scripts": "vitest run scripts/sccache-env.test.mjs && vitest run scripts/wasm-opt-cache.test.mjs && node --test scripts/lib/publish-set.spec.mjs && node --test scripts/lib/crate-graph.spec.mjs && node --test scripts/editor-contracts/plenary-outcome-guard.test.mjs && node --test scripts/validate-performance-gates.test.mjs && node --test scripts/probe-bundler-route-isolation.test.mjs && node --test scripts/affected-tests.test.mjs && node --test scripts/gate-telemetry-selftest.mjs",
+    "test:scripts": "vitest run scripts/sccache-env.test.mjs && vitest run scripts/wasm-opt-cache.test.mjs && node --test scripts/lib/publish-set.spec.mjs && node --test scripts/lib/crate-graph.spec.mjs && node --test scripts/editor-contracts/plenary-outcome-guard.test.mjs && node --test scripts/validate-performance-gates.test.mjs && node --test scripts/probe-bundler-route-isolation.test.mjs && node --test scripts/affected-tests.test.mjs && node --test scripts/gate-telemetry-selftest.mjs && node --test scripts/gate-wasm-lane-selftest.mjs",
     "affected-tests": "node scripts/affected-tests.mjs",
     "bump": "node scripts/bump.mjs",
     "fmt": "oxfmt",
