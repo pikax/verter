@@ -1169,7 +1169,7 @@ impl VerterHost {
                 if macro_projection_faulted(MacroProjectionLane::Tsc) {
                     return partial_failure().tsc();
                 }
-                let Some(surface) = surface else {
+                let Some(surface) = authored_fallback_surface(surface) else {
                     return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
                 };
 
@@ -1244,7 +1244,7 @@ impl VerterHost {
                 if macro_projection_faulted(MacroProjectionLane::Tsc) {
                     return partial_failure().tsc();
                 }
-                let Some(surface) = surface else {
+                let Some(surface) = authored_fallback_surface(surface) else {
                     return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
                 };
                 if emits_surface_has_invalid_member(
@@ -1473,7 +1473,7 @@ impl VerterHost {
         if macro_projection_faulted(lane) {
             return partial_failure().runtime();
         }
-        let Some(surface) = surface else {
+        let Some(surface) = authored_fallback_surface(surface) else {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         };
 
@@ -1601,7 +1601,7 @@ impl VerterHost {
         if macro_projection_faulted(lane) {
             return partial_failure().runtime();
         }
-        let Some(surface) = surface else {
+        let Some(surface) = authored_fallback_surface(surface) else {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         };
         if emits_surface_has_invalid_member(dispatch, &surface, runtime_context) {
@@ -1694,5 +1694,31 @@ impl VerterHost {
                 },
             },
         }))
+    }
+}
+
+/// Discharge a shallow-surface resolution for the CODEGEN lanes.
+///
+/// The macro codegen projections splice the AUTHORED type argument (TSC lane)
+/// or degrade through their own typed `ProjectionFailure` rails — they do not
+/// publish resolved-surface metadata, so an incomplete resolution here keeps
+/// its authored fallback instead of a completeness record: the usable subset
+/// (a partial terminal read's positive members) still projects, and a
+/// surface-less failure routes to the lane's `NonObjectRoot` failure exactly
+/// as a genuinely non-object root does.
+fn authored_fallback_surface(
+    resolution: crate::typeinfo::surface_resolution::SurfaceResolution<
+        crate::typeinfo::surface::TypeInfoSurface,
+    >,
+) -> Option<crate::typeinfo::surface::TypeInfoSurface> {
+    match resolution {
+        crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
+        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
+            Some(surface)
+        }
+        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => None,
+        crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+            incomplete.into_authored_fallback()
+        }
     }
 }

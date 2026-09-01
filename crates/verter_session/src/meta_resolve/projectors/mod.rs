@@ -98,8 +98,8 @@ pub(crate) use output_sink::MetaResolveProjectorsOutputCap;
 pub(crate) use macro_payload_substrate::EMIT_CARRIER_WALK_FUSE;
 #[allow(unused_imports)]
 pub(crate) use macro_payload_substrate::{
-    resolve_emit_payload_to_conditional_root, resolve_macro_payload_diagnostic_probe,
-    resolve_payload_surface_with_scope, MemberValueRole, PayloadSurfaceScope,
+    resolve_emit_payload_to_conditional_root, resolve_payload_surface_with_scope, MemberValueRole,
+    PayloadSurfaceScope,
 };
 
 pub(crate) use define_shapes::project_define_macro_shapes;
@@ -419,7 +419,9 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 /// reduce (or publish the Ref shallow per the shallow-by-default rule).
 /// Read the positive member evidence backing `node`, if `node` resolves to a
 /// `SemanticNodeData::Object` shell. An empty result does not prove that an
-/// open-spread surface has no additional members.
+/// open-spread surface has no additional members, and an UNRESOLVED carrier
+/// (an import miss, an opaque shell) is an INCOMPLETE resolution with its
+/// typed reason — never a silent zero-member success.
 ///
 /// An `ObjectSpreadProgram` node is the walker's typed open evidence for an
 /// open / multi-alternative program root (it never fabricates a closed
@@ -433,9 +435,56 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 pub(crate) fn read_positive_surface_members(
     ctx: &dyn ResolverContext,
     surface_node: SemanticNodeId,
-) -> Vec<SurfaceMember> {
+) -> crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>> {
+    use crate::typeinfo::surface_resolution::SurfaceResolution;
+
+    /// Join per-arm resolutions under the given member-join rule: the joined
+    /// positive members always publish, and ANY incomplete arm makes the
+    /// whole join incomplete with the union of the arms' typed reasons — the
+    /// joined subset is usable but never passes as the complete evidence.
+    fn join_arms(
+        ctx: &dyn ResolverContext,
+        arms: &[crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>>],
+        join: impl FnOnce(
+            &crate::semantic_query_memo::SemanticGraphStore,
+            &[Vec<SurfaceMember>],
+            &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+        ) -> Vec<SurfaceMember>,
+    ) -> crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>> {
+        use crate::typeinfo::surface_resolution::SurfaceResolution;
+        let mut incomplete = None::<crate::semantic_query::PartialReasonSet>;
+        let mut per_arm: Vec<Vec<SurfaceMember>> = Vec::with_capacity(arms.len());
+        for arm in arms {
+            match arm {
+                SurfaceResolution::Resolved(members) | SurfaceResolution::OpenPresence(members) => {
+                    per_arm.push(members.clone())
+                }
+                SurfaceResolution::NoSurface => per_arm.push(Vec::new()),
+                SurfaceResolution::Incomplete(inc) => {
+                    incomplete = Some(incomplete.unwrap_or_default().union(inc.reasons()));
+                    per_arm.push(Vec::new());
+                }
+            }
+        }
+        let mut canonical_evidence =
+            crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+        let members = join(
+            ctx.project_type_store().semantic_graph(),
+            &per_arm,
+            &mut canonical_evidence,
+        );
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
+            .deposit_canonical_evidence(canonical_evidence);
+        match incomplete {
+            Some(reasons) => SurfaceResolution::incomplete_with(reasons, members),
+            None => SurfaceResolution::Resolved(members),
+        }
+    }
+
     match crate::project_semantic_dispatch::node_data_for(ctx, surface_node).as_deref() {
-        Some(SemanticNodeData::Object(view)) => view.positive_members().to_vec(),
+        Some(SemanticNodeData::Object(view)) => {
+            SurfaceResolution::Resolved(view.positive_members().to_vec())
+        }
         Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
             let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             let formula = match dispatch.project_object_spread_for_consumer(
@@ -446,7 +495,21 @@ pub(crate) fn read_positive_surface_members(
                 ),
             ) {
                 crate::semantic_query::QueryResult::Value(formula) => formula,
-                _ => return Vec::new(),
+                crate::semantic_query::QueryResult::Recursive(_) => {
+                    return SurfaceResolution::incomplete(
+                        crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
+                    );
+                }
+                // A stable / well-formed open marker contributes no members
+                // and stays COMPLETE; only an operational fault is partial.
+                crate::semantic_query::QueryResult::Error(error) => {
+                    return match crate::typeinfo::surface_resolution::stable_query_error_partiality(
+                        &error,
+                    ) {
+                        Some(reasons) => SurfaceResolution::incomplete(reasons),
+                        None => SurfaceResolution::Resolved(Vec::new()),
+                    };
+                }
             };
             let mut canonical_evidence =
                 crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
@@ -457,24 +520,19 @@ pub(crate) fn read_positive_surface_members(
                     &mut canonical_evidence,
                 );
             dispatch.deposit_canonical_evidence(canonical_evidence);
-            members
+            SurfaceResolution::Resolved(members)
         }
         Some(SemanticNodeData::Union(arms)) => {
             let arms = arms.members_arc();
-            let per_arm: Vec<Vec<SurfaceMember>> = arms
+            let per_arm: Vec<_> = arms
                 .iter()
                 .map(|arm| read_positive_surface_members(ctx, *arm))
                 .collect();
-            let mut canonical_evidence =
-                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
-            let members = crate::project_semantic_dispatch::walk::presence_union_members(
-                ctx.project_type_store().semantic_graph(),
-                &per_arm,
-                &mut canonical_evidence,
-            );
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
-                .deposit_canonical_evidence(canonical_evidence);
-            members
+            join_arms(ctx, &per_arm, |graph, per_arm, evidence| {
+                crate::project_semantic_dispatch::walk::presence_union_members(
+                    graph, per_arm, evidence,
+                )
+            })
         }
         // Intersection carriers merge under INTERSECTION rules (required
         // in any declaring arm stays required, same-key collisions
@@ -483,20 +541,15 @@ pub(crate) fn read_positive_surface_members(
         // values.
         Some(SemanticNodeData::Intersection(arms)) => {
             let arms = arms.members_arc();
-            let per_arm: Vec<Vec<SurfaceMember>> = arms
+            let per_arm: Vec<_> = arms
                 .iter()
                 .map(|arm| read_positive_surface_members(ctx, *arm))
                 .collect();
-            let mut canonical_evidence =
-                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
-            let members = crate::project_semantic_dispatch::walk::presence_intersection_members(
-                ctx.project_type_store().semantic_graph(),
-                &per_arm,
-                &mut canonical_evidence,
-            );
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
-                .deposit_canonical_evidence(canonical_evidence);
-            members
+            join_arms(ctx, &per_arm, |graph, per_arm, evidence| {
+                crate::project_semantic_dispatch::walk::presence_intersection_members(
+                    graph, per_arm, evidence,
+                )
+            })
         }
         Some(SemanticNodeData::Conditional {
             true_branch_ref,
@@ -504,21 +557,29 @@ pub(crate) fn read_positive_surface_members(
             ..
         }) => {
             let (true_branch, false_branch) = (*true_branch_ref, *false_branch_ref);
-            let mut canonical_evidence =
-                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
-            let members = crate::project_semantic_dispatch::walk::presence_union_members(
-                ctx.project_type_store().semantic_graph(),
-                &[
-                    read_positive_surface_members(ctx, true_branch),
-                    read_positive_surface_members(ctx, false_branch),
-                ],
-                &mut canonical_evidence,
-            );
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
-                .deposit_canonical_evidence(canonical_evidence);
-            members
+            let per_arm = [
+                read_positive_surface_members(ctx, true_branch),
+                read_positive_surface_members(ctx, false_branch),
+            ];
+            join_arms(ctx, &per_arm, |graph, per_arm, evidence| {
+                crate::project_semantic_dispatch::walk::presence_union_members(
+                    graph, per_arm, evidence,
+                )
+            })
         }
-        _ => Vec::new(),
+        // An OPERATIONALLY unresolved carrier contributes no members AND
+        // says so — the typed reason makes `Known | Missing` distinguishable
+        // from `Known`. A member-less resolved shape (a primitive / a
+        // function) and a STABLE authored-miss carrier (a `BareRef` mirror,
+        // the walker's well-formed `OpenSurface` marker) genuinely
+        // contribute no positive member evidence — the complete answer.
+        other => {
+            match crate::typeinfo::surface_resolution::stable_member_carrier_partiality(ctx, other)
+            {
+                Some(reasons) => SurfaceResolution::incomplete(reasons),
+                None => SurfaceResolution::Resolved(Vec::new()),
+            }
+        }
     }
 }
 

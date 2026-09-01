@@ -464,7 +464,7 @@ fn single_callable_arm_nullish_union_is_exact_node_and_consistent_with_realizer(
     // resolver's realized node, and both are the exact Function node.
     let aliased = alias(&graph, f);
     let view_arm = CallableNodeView::new(&dispatch, aliased).single_callable_arm(navigate());
-    let realized = realize_callable_member(&dispatch, aliased, navigate());
+    let realized = realize_callable_member(&dispatch, aliased, navigate()).resolved_for_tests();
     assert_eq!(
         view_arm, realized,
         "the view's callable arm equals realize_callable_member's node for an aliased callable"
@@ -547,7 +547,7 @@ fn single_callable_arm_never_intersection_under_union_refuses() {
     // view MATCHES the shared resolver — a view-only tri-state that elided the
     // `never` intersection and returned `Some(f)` would break this parity.
     assert_eq!(
-        realize_callable_member(&dispatch, composite, navigate()),
+        realize_callable_member(&dispatch, composite, navigate()).resolved_for_tests(),
         None,
         "realize_callable_member ALSO refuses `(Fn & undefined) | Fn` — the view is canonical-consistent with the shared resolver"
     );
@@ -1114,7 +1114,7 @@ fn realized_callable_root_normalizes_alias() {
 
     let view = CallableNodeView::new(&dispatch, aliased);
     assert_eq!(
-        view.realized_callable_root(navigate()),
+        view.realized_callable_root(navigate()).resolved_for_tests(),
         Some(f),
         "realized_callable_root normalizes Alias(Function) to the Function node"
     );
@@ -1594,8 +1594,9 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let dispatch = ctx.dispatch();
 
     let member = |name: &str| -> SemanticNodeId {
@@ -1666,7 +1667,7 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
     for name in ["onbare", "ondeclared", "ongeneric"] {
         let value = member(name);
         let view_arm = CallableNodeView::new(&dispatch, value).single_callable_arm(navigate());
-        let realized = realize_callable_member(&dispatch, value, navigate());
+        let realized = realize_callable_member(&dispatch, value, navigate()).resolved_for_tests();
         assert!(
             view_arm.is_some(),
             "`{name}` yields a callable arm (precondition for the consistency check)"
@@ -1719,8 +1720,9 @@ fn event_names_resolves_declref_and_instantiationref_event_unions() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let dispatch = ctx.dispatch();
     let member = |name: &str| -> SemanticNodeId {
         surface
@@ -1811,8 +1813,9 @@ fn positional_params_expands_declref_and_instantiationref_rest_tuples() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let dispatch = ctx.dispatch();
     let member = |name: &str| -> SemanticNodeId {
         surface
@@ -1915,8 +1918,9 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let dispatch = ctx.dispatch();
     let member = |name: &str| -> SemanticNodeId {
         surface
@@ -2016,8 +2020,9 @@ fn slot_param_and_return_resolves_aliased_and_nullable_slot_arms() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let dispatch = ctx.dispatch();
     let member = |name: &str| -> SemanticNodeId {
         surface
@@ -2129,8 +2134,9 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let dispatch = ctx.dispatch();
     let onprops = surface
         .members
@@ -2249,6 +2255,7 @@ fn normalize_node_for_fact_demand_resolves_carrier_chains() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
+        .resolved_for_tests()
         .expect("props surface");
     let dispatch = ctx.dispatch();
     let member = |name: &str| -> SemanticNodeId {
@@ -2308,6 +2315,7 @@ fn normalize_node_for_fact_demand_preserves_cycles_and_resolves_deep_finite_chai
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
+        .resolved_for_tests()
         .expect("props surface");
     let dispatch = ctx.dispatch();
     let member = |name: &str| -> SemanticNodeId {
@@ -2459,8 +2467,9 @@ fn normalize_node_for_fact_demand_over_cap_template_behind_declref_is_partial() 
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let dispatch = ctx.dispatch();
     let toowide = surface
         .members
@@ -2517,6 +2526,7 @@ fn positional_params_partial_rest_demand_fails_whole_read() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
+        .resolved_for_tests()
         .expect("props surface");
     let dispatch = ctx.dispatch();
     let mut_ref = surface
@@ -2569,6 +2579,7 @@ fn demand_validated_structural_node_partial_yields_none() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
+        .resolved_for_tests()
         .expect("props surface");
     let dispatch = ctx.dispatch();
     let mut_ref = surface
@@ -2627,8 +2638,9 @@ fn event_names_direct_self_reference_terminates_complete() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let dispatch = ctx.dispatch();
     let onself = surface
         .members
@@ -2695,8 +2707,9 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let dispatch = ctx.dispatch();
     let member = |name: &str| -> SemanticNodeId {
         surface
@@ -3052,8 +3065,9 @@ fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
         shallow.has_type_symbol_in(props_locator.anchor.owner, "Props"),
         "the exact instance owner indexes the local `Props` declaration"
     );
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let dispatch = ctx.dispatch();
     let row = surface
         .members
@@ -3158,6 +3172,7 @@ fn peel_bounded_fail_closed_on_declref_cycle() {
         "the exact instance owner indexes the local `Props` declaration"
     );
     let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
+        .resolved_for_tests()
         .expect("props surface");
     let dispatch = ctx.dispatch();
     let mutual = surface
@@ -3307,8 +3322,9 @@ fn validated_snippet_params_partial_arg_fails_closed_not_bindingless() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let dispatch = ctx.dispatch();
     let toowide = surface
         .members
@@ -3472,8 +3488,9 @@ fn validated_snippet_params_declref_tuple_arg_resolves_the_superset_flip() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
-    let surface =
-        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let surface = navigate_param_to_object_surface(&ctx, component, props_type)
+        .resolved_for_tests()
+        .expect("props surface");
     let dispatch = ctx.dispatch();
     let x = surface
         .members
@@ -3634,7 +3651,7 @@ fn realize_of_derived_union_collapses_duplicate_realized_arms() {
         )),
     ));
     assert_eq!(
-        realize_callable_member(&dispatch, authored, navigate()),
+        realize_callable_member(&dispatch, authored, navigate()).resolved_for_tests(),
         Some(f),
         "both arms realize to the one Function — the derived rebuild \
          collapses to it instead of publishing `Union(f, f)`"

@@ -195,6 +195,27 @@ Best-architecture target for component-meta:
 
 ## Component-Meta Completeness Contract (CRITICAL)
 
+**Producer-boundary typed outcome.** Every resolution-to-surface producer
+(`project_shallow_surface_from_base` / `project_shallow_surface_graph_only`,
+`navigate_param_to_object_surface`, `realize_callable_member` /
+`CallableNodeView::realized_callable_root`, `read_positive_surface_members`,
+`TypeInfoSurface::from_spread_projection`) returns
+`crate::typeinfo::surface_resolution::SurfaceResolution` — `Resolved(surface)`
+(closed complete domain), `OpenPresence(surface)` (positive presence-only
+projection of an open domain; complete-as-a-result, warm-capable),
+`NoSurface` (the complete negative answer), or `Incomplete` carrying a
+non-empty `PartialReasonSet`. The raw empty-success pair is unconstructible:
+`IncompleteSurface`'s fields are module-private, the outcome has no `Default`
+and no `unwrap_or_default`, and the discharges are named
+(`recorded()` / `into_recorded_partial()` fold the reason into the
+request/cold-compute completeness before any value flows;
+`into_authored_fallback()` is reserved for codegen lanes that splice the
+authored source). Guarded by the trybuild fixture
+`tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs`.
+A genuinely empty resolved surface stays `Resolved(empty)` — complete, exact,
+warm-capable.
+
+
 Component-meta completeness is part of the public API surface.
 
 - `acceptedSurfaceCompleteness`, expansion exactness, bridge-depth state, unsupported operators, unresolved branches, and budget exits must remain explicit through Rust payloads, protocol conversion, the TS bridge, native component-meta, and compat adapters.

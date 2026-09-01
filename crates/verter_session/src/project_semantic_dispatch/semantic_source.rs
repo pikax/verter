@@ -862,7 +862,11 @@ impl ProjectSemanticDispatch<'_> {
                 None => return SourceRaiseOutcome::Absent,
             }
         } else {
-            let Some(realized_root) = view.realized_callable_root(context) else {
+            // A genuinely non-callable root is ABSENT (the complete negative
+            // answer). An UNRESOLVED root records its typed reason before the
+            // absent outcome — the raise's emptiness is then never mistaken
+            // for a callable-less occurrence.
+            let Some(realized_root) = view.realized_callable_root(context).recorded() else {
                 return SourceRaiseOutcome::Absent;
             };
             let combine = match super::node_data_for(self.ctx, realized_root).as_deref() {

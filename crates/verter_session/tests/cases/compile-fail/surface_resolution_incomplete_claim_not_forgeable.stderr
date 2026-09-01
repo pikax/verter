@@ -1,0 +1,9 @@
+error[E0451]: fields `reason` and `partial` of struct `IncompleteSurface` are private
+  --> tests/cases/compile-fail/surface_resolution_incomplete_claim_not_forgeable.rs:14:9
+   |
+13 |     let _forged: IncompleteSurface<Vec<u8>> = IncompleteSurface {
+   |                                               ----------------- in this type
+14 |         reason: PartialReasonSet::empty(),
+   |         ^^^^^^ private field
+15 |         partial: None,
+   |         ^^^^^^^ private field

@@ -79,9 +79,12 @@ use std::sync::Arc;
 /// 5. **`DeclRef { identity }`** → dispatch `ResolveDecl` to unwrap the
 ///    identity, then recurse on the resolved body.
 ///
-/// Any other shape (Object, Union, Intersection, Primitive, Mapped,
-/// KeyOf, ...) returns `None` — the consumer's "not a function" arm
-/// fires.
+/// Any other RESOLVED shape (Object, Primitive, Mapped, KeyOf, ...)
+/// returns `NoSurface` — the consumer's "not a function" arm fires as a
+/// COMPLETE negative answer. An UNRESOLVED carrier (an import miss, a
+/// failed `ResolveDecl` / `Instantiate`, a missing arena node, the depth
+/// fuse) is `Incomplete` with its typed reason — a failed realization is
+/// never spelled as "not callable".
 ///
 /// **Cycle / depth safety**: bounded at depth 32 — generous enough for
 /// real-world carrier nesting (Alias → InstantiationRef → Conditional →
@@ -97,7 +100,7 @@ pub(crate) fn realize_callable_member(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: crate::semantic_query::SemanticNodeId,
     context: crate::semantic_query::ProjectionReductionContext,
-) -> Option<crate::semantic_query::SemanticNodeId> {
+) -> crate::typeinfo::surface_resolution::SurfaceResolution<crate::semantic_query::SemanticNodeId> {
     realize_callable_member_inner(dispatch, node, context, 0)
 }
 
@@ -107,17 +110,20 @@ fn realize_callable_member_inner(
     node: crate::semantic_query::SemanticNodeId,
     context: crate::semantic_query::ProjectionReductionContext,
     depth: u32,
-) -> Option<crate::semantic_query::SemanticNodeId> {
+) -> crate::typeinfo::surface_resolution::SurfaceResolution<crate::semantic_query::SemanticNodeId> {
     use crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts;
     use crate::semantic_query::{
-        ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, SemanticNodeData,
-        SemanticQueryKey,
+        PartialReasonSet, ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey,
+        SemanticNodeData, SemanticQueryKey,
     };
+    use crate::typeinfo::surface_resolution::SurfaceResolution;
 
     if depth > 32 {
-        return None;
+        return SurfaceResolution::incomplete(PartialReasonSet::PROJECTION_WORK_LIMIT);
     }
-    let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node)?;
+    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+        return SurfaceResolution::incomplete(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
+    };
     match data.as_ref() {
         // (1) A CALL signature — the realized callable. Return verbatim.
         // A CONSTRUCT signature (`new (...) => R`) is not invocable as a
@@ -125,7 +131,7 @@ fn realize_callable_member_inner(
         SemanticNodeData::Signature {
             kind: crate::semantic_query::SignatureKind::Call,
             ..
-        } => Some(node),
+        } => SurfaceResolution::Resolved(node),
 
         // (2) Alias → recurse on inner.
         SemanticNodeData::Alias(inner) => {
@@ -167,8 +173,20 @@ fn realize_callable_member_inner(
                 QueryResult::Value(id) if id != node => id,
                 // A `Value(id) where id == node` means the dispatch
                 // returned the deferred Conditional shell unchanged
-                // (not decidable) — nothing further to realize.
-                _ => return None,
+                // (not decidable) — nothing further to realize; the
+                // undecided conditional is a complete "not a callable
+                // surface" answer.
+                QueryResult::Value(_) => return SurfaceResolution::NoSurface,
+                QueryResult::Recursive(_) => {
+                    return SurfaceResolution::incomplete(PartialReasonSet::SAME_PATH_RECURSION);
+                }
+                QueryResult::Error(error) => {
+                    return SurfaceResolution::incomplete(
+                        crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(
+                            &error,
+                        ),
+                    );
+                }
             };
             realize_callable_member_inner(dispatch, reduced, context, depth + 1)
         }
@@ -199,7 +217,16 @@ fn realize_callable_member_inner(
             emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
             let body = match read.value {
                 QueryResult::Value(id) => id,
-                QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+                QueryResult::Recursive(_) => {
+                    return SurfaceResolution::incomplete(PartialReasonSet::SAME_PATH_RECURSION);
+                }
+                QueryResult::Error(error) => {
+                    return SurfaceResolution::incomplete(
+                        crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(
+                            &error,
+                        ),
+                    );
+                }
             };
             realize_callable_member_inner(dispatch, body, context, depth + 1)
         }
@@ -228,7 +255,16 @@ fn realize_callable_member_inner(
             emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
             let resolved = match read.value {
                 QueryResult::Value(id) => id,
-                QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+                QueryResult::Recursive(_) => {
+                    return SurfaceResolution::incomplete(PartialReasonSet::SAME_PATH_RECURSION);
+                }
+                QueryResult::Error(error) => {
+                    return SurfaceResolution::incomplete(
+                        crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(
+                            &error,
+                        ),
+                    );
+                }
             };
             realize_callable_member_inner(dispatch, resolved, context, depth + 1)
         }
@@ -269,10 +305,22 @@ fn realize_callable_member_inner(
             emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
             let body = match read.value {
                 QueryResult::Value(id) if id != node => id,
-                // `Value(id) where id == node` means the instantiate returned the
-                // placeholder unchanged (unresolved declaration) — nothing to
-                // realize.
-                _ => return None,
+                // `Value(id) where id == node` means the instantiate returned
+                // the placeholder unchanged: an UNRESOLVED declaration — an
+                // incomplete realization, never a silent "not callable".
+                QueryResult::Value(_) => {
+                    return SurfaceResolution::incomplete(PartialReasonSet::MISSING_DEPENDENCY);
+                }
+                QueryResult::Recursive(_) => {
+                    return SurfaceResolution::incomplete(PartialReasonSet::SAME_PATH_RECURSION);
+                }
+                QueryResult::Error(error) => {
+                    return SurfaceResolution::incomplete(
+                        crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(
+                            &error,
+                        ),
+                    );
+                }
             };
             realize_callable_member_inner(dispatch, body, context, depth + 1)
         }
@@ -296,16 +344,25 @@ fn realize_callable_member_inner(
             let mut realized_arms: Vec<crate::semantic_query::SemanticNodeId> =
                 Vec::with_capacity(arms.len());
             for arm in arms.iter() {
-                let realized = realize_callable_member_inner(dispatch, *arm, context, depth + 1)?;
+                let realized =
+                    match realize_callable_member_inner(dispatch, *arm, context, depth + 1) {
+                        SurfaceResolution::Resolved(id) | SurfaceResolution::OpenPresence(id) => id,
+                        // A non-callable arm makes the whole composite not
+                        // slot-callable — the complete negative answer.
+                        SurfaceResolution::NoSurface => return SurfaceResolution::NoSurface,
+                        // An UNRESOLVED arm makes the whole composite
+                        // incomplete with the arm's typed reason.
+                        incomplete @ SurfaceResolution::Incomplete(_) => return incomplete,
+                    };
                 realized_arms.push(realized);
             }
             if realized_arms.is_empty() {
-                return None;
+                return SurfaceResolution::NoSurface;
             }
             // If realization left every arm unchanged, return the original node
             // (avoid interning an identical composite).
             if realized_arms.iter().zip(arms.iter()).all(|(a, b)| a == b) {
-                return Some(node);
+                return SurfaceResolution::Resolved(node);
             }
             // Carrier-semantics dispatch on the original composite's
             // at-rest origin category: realizing a canonical/authored
@@ -316,7 +373,7 @@ fn realize_callable_member_inner(
             // intersection whose realized arms may carry call signatures
             // — keeps its verbatim order- and arity-preserving rebuild.
             if dispatch.composite_rebuild_re_decides(category, &realized_arms, is_union) {
-                return Some(
+                return SurfaceResolution::Resolved(
                     dispatch.intern_normalized_union_or_intersection(&realized_arms, is_union),
                 );
             }
@@ -331,7 +388,7 @@ fn realize_callable_member_inner(
                     crate::semantic_query::composite::CompositeList::preserving_rebuild(realized),
                 )
             };
-            Some(
+            SurfaceResolution::Resolved(
                 dispatch
                     .ctx
                     .project_type_store()
@@ -340,10 +397,21 @@ fn realize_callable_member_inner(
             )
         }
 
-        // Any other shape (Object, Primitive, Mapped, KeyOf, IndexedAccess,
-        // TypeOf, TypeParam, Literal, Tuple, Array, TemplateLiteral, Opaque) —
-        // not callable.
-        _ => None,
+        // Any other RESOLVED shape (Object, Primitive, Mapped, KeyOf,
+        // IndexedAccess, TypeOf, TypeParam, Literal, Tuple, Array,
+        // TemplateLiteral) — genuinely not callable — and any STABLE
+        // authored-miss carrier (a `BareRef` mirror, an honest `Miss`) keep
+        // the complete negative answer. Only an OPERATIONAL failure
+        // (`ImportType` import-backed unresolvables, raw fallbacks, budget /
+        // cancellation / torn-state faults) is an INCOMPLETE realization
+        // with its typed reason.
+        other => match crate::typeinfo::surface_resolution::stable_member_carrier_partiality(
+            dispatch.ctx,
+            Some(other),
+        ) {
+            Some(reasons) => SurfaceResolution::incomplete(reasons),
+            None => SurfaceResolution::NoSurface,
+        },
     }
 }
 

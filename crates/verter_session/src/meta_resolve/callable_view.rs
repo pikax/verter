@@ -200,13 +200,14 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     }
 
     /// Normalize the root to its underlying callable node through the shared
-    /// carrier-shell normalizer. Returns a `Function` node, or a
-    /// `Union` / `Intersection` of realized `Function` arms, or `None` when the
-    /// root does not realize to a callable.
+    /// carrier-shell normalizer. `Resolved` carries a `Function` node or a
+    /// `Union` / `Intersection` of realized `Function` arms; `NoSurface` is
+    /// the complete "does not realize to a callable" answer; `Incomplete`
+    /// names why the realization could not resolve.
     pub(crate) fn realized_callable_root(
         &self,
         context: ProjectionReductionContext,
-    ) -> Option<SemanticNodeId> {
+    ) -> crate::typeinfo::surface_resolution::SurfaceResolution<SemanticNodeId> {
         realize_callable_member(self.dispatch, self.root, context)
     }
 
@@ -318,10 +319,23 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             // A non-composite leaf that is not itself a `Function` (a residual
             // carrier the primitive could not resolve, a `Conditional` the
             // realizer can still decide, or a non-callable scalar): compose the
-            // shared per-arm callable realizer. A no-progress realize (or a
-            // non-callable shape) refuses.
+            // shared per-arm callable realizer. A no-progress realize, a
+            // non-callable shape, or an UNRESOLVED carrier all refuse — this
+            // is a strict CLASSIFIER whose callers apply their own policy to a
+            // refusal; the surface-producing consumers reach the realizer's
+            // typed incomplete claim through `realized_callable_root` /
+            // `collect_callable_arms` instead.
             _ => {
-                let realized = realize_callable_member(self.dispatch, normalized, context)?;
+                let realized = match realize_callable_member(self.dispatch, normalized, context) {
+                    crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
+                    | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                        id
+                    }
+                    crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface
+                    | crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(_) => {
+                        return None;
+                    }
+                };
                 if realized == normalized {
                     None
                 } else {
@@ -614,6 +628,10 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 ProjectionReductionContext::published(ProjectionMode::Shallow),
                 None,
             )
+            // An INCOMPLETE projection records its typed reason before the
+            // no-surface answer; a failed resolution never reads as "the
+            // param has no object surface".
+            .recorded()
     }
 
     /// All positional params of the realized callable — leading `this` skipped,
@@ -902,10 +920,27 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 }
                 Some(())
             }
-            // A non-composite leaf: realize to a callable `Function`. FAIL CLOSED
-            // (a non-callable non-nullish arm makes the member not slot-callable).
+            // A non-composite leaf: realize to a callable `Function`. FAIL
+            // CLOSED (a non-callable non-nullish arm makes the member not
+            // slot-callable); an UNRESOLVED arm RECORDS its typed reason
+            // before the refusal, so a slot dropped over an import miss is
+            // partial — never byte-identical to a genuinely non-callable one.
             _ => {
-                let realized = realize_callable_member(self.dispatch, normalized, context)?;
+                let realized = match realize_callable_member(self.dispatch, normalized, context) {
+                    crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
+                    | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                        id
+                    }
+                    crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => {
+                        return None;
+                    }
+                    crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(
+                        incomplete,
+                    ) => {
+                        let _ = incomplete.into_recorded_partial();
+                        return None;
+                    }
+                };
                 if realized == normalized {
                     None
                 } else {

@@ -682,8 +682,8 @@ pub(crate) fn presence_intersection_members(
 /// under the macro enumeration rule (value union on collision,
 /// visibility most-restrictive, optional when not universal), NEVER a
 /// completeness claim. Callers own the incompleteness signal (walker
-/// partial flag, `members_complete = false`, or the macro diagnostic
-/// envelope). A single arm bypasses the merge so member fidelity
+/// partial flag, the open-presence resolution arm, or the macro
+/// diagnostic envelope). A single arm bypasses the merge so member fidelity
 /// (method kind, spans, origins) survives verbatim.
 #[must_use]
 pub(crate) fn presence_union_members(

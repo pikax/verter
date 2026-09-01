@@ -482,7 +482,8 @@ impl VerterHost {
         // The public component type is a plain structural object
         // (`{ $props, $emit, $slots }`) — no macro own-body provenance applies
         // to the synthesized instance members, so the structural
-        // `published(Shallow)` context is correct.
+        // `published(Shallow)` context is correct. An INCOMPLETE projection
+        // records its typed reason before surfacing the miss.
         self.project_shallow_surface_from_base(
             &host_ctx,
             &dispatch,
@@ -491,6 +492,7 @@ impl VerterHost {
             ProjectionReductionContext::published(ProjectionMode::Shallow),
             None,
         )
+        .recorded()
     }
 
     /// Resolve a `.vue` macro's type-argument surface to its span-rich
@@ -690,14 +692,36 @@ impl VerterHost {
         // shallow synthesis dropped ride the resolved surface to the
         // compile-facing collector.
         let mut walker_diagnostics = Vec::new();
-        let surface = self.project_shallow_surface_from_base(
-            ctx,
-            &dispatch,
-            base,
-            path,
-            terminal_context,
-            Some(&mut walker_diagnostics),
-        )?;
+        // The terminal-hop discharge: a projection that could not produce the
+        // demanded surface (a MISSED terminal hop on a deep indexed access, an
+        // unresolved carrier mid-path) records its typed partiality — the
+        // empty macro-DTO bundle the caller then publishes is PARTIAL, refused
+        // surface-store admission, and reaches the payload as a degraded
+        // surface instead of a wrong-complete silence. A genuinely non-object
+        // terminal stays the complete "no surface" miss.
+        let surface = self
+            .project_shallow_surface_from_base(
+                ctx,
+                &dispatch,
+                base,
+                path,
+                terminal_context,
+                Some(&mut walker_diagnostics),
+            )
+            .recorded()?;
+        let unresolved_surface_arms = unresolved_surface_arms_from_diags(&walker_diagnostics);
+        // An unresolvable SURFACE-COMPOSITION arm (a heritage / intersection /
+        // union contributor the shallow synthesis dropped) makes the published
+        // METADATA surface partial: the members behind that arm are missing,
+        // so the surface must never publish (or warm) as the complete answer.
+        // The codegen lanes keep their own diagnostic channel for these arms.
+        if !unresolved_surface_arms.is_empty() {
+            crate::request_context::fold_result_completeness(
+                crate::semantic_query::ResultCompleteness::partial(
+                    crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+                ),
+            );
+        }
         Some(VueMacroSurface {
             surface,
             macro_kind: request.macro_kind,
@@ -705,7 +729,7 @@ impl VerterHost {
             macro_index: request.macro_index,
             macro_call_span: mac.span,
             level: request.level,
-            unresolved_surface_arms: unresolved_surface_arms_from_diags(&walker_diagnostics),
+            unresolved_surface_arms,
         })
     }
 
@@ -806,14 +830,16 @@ impl VerterHost {
             )),
         );
         let dispatch = ctx.dispatch();
-        let surface = self.project_shallow_surface_from_base(
-            ctx,
-            &dispatch,
-            base,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-            None,
-        )?;
+        let surface = self
+            .project_shallow_surface_from_base(
+                ctx,
+                &dispatch,
+                base,
+                Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                ProjectionReductionContext::published(ProjectionMode::Shallow),
+                None,
+            )
+            .recorded()?;
         Some(VueMacroSurface {
             surface,
             macro_kind: request.macro_kind,
@@ -883,18 +909,19 @@ fn unknown_member_value_node(
 /// the one shared raise bridge ([`ProjectSemanticDispatch::raise_semantic_type_source_to_hot`]
 /// → the memoized `LowerLocator` / macro type-arg producer), `Pick` is
 /// navigated, and an alias `Ref` is resolved by the one shared resolver.
-/// Returns `None` when the scope file is not loaded, the locator does not
-/// deref under the current view, or the type does not project to an object
-/// surface.
+/// `NoSurface` when the type genuinely projects to no object surface (a
+/// primitive, a committed-surface decline under the open-generic gate);
+/// `Incomplete` — with the typed reason — when the locator does not deref
+/// under the current view or the projection walks into an unresolved
+/// carrier: a failed resolution is never an authoritative empty surface.
 ///
 /// Bound to `ctx` (`ctx.dispatch()`), so an overlay session resolves the
 /// slot-param object against its OVERLAY content.
-#[must_use]
 pub(crate) fn navigate_param_to_object_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     scope_canonical: &str,
     payload: &verter_type_expr::locators::AuthoredTypePayloadRef,
-) -> Option<TypeInfoSurface> {
+) -> crate::typeinfo::surface_resolution::SurfaceResolution<TypeInfoSurface> {
     let dispatch = ctx.dispatch();
     let scope_owner = match &payload.locator {
         verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot) => slot.anchor.owner,
@@ -912,9 +939,10 @@ pub(crate) fn navigate_param_to_object_surface(
     // Raise the authored payload locator to its base node through the shared
     // source-raise bridge under structural-transit Navigate (member values
     // stay shallow); the empty-path Shallow projection then synthesises the
-    // one-level object surface. An undeferenceable locator is an honest
-    // `None` — never a fabricated stand-in node.
-    let base = dispatch
+    // one-level object surface. An undeferenceable locator is an INCOMPLETE
+    // resolution with a named reason — never a fabricated stand-in node and
+    // never a silent "no surface".
+    let Some(base) = dispatch
         .raise_semantic_type_source_to_hot(
             &verter_type_expr::facts::SemanticTypeSource::Authored(payload.locator.clone()),
             crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
@@ -926,17 +954,35 @@ pub(crate) fn navigate_param_to_object_surface(
                 interior_failures: None,
             },
         )
-        .at_optional_boundary()?
-        .node();
+        .at_optional_boundary()
+        .map(|raised| raised.node())
+    else {
+        return crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(
+            crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+        );
+    };
     // Open-generic gate: a slot-param root that is symbolic-only (an open
     // Conditional whose check carries a free `TypeParam`, an unresolved
     // `IndexedAccess` / `Mapped`, …) must NOT be materialised into a committed
     // object surface. This is the SAME gate the graph-native slot-binding
     // synthesis applies; routing both binding paths through it keeps them in
     // agreement.
+    // An IMPORT-BACKED unresolved base (a `BareRef` whose name is an
+    // authored import that did not resolve, an `ImportType`, an operational
+    // fault carrier) is an INCOMPLETE resolution with its typed reason. A
+    // LOCAL authored-reference mirror passes through — the projection's
+    // carrier-head resolution resolves it (or classifies its own terminal).
+    if let Some(reasons) = crate::typeinfo::surface_resolution::stable_member_carrier_partiality(
+        ctx,
+        crate::project_semantic_dispatch::node_data_for(ctx, base).as_deref(),
+    ) {
+        return crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(reasons);
+    }
     if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(&dispatch, base, 0)
     {
-        return None;
+        // The open-generic gate DECLINES a committed surface by design — a
+        // complete negative answer, not a failure.
+        return crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface;
     }
     ctx.host_for_fact_tracer_install()
         .project_shallow_surface_from_base(

@@ -1016,7 +1016,25 @@ pub(crate) fn compute_bindings_via_graph(
             return out;
         }
     };
-    let slot_members = super::projectors::read_positive_surface_members(ctx, slot_surface);
+    let slot_members = match super::projectors::read_positive_surface_members(ctx, slot_surface) {
+        crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(members)
+        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(members) => members,
+        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => Vec::new(),
+        // An unresolvable slot-surface member read suppresses warm promotion
+        // and records its typed reason; the usable subset still publishes.
+        crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+            *should_suppress = true;
+            diag_sink.push(macro_expansion_for_query_error(
+                owner_macro.macro_index,
+                MacroExpansionKind::DefineSlots,
+                format!(
+                    "slot-surface-members-unresolved::{:?}",
+                    incomplete.reasons()
+                ),
+            ));
+            incomplete.into_recorded_partial().unwrap_or_default()
+        }
+    };
 
     for slot_member in slot_members.iter() {
         // Public-only publication: a `private` / `protected` class member
@@ -1038,14 +1056,33 @@ pub(crate) fn compute_bindings_via_graph(
         // Conditional reduction, transit-mode Instantiate,
         // ResolveDecl unwrap) so a decidable callable surfaces as a
         // `Function` node; non-callable shapes (Object / Union /
-        // Intersection / Mapped / KeyOf / primitives) return `None`
-        // and skip naturally below.
-        let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
+        // Intersection / Mapped / KeyOf / primitives) resolve `NoSurface`
+        // and skip naturally below. An UNRESOLVED slot value (an import
+        // miss, a failed decl resolve mid-chain) suppresses warm promotion
+        // and records its typed reason — the missing binding row is then
+        // partial, never byte-identical to a genuinely non-callable member.
+        let realized = match crate::meta_resolve::dispatch_helpers::realize_callable_member(
             dispatch,
             slot_member.value,
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
-        )
-        .unwrap_or(slot_member.value);
+        ) {
+            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
+            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => id,
+            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => slot_member.value,
+            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                *should_suppress = true;
+                diag_sink.push(macro_expansion_for_query_error(
+                    owner_macro.macro_index,
+                    MacroExpansionKind::DefineSlots,
+                    format!(
+                        "slot-callable-unresolved::{slot_name}::{:?}",
+                        incomplete.reasons()
+                    ),
+                ));
+                let _ = incomplete.into_recorded_partial();
+                continue;
+            }
+        };
 
         // Step 4: read Function.params[0].ty. CALL kind only — a construct
         // signature is not a callable slot shape and synthesizes no
@@ -1140,7 +1177,28 @@ pub(crate) fn compute_bindings_via_graph(
                 continue;
             }
         };
-        let binding_members = super::projectors::read_positive_surface_members(ctx, param_surface);
+        let binding_members =
+            match super::projectors::read_positive_surface_members(ctx, param_surface) {
+                crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(members)
+                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(members) => {
+                    members
+                }
+                crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => Vec::new(),
+                // An unresolvable binding-surface read suppresses warm promotion
+                // and records its typed reason; the usable subset still publishes.
+                crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                    *should_suppress = true;
+                    diag_sink.push(macro_expansion_for_query_error(
+                        owner_macro.macro_index,
+                        MacroExpansionKind::DefineSlots,
+                        format!(
+                            "slot-param-members-unresolved::{slot_name}::{:?}",
+                            incomplete.reasons()
+                        ),
+                    ));
+                    incomplete.into_recorded_partial().unwrap_or_default()
+                }
+            };
 
         for binding in binding_members.iter() {
             // Public-only publication: a navigated class param's `private` /

@@ -372,6 +372,12 @@ fn partial_diagnostic_messages(reasons: PartialReasonSet) -> Vec<String> {
             "Type evaluation exceeded Verter's safe connected-query depth limit.".to_string(),
         );
     }
+    if reasons.contains(PartialReasonSet::MISSING_DEPENDENCY) {
+        diagnostics.push(
+            "A referenced type's imported dependency could not be resolved; the surface is              published as a partial subset."
+                .to_string(),
+        );
+    }
     if diagnostics.is_empty() {
         diagnostics.push("Type evaluation produced a safe partial result.".to_string());
     }
@@ -564,7 +570,8 @@ fn resolve_runes_props(
     // from an imported base reports THAT base's file, not the props_type's.
     let surface = navigate_param_to_object_surface(ctx, owner, props_type);
     let (mut fields, prop_origins) = match surface {
-        Some(surface) => {
+        crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
+        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
             let prop_origins = prop_origins_from_surface(owner, &surface);
             let dispatch = ctx.dispatch();
             let callable_roles = surface
@@ -600,10 +607,29 @@ fn resolve_runes_props(
                 .collect();
             (fields, prop_origins)
         }
-        // A props type that does not project to an object surface (a primitive /
-        // open generic) still establishes a PRESENT props surface — supported-
-        // empty, never a Missing.
-        None => (Vec::new(), Vec::new()),
+        // A props type that RESOLVES to no object surface (a primitive /
+        // open generic) still establishes a PRESENT props surface —
+        // supported-empty, never a Missing.
+        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => {
+            (Vec::new(), Vec::new())
+        }
+        // An UNRESOLVABLE `$props()` type is NOT a supported-empty surface:
+        // record the typed reason (the enclosing cold-compute scope turns the
+        // outcome PARTIAL on the wire and refuses store admission) and
+        // publish the usable positive subset the producer still built.
+        crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+            match incomplete.into_recorded_partial() {
+                Some(surface) => {
+                    let prop_origins = prop_origins_from_surface(owner, &surface);
+                    let fields = props_from_typeinfo_surface(
+                        ctx,
+                        &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
+                    );
+                    (fields, prop_origins)
+                }
+                None => (Vec::new(), Vec::new()),
+            }
+        }
     };
     for row in &mut fields {
         if matches!(
@@ -822,11 +848,14 @@ fn resolve_bindable(
         return ResolvedOutcome::Missing;
     }
     // Resolve the props surface once and pick the bindable members from it.
+    // An INCOMPLETE props-surface resolution records its typed reason before
+    // the bindable rows degrade to their name-only form — the enclosing
+    // cold-compute scope turns the outcome PARTIAL.
     let props_fields: Vec<crate::typeinfo::framework_surface::results::ResolvedPropField> = facts
         .props_type
         .as_ref()
         .copied()
-        .and_then(|props_type| navigate_param_to_object_surface(ctx, owner, props_type))
+        .and_then(|props_type| navigate_param_to_object_surface(ctx, owner, props_type).recorded())
         .map(|surface| {
             props_from_typeinfo_surface(
                 ctx,
@@ -889,7 +918,10 @@ fn resolve_snippet_props(
     let Some(props_type) = facts.props_type.as_ref() else {
         return ResolvedOutcome::Missing;
     };
-    let Some(surface) = navigate_param_to_object_surface(ctx, owner, props_type) else {
+    // An INCOMPLETE props-surface resolution records its typed reason; the
+    // enclosing cold-compute scope then publishes the snippet surface as
+    // PARTIAL instead of laundering it into an ordinary absent macro.
+    let Some(surface) = navigate_param_to_object_surface(ctx, owner, props_type).recorded() else {
         return ResolvedOutcome::Missing;
     };
     let dispatch = ctx.dispatch();
@@ -967,8 +999,12 @@ fn svelte_snippet_slots_from_typeinfo_surface(
             // A fail-closed `None` (an unresolved `Params` carrier) drops the slot.
             let view = CallableNodeView::new(&dispatch, member.value);
             let params = view.validated_snippet_positional_params(context)?;
+            // An UNRESOLVED snippet root records its typed reason; the
+            // return display then stays absent honestly (the validated
+            // snippet member itself already resolved above).
             let return_node = view
                 .realized_callable_root(context)
+                .recorded()
                 .and_then(|realized_root| {
                     let combine = match crate::project_semantic_dispatch::node_data_for(
                         dispatch.ctx,
@@ -1174,7 +1210,6 @@ fn retain_svelte_snippet_members(
             .cloned()
             .collect(),
         members: Arc::from(members.into_boxed_slice()),
-        members_complete: surface.members_complete,
         call_signatures: Arc::clone(&surface.call_signatures),
         construct_signatures: Arc::clone(&surface.construct_signatures),
         index_signatures: Arc::clone(&surface.index_signatures),
@@ -1399,7 +1434,11 @@ fn resolve_dispatcher(
     let Some(event_map) = facts.and_then(|facts| facts.dispatcher_events) else {
         return ResolvedOutcome::Missing;
     };
+    // An UNRESOLVABLE event map records its typed reason (the enclosing
+    // cold-compute scope publishes PARTIAL); a genuinely surface-less event
+    // map stays the present-but-empty emits surface.
     let fields = navigate_param_to_object_surface(ctx, owner, event_map)
+        .recorded()
         .map(|surface| {
             emits_from_typeinfo_surface(
                 ctx,
@@ -1440,7 +1479,11 @@ fn resolve_callback_prop_events(
     let Some(props_type) = facts.and_then(|facts| facts.props_type) else {
         return ResolvedOutcome::Missing;
     };
+    // An UNRESOLVABLE `$props()` source records its typed reason (the
+    // enclosing cold-compute scope publishes PARTIAL); a resolvable props
+    // type with no `on*` members stays the present-but-empty emits surface.
     let fields = navigate_param_to_object_surface(ctx, owner, props_type)
+        .recorded()
         .map(|surface| {
             callback_events_from_props_surface(ctx, &surface, &props_type.locator, owner)
         })

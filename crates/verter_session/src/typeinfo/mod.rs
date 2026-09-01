@@ -48,6 +48,7 @@ pub mod resolve_named_symbol;
 pub(crate) mod scratch_cache;
 pub mod shallow_surface;
 pub mod surface;
+pub mod surface_resolution;
 pub mod symbol_inventory;
 pub mod types;
 pub(crate) mod vue_macro_codegen;

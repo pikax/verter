@@ -1902,11 +1902,11 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
             property("x", number, false),
         ],
     );
-    let surface = shallow(open).expect("an open program joins a shallow surface");
-    assert!(
-        !surface.members_complete,
-        "a joined open surface never claims completeness"
-    );
+    let crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) =
+        shallow(open)
+    else {
+        panic!("an open program joins a PRESENCE-ONLY shallow surface (never a closed claim)");
+    };
     let x = member_named(&surface, "x");
     assert!(!x.optional);
     assert_eq!(x.value, number);
@@ -1919,11 +1919,10 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
             [surface_member("a", number, false)],
         ))],
     );
-    let surface = shallow(closed).expect("a closed program yields a surface");
-    assert!(
-        surface.members_complete,
-        "the single closed witness sets members_complete"
-    );
+    let crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface) = shallow(closed)
+    else {
+        panic!("the single closed witness resolves the exact COMPLETE surface");
+    };
     assert_eq!(surface.members.len(), 1);
     assert!(!member_named(&surface, "a").optional);
 
@@ -1935,11 +1934,11 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
         crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([left, right])),
     ));
     let correlated = program(graph, [ObjectConstructionEffect::Spread(union)]);
-    let surface = shallow(correlated).expect("a correlated program joins");
-    assert!(
-        !surface.members_complete,
-        "joining correlated branches forfeits exact-domain claims"
-    );
+    let crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) =
+        shallow(correlated)
+    else {
+        panic!("joining correlated branches yields PRESENCE-ONLY evidence, never a closed claim");
+    };
     assert!(member_named(&surface, "a").optional);
     assert!(member_named(&surface, "b").optional);
 }
@@ -3236,7 +3235,9 @@ fn macro_member_reader_publishes_open_program_positive_names_without_completenes
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let names_of = |node: SemanticNodeId| -> Vec<String> {
-        let members = crate::meta_resolve::projectors::read_positive_surface_members(&host, node);
+        let members = crate::meta_resolve::projectors::read_positive_surface_members(&host, node)
+            .resolved_for_tests()
+            .expect("resolvable fixture surface");
         let mut names: Vec<String> = members
             .iter()
             .map(|member| {
@@ -3528,7 +3529,9 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
     let QueryResult::Value(terminal) = read.value else {
         panic!("expected a terminal value, got {:?}", read.value)
     };
-    let members = crate::meta_resolve::projectors::read_positive_surface_members(&host, terminal);
+    let members = crate::meta_resolve::projectors::read_positive_surface_members(&host, terminal)
+        .resolved_for_tests()
+        .expect("resolvable carrier fixture");
     let mut names: Vec<String> = members
         .iter()
         .map(|member| {
@@ -3546,20 +3549,18 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
     );
 
     // Typeinfo over the same carrier: positive members, never complete.
-    let surface = host
-        .project_shallow_surface_graph_only(
-            &host,
-            &dispatch,
-            union_root,
-            Arc::from([]),
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-            None,
-        )
-        .expect("an open carrier joins a presence-only typeinfo surface");
-    assert!(
-        !surface.members_complete,
-        "the carrier surface never claims completeness"
+    let surface = host.project_shallow_surface_graph_only(
+        &host,
+        &dispatch,
+        union_root,
+        Arc::from([]),
+        ProjectionReductionContext::published(ProjectionMode::Shallow),
+        None,
     );
+    let crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) = surface
+    else {
+        panic!("an open carrier joins a PRESENCE-ONLY typeinfo surface (never a closed claim)");
+    };
     let mut typeinfo_names: Vec<String> = surface
         .members
         .iter()
@@ -3592,6 +3593,8 @@ fn props_reader_applies_intersection_rules_to_intersection_carriers() {
     });
     let names_of = |node: SemanticNodeId| -> Vec<crate::semantic_query::SurfaceMember> {
         crate::meta_resolve::projectors::read_positive_surface_members(&host, node)
+            .resolved_for_tests()
+            .expect("resolvable fixture surface")
     };
 
     // `{token: string} & {extra?: number, ...T}` — `token` is REQUIRED
@@ -3722,7 +3725,9 @@ fn macro_union_merge_collapses_dual_spelling_members() {
             open_arm,
         ])),
     ));
-    let members = crate::meta_resolve::projectors::read_positive_surface_members(&host, union_root);
+    let members = crate::meta_resolve::projectors::read_positive_surface_members(&host, union_root)
+        .resolved_for_tests()
+        .expect("resolvable union fixture");
     assert_eq!(
         members.len(),
         1,
@@ -4068,20 +4073,20 @@ fn typeinfo_join_collapses_dual_spelling_members() {
             property("z", boolean, false),
         ],
     );
-    let surface = host
-        .project_shallow_surface_graph_only(
-            &host,
-            &dispatch,
-            root,
-            Arc::from([]),
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-            None,
-        )
-        .expect("a correlated program joins a typeinfo surface");
-    assert!(
-        !surface.members_complete,
-        "the correlated join never claims completeness"
+    let surface = host.project_shallow_surface_graph_only(
+        &host,
+        &dispatch,
+        root,
+        Arc::from([]),
+        ProjectionReductionContext::published(ProjectionMode::Shallow),
+        None,
     );
+    let crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) = surface
+    else {
+        panic!(
+            "a correlated program joins a PRESENCE-ONLY typeinfo surface (never a closed claim)"
+        );
+    };
     let colliding: Vec<&crate::typeinfo::surface::TypeInfoSurfaceMember> = surface
         .members
         .iter()
@@ -4303,17 +4308,18 @@ fn typeinfo_join_publishes_indeterminate_value_members_as_open_rows() {
             ObjectConstructionEffect::Spread(type_param),
         ],
     );
-    let surface = host
-        .project_shallow_surface_graph_only(
-            &host,
-            &dispatch,
-            root,
-            Arc::from([]),
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-            None,
-        )
-        .expect("an open program joins a typeinfo surface");
-    assert!(!surface.members_complete);
+    let surface = host.project_shallow_surface_graph_only(
+        &host,
+        &dispatch,
+        root,
+        Arc::from([]),
+        ProjectionReductionContext::published(ProjectionMode::Shallow),
+        None,
+    );
+    let crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) = surface
+    else {
+        panic!("an open program joins a PRESENCE-ONLY typeinfo surface (never a closed claim)");
+    };
     let a = surface
         .members
         .iter()

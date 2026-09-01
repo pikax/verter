@@ -9,13 +9,12 @@
 //!
 //! Primitives in this module:
 //!
-//! - [`resolve_macro_payload_diagnostic_probe`] — boundary probe
-//!   that restores silent-miss diagnostics under transit-shallow
-//!   macro publication. Re-dispatches the macro payload under
-//!   publication demand on a non-value-publishing path so unresolved
-//!   `DeclRef` / `Opaque` carriers surface as
-//!   `MacroExpansionDiagnostics` envelopes even though the macro's
-//!   published value stays shallow.
+//! Silent-miss failure semantics (an unresolved `DeclRef` / `Opaque`
+//! carrier reached under publication demand) live on the MANDATORY typed
+//! resolution outcome the value path itself returns
+//! (`crate::typeinfo::surface_resolution::SurfaceResolution`) — there is
+//! no second, diagnostic-only dispatch.
+//!
 //! - [`PayloadSurfaceScope`] + [`resolve_payload_surface_with_scope`]
 //!   — scope-gated payload surface resolver. Enables branch-merged
 //!   shallow semantics for emit-class macro object payloads (an
@@ -45,121 +44,9 @@ use crate::semantic_query::{
     ProjectionMode, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SurfaceMember,
 };
 
-use super::{empty_path, macro_expansion_for_cycle, macro_expansion_for_query_error};
+use super::{empty_path, macro_expansion_for_query_error};
 use crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts;
 use crate::meta_resolve::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
-
-/// **Macro-payload boundary diagnostic probe.**
-///
-/// Restores the silent-miss diagnostic contract for the transit-
-/// shallow macro publication path. Under transit-shallow lowering
-/// the publication boundary carrier-stops `KeyOf` / `Mapped` /
-/// `DeclRef` carriers, so an unresolved-import surface can resolve
-/// to a `DeclRef` shell WITHOUT firing `walker_diagnostics` — the
-/// missing-decl failure that an eager `Published(Expanded)` lowering
-/// would have surfaced loudly (by returning `None` from
-/// `lower_type_expr_in_scope_with_mode`) silently passes through.
-///
-/// The probe runs a **second**, non-value-publishing dispatch under
-/// publication demand on the transit-shallow payload node. The
-/// probe's result is DISCARDED at the value level (the macro
-/// publication still publishes the transit-shallow payload); only
-/// its diagnostics, dep-signatures, and cache-suppress flag flow
-/// into the consumer-visible `MacroExpansionDiagnostics` envelope.
-///
-/// Probe dispatch:
-/// - The probe runs `ProjectPath { base: payload, [], Published(Shallow) }`
-///   so the publication path tries to enumerate the payload's
-///   surface members under publication demand. The `ProjectPath`
-///   walker internally re-dispatches `DeclRef` → `ResolveDecl`,
-///   `InstantiationRef` → `Instantiate { Published(Shallow) }`,
-///   `Mapped` → `MappedType { Published(Shallow) }`, etc. — so a
-///   single `ProjectPath` probe exercises the full carrier-
-///   resolution surface.
-/// - `walker_diagnostics`, `cache_suppress`, and the dispatch's
-///   `dep_signature` translate into `MacroExpansionDiagnostics`
-///   envelopes via the existing
-///   `shallow_diagnostics_to_macro_expansion` /
-///   `macro_expansion_for_query_error` / `macro_expansion_for_cycle`
-///   helpers — identical to the diagnostic contract that eager
-///   lowering used to enforce.
-///
-/// **Probe result MUST NOT replace the transit-shallow payload
-/// value.** The probe is diagnostic-only; the macro publication's
-/// downstream consumers continue reading the transit-shallow payload
-/// node so the publication contract (carrier-stop / no deep member
-/// breadth-enumeration) holds.
-///
-/// `Opaque` carrier handling: the probe treats `Opaque(_)` payloads
-/// (e.g. `Opaque(DeclPlaceholder)` for an unresolved import) as
-/// failure-with-diagnostic per the existing `resolve_macro_payload`'s
-/// post-lowering opaque check. Higher-level consumers consume both
-/// the transit-shallow value AND the probe-emitted diagnostics
-/// independently.
-#[allow(dead_code)]
-pub(crate) fn resolve_macro_payload_diagnostic_probe(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    payload_node: SemanticNodeId,
-    macro_index: usize,
-    expansion_kind: MacroExpansionKind,
-    diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-) {
-    let probe_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
-        base: payload_node,
-        path: empty_path(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            ProjectionMode::Shallow,
-        ),
-    });
-    crate::request_context::observe_component_meta_read_suppress(&probe_read);
-    emit_dispatch_dep_signature_facts(dispatch.ctx, &probe_read.dep_signature);
-
-    if !probe_read.walker_diagnostics.is_empty() {
-        diag_sink.push(shallow_diagnostics_to_macro_expansion(
-            &probe_read.walker_diagnostics,
-            macro_index,
-            expansion_kind.clone(),
-            probe_read.cache_suppress,
-        ));
-    }
-
-    match probe_read.value {
-        QueryResult::Value(id) => {
-            // Probe surface resolved. Inspect for an `Opaque(_)`
-            // carrier — the transit-shallow lowering may have
-            // succeeded at producing a node, but the publication-
-            // demand probe walks into an opaque shell. Translate
-            // the QueryError verbatim (per the existing
-            // `resolve_macro_payload` opaque check pattern).
-            if let Some(SemanticNodeData::Opaque(err)) =
-                crate::project_semantic_dispatch::node_data_for(dispatch.ctx, id).as_deref()
-            {
-                diag_sink.push(macro_expansion_for_query_error(
-                    macro_index,
-                    expansion_kind,
-                    format!("macro-payload-probe-opaque::{:?}", err),
-                ));
-            }
-            // Otherwise: no probe-emitted diagnostic. The transit-
-            // shallow payload is healthy at the publication
-            // boundary.
-        }
-        QueryResult::Recursive(_) => {
-            diag_sink.push(macro_expansion_for_cycle(
-                macro_index,
-                expansion_kind,
-                "cyclic-macro-payload-probe".to_string(),
-            ));
-        }
-        QueryResult::Error(e) => {
-            diag_sink.push(macro_expansion_for_query_error(
-                macro_index,
-                expansion_kind,
-                format!("macro-payload-probe-error::{:?}", e),
-            ));
-        }
-    }
-}
 
 /// **Branch-merge primitive scope tag.**
 ///
@@ -444,7 +331,13 @@ pub(crate) fn resolve_payload_surface_with_scope(
             }
         };
 
-    let mut project_branch = |branch_node: SemanticNodeId| -> Option<(SemanticNodeId, bool)> {
+    // A failed branch carries its typed reason to the merge below — the
+    // one-branch surface it forces is a USABLE SUBSET, never spelled as the
+    // complete emit set.
+    let mut project_branch = |branch_node: SemanticNodeId| -> Result<
+        (SemanticNodeId, bool),
+        crate::semantic_query::PartialReasonSet,
+    > {
         let branch_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
             base: branch_node,
             path: empty_path(),
@@ -474,18 +367,36 @@ pub(crate) fn resolve_payload_surface_with_scope(
                             .as_deref(),
                         Some(SemanticNodeData::ObjectSpreadProgram(_))
                     );
-                Some((id, open))
+                Ok((id, open))
             }
-            _ => None,
+            QueryResult::Recursive(_) => {
+                Err(crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION)
+            }
+            QueryResult::Error(error) => Err(
+                crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(
+                    &error,
+                ),
+            ),
         }
     };
 
-    let true_surface = project_branch(true_branch);
-    let false_surface = project_branch(false_branch);
+    let true_projection = project_branch(true_branch);
+    let false_projection = project_branch(false_branch);
 
-    let read_members = |surface: SemanticNodeId| -> Option<Vec<SurfaceMember>> {
+    // A projected branch whose terminal is an UNRESOLVED carrier fails the
+    // branch WITH its typed reason (`Err`); a resolved shape that carries no
+    // enumerable member surface (a primitive / interface-with-signatures
+    // branch) is `Ok(None)` — the merge then publishes the OTHER branch's
+    // RAW node verbatim, exactly as before, so call/construct signatures
+    // survive un-flattened.
+    let read_members = |surface: SemanticNodeId| -> Result<
+        Option<Vec<SurfaceMember>>,
+        crate::semantic_query::PartialReasonSet,
+    > {
         match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, surface).as_deref() {
-            Some(SemanticNodeData::Object(view)) => Some(view.closed().complete_members().to_vec()),
+            Some(SemanticNodeData::Object(view)) => {
+                Ok(Some(view.closed().complete_members().to_vec()))
+            }
             // The walker's typed open evidence for an open /
             // multi-alternative program branch: publish the positive
             // member names through the correlated query — presence only.
@@ -501,7 +412,16 @@ pub(crate) fn resolve_payload_surface_with_scope(
                     ),
                 ) {
                     QueryResult::Value(formula) => formula,
-                    _ => return None,
+                    QueryResult::Recursive(_) => {
+                        return Err(crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION);
+                    }
+                    QueryResult::Error(error) => {
+                        return Err(
+                            crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(
+                                &error,
+                            ),
+                        );
+                    }
                 };
                 let mut canonical_evidence =
                     crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default(
@@ -513,21 +433,22 @@ pub(crate) fn resolve_payload_surface_with_scope(
                         &mut canonical_evidence,
                     );
                 dispatch.deposit_canonical_evidence(canonical_evidence);
-                Some(members)
+                Ok(Some(members))
             }
-            _ => None,
+            other => match crate::typeinfo::surface_resolution::unresolved_node_partiality(other) {
+                Some(reasons) => Err(reasons),
+                None => Ok(None),
+            },
         }
     };
 
-    let true_members = true_surface
-        .as_ref()
-        .and_then(|(node, _)| read_members(*node));
-    let false_members = false_surface
-        .as_ref()
-        .and_then(|(node, _)| read_members(*node));
+    let true_surface = true_projection
+        .and_then(|(node, open)| read_members(node).map(|members| (node, open, members)));
+    let false_surface = false_projection
+        .and_then(|(node, open)| read_members(node).map(|members| (node, open, members)));
 
-    match (true_members, false_members) {
-        (Some(t), Some(f)) => {
+    match (true_surface, false_surface) {
+        (Ok((_, true_open, Some(t))), Ok((_, false_open, Some(f)))) => {
             // An OPEN branch contributed presence-only evidence: do NOT
             // intern a closed `Object` from the merge — `SurfaceView`'s
             // completeness witness is total, so the merged node would
@@ -535,9 +456,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
             // the conditional carrier instead; the branch diagnostics
             // already carry the open signal into the macro envelope
             // (`OpenSpreadProgram` → `IndeterminateConditional`).
-            let either_open = true_surface.as_ref().is_some_and(|(_, open)| *open)
-                || false_surface.as_ref().is_some_and(|(_, open)| *open);
-            if either_open {
+            if true_open || false_open {
                 return Some(conditional_node);
             }
             let merged = merge_emit_branch_members(&t, &f);
@@ -550,12 +469,53 @@ pub(crate) fn resolve_payload_surface_with_scope(
                     .intern_node(SemanticNodeData::Object(view)),
             )
         }
+        // One branch has an enumerable member surface, the other RESOLVED
+        // to a member-less shape: publish the member-bearing branch's RAW
+        // node (signatures survive) — the complete answer, exactly the
+        // pre-merge behaviour for a primitive sibling branch.
+        (Ok((node, _, Some(_))), Ok((_, _, None))) | (Ok((_, _, None)), Ok((node, _, Some(_)))) => {
+            Some(node)
+        }
         // Partial coverage — better than dropping the inherited set
-        // entirely. The available branch surfaces alone (an open branch
-        // stays its open carrier — no closed-Object claim).
-        (Some(_), None) => true_surface.map(|(node, _)| node),
-        (None, Some(_)) => false_surface.map(|(node, _)| node),
-        (None, None) => {
+        // entirely, but never the COMPLETE emit set: the failed branch's
+        // typed reason is RECORDED so the one-branch surface publishes as a
+        // usable partial subset, and a diagnostic names the drop.
+        (Ok((node, _, Some(_))), Err(reasons)) | (Err(reasons), Ok((node, _, Some(_)))) => {
+            crate::request_context::mark_request_result_partial_from_read_with(reasons);
+            diag_sink.push(macro_expansion_for_query_error(
+                macro_index,
+                expansion_kind,
+                format!(
+                    "macro-payload-surface-branch-merge-partial::one-branch-unresolved::{reasons:?}"
+                ),
+            ));
+            Some(node)
+        }
+        // An UNRESOLVED branch beside a member-less one, or two unresolved
+        // branches: record every typed reason; nothing publishable.
+        (Ok((_, _, None)), Err(reasons)) | (Err(reasons), Ok((_, _, None))) => {
+            crate::request_context::mark_request_result_partial_from_read_with(reasons);
+            diag_sink.push(macro_expansion_for_query_error(
+                macro_index,
+                expansion_kind,
+                "macro-payload-surface-branch-merge-error::both-branches-unresolved".to_string(),
+            ));
+            None
+        }
+        (Err(true_reasons), Err(false_reasons)) => {
+            crate::request_context::mark_request_result_partial_from_read_with(
+                true_reasons.union(false_reasons),
+            );
+            diag_sink.push(macro_expansion_for_query_error(
+                macro_index,
+                expansion_kind,
+                "macro-payload-surface-branch-merge-error::both-branches-unresolved".to_string(),
+            ));
+            None
+        }
+        // Both branches resolved member-less: no surface to merge — the
+        // pre-existing degraded answer, complete (no fabricated recording).
+        (Ok((_, _, None)), Ok((_, _, None))) => {
             diag_sink.push(macro_expansion_for_query_error(
                 macro_index,
                 expansion_kind,

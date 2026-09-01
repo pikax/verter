@@ -2476,6 +2476,329 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
     }
 }
 
+/// PUBLIC BOUNDARY — a deep macro path projection whose TERMINAL hop misses
+/// never publishes an empty props surface as COMPLETE, and never warms.
+///
+/// `defineProps<Deep['ui']['missing']>()` where `Deep['ui']` resolves but has
+/// no `missing` member: the checker REJECTS the program (`Property 'missing'
+/// does not exist`), so zero props is not "nothing was declared" — it is a
+/// resolution that could not produce the demanded surface. Publishing it
+/// complete makes an ill-typed component byte-identical to a props-less one,
+/// and warming it replays the wrong-complete answer for the file's lifetime.
+///
+/// The boundary triple: published `props`, `synthesis_should_suppress`, and
+/// the `component_meta_result_cache_hits` delta across a replay.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_missed_terminal_hop_on_a_deep_macro_projection_never_publishes_complete_or_warm() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/DeepMiss.vue",
+            r#"<script setup lang="ts">
+interface Deep { ui: { header: { title: string } } }
+defineProps<Deep['ui']['missing']>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/DeepMiss.vue");
+    let names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        names.is_empty(),
+        "a missed terminal hop must not fabricate props; got {names:?}"
+    );
+
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/DeepMiss.vue")
+        .expect("the resolve must still return metadata");
+    assert!(
+        resolved.synthesis_should_suppress,
+        "a props surface whose terminal hop missed must NOT report COMPLETE — \
+         the emptiness is a failed resolution, not an authored empty surface"
+    );
+
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/DeepMiss.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a missed terminal hop must NOT warm `ComponentMetaResultDb` \
+         (hits_before={hits_before}, hits_after={hits_after})"
+    );
+}
+
+/// THE DISCRIMINATION CONTROL for the missed-terminal-hop rule: the SAME deep
+/// path whose terminal hop EXISTS and is a genuinely empty object type still
+/// publishes zero props as COMPLETE, exact, and WARM. A fix that marks every
+/// empty surface partial passes the test above and fails this one.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_resolved_empty_terminal_hop_still_publishes_complete_and_warm() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/DeepEmpty.vue",
+            r#"<script setup lang="ts">
+interface Deep { ui: { header: {} } }
+defineProps<Deep['ui']['header']>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/DeepEmpty.vue");
+    assert!(
+        meta.props.is_empty(),
+        "the genuinely empty terminal object declares no props"
+    );
+
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/DeepEmpty.vue")
+        .expect("the resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "a genuinely empty resolved surface IS the complete answer"
+    );
+
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/DeepEmpty.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after,
+        hits_before + 1,
+        "a genuinely empty resolved surface WARMS on replay \
+         (hits_before={hits_before}, hits_after={hits_after})"
+    );
+}
+
+/// PUBLIC BOUNDARY — a `defineSlots` surface with an UNRESOLVABLE slot value
+/// never publishes as COMPLETE and never warms. Three spellings of the same
+/// drop, each with a different producer that used to spell the failure as
+/// silence:
+///
+/// 1. a slot member typed DIRECTLY by an unresolvable import — the slot
+///    cannot be classified callable at all;
+/// 2. a slot member typed by a LOCAL alias whose body is the unresolvable
+///    import — the alias demand-validates but the callable realization walks
+///    into the unresolved body;
+/// 3. a resolvable slot CALLABLE whose first-param (binding) type is the
+///    unresolvable import — the slot publishes, its binding surface cannot.
+///
+/// In every row: no fabricated slots/bindings, `synthesis_should_suppress`,
+/// and no `ComponentMetaResultDb` warm on replay.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_unresolvable_slot_surface_never_publishes_complete_or_warm() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    const ROWS: &[(&str, &str)] = &[
+        (
+            "/src/SlotValueMissing.vue",
+            r#"<script setup lang="ts">
+import type { SlotFn } from './missing'
+defineSlots<{ default: SlotFn }>()
+</script>
+<template><div /></template>"#,
+        ),
+        (
+            "/src/SlotAliasMissing.vue",
+            r#"<script setup lang="ts">
+import type { Missing } from './missing'
+type SlotFn = Missing
+defineSlots<{ default: SlotFn }>()
+</script>
+<template><div /></template>"#,
+        ),
+        (
+            "/src/SlotBindingMissing.vue",
+            r#"<script setup lang="ts">
+import type { MissingProps } from './missing'
+defineSlots<{ default: (props: MissingProps) => any }>()
+</script>
+<template><div /></template>"#,
+        ),
+    ];
+
+    for (canonical, source) in ROWS {
+        let project = make_project();
+        project.upsert_base(canonical, source).unwrap();
+        let host = project.host();
+        let meta = get_meta(&project, canonical);
+        for slot in &meta.slots {
+            assert!(
+                slot.bindings.is_empty(),
+                "{canonical}: an unresolvable slot surface must not fabricate \
+                 bindings; slot `{}` got {:?}",
+                slot.name,
+                slot.bindings
+            );
+        }
+
+        let (_, resolved) = host
+            .get_component_meta_with_resolution(canonical)
+            .expect("the resolve must still return metadata");
+        assert!(
+            resolved.synthesis_should_suppress,
+            "{canonical}: a slots surface built around an unresolvable value \
+             must NOT report COMPLETE"
+        );
+
+        let hits_before = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        let _ = get_meta(&project, canonical);
+        let hits_after = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        assert_eq!(
+            hits_after, hits_before,
+            "{canonical}: an unresolvable slot surface must NOT warm \
+             `ComponentMetaResultDb`"
+        );
+    }
+
+    // THE DISCRIMINATION CONTROL: a resolvable slot whose binding object is
+    // genuinely EMPTY publishes the slot, zero bindings, COMPLETE, and WARMS.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/SlotEmptyBindings.vue",
+            r#"<script setup lang="ts">
+defineSlots<{ default: (props: {}) => any }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/SlotEmptyBindings.vue");
+    assert!(
+        meta.slots.iter().any(|slot| slot.name == "default"),
+        "the control publishes its declared slot"
+    );
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/SlotEmptyBindings.vue")
+        .expect("the control resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "a resolvable slot with a genuinely empty binding object is COMPLETE"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/SlotEmptyBindings.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(hits_after, hits_before + 1, "the control WARMS on replay");
+}
+
+/// PUBLIC BOUNDARY — a compound (union) macro type argument with an
+/// UNRESOLVABLE arm publishes the resolvable arm's members as a usable
+/// subset, but never as a COMPLETE surface, and never warms. The presence-
+/// only branch reader used to yield zero members for the unresolved arm
+/// with no signal, making `Known | Missing` byte-identical to `Known`.
+///
+/// CONTROL: both arms resolvable — the union surface is complete and warms.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_union_macro_arg_with_an_unresolvable_arm_never_publishes_complete_or_warm() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/UnionMissingArm.vue",
+            r#"<script setup lang="ts">
+import type { Extra } from './missing'
+interface Known { label: string }
+defineProps<Known | Extra>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let _ = get_meta(&project, "/src/UnionMissingArm.vue");
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/UnionMissingArm.vue")
+        .expect("the resolve must still return metadata");
+    assert!(
+        resolved.synthesis_should_suppress,
+        "a union props argument with an unresolvable arm must NOT report COMPLETE"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/UnionMissingArm.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a union props argument with an unresolvable arm must NOT warm"
+    );
+
+    // CONTROL: both arms resolvable.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/UnionBothArms.vue",
+            r#"<script setup lang="ts">
+interface Known { label: string }
+interface Extra { count: number }
+defineProps<Known | Extra>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let _ = get_meta(&project, "/src/UnionBothArms.vue");
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/UnionBothArms.vue")
+        .expect("the control resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the both-arm union control is COMPLETE"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/UnionBothArms.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after,
+        hits_before + 1,
+        "the both-arm union control WARMS on replay"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn one_unmodeled_member_marks_its_prop_and_the_props_surface_survives() {

@@ -7898,7 +7898,9 @@ defineEmits<ConditionalEmits>()
         "the emits branch-merge must resolve the aliased-conditional \
          payload surface by following the DeclRef carrier to the Conditional root",
     );
-    let members = crate::meta_resolve::projectors::read_positive_surface_members(host, surface);
+    let members = crate::meta_resolve::projectors::read_positive_surface_members(host, surface)
+        .resolved_for_tests()
+        .expect("a resolvable branch-merge surface reads its members");
     let event_names: Vec<String> = members
         .iter()
         .map(|m| m.string_name().expect("string-key fixture").to_string())
@@ -7988,6 +7990,115 @@ fn emit_branch_merge_merges_colliding_js_property_spellings() {
         "visibility folds to the most restrictive across branches"
     );
     assert_eq!(merged[1].string_name(), Some("b"));
+}
+
+/// A conditional emit merge with ONE unresolvable branch publishes the
+/// resolvable branch's events as a USABLE SUBSET — but never as the
+/// COMPLETE emit set. The drop of the unresolvable branch must record its
+/// typed partiality into the active cold-compute scope; without it the
+/// one-branch surface is byte-indistinguishable from a both-branch merge
+/// and warms as complete metadata.
+///
+/// CONTROL (same test): the both-branch merge records NO partiality — a
+/// fix that marks every branch-merge partial fails the control arm.
+#[test]
+fn emit_branch_merge_with_one_unresolvable_branch_records_partiality() {
+    use crate::meta_resolve::projectors::{
+        resolve_payload_surface_with_scope, PayloadSurfaceScope,
+    };
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::ProjectionMode;
+
+    let drive = |canonical: &str,
+                 source: &str|
+     -> (
+        Option<Vec<String>>,
+        bool,
+        crate::semantic_query::PartialReasonSet,
+    ) {
+        let project = make_project();
+        project.upsert_base(canonical, source).unwrap();
+        let session = project.open_session_batch().unwrap();
+        let _ = session.evaluate_types(canonical).unwrap();
+        let host = project.host();
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let conditional_ref = TypeExpr::Ref {
+            name: std::sync::Arc::from("ConditionalEmits"),
+            type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
+        };
+        let payload_node = dispatch
+            .lower_type_expr_in_owner_scope_with_mode(
+                canonical,
+                verter_type_expr::TopLevelOwnerId::instance(0),
+                &conditional_ref,
+                ProjectionMode::Navigate,
+            )
+            .expect("ConditionalEmits must lower to a Navigate carrier node");
+
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let mut diag_sink = Vec::new();
+        let surface = resolve_payload_surface_with_scope(
+            &dispatch,
+            payload_node,
+            0,
+            verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits,
+            PayloadSurfaceScope::EmitClassMacroObject,
+            &mut diag_sink,
+        );
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        drop(scope);
+        let reasons = completeness.reasons();
+        let names = surface.map(|surface| {
+            crate::meta_resolve::projectors::read_positive_surface_members(host, surface)
+                .resolved_for_tests()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|m| m.string_name().map(|n| n.to_string()))
+                .collect::<Vec<_>>()
+        });
+        (names, completeness.is_partial(), reasons)
+    };
+
+    // One branch's event map is an unresolvable import: the merge may keep
+    // the editor branch's rows (a usable subset), but the RESULT is partial.
+    let (names, partial, reasons) = drive(
+        "/src/OneBranchMissing.vue",
+        r#"<script setup lang="ts" generic="Mode extends 'editor' | 'viewer'">
+import type { ViewerEmits } from './missing'
+type EditorEmits = { itemEdited: [id: number] }
+type ConditionalEmits = Mode extends 'editor' ? EditorEmits : ViewerEmits
+defineEmits<ConditionalEmits>()
+</script>
+<template><div /></template>"#,
+    );
+    assert!(
+        partial,
+        "publishing ONE branch as the emit surface while the other branch's \
+         event map is unresolvable MUST record typed partiality \
+         (published events: {names:?})"
+    );
+    assert!(
+        reasons.contains(crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY),
+        "the drop-site record carries the NAMED missing-dependency class — the \
+         anonymous boolean bridge alone is not the typed outcome; got {reasons:?}"
+    );
+
+    // CONTROL: both branches resolvable — the merged surface is complete.
+    let (names, partial, _reasons) = drive(
+        "/src/BothBranches.vue",
+        r#"<script setup lang="ts" generic="Mode extends 'editor' | 'viewer'">
+type EditorEmits = { itemEdited: [id: number] }
+type ViewerEmits = { itemViewed: [id: number] }
+type ConditionalEmits = Mode extends 'editor' ? EditorEmits : ViewerEmits
+defineEmits<ConditionalEmits>()
+</script>
+<template><div /></template>"#,
+    );
+    assert!(
+        !partial,
+        "the both-branch merge is COMPLETE — blanket partiality fails here \
+         (published events: {names:?})"
+    );
 }
 
 /// An open spread-program branch in an emit conditional keeps the
@@ -8098,7 +8209,9 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     // positive events publish (`saved` from the closed branch, `loaded`
     // from the open program branch), and the open signal is retained in
     // the diagnostic envelope.
-    let members = crate::meta_resolve::projectors::read_positive_surface_members(&host, surface);
+    let members = crate::meta_resolve::projectors::read_positive_surface_members(&host, surface)
+        .resolved_for_tests()
+        .expect("a resolvable branch-merge surface reads its members");
     let mut names: Vec<String> = members
         .iter()
         .map(|member| {
@@ -8236,7 +8349,9 @@ defineEmits<EmitChain0>()
          to the Conditional root — identity-bounded termination reaches it; the \
          retired depth-8 cap returned None before hop 12 and lost the merge",
     );
-    let members = crate::meta_resolve::projectors::read_positive_surface_members(host, surface);
+    let members = crate::meta_resolve::projectors::read_positive_surface_members(host, surface)
+        .resolved_for_tests()
+        .expect("a resolvable branch-merge surface reads its members");
     let event_names: Vec<String> = members
         .iter()
         .map(|m| m.string_name().expect("string-key fixture").to_string())

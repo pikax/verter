@@ -111,17 +111,23 @@ pub(crate) fn named_native_props_outcome(
     };
 
     let host = ctx.host_for_fact_tracer_install();
-    let Some(surface) = host.project_shallow_surface_graph_only(
-        ctx,
-        &dispatch,
-        base,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        ProjectionReductionContext::macro_object_surface(
-            ProjectionMode::Shallow,
-            SurfaceProvenanceContext::MacroTypeArgOwnBody,
-        ),
-        None,
-    ) else {
+    // An INCOMPLETE projection records its typed reason before degrading to
+    // the miss outcome — a failed resolution never reads as a props-less
+    // declaration.
+    let Some(surface) = host
+        .project_shallow_surface_graph_only(
+            ctx,
+            &dispatch,
+            base,
+            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            ProjectionReductionContext::macro_object_surface(
+                ProjectionMode::Shallow,
+                SurfaceProvenanceContext::MacroTypeArgOwnBody,
+            ),
+            None,
+        )
+        .recorded()
+    else {
         return if recursive {
             ResolvedNativePropsOutcome::Recursive
         } else {

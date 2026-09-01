@@ -1,0 +1,32 @@
+error[E0599]: no method named `unwrap_or_default` found for enum `SurfaceResolution<T>` in the current scope
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:23:69
+   |
+23 |     let _escaped: Vec<u8> = SurfaceResolution::<Vec<u8>>::NoSurface.unwrap_or_default();
+   |                                                                     ^^^^^^^^^^^^^^^^^ method not found in `SurfaceResolution<Vec<u8>>`
+
+error[E0277]: the trait bound `SurfaceResolution<Vec<u8>>: std::default::Default` is not satisfied
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:22:50
+   |
+22 |     let _defaulted: SurfaceResolution<Vec<u8>> = Default::default();
+   |                                                  ^^^^^^^^^^^^^^^^^^ the trait `std::default::Default` is not implemented for `SurfaceResolution<Vec<u8>>`
+
+error[E0624]: associated function `incomplete` is private
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:24:66
+   |
+24 |     let _minted: SurfaceResolution<Vec<u8>> = SurfaceResolution::incomplete(todo!());
+   |                                                                  ^^^^^^^^^^ private associated function
+   |
+  ::: src/typeinfo/surface_resolution.rs
+   |
+   |     pub(crate) fn incomplete(reason: PartialReasonSet) -> Self {
+   |     ---------------------------------------------------------- private associated function defined here
+
+warning: unreachable call
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:24:47
+   |
+24 |     let _minted: SurfaceResolution<Vec<u8>> = SurfaceResolution::incomplete(todo!());
+   |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
+   |                                               |
+   |                                               unreachable call
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default

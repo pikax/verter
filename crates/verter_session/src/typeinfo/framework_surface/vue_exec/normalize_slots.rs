@@ -97,7 +97,20 @@ pub(crate) fn slots_from_typeinfo_surface(
             // `Union` of function arms unions returns; a single `Function` or an
             // `Intersection` of function arms intersects them. (The first params
             // are ALWAYS intersected — a template binding must hold across arms.)
-            let realized_root = view.realized_callable_root(context)?;
+            // A member that genuinely realizes to a non-callable is not a
+            // slot (dropped — the complete negative answer). An UNRESOLVED
+            // member value records its typed reason before the drop, so the
+            // missing slot is a PARTIAL surface, never byte-identical to a
+            // surface that legitimately has no such slot.
+            let realized_root = match view.realized_callable_root(context) {
+                crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
+                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => id,
+                crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => return None,
+                crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                    let _ = incomplete.into_recorded_partial();
+                    return None;
+                }
+            };
             let combine = match node_data_for(dispatch.ctx, realized_root).as_deref() {
                 Some(SemanticNodeData::Union(_)) => ArmCombineNode::Union,
                 _ => ArmCombineNode::Intersection,
@@ -276,6 +289,19 @@ fn binding_fields_from_param_node(
     // / indexed / free `TypeParam`) must NOT be materialised into a committed
     // object surface — the SAME gate `navigate_param_to_object_surface` /
     // `first_param_object_surface` apply, keeping every binding path in agreement.
+    // An IMPORT-BACKED unresolved first-param root records its typed
+    // reason: zero bindings over a type whose imported dependency did not
+    // resolve is a PARTIAL surface, not a binding-less slot. A LOCAL
+    // authored-reference mirror passes through — the projection resolves it.
+    if let Some(reasons) = crate::typeinfo::surface_resolution::stable_member_carrier_partiality(
+        ctx,
+        crate::project_semantic_dispatch::node_data_for(ctx, first_param).as_deref(),
+    ) {
+        crate::request_context::fold_result_completeness(
+            crate::semantic_query::ResultCompleteness::partial(reasons),
+        );
+        return Vec::new();
+    }
     if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(
         &dispatch,
         first_param,
@@ -286,15 +312,28 @@ fn binding_fields_from_param_node(
     // Project the first-param node's one-level SHALLOW object surface (STAYS
     // Shallow / carrier-preserving — the root is NOT carrier-resolved, preserving
     // the `AppProps['avatar']` symbolic-access policy).
-    let Some(surface) = host.project_shallow_surface_from_base(
+    // An INCOMPLETE binding-surface projection records its typed reason —
+    // a slot whose binding object could not resolve publishes NO fabricated
+    // bindings AND marks the result partial, so zero bindings is never
+    // byte-identical to a genuinely binding-less slot. A genuinely
+    // non-object first param stays the complete no-bindings answer.
+    let surface = match host.project_shallow_surface_from_base(
         ctx,
         &dispatch,
         first_param,
         Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
-    ) else {
-        return Vec::new();
+    ) {
+        crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
+        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => surface,
+        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface => return Vec::new(),
+        crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+            match incomplete.into_recorded_partial() {
+                Some(surface) => surface,
+                None => return Vec::new(),
+            }
+        }
     };
     // Shallow-by-default Pick member publication: when the slot param is a
     // `Pick<NamedRoot, K>` the picked members stay SYMBOLIC at the published

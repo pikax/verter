@@ -406,7 +406,11 @@ pub(crate) fn read_surface_member_candidates(
     ctx: &dyn ResolverContext,
     surface: &ResolvedPayloadSurface,
 ) -> Vec<SurfaceMemberCandidate> {
-    let members = super::read_positive_surface_members(ctx, surface.node);
+    // An INCOMPLETE member read records its typed reason and enumerates only
+    // the usable subset — never a silently truncated candidate set.
+    let members = super::read_positive_surface_members(ctx, surface.node)
+        .recorded()
+        .unwrap_or_default();
     members
         .into_iter()
         .map(|member| SurfaceMemberCandidate {

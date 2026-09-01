@@ -450,6 +450,11 @@ node_id = "TA2"
 commit_message = "feat(session): demand-scoped truthiness domain authority consumed by flow"
 commit_date = "2026-09-01T04:00:00+01:00"
 
+[[implemented]]
+node_id = "D2D"
+commit_message = "feat(session): make every surface producer return a typed resolution outcome"
+commit_date = "2026-09-01T19:15:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
