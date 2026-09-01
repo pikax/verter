@@ -76,10 +76,17 @@ impl ProjectSemanticDispatch<'_> {
     /// of the same union interns under the owning file scope, and a
     /// closed-fact replay of the identical decided value must hash-cons
     /// with it, never fork instantiation/cache identity onto a
-    /// scope-split twin. The re-anchored payload keeps its origin
-    /// category unchanged (`Canonical` when the canonicalization
-    /// completed, `CanonicalUnproven` when it was budgeted); anchoring is
-    /// a same-kind, value-identical re-intern, not a second mint.
+    /// scope-split twin. The re-anchored payload keeps its origin category
+    /// UNCHANGED — ordinarily `Canonical` (canonicalization completed) or
+    /// `CanonicalUnproven` (it was budgeted), but the hash-cons is
+    /// content-only first-wins: a byte-identical arm list interned earlier
+    /// under a bypass mint (`OrderedCarrier`, `AuthoredShell`,
+    /// `PreservingRebuild`, `QuerySubject`, or `TestFixture` in test
+    /// builds) wins the arena slot, so the retained tag can be ANY
+    /// collided category, not only the two canonical ones (see the
+    /// `composite` module docs' identity discipline for the collision
+    /// rule); anchoring is a same-kind, value-identical re-intern, not a
+    /// second mint.
     pub(in crate::project_semantic_dispatch) fn raise_closed_leaf_union(
         &self,
         members: &[SemanticNodeId],

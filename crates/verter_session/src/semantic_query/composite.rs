@@ -100,21 +100,57 @@
 //!
 //! One order-bearing first-wins residue is DISCLOSED OPEN, not closed: an
 //! ordered mint whose arm list is byte-identical to an earlier
-//! `Canonical`-tagged twin is misread as re-decidable at the rebuild
-//! sites, and the fail-closed callable guard
-//! (`value_may_contribute_call_signatures`) narrows only the
-//! overload-group class of that misread — an intersection rebuild whose
-//! arms may carry call signatures preserves order regardless of the tag.
-//! Order semantics INDEPENDENT of callability are not covered by it:
+//! `Canonical`- OR `CanonicalUnproven`-tagged twin is misread as
+//! re-decidable at the rebuild sites — `composite_rebuild_re_decides`
+//! routes both tags to `derived = true` identically — and the fail-closed
+//! callable guard (`value_may_contribute_call_signatures`) narrows only
+//! the overload-group class of that misread — an intersection rebuild
+//! whose arms may carry call signatures preserves order regardless of the
+//! tag. Order semantics INDEPENDENT of callability are not covered by it:
 //! own-body-LAST heritage topology, rendered-type-text fidelity, and the
 //! first-encountered entry/keyspace slots of the intersection surface
 //! merge (`merge_intersection_surfaces_with_graph`) all consume arm
 //! order, so a collided ordered carrier whose rebuilt arms are
-//! signature-free CAN be reordered by a commutative re-decide. The live
-//! window is narrow — ordered mints share the `Global` identity domain
-//! with canonical multi-arm mints, and canonical order (node-id order)
-//! typically coincides with construction order, so the colliding twin
-//! usually already carries the ordered spelling — but it is NOT empty.
+//! signature-free CAN be reordered by a commutative re-decide. Against a
+//! `CanonicalUnproven` twin the misread reaches further than reordering:
+//! a budget-degraded canonicalization can stamp an arm list that still
+//! carries structural duplicates the skipped tier would have collapsed,
+//! so re-deciding through the full canonical authority can also REDUCE
+//! the arm count, not only reorder it. Ordered mints share the `Global`
+//! identity domain with canonical multi-arm mints, which is why the
+//! collision is reachable at all — but the collision REQUIRES the two
+//! stored member lists to be byte-identical, so observing that the stored
+//! twin "already carries the ordered spelling" is true by definition and
+//! mitigates nothing: the rebuild site does not re-decide the stored
+//! twin, it re-decides the REBUILT arm list, whose order the canonical
+//! authority derives from the rebuilt arms' own ids, not the ids the
+//! original mint stored. The window is NOT empty and no further bound on
+//! it is established here.
+//!
+//! Closing this window needs the order-bearing tag to survive a
+//! first-wins collision, and two ways to do that were rejected because
+//! each contradicts a design invariant stated above: mutating the
+//! already-interned arena payload in place (arena node data is immutable
+//! — see the Identity discipline paragraph), or folding the origin
+//! category into node identity / `Hash` (the Identity discipline
+//! paragraph is explicit that identity stays `(members, kind, sidecar
+//! scope)` so canonical dedup and every pinned node identity stay
+//! unchanged; a category-bearing identity would fragment that dedup —
+//! two mints of the same byte-identical list under different categories
+//! would then intern as two arena nodes instead of one). A third way is
+//! NOT ruled out by either argument and was not taken here: a store-owned
+//! monotone category-bits sidecar — parallel to the arena's existing
+//! per-node scope sidecar (`SemanticGraphStore::node_scope`), which
+//! already records an at-rest fact per node id outside `Eq`/`Hash` —
+//! widened on every hash-cons hit to the union of every category ever
+//! minted for that slot, so a rebuild site could fail closed on "this
+//! node ever minted order-bearing" without touching node identity or
+//! mutating the payload. It inherits only the history-dependence
+//! first-wins already has (which category a slot first records still
+//! depends on mint order) and is otherwise strictly conservative (a
+//! widen only ADDS bits, never removes one). It is left unadopted here on
+//! its own, unweighed, per-intern bookkeeping cost — not on a design
+//! conflict with the two rejected ways above.
 //!
 //! ## Confinement — the disclosed language limit
 //!

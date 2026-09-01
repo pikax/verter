@@ -80,21 +80,28 @@ use crate::semantic_query_memo::{ObservedGraphSelfRoot, SemanticGraphStore};
 pub(crate) struct CanonicalMint {
     /// `true` iff the canonicalization COMPLETED — no structural comparison
     /// returned `Incomplete`, no bounded scan was skipped for size, no
-    /// bounded peek was undecided, no dangling arm was preserved. Only a
-    /// complete canonicalization proves the member list is canonical FORM;
-    /// the mint maps an incomplete one to the at-rest
-    /// `CanonicalUnproven` category, which the pre-seal closure's O(1)
-    /// skip does not accept — a budget-degraded list resurfacing in a
-    /// later request pays the full re-close (and its evidence re-deposit)
-    /// instead of being classified warm-eligible canonical form.
+    /// bounded peek was undecided, no dangling arm was preserved. This
+    /// witnesses that the budgeted pipeline ran to its fixed point with no
+    /// explicit incompleteness signal — NOT comparator-complete dedup: the
+    /// structural-prehash candidate narrowing (see the "Known bounded
+    /// divergences" note where it is built) can separate two arms the
+    /// comparator would judge `Equal` into different groups, so they are
+    /// never pairwise-compared and never flip this flag to `false`, yet a
+    /// full pairwise pass would have collapsed them. The mint maps a
+    /// `false` value to the at-rest `CanonicalUnproven` category, which the
+    /// pre-seal closure's O(1) skip does not accept — a budget-degraded
+    /// list resurfacing in a later request pays the full re-close (and its
+    /// evidence re-deposit) instead of being classified warm-eligible.
     canonical_form_proven: bool,
     _sealed: (),
 }
 
 impl CanonicalMint {
-    /// Whether this mint's canonicalization PROVED canonical form (complete
-    /// evidence). Read by the category funnel to choose between the at-rest
-    /// `Canonical` and `CanonicalUnproven` facts.
+    /// Whether this mint's canonicalization reached the budgeted pipeline's
+    /// fixed point with no explicit incompleteness signal (see the field
+    /// doc above for what this does — and does not — prove). Read by the
+    /// category funnel to choose between the at-rest `Canonical` and
+    /// `CanonicalUnproven` facts.
     pub(crate) fn certifies_canonical_form(&self) -> bool {
         self.canonical_form_proven
     }
@@ -645,12 +652,22 @@ fn canonicalize(
         // same-shaped arms off the shared budget entirely. The prehash is
         // deliberately skipped for small sets, where hashing every arm
         // costs more than the direct pairwise walk. Known bounded
-        // divergence: the prehash includes `TypeParam.display_name`, which
-        // canonical identity excludes — a pair equal-except-display-name
-        // would narrow into different groups and stay two arms (a missed
-        // dedup, never a wrong collapse); `display_name` is derived from
-        // the declaration identity the hash also covers, so the pair
-        // cannot arise from one coherent generation.
+        // divergences (both a missed dedup, never a wrong collapse): (a)
+        // the prehash includes `TypeParam.display_name`, which canonical
+        // identity excludes — a pair equal-except-display-name would
+        // narrow into different groups and stay two arms; `display_name`
+        // is derived from the declaration identity the hash also covers,
+        // so the pair cannot arise from one coherent generation. (b) two
+        // arms the comparator's coinductive rule (`compare_structural`,
+        // below) would judge `Equal` as a bisimulation can still prehash
+        // apart when they are self-referential cycles of different unroll
+        // periods: `structural_hash_of`'s `TAG_CYCLE` fires on a
+        // single-node descent-path revisit, so its position depends on
+        // interning topology (which nodes happen to be hash-consed
+        // together), not on the comparator's pairwise coinductive
+        // assumption — two topologically different but bisimulation-equal
+        // cycles can prehash to different groups and never reach the
+        // pairwise tier.
         let prehash_groups: Option<FxHashMap<crate::types::Hash16, Vec<usize>>> =
             if child_bearing.len() > STRUCTURAL_PREHASH_MIN_ARMS {
                 let mut groups: FxHashMap<crate::types::Hash16, Vec<usize>> = FxHashMap::default();
@@ -735,10 +752,12 @@ fn canonicalize(
     //    retained member unchanged (that member's own scope); a derived
     //    multi-arm composite sorts deterministically and interns under
     //    `Global` through the sealed canonical mint. The mint carries the
-    //    completeness verdict: only COMPLETE evidence certifies canonical
-    //    FORM, so an incomplete run (over-cap arm set, exhausted compare
-    //    budget, dangling arm, undecided peek) is stamped
-    //    `CanonicalUnproven` at rest — never skip-eligible `Canonical`.
+    //    completeness verdict (see `CanonicalMint::canonical_form_proven`
+    //    for exactly what it does and does not witness): only a run with
+    //    no explicit incompleteness signal (over-cap arm set, exhausted
+    //    compare budget, dangling arm, undecided peek) is stamped
+    //    `Canonical`; anything else is stamped `CanonicalUnproven` at rest
+    //    — never skip-eligible.
     kept.sort_by_key(|id| id.0);
     kept.dedup();
     let node = match kept.as_slice() {
