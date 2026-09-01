@@ -76,7 +76,7 @@ rescope_unrelated_packages = 3
 [[node]]
 id = "D2B"
 name = "Atomic public flow-proof cutover and distributed-admission retirement"
-predecessors = ["D2A","TA1B","TA2"]
+predecessors = ["D2A","TA1B","TA2","D2D"]
 phase = "rev11"
 train = "rev11.flow"
 product = "rev11"
@@ -143,6 +143,42 @@ max_production_files = 4
 max_related_packages = 2
 rescope_loc = 1500
 rescope_files = 12
+rescope_unrelated_packages = 3
+
+[[node]]
+id = "D2D"
+name = "Typed resolution outcome for every surface producer"
+predecessors = ["D2A"]
+phase = "rev11"
+train = "rev11.flow"
+product = "rev11"
+kind = "implementation"
+semantic_role = "delivery"
+class = "foundational"
+owner = "rev11.flow:sole shared flow authority"
+conflict_domains = ["semantic_authority"]
+resource_class = "rust-mixed"
+gate_profile = "targeted-domain"
+review_profile = "semantic-3"
+dispatchable = true
+optional = false
+release_gating = "none"
+external_requirements = []
+charter = "charters/rev11-flow/D2D.md"
+implementation_effort_min = "high"
+implementation_effort_default = "high"
+review_effort_min = "high"
+review_effort_default = "high"
+verification_effort_min = "high"
+verification_effort_default = "high"
+confirmation_effort_min = "high"
+confirmation_effort_default = "high"
+size = "M"
+max_production_loc = 800
+max_production_files = 12
+max_related_packages = 2
+rescope_loc = 1500
+rescope_files = 20
 rescope_unrelated_packages = 3
 
 [[node]]
