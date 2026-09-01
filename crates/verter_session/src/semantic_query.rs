@@ -1962,13 +1962,19 @@ pub enum ResolvedCallResult {
         substitution: CanonicalTypeSubstitution,
         /// The call's return type under that substitution.
         return_type: SemanticNodeId,
-        /// Whether `return_type` is a FRESH primitive literal: the naked
-        /// declared return of an UNCONSTRAINED type parameter that fixed
-        /// to a bare-literal argument. Freshness is provenance consumed by
-        /// position — an enclosing unannotated function-return contributor
-        /// widens a fresh result to its base primitive, while a value
-        /// position (a `const` initializer) keeps the literal.
-        fresh_literal_return: bool,
+        /// The FRESH primitive-literal deposits the winner's return keeps
+        /// at TOP LEVEL: an UNCONSTRAINED type parameter fixed to a
+        /// bare-literal argument, reached from the return annotation
+        /// through the binder itself or through UNION constituents
+        /// (intersection reduction pins its literal, and a
+        /// conditional-embedded binder already widened at the call
+        /// boundary). Freshness is provenance consumed by position — an
+        /// enclosing unannotated function-return contributor widens a
+        /// whole-return fresh literal (`return_type` itself listed here)
+        /// to its base primitive, an object-member position widens every
+        /// listed constituent, and a `const` initializer records them as
+        /// the binding's widening membership.
+        fresh_literal_returns: std::sync::Arc<[SemanticNodeId]>,
     },
     /// A UNION callee selected one first-applicable signature in EVERY
     /// callable arm; the call's return is the union of the selected arm

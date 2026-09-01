@@ -68,13 +68,14 @@ pub(crate) const PROFILE_STAMP: &str = "VerterHost standalone { analysis_level: 
 // The recursive expectation
 
 /// Exact literal expectation. Not total over [`LiteralValue`]: only
-/// variants a corpus row or control exercises. Re-add `Bool` / `BigInt`
+/// variants a corpus row or control exercises. Re-add `BigInt`
 /// only together with a control.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Lit {
     Str(&'static str),
     Num(f64),
+    Bool(bool),
 }
 
 /// Recursive graph-node expectation.
@@ -137,6 +138,7 @@ fn lit_matches(expected: &Lit, got: &LiteralValue) -> bool {
     match (expected, got) {
         (Lit::Str(e), LiteralValue::String(g)) => *e == g.as_str(),
         (Lit::Num(e), LiteralValue::Number(g)) => e.to_bits() == g.to_bits(),
+        (Lit::Bool(e), LiteralValue::Boolean(g)) => e == g,
         _ => false,
     }
 }
@@ -873,6 +875,7 @@ pub(crate) mod checker_syntax {
     pub(crate) enum CheckerType {
         StringLit(String),
         NumberLit(f64),
+        BoolLit(bool),
         Primitive(PrimitiveKind),
         Ref(String),
         Union(Vec<CheckerType>),
@@ -1037,14 +1040,8 @@ pub(crate) mod checker_syntax {
                         "unknown" => CheckerType::Primitive(PrimitiveKind::Unknown),
                         "any" => CheckerType::Primitive(PrimitiveKind::Any),
                         "object" => CheckerType::Primitive(PrimitiveKind::Object),
-                        "true" | "false" => {
-                            return Err(format!(
-                                "boolean literal prints are not modelled (`{}`) — add the \
-                                 variant WITH its comparison rule and control when a deep \
-                                 row needs it",
-                                self.text
-                            ));
-                        }
+                        "true" => CheckerType::BoolLit(true),
+                        "false" => CheckerType::BoolLit(false),
                         _ => CheckerType::Ref(name),
                     })
                 }
@@ -1134,6 +1131,9 @@ pub(crate) mod checker_syntax {
             }
             (CheckerType::NumberLit(e), SemanticNodeData::Literal(LiteralValue::Number(g))) => {
                 e.to_bits() == g.to_bits()
+            }
+            (CheckerType::BoolLit(e), SemanticNodeData::Literal(LiteralValue::Boolean(g))) => {
+                e == g
             }
             (CheckerType::Primitive(e), SemanticNodeData::Primitive(g)) => e == g,
             // A reference name matches a resolved `DeclRef` only.
@@ -2415,6 +2415,47 @@ mod expectation_controls {
                     )
                     .is_empty(),
                     "a number literal must NOT satisfy the widened primitive pin"
+                );
+            },
+        );
+        with_flow_node(
+            "function makeProps() { return true as const }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    check_node(dispatch, node, &ExpectedNode::Literal(Lit::Bool(true))).is_empty(),
+                    "the measured BOOLEAN literal must satisfy its own exact pin (measured {})",
+                    render_node(dispatch, node, 0)
+                );
+                assert!(
+                    !check_node(dispatch, node, &ExpectedNode::Literal(Lit::Bool(false)))
+                        .is_empty(),
+                    "a boolean pin must reject the OTHER truth value — the equality clause \
+                     is the comparison under control here"
+                );
+                assert!(
+                    !check_node(
+                        dispatch,
+                        node,
+                        &ExpectedNode::Primitive(PrimitiveKind::Boolean)
+                    )
+                    .is_empty(),
+                    "a boolean literal must NOT satisfy the widened primitive pin"
+                );
+                let parsed = checker_syntax::parse("true").expect("`true` parses");
+                assert!(
+                    checker_syntax::matches_node(dispatch, node, &parsed, 0),
+                    "the checker-syntax boolean literal must match the live boolean node"
+                );
+                let other = checker_syntax::parse("false").expect("`false` parses");
+                assert!(
+                    !checker_syntax::matches_node(dispatch, node, &other, 0),
+                    "the checker-syntax boolean comparison must reject the OTHER truth value"
+                );
+                let widened = checker_syntax::parse("boolean").expect("`boolean` parses");
+                assert!(
+                    !checker_syntax::matches_node(dispatch, node, &widened, 0),
+                    "the checker-syntax boolean literal must NOT satisfy the primitive print"
                 );
             },
         );

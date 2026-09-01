@@ -713,11 +713,13 @@ pub(crate) enum ResolveCallSelection {
         selected: SignatureCandidateOrigin,
         selected_signature: SelectedSignature,
         substitution: CanonicalTypeSubstitution,
-        /// The FRESH primitive-literal return candidates this winner may
-        /// close on: a naked declared return of an unconstrained parameter
-        /// fixed to a bare-literal argument. Consulted at close — a final
-        /// return equal to one of these is a fresh literal the caller's
-        /// return position widens.
+        /// The FRESH primitive-literal deposits this winner's return keeps
+        /// at TOP LEVEL: an unconstrained parameter fixed to a bare-literal
+        /// argument, reached from the return structure through the binder
+        /// itself or through UNION constituents. Consulted at close — a
+        /// final return EQUAL to one of these is a whole-return fresh
+        /// literal the caller's return position widens, and every listed
+        /// deposit widens at the caller's value (member) positions.
         fresh_literal_returns: Vec<SemanticNodeId>,
     },
     /// A UNION callee's per-arm winners: one first-applicable signature in
@@ -774,7 +776,7 @@ impl ResolveCallSelection {
                 },
                 substitution: substitution.clone(),
                 return_type,
-                fresh_literal_return: fresh_literal_returns.contains(&return_type),
+                fresh_literal_returns: std::sync::Arc::from(fresh_literal_returns.as_slice()),
             },
             Self::UnionSelected { arms } => ResolvedCallResult::UnionSelected {
                 selections: Arc::from(

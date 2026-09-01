@@ -3804,8 +3804,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             declared_locals: rustc_hash::FxHashMap::default(),
             var_locals: rustc_hash::FxHashMap::default(),
             var_declared_locals: rustc_hash::FxHashMap::default(),
-            widening_locals: rustc_hash::FxHashSet::default(),
-            var_widening_locals: rustc_hash::FxHashSet::default(),
+            widening_locals: rustc_hash::FxHashMap::default(),
+            var_widening_locals: rustc_hash::FxHashMap::default(),
             bare_return_seen: false,
             implicit_undefined_seen: false,
             member_filter,
@@ -4317,6 +4317,38 @@ fn widen_fresh_read_node(
     widen_literal_node(dispatch, node)
 }
 
+/// Widen exactly the listed literal values within `node`: the node
+/// itself when listed, or the listed constituents of a union. Everything
+/// else passes through unchanged — an authored pinned arm beside a fresh
+/// one keeps its literal.
+fn widen_values_within(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    values: &[SemanticNodeId],
+) -> SemanticNodeId {
+    if values.contains(&node) {
+        return widen_literal_node(dispatch, node);
+    }
+    let graph = dispatch.graph();
+    if let Some(SemanticNodeData::Union(members)) = graph.node_data(node).as_deref() {
+        let widened: Vec<SemanticNodeId> = members
+            .iter()
+            .map(|member| {
+                if values.contains(member) {
+                    widen_literal_node(dispatch, *member)
+                } else {
+                    *member
+                }
+            })
+            .collect();
+        if widened.as_slice() == members.as_ref() {
+            return node;
+        }
+        return dispatch.intern_normalized_union_or_intersection(&widened, true);
+    }
+    node
+}
+
 /// Widen one FRESH literal node to its primitive (tsc's
 /// widening-literal-type rule). Every non-literal node passes through
 /// unchanged.
@@ -4677,14 +4709,16 @@ struct FlowEvaluator<'d, 'b> {
     var_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     /// Function-scoped twin of `declared_locals`.
     var_declared_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
-    /// Locals bound to a WIDENING literal (`const b = 1` — unannotated,
-    /// no const assertion). Reads of these widen to the literal's
-    /// primitive at return-object member positions and at the return
-    /// join (tsc's widening-literal-type rule); `as const` / annotated
-    /// literals never enter this set and stay pinned.
-    widening_locals: rustc_hash::FxHashSet<String>,
+    /// Widening membership of lexical locals (`const b = 1` —
+    /// unannotated, no const assertion — is `All`; a mixed-freshness
+    /// conditional initializer or a union-carried fresh call deposit is
+    /// `Partial` over exactly its fresh values). Reads of these widen at
+    /// return-object member positions and at the return join (tsc's
+    /// widening-literal-type rule); `as const` / annotated literals never
+    /// enter this map and stay pinned.
+    widening_locals: rustc_hash::FxHashMap<String, WideningMembership>,
     /// The `var`-layer widening membership (same rule, function scope).
-    var_widening_locals: rustc_hash::FxHashSet<String>,
+    var_widening_locals: rustc_hash::FxHashMap<String, WideningMembership>,
     /// Whether a bare `return;` was evaluated. A body whose ONLY return
     /// contributions are bare returns models as `void` (BL12);
     /// alongside value returns a bare return contributes `undefined`.
@@ -4761,16 +4795,16 @@ struct FlowEvaluator<'d, 'b> {
     /// Whether the current path exists only for return inference after an
     /// abrupt `finally` replaced the pending break at runtime.
     inference_only_path: bool,
-    /// Return nodes a COMPLETED call in this frame marked
-    /// `fresh_literal_return` (a generic callee whose naked-binder return
-    /// fixed to a fresh-preserved literal). The call executor records the
-    /// provenance; the flow frame's freshness widening happens at the
-    /// return join, so a `return f(…)` whose call closed fresh
-    /// contributes WITH the freshness bit — a value position (an object
-    /// member, a binding initializer) keeps the literal, exactly as the
-    /// return equation's own flow/call domain split decides for held
-    /// calls.
-    call_fresh_literal_returns: Vec<SemanticNodeId>,
+    /// COMPLETED calls in this frame that closed with fresh-preserved
+    /// literal deposits, recorded by their authored call-site span — the
+    /// call-SITE identity a consuming position matches against, never the
+    /// interned literal value, so a sibling arm's authored pin of the
+    /// same value can never borrow a call's freshness. The whole return
+    /// being one of the deposits is the naked case (fresh at the return
+    /// join); every listed deposit widens at a value (member /
+    /// mutable-declaration) position and seeds a `const` binding's
+    /// widening membership.
+    call_fresh_literal_returns: Vec<FreshCallReturn>,
     /// The `break` exits captured as `break` statements evaluate, in
     /// source order: the target (anonymous = the innermost switch) and
     /// the COMPLETE layer state at the break point. The absorbing
@@ -4930,8 +4964,38 @@ struct FlowBreakExit {
 /// fresh in the scope).
 struct ScopeShadow {
     name: String,
-    prior: Option<(SemanticNodeId, bool, bool, bool)>,
+    prior: Option<(SemanticNodeId, Option<WideningMembership>, bool, bool)>,
     prior_declared: Option<SemanticNodeId>,
+}
+
+/// One COMPLETED call that closed with fresh-preserved literal deposits,
+/// recorded by its authored call-site span so a sibling return arm's
+/// authored pin of the same interned literal value can never borrow the
+/// call's freshness.
+#[derive(Clone, Debug)]
+struct FreshCallReturn {
+    /// The authored call expression's span (frame coordinates) — the
+    /// call-SITE identity a consuming position matches against.
+    span: verter_span::Span,
+    /// The call's settled return node.
+    node: SemanticNodeId,
+    /// The fresh literal deposits kept at the return's top level. The
+    /// whole return being ONE of these is the naked case — fresh at the
+    /// return join; every listed value widens at a value position.
+    values: Arc<[SemanticNodeId]>,
+}
+
+/// The widening membership of one binding — WHICH of its literal values
+/// widen at a widening read. `All` is the classic widening-literal
+/// `const`; `Partial` records exactly the fresh values of a
+/// mixed-freshness conditional initializer or a union-carried fresh call
+/// deposit, so an authored pinned arm alongside them stays pinned.
+#[derive(Clone, Debug, PartialEq)]
+enum WideningMembership {
+    /// Every literal (arm) widens at a widening read.
+    All,
+    /// Exactly these literal values widen; sibling arms stay pinned.
+    Partial(Arc<[SemanticNodeId]>),
 }
 
 /// One point-in-time snapshot of the evaluator's binding layers — the
@@ -4947,11 +5011,11 @@ struct FlowLayerState {
     locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     declared_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     degraded_locals: rustc_hash::FxHashSet<String>,
-    widening_locals: rustc_hash::FxHashSet<String>,
+    widening_locals: rustc_hash::FxHashMap<String, WideningMembership>,
     var_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     var_declared_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     var_degraded_locals: rustc_hash::FxHashSet<String>,
-    var_widening_locals: rustc_hash::FxHashSet<String>,
+    var_widening_locals: rustc_hash::FxHashMap<String, WideningMembership>,
     var_conditional_locals: rustc_hash::FxHashSet<String>,
     param_writes: rustc_hash::FxHashMap<u32, SemanticNodeId>,
     narrowings: Vec<(
@@ -5174,7 +5238,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // literal locals stay pinned. Direct literal members already
             // widened (or stayed pinned under a const assertion) at IR
             // lowering.
-            let value = self.widen_if_widening_local_read(member_value, value);
+            let value = self.widen_value_position_read(member_value, value);
             // A non-static key is its own evaluated position. It names
             // the member only if it settles to a LITERAL; anything else
             // leaves the surface's key SET unknown, which an object
@@ -5340,7 +5404,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         name: &str,
         kind: crate::flow_slice_content::SliceBindingKind,
         node: SemanticNodeId,
-        widening: bool,
+        widening: Option<WideningMembership>,
         degraded: bool,
     ) {
         let function_scoped = kind == crate::flow_slice_content::SliceBindingKind::Var;
@@ -5369,10 +5433,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         } else {
             degraded_set.remove(name);
         }
-        if widening {
-            widening_set.insert(name.to_string());
-        } else {
-            widening_set.remove(name);
+        match widening {
+            Some(membership) => {
+                widening_set.insert(name.to_string(), membership);
+            }
+            None => {
+                widening_set.remove(name);
+            }
         }
         locals.insert(name.to_string(), node);
         // A (re)binding replaces the binding's value: every narrow fact a
@@ -5538,12 +5605,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let Positional::Value(node) = outcome else {
             return outcome;
         };
-        let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
-            || self.reads_widening_literal_local(expr);
+        let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh);
         Positional::Value(if fresh {
             widen_fresh_read_node(self.dispatch, node)
         } else {
-            node
+            // A non-fresh spelling may still carry read-side widening
+            // provenance: a widening-membership local, or a completed
+            // fresh-literal call — the same value-position rule the
+            // object-member read applies.
+            self.widen_value_position_read(expr, node)
         })
     }
 
@@ -5587,7 +5657,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let outcome = self.eval_expr(expr);
         let node = self.settle_composite_part(outcome, holds_before);
         let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
-            || self.reads_widening_literal_local(expr);
+            || self.reads_widening_literal_local(expr)
+            || self
+                .fresh_call_return_for(expr, node)
+                .is_some_and(|call| call.values.contains(&node));
         parts.push((node, fresh));
     }
 
@@ -5646,7 +5719,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // `bind_local` itself clears the narrow facts about the
                 // replaced value (the invalidation cannot be forgotten at
                 // one of the two write sites).
-                self.bind_local(name, kind, node, false, degraded);
+                self.bind_local(name, kind, node, None, degraded);
             }
         }
     }
@@ -5709,7 +5782,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 name,
                 crate::flow_slice_content::SliceBindingKind::Let,
                 joined,
-                false,
+                None,
                 false,
             );
         }
@@ -5747,7 +5820,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 name,
                 crate::flow_slice_content::SliceBindingKind::Var,
                 joined,
-                false,
+                None,
                 false,
             );
         }
@@ -5877,10 +5950,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             match &shadow.prior {
                 Some((node, widening, degraded, conditional)) => {
                     state.locals.insert(shadow.name.clone(), *node);
-                    if *widening {
-                        state.widening_locals.insert(shadow.name.clone());
-                    } else {
-                        state.widening_locals.remove(&shadow.name);
+                    match widening {
+                        Some(membership) => {
+                            state
+                                .widening_locals
+                                .insert(shadow.name.clone(), membership.clone());
+                        }
+                        None => {
+                            state.widening_locals.remove(&shadow.name);
+                        }
                     }
                     if *degraded {
                         state.degraded_locals.insert(shadow.name.clone());
@@ -5912,7 +5990,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let prior = self.locals.get(name).map(|node| {
             (
                 *node,
-                self.widening_locals.contains(name),
+                self.widening_locals.get(name).cloned(),
                 self.degraded_locals.contains(name),
                 self.conditional_lexicals.contains(name),
             )
@@ -6041,15 +6119,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         joined
             .degraded_locals
             .extend(b.degraded_locals.iter().cloned());
-        joined
-            .widening_locals
-            .extend(b.widening_locals.iter().cloned());
+        joined.widening_locals.extend(
+            b.widening_locals
+                .iter()
+                .map(|(name, membership)| (name.clone(), membership.clone())),
+        );
         joined
             .var_degraded_locals
             .extend(b.var_degraded_locals.iter().cloned());
-        joined
-            .var_widening_locals
-            .extend(b.var_widening_locals.iter().cloned());
+        joined.var_widening_locals.extend(
+            b.var_widening_locals
+                .iter()
+                .map(|(name, membership)| (name.clone(), membership.clone())),
+        );
         joined
             .var_conditional_locals
             .extend(b.var_conditional_locals.iter().cloned());
@@ -6224,7 +6306,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 param.as_ref(),
                 crate::flow_slice_content::SliceBindingKind::Const,
                 unknown,
-                false,
+                None,
                 false,
             );
         }
@@ -6418,7 +6500,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             name,
             crate::flow_slice_content::SliceBindingKind::Const,
             node,
-            false,
+            None,
             degraded,
         );
     }
@@ -8420,10 +8502,58 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// degradation, because asking about widening is not an observation
     /// of the binding's value.
     fn widening_of(&self, name: &str) -> bool {
+        matches!(self.membership_of(name), Some(WideningMembership::All))
+    }
+
+    /// The full widening MEMBERSHIP of a local binding, if it has one —
+    /// the layer resolution mirrors [`Self::widening_of`], which is its
+    /// `All`-only projection.
+    fn membership_of(&self, name: &str) -> Option<&WideningMembership> {
         if self.locals.contains_key(name) {
-            return self.widening_locals.contains(name);
+            return self.widening_locals.get(name);
         }
-        self.var_locals.contains_key(name) && self.var_widening_locals.contains(name)
+        if self.var_locals.contains_key(name) {
+            return self.var_widening_locals.get(name);
+        }
+        None
+    }
+
+    /// The widening membership one PLAIN (non-mixed) binding initializer
+    /// establishes: an all-fresh literal tree on an unannotated `const`
+    /// (`All` — the classic widening-literal binding), a read of a local
+    /// that already carries membership (`const w = v` propagates it; a
+    /// `let` widens it at the declaration), or a completed fresh-literal
+    /// call (`All` when the whole return is the deposit, `Partial` over a
+    /// union-carried one). Authored pins, annotated initializers, and
+    /// every other spelling establish none.
+    fn binding_init_membership(
+        &self,
+        kind: crate::flow_slice_content::SliceBindingKind,
+        init: &crate::flow_slice_content::SliceExpr,
+        node: SemanticNodeId,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+    ) -> Option<WideningMembership> {
+        if kind == crate::flow_slice_content::SliceBindingKind::Const && freshness.all_fresh() {
+            return Some(WideningMembership::All);
+        }
+        if let crate::flow_slice_content::SliceExpr::Local {
+            name,
+            captured: false,
+            ..
+        } = init
+        {
+            if let Some(membership) = self.membership_of(name.as_ref()) {
+                return Some(membership.clone());
+            }
+        }
+        if let Some(call) = self.fresh_call_return_for(init, node) {
+            return Some(if call.values.contains(&node) {
+                WideningMembership::All
+            } else {
+                WideningMembership::Partial(Arc::clone(&call.values))
+            });
+        }
+        None
     }
 
     /// Evaluate ONE return site under the member-projection demand: the
@@ -8478,7 +8608,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         let outcome = self.eval_expr(&member.value);
         match self.settle(outcome) {
-            Some(node) => Ok(Some(self.widen_if_widening_local_read(&member.value, node))),
+            Some(node) => Ok(Some(self.widen_value_position_read(&member.value, node))),
             // A hold inside the demanded member is the same coinductive
             // hold the whole-return object path reports.
             None => Ok(None),
@@ -8495,19 +8625,61 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.widening_of(name.as_ref())
     }
 
-    /// Widen `node` at a widening READ of a WIDENING-literal local: a
-    /// lone literal widens to its primitive, a union widens every
-    /// literal arm (the all-fresh conditional binding). Every other
-    /// shape — and every non-widening read — passes through unchanged.
-    fn widen_if_widening_local_read(
+    /// The completed fresh-literal call this expression IS (transparently)
+    /// a read of, matched by the authored call-site SPAN — never by the
+    /// interned literal value, so a sibling arm's authored pin of the same
+    /// value can never borrow a call's freshness.
+    fn fresh_call_return_for(
+        &self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        node: SemanticNodeId,
+    ) -> Option<&FreshCallReturn> {
+        match expr {
+            crate::flow_slice_content::SliceExpr::Call(_, site) => {
+                let span = site.span();
+                self.call_fresh_literal_returns
+                    .iter()
+                    .rev()
+                    .find(|call| call.span == span && call.node == node)
+            }
+            crate::flow_slice_content::SliceExpr::FrameShadowed { inner, .. } => {
+                self.fresh_call_return_for(inner, node)
+            }
+            _ => None,
+        }
+    }
+
+    /// Widen `node` at a VALUE (member / mutable-declaration) position
+    /// when the read carries widening provenance: a completed
+    /// fresh-literal call (the whole value listed → it widens; a
+    /// union-carried deposit → exactly the listed constituents widen), or
+    /// a widening-membership local read (`All` → a lone literal widens to
+    /// its primitive and a union widens every literal arm; `Partial` →
+    /// exactly the recorded fresh values). Every other read passes
+    /// through unchanged.
+    fn widen_value_position_read(
         &self,
         expr: &crate::flow_slice_content::SliceExpr,
         node: SemanticNodeId,
     ) -> SemanticNodeId {
-        if !self.reads_widening_literal_local(expr) {
-            return node;
+        if let Some(call) = self.fresh_call_return_for(expr, node) {
+            if call.values.contains(&node) {
+                return widen_fresh_read_node(self.dispatch, node);
+            }
+            return widen_values_within(self.dispatch, node, &call.values);
         }
-        widen_fresh_read_node(self.dispatch, node)
+        if let crate::flow_slice_content::SliceExpr::Local { name, .. } = expr {
+            match self.membership_of(name.as_ref()) {
+                Some(WideningMembership::All) => {
+                    return widen_fresh_read_node(self.dispatch, node);
+                }
+                Some(WideningMembership::Partial(values)) => {
+                    return widen_values_within(self.dispatch, node, values);
+                }
+                None => {}
+            }
+        }
+        node
     }
 
     /// Lower one body-position `TypeExpr` (a fully lowered expression
@@ -8658,12 +8830,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             let outcome = self.eval_expr(expr);
                             if let Some(node) = self.settle(outcome) {
                                 fresh_literal |= self.holds.len() > holds_before;
-                                // A COMPLETED call that closed fresh feeds
-                                // the same join: its executor-marked
-                                // fresh-literal return is a fresh source
-                                // here, exactly as a bare literal argument
-                                // is.
-                                fresh_literal |= self.call_fresh_literal_returns.contains(&node);
+                                // A COMPLETED call that closed on a
+                                // WHOLE-return fresh literal feeds the
+                                // same join — matched by its authored
+                                // call-site span, never by the interned
+                                // literal value, so a sibling arm's
+                                // authored pin of the same value is never
+                                // fresh. A union-carried fresh deposit
+                                // stays pinned at the return position (the
+                                // checker widens it only at value
+                                // positions).
+                                fresh_literal |= self
+                                    .fresh_call_return_for(expr, node)
+                                    .is_some_and(|call| call.values.contains(&node));
                                 contributors.push(FlowContribution {
                                     node,
                                     fresh_literal,
@@ -9495,7 +9674,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     kind,
                     init,
                     declared,
-                    widening_literal,
+                    freshness,
                 } => {
                     // A lexical declaration shadows any outer same-named
                     // binding for the extent of its block scope: record
@@ -9552,7 +9731,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             let marker = self.unmodeled_position();
                             self.set_declared_local(name, *kind, Some(marker));
                             if !no_init_var_with_reaching_value {
-                                self.bind_local(name, *kind, marker, false, false);
+                                self.bind_local(name, *kind, marker, None, false);
                             }
                             continue;
                         }
@@ -9568,7 +9747,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let arms = self.dispatch.union_arms_of(declared_node);
                         match (init, arms) {
                             (None, _) | (Some(_), None) => {
-                                self.bind_local(name, *kind, declared_node, false, false);
+                                self.bind_local(name, *kind, declared_node, None, false);
                                 continue;
                             }
                             (Some(init), Some(arms)) => {
@@ -9589,7 +9768,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                         declared_node
                                     }
                                 };
-                                self.bind_local(name, *kind, node, false, false);
+                                self.bind_local(name, *kind, node, None, false);
                                 continue;
                             }
                         }
@@ -9600,9 +9779,80 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // the whole declaration, so nothing here can observe
                     // an unselected sibling.
                     if let Some(init) = init {
+                        // A MIXED-freshness conditional `const`
+                        // initializer (a bare fresh literal arm beside an
+                        // authored pin, a call, a reference): evaluate
+                        // per-arm so the binding records EXACTLY which
+                        // values widen at a widening read — pinned-wins
+                        // collapse of equal constituents, then Partial
+                        // membership over the surviving fresh values. An
+                        // all-fresh or all-pinned tree keeps the plain
+                        // path below.
+                        if *kind == crate::flow_slice_content::SliceBindingKind::Const
+                            && freshness.is_mixed()
+                            && matches!(init, crate::flow_slice_content::SliceExpr::Union { .. })
+                        {
+                            let mut parts: Vec<(SemanticNodeId, bool)> = Vec::new();
+                            self.collect_evolving_parts(init, freshness, &mut parts);
+                            let mut merged: Vec<(SemanticNodeId, bool)> = Vec::new();
+                            for (node, fresh) in parts {
+                                let data = self.dispatch.graph().node_data(node);
+                                match merged.iter_mut().find(|(existing, _)| {
+                                    self.dispatch.graph().node_data(*existing) == data
+                                }) {
+                                    Some((_, existing_fresh)) => *existing_fresh &= fresh,
+                                    None => merged.push((node, fresh)),
+                                }
+                            }
+                            let nodes: Vec<SemanticNodeId> =
+                                merged.iter().map(|(node, _)| *node).collect();
+                            let value = self
+                                .dispatch
+                                .intern_normalized_union_or_intersection(&nodes, true);
+                            let fresh_values: Vec<SemanticNodeId> = merged
+                                .iter()
+                                .filter(|(_, fresh)| *fresh)
+                                .map(|(node, _)| *node)
+                                .collect();
+                            let membership = if fresh_values.is_empty() {
+                                None
+                            } else if fresh_values.len() == merged.len() {
+                                Some(WideningMembership::All)
+                            } else {
+                                Some(WideningMembership::Partial(Arc::from(
+                                    fresh_values.into_boxed_slice(),
+                                )))
+                            };
+                            self.bind_local(name, *kind, value, membership, false);
+                            continue;
+                        }
                         match self.eval_expr(init) {
                             Positional::Value(node) => {
-                                self.bind_local(name, *kind, node, *widening_literal, false);
+                                let membership =
+                                    self.binding_init_membership(*kind, init, node, freshness);
+                                match kind {
+                                    crate::flow_slice_content::SliceBindingKind::Const => {
+                                        self.bind_local(name, *kind, node, membership, false);
+                                    }
+                                    // A MUTABLE declaration widens its
+                                    // fresh provenance AT the declaration
+                                    // (`let a = idInf(1)` is `number`),
+                                    // exactly as a bare literal
+                                    // initializer already lowered widened.
+                                    crate::flow_slice_content::SliceBindingKind::Let
+                                    | crate::flow_slice_content::SliceBindingKind::Var => {
+                                        let node = match &membership {
+                                            Some(WideningMembership::All) => {
+                                                widen_fresh_read_node(self.dispatch, node)
+                                            }
+                                            Some(WideningMembership::Partial(values)) => {
+                                                widen_values_within(self.dispatch, node, values)
+                                            }
+                                            None => node,
+                                        };
+                                        self.bind_local(name, *kind, node, None, false);
+                                    }
+                                }
                             }
                             Positional::Hold => {}
                             // An UNMODELLED initializer binds the typed
@@ -9619,7 +9869,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 let marker = super::flow_return_callee::unmodeled_position_marker(
                                     self.dispatch,
                                 );
-                                self.bind_local(name, *kind, marker, false, true);
+                                self.bind_local(name, *kind, marker, None, true);
                             }
                         }
                     }
@@ -10754,11 +11004,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // a value position keeps it.
                 if let crate::semantic_query::ResolvedCallResult::Selected {
                     return_type,
-                    fresh_literal_return: true,
+                    fresh_literal_returns,
                     ..
                 } = &result
                 {
-                    self.call_fresh_literal_returns.push(*return_type);
+                    if !fresh_literal_returns.is_empty() {
+                        self.call_fresh_literal_returns.push(FreshCallReturn {
+                            span: site.span(),
+                            node: *return_type,
+                            values: Arc::clone(fresh_literal_returns),
+                        });
+                    }
                 }
                 Some(Positional::Value(CallValue::of_resolved_call(
                     self.dispatch,

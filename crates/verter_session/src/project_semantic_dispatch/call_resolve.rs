@@ -1078,8 +1078,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                         selected,
                                         selected_signature,
                                         substitution,
-                                        return_type: inner_return,
-                                        fresh_literal_return,
+                                        return_type: _,
+                                        fresh_literal_returns,
                                     } => ResolveCallSelection::Selected {
                                         selected,
                                         selected_signature:
@@ -1087,11 +1087,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                                 selected_signature,
                                             ),
                                         substitution,
-                                        fresh_literal_returns: if fresh_literal_return {
-                                            vec![inner_return]
-                                        } else {
-                                            Vec::new()
-                                        },
+                                        fresh_literal_returns: fresh_literal_returns.to_vec(),
                                     },
                                     ResolvedCallResult::UnionSelected { selections, .. } => {
                                         ResolveCallSelection::UnionSelected {
@@ -2019,33 +2015,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut fresh_literal_returns = Vec::new();
         match &candidate.return_carrier {
             SignatureReturnCarrier::Declared(declared) => {
-                let seed = self.substitute_canonical(*declared, &substitution);
-                // Freshness provenance: a NAKED declared return (the raw
-                // annotation IS one of the clause's own binders) whose
-                // fixed bound is a FRESH-preserved bare literal closes on
-                // a fresh literal — the caller's return position widens
-                // it; a value position keeps it.
-                let declared_is_naked_binding = bindings
-                    .iter()
-                    .any(|binding| binding.param == *declared && binding.bound == seed);
-                if declared_is_naked_binding
-                    && self.binding_is_fresh_literal_deposit(session_id, *declared, seed)
-                {
-                    fresh_literal_returns.push(seed);
-                    concrete_seeds.push(seed);
-                } else {
-                    // A fresh literal fixed INSIDE the return's structure
-                    // (a member value, an array element) widens at the
-                    // call boundary itself — the checker's own reading of
-                    // `dwrap("x")` for `dwrap<T>(v: T): { box: T }` is
-                    // `{ box: string }` at every observed position.
-                    match self.fresh_widened_substitution(session_id, &substitution) {
-                        Some(widened) => {
-                            concrete_seeds.push(self.substitute_canonical(*declared, &widened));
-                        }
-                        None => concrete_seeds.push(seed),
-                    }
-                }
+                // Per-binder freshness at the call boundary (the checker's
+                // inference-widening rule, measured against the pinned
+                // checker): a FRESH literal deposit widens at the call
+                // UNLESS its binder appears at TOP LEVEL of the declared
+                // return — the binder itself, or a union / intersection
+                // constituent (`dwrap<T>(v: T): { box: T }` widens
+                // `dwrap("x")` to `{ box: string }`; `unionD<T>(x: T):
+                // T | null` keeps `unionD("x")` as `"x" | null`; a
+                // conditional-embedded binder widens at every depth). A
+                // kept deposit reaching the return through UNION structure
+                // stays FRESH for the caller's value positions, while
+                // intersection reduction pins it (`andD<T>(x: T): T & {}`
+                // keeps `"x"` pinned everywhere).
+                self.collect_union_top_level_fresh_bounds(
+                    session_id,
+                    *declared,
+                    &substitution,
+                    &mut fresh_literal_returns,
+                );
+                let widened = self.fresh_widened_substitution_outside_top_level(
+                    session_id,
+                    &substitution,
+                    *declared,
+                );
+                concrete_seeds.push(
+                    self.substitute_canonical(*declared, widened.as_ref().unwrap_or(&substitution)),
+                );
             }
             SignatureReturnCarrier::Function(source) => match source {
                 verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
@@ -2079,35 +2075,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         {
                             let seed =
                                 self.substitute_canonical(result.return_type(), &substitution);
-                            // A whole-return that IS a fresh-deposited
-                            // literal closes on a fresh literal: the
-                            // caller's return join widens it, a value
-                            // position keeps it. A fresh literal fixed
-                            // INSIDE the return's structure widens at
-                            // the call boundary itself (`wrap("x")` for
+                            // Per-binder freshness at the call boundary,
+                            // exactly as the declared-annotation arm: a
+                            // fresh deposit KEPT at top level of the
+                            // instantiated flow return (the whole return,
+                            // or a union / intersection constituent) stays
+                            // — the whole-return case is fresh at the
+                            // caller's return join, a union-carried one at
+                            // the caller's value positions. A deposit
+                            // fixed INSIDE the return's structure widens
+                            // at the call boundary itself (`wrap("x")` for
                             // `wrap<T>(v: T) { return { box: v } }` is
                             // `{ box: string }` at every observed
-                            // position, member reads of the call
-                            // expression included): the callee's flow
-                            // return is re-taken under the WIDENED
-                            // bindings, because the instantiated flow
-                            // result carries the literal with no binder
-                            // left to substitute. An `as const` or
-                            // explicit-type-argument binding deposits as
-                            // authored, so neither path fires for it and
-                            // the literal stays pinned.
-                            let seed_is_fresh_literal =
-                                substitution.bindings().iter().any(|(param, bound)| {
-                                    *bound == seed
-                                        && self.binding_is_fresh_literal_deposit(
-                                            session_id, *param, seed,
-                                        )
-                                });
-                            if seed_is_fresh_literal {
-                                fresh_literal_returns.push(seed);
-                                concrete_seeds.push(seed);
-                            } else if let Some(widened_substitution) =
-                                self.fresh_widened_substitution(session_id, &substitution)
+                            // position): the callee's flow return is
+                            // re-taken under the WIDENED bindings, because
+                            // the instantiated flow result carries the
+                            // literal with no binder left to substitute.
+                            // An `as const` or explicit-type-argument
+                            // binding deposits as authored, so neither
+                            // path fires for it and the literal stays
+                            // pinned.
+                            self.collect_union_top_level_fresh_bounds(
+                                session_id,
+                                result.return_type(),
+                                &substitution,
+                                &mut fresh_literal_returns,
+                            );
+                            if let Some(widened_substitution) = self
+                                .fresh_widened_substitution_outside_top_level(
+                                    session_id,
+                                    &substitution,
+                                    result.return_type(),
+                                )
                             {
                                 let widened_args: Vec<SemanticNodeId> = raw_type_params
                                     .iter()
@@ -2499,19 +2498,104 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .any(|session| session.id == session_id && session.fresh_literal_deposit(param, bound))
     }
 
-    /// The substitution with every FRESH-deposited literal binding
-    /// widened to its primitive — the checker's rule for a fresh literal
-    /// fixed INSIDE the return's structure: `wrap("x")` for
-    /// `wrap<T>(v: T) { return { box: v } }` reads `{ box: string }` at
-    /// every observed position (the caller's return, a binding
-    /// initializer, a member value, a member read of the call
+    /// Whether one fresh-literal deposit is KEPT at the call boundary:
+    /// its binder — or, for an already-instantiated structure, the
+    /// deposited literal itself — appears at TOP LEVEL of the return
+    /// structure: the node itself, or a union / intersection constituent,
+    /// recursively. This is the checker's inference-widening exemption
+    /// boundary (measured against the pinned checker): a binder reachable
+    /// only through deeper structure — an object member, an array
+    /// element, a CONDITIONAL branch at any depth — widens at the call
+    /// boundary.
+    fn deposit_at_top_level(
+        &self,
+        structure: SemanticNodeId,
+        param: SemanticNodeId,
+        bound: SemanticNodeId,
+    ) -> bool {
+        if structure == param || structure == bound {
+            return true;
+        }
+        match self.graph().node_data(structure).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members
+                .iter()
+                .any(|member| self.deposit_at_top_level(*member, param, bound)),
+            Some(SemanticNodeData::Intersection(members)) => members
+                .iter()
+                .any(|member| self.deposit_at_top_level(*member, param, bound)),
+            _ => false,
+        }
+    }
+
+    /// Collect the fresh-literal deposits reaching `structure`'s top level
+    /// through UNION structure only (the binder or deposited literal
+    /// itself, or a union constituent, recursively) into
+    /// `fresh_literal_returns`. These stay FRESH on the call's return: a
+    /// caller's value (member) position widens them, and the return join
+    /// widens the whole return when it IS one of them. Intersection
+    /// constituents are deliberately excluded — the checker's intersection
+    /// reduction pins the literal (measured: `{ a: andD("x") }` for
+    /// `andD<T>(x: T): T & {}` keeps `"x"` where `{ a: unionD("x") }` for
+    /// `unionD<T>(x: T): T | null` widens to `string | null`).
+    fn collect_union_top_level_fresh_bounds(
+        &self,
+        session_id: SessionId,
+        structure: SemanticNodeId,
+        substitution: &CanonicalTypeSubstitution,
+        fresh_literal_returns: &mut Vec<SemanticNodeId>,
+    ) {
+        let graph = self.graph();
+        for (param, bound) in substitution.bindings() {
+            if !matches!(
+                graph.node_data(*bound).as_deref(),
+                Some(SemanticNodeData::Literal(_))
+            ) {
+                continue;
+            }
+            if !self.binding_is_fresh_literal_deposit(session_id, *param, *bound) {
+                continue;
+            }
+            if self.deposit_at_union_top_level(structure, *param, *bound)
+                && !fresh_literal_returns.contains(bound)
+            {
+                fresh_literal_returns.push(*bound);
+            }
+        }
+    }
+
+    /// The UNION-only half of [`Self::deposit_at_top_level`].
+    fn deposit_at_union_top_level(
+        &self,
+        structure: SemanticNodeId,
+        param: SemanticNodeId,
+        bound: SemanticNodeId,
+    ) -> bool {
+        if structure == param || structure == bound {
+            return true;
+        }
+        match self.graph().node_data(structure).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members
+                .iter()
+                .any(|member| self.deposit_at_union_top_level(*member, param, bound)),
+            _ => false,
+        }
+    }
+
+    /// The substitution with every FRESH-deposited literal binding the
+    /// checker widens at the call boundary widened to its primitive —
+    /// every fresh deposit whose binder does NOT appear at top level of
+    /// `return_structure` (see [`Self::deposit_at_top_level`]):
+    /// `wrap("x")` for `wrap<T>(v: T) { return { box: v } }` reads
+    /// `{ box: string }` at every observed position (the caller's return,
+    /// a binding initializer, a member value, a member read of the call
     /// expression). Bindings without a fresh deposit — authored pins,
-    /// explicit type arguments, outer-context bindings — stay
-    /// unchanged; `None` when no binding is a fresh literal.
-    fn fresh_widened_substitution(
+    /// explicit type arguments, outer-context bindings — and deposits
+    /// kept at top level stay unchanged; `None` when nothing widens.
+    fn fresh_widened_substitution_outside_top_level(
         &self,
         session_id: SessionId,
         substitution: &CanonicalTypeSubstitution,
+        return_structure: SemanticNodeId,
     ) -> Option<CanonicalTypeSubstitution> {
         let graph = self.graph();
         let mut any_widened = false;
@@ -2521,7 +2605,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .map(|(param, bound)| {
                 let widened = match graph.node_data(*bound).as_deref() {
                     Some(SemanticNodeData::Literal(value))
-                        if self.binding_is_fresh_literal_deposit(session_id, *param, *bound) =>
+                        if self.binding_is_fresh_literal_deposit(session_id, *param, *bound)
+                            && !self.deposit_at_top_level(return_structure, *param, *bound) =>
                     {
                         let primitive = match value {
                             verter_type_expr::LiteralValue::String(_) => PrimitiveKind::String,

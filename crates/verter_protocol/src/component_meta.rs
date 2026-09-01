@@ -2970,21 +2970,23 @@ mod tests {
             );
         }
 
-        // COVERAGE: the schema's reasons are a contiguous `1..=N` block (tag 0
-        // is the unspecified sentinel), so a proto value added without a Rust
-        // variant leaves a hole here.
+        // COVERAGE: every DECLARED non-zero proto tag must map onto exactly
+        // one Rust variant — keyed on the declared set itself, not on
+        // contiguity, so retiring a reason under the never-reuse rule (a
+        // `reserved` tag leaving a hole) stays a legal change while an
+        // added-but-unmapped tag still fails. The declared set is probed
+        // through the generated `TryFrom` well past the mapped maximum, so
+        // a new tag above the current ceiling cannot hide either.
         mapped_numbers.sort_unstable();
-        let expected_numbers: Vec<i32> = (1..=ALL.len() as i32).collect();
+        let max_mapped = *mapped_numbers.last().expect("at least one reason maps");
+        let declared_numbers: Vec<i32> = (1..=max_mapped + 256)
+            .filter(|tag| proto::SurfacePartialReason::try_from(*tag).is_ok())
+            .collect();
         assert_eq!(
-            mapped_numbers, expected_numbers,
+            mapped_numbers, declared_numbers,
             "every declared `SurfacePartialReason` tag must have exactly one Rust variant mapped \
-             onto it — a gap means the proto grew a reason the Rust taxonomy cannot express"
-        );
-        assert!(
-            proto::SurfacePartialReason::try_from(ALL.len() as i32 + 1).is_err(),
-            "the taxonomy must end at tag {} — a higher declared tag is a reason with no Rust \
-             variant and no serde spelling",
-            ALL.len()
+             onto it — a declared tag missing from the mapped set is a reason the Rust taxonomy \
+             cannot express, and a mapped tag missing from the declared set is a stale variant"
         );
     }
 

@@ -573,12 +573,15 @@ describe("surface partial reason taxonomy parity", () => {
   };
 
   it("declares every reason the producer can emit", () => {
-    // A non-empty, contiguous 1..n taxonomy — so a reserved/removed tag shows
-    // up here rather than as a silently skipped decoder row.
+    // A non-empty taxonomy of unique positive tags. Keyed on the DECLARED
+    // value set, not on contiguity: retiring a reason under the never-reuse
+    // rule leaves a reserved hole, which is a legal change — while every
+    // declared value is still driven through the real decoder by the
+    // per-value cases below, so an added-but-unmapped tag still fails.
     expect(named.length).toBeGreaterThan(0);
-    expect(named.map((value) => value.number)).toEqual(
-      Array.from({ length: named.length }, (_, i) => i + 1),
-    );
+    const numbers = named.map((value) => value.number);
+    expect(new Set(numbers).size).toBe(numbers.length);
+    expect(numbers.every((number) => number >= 1)).toBe(true);
   });
 
   it.each(named.map((value) => [value.number, value.name, nativeNameOf(value.name)] as const))(
@@ -598,7 +601,10 @@ describe("surface partial reason taxonomy parity", () => {
   });
 
   it("fails closed on a reason tag the taxonomy does not declare", () => {
-    expect(() => decodeReasonsFor([named.length + 1])).toThrow(/unknown surface partial reason/);
+    // The end-of-taxonomy probe derives from the DECLARED maximum, so it
+    // stays an undeclared tag even when the declared set carries holes.
+    const beyond = Math.max(...named.map((value) => value.number)) + 1;
+    expect(() => decodeReasonsFor([beyond])).toThrow(/unknown surface partial reason/);
     expect(() => decodeReasonsFor([0])).toThrow(/unknown surface partial reason/);
   });
 });

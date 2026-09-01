@@ -407,14 +407,18 @@ pub enum SliceStatement {
         /// body-local type declarations ARE in scope in it, so it always
         /// carries the frame gate's verdict.
         declared: Option<GatedType>,
-        /// Whether the binding carries a WIDENING literal type: an
-        /// unannotated `const` whose initializer is a bare literal
-        /// expression with no const assertion (`const b = 1`). Reads of
-        /// such a binding widen to the literal's primitive at
-        /// return-object member positions and at the return join —
-        /// `1 as const` / an annotated `const b: 1` stay non-widening
-        /// and preserve the literal.
-        widening_literal: bool,
+        /// The initializer's FRESHNESS shape for an unannotated `const` —
+        /// the evaluator's widening-membership input, mirroring the
+        /// lowered value tree exactly as an assignment's does. An
+        /// all-fresh tree (`const b = 1`, `f ? 1 : "s"`) is the classic
+        /// widening-literal binding: reads widen every literal arm at
+        /// return-object member positions and at the return join. A MIXED
+        /// tree carries per-arm verdicts, so the evaluator widens exactly
+        /// the fresh arms and keeps authored pins (`1 as const`, a call,
+        /// a reference). Annotated declarators and `let` / `var` (whose
+        /// bare literal initializers already widened at lowering) stay
+        /// `Pinned`.
+        freshness: SliceFreshness,
     },
     /// A return-free loop with no selected downstream transfer: fall-through
     /// transparent because no captured guard, call, write, or escaping `var`
@@ -2205,24 +2209,6 @@ fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
     }
 }
 
-/// Whether `expression` is a bare (fresh) literal, or a conditional tree
-/// whose EVERY leaf is one — the shape whose every evaluated arm is a
-/// fresh literal, so a per-binding widening membership widens exactly
-/// what the checker widens. The descent mirrors
-/// [`assignment_rhs_freshness`]: parentheses and conditionals only;
-/// every other form is one leaf verdict from the shared bare-literal
-/// authority.
-fn expr_is_bare_literal_tree(expression: &Expression<'_>) -> bool {
-    match expression {
-        Expression::ParenthesizedExpression(paren) => expr_is_bare_literal_tree(&paren.expression),
-        Expression::ConditionalExpression(conditional) => {
-            expr_is_bare_literal_tree(&conditional.consequent)
-                && expr_is_bare_literal_tree(&conditional.alternate)
-        }
-        _ => expr_is_bare_literal(expression),
-    }
-}
-
 /// The top-level FRESHNESS shape of one applied write's right-hand side —
 /// the lowering-time input to the evaluator's evolving-target widening
 /// rule (an assignment into a binding with NO declared authority widens
@@ -2248,6 +2234,36 @@ pub enum SliceFreshness {
     /// A conditional expression: per-branch verdicts, aligned with the
     /// lowered [`SliceExpr::Union`] arms (`[consequent, alternate]`).
     PerArm(Arc<[SliceFreshness]>),
+}
+
+impl SliceFreshness {
+    /// Whether EVERY leaf of the tree is fresh (and the tree is
+    /// non-empty) — the classic widening-literal shape.
+    #[must_use]
+    pub fn all_fresh(&self) -> bool {
+        match self {
+            Self::Fresh => true,
+            Self::Pinned => false,
+            Self::PerArm(arms) => !arms.is_empty() && arms.iter().all(Self::all_fresh),
+        }
+    }
+
+    /// Whether ANY leaf of the tree is fresh.
+    #[must_use]
+    pub fn any_fresh(&self) -> bool {
+        match self {
+            Self::Fresh => true,
+            Self::Pinned => false,
+            Self::PerArm(arms) => arms.iter().any(Self::any_fresh),
+        }
+    }
+
+    /// Whether the tree mixes fresh and pinned leaves — the shape whose
+    /// widening decision needs PER-ARM evaluation.
+    #[must_use]
+    pub fn is_mixed(&self) -> bool {
+        self.any_fresh() && !self.all_fresh()
+    }
 }
 
 /// The freshness mirror for one assignment right-hand side. See
@@ -4240,33 +4256,35 @@ impl Lowerer<'_> {
                                 &[],
                             )
                         });
-                        // A WIDENING literal binding: an unannotated
-                        // `const` initialized from a bare literal with no
-                        // const assertion — or from a conditional whose
-                        // EVERY leaf is such a literal (`f ? 1 : "s"`),
-                        // where the checker widens every arm at a
-                        // widening read (`{ label: v }` reads
-                        // `string | number`). A conditional with any
-                        // non-bare leaf (an `as const` arm, a call, a
-                        // reference) stays outside the membership: the
-                        // single per-binding fact cannot express
-                        // per-arm freshness, and widening a pinned arm
-                        // would publish a superset. `let` / `var`
+                        // The initializer's FRESHNESS shape for an
+                        // unannotated `const` — the evaluator's widening
+                        // membership input. An all-fresh tree (a bare
+                        // literal, or a conditional whose EVERY leaf is
+                        // one — `f ? 1 : "s"`) is the classic
+                        // widening-literal binding: the checker widens
+                        // every arm at a widening read (`{ label: v }`
+                        // reads `string | number`). A MIXED tree (an
+                        // `as const` arm, a call, a reference beside a
+                        // fresh leaf) carries per-arm verdicts so the
+                        // evaluator widens exactly the fresh arms and
+                        // keeps the authored pins. `let` / `var`
                         // initializers already widened at `BindingInit`
                         // lowering, and an annotated `const` takes its
-                        // declared type.
-                        let widening_literal = kind == SliceBindingKind::Const
-                            && declared.is_none()
-                            && declarator
+                        // declared type — both stay `Pinned` here.
+                        let freshness = if kind == SliceBindingKind::Const && declared.is_none() {
+                            declarator
                                 .init
                                 .as_ref()
-                                .is_some_and(expr_is_bare_literal_tree);
+                                .map_or(SliceFreshness::Pinned, assignment_rhs_freshness)
+                        } else {
+                            SliceFreshness::Pinned
+                        };
                         out.push(SliceStatement::Binding {
                             name: Arc::from(id.name.as_str()),
                             kind,
                             init,
                             declared,
-                            widening_literal,
+                            freshness,
                         });
                     }
                 }

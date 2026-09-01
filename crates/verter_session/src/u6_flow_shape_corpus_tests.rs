@@ -306,9 +306,13 @@ impl Owner {
         }
     }
 
-    /// Whether the owner is a scheduled `U*` block. `false` means nobody is
-    /// assigned, which is exactly the class that silently blocks a merge.
-    pub(crate) const fn is_scheduled_block(self) -> bool {
+    /// Whether the owner names a semantic authority whose deferred rows ride
+    /// the shared convergence gate. These owners are NOT independently
+    /// scheduled blocks — none has its own schedulable unit; a deferred row
+    /// under one is an obligation of the convergence proof that must retire
+    /// it deliberately. `false` means nobody is assigned at all, which is
+    /// exactly the class that silently blocks a merge.
+    pub(crate) const fn has_convergence_owner(self) -> bool {
         !matches!(
             self,
             Self::SharedTypeResolution | Self::SharedCompilePipeline | Self::FrameworkOnly
@@ -1449,10 +1453,6 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "095993c48c8f8979211c6c00984ccb8b4a8516d601f2e1fea448eafaaffb6ad8",
     ),
     (
-        "X26_switch_assertion_case_scope",
-        "a035d5a7ca9ff3106f1057ae8678e7f3b9c5a5ca1c4f8e84574b9c40c33d82c4",
-    ),
-    (
         "X27_finally_fallthrough_break_override",
         "d2288851e3a19b88563f2253ed7722f95191df0682650547e190f8dd3b58013c",
     ),
@@ -1767,6 +1767,122 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "N95_instanceof_related_arm_drops_unrelated_class_arm",
         "50706288d26387ef6e464f1b79e31e783bff2bb561539cc26e0a24c37357217e",
+    ),
+    (
+        "N96_branch_join_mixed_pinned_arm",
+        "cb79cc4a3063944f86f890e1450c0a2ee0a9c30c6136be2705e3fb0a74e3afbc",
+    ),
+    (
+        "N97_widening_const_read_through_let_initializer",
+        "1caafb1623f5e48fea49e924dd69609a23d678693a10bf8e70e23fff1797f157",
+    ),
+    (
+        "N98_fresh_call_join_sibling_pin_number",
+        "167a1298a202e5b84e7653503842a755f8d10a3653967a110490b7bf6270c5d2",
+    ),
+    (
+        "N99_fresh_call_join_sibling_pin_string",
+        "e07427226c7817232be8773c115f09f489cc5eb6f061701d4098f9a08461e288",
+    ),
+    (
+        "N100_fresh_call_join_sibling_pin_boolean",
+        "73a488a8622baa3e8f379b6d7f39bfbcce1b86d97049ea7945983e398ad857f0",
+    ),
+    (
+        "N101_fresh_call_join_sibling_annotated_const",
+        "aa83cbf9492ad6a69955f9cddd598ae272e909720fc1edd4cb5b0d4968b4633c",
+    ),
+    (
+        "N102_fresh_call_join_both_arms_widen",
+        "a9dc78d4b6e884fb76f15a783bf99814af77370340196f90c7986c3e7a96afd9",
+    ),
+    (
+        "N103_fresh_call_join_distinct_literal_arms",
+        "d2f6e5f3d73f3f4e102b13df9eefb3ff6bc0e3debe546b4b822e24c62ace7c1c",
+    ),
+    (
+        "N104_declared_union_null_keeps_literal",
+        "689c37e2ebb842cd2d183e364e987589128a22c1b6faf2c24aaefc945a627848",
+    ),
+    (
+        "N105_declared_union_undefined_keeps_literal",
+        "288f820f2838008e888ed32300f5491273093421f68a3fc70b58b5ff69a995c9",
+    ),
+    (
+        "N107_declared_union_join_with_pinned_arm",
+        "d6b57f1e9493fa43db04d5345693e65734eef30be7b8fd60e22e60786ad688c5",
+    ),
+    (
+        "N108_flow_inferred_union_keeps_literal",
+        "f00249216ff49425be836597d07ffbe535033a71ec3386e6c832fb23fc5fae4a",
+    ),
+    (
+        "N109_declared_union_explicit_type_argument",
+        "4014b768a705ef0f7a1dc67be225114c24589e7776e35b62d37290341bdda379",
+    ),
+    (
+        "N110_member_fresh_call_widens",
+        "7bb9ef2cb6d3f91db73bcb064a0ffbd2bbe83e43439410da04f05415deda9e4a",
+    ),
+    (
+        "N111_member_fresh_call_binding_widens",
+        "33f929f2a20bd44ab99a2f0aaa4a7db9f4ad48d67670c66ac1858607a9d854a6",
+    ),
+    (
+        "N112_member_fresh_call_nested_widens",
+        "fbe4785c5b81e6eeb0148562593aa16f3db6c33bfb4d062520f149d49e971aff",
+    ),
+    (
+        "N113_member_union_call_fresh_arm_widens",
+        "0275f1d63d147cad7b5aacb87ab5cea9b049b882f82e586ec8f9e7f5d43e2791",
+    ),
+    (
+        "N114_member_union_binding_fresh_arm_widens",
+        "4fc67e22ad714259b7eccbca71856c16444f928410ef8c167f5159466514c93d",
+    ),
+    (
+        "N116_binding_fresh_call_const_widening_read",
+        "e3d55514de38ce18f68aa113a412a677bc1d1792179fbbccf70ff4ec07274c48",
+    ),
+    (
+        "N117_binding_fresh_call_let_widens_at_decl",
+        "eee481bb472bedb1822f599e15233c5ae25347d86992aeb6e5ee10c2579fafb3",
+    ),
+    (
+        "N118_binding_union_call_const_return_pinned",
+        "39e44ff409e42563045a21e38968d375f4b884ed4e14ba487c3752ae5adca759",
+    ),
+    (
+        "N119_binding_union_call_let_widens",
+        "f7a26551c6a84eba01426272f591d99d7402ddd5ccacecfa9e8ac3f0dff3d77d",
+    ),
+    (
+        "N120_membership_through_const_initializer",
+        "92d8ba410f7220598da6805a8eaf504aee92cfe5c93c8b74f5b2fbccfc49ff52",
+    ),
+    (
+        "N121_partial_membership_through_const_initializer",
+        "70d988ead7561445735c5f83937388dd1266ca06125f2565e6965a35161b34e5",
+    ),
+    (
+        "N122_membership_through_let_initializer_return",
+        "a41c746c0447cb4204efe4c68e095d549aebac9b0201a432e6506d21de150b78",
+    ),
+    (
+        "N123_mixed_pinned_same_literal_stays_pinned",
+        "192375a983c1b95f322735a12999e83b5f465c43020cddce455c28fa7939e6e9",
+    ),
+    (
+        "N124_mixed_fresh_and_call_arm_member_read",
+        "efa1cf34c335c4c63ac3267c06050c70c3601058cbc12998a7a4fb0212b04d84",
+    ),
+    (
+        "N125_mixed_pinned_arm_return_read_stays_pinned",
+        "03fa1a0181fff39c32b1ba8c44cb33ac071fa5adf50925e230e7e373d1af7fd9",
+    ),
+    (
+        "N126_all_fresh_conditional_return_read_stays_union",
+        "1305271c5a32b029c7bf278529408ccac71eaf00f1beffd46e5744c884be9df3",
     ),
 ];
 
@@ -2695,6 +2811,14 @@ mod corpus_suite {
             "X87_read_only_let_capture_keeps_reaching_literal",
             "X106_triple_nested_closure_return",
             "N91_typeof_function_over_member_surface_reads_never",
+            "N98_fresh_call_join_sibling_pin_number",
+            "N99_fresh_call_join_sibling_pin_string",
+            "N100_fresh_call_join_sibling_pin_boolean",
+            "N101_fresh_call_join_sibling_annotated_const",
+            "N102_fresh_call_join_both_arms_widen",
+            "N116_binding_fresh_call_const_widening_read",
+            "N117_binding_fresh_call_let_widens_at_decl",
+            "N122_membership_through_let_initializer_return",
         ];
         /// Deep-pinned rows whose `checker` text is NOT byte-comparable
         /// to the renderer, each with the PRESENTATION reason. Semantic
@@ -3004,11 +3128,99 @@ mod corpus_suite {
             ),
             (
                 "N96_branch_join_mixed_pinned_arm",
-                "the renderer spells the (KnownOwed-divergent) node `{ label: Union(1 | \"s\") }` where the checker prints `{ label: number | \"s\"; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ label: number | \"s\"; }`; the renderer spells the same node `{ label: Union(number | \"s\") }` — union spelling and member terminators differ",
             ),
             (
                 "N97_widening_const_read_through_let_initializer",
-                "the renderer spells the (KnownOwed-divergent) surface `{ label: 1 }` where the checker prints `{ label: number; }` — semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ label: number; }`; the renderer spells the same surface `{ label: number }` — object members print without the trailing `;` terminator",
+            ),
+            (
+                "X26_switch_assertion_case_scope",
+                "checker prints `{ c: string | number; }`; the renderer spells the (KnownOwed-divergent) node `Union({ c: string } | { c: string | number })` — the checker's reunion absorbs the subtype arm; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N103_fresh_call_join_distinct_literal_arms",
+                "checker prints `1 | 2`; the renderer spells the same node `Union(2 | 1)` — constituent order differs",
+            ),
+            (
+                "N104_declared_union_null_keeps_literal",
+                "checker prints `\"x\" | null`; the renderer spells the same node `Union(\"x\" | null)`",
+            ),
+            (
+                "N105_declared_union_undefined_keeps_literal",
+                "checker prints `\"x\" | undefined`; the renderer spells the same node `Union(\"x\" | undefined)`",
+            ),
+            (
+                "N107_declared_union_join_with_pinned_arm",
+                "checker prints `1 | null`; the renderer spells the same node `Union(1 | null)`",
+            ),
+            (
+                "N108_flow_inferred_union_keeps_literal",
+                "checker prints `\"x\" | null`; the renderer spells the same node `Union(\"x\" | null)`",
+            ),
+            (
+                "N109_declared_union_explicit_type_argument",
+                "checker prints `string | null`; the renderer spells the same node `Union(string | null)`",
+            ),
+            (
+                "N118_binding_union_call_const_return_pinned",
+                "checker prints `\"x\" | null`; the renderer spells the same node `Union(\"x\" | null)`",
+            ),
+            (
+                "N119_binding_union_call_let_widens",
+                "checker prints `string | null`; the renderer spells the same node `Union(string | null)`",
+            ),
+            (
+                "N125_mixed_pinned_arm_return_read_stays_pinned",
+                "checker prints `\"s\" | 1`; the renderer spells the same node `Union(1 | \"s\")` — constituent order differs",
+            ),
+            (
+                "N126_all_fresh_conditional_return_read_stays_union",
+                "checker prints `1 | 2`; the renderer spells the same node `Union(1 | 2)`",
+            ),
+            (
+                "N110_member_fresh_call_widens",
+                "checker prints `{ a: number; }`; the renderer spells the same surface `{ a: number }` — object members print without the trailing `;` terminator",
+            ),
+            (
+                "N111_member_fresh_call_binding_widens",
+                "checker prints `{ a: number; }`; the renderer spells the same surface `{ a: number }` — object members print without the trailing `;` terminator",
+            ),
+            (
+                "N112_member_fresh_call_nested_widens",
+                "checker prints `{ x: { a: number; }; }`; the renderer spells the same surface `{ x: { a: number } }` — object members print without the trailing `;` terminator",
+            ),
+            (
+                "N113_member_union_call_fresh_arm_widens",
+                "checker prints `{ a: string | null; }`; the renderer spells the same node `{ a: Union(string | null) }` — union spelling and member terminators differ",
+            ),
+            (
+                "N114_member_union_binding_fresh_arm_widens",
+                "checker prints `{ a: string | null; }`; the renderer spells the same node `{ a: Union(string | null) }` — union spelling and member terminators differ",
+            ),
+            (
+                "N115_member_intersection_call_stays_pinned",
+                "the renderer spells the (KnownOwed-divergent) surface `{ a: {  } & \"x\" }` where the checker prints `{ a: \"x\"; }` — the checker reduces the intersection; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N106_declared_intersection_keeps_literal",
+                "the renderer spells the (KnownOwed-divergent) node `{  } & \"x\"` where the checker prints `\"x\"` — the checker reduces the intersection; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N120_membership_through_const_initializer",
+                "checker prints `{ label: number; }`; the renderer spells the same surface `{ label: number }` — object members print without the trailing `;` terminator",
+            ),
+            (
+                "N121_partial_membership_through_const_initializer",
+                "checker prints `{ label: number | \"s\"; }`; the renderer spells the same node `{ label: Union(number | \"s\") }` — union spelling and member terminators differ",
+            ),
+            (
+                "N123_mixed_pinned_same_literal_stays_pinned",
+                "checker prints `{ label: 1; }`; the renderer spells the same surface `{ label: 1 }` — object members print without the trailing `;` terminator",
+            ),
+            (
+                "N124_mixed_fresh_and_call_arm_member_read",
+                "checker prints `{ label: number | boolean; }`; the renderer spells the same node `{ label: Union(number | boolean) }` — union spelling and member terminators differ",
             ),
         ];
         let mut failures = Vec::new();
@@ -4037,11 +4249,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member `caught` Union — deepening pins the exact constituent set",
     ),
     (
-        "X26_switch_assertion_case_scope",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
         "X27_finally_fallthrough_break_override",
         Owner::U6ValueInference,
         "root Union — deepening pins the exact constituent set",
@@ -4297,29 +4504,19 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 ];
 
 /// Burn-down ceiling of [`SHALLOW_PINNED_ROWS`]. Lower freely as rows
-/// deepen; raising it admits a new shallow exception. Asserted by
-/// `value_indistinct_rows_carry_deep_pins_or_are_named_shallow`.
+/// deepen; raising it admits a new shallow exception and must record why.
+/// Asserted by `value_indistinct_rows_carry_deep_pins_or_are_named_shallow`.
 ///
-/// Raised from 81 to 87 for six deliberately-shallow rows, all blocked
-/// structurally rather than by convenience: three carry a measured value the
-/// recursive vocabulary cannot spell (`Array(…)` for the two `Array.isArray`
-/// rows, `Opaque(Miss)` for the explicit-`undefined` evolving binding), and
-/// three are over-narrow CONTROLS whose published value EQUALS the checker
-/// while the result is a typed `ReturnOnly` — a recursive pin on those would
-/// have to assert a divergence the row does not have, which
+/// The remaining shallow entries are each structurally blocked rather than
+/// shallow by convenience: a measured value the recursive vocabulary cannot
+/// spell, an over-narrow CONTROL whose published value EQUALS the checker
+/// while the result is a typed `ReturnOnly` (a recursive pin would have to
+/// assert a divergence the row does not have, which
 /// `deep_pinned_rows_semantic_equality_follows_their_verdict` correctly
-/// rejects. Each entry records which of the two it is.
-///
-/// Raised to 88 when the evolving-target literal widening learned the
-/// fresh/pinned split: X95's published value now EQUALS the checker while
-/// the result stays a typed `ReturnOnly` (ConditionalVarDefinition), the
-/// same value-equals-checker class as N81/N84.
+/// rejects), or a recorded CHECKER text the deep-pin comparer cannot yet
+/// parse. Each ledger entry records which class it is in.
 #[cfg(test)]
-// Raised from 88 for the one deliberate shallow exception whose CHECKER
-// text the deep-pin comparer cannot yet parse (a `Record<K, V>` generic
-// in the recorded answer) — see the ledger entry's reason. Burn-down
-// pressure is unchanged: deepening any entry lowers this again.
-const SHALLOW_PINNED_ROWS_CEILING: usize = 73;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 72;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -4351,15 +4548,6 @@ const OPEN_DEBTS: &[&str] = &[
     // method and the walk authority has no lib/intrinsic member surface
     // for a primitive base (`UnrepresentableCallee`, ReturnOnly).
     "N09_narrow_then_write",
-    // A widening-literal `const` bound from a conditional with a PINNED
-    // arm (`f ? 1 : "s" as const`): the widening membership is a single
-    // per-binding fact, so the fresh arm stays pinned alongside the
-    // authored one where the checker widens exactly the fresh arm.
-    "N96_branch_join_mixed_pinned_arm",
-    // A widening-literal `const` read through a `let` initializer: the
-    // intermediate binding pins the literal where the checker widens it
-    // at the mutable declaration.
-    "N97_widening_const_read_through_let_initializer",
     // The impossible-predicate STATEMENT spelling keeps the dead `x`
     // contributor (`v: A | B | "ok" | "no"` where the checker computes
     // `"no" | "ok"`), wrong-and-warm. Exposed by the recursive expect
@@ -4492,6 +4680,7 @@ const OPEN_DEBTS: &[&str] = &[
     //    with the value-inference owner. Subtype absorption must NOT be
     //    added to the canonical layer; the debt closes in the inference
     //    layer that owns reunion.
+    "X26_switch_assertion_case_scope",
     "X36_labeled_break_drops_arm_assertion",
     "X39_try_catch_throw_point_join",
     "X45_switch_fallthrough_case_narrows_by_chain_tests",
@@ -4499,6 +4688,13 @@ const OPEN_DEBTS: &[&str] = &[
     "X47_try_catch_sequence_throw_point",
     "X48_try_catch_if_guard_throw_point",
     "X49_try_catch_new_callee_throw_point",
+    // ── INTERSECTION-REDUCTION residue, the same extensional-equality
+    //    class: the checker reduces a literal intersected with the empty
+    //    object to the bare literal; the canonical intersection keeps
+    //    both constituents. Clean and warm; closes with the same
+    //    value-inference reduction work.
+    "N106_declared_intersection_keeps_literal",
+    "N115_member_intersection_call_stays_pinned",
 ];
 
 // Per-owner conformance — the merge go/no-go
@@ -4519,14 +4715,14 @@ const OPEN_DEBTS: &[&str] = &[
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 3, 1, 2),
     (Owner::U2MappedTemplate, 4, 1, 2),
-    (Owner::U6CallResolve, 5, 4, 1),
-    // Seven try/catch- and reunion-family rows are parked as the
+    (Owner::U6CallResolve, 16, 15, 1),
+    // Eight switch-, try/catch- and reunion-family rows are parked as the
     // SUBTYPE-REUNION class: TypeScript's return-position reunion applies
     // subtype reduction and absorbs a subtype arm into its supertype; the
     // canonical union keeps both constituents. Extensionally equal, so
     // the rows stay clean and warm while parked with the value-inference
     // owner.
-    (Owner::U6ValueInference, 80, 63, 14),
+    (Owner::U6ValueInference, 93, 74, 16),
     (Owner::U6LoopClosure, 6, 1, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
     (Owner::U6FlowReturnSubstrate, 63, 47, 3),
@@ -4540,7 +4736,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // N25's MatchesChecker label predated the recursive expect pin; the
     // deep measurement showed the dead contributor SURVIVES (wrong-and-
     // warm), so the row is parked against its narrowing block.
-    (Owner::U6NarrowLattice, 33, 18, 15),
+    (Owner::U6NarrowLattice, 38, 24, 14),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 12, 7, 3),
@@ -4588,8 +4784,8 @@ mod conformance {
             };
             let note = if *total == 0 {
                 "   ← NO ROWS SEEDED: this block has no fence"
-            } else if *parked > 0 && !owner.is_scheduled_block() {
-                "   ← NO U-BLOCK ASSIGNED"
+            } else if *parked > 0 && !owner.has_convergence_owner() {
+                "   ← NO OWNER ASSIGNED"
             } else {
                 ""
             };
@@ -4626,7 +4822,7 @@ mod conformance {
         );
     }
 
-    /// Rows owned by NO scheduled `U*` block, called out by name.
+    /// Rows parked with NO assigned owner at all, called out by name.
     ///
     /// These have nobody assigned to fix them and will otherwise be the last
     /// thing blocking the merge.
@@ -4635,7 +4831,7 @@ mod conformance {
         let mut unassigned: Vec<&str> = CORPUS
             .iter()
             .filter(|r| {
-                !r.owner.is_scheduled_block() && matches!(r.verdict, Verdict::KnownOwed { .. })
+                !r.owner.has_convergence_owner() && matches!(r.verdict, Verdict::KnownOwed { .. })
             })
             .map(|r| r.id)
             .collect();

@@ -3329,7 +3329,7 @@ fn local_reaching_definition_is_binding_and_local() {
         kind,
         init,
         declared,
-        widening_literal,
+        freshness,
     } = &node.body.statements[0]
     else {
         panic!("the first statement must be the const binding");
@@ -3348,7 +3348,7 @@ fn local_reaching_definition_is_binding_and_local() {
         "a const initializer keeps its literal: {init:?}"
     );
     assert!(
-        *widening_literal,
+        freshness.all_fresh(),
         "an unannotated bare-literal const is a WIDENING literal binding"
     );
     assert_eq!(
