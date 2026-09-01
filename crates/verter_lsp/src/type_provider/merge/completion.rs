@@ -266,7 +266,7 @@ pub fn merge_completions(
     let mut seen_labels: std::collections::HashSet<String> =
         result.iter().map(|i| i.label.clone()).collect();
 
-    for item in type_result.items {
+    for mut item in type_result.items {
         // Drop every compiler-generated carrier identifier. The emitter crate
         // owns the namespace rule, so a helper added to any IDE prelude is
         // covered the moment it is emitted — the previous per-shape list
@@ -285,6 +285,15 @@ pub fn merge_completions(
         if template_attr_context && !item.kind.is_some_and(is_attribute_surface_kind) {
             continue;
         }
+        if carrier_attr_syntax == Some(CarrierAttributeSyntax::Svelte) {
+            strip_svelte_optional_marker(&mut item.label);
+            if let Some(insert_text) = item.insert_text.as_mut() {
+                strip_svelte_optional_marker(insert_text);
+            }
+            if let Some(new_text) = item.text_edit_new_text.as_mut() {
+                strip_svelte_optional_marker(new_text);
+            }
+        }
         // Attribute spelling belongs to the source framework, not the shared
         // JSX projection. Vue consumes the JSX→Vue transform; Svelte retains
         // authored camelCase and only drops the provider's optional marker.
@@ -293,11 +302,7 @@ pub fn merge_completions(
                 Some(CarrierAttributeSyntax::Vue) => {
                     jsx_prop_to_vue_attr(&item.label).unwrap_or_else(|| item.label.clone())
                 }
-                Some(CarrierAttributeSyntax::Svelte) => item
-                    .label
-                    .strip_suffix('?')
-                    .unwrap_or(&item.label)
-                    .to_string(),
+                Some(CarrierAttributeSyntax::Svelte) => item.label.clone(),
                 None => item.label.clone(),
             }
         } else {
@@ -368,6 +373,12 @@ pub fn merge_completions(
     }
 
     (result, is_incomplete)
+}
+
+fn strip_svelte_optional_marker(value: &mut String) {
+    if value.ends_with('?') {
+        value.pop();
+    }
 }
 
 /// Whether an LSP completion item already carries an actionable provider-neutral

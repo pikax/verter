@@ -401,6 +401,14 @@ struct ChildPublicContractSnapshot {
     freshness: ImportedChildContractFreshnessKey,
 }
 
+#[derive(Clone)]
+struct ChildPublicContractFailureSnapshot {
+    error: verter_session::PublicApiProjectionError,
+    host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
+    freshness: ImportedChildContractFreshnessKey,
+    workspace_content_generation: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthoredBarrelComponentRouteIdentity {
     source: String,
@@ -545,6 +553,10 @@ pub struct ServerCore {
     /// publication lane. Interactive completion only captures a revision- and
     /// workspace-fenced entry; it never starts projection work.
     child_public_contracts: Arc<DashMap<String, ChildPublicContractSnapshot>>,
+    /// Provenance-fenced permanent projection failures. These are settled
+    /// publication outcomes, not missing work: repeated feature misses must
+    /// not hot-loop the same malformed/unsupported authored projection.
+    child_public_contract_failures: Arc<DashMap<String, ChildPublicContractFailureSnapshot>>,
     /// Background-published authored barrel bindings. Interactive completion
     /// uses this exact route instead of resolving/re-walking exports.
     barrel_component_routes: Arc<DashMap<(String, String), BarrelComponentRouteSnapshot>>,
@@ -1243,6 +1255,7 @@ impl VerterLanguageServer {
             ide_sync_next_generation: std::sync::atomic::AtomicU64::new(1),
             import_sync: Arc::new(ImportSyncMemo::default()),
             child_public_contracts: Arc::new(DashMap::new()),
+            child_public_contract_failures: Arc::new(DashMap::new()),
             barrel_component_routes: Arc::new(DashMap::new()),
             #[cfg(test)]
             child_public_contract_projection_count: std::sync::atomic::AtomicUsize::new(0),

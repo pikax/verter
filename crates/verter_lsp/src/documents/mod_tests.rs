@@ -3,6 +3,22 @@
 
 use super::*;
 
+// @ai-generated
+#[test]
+fn progressive_span_rejects_a_byte_offset_inside_a_utf8_code_point() {
+    let source = "aé";
+    let split_code_point = verter_span::Span::new(0, 2);
+
+    assert!(
+        !progressive_span_is_current(source, source, split_code_point),
+        "two invalid UTF-8 slices must not compare as a current authored prefix"
+    );
+    assert!(
+        progressive_span_is_current(source, source, verter_span::Span::new(0, 3)),
+        "a valid UTF-8 boundary remains comparable"
+    );
+}
+
 #[test]
 fn progressive_prop_definition_requires_its_ownership_call_to_remain_authored() {
     let prior_source = "<script>let { staleProp } = $props();</script>";

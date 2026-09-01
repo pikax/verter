@@ -10975,6 +10975,71 @@ async fn barrel_component_route_cache_is_binding_exact_and_provenance_fenced() {
     drop(service);
 }
 
+// @ai-generated
+#[tokio::test(flavor = "multi_thread")]
+async fn permanent_child_projection_failure_settles_until_its_provenance_changes() {
+    const MALFORMED_CHILD: &str = r#"<script setup lang="ts" attrs="Attrs.">
+import type { Attrs } from './types'
+</script><template/>"#;
+    const REPAIRED_CHILD: &str = r#"<script setup lang="ts">
+defineProps<{ title?: string }>()
+</script><template/>"#;
+    const PARENT: &str = r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script><template><Child /></template>"#;
+
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &[
+                ("src/Child.vue", "vue", MALFORMED_CHILD),
+                ("src/App.vue", "vue", PARENT),
+            ],
+            crate::TypeProviderKind::None,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                ..HostConfig::default()
+            },
+            false,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_uri = workspace_uri(&workspace_id, "src/Child.vue");
+    let child_id = format!("{workspace_id}/src/Child.vue");
+
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert!(server.child_public_contract_is_settled(&child_id));
+    assert!(server.cached_child_public_contract(&child_id).is_none());
+    assert!(server.dependency_readiness_capture(&app_uri).is_ready());
+    let projection_count = server.child_public_contract_projection_count_for_test();
+
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert_eq!(
+        server.child_public_contract_projection_count_for_test(),
+        projection_count,
+        "a provenance-current permanent failure must not be projected again"
+    );
+
+    assert!(
+        server
+            .documents
+            .did_change(&child_uri, 2, REPAIRED_CHILD)
+            .changed
+    );
+    server.publish_import_dependencies_settled(&app_uri).await;
+    assert!(
+        server.cached_child_public_contract(&child_id).is_some(),
+        "editing the malformed child must invalidate the failure and allow recovery"
+    );
+    assert!(
+        server.child_public_contract_projection_count_for_test() > projection_count,
+        "the changed provenance must run a fresh projection"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn imported_child_contract_cache_is_provenance_fenced_and_republished() {
     const CHILD_V1: &str = "<script lang=\"ts\">\ninterface Props { title: string; unusedOnly?: boolean }\nlet { title }: Props = $props();\n</script>\n<p>{title}</p>\n";

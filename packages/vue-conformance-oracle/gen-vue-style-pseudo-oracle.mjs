@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { compileStyle } from "@vue/compiler-sfc";
 
 const fixtureUrl = new URL(
-  "../../crates/verter_compiler/tests/fixtures/vue_style_pseudo_oracle.json",
+  "../../crates/verter_compiler/src/direct_result_tests/vue_style_pseudo_oracle.json",
   import.meta.url,
 );
 const fixturePath = fileURLToPath(fixtureUrl);

@@ -3713,6 +3713,51 @@ const VUE_FIXTURE: &str = "<script setup lang=\"ts\">import { ref } from 'vue';\
 
 const VUE_OWNER: &str = "/workspace/src/Comp.vue";
 
+// @ai-generated
+#[test]
+fn changed_workspace_reload_does_not_fence_out_its_own_cold_artifact() {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let canonical = "/workspace/src/reload.ts";
+    workspace.inject_file(
+        canonical.to_string(),
+        Arc::from("export const value = 1;\n"),
+    );
+    let host = Arc::new(VerterHost::new(
+        HostConfig::default(),
+        Arc::clone(&workspace) as Arc<dyn verter_workspace::WorkspaceAccess>,
+    ));
+    host.ensure_indexed_ready(canonical)
+        .expect("initial workspace source materializes");
+
+    host.evict(canonical);
+    host.scheduler.close_file(canonical);
+    workspace.inject_file(
+        canonical.to_string(),
+        Arc::from("export const value = 2;\n"),
+    );
+    host.provenance().reset();
+
+    let refreshed = host
+        .ensure_indexed_ready(canonical)
+        .expect("changed workspace source rematerializes");
+    assert!(refreshed.raw_source.contains("value = 2"));
+    assert!(
+        host.exact_current_indexed_for_test(canonical, refreshed.whole_hash)
+            .is_some(),
+        "the reload's own store-view advance must not turn its artifact into ReturnOnly"
+    );
+    let materializes = host.provenance().snapshot().indexed_ready_materializes;
+    host.ensure_indexed_ready(canonical)
+        .expect("published reload remains warm");
+    assert_eq!(
+        host.provenance().snapshot().indexed_ready_materializes,
+        materializes,
+        "the next read must reuse the artifact published by the reload flight"
+    );
+}
+
 /// Base scheduler-miss lane: the canonical is known only to the VFS, so
 /// the cold `ensure_indexed_ready` flight loads it through
 /// `ensure_loaded` — the scheduler worker performs THE single ingress

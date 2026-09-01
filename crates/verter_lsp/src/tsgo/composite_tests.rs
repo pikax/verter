@@ -26,11 +26,32 @@ use verter_workspace::workspace_snapshot::{
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, WorkspaceAccess};
 
 use super::{
-    carrier_source_of, compose_establishment_discriminant, injection_shadow_safe,
-    invoke_epoch_bound, observe_epoch_bound, real_file_occupies_injected_path, LazyOverlayCore,
-    OverlayPriority, OverlayTransport, SharedEngageFailureKind, SharedRendezvous,
-    SharedTsgoOverlay,
+    carrier_source_of, compose_establishment_discriminant, effective_javascript_check_policy,
+    injection_shadow_safe, invoke_epoch_bound, leading_file_check_directive, observe_epoch_bound,
+    real_file_occupies_injected_path, FileCheckDirective, LazyOverlayCore, OverlayPriority,
+    OverlayTransport, SharedEngageFailureKind, SharedRendezvous, SharedTsgoOverlay,
 };
+
+// @ai-generated
+#[test]
+fn authored_file_check_directive_overrides_the_configured_check_js_policy() {
+    assert_eq!(
+        leading_file_check_directive("// @ts-check\nconst value = 1;"),
+        Some(FileCheckDirective::Check)
+    );
+    assert_eq!(
+        effective_javascript_check_policy(Some(false), Some(FileCheckDirective::Check)),
+        Some(true)
+    );
+    assert_eq!(
+        effective_javascript_check_policy(Some(true), Some(FileCheckDirective::NoCheck)),
+        Some(false)
+    );
+    assert_eq!(
+        effective_javascript_check_policy(Some(false), None),
+        Some(false)
+    );
+}
 
 struct InvocationTransport {
     alive: AtomicBool,

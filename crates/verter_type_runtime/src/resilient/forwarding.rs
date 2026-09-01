@@ -508,7 +508,8 @@ where
     ) -> ProviderFuture<'a, Option<Vec<TypeDiagnostic>>> {
         let path_owned = path.to_string();
         let configured_project = configured_project.to_string();
-        let fp = QueryFingerprint::new("diagnostics-in-project", path, 0, 0);
+        let fp = QueryFingerprint::new("diagnostics-in-project", path, 0, 0)
+            .in_scope(&configured_project);
         Box::pin(async move {
             self.run_guarded(
                 fp,

@@ -29,8 +29,7 @@ use super::handler_guard::block_in_place_if_available;
 use super::server_utils::*;
 use super::{ProviderProjectionContext, PublishedResolverSnapshot, VerterLanguageServer};
 
-/// Whether every provider-sync leg of an import-set pass actually reached the
-/// provider.
+/// Whether every import-set leg reached a settled state.
 ///
 /// The import-set memo may only be published for a `Complete` pass. A failed or
 /// requeued leg feeds `pending_snapshot_provider_sync`, whose sole drain is
@@ -40,7 +39,8 @@ use super::{ProviderProjectionContext, PublishedResolverSnapshot, VerterLanguage
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub(super) enum ImportSyncOutcome {
-    /// Every leg reached the provider, or had nothing to deliver.
+    /// Every leg reached the provider, had nothing to deliver, or produced a
+    /// provenance-fenced permanent projection refusal.
     Complete,
     /// At least one leg failed or was requeued for a later retry.
     Retry,
@@ -152,6 +152,40 @@ impl VerterLanguageServer {
         .then_some(snapshot.contract)
     }
 
+    fn cached_child_public_contract_failure(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_session::PublicApiProjectionError> {
+        let (host_revision, freshness) = self.imported_child_contract_provenance(canonical_id)?;
+        let snapshot = self
+            .child_public_contract_failures
+            .get(canonical_id)?
+            .clone();
+        let workspace_content_generation =
+            self.documents.host().workspace_read().content_generation();
+        if snapshot.host_revision != host_revision
+            || snapshot.freshness != freshness
+            || snapshot.workspace_content_generation != workspace_content_generation
+        {
+            return None;
+        }
+        let (after_host_revision, after_freshness) =
+            self.imported_child_contract_provenance(canonical_id)?;
+        let after_workspace_content_generation =
+            self.documents.host().workspace_read().content_generation();
+        (after_host_revision == host_revision
+            && after_freshness == freshness
+            && after_workspace_content_generation == workspace_content_generation)
+            .then_some(snapshot.error)
+    }
+
+    pub(super) fn child_public_contract_is_settled(&self, canonical_id: &str) -> bool {
+        self.cached_child_public_contract(canonical_id).is_some()
+            || self
+                .cached_child_public_contract_failure(canonical_id)
+                .is_some()
+    }
+
     /// Pure capture of a background-published authored barrel binding. The
     /// current parser import fact, workspace/resolver generation, and terminal
     /// child revision are fenced on both sides of the map clone.
@@ -200,6 +234,12 @@ impl VerterLanguageServer {
     ) -> ImportSyncOutcome {
         if !self.import_identity_is_current(parent_canonical_id, &identity) {
             return ImportSyncOutcome::Retry;
+        }
+        if self
+            .cached_child_public_contract_failure(terminal_canonical_id)
+            .is_some()
+        {
+            return ImportSyncOutcome::Complete;
         }
         let Some(child) = self
             .child_public_contracts
@@ -284,7 +324,7 @@ impl VerterLanguageServer {
                 });
             if direct_carrier
                 .as_deref()
-                .is_some_and(|resolved| self.cached_child_public_contract(resolved).is_none())
+                .is_some_and(|resolved| !self.child_public_contract_is_settled(resolved))
             {
                 return false;
             }
@@ -320,7 +360,7 @@ impl VerterLanguageServer {
     /// the explicit source + workspace witnesses fence edits and resolver
     /// updates that do not need that lease.
     pub(super) fn publish_loaded_child_contract(&self, canonical_id: &str) -> ImportSyncOutcome {
-        if self.cached_child_public_contract(canonical_id).is_some() {
+        if self.child_public_contract_is_settled(canonical_id) {
             return ImportSyncOutcome::Complete;
         }
         let Some((host_revision, freshness)) =
@@ -328,6 +368,8 @@ impl VerterLanguageServer {
         else {
             return ImportSyncOutcome::Retry;
         };
+        let workspace_content_generation =
+            self.documents.host().workspace_read().content_generation();
         #[cfg(test)]
         self.child_public_contract_projection_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -344,7 +386,35 @@ impl VerterLanguageServer {
                     canonical_id,
                     &error,
                 );
-                return ImportSyncOutcome::Retry;
+                if error.is_retryable() {
+                    return ImportSyncOutcome::Retry;
+                }
+                if self.imported_child_contract_provenance(canonical_id)
+                    != Some((host_revision, freshness.clone()))
+                    || self.documents.host().workspace_read().content_generation()
+                        != workspace_content_generation
+                {
+                    return ImportSyncOutcome::Retry;
+                }
+                self.child_public_contracts.remove(canonical_id);
+                self.child_public_contract_failures.insert(
+                    canonical_id.to_string(),
+                    super::ChildPublicContractFailureSnapshot {
+                        error,
+                        host_revision,
+                        freshness: freshness.clone(),
+                        workspace_content_generation,
+                    },
+                );
+                if self.imported_child_contract_provenance(canonical_id)
+                    != Some((host_revision, freshness))
+                    || self.documents.host().workspace_read().content_generation()
+                        != workspace_content_generation
+                {
+                    self.child_public_contract_failures.remove(canonical_id);
+                    return ImportSyncOutcome::Retry;
+                }
+                return ImportSyncOutcome::Complete;
             }
         };
         let Some(publication_witness) = projection.publication_witness else {
@@ -371,6 +441,7 @@ impl VerterLanguageServer {
                 freshness: freshness.clone(),
             },
         );
+        self.child_public_contract_failures.remove(canonical_id);
         if self.imported_child_contract_provenance(canonical_id) != Some((host_revision, freshness))
             || self
                 .child_public_contracts
@@ -396,6 +467,7 @@ impl VerterLanguageServer {
     #[cfg(test)]
     pub(super) fn evict_child_public_contract_for_test(&self, canonical_id: &str) {
         self.child_public_contracts.remove(canonical_id);
+        self.child_public_contract_failures.remove(canonical_id);
     }
 
     #[cfg(test)]
@@ -1984,6 +2056,7 @@ impl VerterLanguageServer {
         *self.vfs_workspace.write() = Some(workspace);
         self.import_sync.evict_all();
         self.child_public_contracts.clear();
+        self.child_public_contract_failures.clear();
         self.barrel_component_routes.clear();
     }
 

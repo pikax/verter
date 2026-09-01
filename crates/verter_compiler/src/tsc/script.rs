@@ -884,6 +884,29 @@ impl TscDeclarationShapeReason {
 }
 
 impl TscGenerationError {
+    /// Whether repeating the projection against the same source/environment
+    /// can legitimately recover. Structural/unsupported authored input is
+    /// stable until its provenance changes; partial or unresolved semantic
+    /// state may become available on a later background pass.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::MissingAuthoritativeSemantics { .. }
+                | Self::MissingEntry { .. }
+                | Self::UnavailableOutcome {
+                    outcome: TscUnavailableOutcome::Partial(_)
+                        | TscUnavailableOutcome::Unresolved(_),
+                    ..
+                }
+                | Self::UnsupportedDeclarationShape {
+                    reason: TscDeclarationShapeReason::TypeInfoDeclarationFailure(_)
+                        | TscDeclarationShapeReason::OwnerValueDependencyUnavailable,
+                    ..
+                }
+        )
+    }
+
     /// Stable machine-readable identity for this failure class.
     #[must_use]
     pub const fn code(&self) -> &'static str {
