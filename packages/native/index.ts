@@ -412,7 +412,6 @@ export type {
   HostSvelteFragments,
   HostSvelteRunes,
   HostSvelteCss,
-  HostSvelteCustomElementPropType,
   HostSvelteCustomElementProp,
   HostSvelteCustomElementDescriptor,
   HostSvelteCompatibility,

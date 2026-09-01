@@ -129,12 +129,16 @@ import type {
   HostAnalysisProduct,
   HostCompileRequest,
   HostDeclarationsProduct,
+  HostIdeCompanionProduct,
   HostPublicApiProduct,
   HostRequestedProduct,
+  HostSvelteCompatibility,
   HostSvelteCompileOptions,
   HostSvelteCompileRequest,
   HostSvelteCustomElementDescriptor,
+  HostSvelteCustomElementProp,
   HostVueAssetUrlTransform,
+  HostVueBackend,
   HostVueCompileOptions,
   HostVueCompileRequest,
   HostVueCssModules,
@@ -227,6 +231,22 @@ const svelteRequest: HostSvelteCompileRequest = {
   },
 };
 
+// `compatibility` is a closed object with no wire slot, and it is closed
+// against an object that was typed BEFORE it reached the slot as well as
+// against a fresh literal. A projection that only forbids the fresh literal
+// lets a caller type-check against a shape the decoder refuses.
+declare const builtCompatibility: { componentApi: boolean };
+// @ts-expect-error `componentApi` has no wire slot
+const preTypedCompatibilityOption: HostSvelteCompileOptions = { compatibility: builtCompatibility };
+// @ts-expect-error `componentApi` has no wire slot
+const preTypedCompatibility: HostSvelteCompatibility = builtCompatibility;
+const literalCompatibilityOption: HostSvelteCompileOptions = {
+  // @ts-expect-error `componentApi` has no wire slot
+  compatibility: { componentApi: true },
+};
+// @ts-expect-error `componentApi` has no wire slot
+const literalCompatibility: HostSvelteCompatibility = { componentApi: true };
+
 // A Svelte option has no slot in the Vue arm, and vice versa.
 const crossFrameworkVueOption: HostVueCompileOptions = {
   backend: "inferred",
@@ -303,9 +323,60 @@ const missingRequiredIdentity: HostVueCompileRequest["identity"] = {};
 // @ts-expect-error `runtimeSourceMap` is required
 const missingRequiredProductOption: HostRequestedProduct = { kind: "runtimeClient" };
 
+// The four shape classes the generated declarations project, pinned as
+// identities rather than as assignability: a widened, narrowed or
+// re-spelled slot fails here even where an example value would still
+// type-check.
+
+// Closed string union: the vocabulary is exactly the decoder's variants.
+type BackendVocabularyIsClosed = Expect<Equal<HostVueBackend, "inferred" | "vdom" | "vapor">>;
+
+// Optional slot: omitted, `undefined` and `null` all decode as absent.
+type AnOptionalSlotAdmitsAbsenceInEveryForm = Expect<
+  Equal<HostVueCompileOptions["comments"], boolean | null | undefined>
+>;
+
+// Required slot: no absence, no null.
+type ARequiredSlotAdmitsNeither = Expect<Equal<HostVueCompileOptions["ssr"], boolean>>;
+
+// Closed object: the option set is exactly the decoder's field set, so an
+// added or removed Rust field shows up here as a changed key set.
+type IdeProductKeysAreExactlyTheDecodersFields = Expect<
+  Equal<
+    keyof HostIdeCompanionProduct,
+    | "kind"
+    | "wantSourceMap"
+    | "embedAmbientTypes"
+    | "conditionalRootNarrowing"
+    | "strictSlots"
+    | "typesModuleName"
+    | "ideChunkBoundaries"
+  >
+>;
+
+// The custom-element prop type is a FORWARDED spelling, not a wire
+// vocabulary: membership is decided once, at canonical request
+// construction, which admits each variant's lowercase and capitalised
+// spelling. A closed union here would refuse spellings the runtime
+// accepts, so the slot is pinned open.
+type PropTypeIsAForwardedSpelling = Expect<
+  Equal<HostSvelteCustomElementProp["propType"], string | null | undefined>
+>;
+
+const capitalisedPropTypeSpelling: HostSvelteCustomElementDescriptor = {
+  props: { value: { propType: "Number" }, label: { propType: "string" } },
+};
+
+void [capitalisedPropTypeSpelling];
+
 export type {
+  ARequiredSlotAdmitsNeither,
+  AnOptionalSlotAdmitsAbsenceInEveryForm,
+  BackendVocabularyIsClosed,
   FrameworkTagsAreExactlyTheTwoArms,
+  IdeProductKeysAreExactlyTheDecodersFields,
   ProductKindsAreExactlyTheSixProducts,
+  PropTypeIsAForwardedSpelling,
   RequestUnionIsExactlyTheTwoArms,
 };
 export {

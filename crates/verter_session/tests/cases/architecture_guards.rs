@@ -5187,6 +5187,11 @@ pub(crate) mod foundations_guards {
     pub fn guard2_allowlist() -> BTreeSet<String> {
         let mut set: BTreeSet<String> = [
             "crates/verter_workspace/src/native_fs.rs",
+            // Declaration generator behind `required-features`, absent from
+            // every default build: its one write rewrites a committed
+            // declaration whose bytes a freshness guard pins. Build-time
+            // source-tree output, not workspace/semantic/overlay state.
+            "crates/verter_napi/src/bin/generate_host_compile_request_ts.rs",
             "crates/verter_workspace/src/config.rs",
             "crates/verter_workspace/src/snapshot_builder.rs",
             "crates/verter_workspace/src/vite_config.rs",
@@ -9213,6 +9218,10 @@ pub(crate) mod foundations_guards {
     /// code change that routes the I/O through `NativeFs` /
     /// `WorkspaceAccess` (or a deletion of the callsite).
     pub const D14_ALLOW_LIST: &[(&str, &str)] = &[
+        (
+            "crates/verter_napi/src/bin/generate_host_compile_request_ts.rs",
+            "Declaration generator, not a runtime path. It is a `[[bin]]` behind `required-features = [\"generate-host-request-ts\"]`, so it is absent from every default build including the published addon; a developer runs it to rewrite one committed file whose bytes a freshness guard then pins. The SOLE `std::fs::` call writes that generated declaration to a path derived from the manifest directory. It touches no workspace, semantic, overlay or VFS state, and routing a build-time source-tree write through the disk boundary would give a generator a session it has no other use for.",
+        ),
         (
             "crates/verter_bench/src/css_gate.rs",
             "Measurement-runner provenance probe (dev/CI-only bench crate, never published). The SOLE `std::fs::` call reads `/proc/loadavg` on Linux to stamp system load into a captured measurement record, mirroring the macOS branch that shells out to `sysctl -n vm.loadavg`. A kernel-synthesised pseudo-file describing the MACHINE, not workspace, semantic, overlay or VFS state — and routing it through the disk boundary would key a path cache on a file whose contents differ on every read. The runner's own artifact I/O (reading a committed baseline, writing a captured record) routes through `NativeFs` and is deliberately NOT covered by this entry.",

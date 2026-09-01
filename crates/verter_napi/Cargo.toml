@@ -13,6 +13,31 @@ exclude = ["tests/fixture_addon"]
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+# Gates the generator command below out of every default build. @napi-rs/cli
+# passes no `--bin` filter to a crate that exposes a cdylib, so the release
+# publish lane's `cargo build --release --target <T>` builds EVERY target of
+# this package on all seven `napi.targets` — five of which no CI lane
+# exercises. A generator has no business being linked for a Windows or musl
+# publish, and a first link there would happen at publish time.
+generate-host-request-ts = []
+
+# The generator that writes `packages/native/host-compile-request.generated.ts`.
+# Declared explicitly so `required-features` can keep it out of the default
+# target set: without a `[[bin]]` row it is auto-discovered and built by every
+# `cargo build` of this package, the cross-compiled publish builds included.
+# The cost of the gate is that a default `cargo check --all-targets` does not
+# compile it; the freshness guard still compiles the renderer it calls, and the
+# command below builds the bin itself.
+#
+#   cargo run -p verter_napi --features generate-host-request-ts \
+#       --bin generate_host_compile_request_ts
+[[bin]]
+name = "generate_host_compile_request_ts"
+path = "src/bin/generate_host_compile_request_ts.rs"
+required-features = ["generate-host-request-ts"]
+
 [dependencies]
 verter_audit = { path = "../verter_audit" }
 verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
@@ -36,6 +61,10 @@ napi-derive = "3"
 backtrace = "0.3.76"
 rustc-hash = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+# The published TypeScript declaration of the host compile request is
+# RENDERED from the Rust declarations that decode it
+# (`src/host_compile_request_ts.rs`), never hand-written beside them.
+ts-rs = "12"
 serde_json = { workspace = true }
 oxc_allocator = { workspace = true }
 tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "rt", "macros"] }

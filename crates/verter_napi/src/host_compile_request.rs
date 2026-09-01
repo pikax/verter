@@ -35,6 +35,12 @@
 //! verbatim, so their fields cannot be dropped, reordered or defaulted on
 //! the way through — there is no per-field copy to get wrong.
 //!
+//! The same two declarations are the authority for the request's PUBLISHED
+//! TypeScript shape: [`crate::host_compile_request_ts`] renders
+//! `packages/native/host-compile-request.generated.ts` from them and the
+//! DTOs their arms carry, so the declaration a caller type-checks against
+//! is the declaration that decodes them.
+//!
 //! No rule the canonical compile request owns is repeated here. Product-set
 //! legality, backend/product compatibility and option admission are decided
 //! when the converted request reaches
@@ -42,9 +48,9 @@
 
 use napi::bindgen_prelude::{FromNapiValue, TypeName, ValidateNapiValue};
 use napi::{Error, Result, Status, ValueType};
-use serde::Deserialize;
 use serde_json::Value;
 
+use crate::host_compile_request_ts::tagged_js_union;
 use crate::js_value_graph::{materialize_js_value, NapiValueGraph};
 
 use verter_ffi::types::{
@@ -53,39 +59,43 @@ use verter_ffi::types::{
     FfiSvelteHostCompileRequest, FfiVueCompileOptions, FfiVueHostCompileRequest,
 };
 
-/// One requested compiler product, tagged by `kind`.
-///
-/// The variants that carry no options are empty struct variants rather
-/// than unit variants so that `deny_unknown_fields` still applies to them:
-/// `{ "kind": "publicApi", "inline": true }` is a refusal, not a silently
-/// ignored option.
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
-pub enum NapiRequestedProduct {
-    RuntimeClient(FfiRuntimeProductRequest),
-    RuntimeServer(FfiRuntimeProductRequest),
-    IdeCompanion(FfiIdeProductRequest),
-    PublicApi {},
-    Declarations {},
-    Analysis(FfiAnalysisProductRequest),
+tagged_js_union! {
+    /// One requested compiler product. The product set is the demand
+    /// document: there is no target preset that expands into a bundle of
+    /// products, and request order is preserved.
+    ///
+    /// An arm that carries no options carries nothing but its tag:
+    /// `{ "kind": "publicApi", "inline": true }` is a refusal, not a
+    /// silently ignored option.
+    pub enum NapiRequestedProduct tagged "kind" as "HostRequestedProduct" {
+        RuntimeClient(FfiRuntimeProductRequest) => "runtimeClient" as "HostRuntimeClientProduct",
+        RuntimeServer(FfiRuntimeProductRequest) => "runtimeServer" as "HostRuntimeServerProduct",
+        IdeCompanion(FfiIdeProductRequest) => "ideCompanion" as "HostIdeCompanionProduct",
+        /// Carries no options: its output is shaped by host-resolved
+        /// profile identities the caller never supplies.
+        PublicApi {} => "publicApi" as "HostPublicApiProduct",
+        /// Carries no options, for the same reason as `publicApi`.
+        Declarations {} => "declarations" as "HostDeclarationsProduct",
+        Analysis(FfiAnalysisProductRequest) => "analysis" as "HostAnalysisProduct",
+    }
 }
 
-/// A host compile request tagged by `framework`, so framework-owned
-/// options are structurally unreachable from the other framework's arm and
-/// a foreign key inside either arm is refused at decode.
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(tag = "framework", rename_all = "camelCase", deny_unknown_fields)]
-pub enum NapiHostCompileRequest {
-    Vue {
-        identity: FfiHostCompileIdentity,
-        products: Vec<NapiRequestedProduct>,
-        options: FfiVueCompileOptions,
-    },
-    Svelte {
-        identity: FfiHostCompileIdentity,
-        products: Vec<NapiRequestedProduct>,
-        options: FfiSvelteCompileOptions,
-    },
+tagged_js_union! {
+    /// A host compile request tagged by `framework`, so framework-owned
+    /// options are structurally unreachable from the other framework's arm
+    /// and a foreign key inside either arm is refused at decode.
+    pub enum NapiHostCompileRequest tagged "framework" as "HostCompileRequest" {
+        Vue {
+            identity: FfiHostCompileIdentity,
+            products: Vec<NapiRequestedProduct>,
+            options: FfiVueCompileOptions,
+        } => "vue" as "HostVueCompileRequest",
+        Svelte {
+            identity: FfiHostCompileIdentity,
+            products: Vec<NapiRequestedProduct>,
+            options: FfiSvelteCompileOptions,
+        } => "svelte" as "HostSvelteCompileRequest",
+    }
 }
 
 /// Decodes a JS-supplied request value.

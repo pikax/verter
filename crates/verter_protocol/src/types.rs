@@ -220,53 +220,60 @@ pub struct FfiVirtualQuery {
 
 /// Which Vue client codegen backend a runtime product resolves to.
 /// `Inferred` defers to the parsed source's own marker.
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "HostVueBackend")]
 pub enum FfiVueBackend {
     Inferred,
     Vdom,
     Vapor,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "HostVueWhitespace")]
 pub enum FfiVueWhitespace {
     Preserve,
     Condense,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "HostVueParsePad")]
 pub enum FfiVueParsePad {
     Space,
     Line,
     Off,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostVueAssetUrlOptions", optional_fields = nullable)]
 pub struct FfiVueAssetUrlOptions {
     pub base: Option<String>,
     pub include_absolute: Option<bool>,
     pub tags: std::collections::BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "HostVueAssetUrlTransform")]
 pub enum FfiVueAssetUrlTransform {
     Disabled,
     Enabled(FfiVueAssetUrlOptions),
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "HostVueCssModuleScopeBehaviour")]
 pub enum FfiVueCssModuleScopeBehaviour {
     Local,
     Global,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "HostVueCssModuleLocalsConvention")]
 pub enum FfiVueCssModuleLocalsConvention {
     CamelCase,
     CamelCaseOnly,
@@ -275,8 +282,9 @@ pub enum FfiVueCssModuleLocalsConvention {
     AsIs,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostVueCssModules", optional_fields = nullable)]
 pub struct FfiVueCssModules {
     pub scope_behaviour: Option<FfiVueCssModuleScopeBehaviour>,
     pub hash_prefix: Option<String>,
@@ -284,11 +292,12 @@ pub struct FfiVueCssModules {
     pub export_globals: Option<bool>,
 }
 
-/// Vue-owned compile options. The trailing `compat_config*` / `codegen_mode`
+/// Vue-owned compile options. The trailing `compatConfig*` / `codegenMode`
 /// slots exist only so a caller who supplies a refused option is told which
-/// one — presence is what the conversion refuses, including `Some(false)`.
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+/// one — presence is what the conversion refuses, `false` included.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostVueCompileOptions", optional_fields = nullable)]
 pub struct FfiVueCompileOptions {
     pub backend: FfiVueBackend,
     /// Mirrors the canonical `ssr` OPTION one-for-one. It is not the SSR
@@ -333,8 +342,9 @@ pub struct FfiVueCompileOptions {
     pub codegen_mode: Option<bool>,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "HostSvelteNamespace")]
 pub enum FfiSvelteNamespace {
     Html,
     Svg,
@@ -342,30 +352,34 @@ pub enum FfiSvelteNamespace {
     Foreign,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "HostSvelteFragments")]
 pub enum FfiSvelteFragments {
     Html,
     Tree,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "HostSvelteRunes")]
 pub enum FfiSvelteRunes {
     True,
     False,
     Infer,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "HostSvelteCss")]
 pub enum FfiSvelteCss {
     Injected,
     External,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostSvelteCustomElementProp", optional_fields = nullable)]
 pub struct FfiSvelteCustomElementProp {
     pub attribute: Option<String>,
     pub reflect: Option<bool>,
@@ -378,8 +392,9 @@ pub struct FfiSvelteCustomElementProp {
     pub prop_type: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostSvelteCustomElementDescriptor", optional_fields = nullable)]
 pub struct FfiSvelteCustomElementDescriptor {
     pub tag: Option<String>,
     pub shadow: Option<bool>,
@@ -388,15 +403,45 @@ pub struct FfiSvelteCustomElementDescriptor {
 
 /// Presence-only marker for the `compatibility` object: the one inventoried
 /// field it may carry (`componentApi`) is refused, so it has no wire slot.
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+// `ts-rs` projects a field-less struct as `Record<symbol, never>`, which is
+// WEAKER than this declaration: it closes a fresh object literal but admits
+// any already-typed object, so `{ componentApi: true }` type-checks and then
+// decodes to a refusal. `Record<string, never>` is what the decoder means.
+//
+// The override is not the hand-written-TypeScript hole this projection
+// closes. That hole is a declaration that DIVERGES from the schema; this one
+// exists because the automatic projection is less closed than the schema is,
+// and it restores what `deny_unknown_fields` on a field-less struct already
+// says. An override that asserted a shape the decoder does not accept would
+// be the lie, and is not licensed by this one. (`rename_all` is dropped: a
+// no-op on a field-less struct, and `ts-rs` refuses it beside an explicit
+// `type`.)
+//
+// This declaration is the ONE line here the byte pin does not bind to the
+// Rust shape: `ts-rs` short-circuits projection on a container `type`
+// override and never reads the fields, so ADDING A FIELD BELOW CHANGES WHAT
+// THE DECODER ACCEPTS AND REDDENS NOTHING. Field-lessness is what makes the
+// override true, and it is held only by this struct staying empty. Give this
+// type a field and the override must go with it.
+#[ts(rename = "HostSvelteCompatibility", type = "Record<string, never>")]
 pub struct FfiSvelteCompatibility {}
 
-/// Svelte-owned compile options. `generate_module` / `experimental_async`
+// The witness for the paragraph above: an exhaustive empty destructuring is
+// E0027 the moment this struct gains a field, so the override cannot outlive
+// the field-lessness that makes it true. This is the binding the byte pin
+// cannot provide here.
+const _: fn() = || {
+    let FfiSvelteCompatibility {} = FfiSvelteCompatibility {};
+};
+
+/// Svelte-owned compile options. `generateModule` / `experimentalAsync`
 /// are well-formed options whose module-compilation capability is refused;
 /// the trailing slots are the unconditionally refused rows.
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostSvelteCompileOptions", optional_fields = nullable)]
 pub struct FfiSvelteCompileOptions {
     pub dev: Option<bool>,
     pub generate_module: Option<bool>,
@@ -420,8 +465,9 @@ pub struct FfiSvelteCompileOptions {
     pub custom_element_extend: Option<bool>,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostRuntimeProductOptions", optional_fields = nullable)]
 pub struct FfiRuntimeProductRequest {
     /// Absent resolves to the request's own `isProduction` — the framework's
     /// documented derivation, computed by the canonical request rather than
@@ -430,8 +476,9 @@ pub struct FfiRuntimeProductRequest {
     pub runtime_source_map: bool,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostIdeProductOptions", optional_fields = nullable)]
 pub struct FfiIdeProductRequest {
     pub want_source_map: bool,
     pub embed_ambient_types: bool,
@@ -441,8 +488,9 @@ pub struct FfiIdeProductRequest {
     pub ide_chunk_boundaries: bool,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostAnalysisProductOptions")]
 pub struct FfiAnalysisProductRequest {
     pub want_script_bindings: bool,
     pub want_template_data: bool,
@@ -468,8 +516,9 @@ pub enum FfiRequestedProduct {
 
 /// Source identity and dev/prod profile shared by every product requested
 /// in one compile.
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostCompileIdentity", optional_fields = nullable)]
 pub struct FfiHostCompileIdentity {
     pub filename: Option<String>,
     pub component_id: Option<String>,

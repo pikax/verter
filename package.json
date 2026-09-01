@@ -50,6 +50,7 @@
     "dev-extension": "pnpm run build:lsp && pnpm --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
     "update-all": "pnpm up -r -i -L",
     "clean": "pnpm -r exec npx shx rm -rf .turbo dist tsconfig.tsbuildinfo && npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
+    "gen:host-request-ts": "cargo run -p verter_napi --features generate-host-request-ts --bin generate_host_compile_request_ts",
     "gen:query-key-spec": "cargo run -p verter_session --bin gen-query-key-spec",
     "gen:oracle-snapshots": "cargo run -p verter_session --features oracle-gen --bin oracle_gen",
     "oracle:lift": "cargo run -p verter_session --features oracle-lift --bin oracle_lift --",

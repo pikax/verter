@@ -20,10 +20,12 @@
   "files": [
     "index.js",
     "host-types.ts",
+    "host-compile-request.generated.ts",
     "audit.ts",
     "dist/index.js",
     "dist/index.d.ts",
     "dist/host-types.d.ts",
+    "dist/host-compile-request.generated.d.ts",
     "dist/audit.d.ts"
   ],
   "main": "index.js",

@@ -43,6 +43,7 @@ mod audit;
 mod host_compile_request;
 #[cfg(test)]
 mod host_compile_request_tests;
+pub mod host_compile_request_ts;
 mod js_value_graph;
 mod memory_audit;
 mod meta;

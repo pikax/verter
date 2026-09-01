@@ -408,6 +408,11 @@ node_id = "CCA1O3C"
 commit_message = "feat(ci): execute the wasm JavaScript-boundary tests in the canonical gate"
 commit_date = "2026-09-01T02:10:00+01:00"
 
+[[implemented]]
+node_id = "CCA1O2I"
+commit_message = "refactor(napi): generate the published host compile-request declaration"
+commit_date = "2026-09-01T14:00:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
