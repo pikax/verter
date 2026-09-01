@@ -827,13 +827,18 @@ test("every workflow runner pin equals the wasm-bindgen version the gate derives
     }
   }
 
-  // Both jobs that invoke the canonical gate exhaustively must provision the target and the runner; the
-  // gate's preflight would otherwise fail the whole job on a prerequisite CI never installed.
+  // Each workflow must actually RUN the lane, and provision what it needs. Which
+  // entry point runs it is not the invariant — `release.yml` reaches it through
+  // the canonical gate, while `ci.yml` builds one shared nextest archive and
+  // therefore drives the lane through its standalone entry. The invariant is
+  // that a workflow does not merely install the target and the runner and then
+  // never execute the only run that can reach a `#[wasm_bindgen_test]` case.
+  const LANE_ENTRIES = ["node scripts/gate.mjs --exhaustive", "scripts/wasm-js-boundary-lane.mjs"];
   for (const workflow of ["ci.yml", "release.yml"]) {
     const source = readFileSync(join(REPO_ROOT, ".github", "workflows", workflow), "utf8");
     assert.ok(
-      source.includes("node scripts/gate.mjs --exhaustive"),
-      `${workflow} is expected to invoke the canonical gate`,
+      LANE_ENTRIES.some((entry) => source.includes(entry)),
+      `${workflow} must run the wasm JS-boundary lane through one of: ${LANE_ENTRIES.join(", ")}`,
     );
     assert.ok(source.includes(WASM_LANE_TARGET), `${workflow} must provision ${WASM_LANE_TARGET}`);
   }
