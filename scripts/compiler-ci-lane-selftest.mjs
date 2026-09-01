@@ -44,3 +44,30 @@ test("compile-contract runner fetches the locked workspace before trybuild goes 
   assert.notEqual(firstOwner, -1, "the runner must execute every compile-contract owner");
   assert.ok(fetch < firstOwner, "the fetch must finish before trybuild starts any owner");
 });
+
+// @ai-generated - Guards workflow prerequisites for generated Svelte conformance artifacts.
+test("Svelte conformance runs for golden-generator changes", () => {
+  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  const conformanceJob = yamlJob(workflow, "svelte-conformance");
+
+  assert.match(
+    conformanceJob,
+    /if:\s*needs\.detect-changes\.outputs\.rust\s*==\s*'true'\s*\|\|\s*needs\.detect-changes\.outputs\.svelte_oracle\s*==\s*'true'/,
+  );
+  assert.match(conformanceJob, /gen-svelte-goldens\.mjs --conformance --check/);
+});
+
+// @ai-generated - Guards clean-checkout package entrypoints used by release JavaScript tests.
+test("release builds TypeScript package entrypoints before JavaScript tests", () => {
+  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "release.yml"), "utf8");
+  const testJob = yamlJob(workflow, "test");
+  const build = testJob.indexOf("pnpm run build:ts");
+  const tests = testJob.indexOf("pnpm test");
+
+  assert.notEqual(build, -1, "release tests must build untracked package dist entrypoints");
+  assert.notEqual(tests, -1, "release must execute the JavaScript test suite");
+  assert.ok(
+    build < tests,
+    "TypeScript package entrypoints must exist before JavaScript tests start",
+  );
+});

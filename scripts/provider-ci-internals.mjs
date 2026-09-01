@@ -248,6 +248,15 @@ export function verifyProviderCiPartition(listJson) {
         if (exactCounts.has(exactKey)) exactCounts.set(exactKey, exactCounts.get(exactKey) + 1);
       }
       const lanes = [...new Set(matches.map((selector) => selector.lane))];
+      if (
+        packageName === "verter_lsp" &&
+        testName.startsWith("real_provider_tests::") &&
+        matches.length === 0
+      ) {
+        errors.push(
+          `real-provider test ${packageName} ${testName} has no explicit tsserver or tsgo selector`,
+        );
+      }
       if (matches.length > 1) {
         errors.push(
           `${packageName} ${testName} matches multiple provider selectors: ${matches

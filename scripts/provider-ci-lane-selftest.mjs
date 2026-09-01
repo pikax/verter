@@ -65,6 +65,21 @@ test("provider filters form one non-empty, disjoint canonical partition", () => 
   assert.match(missingVerdict.errors.join("\n"), /exact provider test .* matched 0 times/);
 });
 
+// @ai-generated - Ensures real-provider modules cannot fall through to the provider-free core lane.
+test("real-provider module tests require explicit provider ownership", () => {
+  const inventory = syntheticInventory();
+  inventory["rust-suites"].verter_lsp.testcases[
+    "real_provider_tests::rename::unsuffixed_provider_test"
+  ] = {};
+
+  const verdict = verifyProviderCiPartition(inventory);
+  assert.equal(verdict.ok, false);
+  assert.match(
+    verdict.errors.join("\n"),
+    /real-provider test .* has no explicit tsserver or tsgo selector/,
+  );
+});
+
 test("provider runners use serial libtest commands instead of nextest", () => {
   for (const lane of ["tsserver", "tsgo"]) {
     const invocations = providerCargoInvocations(lane);

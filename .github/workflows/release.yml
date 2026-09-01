@@ -122,6 +122,8 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Build TypeScript package entrypoints
+        run: pnpm run build:ts
       - name: Provision the Rust gate's offline oracle npm cache
         run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
       - name: Install cargo-nextest
@@ -1867,16 +1869,7 @@ jobs:
   # ---------------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs:
-      [
-        validate,
-        bf2-authoritative,
-        build-native,
-        build-lsp,
-        build-mcp,
-        build-wasm,
-        build-vsix,
-      ]
+    needs: [validate, bf2-authoritative, build-native, build-lsp, build-mcp, build-wasm, build-vsix]
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
