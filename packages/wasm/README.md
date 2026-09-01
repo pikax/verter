@@ -10,7 +10,7 @@ WASM bindings for Verter's framework-carrier compiler host. This package exposes
 
 ## Overview
 
-`@verter/wasm` wraps the same Rust template compiler used by `@verter/native`, but targets WebAssembly instead of native Node.js bindings. The package provides an `initialize()` / `compile()` lifecycle: the WASM module must be loaded asynchronously before compilation can begin, after which both async and sync compilation are available.
+`@verter/wasm` wraps the same Rust template compiler used by `@verter/native`, but targets WebAssembly instead of native Node.js bindings. The package provides an `initialize()` / `createHost()` lifecycle: the WASM module must be loaded asynchronously before a `Host` can be constructed, after which the whole in-memory `VerterHost` surface is available synchronously.
 
 The WASM binary is size-optimized with `opt-level = "s"` and LTO enabled in the release profile, keeping the download footprint small for browser delivery.
 
@@ -68,12 +68,12 @@ stateDiagram-v2
     Initialized --> Initialized: initialize() called again (no-op)
 
     note right of Uninitialized
-        compileSync() throws
-        compile() auto-initializes
+        new Host() throws
+        createHost() auto-initializes
     end note
 
     note right of Initialized
-        compile() and compileSync()
+        new Host() and createHost()
         both available
     end note
 ```
@@ -90,7 +90,7 @@ pnpm add @verter/wasm
 
 ### `initialize(): Promise<void>`
 
-Loads the WASM module. Must be called before `compileSync()`. Safe to call multiple times -- only initializes once. Subsequent calls return immediately.
+Loads the WASM module. `createHost()` calls it for you; call it directly only to front-load the load cost. Safe to call multiple times -- only initializes once. Subsequent calls return immediately.
 
 ```typescript
 import { initialize } from "@verter/wasm";
@@ -98,41 +98,40 @@ import { initialize } from "@verter/wasm";
 await initialize();
 ```
 
-### `compile(input, options?): Promise<CodegenResult>`
+### `createHost(config?): Promise<Host>`
 
-Async compilation. Accepts `string` or `Uint8Array` input. Automatically calls `initialize()` if the module has not been loaded yet, so it is safe to call without explicit initialization.
+The package's compile entry. Initializes the module if needed, then returns
+a `Host` — the same in-memory `VerterHost` surface `@verter/native` exposes:
+register a source with `upsert`, then read its compiled virtual files.
 
 ```typescript
-import { compile } from "@verter/wasm";
+import { createHost } from "@verter/wasm";
 
-const result = await compile("<template><div>{{ msg }}</div></template>", {
-  filename: "App.vue",
-  isProduction: false,
+const host = await createHost();
+
+host.upsert({
+  canonicalId: "/App.vue",
+  inputId: "/App.vue",
+  source: "<template><div>{{ msg }}</div></template>",
+  fileLanguage: { framework: "vue" },
 });
 
-const bytes = new TextEncoder().encode("<template><div>{{ msg }}</div></template>");
-const bytesResult = await compile(bytes, { filename: "App.vue" });
+const main = host.getVirtualFile({
+  canonicalId: "/App.vue",
+  nodeKind: "Main",
+  compileProfile: {},
+});
 
-console.log(result.code);
-console.log(result.sourceMap);
-console.log(result.codeWithSourceMap);
+console.log(main?.code);
 ```
 
-### `compileSync(input, options?): CodegenResult`
-
-Synchronous compilation. Accepts `string` or `Uint8Array`. Requires `initialize()` to have been called and completed beforehand. Throws if the WASM module is not yet loaded.
-
-```typescript
-import { initialize, compileSync } from "@verter/wasm";
-
-await initialize();
-
-const result = compileSync("<template><div>Hello</div></template>");
-```
+There is no standalone `compile()` / `compileSync()`. The WASM artifact
+exports `VerterHost` and nothing else compile-shaped, so those wrappers
+never worked; they were removed rather than left throwing. Use the host.
 
 ### `isInitialized(): boolean`
 
-Returns whether the WASM module has been loaded and is ready for synchronous compilation.
+Returns whether the WASM module has been loaded and a `Host` can be constructed synchronously.
 
 ```typescript
 import { isInitialized, initialize } from "@verter/wasm";
@@ -144,29 +143,10 @@ if (!isInitialized()) {
 
 ### Types
 
-All compile entry points accept `input` as `string | Uint8Array`.
-
-```typescript
-interface CodegenOptions {
-  filename?: string;
-  includeSourceContent?: boolean;
-  ssr?: boolean;
-  isProduction?: boolean;
-  componentId?: string;
-  features?: FeatureFlags;
-}
-
-interface FeatureFlags {
-  optionsApi?: boolean; // default: true
-  propsDestructure?: boolean; // default: true
-}
-
-interface CodegenResult {
-  code: string;
-  sourceMap: string;
-  codeWithSourceMap: string;
-}
-```
+Host request and response types (`HostConfig`, `HostUpsertRequest`,
+`HostVirtualQuery`, `HostVirtualFileResponse`, …) are re-exported from
+`@verter/native/host-types`, so the two packages type-check against one
+definition.
 
 ## Development / Build
 

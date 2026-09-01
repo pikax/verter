@@ -8,7 +8,7 @@ kind=implementation
 semantic_role=delivery
 class=compiler
 predecessors=CCA1J,CCA1M
-owner=compiler.compiler-bridge:Vue FrameworkHostIntegrationBackend implementation
+owner=compiler.compiler-bridge:Vue FrameworkHostIntegrationBackend with demand-specific admission issuance
 conflict_domains=compiler_execution,host_service_graph,vue_product
 resource_class=rust-mixed
 review_profile=public-3
@@ -28,7 +28,7 @@ release_gating=none
 external_requirements=
 charter=charters/compiler-compiler-bridge/CCA1N1.md
 max_production_loc=700
-max_production_files=7
+max_production_files=10
 max_related_packages=2
 rescope_loc=1500
 rescope_files=12
@@ -39,32 +39,37 @@ rescope_unrelated_packages=3
 
 ## Independently acceptable outcome and rollback boundary
 
-Implement the Vue `FrameworkHostIntegrationBackend<VueEpoch, NativeHostEpoch>` behind the existing session route. It coordinates one canonical multi-product `CompileRequest` without becoming the production selector. Reverting removes only this unused Vue host backend and catalog row.
+Implement the Vue `FrameworkHostIntegrationBackend<VueEpoch, NativeHostEpoch>` behind the existing session route, with demand-specific `CompileAdmission` issuance for both lanes. It coordinates canonical typed compile requests without becoming the production selector. Reverting removes only this unused Vue host backend, its catalog row, and the generic issuance surface it introduced.
 
 ## Concrete surfaces and APIs
 
-- Surfaces: Vue-specific helpers reached from `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs`, `host_executor.rs`, `host_compile.rs`, and compiler-side Vue host adapters, including backend entry methods for the future `compile_entry` and `compile_entry_runtime_render` selectors.
-- Owns Vue request construction, prerequisite sharing, ordered calls to the frontend/semantic/projection/runtime capabilities, diagnostic aggregation, refusal atomicity, lifecycle/cancellation handoff, the current Vue host-assembly handoff, the runtime-render lane's render-only handoff, and per-product publication payloads. CCA2BV alone may relocate Vue framework assembly, with CCA2B joining both framework migrations and CCA2C owning the later staged host handoff.
+- Surfaces: Vue-specific helpers reached from `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs`, `host_executor.rs`, `host_compile.rs`, compiler-side Vue host adapters, and the generic demand/issuance method surface on the `FrameworkHostIntegrationBackend` capability trait in `crates/verter_compiler/src/framework_common/capability.rs`.
+- This node alone extends the generic capability trait with the framework-neutral demand-specific issuance surface (host-backed multi-product demand and runtime-render demand each yielding a demand-specific `CompileAdmission`); CCA1N2 consumes that surface and must not modify the generic trait.
+- The single associated `CompileAdmission` token type per backend remains sole, per the compiler architecture contract; demand-specificity is carried in the issued admission's value (the admitted demand and requested product set), never by sibling admission token types.
+- The generic issuance surface must be sufficient for the Svelte backend's named demands — multi-product, render-only, self-contained Main plus requested style side-products, and typed runtime refusal — without further generic-trait changes.
+- Capability validation is demand-specific: a runtime-render demand must not require `ProjectionBackend` capability; a missing required runtime capability yields a typed unavailability outcome, never a fallback to another lane, framework, or compatibility compiler.
+- Owns Vue request construction for both demands, framework-owned prerequisites including Vue macro semantic input, prerequisite sharing, ordered calls to the frontend/semantic/projection/runtime capabilities, diagnostic aggregation, refusal atomicity, lifecycle/cancellation handoff, the current Vue host-assembly handoff, the runtime-render lane's render-only handoff, and per-product publication payloads. CCA2BV alone may relocate Vue framework assembly, with CCA2B joining both framework migrations and CCA2C owning the later staged host handoff.
 - A runtime refusal preserves the current all-or-none transaction outcome; no sibling projection/template product may publish or warm after refusal.
-- Does not move the generic session selector, TypeScript/NAPI DTOs, Svelte orchestration, or CCA2 staged artifact schema.
+- Does not move the generic session selector, does not add a generic framework switch, and does not touch TypeScript/NAPI DTOs, Svelte orchestration, or CCA2 staged artifact schema.
 
 ## Exact predecessor contracts
 
 - **CCA1J:** implemented ledger row for “IDE projection route convergence”.
-- **CCA1M:** implemented ledger row for “Runtime compile route convergence join”; CCA1M1–CCA1M3 prove direct, host-backed, and runtime-render runtime delegation while retaining both outer calls.
+- **CCA1M:** implemented ledger row for “Runtime compile route convergence join”; CCA1M1–CCA1M3 prove direct, compatibility-internal, and runtime-render runtime delegation while retaining both outer calls.
 
 ## Acceptance and evidence
 
 - Vue runtime, IDE, and template-fact demands share one admitted request and one prerequisite population with no duplicate parse, semantic, projection, plan, emit, assembly, or copy pass.
+- Host-backed multi-product and runtime-render demands each receive a demand-specific `CompileAdmission` issued only by this backend; product backends consume, never mint, admission.
 - Produced/refused diagnostics, maps, virtual modules, source identity, cancellation, and publication eligibility match the current transaction exactly.
 - Structural evidence proves both generic production callers still use their old bundle adapters in this node.
 
 ## Deletions, budgets, and aborts
 
 - Delete no generic host route; forbid Svelte, NAPI/TypeScript public DTO, unplugin, and staged-artifact work.
-- Ceiling: 700 LOC, 7 files, 2 crates; rescope if generic selection or another framework enters.
-- Abort on partial publication after refusal, duplicate prerequisites, or parity/performance divergence.
+- Ceiling: 700 LOC, 10 files, 2 crates; rescope if generic selection or another framework enters.
+- Abort on partial publication after refusal, duplicate prerequisites, an admission token exposing a general capability/service bag, or parity/performance divergence.
 
 ## Verification and review
 
-Use TDD around Vue multi-product/refusal/publication boundaries, run compiler/session Vue host suites and `targeted-domain`. Apply `public-3`; add only CCA1N1's ledger row.
+Use TDD around Vue multi-product/render/refusal/publication boundaries, run compiler/session Vue host suites and `targeted-domain`. Apply `public-3`; add only CCA1N1's ledger row.

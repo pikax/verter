@@ -379,7 +379,7 @@ pnpm vitest --run                            # All tests (non-watch)
 pnpm vitest --run path/to/test.spec.ts       # Specific file
 
 # Rust — CANONICAL agent gate
-node scripts/gate.mjs                         # Canonical provider-free core Rust gate: one workspace archive/list and one filtered nextest run. Real providers, Svelte conformance, compile contracts, and proto regeneration freshness have dedicated CI lanes. The shipped-cfg lane is currently SKIPPED and disclosed on every run.
+node scripts/gate.mjs                         # Canonical provider-free core Rust gate: one workspace archive/list, then the serialized wasm JS-boundary lane (the workspace's `#[wasm_bindgen_test]` cases on `wasm32-unknown-unknown` through `wasm-bindgen-test-runner`) and one filtered nextest run; BOTH receipts are required for the verdict. Real providers, Svelte conformance, compile contracts, and proto regeneration freshness have dedicated CI lanes. The shipped-cfg lane is currently SKIPPED and disclosed on every run.
 node scripts/gate.mjs --exhaustive            # CI/complete core diagnostics: same core universe, with `--no-fail-fast`.
 node scripts/compile-contracts.mjs             # Standalone trybuild compile contracts; no Rust test targets.
 pnpm proto:check                               # Pinned buf + oxfmt regeneration freshness.
@@ -429,7 +429,7 @@ recorded as one.
 Run after **every** change. Verter's crates are highly interconnected — a change in one crate frequently breaks tests in dependent crates. Always run the full workspace suite:
 
 ```bash
-node scripts/gate.mjs 2>&1 | tee /tmp/test-output.txt   # Canonical provider-free core Rust gate; dedicated CI owns providers, Svelte conformance, compile contracts, and proto freshness.
+node scripts/gate.mjs 2>&1 | tee /tmp/test-output.txt   # Canonical provider-free core Rust gate: the wasm JS-boundary lane plus archive-backed Surface 1; dedicated CI owns providers, Svelte conformance, compile contracts, and proto freshness.
 node scripts/compile-contracts.mjs
 pnpm proto:check
 cargo test --no-fail-fast -p verter_svelte_conformance --features conformance-tests --lib --bin verter_svelte_conformance --test main -- --test-threads=4
@@ -448,7 +448,7 @@ evidence about the one CI uses.
 
 For TypeScript changes, also run `pnpm test`. Do not skip workspace-wide testing even for "small" changes.
 
-**Agent test policy:** `node scripts/gate.mjs` is the default local provider-free Rust gate; `--exhaustive` changes failure collection only. The shipped-cfg lane remains temporarily skipped and disclosed. Real providers run only in the dedicated serial libtest CI jobs, Svelte conformance runs with its `conformance-tests` feature in its own job, compile-fail fixtures run via `node scripts/compile-contracts.mjs`, and proto regeneration freshness runs via `pnpm proto:check`. Do not run bare `cargo test --workspace` (no `--tests`) by default: it pulls in doctests and examples. Run doctests only when rustdoc examples changed or the user explicitly asks.
+**Agent test policy:** `node scripts/gate.mjs` is the default local provider-free Rust gate; `--exhaustive` changes failure collection only. The wasm JS-boundary lane is REQUIRED on every real invocation, bare and exhaustive, and is never path-filtered: a missing `wasm32-unknown-unknown` target, a missing or version-skewed `wasm-bindgen-test-runner`, an empty case inventory, an absent terminal harness result, or an executed-vs-declared case count that does not reconcile each FAIL the gate loudly (`WASM-LANE PREREQUISITE MISSING` for the prerequisites). Provide them with `rustup target add wasm32-unknown-unknown` and `cargo install wasm-bindgen-cli --version <the `wasm-bindgen` version in `crates/verter_wasm/Cargo.toml`> --locked`. The shipped-cfg lane remains temporarily skipped and disclosed. Real providers run only in the dedicated serial libtest CI jobs, Svelte conformance runs with its `conformance-tests` feature in its own job, compile-fail fixtures run via `node scripts/compile-contracts.mjs`, and proto regeneration freshness runs via `pnpm proto:check`. Do not run bare `cargo test --workspace` (no `--tests`) by default: it pulls in doctests and examples. Run doctests only when rustdoc examples changed or the user explicitly asks.
 
 ### Documentation Updates
 

@@ -1,0 +1,5 @@
+error[E0599]: no associated function or constant named `mint_for_tests` found for struct `ProductExecutionGrant` in the current scope
+  --> tests/cases/compile-fail/grant_test_mint_absent.rs:10:28
+   |
+10 |     ProductExecutionGrant::mint_for_tests(ProductKind::IdeCompanion)
+   |                            ^^^^^^^^^^^^^^ associated function or constant not found in `ProductExecutionGrant`

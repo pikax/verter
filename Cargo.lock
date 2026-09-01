@@ -3349,6 +3349,7 @@ dependencies = [
  "verter_actions",
  "verter_compiler",
  "verter_diagnostics",
+ "verter_identity",
  "verter_language",
  "verter_macro_dto",
  "verter_protocol",
@@ -3492,12 +3493,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "ts-rs",
  "verter_actions",
  "verter_audit",
  "verter_compiler",
  "verter_css_syntax",
  "verter_diagnostics",
  "verter_ffi",
+ "verter_napi_request_fixture",
  "verter_protocol",
  "verter_scheduler",
  "verter_semantic",
@@ -3505,6 +3508,16 @@ dependencies = [
  "verter_span",
  "verter_type_expr",
  "verter_workspace",
+]
+
+[[package]]
+name = "verter_napi_request_fixture"
+version = "0.0.1-beta.3"
+dependencies = [
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "verter_napi",
 ]
 
 [[package]]
@@ -3584,6 +3597,7 @@ dependencies = [
  "serde_json",
  "static_assertions",
  "syn 2.0.117",
+ "ts-rs",
  "verter_language",
  "verter_no_typeexpr",
  "verter_semantic",
@@ -3913,15 +3927,18 @@ version = "0.0.1-beta.3"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.4.2",
+ "js-sys",
  "prost",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
  "verter_actions",
  "verter_audit",
+ "verter_compiler",
  "verter_css_syntax",
  "verter_diagnostics",
  "verter_ffi",
+ "verter_identity",
  "verter_protocol",
  "verter_semantic",
  "verter_session",

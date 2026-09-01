@@ -1638,10 +1638,23 @@ async function main() {
       contract: { status: "ok", parseable: true, complete: true },
       parity: { complete: true, matches: true },
     };
+    // The wasm JS-boundary lane has no enable flag: every row below carries a complete wasm receipt, and
+    // the row set proves that omitting one, or handing over one whose executed-vs-discovered parity does
+    // not reconcile, cannot reach PASS.
+    const completeWasm = {
+      hardFailure: false,
+      failures: [],
+      coverage: { parseable: true, complete: true },
+      parity: { complete: true, matches: true, discoveredCases: 4, selectedCases: 4 },
+    };
     const receiptRows = [
-      [{ surface: completeSurface, shipped: completeShipped }, "PASS", true],
+      [{ surface: completeSurface, shipped: completeShipped, wasm: completeWasm }, "PASS", true],
       [
-        { surface: { ...completeSurface, toleratedOccurred: true }, shipped: completeShipped },
+        {
+          surface: { ...completeSurface, toleratedOccurred: true },
+          shipped: completeShipped,
+          wasm: completeWasm,
+        },
         "PASS-WITH-TOLERATED",
         true,
       ],
@@ -1653,11 +1666,12 @@ async function main() {
             failures: [{ surface: "nextest", name: "cases::real_failure" }],
           },
           shipped: completeShipped,
+          wasm: completeWasm,
         },
         "FAIL",
         true,
       ],
-      [{ surface: completeSurface, shipped: null }, "FAIL", false],
+      [{ surface: completeSurface, shipped: null, wasm: completeWasm }, "FAIL", false],
       [
         {
           surface: completeSurface,
@@ -1665,6 +1679,32 @@ async function main() {
             ...completeShipped,
             contract: { status: "not-run", parseable: false, complete: false },
           },
+          wasm: completeWasm,
+        },
+        "FAIL",
+        false,
+      ],
+      // A run that never produced a wasm receipt at all — the state this lane exists to make impossible.
+      [{ surface: completeSurface, shipped: completeShipped, wasm: null }, "FAIL", false],
+      // A wasm lane that ran but executed fewer cases than the tree declares.
+      [
+        {
+          surface: completeSurface,
+          shipped: completeShipped,
+          wasm: {
+            ...completeWasm,
+            parity: { complete: true, matches: false, discoveredCases: 4, selectedCases: 0 },
+          },
+        },
+        "FAIL",
+        false,
+      ],
+      // A wasm lane whose harness announced work and never closed it.
+      [
+        {
+          surface: completeSurface,
+          shipped: completeShipped,
+          wasm: { ...completeWasm, coverage: { parseable: true, complete: false } },
         },
         "FAIL",
         false,
@@ -1687,6 +1727,7 @@ async function main() {
     const skippedPass = reduceGateLaneReceipts({
       surface: completeSurface,
       shipped: null,
+      wasm: completeWasm,
       shippedCfgLaneEnabled: false,
     });
     if (skippedPass.verdict !== "PASS" || skippedPass.coverageComplete !== true) {
@@ -1699,6 +1740,7 @@ async function main() {
     const skippedIncomplete = reduceGateLaneReceipts({
       surface: { ...completeSurface, coverage: { parseable: false, complete: false } },
       shipped: null,
+      wasm: completeWasm,
       shippedCfgLaneEnabled: false,
     });
     if (
@@ -1709,6 +1751,24 @@ async function main() {
       fail(
         `(GB17.5) Surface-1-only skip must still FAIL on an incomplete Surface receipt, ` +
           `got ${JSON.stringify(skippedIncomplete)}`,
+      );
+      ok = false;
+    }
+
+    const wasmlessSkippedRun = reduceGateLaneReceipts({
+      surface: completeSurface,
+      shipped: null,
+      wasm: null,
+      shippedCfgLaneEnabled: false,
+    });
+    if (
+      wasmlessSkippedRun.verdict !== "FAIL" ||
+      wasmlessSkippedRun.coverageComplete !== false ||
+      !wasmlessSkippedRun.failures.some((row) => row.surface === "gate/incomplete")
+    ) {
+      fail(
+        "(GB17.5) the shipped-cfg skip path must NOT become a hole through which a run with no wasm " +
+          `JS-boundary receipt reaches PASS, got ${JSON.stringify(wasmlessSkippedRun)}`,
       );
       ok = false;
     }
@@ -1994,6 +2054,63 @@ async function main() {
       "utf8",
     );
 
+    // The wasm JS-boundary lane runs before the host lanes and refuses to proceed on a missing
+    // prerequisite, so the stand-in environment must MODEL that prerequisite or the gate never reaches the
+    // lanes under test here. Everything it needs is materialised into the same stub dir, which is first on
+    // PATH, so this scenario stays hermetic on a host with no wasm toolchain installed: a synthetic
+    // one-package workspace metadata document, a source root declaring one case, a `rustc` that reports an
+    // installed target lib directory, and a runner whose version matches the fixture's own declaration.
+    const wasmScanRoot = join(stubDir, "wasm-fixture", "src");
+    mkdirSync(wasmScanRoot, { recursive: true });
+    writeFileSync(
+      join(wasmScanRoot, "boundary.rs"),
+      "#[wasm_bindgen_test]\nfn the_stand_in_case() {}\n",
+      "utf8",
+    );
+    const wasmMetadataPath = join(stubDir, "wasm-metadata.json");
+    writeFileSync(
+      wasmMetadataPath,
+      JSON.stringify({
+        packages: [
+          {
+            name: "stand_in_wasm",
+            manifest_path: join(stubDir, "wasm-fixture", "Cargo.toml"),
+            dependencies: [
+              { name: "wasm-bindgen", kind: null, req: "^0.2.999" },
+              { name: "wasm-bindgen-test", kind: "dev", req: "^0.3.999" },
+            ],
+            targets: [{ kind: ["lib"], src_path: join(wasmScanRoot, "lib.rs"), test: true }],
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const wasmLibDir = join(stubDir, "wasm-target-lib");
+    mkdirSync(wasmLibDir, { recursive: true });
+    writeFileSync(join(wasmLibDir, "libcore-0000000000000000.rlib"), "", "utf8");
+    const rustcStub = join(stubDir, "rustc");
+    writeFileSync(rustcStub, `#!/usr/bin/env bash\nprintf '%s\\n' "${wasmLibDir}"\nexit 0\n`, {
+      mode: 0o755,
+    });
+    const runnerStub = join(stubDir, "wasm-bindgen-test-runner");
+    writeFileSync(
+      runnerStub,
+      "#!/usr/bin/env bash\nprintf 'wasm-bindgen-test-runner 0.2.999\\n'\nexit 0\n",
+      { mode: 0o755 },
+    );
+    for (const shim of [rustcStub, runnerStub]) {
+      try {
+        chmodSync(shim, 0o755);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    // The shipped-check arm matches `check --workspace` and not a bare `check`, because the gate's
+    // report-only Cargo timing-capability probe runs `cargo check --help` at startup regardless of which
+    // lanes are enabled. A bare `check` arm records that probe as a shipped-cfg lane invocation and this
+    // scenario then reports a lane running while it is disabled.
+    //
     // The stub dispatches on the REAL argv shape each production call site builds (buildNextestArchiveArgs
     // / the list step / buildSurface1RunArgs / buildShippedCfgCheckArgs / buildShippedCfgContractArgs) and
     // records the ACTUAL env + argv each per-lane invocation receives, then fails fast (archive/list
@@ -2002,7 +2119,13 @@ async function main() {
     writeFileSync(
       stubPath,
       `#!/usr/bin/env bash
-if [ "$1" = "nextest" ] && [ "$2" = "archive" ]; then
+if [ "$1" = "metadata" ]; then
+  cat "${wasmMetadataPath}"
+  exit 0
+elif [ "$1" = "test" ] && [ "$2" = "--target" ]; then
+  printf 'running 1 tests\\ntest the_stand_in_case ... ok\\n\\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 filtered out; finished in 0.00s\\n'
+  exit 0
+elif [ "$1" = "nextest" ] && [ "$2" = "archive" ]; then
   prev=""
   archfile=""
   for a in "$@"; do
@@ -2017,7 +2140,7 @@ elif [ "$1" = "nextest" ] && [ "$2" = "list" ]; then
 elif [ "$1" = "nextest" ] && [ "$2" = "run" ] && [ "$3" = "--archive-file" ]; then
   { printf 'CARGO_BUILD_JOBS=%s\\n' "$CARGO_BUILD_JOBS"; printf 'ARGS %s\\n' "$*"; } >> "${surfaceMarker}"
   exit 1
-elif [ "$1" = "check" ]; then
+elif [ "$1" = "check" ] && [ "$2" = "--workspace" ]; then
   { printf 'CARGO_BUILD_JOBS=%s\\n' "$CARGO_BUILD_JOBS"; printf 'ARGS %s\\n' "$*"; } >> "${shippedCheckMarker}"
   exit 0
 elif [ "$1" = "nextest" ] && [ "$2" = "run" ] && [ "$3" = "-p" ]; then
@@ -8792,17 +8915,19 @@ fi
         : "";
     if (
       supervisorFactoryCount !== 1 ||
-      productionRunStepCount !== 8 ||
+      productionRunStepCount !== 9 ||
       gateSource.includes("await runContainedStep({") ||
       !gateSource.includes('ctx.supervisor.runStep("surface-1", {') ||
       !gateSource.includes('ctx.supervisor.runStep("shipped-cfg", {') ||
+      !gateSource.includes("ctx.supervisor.runStep(WASM_LANE_ID, {") ||
       !teardownSource.includes('await supervisor.closeAndReapAll("GATE_TEARDOWN")') ||
       teardownSource.indexOf("await supervisor.closeAndReapAll") >
         teardownSource.indexOf("mutex.release()")
     ) {
       fail(
-        `(GB18.10) production must construct exactly one supervisor, route all eight currently ` +
-          `sequential contained commands through it (including Surface 1/shipped lanes), and await its ` +
+        `(GB18.10) production must construct exactly one supervisor, route all nine currently ` +
+          `sequential contained commands through it (including the wasm JS-boundary, Surface 1 and ` +
+          `shipped lanes), and await its ` +
           `close before mutex release; factory=${supervisorFactoryCount} runStep=${productionRunStepCount}`,
       );
       ok = false;

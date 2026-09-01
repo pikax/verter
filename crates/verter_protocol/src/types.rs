@@ -197,6 +197,362 @@ pub struct FfiVirtualQuery {
 }
 
 // =============================================================================
+// Framework-discriminated host compile request (JS → Rust)
+// =============================================================================
+//
+// Every struct below is `deny_unknown_fields`, and the framework arm is an
+// externally-tagged enum: a Svelte option key inside the Vue arm is an
+// unknown field, and an unrecognised framework key is an unknown variant.
+// Both refuse at decode time — there is no arm on which a foreign or
+// misspelled key can be silently dropped.
+//
+// Every non-`Option` field is required: an absent key is a decode refusal,
+// not a substituted value. `Option` fields carry presence semantics — for
+// an option the compiler refuses, `Some(false)` still means "the caller
+// supplied it" and is refused on presence.
+//
+// Presence is measured on the DECODED value, so an omitted key and an
+// explicit JSON `null` are indistinguishable: both decode to `None` and
+// neither is treated as supplied. `{"codegenMode": false}` is refused as
+// a supplied unsupported option; `{"codegenMode": null}` is accepted as
+// an absent one. A caller that must distinguish "explicitly cleared" from
+// "not stated" cannot express that here.
+
+/// Which Vue client codegen backend a runtime product resolves to.
+/// `Inferred` defers to the parsed source's own marker.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "HostVueBackend")]
+pub enum FfiVueBackend {
+    Inferred,
+    Vdom,
+    Vapor,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "HostVueWhitespace")]
+pub enum FfiVueWhitespace {
+    Preserve,
+    Condense,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "HostVueParsePad")]
+pub enum FfiVueParsePad {
+    Space,
+    Line,
+    Off,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostVueAssetUrlOptions", optional_fields = nullable)]
+pub struct FfiVueAssetUrlOptions {
+    pub base: Option<String>,
+    pub include_absolute: Option<bool>,
+    pub tags: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "HostVueAssetUrlTransform")]
+pub enum FfiVueAssetUrlTransform {
+    Disabled,
+    Enabled(FfiVueAssetUrlOptions),
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "HostVueCssModuleScopeBehaviour")]
+pub enum FfiVueCssModuleScopeBehaviour {
+    Local,
+    Global,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "HostVueCssModuleLocalsConvention")]
+pub enum FfiVueCssModuleLocalsConvention {
+    CamelCase,
+    CamelCaseOnly,
+    Dashes,
+    DashesOnly,
+    AsIs,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostVueCssModules", optional_fields = nullable)]
+pub struct FfiVueCssModules {
+    pub scope_behaviour: Option<FfiVueCssModuleScopeBehaviour>,
+    pub hash_prefix: Option<String>,
+    pub locals_convention: Option<FfiVueCssModuleLocalsConvention>,
+    pub export_globals: Option<bool>,
+}
+
+/// Vue-owned compile options. The trailing `compatConfig*` / `codegenMode`
+/// slots exist only so a caller who supplies a refused option is told which
+/// one — presence is what the conversion refuses, `false` included.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostVueCompileOptions", optional_fields = nullable)]
+pub struct FfiVueCompileOptions {
+    pub backend: FfiVueBackend,
+    /// Mirrors the canonical `ssr` OPTION one-for-one. It is not the SSR
+    /// demand: whether a compile produces server output is derived from
+    /// the requested product set, and that derivation stays the canonical
+    /// request's. The two are independent — this flag disagreeing with the
+    /// requested products is not refused when the request is constructed.
+    pub ssr: bool,
+    pub is_custom_element: Vec<String>,
+    /// Exactly two elements; any other length is a typed malformed-value
+    /// refusal, never a fallback to the framework's own delimiters.
+    pub delimiters: Option<Vec<String>>,
+    pub whitespace: Option<FfiVueWhitespace>,
+    pub comments: Option<bool>,
+    pub hoist_static: Option<bool>,
+    pub cache_handlers: Option<bool>,
+    pub hmr: Option<bool>,
+    pub optimize_imports: Option<bool>,
+    pub runtime_module_name: Option<String>,
+    pub ssr_runtime_module_name: Option<String>,
+    pub parse_pad: Option<FfiVueParsePad>,
+    pub ignore_empty: Option<bool>,
+    pub babel_parser_plugins: Vec<String>,
+    pub gen_default_as: Option<String>,
+    pub props_destructure: Option<bool>,
+    pub script_custom_element: Option<bool>,
+    pub transform_asset_urls: Option<FfiVueAssetUrlTransform>,
+    pub style_trim: Option<bool>,
+    pub css_modules: Option<FfiVueCssModules>,
+
+    pub compat_config: Option<bool>,
+    pub compat_config_mode: Option<bool>,
+    pub compat_config_compiler_is_on_element: Option<bool>,
+    pub compat_config_compiler_v_bind_sync: Option<bool>,
+    pub compat_config_compiler_v_if_v_for_precedence: Option<bool>,
+    pub compat_config_compiler_v_bind_object_order: Option<bool>,
+    pub compat_config_compiler_v_on_native: Option<bool>,
+    pub compat_config_compiler_native_template: Option<bool>,
+    pub compat_config_compiler_inline_template: Option<bool>,
+    pub compat_config_compiler_filters: Option<bool>,
+    pub transform_compat_config: Option<bool>,
+    pub codegen_mode: Option<bool>,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "HostSvelteNamespace")]
+pub enum FfiSvelteNamespace {
+    Html,
+    Svg,
+    MathMl,
+    Foreign,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "HostSvelteFragments")]
+pub enum FfiSvelteFragments {
+    Html,
+    Tree,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "HostSvelteRunes")]
+pub enum FfiSvelteRunes {
+    True,
+    False,
+    Infer,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "HostSvelteCss")]
+pub enum FfiSvelteCss {
+    Injected,
+    External,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostSvelteCustomElementProp", optional_fields = nullable)]
+pub struct FfiSvelteCustomElementProp {
+    pub attribute: Option<String>,
+    pub reflect: Option<bool>,
+    /// The caller's prop-type spelling, carried verbatim. The wire owns no
+    /// membership over the custom-element prop-type vocabulary: an
+    /// unrecognised spelling decodes fine here and is refused at canonical
+    /// request construction, the one place that decides the vocabulary, so
+    /// this boundary cannot drift from it or refuse at a different stage
+    /// than the direct canonical entry point does.
+    pub prop_type: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostSvelteCustomElementDescriptor", optional_fields = nullable)]
+pub struct FfiSvelteCustomElementDescriptor {
+    pub tag: Option<String>,
+    pub shadow: Option<bool>,
+    pub props: std::collections::BTreeMap<String, FfiSvelteCustomElementProp>,
+}
+
+/// Presence-only marker for the `compatibility` object: the one inventoried
+/// field it may carry (`componentApi`) is refused, so it has no wire slot.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+// `ts-rs` projects a field-less struct as `Record<symbol, never>`, which is
+// WEAKER than this declaration: it closes a fresh object literal but admits
+// any already-typed object, so `{ componentApi: true }` type-checks and then
+// decodes to a refusal. `Record<string, never>` is what the decoder means.
+//
+// The override is not the hand-written-TypeScript hole this projection
+// closes. That hole is a declaration that DIVERGES from the schema; this one
+// exists because the automatic projection is less closed than the schema is,
+// and it restores what `deny_unknown_fields` on a field-less struct already
+// says. An override that asserted a shape the decoder does not accept would
+// be the lie, and is not licensed by this one. (`rename_all` is dropped: a
+// no-op on a field-less struct, and `ts-rs` refuses it beside an explicit
+// `type`.)
+//
+// This declaration is the ONE line here the byte pin does not bind to the
+// Rust shape: `ts-rs` short-circuits projection on a container `type`
+// override and never reads the fields, so ADDING A FIELD BELOW CHANGES WHAT
+// THE DECODER ACCEPTS AND REDDENS NOTHING. Field-lessness is what makes the
+// override true, and it is held only by this struct staying empty. Give this
+// type a field and the override must go with it.
+#[ts(rename = "HostSvelteCompatibility", type = "Record<string, never>")]
+pub struct FfiSvelteCompatibility {}
+
+// The witness for the paragraph above: an exhaustive empty destructuring is
+// E0027 the moment this struct gains a field, so the override cannot outlive
+// the field-lessness that makes it true. This is the binding the byte pin
+// cannot provide here.
+const _: fn() = || {
+    let FfiSvelteCompatibility {} = FfiSvelteCompatibility {};
+};
+
+/// Svelte-owned compile options. `generateModule` / `experimentalAsync`
+/// are well-formed options whose module-compilation capability is refused;
+/// the trailing slots are the unconditionally refused rows.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostSvelteCompileOptions", optional_fields = nullable)]
+pub struct FfiSvelteCompileOptions {
+    pub dev: Option<bool>,
+    pub generate_module: Option<bool>,
+    pub experimental_async: Option<bool>,
+    pub custom_element: Option<bool>,
+    pub custom_element_descriptor: Option<FfiSvelteCustomElementDescriptor>,
+    pub namespace: Option<FfiSvelteNamespace>,
+    pub css: Option<FfiSvelteCss>,
+    pub preserve_comments: Option<bool>,
+    pub preserve_whitespace: Option<bool>,
+    pub fragments: Option<FfiSvelteFragments>,
+    pub runes: Option<FfiSvelteRunes>,
+    pub disclose_version: Option<bool>,
+    pub compatibility: Option<FfiSvelteCompatibility>,
+
+    pub loose: Option<bool>,
+    pub accessors: Option<bool>,
+    pub immutable: Option<bool>,
+    pub compatibility_component_api: Option<bool>,
+    pub hmr: Option<bool>,
+    pub custom_element_extend: Option<bool>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostRuntimeProductOptions", optional_fields = nullable)]
+pub struct FfiRuntimeProductRequest {
+    /// Absent resolves to the request's own `isProduction` — the framework's
+    /// documented derivation, computed by the canonical request rather than
+    /// substituted here.
+    pub inline: Option<bool>,
+    pub runtime_source_map: bool,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostIdeProductOptions", optional_fields = nullable)]
+pub struct FfiIdeProductRequest {
+    pub want_source_map: bool,
+    pub embed_ambient_types: bool,
+    pub conditional_root_narrowing: bool,
+    pub strict_slots: bool,
+    pub types_module_name: Option<String>,
+    pub ide_chunk_boundaries: bool,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostAnalysisProductOptions")]
+pub struct FfiAnalysisProductRequest {
+    pub want_script_bindings: bool,
+    pub want_template_data: bool,
+}
+
+/// One requested compiler product, 1:1 with the canonical product
+/// vocabulary. The product set is the demand document: there is no target
+/// string and no preset that expands into a bundle of products.
+///
+/// `PublicApi` and `Declarations` are unit variants because the canonical
+/// requests for those products carry only host-resolved profile
+/// identities, which the wire never supplies.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiRequestedProduct {
+    RuntimeClient(FfiRuntimeProductRequest),
+    RuntimeServer(FfiRuntimeProductRequest),
+    IdeCompanion(FfiIdeProductRequest),
+    PublicApi,
+    Declarations,
+    Analysis(FfiAnalysisProductRequest),
+}
+
+/// Source identity and dev/prod profile shared by every product requested
+/// in one compile.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename = "HostCompileIdentity", optional_fields = nullable)]
+pub struct FfiHostCompileIdentity {
+    pub filename: Option<String>,
+    pub component_id: Option<String>,
+    pub is_production: bool,
+    pub force_js: bool,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FfiVueHostCompileRequest {
+    pub identity: FfiHostCompileIdentity,
+    pub products: Vec<FfiRequestedProduct>,
+    pub options: FfiVueCompileOptions,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FfiSvelteHostCompileRequest {
+    pub identity: FfiHostCompileIdentity,
+    pub products: Vec<FfiRequestedProduct>,
+    pub options: FfiSvelteCompileOptions,
+}
+
+/// A host compile request discriminated by framework at the outermost
+/// level, so framework-owned options are structurally unreachable from the
+/// other framework's arm.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiHostCompileRequest {
+    Vue(FfiVueHostCompileRequest),
+    Svelte(FfiSvelteHostCompileRequest),
+}
+
+// =============================================================================
 // Output types (Rust → JS)
 // =============================================================================
 

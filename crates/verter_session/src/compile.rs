@@ -137,7 +137,7 @@ impl std::error::Error for VueMainAssemblyFailure {}
 /// re-derive `main_lang` for both its Main-node paths, so this is the
 /// single authority both now read from [`AssembledVueModule::lang`]
 /// instead.
-fn resolve_main_dialect(meta: &FileMeta, profile: &CompileProfile) -> FragmentDialect {
+fn resolve_main_dialect(meta: &FileMeta, profile: &VueMainAssemblyAxes) -> FragmentDialect {
     let raw = meta.script_lang.as_deref().unwrap_or("js");
     let is_tsx = raw.eq_ignore_ascii_case("tsx");
     let is_jsx = is_tsx || raw.eq_ignore_ascii_case("jsx");
@@ -198,6 +198,69 @@ pub fn assemble_vue_main_module(
     compiled: &RuntimeCompileOutput,
     meta: &FileMeta,
     profile: &CompileProfile,
+) -> Result<AssembledVueModule, VueMainAssemblyFailure> {
+    assemble_vue_main_module_with_axes(
+        canonical_id,
+        compiled,
+        meta,
+        &VueMainAssemblyAxes::from(profile),
+    )
+}
+
+/// Exactly the axes the host-side `Main` assembly reads, named
+/// independently of the vocabulary a caller happens to state them in.
+///
+/// The assembly itself has one implementation; this carrier is what lets
+/// a route holding a canonical compiler request state those axes directly
+/// instead of round-tripping them through a compile profile it does not
+/// otherwise have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VueMainAssemblyAxes {
+    /// Emit JavaScript regardless of the carrier's authored script dialect.
+    pub(crate) force_js: bool,
+    /// Compose and return the assembled module's source map.
+    pub(crate) source_map: bool,
+    /// Module specifier the assembled imports resolve the Vue runtime from.
+    pub(crate) runtime_module_name: Option<String>,
+    /// Assemble the server (SSR) shape.
+    pub(crate) ssr: bool,
+    /// Production build: no `__file`, no HMR acceptance.
+    pub(crate) is_production: bool,
+    /// Dev-server tooling flavour, gating `__file` and HMR acceptance.
+    pub(crate) hmr_strategy: HmrStrategy,
+    /// Emit the Vite SSR-manifest module registration on an SSR assembly.
+    pub(crate) emit_ssr_module_registration: bool,
+    /// Manifest key form the SSR registration records; the canonical id
+    /// is the fallback.
+    pub(crate) ssr_module_id: Option<String>,
+}
+
+impl From<&CompileProfile> for VueMainAssemblyAxes {
+    fn from(profile: &CompileProfile) -> Self {
+        Self {
+            force_js: profile.force_js,
+            source_map: profile.source_map,
+            runtime_module_name: profile.runtime_module_name.clone(),
+            ssr: profile.ssr,
+            is_production: profile.is_production,
+            hmr_strategy: profile.hmr_strategy,
+            emit_ssr_module_registration: profile.emit_ssr_module_registration,
+            ssr_module_id: profile.ssr_module_id.clone(),
+        }
+    }
+}
+
+/// The one host-side `Main` assembly. [`assemble_vue_main_module`] is the
+/// compile-profile-stated spelling of this same call.
+///
+/// # Errors
+///
+/// See [`assemble_vue_main_module`].
+pub(crate) fn assemble_vue_main_module_with_axes(
+    canonical_id: &str,
+    compiled: &RuntimeCompileOutput,
+    meta: &FileMeta,
+    profile: &VueMainAssemblyAxes,
 ) -> Result<AssembledVueModule, VueMainAssemblyFailure> {
     use std::fmt::Write;
 

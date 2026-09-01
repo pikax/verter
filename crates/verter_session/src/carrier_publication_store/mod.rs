@@ -763,12 +763,6 @@ impl CarrierPublicationStore {
                 current_source: None,
             });
         }
-        let compiler = crate::parse::carrier_compiler_registry()
-            .compiler_for_carrier_language(
-                accepted.grammar().adapter_id(),
-                accepted.grammar().language_id(),
-            )
-            .cloned();
         let parse_key = parse_key_for_accepted(accepted);
         let artifact_id = FrameworkArtifactId::derive(accepted, parse_key);
         self.audit.push(
@@ -821,7 +815,7 @@ impl CarrierPublicationStore {
                 PublicationAuditKind::CoordinationLaneEntered(PublicationLaneRole::Leader),
             );
             let outcome = match catch_unwind(AssertUnwindSafe(|| {
-                self.produce(compiler.as_ref(), accepted, &request, &artifact_id)
+                self.produce(accepted, &request, &artifact_id)
             })) {
                 Ok(outcome) => outcome,
                 Err(_) => PublicationOutcome::WinnerPanicked,
@@ -906,16 +900,31 @@ impl CarrierPublicationStore {
 
     fn produce(
         &self,
-        compiler: Option<&Arc<dyn verter_compiler::framework_common::CarrierCompiler>>,
         accepted: &AcceptedRegisteredCarrierSource,
         request: &PublicationRequestContext,
         artifact_id: &FrameworkArtifactId,
     ) -> PublicationOutcome {
-        let Some(compiler) = compiler else {
+        let language = accepted.source().resolved_file_language();
+        let Some(adapter_id) = language.adapter_id() else {
             return PublicationOutcome::Unsupported(
                 RegisteredCarrierUnsupported::NoRegisteredProducer,
             );
         };
+        let Some(carrier_language_id) = language.carrier_language_id() else {
+            return PublicationOutcome::Unsupported(
+                RegisteredCarrierUnsupported::NoRegisteredProducer,
+            );
+        };
+        if verter_compiler::framework_common::registered_carrier_projection::registered_frontend_for(
+            adapter_id,
+            carrier_language_id,
+        )
+        .is_none()
+        {
+            return PublicationOutcome::Unsupported(
+                RegisteredCarrierUnsupported::NoRegisteredProducer,
+            );
+        }
         if let Some(candidate) = self.persistence.take_candidate(artifact_id, accepted) {
             self.audit.push(
                 request,
@@ -956,7 +965,7 @@ impl CarrierPublicationStore {
                                 artifact_id,
                                 PublicationAuditKind::PersistentCandidateDiscarded,
                             );
-                            return self.produce_fresh(compiler, accepted, request, artifact_id);
+                            return self.produce_fresh(accepted, request, artifact_id);
                         }
                     };
                     let envelope = Arc::new(FrameworkArtifactEnvelope {
@@ -987,25 +996,25 @@ impl CarrierPublicationStore {
             );
         }
 
-        self.produce_fresh(compiler, accepted, request, artifact_id)
+        self.produce_fresh(accepted, request, artifact_id)
     }
 
     fn produce_fresh(
         &self,
-        compiler: &Arc<dyn verter_compiler::framework_common::CarrierCompiler>,
         accepted: &AcceptedRegisteredCarrierSource,
         request: &PublicationRequestContext,
         artifact_id: &FrameworkArtifactId,
     ) -> PublicationOutcome {
         use std::sync::atomic::Ordering::Relaxed;
         self.provenance.carrier_parses.fetch_add(1, Relaxed);
-        if compiler.adapter_id().is_vue() {
+        if accepted.grammar().adapter_id().is_vue() {
             self.provenance.sfc_parses.fetch_add(1, Relaxed);
         }
         self.audit
             .push(request, artifact_id, PublicationAuditKind::ParserStarted);
-        let projection =
-            match crate::parse::carrier_compiler_registry().project_registered(accepted) {
+        let projection = match verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted(
+            accepted,
+        ) {
                 Ok(projection) => projection,
                 Err(reject) => {
                     // A reject is a COMPLETED parse attempt (the frontend ran and

@@ -9,41 +9,29 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use verter_css_syntax::CssDialect;
 use verter_language::{
-    parse_key_for, syntax_profile_id_for, CarrierParse, ExternalLinkKind, FileLanguage,
-    FrameworkAdapterId, JsModuleKind, LanguageId, ScriptSourceType,
-    UnregisteredFrameworkParseArtifact, VUE_SYNTAX_COMPATIBILITY_DOMAIN,
-    VUE_SYNTAX_COMPATIBILITY_EPOCH,
+    parse_key_for, syntax_profile_id_for, CarrierParse, FileLanguage, FrameworkAdapterId,
+    JsModuleKind, LanguageId, ScriptSourceType, UnregisteredFrameworkParseArtifact,
+    VUE_SYNTAX_COMPATIBILITY_DOMAIN, VUE_SYNTAX_COMPATIBILITY_EPOCH,
 };
 use verter_span::Span;
 
 use verter_parser::parser::types::ParsedSfc;
 use verter_parser::types::NodeProp;
 
-use crate::compile::types::{
-    CodegenOptions, CompileTarget, ResolvedVueCompileOptions, VueExecutionInputs,
-    VueMacroSemanticInput,
+use crate::compile::types::{VueExecutionInputs, VueMacroSemanticInput};
+use crate::compile::{compile_from_parsed, parse_sfc};
+use crate::compile_request::{
+    CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest,
+    IdeProductRequest, VueBackendRequest, VueCompileRequest,
 };
-use crate::compile::{
-    compile_from_parsed, compile_from_parsed_legacy, parse_script_block, parse_sfc,
-    parse_template_block, style_dialect, template_unit_used_vars,
-};
-use crate::compile_request::CompileRequestError;
 use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
     RuntimeCompileOptions, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic,
     RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
-    RuntimeTemplateBlock, SourceMapFidelity, TemplateFacts,
-};
-use crate::framework_common::generated_chunk::{
-    compose_generated_chunk, GeneratedFragment, GeneratedUnit,
+    RuntimeTemplateBlock, SourceMapFidelity,
 };
 use crate::framework_common::FrameworkParseArtifact;
-use crate::style_planner::{
-    prepared_style_for_sealed_slot, run_vue_style_cascade, transform_vue_style, AuthoredStyleInput,
-    VerifiedPlainCss,
-};
 use verter_language::ParseOptions;
 
 /// The concrete Vue carrier: the full parsed SFC behind the erasure
@@ -51,12 +39,17 @@ use verter_language::ParseOptions;
 #[derive(Debug)]
 pub struct VueParseCarrier {
     parsed: Arc<ParsedSfc>,
+    parse_options: ParseOptions,
 }
 
 impl VueParseCarrier {
-    /// Wrap a parsed SFC.
-    pub fn new(parsed: Arc<ParsedSfc>) -> Self {
-        Self { parsed }
+    /// Wrap a parsed SFC together with the parse-affecting options that
+    /// produced it.
+    pub fn new(parsed: Arc<ParsedSfc>, parse_options: ParseOptions) -> Self {
+        Self {
+            parsed,
+            parse_options,
+        }
     }
 
     /// The wrapped parse result.
@@ -67,6 +60,11 @@ impl VueParseCarrier {
     /// The wrapped parse result, as the shared handle.
     pub fn parsed_arc(&self) -> &Arc<ParsedSfc> {
         &self.parsed
+    }
+
+    /// Parse-affecting options stamped at artifact construction.
+    pub fn parse_options(&self) -> &ParseOptions {
+        &self.parse_options
     }
 }
 
@@ -196,7 +194,7 @@ pub fn build_vue_parse_artifact(
         Arc::new(parse_key),
         Arc::new(syntax_profile),
         diagnostics,
-        Arc::new(VueParseCarrier::new(parsed)),
+        Arc::new(VueParseCarrier::new(parsed, options.clone())),
     ))
 }
 
@@ -252,220 +250,6 @@ impl VueCarrierCompiler {
     ) -> Option<&'a ParsedSfc> {
         verter_language::__carrier_downcast_ref::<VueParseCarrier>(artifact)
             .map(VueParseCarrier::parsed)
-    }
-
-    fn compile_projected_script_bundle(
-        &self,
-        source: &str,
-        parsed: &ParsedSfc,
-        input: &crate::framework_common::RuntimeBlockContentInput,
-        is_setup: bool,
-        opts: &RuntimeCompileOptions,
-        alloc: &oxc_allocator::Allocator,
-    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
-        if (is_setup && parsed.script().is_some()) || (!is_setup && parsed.script_setup().is_some())
-        {
-            return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                adapter_id: self.adapter_id(),
-            });
-        }
-        let extras = opts.vue_facts.as_ref();
-        let macro_semantics = extras
-            .and_then(|extras| extras.macro_runtime.clone())
-            .map(VueMacroSemanticInput::Runtime)
-            .unwrap_or_default();
-        let script_parsed = parse_script_block(&input.code, &input.lang, is_setup);
-        let template_used_vars = template_unit_used_vars(
-            source,
-            parsed,
-            opts.delimiters.clone(),
-            opts.custom_elements.clone(),
-            alloc,
-        );
-        // This helper compiles the projected SCRIPT UNIT, so the `SCRIPT` bit is
-        // its own subject, not a requested product: the unit's bindings are what
-        // BOTH the runtime script block and the IDE shell below are built from.
-        // Whether the resulting runtime block is PUBLISHED onto the bundle is
-        // what `want_runtime` decides, further down.
-        let mut script_target = CompileTarget::SCRIPT;
-        if opts.want_ide {
-            script_target |= CompileTarget::TSX;
-        }
-        let script_result = compile_from_parsed_legacy(
-            &input.code,
-            &script_parsed,
-            &CodegenOptions {
-                filename: opts.filename.clone(),
-                is_production: opts.is_production,
-                custom_element: opts.custom_element,
-                component_id: opts.component_id.clone(),
-                inline: Some(false),
-                runtime_module_name: opts.runtime_module_name.clone(),
-                types_module_name: opts.types_module_name.clone(),
-                target: script_target,
-                embed_ambient_types: opts.embed_ambient_types,
-                conditional_root_narrowing: opts.conditional_root_narrowing,
-                strict_slots: opts.strict_slots,
-                ide_chunk_boundaries: opts.want_ide,
-                ..Default::default()
-            },
-            &ResolvedVueCompileOptions {
-                force_js: opts.force_js,
-                // Decoupled (the fixed map-coupling bug): requesting the IDE
-                // product no longer silently forces the runtime script map
-                // on. Each output's map tracks the caller's own
-                // `source_map` request, gated on whether that product was
-                // actually asked for.
-                source_map: opts.source_map,
-                ide_source_map: opts.source_map && opts.want_ide,
-                template_used_vars: Some(template_used_vars),
-                ..Default::default()
-            },
-            &macro_semantics,
-            alloc,
-        )
-        .map_err(CompileUnsupported::RequestExecutionRefused)?;
-        let binding_metadata = script_result.template_binding_metadata.clone();
-        let mut script_bundle =
-            vue_result_to_runtime_bundle(&input.code, &script_parsed, script_result);
-        let mut carrier_view = parsed.clone();
-        carrier_view.script_node = None;
-        carrier_view.script_setup_node = None;
-        let mut carrier_target = CompileTarget::empty();
-        if opts.want_runtime {
-            carrier_target |= CompileTarget::BUNDLER;
-        }
-        if opts.want_ide {
-            carrier_target |= CompileTarget::TSX;
-        }
-        if opts.want_template_data {
-            carrier_target |= CompileTarget::TEMPLATE_DATA;
-        }
-        let carrier_result = compile_from_parsed_legacy(
-            source,
-            &carrier_view,
-            &CodegenOptions {
-                filename: opts.filename.clone(),
-                is_production: opts.is_production,
-                component_id: opts.component_id.clone(),
-                inline: Some(false),
-                delimiters: opts.delimiters.clone(),
-                custom_elements: opts.custom_elements.clone(),
-                comments: opts.comments,
-                runtime_module_name: opts.runtime_module_name.clone(),
-                types_module_name: opts.types_module_name.clone(),
-                target: carrier_target,
-                embed_ambient_types: opts.embed_ambient_types,
-                conditional_root_narrowing: opts.conditional_root_narrowing,
-                strict_slots: opts.strict_slots,
-                ide_chunk_boundaries: opts.want_ide,
-                ..Default::default()
-            },
-            &ResolvedVueCompileOptions {
-                force_vapor: opts.force_vapor,
-                force_js: opts.force_js,
-                // Decoupled — see the sibling script-unit compile above.
-                source_map: opts.source_map,
-                ide_source_map: opts.source_map && opts.want_ide,
-                ssr: opts.ssr,
-                prop_constness_overrides: binding_metadata.const_props.clone(),
-                template_binding_metadata: Some(binding_metadata),
-                ..Default::default()
-            },
-            &VueMacroSemanticInput::default(),
-            alloc,
-        )
-        .map_err(CompileUnsupported::RequestExecutionRefused)?;
-        let mut bundle = vue_result_to_runtime_bundle(source, &carrier_view, carrier_result);
-        let mut script = script_bundle.script.take().ok_or(
-            CompileUnsupported::BlockContentRuntimeUnavailable {
-                adapter_id: self.adapter_id(),
-            },
-        )?;
-        script.output_descriptor = RuntimeOutputDescriptor::generated(
-            &script.code,
-            (!script.source_map.is_empty()).then_some(script.source_map.as_str()),
-            &[(
-                input.source_space_token.as_str(),
-                input.content_artifact_token.as_str(),
-            )],
-            SourceMapFidelity::Approximate,
-        );
-        // The runtime script block is PUBLISHED only when the request asked for
-        // a runtime product; an IDE-only request keeps the unit's semantics
-        // (they compose the shell below) without emitting its runtime block.
-        if opts.want_runtime {
-            bundle.script = Some(script);
-        }
-        bundle.diagnostics.extend(script_bundle.diagnostics);
-
-        if opts.want_ide {
-            let mut shell =
-                script_bundle
-                    .tsx
-                    .take()
-                    .ok_or(CompileUnsupported::BlockContentIdeUnavailable {
-                        adapter_id: self.adapter_id(),
-                    })?;
-            let fragment =
-                bundle
-                    .tsx
-                    .take()
-                    .ok_or(CompileUnsupported::BlockContentIdeUnavailable {
-                        adapter_id: self.adapter_id(),
-                    })?;
-            let hole = shell.generated_template_hole.clone().ok_or(
-                CompileUnsupported::BlockContentIdeUnavailable {
-                    adapter_id: self.adapter_id(),
-                },
-            )?;
-            let chunk = fragment.generated_template_chunk.as_ref().ok_or(
-                CompileUnsupported::BlockContentIdeUnavailable {
-                    adapter_id: self.adapter_id(),
-                },
-            )?;
-            let (carrier_space, carrier_artifact) = RuntimeOutputDescriptor::carrier_source(source);
-            let composed = compose_generated_chunk(
-                "",
-                GeneratedUnit {
-                    code: &shell.code,
-                    source_map: &shell.source_map,
-                    source_space: &input.source_space_token,
-                    source: &input.code,
-                },
-                hole,
-                GeneratedFragment {
-                    unit: GeneratedUnit {
-                        code: &chunk.code,
-                        source_map: &chunk.source_map,
-                        source_space: &carrier_space,
-                        source,
-                    },
-                    range: 0..chunk.code.len() as u32,
-                },
-            )
-            .ok_or(CompileUnsupported::BlockContentIdeUnavailable {
-                adapter_id: self.adapter_id(),
-            })?;
-            shell.code = composed.code;
-            shell.source_map = composed.source_map;
-            shell.generated_template_hole = None;
-            shell.generated_template_chunk = None;
-            shell.output_descriptor = RuntimeOutputDescriptor::generated(
-                &shell.code,
-                Some(&shell.source_map),
-                &[
-                    (
-                        input.source_space_token.as_str(),
-                        input.content_artifact_token.as_str(),
-                    ),
-                    (carrier_space.as_str(), carrier_artifact.as_str()),
-                ],
-                SourceMapFidelity::Approximate,
-            );
-            bundle.tsx = Some(shell);
-        }
-        Ok(bundle)
     }
 }
 
@@ -590,166 +374,44 @@ impl CarrierCompiler for VueCarrierCompiler {
         Ok(build_vue_parse_artifact(source, parsed, opts))
     }
 
-    fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
-        // Position-preserving blanking from the artifact's own typed
-        // script regions: every byte starts blanked (line terminators
-        // preserved so line/column geometry is unchanged), then each
-        // script region's RAW bytes are stamped over their carrier-
-        // absolute offsets. Output length == input length by
-        // construction.
-        let src = source.as_bytes();
-        let mut out: Vec<u8> = src
-            .iter()
-            .map(|&b| if b == b'\n' || b == b'\r' { b } else { b' ' })
-            .collect();
-        for region in artifact.script_regions() {
-            let start = region.span.start as usize;
-            let end = region.span.end as usize;
-            if start <= end && end <= src.len() {
-                out[start..end].copy_from_slice(&src[start..end]);
-            }
-        }
-        // Every replaced byte is single-byte ASCII and every preserved
-        // range is copied wholesale from valid UTF-8, so `out` is valid
-        // UTF-8 and exactly `source.len()` bytes long.
-        Arc::from(
-            String::from_utf8(out)
-                .unwrap_or_else(|_| source.to_string())
-                .as_str(),
-        )
-    }
-
     fn compile_ide(
         &self,
         source: &str,
         artifact: &FrameworkParseArtifact,
         opts: &IdeCompileOptions,
     ) -> Result<IdeOutput, CompileUnsupported> {
-        let Some(parsed) = self.parsed_sfc(artifact) else {
-            return Err(CompileUnsupported::NoIdeProjection {
-                adapter_id: self.adapter_id(),
-            });
-        };
-        if !opts.block_content.is_empty() {
-            let alloc = oxc_allocator::Allocator::new();
-            return self
-                .compile_bundle(
-                    source,
-                    artifact,
-                    &RuntimeCompileOptions {
-                        filename: opts.filename.clone(),
-                        source_map: !opts.skip_source_map,
-                        // `compile_ide`'s ONLY product is the IDE artifact —
-                        // it discards every other field of this bundle and
-                        // publishes nothing. It asks for the runtime lowering
-                        // because Vue's supplied-block-content IDE composition
-                        // consumes the runtime template chunk to fill the
-                        // generated hole; that lowering is a PREREQUISITE of
-                        // the IDE artifact here, not a second published
-                        // product. The requested-product set that decides what
-                        // the host PUBLISHES is the one the session threads
-                        // into `compile_bundle`, not this local scaffolding.
-                        want_runtime: true,
-                        want_ide: true,
-                        embed_ambient_types: opts.embed_ambient_types,
-                        block_content: opts.block_content.clone(),
-                        ..Default::default()
-                    },
-                    &alloc,
-                )?
-                .into_produced()
-                .and_then(|bundle| bundle.tsx)
-                .ok_or(CompileUnsupported::BlockContentIdeUnavailable {
-                    adapter_id: self.adapter_id(),
-                });
-        }
-
-        // The Vue IDE pipeline owns its own unified `CodeTransform`
-        // internally and produces the token-precise TSX/JSX + source map.
-        // The bridge delegates and lifts the result verbatim — no caller
-        // CodeTransform, no post-build string munging.
-        let core_opts = CodegenOptions {
-            filename: opts.filename.clone(),
-            target: CompileTarget::IDE,
-            embed_ambient_types: opts.embed_ambient_types,
-            ..Default::default()
-        };
-        let verter_opts = ResolvedVueCompileOptions {
-            // `target` is `CompileTarget::IDE` only — the only output this
-            // call ever produces is the TSX block, so it is
-            // `ide_source_map` that gates it, not the runtime `source_map`.
-            ide_source_map: !opts.skip_source_map,
-            ..Default::default()
-        };
-        let alloc = oxc_allocator::Allocator::new();
-        let result = compile_from_parsed_legacy(
+        let request = vue_ide_only_request(
+            opts.filename.clone(),
+            None,
+            false,
+            false,
+            IdeProductRequest {
+                want_source_map: !opts.skip_source_map,
+                embed_ambient_types: opts.embed_ambient_types,
+                ide_chunk_boundaries: opts.block_content.template.is_some(),
+                ..Default::default()
+            },
+            vue_request_from_admitted_artifact(artifact),
+        )?;
+        // This registry route carries no host-issued admission, so the
+        // projection grant is minted at the route boundary (crate-private
+        // mint); admission-issued flows carve theirs off the consumed
+        // admission instead.
+        let grant = super::capability::ProductExecutionGrant::mint(
+            crate::compile_request::ProductKind::IdeCompanion,
+        );
+        super::registered_carrier_projection::project_ide_from_catalog(
+            grant,
+            artifact,
             source,
-            parsed,
-            &core_opts,
-            &verter_opts,
-            &VueMacroSemanticInput::Unavailable,
-            &alloc,
+            &request,
+            &super::registered_carrier_projection::ProjectionCatalogInputs {
+                block_content: opts.block_content.clone(),
+                vue_execution: VueExecutionInputs::default(),
+                vue_macros: VueMacroSemanticInput::default(),
+            },
         )
-        .map_err(CompileUnsupported::RequestExecutionRefused)?;
-
-        match result.tsx {
-            Some(tsx) => {
-                let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
-                let output_descriptor = RuntimeOutputDescriptor::generated(
-                    &tsx.code,
-                    (!tsx.source_map.is_empty()).then_some(tsx.source_map.as_str()),
-                    &[(space.as_str(), artifact.as_str())],
-                    SourceMapFidelity::Approximate,
-                );
-                Ok(IdeOutput {
-                    code: tsx.code,
-                    source_map: tsx.source_map,
-                    is_jsx: tsx.is_jsx,
-                    duration_ms: tsx.duration_ms,
-                    destructured_block: tsx.destructured_block,
-                    output_descriptor,
-                    generated_template_hole: tsx.generated_template_hole,
-                    generated_template_chunk: tsx.generated_template_chunk,
-                })
-            }
-            // `CompileTarget::IDE` always sets `TSX`, so a missing `tsx`
-            // block means the codegen produced no IDE artifact for this
-            // carrier — the typed unsupported answer, never a silent empty.
-            None => Err(CompileUnsupported::TargetMissingIde),
-        }
-    }
-
-    fn template_data(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts {
-        let Some(parsed) = self.parsed_sfc(artifact) else {
-            return TemplateFacts::default();
-        };
-        let core_opts = CodegenOptions {
-            target: CompileTarget::TEMPLATE_DATA,
-            ..Default::default()
-        };
-        let verter_opts = ResolvedVueCompileOptions {
-            source_map: false,
-            ..Default::default()
-        };
-        let alloc = oxc_allocator::Allocator::new();
-        // `CarrierCompiler::template_data` returns a bare `TemplateFacts`
-        // (its trait signature has no error channel), so a construction
-        // refusal fails closed to the empty facts the caller already
-        // treats as "nothing extracted" — the SAME fallback this function
-        // uses two lines up for a missing parsed artifact, never a panic.
-        let Ok(result) = compile_from_parsed_legacy(
-            source,
-            parsed,
-            &core_opts,
-            &verter_opts,
-            &VueMacroSemanticInput::Unavailable,
-            &alloc,
-        ) else {
-            return TemplateFacts::default();
-        };
-        TemplateFacts {
-            data: result.template_data.unwrap_or_default(),
-        }
+        .map(|companion| companion.ide)
     }
 
     fn compile_bundle(
@@ -759,653 +421,292 @@ impl CarrierCompiler for VueCarrierCompiler {
         opts: &RuntimeCompileOptions,
         alloc: &oxc_allocator::Allocator,
     ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
-        let Some(parsed) = self.parsed_sfc(artifact) else {
-            return Err(CompileUnsupported::NoIdeProjection {
-                adapter_id: self.adapter_id(),
-            });
-        };
+        vue_carrier_bundle(
+            source,
+            artifact,
+            opts,
+            alloc,
+            super::carrier_compiler::registry_route_execution_grants(opts),
+        )
+    }
+}
 
-        // The same two fail-closed rules `CompileRequest::new` /
-        // `resolve_vue_backend` apply to every `CompileRequest`-constructed
-        // route apply here too: this trait method is a SEPARATE production
-        // entry into the same shared codegen substrate, reached by the
-        // session's per-file/virtual-product compile path (not yet
-        // converted onto `CompileRequest` itself). Without this check an
-        // SSR x Vapor or inline x SSR request would silently reach codegen
-        // and produce wrong output instead of a typed refusal — the same
-        // bug class `CompileRequest` construction closes for its own
-        // callers. `parsed.is_vapor()` covers the implicit `<template
-        // vapor>` marker; `opts.force_vapor` covers the explicit request —
-        // together they mirror `resolve_vue_backend`'s `Inferred` fallback.
-        let effective_vapor = opts.force_vapor || parsed.is_vapor();
-        if opts.ssr && effective_vapor {
-            return Err(CompileUnsupported::RequestExecutionRefused(
-                CompileRequestError::SsrVaporBackendUnsupported,
-            ));
-        }
-        if opts.ssr && opts.inline == Some(true) {
-            return Err(CompileUnsupported::RequestExecutionRefused(
-                CompileRequestError::InlineSsrUnsupported,
-            ));
-        }
+/// The one Vue bundle orchestration over an admitted parse: ordered
+/// runtime, IDE-projection, and template-fact capability calls with shared
+/// prerequisites and deduplicated diagnostics. Shared by the compatibility
+/// [`CarrierCompiler::compile_bundle`] route and the Vue host-integration
+/// backend so both drive the identical single-population pass.
+///
+/// Every product-backend leg requires — and consumes — its own
+/// [`super::capability::ProductExecutionGrant`]: the host route carves
+/// them off the consumed admission, the registry bundle route mints them
+/// crate-privately at its boundary, and a demanded-but-ungranted leg
+/// fails closed typed.
+pub(crate) fn vue_carrier_bundle(
+    source: &str,
+    artifact: &FrameworkParseArtifact,
+    opts: &RuntimeCompileOptions,
+    alloc: &oxc_allocator::Allocator,
+    mut grants: super::capability::ProductExecutionGrants,
+) -> Result<CarrierCompileOutcome, CompileUnsupported> {
+    let Some(parsed) = VueCarrierCompiler.parsed_sfc(artifact) else {
+        return Err(CompileUnsupported::NoIdeProjection {
+            adapter_id: VueCarrierCompiler.adapter_id(),
+        });
+    };
 
-        // A selected template fragment is inserted at the compiler-registered
-        // IDE hole. For a carrier with only a plain script that hole is the
-        // script-content boundary, which is mid-module rather than a valid JSX
-        // statement position. These are parser-owned carrier facts plus the
-        // host-selected block input; do not rediscover the geometry by scanning
-        // source text. Keep this exact partially-capable class fail-closed.
-        if opts.want_ide
-            && opts.block_content.template.is_some()
-            && parsed.script().is_some()
-            && parsed.script_setup().is_none()
-        {
+    // The same two fail-closed rules `CompileRequest::new` /
+    // `resolve_vue_backend` apply to every `CompileRequest`-constructed
+    // route apply here too: this orchestration is a SEPARATE production
+    // entry into the same shared codegen substrate — the host-integration
+    // backend reaches it from an admitted `CompileRequest` (options
+    // derived off the admitted request), while the retained registry
+    // route reaches it from bare `RuntimeCompileOptions`. Without this
+    // check an SSR x Vapor or inline x SSR request would silently reach
+    // codegen and produce wrong output instead of a typed refusal — the
+    // same bug class `CompileRequest` construction closes for its own
+    // callers. `parsed.is_vapor()` covers the implicit `<template
+    // vapor>` marker; `opts.force_vapor` covers the explicit request —
+    // together they mirror `resolve_vue_backend`'s `Inferred` fallback.
+    let effective_vapor = opts.force_vapor || parsed.is_vapor();
+    if opts.ssr && effective_vapor {
+        return Err(CompileUnsupported::RequestExecutionRefused(
+            CompileRequestError::SsrVaporBackendUnsupported,
+        ));
+    }
+    if opts.ssr && opts.inline == Some(true) {
+        return Err(CompileUnsupported::RequestExecutionRefused(
+            CompileRequestError::InlineSsrUnsupported,
+        ));
+    }
+
+    // A selected template fragment is inserted at the compiler-registered
+    // IDE hole. For a carrier with only a plain script that hole is the
+    // script-content boundary, which is mid-module rather than a valid JSX
+    // statement position. These are parser-owned carrier facts plus the
+    // host-selected block input; do not rediscover the geometry by scanning
+    // source text. Keep this exact partially-capable class fail-closed.
+    if opts.want_ide
+        && opts.block_content.template.is_some()
+        && parsed.script().is_some()
+        && parsed.script_setup().is_none()
+    {
+        return Err(CompileUnsupported::BlockContentIdeUnavailable {
+            adapter_id: VueCarrierCompiler.adapter_id(),
+        });
+    }
+
+    match (
+        opts.block_content.script.as_ref(),
+        opts.block_content.script_setup.as_ref(),
+    ) {
+        (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) if opts.want_ide => {
             return Err(CompileUnsupported::BlockContentIdeUnavailable {
-                adapter_id: self.adapter_id(),
+                adapter_id: VueCarrierCompiler.adapter_id(),
             });
         }
+        _ => {}
+    }
 
-        match (
-            opts.block_content.script.as_ref(),
-            opts.block_content.script_setup.as_ref(),
-        ) {
-            (Some(_), Some(_)) if opts.want_ide => {
-                return Err(CompileUnsupported::BlockContentIdeUnavailable {
-                    adapter_id: self.adapter_id(),
-                });
-            }
-            (Some(_), Some(_)) => {
-                return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                    adapter_id: self.adapter_id(),
-                });
-            }
-            (Some(_), None) if opts.want_ide => {
-                return Err(CompileUnsupported::BlockContentIdeUnavailable {
-                    adapter_id: self.adapter_id(),
-                });
-            }
-            (Some(_), None) => {
-                return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                    adapter_id: self.adapter_id(),
-                });
-            }
-            (None, Some(_)) if opts.want_ide => {
-                return Err(CompileUnsupported::BlockContentIdeUnavailable {
-                    adapter_id: self.adapter_id(),
-                });
-            }
-            (None, Some(input)) => {
-                // Vue emits a runtime surface or a genuine compile error; it
-                // never fail-closes on an unsupported runtime surface.
-                return self
-                    .compile_projected_script_bundle(source, parsed, input, true, opts, alloc)
-                    .map(CarrierCompileOutcome::Produced);
-            }
-            (None, None) => {}
-        }
-
-        let supplied_inline_template = opts.block_content.template.is_some()
-            && opts.inline.unwrap_or(opts.is_production)
-            && parsed.script_setup().is_some()
-            && !artifact
-                .common()
-                .external_links()
-                .iter()
-                .any(|link| link.kind == ExternalLinkKind::Template)
-            && !opts.force_vapor
-            && !opts.ssr;
-
-        // The Vue target is composed from the REQUESTED-PRODUCT SET, starting
-        // empty: the runtime bundler bits only under `want_runtime`, TSX only
-        // under `want_ide`, template data only under `want_template_data`. A
-        // successful compile therefore emits all and only the products the
-        // request asked for. `CompileTarget::IDE` is the TSX bit alone (see
-        // `compile::types`), so TSX codegen does not require the runtime bits.
-        let mut target = CompileTarget::empty();
-        if opts.want_runtime {
-            target |= CompileTarget::BUNDLER;
-        }
-        if opts.want_ide {
-            target |= CompileTarget::TSX;
-        }
-        if opts.want_template_data {
-            target |= CompileTarget::TEMPLATE_DATA;
-        }
-
-        let core_opts = CodegenOptions {
-            filename: opts.filename.clone(),
-            is_production: opts.is_production,
-            custom_element: opts.custom_element,
-            // Inline-template topology flows from the runtime options (`None`
-            // resolves to `is_production`, matching the official default:
-            // inline in prod builds). The compiler falls back to non-inline
-            // for Vapor / SSR / template-only / script-only SFCs; the bundle
-            // carries the RESOLVED topology (`inline`) so the host assembly
-            // never sniffs source text.
-            inline: opts.inline,
-            component_id: opts.component_id.clone(),
-            delimiters: opts.delimiters.clone(),
-            custom_elements: opts.custom_elements.clone(),
-            comments: opts.comments,
-            runtime_module_name: opts.runtime_module_name.clone(),
-            types_module_name: opts.types_module_name.clone(),
-            target,
-            embed_ambient_types: opts.embed_ambient_types,
-            conditional_root_narrowing: opts.conditional_root_narrowing,
-            strict_slots: opts.strict_slots,
-            ide_chunk_boundaries: opts.want_ide && opts.block_content.template.is_some(),
-            ..CodegenOptions::default()
-        };
-        // The Vue-private resolved inputs ride on the typed `vue_facts`
-        // carrier (a foreign / absent value yields defaults, so a generic
-        // caller that did not supply Vue extras still compiles).
-        let extras = opts.vue_facts.as_ref();
-        let verter_opts = ResolvedVueCompileOptions {
-            force_vapor: opts.force_vapor,
-            force_js: opts.force_js,
-            // Decoupled — see the map-coupling fix note on the sibling
-            // sub-compiles in this file.
-            source_map: opts.source_map,
-            ide_source_map: opts.source_map && opts.want_ide,
-            ssr: opts.ssr,
-            style_processing: opts.style_processing,
-            prop_constness_overrides: extras.and_then(|e| e.prop_constness_overrides.clone()),
-            style_v_bind_vars: extras
-                .map(|e| e.style_v_bind_vars.clone())
-                .unwrap_or_default(),
-            style_v_bind_usage_complete: opts
-                .block_content
-                .styles
-                .iter()
-                .any(Option::is_some)
-                .then(|| {
-                    extras
-                        .and_then(|e| e.style_v_bind_usage_complete)
-                        .unwrap_or(false)
+    // Runtime products come from one bundler pass. IDE projection is
+    // catalog-owned and never re-enters compile_inner as TSX on this
+    // path. Template facts are catalog-owned. An IDE-only request
+    // therefore skips the bundler pass unless a runtime product is
+    // actually required.
+    let mut bundle = RuntimeCompileOutput::default();
+    if opts.want_runtime {
+        // The runtime leg is selected from the immutable catalog at
+        // execution, exactly like the projection and template-fact legs —
+        // the catalog is execution's authority, not just admission's
+        // boolean. A miss (no registered Vue runtime row for this
+        // adapter × epoch) refuses typed: the runtime capability this
+        // request touches is not available, never a fallback emitter.
+        let Some(crate::standalone::InstalledRuntimeBackend::Vue(backend)) =
+            crate::standalone::registered_runtime_for(artifact.adapter_id(), artifact.epoch())
+        else {
+            return Err(CompileUnsupported::RequestExecutionRefused(
+                CompileRequestError::CapabilityUnsupported(if opts.ssr {
+                    crate::compile_request::CapabilityCell::VueSsr
+                } else if effective_vapor {
+                    crate::compile_request::CapabilityCell::VueVaporClient
+                } else {
+                    crate::compile_request::CapabilityCell::VueVdomClient
                 }),
-            template_binding_metadata: None,
-            template_used_vars: None,
-            runtime_template_hole: supplied_inline_template,
-            runtime_inline_template_chunk: false,
-            prepared_styles: if opts.prepared_styles.is_empty() {
-                extras
-                    .map(|facts| facts.prepared_styles.clone())
-                    .unwrap_or_default()
-            } else {
-                opts.prepared_styles.clone()
-            },
+            ));
         };
+        // The runtime leg executes only under its consume-once grant for
+        // the demanded runtime kind — never with no admission evidence.
+        let expected_runtime = if opts.ssr {
+            crate::compile_request::ProductKind::RuntimeServer
+        } else {
+            crate::compile_request::ProductKind::RuntimeClient
+        };
+        let Some(grant) = grants
+            .runtime
+            .take()
+            .filter(|grant| grant.admits(expected_runtime))
+        else {
+            return Err(CompileUnsupported::ProductExecutionUngranted {
+                product: expected_runtime,
+            });
+        };
+        bundle = backend.compile_bundle_runtime(grant, source, parsed, opts, alloc)?;
+    }
 
-        // Vue uses `VerterCompileResult` INTERNALLY here; the returned bundle
-        // re-expresses every field neutrally so session assembly never sees
-        // the Vue-shaped result.
-        let macro_semantics = extras
-            .and_then(|extras| extras.macro_runtime.clone())
+    if opts.want_ide {
+        let mut vue = vue_request_from_admitted_artifact(artifact);
+        vue.backend = if opts.force_vapor {
+            VueBackendRequest::Vapor
+        } else {
+            VueBackendRequest::Inferred
+        };
+        vue.ssr = opts.ssr;
+        vue.comments = opts.comments;
+        vue.runtime_module_name = opts.runtime_module_name.clone();
+        vue.script_custom_element = Some(opts.custom_element);
+        let request = vue_ide_only_request(
+            opts.filename.clone(),
+            opts.component_id.clone(),
+            opts.is_production,
+            opts.force_js,
+            IdeProductRequest {
+                want_source_map: opts.ide_source_map.unwrap_or(opts.source_map),
+                embed_ambient_types: opts.embed_ambient_types,
+                conditional_root_narrowing: opts.conditional_root_narrowing,
+                strict_slots: opts.strict_slots,
+                types_module_name: opts.types_module_name.clone(),
+                ide_chunk_boundaries: opts.block_content.template.is_some(),
+                ..Default::default()
+            },
+            vue,
+        )?;
+        let execution = opts.vue_facts.clone().unwrap_or_default();
+        let macros = execution
+            .macro_runtime
+            .clone()
             .map(VueMacroSemanticInput::Runtime)
             .unwrap_or_default();
-        let mut carrier_view = parsed.clone();
-        if opts.block_content.template.is_some() {
-            carrier_view.template_ast = None;
-        }
-        for (style, selected) in carrier_view
-            .style_nodes
-            .iter_mut()
-            .zip(opts.block_content.styles.iter())
-        {
-            if selected.is_some() {
-                // The registered block-content projection owns these bytes.
-                // Preserve the parser-owned slot and attributes, but do not
-                // let the carrier-authored dialect enter either rewrite stage.
-                style.content = None;
-            }
-        }
-        let selected_template = opts.block_content.template.as_ref().map(|input| {
-            let parsed_template = parse_template_block(
-                &input.code,
-                opts.delimiters
-                    .as_ref()
-                    .map(|(open, close)| (open.as_str(), close.as_str())),
-                opts.custom_elements.as_deref(),
-            );
-            let used_vars = template_unit_used_vars(
-                &input.code,
-                &parsed_template,
-                opts.delimiters.clone(),
-                opts.custom_elements.clone(),
-                alloc,
-            );
-            (input, parsed_template, used_vars)
-        });
-        let mut verter_opts = verter_opts;
-        verter_opts.template_used_vars = selected_template
-            .as_ref()
-            .map(|(_, _, used_vars)| used_vars.clone());
-        let result = compile_from_parsed_legacy(
+        // The projection leg executes only under its consume-once grant.
+        let Some(grant) = grants
+            .projection
+            .take()
+            .filter(|grant| grant.admits(crate::compile_request::ProductKind::IdeCompanion))
+        else {
+            return Err(CompileUnsupported::ProductExecutionUngranted {
+                product: crate::compile_request::ProductKind::IdeCompanion,
+            });
+        };
+        let companion = super::registered_carrier_projection::project_ide_from_catalog(
+            grant,
+            artifact,
             source,
-            &carrier_view,
-            &core_opts,
-            &verter_opts,
-            &macro_semantics,
-            alloc,
-        )
-        .map_err(CompileUnsupported::RequestExecutionRefused)?;
-        let binding_metadata = result.template_binding_metadata.clone();
-        let mut bundle = vue_result_to_runtime_bundle(source, &carrier_view, result);
-
-        if let Some((input, parsed_template, _)) = selected_template {
-            let template_core_opts = CodegenOptions {
-                filename: opts.filename.clone(),
-                is_production: opts.is_production,
-                component_id: opts.component_id.clone(),
-                delimiters: opts.delimiters.clone(),
-                custom_elements: opts.custom_elements.clone(),
-                comments: opts.comments,
-                runtime_module_name: opts.runtime_module_name.clone(),
-                target: CompileTarget::TEMPLATE
-                    | if opts.want_ide {
-                        CompileTarget::TSX
-                    } else {
-                        CompileTarget::empty()
-                    }
-                    | if opts.want_template_data {
-                        CompileTarget::TEMPLATE_DATA
-                    } else {
-                        CompileTarget::empty()
-                    },
-                ide_chunk_boundaries: opts.want_ide,
-                ..CodegenOptions::default()
-            };
-            let template_verter_opts = ResolvedVueCompileOptions {
-                force_vapor: opts.force_vapor,
-                force_js: opts.force_js,
-                // Decoupled — see the map-coupling fix note above.
-                source_map: opts.source_map,
-                ide_source_map: opts.source_map && opts.want_ide,
-                ssr: opts.ssr,
-                prop_constness_overrides: binding_metadata.const_props.clone(),
-                template_binding_metadata: Some(binding_metadata),
-                runtime_inline_template_chunk: supplied_inline_template,
-                ..Default::default()
-            };
-            let compiled = compile_from_parsed_legacy(
-                &input.code,
-                &parsed_template,
-                &template_core_opts,
-                &template_verter_opts,
-                &VueMacroSemanticInput::default(),
-                alloc,
-            )
-            .map_err(CompileUnsupported::RequestExecutionRefused)?;
-            let mut selected =
-                vue_result_to_runtime_bundle(&input.code, &parsed_template, compiled);
-            if let Some(template) = selected.template.as_mut() {
-                template.output_descriptor = RuntimeOutputDescriptor::generated(
-                    &template.code,
-                    (!template.source_map.is_empty()).then_some(template.source_map.as_str()),
-                    &[(
-                        input.source_space_token.as_str(),
-                        input.content_artifact_token.as_str(),
-                    )],
-                    SourceMapFidelity::Approximate,
-                );
-            }
-            if supplied_inline_template {
-                let mut shell = bundle.script.take().ok_or(
-                    CompileUnsupported::BlockContentRuntimeUnavailable {
-                        adapter_id: self.adapter_id(),
-                    },
-                )?;
-                let template = selected.template.as_ref().ok_or(
-                    CompileUnsupported::BlockContentRuntimeUnavailable {
-                        adapter_id: self.adapter_id(),
-                    },
-                )?;
-                let hole = shell.generated_template_hole.clone().ok_or(
-                    CompileUnsupported::BlockContentRuntimeUnavailable {
-                        adapter_id: self.adapter_id(),
-                    },
-                )?;
-                let mut imports = template
-                    .imports
-                    .iter()
-                    .filter(|name| !shell.runtime_imports.contains(name))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                imports.sort_unstable();
-                imports.dedup();
-                let preamble = if imports.is_empty() {
-                    String::new()
-                } else {
-                    let specifiers = imports
-                        .iter()
-                        .map(|name| crate::compile::format_import_specifier(name))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!(
-                        "import {{ {specifiers} }} from \"{}\"\n",
-                        opts.runtime_module_name.as_deref().unwrap_or("vue")
-                    )
-                };
-                let (carrier_space, carrier_artifact) =
-                    RuntimeOutputDescriptor::carrier_source(source);
-                let composed = compose_generated_chunk(
-                    &preamble,
-                    GeneratedUnit {
-                        code: &shell.code,
-                        source_map: &shell.source_map,
-                        source_space: &carrier_space,
-                        source,
-                    },
-                    hole,
-                    GeneratedFragment {
-                        unit: GeneratedUnit {
-                            code: &template.code,
-                            source_map: &template.source_map,
-                            source_space: &input.source_space_token,
-                            source: &input.code,
-                        },
-                        range: 0..template.code.len() as u32,
-                    },
-                )
-                .ok_or(CompileUnsupported::BlockContentRuntimeUnavailable {
-                    adapter_id: self.adapter_id(),
-                })?;
-                shell.code = composed.code;
-                shell.source_map = composed.source_map;
-                shell.generated_template_hole = None;
-                shell.output_descriptor = RuntimeOutputDescriptor::generated(
-                    &shell.code,
-                    Some(&shell.source_map),
-                    &[
-                        (carrier_space.as_str(), carrier_artifact.as_str()),
-                        (
-                            input.source_space_token.as_str(),
-                            input.content_artifact_token.as_str(),
-                        ),
-                    ],
-                    SourceMapFidelity::Approximate,
-                );
-                bundle.script = Some(shell);
-                bundle.template = None;
-                bundle.inline = true;
-            } else {
-                bundle.template = selected.template;
-            }
-            bundle.template_data = selected.template_data;
-            bundle.diagnostics.extend(selected.diagnostics);
-            if opts.want_ide {
-                let mut shell =
-                    bundle
-                        .tsx
-                        .take()
-                        .ok_or(CompileUnsupported::BlockContentIdeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        })?;
-                let fragment =
-                    selected
-                        .tsx
-                        .take()
-                        .ok_or(CompileUnsupported::BlockContentIdeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        })?;
-                let hole = shell.generated_template_hole.clone().ok_or(
-                    CompileUnsupported::BlockContentIdeUnavailable {
-                        adapter_id: self.adapter_id(),
-                    },
-                )?;
-                let template_chunk = fragment.generated_template_chunk.as_ref().ok_or(
-                    CompileUnsupported::BlockContentIdeUnavailable {
-                        adapter_id: self.adapter_id(),
-                    },
-                )?;
-                let (carrier_space, carrier_artifact) =
-                    RuntimeOutputDescriptor::carrier_source(source);
-                let composed = compose_generated_chunk(
-                    "",
-                    GeneratedUnit {
-                        code: &shell.code,
-                        source_map: &shell.source_map,
-                        source_space: &carrier_space,
-                        source,
-                    },
-                    hole,
-                    GeneratedFragment {
-                        unit: GeneratedUnit {
-                            code: &template_chunk.code,
-                            source_map: &template_chunk.source_map,
-                            source_space: &input.source_space_token,
-                            source: &input.code,
-                        },
-                        range: 0..template_chunk.code.len() as u32,
-                    },
-                )
-                .ok_or(CompileUnsupported::BlockContentIdeUnavailable {
-                    adapter_id: self.adapter_id(),
-                })?;
-                shell.code = composed.code;
-                shell.source_map = composed.source_map;
-                shell.generated_template_hole = None;
-                shell.generated_template_chunk = None;
-                shell.output_descriptor = RuntimeOutputDescriptor::generated(
-                    &shell.code,
-                    Some(&shell.source_map),
-                    &[
-                        (carrier_space.as_str(), carrier_artifact.as_str()),
-                        (
-                            input.source_space_token.as_str(),
-                            input.content_artifact_token.as_str(),
-                        ),
-                    ],
-                    SourceMapFidelity::Approximate,
-                );
-                bundle.tsx = Some(shell);
-            }
+            &request,
+            &super::registered_carrier_projection::ProjectionCatalogInputs {
+                block_content: opts.block_content.clone(),
+                vue_execution: execution,
+                vue_macros: macros,
+            },
+        )?;
+        bundle.tsx = Some(companion.ide);
+        if opts.want_runtime {
+            extend_unique_diagnostics(&mut bundle.diagnostics, companion.diagnostics);
+        } else {
+            bundle.diagnostics = companion.diagnostics;
         }
-
-        let style_scope = bundle
-            .scope_id
-            .strip_prefix("data-v-")
-            .unwrap_or(&bundle.scope_id)
-            .to_string();
-        for (style_index, ((slot, selected), node)) in opts
-            .block_content
-            .styles
-            .iter()
-            .zip(bundle.styles.iter_mut())
-            .zip(parsed.style_nodes())
-            .enumerate()
-        {
-            if let Some(input) = slot {
-                let authored_dialect = style_dialect(node.lang);
-                let selected_dialect = match input.lang.as_str() {
-                    "css" => CssDialect::Css,
-                    "scss" => CssDialect::Scss,
-                    "sass" => CssDialect::Sass,
-                    "less" => CssDialect::Less,
-                    "stylus" | "styl" => CssDialect::Stylus,
-                    _ => {
-                        return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        });
-                    }
-                };
-                let supplied_preprocessor_output = selected_dialect == CssDialect::Css
-                    && authored_dialect != Some(CssDialect::Css);
-                if authored_dialect.is_none() && !supplied_preprocessor_output {
-                    return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                        adapter_id: self.adapter_id(),
-                    });
-                }
-                let mut current = input.code.to_string();
-                let mut current_map = if opts.source_map {
-                    input.source_map.as_deref().map(str::to_string)
-                } else {
-                    None
-                };
-                let mut descriptor = RuntimeOutputDescriptor::identity(
-                    &current,
-                    &input.source_space_token,
-                    &input.content_artifact_token,
-                );
-                let mut applied_rewrite_stages = 0u8;
-
-                if !supplied_preprocessor_output {
-                    // The common path: authored bytes, not already-preprocessed
-                    // output, so all 3 stages apply in one cascade — a stage
-                    // that produces no edits hands its retained IR to the next
-                    // instead of forcing a re-parse (A10i).
-                    let mut authored = AuthoredStyleInput::new(
-                        &current,
-                        selected_dialect,
-                        &input.source_space_token,
-                        &input.source_space_token,
-                        &input.content_artifact_token,
-                    );
-                    if let Some(prepared) = prepared_style_for_sealed_slot(
-                        input.parsed.as_ref(),
-                        &opts.prepared_styles,
-                        style_index,
-                        current.as_str(),
-                    ) {
-                        authored = authored.with_prepared(prepared.ir());
-                    }
-                    let cascade_module = node.module && selected_dialect == CssDialect::Css;
-                    let outcome = run_vue_style_cascade(
-                        authored,
-                        &style_scope,
-                        cascade_module,
-                        node.scoped,
-                        opts.source_map,
-                    );
-                    if !outcome.stage_failures.is_empty() {
-                        return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        });
-                    }
-                    let stage_count = [
-                        outcome.facts.rewrites.v_bind,
-                        outcome.facts.rewrites.css_modules,
-                        outcome.facts.rewrites.scoped_selector
-                            || outcome.facts.rewrites.keyframes
-                            || outcome.facts.rewrites.deep
-                            || outcome.facts.rewrites.slotted
-                            || outcome.facts.rewrites.global,
-                    ]
-                    .into_iter()
-                    .filter(|applied| *applied)
-                    .count();
-                    if stage_count > 0 {
-                        current = outcome.code;
-                        current_map = opts
-                            .source_map
-                            .then_some(outcome.source_map)
-                            .filter(|map| !map.is_empty());
-                        descriptor = RuntimeOutputDescriptor::generated(
-                            &current,
-                            current_map.as_deref(),
-                            &[(
-                                input.source_space_token.as_str(),
-                                input.content_artifact_token.as_str(),
-                            )],
-                            SourceMapFidelity::Exact,
-                        );
-                        applied_rewrite_stages =
-                            applied_rewrite_stages.saturating_add(stage_count as u8);
-                    }
-                } else {
-                    // A completed external-preprocessor result is parsed once
-                    // at host admission. The retained IR is required here —
-                    // raw bytes are not a transform fallback.
-                    let prepared = prepared_style_for_sealed_slot(
-                        input.parsed.as_ref(),
-                        &opts.prepared_styles,
-                        style_index,
-                        current.as_str(),
-                    )
-                    .ok_or(
-                        CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        },
-                    )?;
-                    let verified = VerifiedPlainCss::from_parsed_native_css(prepared.ir()).ok_or(
-                        CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        },
-                    )?;
-                    let cascade_module = node.module && selected_dialect == CssDialect::Css;
-                    let outcome = transform_vue_style(
-                        verified,
-                        &input.source_space_token,
-                        &input.source_space_token,
-                        &input.content_artifact_token,
-                        &style_scope,
-                        cascade_module,
-                        node.scoped,
-                        opts.source_map,
-                    );
-                    if !outcome.stage_failures.is_empty() {
-                        return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        });
-                    }
-                    let stage_count = [
-                        outcome.facts.rewrites.v_bind,
-                        outcome.facts.rewrites.css_modules,
-                        outcome.facts.rewrites.scoped_selector
-                            || outcome.facts.rewrites.keyframes
-                            || outcome.facts.rewrites.deep
-                            || outcome.facts.rewrites.slotted
-                            || outcome.facts.rewrites.global,
-                    ]
-                    .into_iter()
-                    .filter(|applied| *applied)
-                    .count();
-                    if stage_count > 0 {
-                        current = outcome.code;
-                        current_map = opts
-                            .source_map
-                            .then_some(outcome.source_map)
-                            .filter(|map| !map.is_empty());
-                        descriptor = RuntimeOutputDescriptor::generated(
-                            &current,
-                            current_map.as_deref(),
-                            &[(
-                                input.source_space_token.as_str(),
-                                input.content_artifact_token.as_str(),
-                            )],
-                            SourceMapFidelity::Exact,
-                        );
-                        applied_rewrite_stages =
-                            applied_rewrite_stages.saturating_add(stage_count as u8);
-                    }
-                }
-
-                if applied_rewrite_stages > 1 {
-                    descriptor.source_map.fidelity = SourceMapFidelity::Approximate;
-                }
-
-                selected.code = current;
-                selected.source_map = current_map;
-                selected.lang = Some(input.lang.clone());
-                selected.output_descriptor = descriptor;
-            }
-        }
-        for (slot, selected) in opts
-            .block_content
-            .custom_blocks
-            .iter()
-            .zip(bundle.custom_blocks.iter_mut())
-        {
-            if let Some(input) = slot {
-                selected.content = input.code.to_string();
-            }
-        }
-
-        // Vue emits a runtime surface or a genuine compile error; it never
-        // fail-closes on an unsupported runtime surface the way Svelte does, so
-        // its outcome is always `Produced`.
-        Ok(CarrierCompileOutcome::Produced(bundle))
     }
+
+    // Vue emits a runtime surface or a genuine compile error; it never
+    // fail-closes on an unsupported runtime surface the way Svelte does, so
+    // its outcome is always `Produced`.
+    Ok(CarrierCompileOutcome::Produced(
+        with_catalog_template_facts(
+            bundle,
+            artifact,
+            source,
+            opts.want_template_data,
+            opts.block_content
+                .template
+                .as_ref()
+                .map(|input| input.code.as_ref()),
+        ),
+    ))
+}
+
+fn vue_ide_only_request(
+    filename: Option<String>,
+    component_id: Option<String>,
+    is_production: bool,
+    force_js: bool,
+    ide: IdeProductRequest,
+    vue: VueCompileRequest,
+) -> Result<CompileRequest, CompileUnsupported> {
+    CompileRequest::new(
+        vec![CompileProduct::IdeCompanion(ide)],
+        FrameworkCompileRequest::Vue(vue),
+        None,
+        filename,
+        component_id,
+        is_production,
+        force_js,
+    )
+    .map_err(CompileUnsupported::RequestExecutionRefused)
+}
+
+fn vue_request_from_admitted_artifact(artifact: &FrameworkParseArtifact) -> VueCompileRequest {
+    let Some(options) = artifact
+        .carrier_ref::<VueParseCarrier>()
+        .map(VueParseCarrier::parse_options)
+    else {
+        return VueCompileRequest::default();
+    };
+    VueCompileRequest {
+        delimiters: Some(options.delimiters.clone()),
+        is_custom_element: options.custom_elements.clone(),
+        ..Default::default()
+    }
+}
+
+fn extend_unique_diagnostics(dest: &mut Vec<RuntimeDiagnostic>, extra: Vec<RuntimeDiagnostic>) {
+    for diagnostic in extra {
+        let already = dest.iter().any(|existing| {
+            existing.code == diagnostic.code
+                && existing.message == diagnostic.message
+                && existing.span == diagnostic.span
+        });
+        if !already {
+            dest.push(diagnostic);
+        }
+    }
+}
+
+fn with_catalog_template_facts(
+    mut bundle: RuntimeCompileOutput,
+    artifact: &FrameworkParseArtifact,
+    source: &str,
+    want: bool,
+    selected_template: Option<&str>,
+) -> RuntimeCompileOutput {
+    bundle.template_data = if want {
+        let basis = match selected_template {
+            Some(bytes) => {
+                super::registered_carrier_projection::TemplateFactsBasis::SelectedTemplate(bytes)
+            }
+            None => super::registered_carrier_projection::TemplateFactsBasis::AdmittedArtifact,
+        };
+        super::registered_carrier_projection::template_facts_from_catalog(artifact, source, basis)
+            .inspect(|facts| {
+                // The fact producer is the only pass that parses template
+                // expressions on this route — its diagnostics (e.g. a
+                // malformed `v-if` expression) are published with the
+                // bundle, deduplicated against the carrier's own channel.
+                // The product keeps its own copy attached so downstream
+                // conversions of the facts carry the same set.
+                extend_unique_diagnostics(&mut bundle.diagnostics, facts.diagnostics.clone());
+            })
+    } else {
+        None
+    };
+    bundle
 }
 
 /// Re-express a Vue [`VerterCompileResult`] as the framework-neutral
@@ -1521,6 +822,29 @@ pub fn vue_result_to_runtime_bundle(
             generated_template_chunk: tsx.generated_template_chunk,
         }
     });
+    // The template-data extraction pass's own diagnostic slice rides WITH
+    // the facts. It is a subset of `errors` — the bundle's `diagnostics`
+    // below already publishes it once for this route — so the attached copy
+    // exists for downstream conversions of the data, not as a second
+    // publication.
+    let template_facts_diagnostics: Vec<RuntimeDiagnostic> = result
+        .template_data_diagnostics
+        .iter()
+        .map(|d| RuntimeDiagnostic {
+            severity: d.severity.into(),
+            code: d.code.clone(),
+            message: d.message.clone(),
+            span: d
+                .span
+                .unwrap_or_else(|| verter_span::Span::new(0, source.len() as u32)),
+        })
+        .collect();
+    let template_data = result.template_data.map(|data| {
+        super::registered_carrier_projection::TemplateFactsProduct {
+            data,
+            diagnostics: template_facts_diagnostics,
+        }
+    });
     let diagnostics = result
         .errors
         .into_iter()
@@ -1548,7 +872,7 @@ pub fn vue_result_to_runtime_bundle(
         custom_blocks,
         scope_id: result.scope_id,
         tsx,
-        template_data: result.template_data,
+        template_data,
         diagnostics,
         // The RESOLVED inline topology — the compiler already merged the
         // render into `setup()` when true, so host assembly takes the inline
@@ -1582,12 +906,13 @@ mod tests {
     use super::*;
     use crate::framework_common::carrier_compiler::CompileBundleProducedExt;
     use crate::framework_common::{
-        carrier_compiler::OutputSourceSpaceKind, RuntimeBlockContentInput,
-        RuntimeBlockContentInputs,
+        carrier_compiler::OutputSourceSpaceKind, FrameworkSemanticAuthority,
+        RuntimeBlockContentInput, RuntimeBlockContentInputs,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use verter_css_syntax::CssDialect;
     use verter_language::{ExternalLinkKind, ScriptRegionKind};
 
     fn workspace_root() -> PathBuf {
@@ -1929,6 +1254,51 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn compile_bundle_runtime_branch_delegates_to_the_typed_runtime_backend() {
+        // The bundle route reaches its runtime product only through the typed
+        // Vue runtime backend; the per-thread delegation counter is the
+        // witness that no route-private runtime emitter remains.
+        let compiler = VueCarrierCompiler;
+        let source = "<script setup>const n = 1</script><template><div>{{ n }}</div></template>";
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+
+        let before = crate::standalone::runtime_backend_delegation_count();
+        compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions::default(),
+                &alloc,
+            )
+            .expect("vue runtime bundle");
+        assert_eq!(
+            crate::standalone::runtime_backend_delegation_count(),
+            before + 1,
+            "the bundle runtime branch must delegate exactly once to the typed Vue runtime backend"
+        );
+
+        let before_ide_only = crate::standalone::runtime_backend_delegation_count();
+        compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    want_runtime: false,
+                    want_ide: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("vue ide-only bundle");
+        assert_eq!(
+            crate::standalone::runtime_backend_delegation_count(),
+            before_ide_only,
+            "a bundle request planning no runtime product must not touch the runtime backend"
+        );
+    }
+
     /// @ai-generated - Proves external template lowering receives the inline
     /// setup binding metadata instead of resolving an imported component by name.
     #[test]
@@ -2010,6 +1380,41 @@ mod tests {
             result,
             Err(CompileUnsupported::BlockContentIdeUnavailable { .. })
         ));
+    }
+
+    #[test]
+    fn runtime_leg_is_catalog_selected_a_catalog_miss_refuses_typed() {
+        // The runtime leg must be selected from the immutable catalog at
+        // execution, exactly like the projection and template-fact legs: an
+        // artifact whose epoch has no registered runtime row refuses typed
+        // instead of compiling through a concretely-constructed backend.
+        let source = "<script setup>const n = 1</script><template><div>{{ n }}</div></template>";
+        let artifact = artifact_for(source).remint_epoch_for_tests("unknown-epoch");
+        let alloc = oxc_allocator::Allocator::new();
+        let before = crate::standalone::runtime_backend_delegation_count();
+        let result = VueCarrierCompiler.compile_bundle(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                want_runtime: true,
+                ..Default::default()
+            },
+            &alloc,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(CompileUnsupported::RequestExecutionRefused(
+                    CompileRequestError::CapabilityUnsupported(_)
+                ))
+            ),
+            "a runtime-catalog miss must refuse typed, got {result:?}"
+        );
+        assert_eq!(
+            crate::standalone::runtime_backend_delegation_count(),
+            before,
+            "no runtime backend may execute on a catalog miss"
+        );
     }
 
     #[test]
@@ -3430,29 +2835,6 @@ mod tests {
     }
 
     #[test]
-    fn vue_compiler_eval_source_is_position_preserving_with_script_at_raw_offsets() {
-        let compiler = VueCarrierCompiler;
-        let source = "<template><div/></template>\n<script setup lang=\"ts\">const a = 1</script>";
-        let artifact = artifact_for(source);
-        let eval = compiler.eval_source(source, &artifact);
-        // Length invariant.
-        assert_eq!(
-            eval.len(),
-            source.len(),
-            "eval source must equal SFC length"
-        );
-        // The script region's bytes sit at their raw offsets.
-        let region = artifact.script_regions()[0].span;
-        let (s, e) = (region.start as usize, region.end as usize);
-        assert_eq!(&eval[s..e], "const a = 1");
-        // The `<template>` markup is blanked (no `<` survives outside script).
-        assert!(
-            !eval[..s].contains('<'),
-            "markup before the script must be blanked"
-        );
-    }
-
-    #[test]
     fn vue_compiler_compile_ide_produces_tsx_for_a_typescript_sfc() {
         let compiler = VueCarrierCompiler;
         let source = "<script setup lang=\"ts\">const a: number = 1</script>\n<template><div>{{ a }}</div></template>";
@@ -3490,13 +2872,177 @@ mod tests {
 
     #[test]
     fn vue_compiler_template_data_extracts_component_usages() {
-        let compiler = VueCarrierCompiler;
         let source = "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n<template><Child :foo=\"1\" /></template>";
         let artifact = artifact_for(source);
-        let facts = compiler.template_data(source, &artifact);
+        let facts = crate::framework_common::VueSemanticAuthority
+            .template_facts(source, &artifact)
+            .expect("a Vue artifact must produce template facts")
+            .data;
         assert!(
-            facts.data.components.iter().any(|c| c.tag_name == "Child"),
-            "template_data must surface the <Child> component usage"
+            facts.components.iter().any(|c| c.tag_name == "Child"),
+            "template facts must surface the <Child> component usage"
+        );
+    }
+
+    #[test]
+    fn compile_bundle_template_facts_come_from_the_catalog() {
+        let source = concat!(
+            "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n",
+            "<template><Child :foo=\"1\" /></template>",
+        );
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let opts = RuntimeCompileOptions {
+            want_runtime: false,
+            want_ide: false,
+            want_template_data: true,
+            ..Default::default()
+        };
+        let bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
+            .expect("Vue compile_bundle produces a bundle");
+        let catalog =
+            crate::framework_common::registered_carrier_projection::template_facts_from_catalog(
+                &artifact,
+                source,
+                crate::framework_common::registered_carrier_projection::TemplateFactsBasis::AdmittedArtifact,
+            )
+            .expect("catalog must produce Vue template facts")
+            .data;
+        let bundled = bundle
+            .template_data
+            .as_ref()
+            .expect("want_template_data must fill catalog facts");
+        let bundled = &bundled.data;
+        assert_eq!(bundled.components.len(), catalog.components.len());
+        assert!(
+            bundled
+                .components
+                .iter()
+                .any(|component| component.tag_name == "Child"),
+            "bundle template facts must retain the <Child> usage"
+        );
+
+        let reminted = artifact.remint_epoch_for_tests("unknown-epoch");
+        let refused = VueCarrierCompiler
+            .compile_bundle_expect_produced(source, &reminted, &opts, &alloc)
+            .expect("runtime/IDE-free compile still produces a bundle");
+        assert!(
+            refused.template_data.is_none(),
+            "a catalog miss must leave template_data None, not independently extract"
+        );
+    }
+
+    fn template_facts_opts(template: Option<&str>) -> RuntimeCompileOptions {
+        RuntimeCompileOptions {
+            want_runtime: false,
+            want_ide: false,
+            want_template_data: true,
+            block_content: RuntimeBlockContentInputs {
+                template: template.map(|code| projected_script(code, "html")),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn compile_bundle_refuses_template_facts_for_external_src_selected_content() {
+        let source = concat!(
+            "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n",
+            "<template src=\"./view.html\"></template>",
+        );
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let _ = crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations();
+        let bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &template_facts_opts(Some("<Child :foo=\"1\" />")),
+                &alloc,
+            )
+            .expect("Vue compile_bundle produces a bundle");
+        assert!(
+            bundle.template_data.is_none(),
+            "non-empty selected content for an external template src must refuse facts, not Some(empty)"
+        );
+        assert_eq!(
+            crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations(),
+            0,
+            "a selected-content mismatch must not invoke the semantic producer"
+        );
+    }
+
+    #[test]
+    fn compile_bundle_refuses_template_facts_when_selected_bytes_differ() {
+        let source = concat!(
+            "<script setup lang=\"ts\">import Original from './Original.vue'</script>\n",
+            "<template><Original /></template>",
+        );
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let _ = crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations();
+        let bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &template_facts_opts(Some("<Replacement />")),
+                &alloc,
+            )
+            .expect("Vue compile_bundle produces a bundle");
+        assert!(
+            bundle.template_data.is_none(),
+            "selected bytes that replace the admitted template must refuse facts, never publish the superseded <Original />"
+        );
+        assert_eq!(
+            crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations(),
+            0,
+            "a selected-content mismatch must not invoke the semantic producer"
+        );
+    }
+
+    #[test]
+    fn compile_bundle_keeps_admitted_template_facts_when_selected_bytes_match() {
+        let source = concat!(
+            "<script setup lang=\"ts\">import Original from './Original.vue'</script>\n",
+            "<template><Original /></template>",
+        );
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let _ = crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations();
+        let bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &template_facts_opts(Some("<Original />")),
+                &alloc,
+            )
+            .expect("Vue compile_bundle produces a bundle");
+        let facts = bundle
+            .template_data
+            .as_ref()
+            .expect("byte-identical selected content must keep admitted carrier facts");
+        assert!(
+            facts
+                .data
+                .components
+                .iter()
+                .any(|component| component.tag_name == "Original"),
+            "byte-identical selection must retain the admitted <Original /> usage"
+        );
+        assert!(
+            facts
+                .data
+                .components
+                .iter()
+                .all(|component| component.tag_name != "Replacement"),
+            "byte-identical selection must not invent a replacement component"
+        );
+        assert_eq!(
+            crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations(),
+            1,
+            "an admitted selected match must invoke the semantic producer exactly once"
         );
     }
 }

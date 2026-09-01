@@ -7,9 +7,36 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 description = "Native Node.js bindings for Verter Vue compiler (NAPI-RS)"
+# The test-only fixture addon is its own package; it is not part of this one.
+exclude = ["tests/fixture_addon"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Gates the generator command below out of every default build. @napi-rs/cli
+# passes no `--bin` filter to a crate that exposes a cdylib, so the release
+# publish lane's `cargo build --release --target <T>` builds EVERY target of
+# this package on all seven `napi.targets` — five of which no CI lane
+# exercises. A generator has no business being linked for a Windows or musl
+# publish, and a first link there would happen at publish time.
+generate-host-request-ts = []
+
+# The generator that writes `packages/native/host-compile-request.generated.ts`.
+# Declared explicitly so `required-features` can keep it out of the default
+# target set: without a `[[bin]]` row it is auto-discovered and built by every
+# `cargo build` of this package, the cross-compiled publish builds included.
+# The cost of the gate is that a default `cargo check --all-targets` does not
+# compile it; the freshness guard still compiles the renderer it calls, and the
+# command below builds the bin itself.
+#
+#   cargo run -p verter_napi --features generate-host-request-ts \
+#       --bin generate_host_compile_request_ts
+[[bin]]
+name = "generate_host_compile_request_ts"
+path = "src/bin/generate_host_compile_request_ts.rs"
+required-features = ["generate-host-request-ts"]
 
 [dependencies]
 verter_audit = { path = "../verter_audit" }
@@ -34,11 +61,22 @@ napi-derive = "3"
 backtrace = "0.3.76"
 rustc-hash = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+# The published TypeScript declaration of the host compile request is
+# RENDERED from the Rust declarations that decode it
+# (`src/host_compile_request_ts.rs`), never hand-written beside them.
+ts-rs = "12"
 serde_json = { workspace = true }
 oxc_allocator = { workspace = true }
 tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
 
 [dev-dependencies]
+# The test-only Node addon `cases::real_js_host_request_boundary` loads. The
+# edge is here so cargo builds the addon whenever it builds this crate's
+# tests, which puts it beside the test binary instead of leaving that suite
+# to spawn a `cargo build` of the whole native closure at run time. The
+# addon is never used from Rust; `exclude` above keeps it out of this
+# package, and a dev-dependency is dropped from a published manifest.
+verter_napi_request_fixture = { path = "tests/fixture_addon" }
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
 verter_semantic = { path = "../verter_semantic", features = ["test-support"] }
 verter_session = { path = "../verter_session", features = ["test-support"] }

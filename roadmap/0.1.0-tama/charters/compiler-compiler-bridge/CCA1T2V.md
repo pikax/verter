@@ -52,7 +52,7 @@ Do not touch `svelte/carrier.rs`, `svelte/mod.rs`, the `CarrierCompiler` declara
 ## Exact predecessor contract and binding laws
 
 - **CCA1T1:** `CarrierCompilerRegistry` and registry-only lookups are absent, so no production trait object can select the Vue implementation.
-- Structural route evidence must also prove all Vue frontend, semantic, projection, runtime, and host calls already select typed backends from immutable catalog identity.
+- Structural route evidence must also prove all Vue frontend, semantic, projection, runtime, and host calls already select typed backends from immutable catalog identity, and that both the host-backed and runtime-render production lanes consume typed `CompileAdmission` issued by the Vue `FrameworkHostIntegrationBackend` before this compatibility implementation is deleted.
 - Tests, comments, assertions, and diagnostics use durable backend/capability language only; no roadmap, node, phase, sequence, or deletion-history vocabulary may enter code or tests.
 
 ## Migration, deletions, acceptance, and performance

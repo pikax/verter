@@ -389,27 +389,27 @@ fn no_custom_event_any_detector_discriminates() {
 
 #[test]
 fn template_data_ingestion_is_registry_dispatched() {
-    // Shared-substrate rule: template-data ingestion is REGISTRY-DISPATCHED
+    // Shared-substrate rule: template-data ingestion is catalog-dispatched
     // by the file's carrier row, NOT gated on a hardcoded `.vue` / `is_vue()`
     // check. The `compute_template_analysis_if_missing` body and the
-    // `build_template_analysis` body must route the extraction through the
-    // carrier registry (`file_language_has_template_data_compiler` +
-    // `compile_template_data`), and must NOT contain a `.vue` literal gate or an
-    // `is_vue()` gate on the template-data path.
+    // `build_template_analysis` body must route the extraction through
+    // `file_language_has_template_data_compiler` + `compile_template_data`,
+    // and must NOT contain a `.vue` literal gate or an `is_vue()` gate on
+    // the template-data path.
     let analysis_io = strip_line_comments(&read_src(
         "crates/verter_session/src/host_manage/analysis_io.rs",
     ));
 
-    // The registry-dispatched gate + extraction must be present.
+    // The catalog-dispatched gate + extraction must be present.
     assert!(
         analysis_io.contains("file_language_has_template_data_compiler"),
-        "the template-data ingestion gate must be the registry-dispatched \
+        "the template-data ingestion gate must be the catalog-dispatched \
          `file_language_has_template_data_compiler`, not a hardcoded carrier check"
     );
     assert!(
         analysis_io.contains("compile_template_data("),
         "template-data extraction must route through the carrier-neutral \
-         `compile_template_data` (registry-dispatched), not a Vue-only path"
+         `compile_template_data` (catalog-dispatched), not a Vue-only path"
     );
 
     // The retired Vue-only gates must NOT reappear on the template-data path.
@@ -442,6 +442,23 @@ fn template_data_ingestion_is_registry_dispatched() {
         !parse.contains("fn compile_vue_template_data"),
         "the Vue-only `compile_vue_template_data` must be retired in favour of the \
          carrier-neutral `compile_template_data` — no dual path"
+    );
+
+    let compile_body = parse
+        .split("fn compile_template_data")
+        .nth(1)
+        .and_then(|rest| rest.split("\npub(crate) fn ").next())
+        .unwrap_or("");
+    assert!(
+        compile_body.contains("template_facts_from_catalog"),
+        "compile_template_data must select the semantic catalog helper, \
+         not a combined compiler"
+    );
+    assert!(
+        !compile_body.contains("compiler_for_carrier_language")
+            && !compile_body.contains(".template_data("),
+        "compile_template_data must not dispatch through CarrierCompiler::template_data:\n\
+         {compile_body}"
     );
 }
 

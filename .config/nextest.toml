@@ -33,3 +33,31 @@ filter = 'test(/shared_provider_live::(shared_provider_serves_real_vue_macro_car
 # for a truly wedged subprocess, while the in-test watchdog is the deadline
 # that actually fires and reports its diagnostic message. 60s x 6 = 360s.
 slow-timeout = { period = "60s", terminate-after = 6 }
+
+# ── The real-JS request boundary addon ──────────────────────────────────────
+# `cases::real_js_host_request_boundary` loads a test-only Node addon to put
+# the native host compile request in front of live V8 objects. The addon is a
+# `cdylib` package `verter_napi` dev-depends on, so cargo links it while
+# building that suite's binary and leaves it in the same `deps` directory.
+# Nothing links the addon at runtime, so nextest does not carry it as one of
+# the suite's own dynamic dependencies; naming it here does, at the same
+# relative path, which is what makes it a sibling of the test binary in an
+# extracted archive exactly as it is in `target`.
+#
+# Without this the suite would have to build the addon itself, and that build
+# links the native crate's whole dependency closure: minutes against a cold
+# target directory, which a workspace run reports as a hang and terminates,
+# cancelling every test it had not yet scheduled.
+#
+# `debug` is the dev profile's output directory, and the dev profile is what
+# the archive is built under. One entry per platform naming, because `include`
+# has no platform predicate.
+# `on-missing = "ignore"` is what lets the two inapplicable names be absent;
+# the applicable one going missing is caught by the suite, which fails by name
+# on an addon that is not beside it rather than rebuilding one.
+[profile.default.archive]
+include = [
+  { path = "debug/deps/libverter_napi_request_fixture.dylib", relative-to = "target", on-missing = "ignore" },
+  { path = "debug/deps/libverter_napi_request_fixture.so", relative-to = "target", on-missing = "ignore" },
+  { path = "debug/deps/verter_napi_request_fixture.dll", relative-to = "target", on-missing = "ignore" },
+]

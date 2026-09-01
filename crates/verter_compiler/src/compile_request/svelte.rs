@@ -187,6 +187,73 @@ pub enum SvelteCssRequest {
     External,
 }
 
+/// Declares the closed custom-element prop-type vocabulary from ONE list
+/// of rows, each naming a variant and its two admitted spellings.
+///
+/// The single-list shape is the point. The vocabulary is generated from
+/// these rows: the variant exists only because the row does, the
+/// membership match is generated from the row's two spellings, and the
+/// rendered backend spelling is generated from the row's capitalised
+/// half. Adding a sixth prop type — both of its spellings, its
+/// membership, and its rendering — is therefore the addition of one row,
+/// and no second place can disagree about the vocabulary because no
+/// second place states it.
+macro_rules! svelte_custom_element_prop_types {
+    ($($variant:ident => $lowercase:literal | $capitalised:literal),+ $(,)?) => {
+        /// The closed Svelte custom-element prop-type vocabulary.
+        ///
+        /// This type IS the admission: an [`SvelteCompileRequest`] carries
+        /// it rather than a string, so a request holding an unrecognised
+        /// prop type is unrepresentable and no later stage — transport,
+        /// normalisation, or emission — has anything left to refuse.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum SvelteCustomElementPropType {
+            $($variant),+
+        }
+
+        impl SvelteCustomElementPropType {
+            /// Every variant, in declaration order.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            /// The sole membership decision over the vocabulary.
+            ///
+            /// Exactly two spellings admit each variant: the lowercase
+            /// form the transport schema publishes and the capitalised
+            /// form Svelte itself writes. Both were already accepted by
+            /// one of the two public entry points, so admitting their
+            /// union narrows neither and widens past neither. Any other
+            /// casing — `STRING`, `nUmBeR` — is refused: this is a closed
+            /// set of spellings, not a case-insensitive comparison.
+            pub fn from_spelling(spelling: &str) -> Option<Self> {
+                Some(match spelling {
+                    $($lowercase | $capitalised => Self::$variant,)+
+                    _ => return None,
+                })
+            }
+
+            /// The capitalised spelling Svelte's backend emits. It does
+            /// not depend on which admitted spelling the caller wrote, so
+            /// rendered output is identical across a variant's spellings.
+            pub fn as_svelte_name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $capitalised),+
+                }
+            }
+        }
+    };
+}
+
+svelte_custom_element_prop_types! {
+    String => "string" | "String",
+    Boolean => "boolean" | "Boolean",
+    Number => "number" | "Number",
+    Array => "array" | "Array",
+    Object => "object" | "Object",
+}
+
+/// A caller's unadmitted custom-element prop descriptor: `prop_type` is
+/// still the caller's raw spelling, decided by
+/// [`SvelteOptionAttempt::into_request`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SvelteCustomElementPropDescriptor {
     pub attribute: Option<String>,
@@ -194,11 +261,30 @@ pub struct SvelteCustomElementPropDescriptor {
     pub prop_type: Option<String>,
 }
 
+/// The unadmitted custom-element descriptor a transport or host fills in.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SvelteCustomElementDescriptor {
     pub tag: Option<String>,
     pub shadow: Option<bool>,
     pub props: std::collections::BTreeMap<String, SvelteCustomElementPropDescriptor>,
+}
+
+/// The admitted counterpart of [`SvelteCustomElementPropDescriptor`],
+/// carrying the closed vocabulary instead of a raw spelling.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdmittedSvelteCustomElementPropDescriptor {
+    pub attribute: Option<String>,
+    pub reflect: Option<bool>,
+    pub prop_type: Option<SvelteCustomElementPropType>,
+}
+
+/// The admitted counterpart of [`SvelteCustomElementDescriptor`], the only
+/// descriptor an [`SvelteCompileRequest`] can carry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdmittedSvelteCustomElementDescriptor {
+    pub tag: Option<String>,
+    pub shadow: Option<bool>,
+    pub props: std::collections::BTreeMap<String, AdmittedSvelteCustomElementPropDescriptor>,
 }
 
 /// The `compatibility` canonical object — only the inventoried field is
@@ -228,7 +314,7 @@ pub struct SvelteCompatibilityRequest {
 pub struct SvelteCompileRequest {
     pub dev: Option<bool>,
     pub custom_element: Option<bool>,
-    pub custom_element_descriptor: Option<SvelteCustomElementDescriptor>,
+    pub custom_element_descriptor: Option<AdmittedSvelteCustomElementDescriptor>,
     pub namespace: Option<SvelteNamespaceRequest>,
     pub css: Option<SvelteCssRequest>,
     pub preserve_comments: Option<bool>,
@@ -334,10 +420,14 @@ impl SvelteOptionAttempt {
                 );
             }
         }
+        let custom_element_descriptor = self
+            .custom_element_descriptor
+            .map(admit_custom_element_descriptor)
+            .transpose()?;
         Ok(SvelteCompileRequest {
             dev: self.dev,
             custom_element: self.custom_element,
-            custom_element_descriptor: self.custom_element_descriptor,
+            custom_element_descriptor,
             namespace: self.namespace,
             css: self.css,
             preserve_comments: self.preserve_comments,
@@ -348,6 +438,52 @@ impl SvelteOptionAttempt {
             compatibility: self.compatibility,
         })
     }
+}
+
+/// Admits a caller's custom-element descriptor, converting every prop-type
+/// spelling into the closed vocabulary.
+///
+/// This is the only membership decision over that vocabulary in the
+/// workspace. Transports forward the caller's spelling verbatim and the
+/// execution path renders an already-admitted value, so an unrecognised
+/// spelling is refused here — at request construction — naming the
+/// `customElement.props.type` row and carrying the offending value.
+fn admit_custom_element_descriptor(
+    descriptor: SvelteCustomElementDescriptor,
+) -> Result<AdmittedSvelteCustomElementDescriptor, crate::compile_request::CompileRequestError> {
+    let SvelteCustomElementDescriptor { tag, shadow, props } = descriptor;
+    let mut admitted = std::collections::BTreeMap::new();
+    for (name, prop) in props {
+        let SvelteCustomElementPropDescriptor {
+            attribute,
+            reflect,
+            prop_type,
+        } = prop;
+        let prop_type = match prop_type {
+            None => None,
+            Some(spelling) => Some(SvelteCustomElementPropType::from_spelling(&spelling).ok_or(
+                crate::compile_request::CompileRequestError::MalformedOptionValue {
+                    option: crate::compile_request::FrameworkOption::Svelte(
+                        SvelteOption::CustomElementPropsType,
+                    ),
+                    value: spelling,
+                },
+            )?),
+        };
+        admitted.insert(
+            name,
+            AdmittedSvelteCustomElementPropDescriptor {
+                attribute,
+                reflect,
+                prop_type,
+            },
+        );
+    }
+    Ok(AdmittedSvelteCustomElementDescriptor {
+        tag,
+        shadow,
+        props: admitted,
+    })
 }
 
 #[cfg(test)]
@@ -447,6 +583,241 @@ mod tests {
                 a.into_request().is_err(),
                 "slot {i} must refuse construction"
             );
+        }
+    }
+    fn attempt_with_prop_type(spelling: &str) -> SvelteOptionAttempt {
+        let mut props = std::collections::BTreeMap::new();
+        props.insert(
+            "count".to_string(),
+            SvelteCustomElementPropDescriptor {
+                prop_type: Some(spelling.to_string()),
+                ..Default::default()
+            },
+        );
+        SvelteOptionAttempt {
+            custom_element_descriptor: Some(SvelteCustomElementDescriptor {
+                props,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn admitted_prop_type(spelling: &str) -> Option<SvelteCustomElementPropType> {
+        attempt_with_prop_type(spelling)
+            .into_request()
+            .unwrap_or_else(|e| panic!("`{spelling}` must be admitted, got {e:?}"))
+            .custom_element_descriptor
+            .expect("the admitted request keeps the descriptor")
+            .props
+            .remove("count")
+            .expect("the admitted descriptor keeps the prop")
+            .prop_type
+    }
+
+    /// The admitted vocabulary is exactly each variant's capitalised
+    /// spelling and its lowercase form — ten spellings over five variants.
+    ///
+    /// The per-variant expectations are derived from the vocabulary itself
+    /// rather than restated, so a sixth prop type is covered by the loop
+    /// without editing it. The roster below is deliberately NOT derived: it
+    /// pins the backend spellings as literal bytes, because every other
+    /// assertion here reads them back out of `as_svelte_name`, and an oracle
+    /// that asks the function under test what the right answer is cannot
+    /// notice the function changing its answer. These five strings are
+    /// Svelte's, not this table's.
+    #[test]
+    fn exactly_two_spellings_admit_each_prop_type_variant() {
+        assert_eq!(
+            SvelteCustomElementPropType::ALL
+                .iter()
+                .map(|variant| variant.as_svelte_name())
+                .collect::<Vec<_>>(),
+            ["String", "Boolean", "Number", "Array", "Object"],
+            "the rendered backend spellings are Svelte's own and are byte-pinned here"
+        );
+        for variant in SvelteCustomElementPropType::ALL {
+            let capitalised = variant.as_svelte_name();
+            let lowercase = capitalised.to_ascii_lowercase();
+            assert_ne!(
+                capitalised, lowercase,
+                "the two spellings of {variant:?} must differ"
+            );
+            assert_eq!(
+                SvelteCustomElementPropType::from_spelling(capitalised),
+                Some(*variant)
+            );
+            assert_eq!(
+                SvelteCustomElementPropType::from_spelling(&lowercase),
+                Some(*variant)
+            );
+            assert_eq!(admitted_prop_type(capitalised), Some(*variant));
+            assert_eq!(admitted_prop_type(&lowercase), Some(*variant));
+
+            // Every OTHER casing of the same word is refused: the set of
+            // spellings is closed, not case-normalised.
+            let uppercase = capitalised.to_ascii_uppercase();
+            let alternating: String = capitalised
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 2 == 0 {
+                        c.to_ascii_lowercase()
+                    } else {
+                        c.to_ascii_uppercase()
+                    }
+                })
+                .collect();
+            for refused in [uppercase, alternating] {
+                if refused == capitalised || refused == lowercase {
+                    continue;
+                }
+                assert_eq!(
+                    SvelteCustomElementPropType::from_spelling(&refused),
+                    None,
+                    "`{refused}` is outside the admitted set"
+                );
+            }
+        }
+    }
+
+    /// Spellings that resemble the vocabulary but are not in it.
+    #[test]
+    fn a_spelling_outside_the_admitted_set_is_not_admitted() {
+        for refused in [
+            "", " string", "string ", "Str", "strings", "symbol", "Symbol", "bigint", "Function",
+        ] {
+            assert_eq!(
+                SvelteCustomElementPropType::from_spelling(refused),
+                None,
+                "`{refused}` must not be admitted"
+            );
+        }
+    }
+
+    /// An absent prop type stays absent — admission decides membership, it
+    /// does not invent a default.
+    #[test]
+    fn an_absent_prop_type_admits_as_absent() {
+        let attempt = SvelteOptionAttempt {
+            custom_element_descriptor: Some(SvelteCustomElementDescriptor {
+                props: [(
+                    "count".to_string(),
+                    SvelteCustomElementPropDescriptor::default(),
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let request = attempt.into_request().expect("an absent prop type admits");
+        assert_eq!(
+            request
+                .custom_element_descriptor
+                .expect("descriptor")
+                .props
+                .remove("count")
+                .expect("prop")
+                .prop_type,
+            None
+        );
+    }
+
+    /// Admission carries the other descriptor fields through untouched.
+    #[test]
+    fn admission_preserves_the_rest_of_the_descriptor() {
+        let attempt = SvelteOptionAttempt {
+            custom_element_descriptor: Some(SvelteCustomElementDescriptor {
+                tag: Some("x-el".to_string()),
+                shadow: Some(false),
+                props: [(
+                    "count".to_string(),
+                    SvelteCustomElementPropDescriptor {
+                        attribute: Some("data-count".to_string()),
+                        reflect: Some(true),
+                        prop_type: Some("number".to_string()),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+            ..Default::default()
+        };
+        let descriptor = attempt
+            .into_request()
+            .expect("admits")
+            .custom_element_descriptor
+            .expect("descriptor");
+        assert_eq!(descriptor.tag.as_deref(), Some("x-el"));
+        assert_eq!(descriptor.shadow, Some(false));
+        let prop = descriptor.props.get("count").expect("prop");
+        assert_eq!(prop.attribute.as_deref(), Some("data-count"));
+        assert_eq!(prop.reflect, Some(true));
+        assert_eq!(prop.prop_type, Some(SvelteCustomElementPropType::Number));
+    }
+
+    /// The refusal names the offending prop, not the first prop in the map.
+    #[test]
+    fn the_refusal_carries_the_offending_spelling_from_any_prop() {
+        let mut props = std::collections::BTreeMap::new();
+        props.insert(
+            "aaa".to_string(),
+            SvelteCustomElementPropDescriptor {
+                prop_type: Some("string".to_string()),
+                ..Default::default()
+            },
+        );
+        props.insert(
+            "zzz".to_string(),
+            SvelteCustomElementPropDescriptor {
+                prop_type: Some("nonsense".to_string()),
+                ..Default::default()
+            },
+        );
+        let attempt = SvelteOptionAttempt {
+            custom_element_descriptor: Some(SvelteCustomElementDescriptor {
+                props,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        match attempt.into_request().unwrap_err() {
+            crate::compile_request::CompileRequestError::MalformedOptionValue { value, .. } => {
+                assert_eq!(value, "nonsense")
+            }
+            other => panic!("expected MalformedOptionValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_prop_type_outside_the_admitted_vocabulary_is_refused_at_request_construction() {
+        let mut props = std::collections::BTreeMap::new();
+        props.insert(
+            "count".to_string(),
+            SvelteCustomElementPropDescriptor {
+                prop_type: Some("nonsense".to_string()),
+                ..Default::default()
+            },
+        );
+        let attempt = SvelteOptionAttempt {
+            custom_element_descriptor: Some(SvelteCustomElementDescriptor {
+                props,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        match attempt.into_request().unwrap_err() {
+            crate::compile_request::CompileRequestError::MalformedOptionValue { option, value } => {
+                assert_eq!(
+                    option,
+                    crate::compile_request::FrameworkOption::Svelte(
+                        SvelteOption::CustomElementPropsType
+                    )
+                );
+                assert_eq!(value, "nonsense");
+            }
+            other => panic!("expected MalformedOptionValue, got {other:?}"),
         }
     }
 }

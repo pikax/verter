@@ -6,16 +6,20 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_compiler::compile::template_data::RawTemplateData;
+use verter_compiler::framework_common::carrier_compiler::{
+    RuntimeDiagnostic, RuntimeDiagnosticSeverity,
+};
+use verter_compiler::framework_common::registered_carrier_projection::TemplateFactsProduct;
 use verter_semantic::analysis::macro_usage::MacroUsageFacts;
 use verter_semantic::analysis::template::{
     AnalyzedEmitDefinition, AnalyzedPropDefinition, AnalyzedSlotDeclaration, BindingUsageKind,
     CommentDirective, CommentDirectiveKind, DefinedSlot, ElementNamespace, IfChain,
     PropValueConstness, SnippetDefinition, SvelteDirectiveInfo, TemplateAnalysisSnapshot,
     TemplateAttribute, TemplateBindingOccurrence, TemplateComponentBinding, TemplateComponentEvent,
-    TemplateComponentUsage, TemplateComponentVModel, TemplateDirective, TemplateElement,
-    TemplateEventHandler, TemplateExpressionLocator, TemplateExpressionRecord, TemplateMemberRead,
-    TemplatePropUsage, TemplateRef, TemplateTextSegment, UnresolvedBinding, VForDirective,
-    VModelDirective,
+    TemplateComponentUsage, TemplateComponentVModel, TemplateDiagnosticSeverity, TemplateDirective,
+    TemplateElement, TemplateEventHandler, TemplateExpressionDiagnostic, TemplateExpressionLocator,
+    TemplateExpressionRecord, TemplateMemberRead, TemplatePropUsage, TemplateRef,
+    TemplateTextSegment, UnresolvedBinding, VForDirective, VModelDirective,
 };
 use verter_semantic::analysis::types::{
     AnalyzedBinding, AnalyzedMacro, AnalyzedMacroKind, VueApiCallSite, VueApiClassification,
@@ -67,7 +71,57 @@ impl<'a> UnusedDeclarationContext<'a> {
     }
 }
 
-/// Convert raw template data from `verter_compiler` into `verter_semantic::analysis` types.
+/// Borrowed view of a [`TemplateFactsProduct`] for conversion: both halves
+/// must be supplied together, so no conversion site can take the data and
+/// silently drop the diagnostics half. The fields are private — construction
+/// outside this module goes through the complete `From<&TemplateFactsProduct>`
+/// only, so no crate site can pair the data with a fabricated empty
+/// diagnostics slice. Test fixtures (a child module of this one) pair a bare
+/// `RawTemplateData` with an explicit (possibly empty) diagnostics slice.
+#[derive(Clone, Copy)]
+pub(crate) struct TemplateFactsRef<'a> {
+    data: &'a RawTemplateData,
+    diagnostics: &'a [RuntimeDiagnostic],
+}
+
+impl<'a> From<&'a TemplateFactsProduct> for TemplateFactsRef<'a> {
+    fn from(product: &'a TemplateFactsProduct) -> Self {
+        Self {
+            data: &product.data,
+            diagnostics: &product.diagnostics,
+        }
+    }
+}
+
+/// Total mapping of the extraction pass's diagnostics onto the snapshot's
+/// neutral carrier — no diagnostic is dropped or reclassified in conversion.
+fn expression_diagnostics_from_runtime(
+    diagnostics: &[RuntimeDiagnostic],
+) -> Vec<TemplateExpressionDiagnostic> {
+    diagnostics
+        .iter()
+        .map(|d| TemplateExpressionDiagnostic {
+            severity: match d.severity {
+                RuntimeDiagnosticSeverity::Error => TemplateDiagnosticSeverity::Error,
+                RuntimeDiagnosticSeverity::Warning => TemplateDiagnosticSeverity::Warning,
+                RuntimeDiagnosticSeverity::Info => TemplateDiagnosticSeverity::Info,
+            },
+            code: d.code.clone(),
+            message: d.message.clone(),
+            span: d.span,
+        })
+        .collect()
+}
+
+/// Convert the template-facts product from `verter_compiler` into
+/// `verter_semantic::analysis` types.
+///
+/// Takes BOTH halves of the [`TemplateFactsProduct`] — the data and the
+/// extraction's own diagnostics — so every conversion site carries the
+/// diagnostics onto
+/// [`TemplateAnalysisSnapshot::expression_diagnostics`] identically. A
+/// signature over the bare data would let a consumer silently drop the
+/// diagnostic half of the product.
 ///
 /// The `script_imports` map resolves component tag names to their import source
 /// paths for cross-file analysis. This is populated from the script analysis
@@ -76,11 +130,15 @@ impl<'a> UnusedDeclarationContext<'a> {
 /// `class_domains` is an opaque, revision-checked projection of semantic facts.
 /// Callers cannot manufacture class-domain tuples or feed display strings.
 pub(crate) fn convert_raw_to_analysis(
-    raw: &RawTemplateData,
+    facts: TemplateFactsRef<'_>,
     script_imports: &[(String, String)], // (local_name, source_path)
     class_domains: &TemplateClassDomainIndex,
     unused_declarations: Option<&UnusedDeclarationContext<'_>>,
 ) -> TemplateAnalysisSnapshot {
+    let TemplateFactsRef {
+        data: raw,
+        diagnostics: facts_diagnostics,
+    } = facts;
     let mut expression_records = Vec::new();
     let components: Vec<TemplateComponentUsage> = raw
         .components
@@ -559,6 +617,7 @@ pub(crate) fn convert_raw_to_analysis(
         comment_directives,
         css_var_names,
         has_expression_errors: raw.has_expression_errors,
+        expression_diagnostics: expression_diagnostics_from_runtime(facts_diagnostics),
         has_dynamic_slot_outlet: raw.has_dynamic_slot_outlet,
         member_reads: raw
             .member_reads

@@ -1,0 +1,36 @@
+error[E0277]: the trait bound `(): HostEpoch` is not satisfied
+  --> tests/cases/compile-fail/host_integration_requires_host_epoch.rs:13:6
+   |
+13 | impl FrameworkHostIntegrationBackend<TestEpoch, ()> for HostCapable {
+   |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HostEpoch` is not implemented for `()`
+   |
+help: the trait `HostEpoch` is implemented for `NativeHostEpoch`
+  --> src/framework_common/capability.rs
+   |
+   | impl HostEpoch for NativeHostEpoch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `FrameworkHostIntegrationBackend`
+  --> src/framework_common/capability.rs
+   |
+   | pub trait FrameworkHostIntegrationBackend<E: FrameworkEpoch, HostE: HostEpoch>:
+   |                                                                     ^^^^^^^^^ required by this bound in `FrameworkHostIntegrationBackend`
+
+error[E0277]: the trait bound `(): HostEpoch` is not satisfied
+  --> tests/cases/compile-fail/host_integration_requires_host_epoch.rs:38:81
+   |
+38 |     let _ = TypedCapabilityRegistration::register_host_integration::<TestEpoch, (), _>(
+   |                                                                                 ^^ the trait `HostEpoch` is not implemented for `()`
+   |
+help: the trait `HostEpoch` is implemented for `NativeHostEpoch`
+  --> src/framework_common/capability.rs
+   |
+   | impl HostEpoch for NativeHostEpoch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `TypedCapabilityRegistration::<()>::register_host_integration`
+  --> src/framework_common/catalog.rs
+   |
+   |     pub fn register_host_integration<
+   |            ------------------------- required by a bound in this associated function
+   |         E: FrameworkEpoch,
+   |         HostE: HostEpoch,
+   |                ^^^^^^^^^ required by this bound in `TypedCapabilityRegistration::<()>::register_host_integration`

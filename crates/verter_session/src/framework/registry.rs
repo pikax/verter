@@ -345,7 +345,7 @@ impl FrameworkAdapterRegistry {
 
     /// Every registered adapter's descriptor, in adapter-id order. The
     /// compiler-completeness guard iterates these to assert every
-    /// carrier-bearing descriptor has a registered `CarrierCompiler`.
+    /// carrier-bearing descriptor has a registered compile/eval/IDE compiler.
     #[must_use]
     pub fn descriptors(&self) -> Vec<crate::framework::descriptor::FrameworkAdapterDescriptor> {
         let mut rows: Vec<_> = self

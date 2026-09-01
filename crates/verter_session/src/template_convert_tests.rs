@@ -29,7 +29,15 @@ fn convert_raw_to_analysis(
             domains.binding_domains.insert(name.as_str().into(), values);
         }
     }
-    super::convert_raw_to_analysis(raw, script_imports, &domains, unused_declarations)
+    super::convert_raw_to_analysis(
+        super::TemplateFactsRef {
+            data: raw,
+            diagnostics: &[],
+        },
+        script_imports,
+        &domains,
+        unused_declarations,
+    )
 }
 
 fn indexed_call(point: u32) -> verter_type_expr::IndexedValueExpression {
@@ -731,7 +739,17 @@ fn the_revision_gate_refuses_facts_stamped_with_another_revision() {
     let matching = TemplateClassDomainIndex::from_semantic_facts(&facts, CANONICAL, revision_a)
         .expect("a matching owner revision must admit the facts");
     assert_eq!(
-        super::convert_raw_to_analysis(&raw, &[], &matching, None).elements[0].dynamic_classes,
+        super::convert_raw_to_analysis(
+            super::TemplateFactsRef {
+                data: &raw,
+                diagnostics: &[]
+            },
+            &[],
+            &matching,
+            None,
+        )
+        .elements[0]
+            .dynamic_classes,
         vec!["primary"],
         "the matching revision must publish the classified domain"
     );
@@ -751,7 +769,16 @@ fn the_revision_gate_refuses_facts_stamped_with_another_revision() {
     let refused = TemplateClassDomainIndex::from_semantic_facts(&facts, CANONICAL, revision_b)
         .unwrap_or_else(TemplateClassDomainIndex::empty);
     assert!(
-        super::convert_raw_to_analysis(&raw, &[], &refused, None).elements[0]
+        super::convert_raw_to_analysis(
+            super::TemplateFactsRef {
+                data: &raw,
+                diagnostics: &[]
+            },
+            &[],
+            &refused,
+            None,
+        )
+        .elements[0]
             .dynamic_classes
             .is_empty(),
         "a refused revision must publish no dynamic classes at all"

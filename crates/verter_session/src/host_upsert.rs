@@ -349,6 +349,7 @@ impl VerterHost {
     /// and workspace commit path as [`Self::upsert_many_with_priority`] while
     /// omitting the public [`HostUpdateResult`] projection that `compile_many`
     /// never reads.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn upsert_many_for_compile(
         &self,
         requests: Vec<UpsertRequest>,

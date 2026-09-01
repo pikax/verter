@@ -27,11 +27,11 @@ optional=false
 release_gating=none
 external_requirements=
 charter=charters/compiler-compiler-bridge/CCA1GT.md
-max_production_loc=600
-max_production_files=5
+max_production_loc=1200
+max_production_files=8
 max_related_packages=2
 rescope_loc=1500
-rescope_files=12
+rescope_files=16
 rescope_unrelated_packages=3
 -->
 
@@ -43,13 +43,28 @@ Route `compile_template_data` through the registered framework's `FrameworkSeman
 
 ## Exact production population and APIs
 
-- `crates/verter_session/src/parse.rs` — replace `file_language_has_template_data_compiler`/`compile_template_data` combined-compiler lookup with semantic capability selection.
-- `crates/verter_compiler/src/framework_common/carrier_compiler.rs` — delete the combined method, wrapper, and method-only harness.
-- `crates/verter_compiler/src/framework_common/vue_bridge.rs` — delete the Vue combined-method implementation after route equivalence.
-- `crates/verter_compiler/src/svelte/carrier.rs` — delete the Svelte combined-method implementation after route equivalence.
-- Existing template-data, template-class, host-manage, and Svelte conformance tests are evidence surfaces and do not enlarge the production-file budget.
+No dual producer may survive. Every file below is in-scope; a 9th production file is a rescope.
 
-The boundary is source plus immutable framework/parse identity to complete raw template facts with SFC-absolute byte spans. Serialization keeps its owning UTF-16 conversion. Parse publication, eval source, projection, runtime, assembly, and host routing are excluded.
+**Catalog lookup and backend facts**
+
+- `crates/verter_compiler/src/framework_common/registered_carrier_projection.rs` — type-erased semantic catalog lookup; `InstalledSemanticAuthority` is an eval-source fn plus a template-facts fn payload keyed adapter × artifact epoch × Semantic, not a Vue/Svelte match dispatcher. Template-facts lookup binds `compile_source` to `artifact.parse_key()`. `TemplateFactsBasis` makes the effective template explicit: `AdmittedArtifact` uses the registered parse; `SelectedTemplate(bytes)` binds only when those bytes equal the unique admitted `SectionRole::TemplateHost` region's `syntax.content_span` sliced through the artifact inventory. Missing, duplicate, unsliceable, or differing bytes return `None` before catalog lookup or semantic extraction. `content_artifact_token` is not parse admission. On equality the catalog still receives the original carrier source/artifact so spans stay SFC-absolute.
+- `crates/verter_compiler/src/framework_common/vue_semantic_authority.rs` — Vue backend template facts over a registered parse artifact. Producer failure is typed `None`, never `RawTemplateData::default()` as success. A valid template-free SFC is `Some` empty facts.
+- `crates/verter_compiler/src/svelte/semantic_authority.rs` — Svelte backend template facts over a registered parse artifact. Same refusal versus template-free contract.
+
+**Combined-method deletion and compile-bundle consumer**
+
+- `crates/verter_compiler/src/framework_common/carrier_compiler.rs` — delete the combined method, wrapper, and method-only harness.
+- `crates/verter_compiler/src/framework_common/mod.rs` — drop the displaced `TemplateFacts` re-export.
+- `crates/verter_compiler/src/framework_common/vue_bridge.rs` — delete the Vue combined-method implementation after route equivalence. `compile_bundle` must not independently extract; when `want_template_data` it fills `template_data` from catalog template facts, passing `SelectedTemplate` whenever `block_content.template` is `Some`.
+- `crates/verter_compiler/src/svelte/carrier.rs` — delete the Svelte combined-method implementation after route equivalence. `compile_bundle` must not independently extract; consume catalog template facts, passing `SelectedTemplate` whenever `block_content.template` is `Some`.
+
+**Dispatch**
+
+- `crates/verter_session/src/parse.rs` — replace `file_language_has_template_data_compiler`/`compile_template_data` combined-compiler lookup with semantic catalog selection. Reuse binds adapter, language, and `artifact.parse_key()` to `compile_source`. Direct artifact queries pass `AdmittedArtifact`.
+
+Existing template-data, template-class, host-manage, and Svelte conformance tests are evidence surfaces and do not enlarge the production-file budget.
+
+The boundary is source plus immutable framework/parse identity to complete raw template facts with SFC-absolute byte spans. Selected-template facts bind only when the selected bytes equal the unique admitted TemplateHost region; otherwise the request is `None` before extraction. Serialization keeps its owning UTF-16 conversion. Parse publication, eval source, projection, runtime, assembly, and host routing are excluded. Do not mutate eval-source producer behavior except a second catalog fn that does not couple identity.
 
 ## Exact predecessor contracts and binding laws
 
@@ -57,14 +72,15 @@ The boundary is source plus immutable framework/parse identity to complete raw t
 - **CCA1F:** the Svelte semantic backend produces complete template facts from its registered parse artifact.
 - Capability availability replaces filename/framework guessing; unsupported/inapplicable requests return the existing typed absence/refusal and never a fabricated empty success.
 - Facts bind source revision, parse identity, provenance, deterministic order, and complete-only admission. Cancelled, stale, partial, or source-mismatched facts publish and warm nothing.
+- Selected-template facts bind only when the selected bytes equal the unique admitted TemplateHost region of the registered artifact. Missing, duplicate, unsliceable, or differing bytes refuse before catalog lookup. `content_artifact_token` is not parse admission. Native/no-override queries remain `AdmittedArtifact`.
 
 ## Internal subblocks, migration, and deletions
 
 1. Characterize Vue/Svelte fact values, span geometry, fresh/incremental equivalence, and unsupported outcomes.
 2. Switch both availability and production dispatch atomically to semantic capability selection.
-3. Delete the combined method, `TemplateFacts` compatibility wrapper when unreferenced, both framework implementations, and method-only tests.
+3. Delete the combined method, `TemplateFacts` compatibility wrapper when unreferenced, both framework implementations, and method-only tests. `compile_bundle` must consume catalog template facts instead of independently extracting.
 
-No shadow/dual read may survive. Delete no eval-source, IDE, runtime, host, registry, trait, option, or staged-artifact authority.
+No shadow/dual producer may survive. Delete no eval-source, IDE, runtime, host, registry, trait, option, or staged-artifact authority.
 
 ## Acceptance, performance, aborts, and verification
 
@@ -73,4 +89,4 @@ No shadow/dual read may survive. Delete no eval-source, IDE, runtime, host, regi
 - **CCA1GT-AC3:** fresh, preloaded, incremental, and edit-revert agree; stale/cancelled/partial facts cannot publish or warm.
 - **CCA1GT-AC4:** one request performs one fact extraction with no duplicate parse/semantic pass, source copy, or retained candidate; absent/inapplicable demand is zero-work.
 
-Ceiling: 600 production LOC, 5 production files, 2 crates. Abort on another production caller, semantic divergence, a second resolver, or any eval-source mutation. Run focused compiler/session template-fact, map/span, and Svelte conformance evidence plus `targeted-domain`; CCA1G joins this result with CCA1GE.
+Ceiling: 1200 production LOC, 8 production files, 2 crates. Abort on another production caller, semantic divergence, a second resolver, or any eval-source mutation. Run focused compiler/session template-fact, map/span, and Svelte conformance evidence plus `targeted-domain`; CCA1G joins this result with CCA1GE.

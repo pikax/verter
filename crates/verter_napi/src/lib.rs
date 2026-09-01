@@ -40,9 +40,25 @@ use verter_session as host;
 use verter_type_expr::TypeExpr;
 
 mod audit;
+mod host_compile_request;
+#[cfg(test)]
+mod host_compile_request_tests;
+pub mod host_compile_request_ts;
+mod js_value_graph;
 mod memory_audit;
 mod meta;
 mod typeinfo;
+
+pub use host_compile_request::{
+    decode_host_compile_request, napi_host_compile_request_to_ffi, NapiHostCompileRequest,
+    NapiRequestedProduct,
+};
+// Reachable so the boundary suites can drive materialisation over a
+// modelled graph. Not part of the addon's JS surface.
+#[doc(hidden)]
+pub use js_value_graph::{
+    materialize_js_value, JsValueClass, JsValueGraph, MAX_ARRAY_ELEMENTS, MAX_NESTING_DEPTH,
+};
 
 // Re-imports for code actions and diagnostics (parity with verter_wasm)
 use verter_actions::{ActionContext, ActionEngine};

@@ -94,36 +94,18 @@ impl CarrierCompilerRegistry {
 
     /// Project `accepted` into registered carrier geometry.
     ///
-    /// Dispatches over the closed [`KnownRegisteredCompiler`] set — there is
-    /// no `&dyn CarrierCompiler` entry point here, so a third-party
-    /// `CarrierCompiler` implementation cannot publish a registered
-    /// `FrameworkParseArtifact` even if it reports one of the known adapter
-    /// ids. `Err(SyntaxReject)` covers both an unrecognized adapter and a
-    /// frontend refusal.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `accepted`'s resolved language names an adapter this
-    /// registry has no known registered projector for. The grammar
-    /// authority that mints an `AcceptedRegisteredCarrierSource` only ever
-    /// accepts a registered Vue/Svelte grammar, so for a `built_in()`
-    /// registry this is a wiring defect, never a reachable input — the same
-    /// invariant class as the `assert_eq!`s inside
-    /// [`registered_carrier_projection::project_registered_carrier`].
+    /// Parse is catalog-selected. Geometry then dispatches over the closed
+    /// [`KnownRegisteredCompiler`] set — there is no `&dyn CarrierCompiler`
+    /// parse entry here. `Err(SyntaxReject)` covers a catalog miss, a
+    /// missing known projector, and a frontend refusal.
     pub fn project_registered(
         &self,
         accepted: &AcceptedRegisteredCarrierSource,
     ) -> Result<RegisteredCarrierProjection, SyntaxReject> {
         let language = accepted.source().resolved_file_language();
-        let adapter_id = language
+        let known = language
             .adapter_id()
-            .expect("an accepted registered carrier source resolves to a carrier adapter");
-        let known = self.known_registered.get(adapter_id).unwrap_or_else(|| {
-            panic!(
-                "accepted carrier source resolved to adapter {adapter_id:?}, which has no \
-                 known registered projector"
-            )
-        });
+            .and_then(|adapter_id| self.known_registered.get(adapter_id));
         registered_carrier_projection::project_registered_carrier(known, accepted)
     }
 

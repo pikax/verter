@@ -57,6 +57,69 @@ reaping. Raw per-lane output (concurrent or serial, per `deriveGateLaneResourceS
 is buffered lane-locally and replayed exactly once under the existing Surface/check/contract headers, so
 parseable nextest rows remain deterministic.
 
+## WASM JavaScript-boundary lane
+
+The workspace's `#[wasm_bindgen_test]` cases are `#[cfg(target_arch = "wasm32")]`. No host-target run can
+compile them, so archive-backed Surface 1 can never execute them: they existed, compiled, and proved
+nothing. The canonical gate runs them itself, in a lane that is required on every real invocation — bare
+and exhaustive — and is never path-filtered inside the gate. `--prepare` runs no test and is exempt.
+
+Two halves:
+
+- **Prerequisite preflight**, in the Cargo phase, immediately before the lane that consumes it. It is
+  deliberately NOT one of the pre-archive preflights: those are node-only and must stay that way, while
+  this check needs a working `cargo` and Rust toolchain. It derives
+  the lane's scope from `cargo metadata --no-deps` (every package that dev-depends on `wasm-bindgen-test`,
+  with the directories of that package's `test = true` targets as its scan roots), derives the required
+  runner version from that scope's `wasm-bindgen` dependency, proves the `wasm32-unknown-unknown` standard
+  library is installed (`rustc --print target-libdir` names a directory holding a compiled `core` rlib —
+  the path alone is printed for any recognised triple and proves nothing), resolves
+  `wasm-bindgen-test-runner` on the same constructed PATH the lane's Cargo child receives, and requires its
+  version to EQUAL the derived one. The runner and the library are one ABI: a skew compiles cleanly and
+  then fails inside generated JavaScript, which reads as a product regression rather than a toolchain
+  problem. A missing target, a missing runner, a skew, an empty scope, or an empty case inventory each fail
+  setup with exit 127 and `WASM-LANE PREREQUISITE MISSING`, naming the exact prerequisite and the command
+  that produces it. The gate never installs a prerequisite (its verdict must not depend on a mutation it
+  performed) and never degrades to a skip.
+- **Execution**, immediately after that check — after the one archive/list front half and before the host
+  lanes — serialized: no other
+  Cargo is live, so the lane takes the whole build ceiling rather than a share of it, under the same
+  supervisor, deadline, stall clock and process-forest RSS ceiling as every other phase, on its own
+  `<runnerTarget>/lanes/wasm-js-boundary/target` root. Each scoped package runs
+  `cargo test --target wasm32-unknown-unknown -p <pkg> --tests` with
+  `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER` set to the resolved absolute runner (so `.cargo/config.toml`
+  never acquires a repo-wide runner every unrelated wasm invocation would inherit).
+
+The lane's receipt is required by the same fixed-order reducer that owns the rest of the verdict, and it
+carries two independent obligations. A **terminal result**: every announced `running N tests` must be
+closed by a `test result:` line — a transcript that announced work and never closed it is a run that did
+not finish. And **executed-vs-declared parity**: both the announced count and the *executed* count
+(`passed + failed`) must equal an independent source scan of the scope's `#[wasm_bindgen_test]` attributes.
+Those two counts are not interchangeable — the harness prints `running N tests` *before* it applies the
+ignore filter, and the scan counts the attribute either way because `#[ignore]` is a separate line, so a
+comparison against the announced count alone would report full coverage for a lane that executed nothing.
+An unexecuted boundary case has no tolerated disposition here: it is fixed or deleted, never ignored. Zero
+declared cases is a failure, and a superset is equally untrusted (it means the scan missed a source the
+lane compiled). Both comparisons are applied per package as well as on the totals, because a sum
+reconciles under compensating drift between two scoped packages. There is no enable flag and no skip
+disposition: a run with no wasm receipt reduces to the same FAIL as any other incomplete coverage.
+
+One shape the scan cannot see: a `#[wasm_bindgen_test]` written in a lib *outside* `#[cfg(test)]` compiles
+into both the lib test binary and any integration test binary that links it, so it executes twice against a
+single scanned attribute and fails parity as a superset. Keep boundary cases inside `#[cfg(test)]`.
+
+Both discovery inputs are derived rather than listed — the package set from `cargo metadata`, the case
+inventory from a tree scan — so a case added to a file the lane has never seen is executed with no edit to
+the gate. `scripts/gate-wasm-lane-selftest.mjs` (run by `pnpm run test:scripts`) drives each of those
+decisions directly and proves it fails in its own direction.
+
+CI provisions the target and the runner for the two jobs that already invoke the canonical gate
+exhaustively (`ci.yml`'s `rust-test` and `release.yml`'s `test`). It does not own or duplicate the lane;
+`wasm-build` keeps its separate artifact responsibilities. The workflow pin is a literal because a
+GitHub action input cannot be computed, so `gate-wasm-lane-selftest.mjs` also asserts every workflow pin
+equals the version the tree declares — a dependency bump that forgot a workflow fails locally instead of
+reddening CI at the skew check.
+
 ## Measured resource defaults and prepare warm environment
 
 Build jobs and test threads are independent policies even though their current

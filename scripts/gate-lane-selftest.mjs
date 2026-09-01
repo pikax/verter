@@ -38,6 +38,25 @@ const completeSurfaceReceipt = (overrides = {}) => ({
   ...overrides,
 });
 
+// The reducer REQUIRES a complete wasm JS-boundary receipt: that lane exists precisely because its tests
+// were compiled and never executed, so "no receipt" must never reduce to a pass. Scenarios below that are
+// about surface/shipped orchestration supply a green one through `reduceWithGreenWasm`; the requirement
+// itself, and every direction the lane must discriminate, is covered by `gate-wasm-lane-selftest.mjs`.
+const completeWasmReceipt = (overrides = {}) => ({
+  laneId: "wasm-js-boundary",
+  status: "ok",
+  hardFailure: false,
+  exitCode: null,
+  failures: [],
+  coverage: { parseable: true, complete: true },
+  parity: { complete: true, matches: true, discoveredCases: 4, selectedCases: 4, executedCases: 4 },
+  output: "wasm-output\n",
+  ...overrides,
+});
+
+const reduceWithGreenWasm = (receipts) =>
+  reduceGateLaneReceipts({ wasm: completeWasmReceipt(), ...receipts });
+
 const completeShippedReceipt = (overrides = {}) => ({
   laneId: "shipped-cfg",
   hardFailure: false,
@@ -212,7 +231,7 @@ const completeShippedReceipt = (overrides = {}) => ({
   assert.deepEqual(starts, ["surface-1", "shipped-cfg"]);
   assert.deepEqual(cancels, [["shipped-cfg", "SURFACE_1_FAIL_FAST"]]);
   assert.equal(local.shipped.check.status, "cancelled");
-  assert.equal(reduceGateLaneReceipts(local).coverageDisposition, "cancelled-by-local-fail-fast");
+  assert.equal(reduceWithGreenWasm(local).coverageDisposition, "cancelled-by-local-fail-fast");
 
   const reverseEvents = [];
   let releaseSurface;
@@ -252,7 +271,7 @@ const completeShippedReceipt = (overrides = {}) => ({
     "surface-finish",
   ]);
   assert.equal(cancels.length, 1, "exhaustive Surface failure never adds a lane cancellation");
-  const exhaustiveDecision = reduceGateLaneReceipts(exhaustiveReceipts);
+  const exhaustiveDecision = reduceWithGreenWasm(exhaustiveReceipts);
   assert.deepEqual(
     exhaustiveDecision.failures.map((failure) => failure.name),
     ["surface failure", "shipped failure"],
@@ -272,7 +291,7 @@ const completeShippedReceipt = (overrides = {}) => ({
     },
   });
   assert.equal(shippedFirstCancelCount, 0, "shipped-first failure never cancels Surface");
-  assert.equal(reduceGateLaneReceipts(shippedFirst).verdict, "FAIL");
+  assert.equal(reduceWithGreenWasm(shippedFirst).verdict, "FAIL");
 
   const infrastructureCancels = [];
   await orchestrateGateLanes({
@@ -359,20 +378,20 @@ const completeShippedReceipt = (overrides = {}) => ({
   );
   assert.deepEqual(fastFailCancels, [["shipped-cfg", "SURFACE_1_FAIL_FAST"]]);
   assert.equal(fastFail.shipped, null);
-  assert.equal(reduceGateLaneReceipts(fastFail).verdict, "FAIL");
+  assert.equal(reduceWithGreenWasm(fastFail).verdict, "FAIL");
 }
 
 // Architecture-plan test 11: complete coverage is a separate green fence. Missing, cancelled, unrun,
 // unparsable, or parity-incomplete receipts cannot PASS; a fully measured red exhaustive run stays red.
 {
-  const green = reduceGateLaneReceipts({
+  const green = reduceWithGreenWasm({
     surface: completeSurfaceReceipt(),
     shipped: completeShippedReceipt(),
   });
   assert.equal(green.verdict, "PASS");
   assert.equal(green.coverageComplete, true);
 
-  const tolerated = reduceGateLaneReceipts({
+  const tolerated = reduceWithGreenWasm({
     surface: completeSurfaceReceipt({ toleratedOccurred: true }),
     shipped: completeShippedReceipt(),
   });
@@ -400,13 +419,13 @@ const completeShippedReceipt = (overrides = {}) => ({
     },
   ];
   for (const receipts of incompleteCases) {
-    const decision = reduceGateLaneReceipts(receipts);
+    const decision = reduceWithGreenWasm(receipts);
     assert.equal(decision.coverageComplete, false);
     assert.equal(decision.verdict, "FAIL");
     assert.ok(decision.failures.some((failure) => failure.surface === "gate/incomplete"));
   }
 
-  const measuredRed = reduceGateLaneReceipts({
+  const measuredRed = reduceWithGreenWasm({
     surface: completeSurfaceReceipt({
       hardFailure: true,
       failures: [{ surface: "nextest", name: "known Windows product failure" }],
@@ -417,14 +436,14 @@ const completeShippedReceipt = (overrides = {}) => ({
   assert.equal(measuredRed.coverageDisposition, "complete");
   assert.equal(measuredRed.verdict, "FAIL");
 
-  const setup = reduceGateLaneReceipts({
+  const setup = reduceWithGreenWasm({
     surface: completeSurfaceReceipt({ exitCode: 127 }),
     shipped: completeShippedReceipt(),
   });
   assert.equal(setup.verdict, null);
   assert.equal(setup.exitCode, 127);
 
-  const aggregateAbort = reduceGateLaneReceipts({
+  const aggregateAbort = reduceWithGreenWasm({
     surface: completeSurfaceReceipt({ exitCode: 123 }),
     shipped: completeShippedReceipt({ exitCode: 123 }),
   });
@@ -450,7 +469,7 @@ const completeShippedReceipt = (overrides = {}) => ({
   });
   assert.deepEqual(
     segments.map((segment) => segment.phaseId),
-    ["surface-1", "shipped-check", "shipped-contract"],
+    ["surface-1", "shipped-check", "shipped-contract", "wasm-js-boundary"],
   );
   const transcript = segments.map(({ header, output }) => `${header}\n${output}`).join("");
   assert.ok(transcript.indexOf("surface-unique") < transcript.indexOf("check-unique"));

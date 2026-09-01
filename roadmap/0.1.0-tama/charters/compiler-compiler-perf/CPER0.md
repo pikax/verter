@@ -7,7 +7,7 @@ product=compiler_perf
 kind=lock
 semantic_role=delivery
 class=compiler
-predecessors=CPF1,PAR0,PER0,CCA2
+predecessors=CPF1,PAR0,PER0,CCA2,CPER0M
 owner=compiler.compiler-perf:phase/owner-labeled equivalent-work ledger
 conflict_domains=compiler_execution,performance_evidence
 resource_class=docs-light
@@ -55,6 +55,7 @@ Compiler equivalent-work and oracle genesis lock. The current owner is **unattri
 - **PAR0:** implemented ledger row for “Parser decision, ownership, reuse, and lineage contract”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **PER0:** implemented ledger row for “Cache/backend identity, cancellation, budgets, and zero work”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **CCA2:** implemented ledger row for “Compiler artifact boundary convergence join”; its CCA2A–CCA2F ancestors provide one staged artifact/assembly/host/style/custom-block/facade boundary suitable for equivalent-work attribution. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
+- **CPER0M:** implemented ledger row for “NAPI memory-audit snapshot coherence”; the native memory-audit peak is coherent with its live counter, so a memory counter or baseline captured here rests on a sound high-water number. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope

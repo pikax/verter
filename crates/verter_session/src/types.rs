@@ -1320,15 +1320,15 @@ bitflags::bitflags! {
     ///
     /// Session-owned: the canonical `CompileRequest` (`verter_compiler`) is
     /// the ONE fail-closed construction authority for the actual compile
-    /// pipeline: every production entry point that reaches `compile_bundle`/
-    /// `compile()` builds a `CompileRequest` (via `CompileRequest::new` or
-    /// the equivalent per-route reverse-mapping helper) and refuses an
-    /// invalid product/mode combination by construction. This bitset exists
-    /// only because `CompileProfile` needs a `Hash`/`Eq` cache-slot
-    /// discriminant, and most of `CompileRequest`'s nested types are not
-    /// `Hash`. It is never passed into the compiler directly; call sites
-    /// convert it through `CompileRequest::new` (or a route's reverse-
-    /// mapping helper) before it can influence a compile.
+    /// pipeline. Every production compile entry point composes a
+    /// `CompileRequest` — the host-backed and runtime-render lanes through
+    /// the framework host backend's own admission issuance, every other
+    /// caller through `CompileRequest::new` — and an invalid product/mode
+    /// combination refuses by construction. This bitset exists only because
+    /// `CompileProfile` needs a `Hash`/`Eq` cache-slot discriminant, and
+    /// most of `CompileRequest`'s nested types are not `Hash`. It is never
+    /// passed into the compiler directly: a call site converts it into a
+    /// demanded product set before it can influence a compile.
     ///
     /// Use the preset constants for common configurations:
     /// - [`BUNDLER`](Self::BUNDLER) — style + script + template codegen (runtime output)
@@ -1523,24 +1523,29 @@ pub struct CompileProfile {
     /// Svelte `ModuleCompileOptions.generate`. Settable here (a
     /// `supported canonical` option row in isolation), but there is no
     /// Verter product for Svelte's `ModuleJavaScript` output family
-    /// today: setting this refuses `build_compile_request` with a typed
-    /// `UnsupportedOption` naming the `SvelteModule` capability cell,
-    /// `unsupported fail-closed` per `capability-matrix.tsv` — the same
-    /// "option admits fine, the capability it depends on does not"
-    /// pattern as `VUE-COMPAT-V2`.
+    /// today: setting this refuses canonical request construction inside
+    /// the bound backend's admission with a typed `UnsupportedOption`
+    /// naming the `SvelteModule` capability cell, `unsupported
+    /// fail-closed` per `capability-matrix.tsv` — the same "option admits
+    /// fine, the capability it depends on does not" pattern as
+    /// `VUE-COMPAT-V2`.
     pub svelte_generate_module: Option<bool>,
     /// Svelte `ModuleCompileOptions.experimental.async`. Same capability
     /// gate as [`Self::svelte_generate_module`] — also refuses.
     pub svelte_experimental_async: Option<bool>,
-    /// Svelte `CompileOptions.css` — `"injected"` or `"external"`. Not yet
-    /// consulted by the carrier's own css-mode detection (which derives
-    /// the mode from the source's `<svelte:options css>` / `<style>`
-    /// content instead) — representable on the request, not yet live.
+    /// Svelte `CompileOptions.css` — `"injected"` or `"external"`. The
+    /// bundle execution derives its css mode from the source
+    /// (`<svelte:options css>` / `<style>` content) and carries no
+    /// request-level css channel, so a host compile demanding this axis
+    /// refuses TYPED at the bound backend's admission
+    /// (`SvelteHostUnproducibleDemand::CssMode`) — never a silent drop.
     pub svelte_css: Option<String>,
     /// Svelte `SvelteOptions.customElement.tag` — the custom-element tag
-    /// name. Not yet consulted by the carrier's custom-element
-    /// resolution (`resolve_custom_element`, which only reads the plain
-    /// `customElement: bool` axis today) — representable, not yet live.
+    /// name. The bundle execution resolves the descriptor from the parsed
+    /// `<svelte:options>` element only, so a host compile demanding a
+    /// request-level descriptor refuses TYPED at the bound backend's
+    /// admission (`SvelteHostUnproducibleDemand::CustomElementDescriptor`)
+    /// — never a silent drop.
     pub svelte_custom_element_tag: Option<String>,
     /// Svelte `SvelteOptions.customElement.shadow` — `true` (open shadow
     /// root, the default) or `false` (no shadow root). Same carrier-
@@ -1551,7 +1556,10 @@ pub struct CompileProfile {
     /// meaningful sub-fields once its `componentApi` axis is excluded as
     /// `unsupported fail-closed`; only WHETHER the caller specified
     /// `compatibility: {}` at all is representable). `Some(true)` sets
-    /// the presence marker; `None`/`Some(false)` omit it.
+    /// the presence marker; `None`/`Some(false)` omit it. The bundle
+    /// execution has no compatibility routing channel, so a host compile
+    /// demanding it refuses TYPED at the bound backend's admission
+    /// (`SvelteHostUnproducibleDemand::Compatibility`).
     pub svelte_compatibility: Option<bool>,
     /// Caller-requested compile cache mode for this request.
     ///
@@ -2587,9 +2595,10 @@ impl DiagnosticsSnapshot {
     }
 
     /// Merge diagnostics from a different reporting channel that can
-    /// carry the same defect. Vue's `compile_bundle` clones parse-time
-    /// diagnostics into the compile result, so byte-identical entries
-    /// (severity, code, message, span, arguments) are dropped.
+    /// carry the same defect. The Vue backend's bundle execution reuses the
+    /// already-parsed artifact and clones that same parse's diagnostics into
+    /// the compile result, so byte-identical entries (severity, code,
+    /// message, span, arguments) are dropped.
     pub(crate) fn merge_deduplicated(mut self, mut incoming: DiagnosticsSnapshot) -> Self {
         incoming
             .diagnostics
@@ -2967,6 +2976,152 @@ pub struct IdeResponse {
     pub is_jsx: bool,
     /// Structured metadata for the destructured block region, if present.
     pub destructured_block: Option<verter_compiler::compile::types::DestructuredBlockMeta>,
+}
+
+/// One separately addressed output of a compiled runtime product.
+///
+/// A runtime product is not one blob: the carrier's script, its compiled
+/// template, and each style block are distinct modules a consumer loads
+/// and maps independently, and the assembled main module imports them.
+/// Each row therefore keeps its OWN code and its OWN map — the same
+/// payload the per-node cached read serves — rather than collapsing into
+/// a single string a consumer would have to take apart again.
+#[derive(Debug, Clone)]
+pub struct CompiledVirtualNode {
+    /// Which node of the carrier this row is.
+    pub node: VirtualNodeKind,
+    /// Compiled code for this node.
+    pub code: Arc<str>,
+    /// This node's own JSON source map, when the request asked for maps
+    /// and the node has one.
+    pub source_map: Option<Arc<str>>,
+    /// Output language (e.g. `"js"`, `"ts"`, `"css"`, `"scss"`).
+    pub lang: Option<String>,
+    /// Block-specific metadata (scope id, block type, index).
+    pub meta: VirtualMeta,
+}
+
+/// One row of a [`CompileRequestResponse`]'s product list, one-to-one
+/// with a requested product kind and in request order.
+#[derive(Debug, Clone)]
+pub enum CompiledProduct {
+    /// A runtime product (client or server), as its separately addressed
+    /// virtual nodes in stable node order.
+    Runtime {
+        /// Which runtime kind was requested — the client or the server
+        /// product. A request naming both is refused at admission
+        /// (`DualRuntimeKind`), so exactly one runtime row can appear —
+        /// the invariant the node-vec move below relies on.
+        kind: verter_compiler::compile_request::ProductKind,
+        /// The product's virtual nodes: the assembled main module, the
+        /// script, the compiled template, each style block, and each
+        /// custom block, in stable order.
+        nodes: Vec<CompiledVirtualNode>,
+    },
+    /// The IDE companion projection.
+    Ide(IdeResponse),
+    /// The host analysis payload.
+    Analysis(Box<verter_semantic::analysis::template::TemplateAnalysisSnapshot>),
+}
+
+/// The result of executing one caller-supplied canonical compile request.
+///
+/// Complete-only: every requested product the host can produce is present.
+/// There is no partial arm, no null, and no ensure boolean — a refusal at
+/// any stage fails the whole request through [`CompileRequestFailure`]
+/// and publishes no sibling product.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct CompileRequestResponse {
+    /// The canonical id the request executed against, after alias
+    /// resolution.
+    pub canonical_id: String,
+    /// The compile's diagnostics, deduplicated once across every product
+    /// of the single admitted compile — not per-product sets a consumer
+    /// would have to merge.
+    pub diagnostics: DiagnosticsSnapshot,
+    /// One row per requested product kind, in request order.
+    pub products: Vec<CompiledProduct>,
+}
+
+/// Why executing a caller-supplied canonical compile request failed.
+///
+/// All-or-none: each arm ends the whole request, and none of them can
+/// accompany a published product.
+#[derive(Debug)]
+pub enum CompileRequestFailure {
+    /// The request could not reach execution at all: no source is
+    /// registered under the canonical id, the registered snapshot was
+    /// superseded mid-request, a carrier block's content is unavailable,
+    /// or the registered carrier grammar cannot serve the request's own
+    /// template grammar.
+    Host(HostError),
+    /// The request's framework arm names a framework the registered
+    /// carrier is not. Refused, never compiled under the registered
+    /// carrier instead.
+    FrameworkMismatch {
+        /// The canonical id whose registered carrier was consulted.
+        canonical_id: String,
+        /// The framework the request names.
+        requested: &'static str,
+        /// The framework adapter the source is registered under.
+        registered: String,
+    },
+    /// A demanded product kind the bound host integration produces no
+    /// route for — the public-API and declaration kinds, which both host
+    /// integrations refuse at admission. Never an empty success.
+    UnsupportedProduct {
+        /// The canonical id the request executed against.
+        canonical_id: String,
+        /// The product kind with no host production route.
+        kind: verter_compiler::compile_request::ProductKind,
+        /// The refusal's diagnostics, naming the refused kind.
+        diagnostics: DiagnosticsSnapshot,
+    },
+    /// A product kind was ADMITTED and the compile succeeded, but the
+    /// carrier published no payload for it.
+    ///
+    /// Admission and publication are independent: admission proves the
+    /// capability is registered and the demand is routable, not that the
+    /// execution produced bytes. The template-fact producer, for instance,
+    /// fails closed to no payload when the selected `<template src="...">`
+    /// bytes are not the admitted host block's. Complete-only means the
+    /// whole request fails here, naming the kind that produced nothing —
+    /// never a row carrying a fabricated payload, and never a panic in the
+    /// caller's thread.
+    ProductNotProduced {
+        /// The canonical id the request executed against.
+        canonical_id: String,
+        /// The admitted product kind whose payload is absent.
+        kind: verter_compiler::compile_request::ProductKind,
+        /// The compile's diagnostics up to the missing payload.
+        diagnostics: DiagnosticsSnapshot,
+    },
+    /// The requested runtime surface was refused by the carrier. Carries
+    /// the carrier's own structural code and reason; no sibling product
+    /// published.
+    RuntimeSurfaceRefused {
+        /// The canonical id the request executed against.
+        canonical_id: String,
+        /// Structural refusal code.
+        diagnostic_code: String,
+        /// Human-readable refusal reason.
+        message: String,
+        /// Diagnostics collected before the refusal, plus the refusal's
+        /// own reason.
+        diagnostics: DiagnosticsSnapshot,
+    },
+    /// The request was refused at construction, admission, or execution.
+    /// The diagnostics name the exact rule that refused it — an
+    /// unsupported option and its capability cell, an unproducible demand
+    /// shape, a missing capability, or the post-parse resolution refusal
+    /// — never a generic failure.
+    Refused {
+        /// The canonical id the request executed against.
+        canonical_id: String,
+        /// The refusal's diagnostics.
+        diagnostics: DiagnosticsSnapshot,
+    },
 }
 
 // `TscResponse` and its labeled-rendering selectors live in a PRIVATE child
@@ -3979,9 +4134,9 @@ pub struct MetaProvenance {
     /// entry (`parse_eval_program`). Exactly 1 per cold canonical build.
     pub eval_program_parses: std::sync::atomic::AtomicU64,
     /// Carrier parses performed through the single counted carrier
-    /// store-leader projector boundary — every framework
+    /// store-leader frontend boundary — every framework
     /// carrier (`.vue`, `.svelte`, …) increments this exactly once per
-    /// `CarrierCompiler::parse`. The framework-neutral parse-once rail:
+    /// elected catalog-frontend parse. The framework-neutral parse-once rail:
     /// a cold build of any carrier file bumps this once, so a duplicate
     /// carrier parse on any host lane (Vue OR Svelte) is counter-visible
     /// without naming a framework.
@@ -4888,9 +5043,13 @@ mod tests {
     /// * the Svelte carrier's own codes (`svelte-runtime-*`, its CSS and
     ///   rejected-rule codes) — all unsupported/invalid constructs in the
     ///   bytes;
-    /// * `HOST_NO_CARRIER_ARTIFACT` / `HOST_NO_CARRIER_COMPILER` — no parse
-    ///   artifact for these bytes / no compiler registered for the adapter;
-    ///   neither is waiting on a file;
+    /// * `HOST_NO_CARRIER_ARTIFACT` — no parse artifact for these bytes; the
+    ///   input registers no framework carrier, so it is not waiting on a file;
+    /// * `HOST_NATIVE_BINDING_UNAVAILABLE` — the registered host-integration
+    ///   catalog holds no bindable row for the artifact's identity; the
+    ///   catalog is built-in and static per build, so identical bytes cannot
+    ///   bind later (a superseded snapshot maps to `HostError::Superseded`
+    ///   instead and never carries this code);
     /// * `HOST_COMPILE_TARGET_MISSING_IDE` / `HOST_COMPILE_UNSUPPORTED` — the
     ///   carrier refused to produce the demanded surface for these bytes;
     /// * `script-owner-index` — an owner-table invariant over the file's OWN
@@ -5040,7 +5199,7 @@ mod tests {
             "svelte-runtime-generated-module-invalid",
             // The host-side compile-routing refusals.
             "HOST_NO_CARRIER_ARTIFACT",
-            "HOST_NO_CARRIER_COMPILER",
+            "HOST_NATIVE_BINDING_UNAVAILABLE",
             "HOST_COMPILE_TARGET_MISSING_IDE",
             "HOST_COMPILE_UNSUPPORTED",
             "script-owner-index",

@@ -791,7 +791,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
 ) -> ScriptFactEvidence<T> {
     // Zero-cost fast path: this registration registers NO provider ⇒ no
     // candidates ⇒ no facts, so the resolved-validation half does ZERO per-file
-    // work — no `current_eval_state`, no classification, no `get_analysis`, no
+    // work — no IndexedReady serve, no classification, no `get_analysis`, no
     // import resolution. (The Vue registration is provider-less; the Svelte
     // registration carries one.) The host registry's `ActiveProviderIndex`
     // aggregates EVERY registration's providers, so it is empty IFF no
@@ -808,31 +808,28 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             ScriptFactNotApplicableReason::ProviderNotRegistered,
         ));
     }
-    let Some((raw_source, framework_parse, whole_hash)) = host.current_eval_state(canonical) else {
+    let Some(facts) = (match request_ctx {
+        Some(ctx) => ctx
+            .ensure_indexed_ready_serve(canonical)
+            .map(|serve| serve.indexed),
+        None => host
+            .ensure_indexed_ready_serve(canonical)
+            .map(|serve| serve.indexed),
+    }) else {
         return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
             ScriptFactUnavailableReason::SourceUnavailable,
         ));
     };
     let file_language = host.language_classifier().classify(canonical);
     let carrier_language = file_language.carrier_language_id();
+    let whole_hash = facts.whole_hash;
+    let framework_parse = facts.framework_parse.clone();
 
-    // A framework carrier's runes/macros live in its script block(s). The
-    // provider captures over the POSITION-PRESERVING eval-source (script bytes at
-    // raw carrier offsets, markup/styles blanked) — the SAME source the synth
-    // injection captures from — so a `.svelte` capture parses valid TS, never the
-    // raw markup. A non-carrier file's raw source is already script.
-    let source: Arc<str> = if file_language.is_framework_carrier() {
-        Arc::from(
-            crate::VerterHost::build_eval_script_source(
-                canonical,
-                raw_source.as_ref(),
-                framework_parse.as_deref(),
-            )
-            .as_str(),
-        )
-    } else {
-        raw_source
-    };
+    // Provider capture uses the stored IndexedReady eval-source Arc (script
+    // bytes at raw carrier offsets, markup/styles blanked). Catalog lookup
+    // lives only in the IndexedReady producer; a missing artifact stays
+    // unavailable instead of recataloging.
+    let source = Arc::clone(&facts.eval_source);
     // The module-script region (so the provider classifies module vs instance
     // exports) — read from the carrier's neutral script regions.
     let module_region = framework_parse

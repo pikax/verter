@@ -1,7 +1,8 @@
-//! Carrier-runtime-routing functional gate (native-Svelte foundation).
+//! Carrier-runtime-routing functional gate.
 //!
-//! These are the DISCRIMINATING tests for the carrier-registry routing of the runtime
-//! compile through the `CarrierCompiler` registry:
+//! These are the DISCRIMINATING tests for the framework-neutral routing of
+//! the session's runtime compile through the request-scoped bound framework
+//! host-integration backends:
 //!
 //! * Vue runtime (`Main`) + IDE (`getIde`) output stays BYTE-IDENTICAL through
 //!   the neutral-bundle path (carrier routing must not change Vue bytes).
@@ -84,14 +85,14 @@ fn main_code(host: &VerterHost, canonical: &str, profile: &CompileProfile) -> Op
 // block (exercises the custom-block import + invocation lines).
 const VUE_SRC: &str = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst msg = ref('hi')\n</script>\n<template><div>{{ msg }}</div></template>\n<style scoped>.a{color:red}</style>\n";
 
-/// The Vue runtime `Main` module — byte-frozen. The carrier-routed compile MUST
-/// reproduce these bytes exactly; any drift fails this gate (the §4.4
-/// byte-identity characterization). Captured from the live carrier-routed
-/// compile; a future change that alters Vue runtime bytes fails here.
-const VUE_MAIN_GOLDEN: &str = include_str!("svelte_compiler_block1_goldens/vue_main.txt");
+/// The Vue runtime `Main` module — byte-frozen. The host-backed compile MUST
+/// reproduce these bytes exactly. Captured from the live route; a change that
+/// alters the Vue runtime bytes a bundler consumes fails here, so a routing
+/// or codegen change cannot silently move published output.
+const VUE_MAIN_GOLDEN: &str = include_str!("carrier_compile_routing_goldens/vue_main.txt");
 
 /// The Vue IDE (`getIde`) TSX — byte-frozen.
-const VUE_IDE_GOLDEN: &str = include_str!("svelte_compiler_block1_goldens/vue_ide.txt");
+const VUE_IDE_GOLDEN: &str = include_str!("carrier_compile_routing_goldens/vue_ide.txt");
 
 #[test]
 fn vue_runtime_main_is_byte_identical_through_the_carrier() {
@@ -311,12 +312,13 @@ fn svelte_ensure_ide_compiled_preserves_supported_legacy_main() {
     );
 }
 
-/// A SUPPORTED runes Svelte component emits a runtime `Main` virtual node through
-/// registry routing — the §1.2 client surface reaches `get_virtual_file(Main)`.
+/// A SUPPORTED runes Svelte component emits a runtime `Main` virtual node: the
+/// Svelte client surface is reachable through `get_virtual_file(Main)`.
 #[test]
 fn svelte_runes_component_emits_a_runtime_main() {
     let host = host();
-    // The §1.2 conformance fixture: `$state` + bind + a delegated event.
+    // Exercises the runes surface a client component depends on: `$state`, a
+    // two-way binding, and a delegated event handler.
     let src = "<script>\n\tlet name = $state('world');\n\tlet count = $state(0);\n</script>\n\n<h1>Hello {name}!</h1>\n<input bind:value={name} />\n<button onclick={() => count += 1}>clicks: {count}</button>\n";
     upsert(&host, "/src/App.svelte", src, FileLanguage::svelte());
     let profile = runtime_and_ide_profile();
@@ -348,14 +350,13 @@ fn svelte_runes_component_emits_a_runtime_main() {
 
 /// Session-level Svelte option wiring: setting `svelte_disclose_version` on a
 /// REAL `CompileProfile` and driving it through the actual production
-/// session route (`get_virtual_file` -> `compile_entry` ->
-/// `host_resolve::compile_request_build::build_compile_request` /
-/// `derive_runtime_compile_options`) must reach the compiled output.
+/// session route (`get_virtual_file` -> `compile_entry` -> the bound
+/// Svelte host backend's admitted demand) must reach the compiled output.
 /// Discriminating from the carrier-level tests already covering this
 /// option (`svelte/carrier.rs`, `svelte/runtime` tests), which construct
 /// `RuntimeCompileOptions` by hand and never exercise the session's real
-/// `CompileProfile` -> `CompileRequest` -> `RuntimeCompileOptions`
-/// construct-then-derive path at all.
+/// `CompileProfile` -> bound demand -> admitted `CompileRequest` path at
+/// all.
 #[test]
 fn session_profile_svelte_disclose_version_reaches_the_compiled_main() {
     let host = host();
@@ -393,8 +394,8 @@ fn session_profile_svelte_disclose_version_reaches_the_compiled_main() {
 
 /// `svelte_runes` set on a real session `CompileProfile` must reach the
 /// compiled output through the real production route, exactly like
-/// `svelte_disclose_version` above — `derive_runtime_compile_options`
-/// must not discard the caller's `svelte_runes` choice.
+/// `svelte_disclose_version` above — the bound demand and its admitted
+/// request must not discard the caller's `svelte_runes` choice.
 ///
 /// `$state(...)` is a rune ONLY under runes mode; forced legacy mode
 /// (`runes: false`) parses `$state` as a `$`-prefixed STORE subscription
@@ -655,13 +656,15 @@ fn session_profile_svelte_dev_reaches_the_carrier() {
     );
 }
 
-/// Spot-check: `svelte_compatibility` reaches `build_compile_request`
-/// without refusing (the ONLY thing currently testable for this option —
-/// `SvelteCompatibilityRequest` is presence-only with no live sub-field
-/// once `componentApi` is excluded as unsupported, so there is no
-/// codegen-observable effect to assert on yet).
+/// `svelte_compatibility` has no routing channel through the bound host
+/// bundle execution: the bound Svelte backend refuses the demand TYPED at
+/// admission (`HOST_COMPILE_ADMISSION_REFUSED`, naming the compatibility
+/// axis) — never a silent drop of the requested option and never a
+/// compile that pretends to honor it. Discriminating: a route that
+/// dropped the axis instead of refusing would compile successfully and
+/// fail this test.
 #[test]
-fn session_profile_svelte_compatibility_constructs_without_refusing() {
+fn session_profile_svelte_compatibility_refuses_typed_at_admission() {
     let host = host();
     let src = "<div>hi</div>\n";
     upsert(
@@ -676,10 +679,145 @@ fn session_profile_svelte_compatibility_constructs_without_refusing() {
         svelte_compatibility: Some(true),
         ..CompileProfile::default()
     };
+    let err = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Compatibility.svelte".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .expect_err("an unroutable compatibility demand must refuse, not compile");
+    let HostError::CompileError(failure) = err else {
+        panic!("expected the typed compile-error refusal, got another host error");
+    };
     assert!(
-        main_code(&host, "/src/Compatibility.svelte", &profile).is_some(),
-        "svelte_compatibility=true must construct and compile normally through the \
-         session route (presence-only, no live sub-field to observe yet)"
+        failure.diagnostics.diagnostics.iter().any(|d| {
+            d.code == "HOST_COMPILE_ADMISSION_REFUSED" && d.message.contains("Compatibility")
+        }),
+        "the refusal must carry the typed admission-refused diagnostic naming the \
+         compatibility axis, got {:?}",
+        failure.diagnostics.diagnostics
+    );
+}
+
+/// `svelte_css` (injected/external) has no request-level routing channel
+/// through the bound host bundle execution: the demand refuses TYPED at
+/// admission naming the css-mode axis — never a compile that silently
+/// derives the mode from the source while claiming to honor the request.
+#[test]
+fn session_profile_svelte_css_mode_refuses_typed_at_admission() {
+    let host = host();
+    upsert(
+        &host,
+        "/src/CssMode.svelte",
+        "<div>hi</div>\n",
+        FileLanguage::svelte(),
+    );
+    let profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_css: Some("injected".to_string()),
+        ..CompileProfile::default()
+    };
+    let err = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/CssMode.svelte".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .expect_err("an unroutable css-mode demand must refuse, not compile");
+    let HostError::CompileError(failure) = err else {
+        panic!("expected the typed compile-error refusal, got another host error");
+    };
+    assert!(
+        failure.diagnostics.diagnostics.iter().any(|d| {
+            d.code == "HOST_COMPILE_ADMISSION_REFUSED" && d.message.contains("CssMode")
+        }),
+        "the refusal must carry the typed admission-refused diagnostic naming the \
+         css-mode axis, got {:?}",
+        failure.diagnostics.diagnostics
+    );
+}
+
+/// A request-level custom-element descriptor (`tag`/`shadow`) has no
+/// routing channel through the bound host bundle execution (the
+/// descriptor is resolved from the parsed `<svelte:options>` element
+/// only): the demand refuses TYPED at admission naming the descriptor
+/// axis — never a compile with the descriptor silently dropped.
+#[test]
+fn session_profile_svelte_custom_element_descriptor_refuses_typed_at_admission() {
+    let host = host();
+    upsert(
+        &host,
+        "/src/Descriptor.svelte",
+        "<div>hi</div>\n",
+        FileLanguage::svelte(),
+    );
+    let profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_custom_element_tag: Some("my-widget".to_string()),
+        ..CompileProfile::default()
+    };
+    let err = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Descriptor.svelte".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .expect_err("an unroutable descriptor demand must refuse, not compile");
+    let HostError::CompileError(failure) = err else {
+        panic!("expected the typed compile-error refusal, got another host error");
+    };
+    assert!(
+        failure.diagnostics.diagnostics.iter().any(|d| {
+            d.code == "HOST_COMPILE_ADMISSION_REFUSED"
+                && d.message.contains("CustomElementDescriptor")
+        }),
+        "the refusal must carry the typed admission-refused diagnostic naming the \
+         descriptor axis, got {:?}",
+        failure.diagnostics.diagnostics
+    );
+}
+
+/// A MALFORMED Svelte option token refuses at the session's demand decode
+/// boundary with the request-construction code — the same
+/// `HOST_COMPILE_REQUEST_EXECUTION_REFUSED` class the render lane reports
+/// for the identical token, and a DIFFERENT class from the admission
+/// refusals above (decode refusal vs unroutable-axis refusal).
+#[test]
+fn session_profile_malformed_svelte_css_token_refuses_at_decode() {
+    let host = host();
+    upsert(
+        &host,
+        "/src/BadCss.svelte",
+        "<div>hi</div>\n",
+        FileLanguage::svelte(),
+    );
+    let profile = CompileProfile {
+        target: CompileTarget::BUNDLER,
+        svelte_css: Some("not-a-real-mode".to_string()),
+        ..CompileProfile::default()
+    };
+    let err = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/BadCss.svelte".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .expect_err("a malformed css token must refuse, not silently default");
+    let HostError::CompileError(failure) = err else {
+        panic!("expected the typed compile-error refusal, got another host error");
+    };
+    assert!(
+        failure.diagnostics.diagnostics.iter().any(|d| {
+            d.code == "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"
+                && d.message.contains("MalformedOptionValue")
+        }),
+        "the refusal must carry the request-construction code for a malformed token, \
+         got {:?}",
+        failure.diagnostics.diagnostics
     );
 }
 

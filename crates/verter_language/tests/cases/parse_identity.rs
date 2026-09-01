@@ -3,9 +3,10 @@ use verter_identity::identity::{
     CompatibilityDomainId, CompatibilityEpoch, ContentId, SyntaxProfileId,
 };
 use verter_language::parse_identity::{
-    parse_key_for, syntax_profile_id_for, ParseKeyDescriptor, ParseOptions, SyntaxProfileDescriptor,
+    parse_key_for, syntax_profile_id_for, ParseIdentityError, ParseKeyDescriptor, ParseOptions,
+    SyntaxProfileDescriptor,
 };
-use verter_language::{FileLanguage, LanguageId, ScriptSourceType};
+use verter_language::{FileLanguage, FrameworkAdapterId, LanguageId, ScriptSourceType};
 
 const SYNTAX_PROFILE_GOLDEN_BYTES_HEX: &str = concat!(
     "210000007665727465722e6c616e67756167652e73796e7461785f70726f66696c652e7631",
@@ -214,4 +215,29 @@ fn script_profiles_encode_the_real_dialect_and_exact_source_bytes() {
     assert_eq!(first, repeated);
     assert_ne!(first, changed_dialect);
     assert_ne!(first, changed_source);
+}
+
+#[test]
+fn requested_unknown_framework_identity_keeps_adapter_language_and_options() {
+    use verter_language::{default_parse_identity_for, parse_identity_for};
+
+    let source = "<template></template>";
+    let language = FileLanguage::Framework {
+        adapter_id: FrameworkAdapterId::new("unknown"),
+        language_id: LanguageId::new("vue"),
+    };
+    let opts = ParseOptions {
+        delimiters: ("[[".to_string(), "]]".to_string()),
+        custom_elements: vec!["x-foo".to_string()],
+        svelte_loose: true,
+    };
+    let (profile, key) = parse_identity_for(source, &language, &opts).expect("requested identity");
+    let vue_default = default_parse_identity_for(source, &FileLanguage::vue()).unwrap();
+    assert_ne!(key, vue_default.1);
+    let rewritten = parse_identity_for(source, &language, &ParseOptions::default()).unwrap();
+    assert_ne!(profile, rewritten.0);
+    assert!(matches!(
+        default_parse_identity_for(source, &language),
+        Err(ParseIdentityError::UnsupportedFileLanguage)
+    ));
 }

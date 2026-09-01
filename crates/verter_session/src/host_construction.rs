@@ -327,25 +327,48 @@ impl VerterHost {
                 .expect("carrier grammar authority"),
         );
         use verter_language::carrier_grammar::{
-            CarrierGrammarConfig, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
+            CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
         };
-        carrier_grammar_authority
-            .register_carrier_grammar(
-                verter_language::FileLanguage::vue(),
-                FrameworkAdapterSemanticVersion::new(1).expect("adapter version"),
-                CarrierParserGrammarVersion::new(1).expect("grammar version"),
-                CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>())
-                    .expect("default Vue grammar"),
+        // Seed the live grammar registry from the compiler's frontend
+        // catalog rows: the catalog `CarrierFrontend` registration is the
+        // SOLE grammar authority, so the host registers the catalog fact
+        // itself rather than an independently spelled copy. The version
+        // pairs below are host registration metadata (adapter semantic
+        // version × parser grammar version), not grammar content. A
+        // catalog row without a registered grammar fact fails host
+        // construction loudly — never a silently skipped registration.
+        for (language, adapter_version, grammar_version) in [
+            (verter_language::FileLanguage::vue(), 1, 1),
+            (verter_language::FileLanguage::svelte(), 1, 1),
+        ] {
+            let adapter_id = language
+                .adapter_id()
+                .expect("built-in carrier language carries a framework adapter id");
+            let carrier_language_id = language
+                .carrier_language_id()
+                .expect("built-in carrier language carries a carrier language id");
+            let grammar = verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+                adapter_id,
+                carrier_language_id,
             )
-            .expect("register Vue grammar");
-        carrier_grammar_authority
-            .register_carrier_grammar(
-                verter_language::FileLanguage::svelte(),
-                FrameworkAdapterSemanticVersion::new(1).expect("adapter version"),
-                CarrierParserGrammarVersion::new(1).expect("grammar version"),
-                CarrierGrammarConfig::Svelte,
-            )
-            .expect("register Svelte grammar");
+            .unwrap_or_else(|| {
+                panic!(
+                    "frontend catalog row for adapter '{adapter_id}' × language \
+                     '{carrier_language_id}' carries no registered grammar fact"
+                )
+            })
+            .clone();
+            carrier_grammar_authority
+                .register_carrier_grammar(
+                    language.clone(),
+                    FrameworkAdapterSemanticVersion::new(adapter_version).expect("adapter version"),
+                    CarrierParserGrammarVersion::new(grammar_version).expect("grammar version"),
+                    grammar,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("register catalog grammar for adapter '{adapter_id}': {error:?}")
+                });
+        }
         let carrier_publication_store = Arc::new(
             crate::carrier_publication_store::CarrierPublicationStore::with_provenance(
                 Arc::clone(&registered_source_authority),
@@ -1406,6 +1429,69 @@ mod resource_policy_lazy_tests {
                 host.decl_lowering.workers_spawned(),
                 "default()/lsp_interactive() host must spawn decl-lowering workers eagerly \
                  at construction"
+            );
+        }
+    }
+
+    /// The grammar the host's `CarrierGrammarAuthority` holds for each
+    /// built-in carrier language IS the compiler frontend catalog's
+    /// registered grammar fact: accepting a source against the host
+    /// authority with the catalog fact must succeed, and the accepted
+    /// canonical config must equal that fact's canonicalization. Any
+    /// second host-side grammar spelling that drifts from the catalog
+    /// row turns this into a `GrammarConfigMismatch`.
+    #[test]
+    fn host_grammar_registrations_are_the_catalog_grammar_facts() {
+        use verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for;
+        use verter_language::registered_source_authority::{
+            CanonicalFileId, FileIncarnation, SourceGeneration,
+        };
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        for (language, source) in [
+            (
+                verter_language::FileLanguage::vue(),
+                "<template><div>{{ x }}</div></template>",
+            ),
+            (
+                verter_language::FileLanguage::svelte(),
+                "<script>let x = 1</script><div>{x}</div>",
+            ),
+        ] {
+            let adapter_id = language.adapter_id().expect("framework adapter id");
+            let carrier_language_id = language.carrier_language_id().expect("carrier language id");
+            let catalog_fact = registered_grammar_for(adapter_id, carrier_language_id)
+                .expect("built-in frontend catalog row carries a registered grammar fact");
+            let snapshot = host
+                .carrier_publication
+                .source_authority
+                .register_source(
+                    CanonicalFileId::new(format!("/grammar-pin/{adapter_id}")),
+                    FileIncarnation::new(1),
+                    SourceGeneration::new(1),
+                    language.clone(),
+                    Arc::from(source),
+                )
+                .expect("register source");
+            let accepted = host
+                .carrier_publication
+                .grammar_authority
+                .accept_registered_source(
+                    &host.carrier_publication.source_authority,
+                    &snapshot,
+                    catalog_fact,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "the host authority's registered grammar for adapter \
+                         '{adapter_id}' must be the catalog fact: {error:?}"
+                    )
+                });
+            assert_eq!(
+                accepted.grammar().canonical_config(),
+                catalog_fact,
+                "host-held canonical grammar for adapter '{adapter_id}' must equal the \
+                 catalog fact"
             );
         }
     }

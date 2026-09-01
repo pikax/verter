@@ -93,17 +93,29 @@ jobs:
               # release graph; release-only changes must execute that guard.
               - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
+            # Gates `wasm-build` ALONE, which both builds the browser artifact
+            # and verifies the committed carrier fixture against it. So this
+            # filter decides whether that fixture check runs at all, and it must
+            # cover everything the artifact is built from — a crate that is in
+            # the build closure but not here changes carrier output while the
+            # check that would catch it is skipped.
+            #
+            # `crates/**` rather than an enumerated closure: the closure derived
+            # from `cargo metadata` (verter_wasm's transitive normal + build
+            # dependencies that are workspace members) is 27 crates, and an
+            # enumerated list silently goes stale the next time one of them
+            # takes a new dependency — the exact failure this check exists to
+            # end. A directory wildcard cannot drift. The cost is that
+            # `wasm-build` also runs for the 19 workspace crates outside the
+            # closure; over-running a cached build is cheap, under-running the
+            # freshness check is not. Manifests and the lockfile are included
+            # because a dependency bump (an OXC version, say) moves compiler
+            # output without touching a single crate path.
             wasm:
-              - 'crates/verter_compiler/**'
-              - 'crates/verter_parser/**'
-              - 'crates/verter_session/**'
-              - 'crates/verter_workspace/**'
-              - 'crates/verter_semantic/**'
-              - 'crates/verter_ffi/**'
-              - 'crates/verter_wasm/**'
-              - 'crates/verter_diagnostics/**'
-              - 'crates/verter_actions/**'
-              - 'crates/verter_span/**'
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
               - 'packages/wasm/**'
               - '.cargo/**'
               - '.github/workflows/ci.yml'
@@ -388,6 +400,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          # REQUIRED by the gate's wasm JavaScript-boundary lane. Those tests are
+          # `#[cfg(target_arch = "wasm32")]`, so no host-target run can execute
+          # them; without this target the gate's prerequisite preflight fails
+          # loudly rather than skipping them.
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           # Job-scoped by default. The previous shared
@@ -575,6 +593,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          # A trybuild `.stderr` is EXACT rustc output, and rustc renders the
+          # snippet behind a `help:` that points into the standard library only
+          # when the library source is present. Without `rust-src` those lines
+          # vanish and a fixture whose expectation was blessed on an ordinary
+          # developer machine (where rustup installs it) mismatches for a reason
+          # that has nothing to do with the seal it protects.
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
         with:
           key: compiler-contracts
@@ -997,6 +1023,36 @@ jobs:
         run: pnpm --filter @verter/wasm build
       - name: Smoke test WASM
         run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
+      # The committed carrier fixture the playground's in-context
+      # LanguageService guards load is a snapshot of real host output. Those
+      # guards read the snapshot, never the host, so nothing else in the suite
+      # notices when compiler output moves and the snapshot does not. This runs
+      # here because this is the job that HAS the artifact: it compares against
+      # the bytes just built, and its path filter is the artifact's own build
+      # closure, so every change that can move carrier output reaches it.
+      # Unconditional and non-advisory — a difference fails the job.
+      #
+      # Invoked as the script, not `pnpm --filter ... run check:wasm-fixtures`:
+      # pnpm exits 0 when a filter matches no package AND when a matched
+      # package has no such script (`--fail-if-no-match` fixes only the first),
+      # so renaming either the package or the script would turn this step into
+      # a green no-op. The script resolves every path from its own location and
+      # needs no workspace resolution.
+      - name: Verify committed carrier fixtures against the built WASM
+        run: node packages/playground/scripts/capture-wasm-carrier-fixtures.mjs --check
+      # The workspace's `#[wasm_bindgen_test]` cases prove the closed-shape
+      # refusals where a browser caller meets them — against a real JS object
+      # graph, on the wasm target. They are `#[cfg(target_arch = "wasm32")]`,
+      # so the shared nextest archive the Rust lanes run CANNOT contain a
+      # single one; only a wasm-target run executes them.
+      #
+      # This is that run, and it lives here because this is the job already
+      # provisioned for it: the `wasm32-unknown-unknown` target and the pinned
+      # `wasm-bindgen-cli` above are exactly what the lane needs. The local
+      # gate runs the same lane through the same `gate-internals.mjs`
+      # helpers, so the two cannot disagree on what passing means.
+      - name: WASM JavaScript-boundary lane
+        run: node scripts/wasm-js-boundary-lane.mjs --exhaustive
       # Shared with playground-test so wasm32 is compiled ONCE per run.
       - name: Upload WASM build
         uses: actions/upload-artifact@v6

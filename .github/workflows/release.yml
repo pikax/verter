@@ -116,6 +116,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt
+          # REQUIRED by the gate's wasm JavaScript-boundary lane — this job runs
+          # the same canonical gate exhaustively, and its prerequisite preflight
+          # fails loudly on a missing target rather than skipping those tests.
+          targets: wasm32-unknown-unknown
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
@@ -128,6 +132,14 @@ jobs:
         run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+      # REQUIRED by the gate's wasm JavaScript-boundary lane. The runner and the
+      # `wasm-bindgen` library are ONE ABI, so the gate derives the required
+      # version from the tree and refuses a mismatched runner; keep this pin
+      # equal to the `wasm-bindgen` dependency in `crates/verter_wasm/Cargo.toml`.
+      - name: Install wasm-bindgen CLI (test runner for the gate's wasm lane)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.122
       # One dev archive/list feeds archive-backed Surface 1. After listing,
       # Surface 1 overlaps an isolated shipped-cfg lane: workspace/all-targets
       # compile check followed serially by the small verter_shipped_cfg_contract

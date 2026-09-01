@@ -176,9 +176,11 @@ fn b2_materialization_preserves_exact_carrier_and_inventory_arcs() {
     ] {
         let (_, _, accepted) = accepted(path, language, source);
         let known = known_compiler(&accepted);
-        let projection =
-            super::registered_carrier_projection::project_registered_carrier(&known, &accepted)
-                .expect("registered source parses");
+        let projection = super::registered_carrier_projection::project_registered_carrier(
+            Some(&known),
+            &accepted,
+        )
+        .expect("registered source parses");
         let carrier_before = projection.carrier().clone();
         let inventory_before = Arc::clone(projection.inventory());
         let artifact = projection.into_framework_parse_artifact();
@@ -1022,13 +1024,184 @@ fn unclosed_dynamic_directive_argument_at_eof_projects_typed_recovery() {
     )));
 }
 
-// The old `registered_projector_signature_requires_authority_seal` runtime
-// signature check is superseded by a strictly stronger STRUCTURAL guarantee:
-// `project_registered_carrier` takes `&KnownRegisteredCompiler` (a closed,
-// two-variant enum), not `&dyn CarrierCompiler` — there is no runtime
-// capability check left to pin, because there is no `&dyn CarrierCompiler`
-// parameter anywhere on the registered-projection path to forge a call
-// against in the first place.
+#[test]
+fn catalog_project_registered_accepted_parses_without_compiler_registry() {
+    let (_, _, accepted) = accepted(
+        "file:///workspace/App.vue",
+        verter_language::FileLanguage::vue(),
+        "<template><p>ok</p></template>",
+    );
+    let parses_before = super::registered_carrier_projection::registered_frontend_parse_count();
+    let projection = super::registered_carrier_projection::project_registered_accepted(&accepted)
+        .expect("catalog frontend must project accepted Vue source");
+    assert_eq!(
+        super::registered_carrier_projection::registered_frontend_parse_count(),
+        parses_before + 1
+    );
+    let artifact = projection.into_framework_parse_artifact();
+    assert_eq!(
+        artifact.adapter_id(),
+        &verter_language::FrameworkAdapterId::vue()
+    );
+}
+
+#[test]
+fn catalog_selects_vue_and_svelte_frontends_and_rejects_unknown() {
+    use verter_language::{FrameworkAdapterId, LanguageId};
+
+    let vue = super::registered_carrier_projection::registered_frontend_for(
+        &FrameworkAdapterId::vue(),
+        &LanguageId::new("vue"),
+    );
+    assert!(vue.is_some(), "Vue frontend must be catalog-selected");
+    let svelte = super::registered_carrier_projection::registered_frontend_for(
+        &FrameworkAdapterId::svelte(),
+        &LanguageId::new("svelte"),
+    );
+    assert!(svelte.is_some(), "Svelte frontend must be catalog-selected");
+    assert!(
+        super::registered_carrier_projection::registered_frontend_for(
+            &FrameworkAdapterId::new("unknown"),
+            &LanguageId::new("vue"),
+        )
+        .is_none(),
+        "unknown adapter must not select a frontend"
+    );
+    assert!(
+        super::registered_carrier_projection::registered_frontend_for(
+            &FrameworkAdapterId::vue(),
+            &LanguageId::new("svelte"),
+        )
+        .is_none(),
+        "mismatched language must not select a frontend"
+    );
+}
+
+fn expected_catalog_miss_identity(
+    source: &str,
+    adapter_id: &verter_language::FrameworkAdapterId,
+    carrier_language_id: &verter_language::LanguageId,
+    opts: &verter_language::ParseOptions,
+) -> (verter_language::SyntaxProfileId, verter_language::ParseKey) {
+    let language = verter_language::FileLanguage::Framework {
+        adapter_id: adapter_id.clone(),
+        language_id: carrier_language_id.clone(),
+    };
+    verter_language::parse_identity_for(source, &language, opts)
+        .expect("requested catalog-miss identity")
+}
+
+#[test]
+fn catalog_miss_is_typed_frontend_mismatch_not_a_parse() {
+    use verter_language::{
+        default_parse_identity_for, FileLanguage, FrameworkAdapterId, LanguageId, ParseOptions,
+        SyntaxReject, UnsupportedSyntaxProfileReason,
+    };
+
+    let source = "<template></template>";
+    let opts = ParseOptions {
+        delimiters: ("[[".to_string(), "]]".to_string()),
+        custom_elements: vec!["x-foo".to_string()],
+        svelte_loose: true,
+    };
+    let adapter = FrameworkAdapterId::new("unknown");
+    let language_id = LanguageId::new("vue");
+    let err = super::registered_carrier_projection::parse_registered_frontend(
+        &adapter,
+        &language_id,
+        source,
+        &opts,
+    )
+    .expect_err("unknown adapter must not parse");
+    let SyntaxReject::UnsupportedProfile {
+        parse_key,
+        syntax_profile,
+        reason: UnsupportedSyntaxProfileReason::FrontendMismatch,
+    } = err
+    else {
+        panic!("catalog miss must be FrontendMismatch, got {err:?}");
+    };
+    let (expected_profile, expected_key) =
+        expected_catalog_miss_identity(source, &adapter, &language_id, &opts);
+    assert_eq!(
+        *syntax_profile, expected_profile,
+        "miss syntax_profile must be the requested identity"
+    );
+    assert_eq!(
+        *parse_key, expected_key,
+        "miss parse_key must be the requested identity"
+    );
+    let vue_default =
+        default_parse_identity_for(source, &FileLanguage::vue()).expect("vue default identity");
+    assert_ne!(
+        *parse_key, vue_default.1,
+        "unknown adapter must not remap onto FileLanguage::vue()"
+    );
+    let rewritten =
+        expected_catalog_miss_identity(source, &adapter, &language_id, &ParseOptions::default());
+    assert_ne!(
+        *syntax_profile, rewritten.0,
+        "catalog miss must not rewrite requested parse options"
+    );
+
+    let adapter = FrameworkAdapterId::vue();
+    let language_id = LanguageId::new("svelte");
+    let err = super::registered_carrier_projection::parse_registered_frontend(
+        &adapter,
+        &language_id,
+        source,
+        &opts,
+    )
+    .expect_err("mismatched language must not parse");
+    let SyntaxReject::UnsupportedProfile {
+        parse_key,
+        syntax_profile,
+        reason: UnsupportedSyntaxProfileReason::FrontendMismatch,
+    } = err
+    else {
+        panic!("mismatch must be FrontendMismatch, got {err:?}");
+    };
+    let (expected_profile, expected_key) =
+        expected_catalog_miss_identity(source, &adapter, &language_id, &opts);
+    assert_eq!(*syntax_profile, expected_profile);
+    assert_eq!(*parse_key, expected_key);
+    let svelte_default = default_parse_identity_for(source, &FileLanguage::svelte())
+        .expect("svelte default identity");
+    assert_ne!(
+        *parse_key, svelte_default.1,
+        "mismatched language must not remap onto FileLanguage::svelte()"
+    );
+}
+
+#[test]
+fn fixture_registry_rejects_without_panic_when_known_projector_is_absent() {
+    let (_, _, accepted) = accepted(
+        "file:///workspace/Fixture.vue",
+        verter_language::FileLanguage::vue(),
+        "<template>ok</template>",
+    );
+    let parses_before = super::registered_carrier_projection::registered_frontend_parse_count();
+    let err = match CarrierCompilerRegistry::from_compilers([]).project_registered(&accepted) {
+        Err(err) => err,
+        Ok(_) => panic!("fixture registry has no known projector"),
+    };
+    assert_eq!(
+        super::registered_carrier_projection::registered_frontend_parse_count(),
+        parses_before,
+        "a missing known projector must not parse"
+    );
+    assert!(matches!(
+        err,
+        verter_language::SyntaxReject::UnsupportedProfile {
+            reason: verter_language::UnsupportedSyntaxProfileReason::FrontendMismatch,
+            ..
+        }
+    ));
+}
+
+// Parse selection is catalog-typed (`parse_registered_frontend` /
+// `InstalledCarrierFrontend`). Geometry after parse still matches the
+// closed `KnownRegisteredCompiler` enum — not `&dyn CarrierCompiler`.
 
 // ── FL2-E TE-C-12 / T-B1-D03: Svelte style dialect derives from `lang` ──
 

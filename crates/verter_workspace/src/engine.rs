@@ -1992,9 +1992,11 @@ impl Engine {
                 records
                     .iter()
                     .filter_map(|(canonical_id, source)| {
-                        overlay
-                            .set(canonical_id.clone(), Arc::clone(source))
-                            .then(|| canonical_id.clone())
+                        if overlay.set(canonical_id.clone(), Arc::clone(source)) {
+                            Some(canonical_id.clone())
+                        } else {
+                            None
+                        }
                     })
                     .collect::<Vec<_>>()
             };

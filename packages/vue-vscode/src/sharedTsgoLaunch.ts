@@ -61,13 +61,23 @@ export function relayShimCandidates(opts: {
   extensionPath: string;
   env?: Record<string, string | undefined>;
   platform?: NodeJS.Platform;
+  /** Defaults to the running host. Taken alongside `platform` because a
+   *  triple needs both: passing only `platform` left the arch bound to the
+   *  real host, so a caller simulating one platform got that platform's
+   *  triples on an x64 machine and NO triples on an arm64 one. */
+  arch?: string;
 }): string[] {
-  const { extensionPath, env = process.env, platform = process.platform } = opts;
+  const {
+    extensionPath,
+    env = process.env,
+    platform = process.platform,
+    arch = process.arch,
+  } = opts;
   const explicit = env.VERTER_RELAY_SHIM_BINARY;
   if (explicit) return [explicit];
 
   const base = relayShimBasename(platform);
-  const triples = hostRustTriples(platform);
+  const triples = hostRustTriples(platform, arch);
   const candidates: string[] = [];
   // Dev builds first (freshest) — walk up to the monorepo root's target/ dir.
   // Triple-qualified layout (an explicit `--target` build lane) before the

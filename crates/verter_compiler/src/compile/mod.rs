@@ -43,8 +43,9 @@ use crate::parser::Syntax;
 use crate::script::prepared::PreparedScript;
 use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style_planner::{
-    analyze_css_module_classes, complete_static_class_names, prepared_style_for_sealed_slot,
-    run_vue_style_authored_only, run_vue_style_cascade, AuthoredStyleInput, StyleRewriteFailure,
+    analyze_css_module_classes, complete_static_class_names, generate_var_name,
+    prepared_style_for_sealed_slot, run_vue_style_authored_only, run_vue_style_cascade,
+    AuthoredStyleInput, StyleRewriteFailure, VBindVar,
 };
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
@@ -657,16 +658,14 @@ pub(crate) fn compile_from_parsed(
 /// Crate-internal escape hatch: drives [`compile_inner`] directly from
 /// already-legacy-shaped options, bypassing `CompileRequest` derivation.
 ///
-/// Used ONLY by `framework_common::vue_bridge`'s block-content composition
-/// sub-calls, which decompose ONE top-level `RuntimeCompileOptions`-shaped
-/// request into 2-3 fine-grained sub-compiles over SELECTED SFC fragments
-/// (a projected script unit, a selected template block) that do not
-/// themselves correspond to an independent top-level product request — they
-/// are internal plumbing for one external `CarrierCompiler::compile_bundle`
-/// call, not a second production request-construction point. `compile_bundle`
-/// itself (fed by `RuntimeCompileOptions`, the actual external boundary) is
-/// converted to build a canonical `CompileRequest` separately. NOT reachable
-/// outside this crate.
+/// Used by `framework_common::vue_bridge`'s block-content composition
+/// sub-calls and by [`crate::standalone::StandaloneCompiler`]'s selected-
+/// template IDE prerequisite. Those decompose one external request into
+/// fine-grained sub-compiles over selected SFC fragments (a projected
+/// script unit, a selected template block) that do not themselves
+/// correspond to an independent top-level product request — internal
+/// plumbing, not a second production request-construction point. NOT
+/// reachable outside this crate.
 ///
 /// Infallible in practice: it bypasses `CompileRequest::resolve_vue_backend`
 /// entirely (there is no top-level `CompileRequest` at this decomposition
@@ -700,7 +699,7 @@ pub(crate) fn compile_from_parsed_legacy(
 /// fail-closed rule already ran in `CompileRequest::new`; `resolved_backend`
 /// already ran the post-parse half (`resolve_vue_backend`) — this function
 /// only translates, never re-decides, semantics.
-fn derive_legacy_vue_options(
+pub(crate) fn derive_legacy_vue_options(
     request: &crate::compile_request::CompileRequest,
     resolved_backend: crate::compile_request::ResolvedVueBackend,
     execution_inputs: &VueExecutionInputs,
@@ -774,7 +773,18 @@ fn derive_legacy_vue_options(
     let resolved_flags = ResolvedVueCompileOptions {
         force_vapor: use_vapor,
         force_js: request.force_js(),
-        source_map: runtime.is_some_and(|r| r.runtime_source_map),
+        source_map: if ssr {
+            request.products().iter().find_map(|p| match p {
+                CompileProduct::RuntimeServer(r) => Some(r.runtime_source_map),
+                _ => None,
+            })
+        } else {
+            request.products().iter().find_map(|p| match p {
+                CompileProduct::RuntimeClient(r) => Some(r.runtime_source_map),
+                _ => None,
+            })
+        }
+        .unwrap_or(false),
         ide_source_map: ide.is_some_and(|i| i.want_source_map),
         ssr,
         style_processing: request.runtime_style_processing(),
@@ -1030,6 +1040,17 @@ fn compile_inner(
             }
         }
     } // end if needs_style
+
+    if all_v_bind_vars.is_empty() && !options.target.needs_style() {
+        all_v_bind_vars.extend(verter_options.style_v_bind_vars.iter().map(|expression| {
+            VBindVar {
+                expression: expression.clone(),
+                var_name: generate_var_name(scope_id_str, expression),
+                expr_start: 0,
+                expr_end: 0,
+            }
+        }));
+    }
 
     // ── 4. Script codegen ─────────────────────────────────────────
     // Script codegen is skipped when the target only needs TSX or TSC,
@@ -1569,6 +1590,10 @@ fn compile_inner(
 
     let needs_tpl_codegen = options.target.needs_template_codegen();
     let needs_tpl_data = options.target.needs_template_data();
+    // Diagnostics attributable to the template-data extraction pass itself
+    // (expression parse errors). A subset of `errors`, carried separately on
+    // the result so the template-facts consumer can publish them.
+    let mut template_data_diagnostics: Vec<CompileDiagnostic> = Vec::new();
 
     let (template_block, extracted_template_data) = if has_parse_errors
         || (!needs_tpl_codegen && !needs_tpl_data)
@@ -1603,8 +1628,22 @@ fn compile_inner(
                 false,
             );
 
-            // Collect OXC expression parse errors as XInvalidExpression diagnostics
+            // Collect OXC expression parse errors as XInvalidExpression diagnostics.
+            // The appended delta is ALSO recorded as the template-data
+            // extraction's own diagnostic slice: this pass is the only one
+            // that parses these expressions when no template codegen target
+            // is requested, so the template-facts consumer republishes the
+            // slice rather than re-running the pass (or inheriting unrelated
+            // channels such as macro-semantic validation).
+            let expr_diag_start = all_diagnostics.len();
+            let expr_failure_start = compile_failures.len();
             collect_expression_errors(oxc_ast, input, &mut all_diagnostics, &mut compile_failures);
+            if needs_tpl_data {
+                template_data_diagnostics =
+                    convert_diagnostics(&all_diagnostics[expr_diag_start..]);
+                template_data_diagnostics
+                    .extend_from_slice(&compile_failures[expr_failure_start..]);
+            }
 
             // Extract raw template data for cross-file analysis (before bindings are moved)
             let raw_template_data = if needs_tpl_data {
@@ -2296,6 +2335,7 @@ fn compile_inner(
         tsx: tsx_block,
         tsc: tsc_block,
         template_data: extracted_template_data,
+        template_data_diagnostics,
         // True when the render function was inlined into `setup()` (official
         // production topology) — the script block already contains the full
         // component, and no separate template block was emitted. Gated on the

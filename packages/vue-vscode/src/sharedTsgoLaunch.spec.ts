@@ -50,7 +50,15 @@ describe("relayShimCandidates", () => {
     ).toEqual([explicit]);
   });
   it("prefers target-triple dev builds, then legacy dev builds, over packaged bin/", () => {
-    const c = relayShimCandidates({ extensionPath: "/ext", env: {}, platform: "win32" });
+    // `arch` is stated, not inherited: a triple needs both halves, so a test
+    // that names only the platform asserts a Windows layout while silently
+    // taking the running machine's arch — green on x64, red on arm64.
+    const c = relayShimCandidates({
+      extensionPath: "/ext",
+      env: {},
+      platform: "win32",
+      arch: "x64",
+    });
     const tripleDebug = join(
       "/ext",
       "target",

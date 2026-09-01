@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O2
+predecessors=CCA1O2,CCA1O2H,CCA1O2I,CCA1O2J
 owner=compiler.compiler-bridge:typescript-plugin typed native IDE request route
 conflict_domains=host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -44,18 +44,21 @@ Move the production TypeScript-plugin mirror host from positional native IDE pro
 ## Exact source population and API boundary
 
 - The sole production surface is `packages/typescript-plugin/src/tsc/mirrorHost.ts`; focused evidence is `mirrorHost.spec.ts` and `spike.spec.ts`.
-- Own the `CarrierCodegenHost` signatures, the dynamic `@verter/native` constructor typing, and the `ensureIdeCompiled`/`getIde` call pair used for Vue and Svelte IDE carriers.
+- Own the `CarrierCodegenHost` signatures, the dynamic `@verter/native` constructor typing, and the Vue and Svelte IDE carrier compile call, which becomes one typed `compileRequest` in place of the `ensureIdeCompiled`/`getIde` pair.
 - Construct one typed request from each source's framework, canonical ID, IDE product, source-map intent, and existing options; `getPublicApi`, mirroring, declaration generation, and TypeScript project orchestration are excluded.
 
 ## Exact predecessor contract
 
 - **CCA1O2:** NAPI/native exposes the typed `HostCompileRequest` route beside the legacy profile route.
+- **CCA1O2H:** implemented ledger row for “NAPI own-property closedness repair”; the native decode refuses an own unknown or cross-framework key whatever its value, so the typed route this consumer moves onto is closed as declared.
+- **CCA1O2I:** implemented ledger row for “Generated native host-request TypeScript mirror”; the request declarations this consumer type-checks against are generated from the Rust schema and byte-pinned, so they cannot drift from the decoder.
+- **CCA1O2J:** implemented ledger row for “NAPI typed host-request callable route”; the native host object exposes callable typed compile and batch routes, so this consumer has a reachable typed route to move onto.
 
 ## Invariants and acceptance
 
-- Preserve lazy native loading, injected fake-host compatibility, pure cached `getIde`, explicit materialization before read, carrier source ordering, output/map bytes, diagnostics, and missing/refused behavior.
+- Preserve lazy native loading, injected fake-host compatibility, carrier source ordering, output/map bytes, diagnostics, and missing/refused behavior. The legacy pure cached read and its explicit materialization remain installed on the native surface; this consumer simply stops using them.
 - The production file contains no positional `{ target, sourceMap }` IDE profile signature/call and type-checks against the real native host without a cast that hides signature incompatibility.
-- One source still performs at most one ensure and one cached read; no extra native compile or source copy is introduced.
+- One source performs exactly one typed IDE call against its already registered source; no extra native compile and no source copy is introduced.
 
 ## Deletions, budget, and verification
 

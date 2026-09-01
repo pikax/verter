@@ -50,7 +50,7 @@ Add an unused framework-discriminated FFI host compile-request schema and exact 
 
 ## Exact predecessor contract
 
-- **CCA1N:** implemented ledger row for “Native host-integration route convergence join”; CCA1N3/CCA1N4 separately removed the host-backed and runtime-render bundle selectors.
+- **CCA1N:** implemented ledger row for “Native host-integration route convergence join”; CCA1N4/CCA1N3 cut the runtime-render and host-backed lanes over to request-scoped bound framework host backends and removed both bundle selectors.
 
 ## Acceptance and evidence
 

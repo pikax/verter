@@ -21,8 +21,9 @@ fn template(code: &str, source_map: &str, imports: Vec<String>) -> RuntimeTempla
 
 #[test]
 fn no_imports_returns_the_template_verbatim() {
-    let (code, map) = compose_template_virtual_file(template("const a = 1", "", vec![]), None)
-        .expect("no-import template composes trivially");
+    let block = template("const a = 1", "", vec![]);
+    let (code, map) =
+        compose_template_virtual_file(&block, None).expect("no-import template composes trivially");
     assert_eq!(code, "const a = 1");
     assert!(map.is_none());
 }
@@ -30,11 +31,9 @@ fn no_imports_returns_the_template_verbatim() {
 #[test]
 fn imports_present_prepends_the_import_line_and_shifts_the_map() {
     let map_json = "{\"version\":3,\"sources\":[\"Comp.vue\"],\"names\":[],\"mappings\":\"MACM\"}";
-    let (code, map) = compose_template_virtual_file(
-        template("const n = 1", map_json, vec!["_openBlock".to_string()]),
-        None,
-    )
-    .expect("import template composes");
+    let block = template("const n = 1", map_json, vec!["_openBlock".to_string()]);
+    let (code, map) =
+        compose_template_virtual_file(&block, None).expect("import template composes");
     assert_eq!(
         code, "import { openBlock as _openBlock } from \"vue\"\nconst n = 1",
         "the import preamble must precede the template's own code verbatim"
@@ -60,10 +59,8 @@ fn imports_present_prepends_the_import_line_and_shifts_the_map() {
 
 #[test]
 fn custom_runtime_module_name_reaches_the_import_specifier() {
-    let (code, _) = compose_template_virtual_file(
-        template("const n = 1", "", vec!["_openBlock".to_string()]),
-        Some("@vue/runtime-dom"),
-    )
-    .expect("composes");
+    let block = template("const n = 1", "", vec!["_openBlock".to_string()]);
+    let (code, _) =
+        compose_template_virtual_file(&block, Some("@vue/runtime-dom")).expect("composes");
     assert!(code.starts_with("import { openBlock as _openBlock } from \"@vue/runtime-dom\"\n"));
 }

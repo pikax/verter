@@ -1,5 +1,13 @@
 [workspace]
-members = ["crates/*", "xtask"]
+# `crates/verter_napi/tests/fixture_addon` is a test-only Node addon that
+# lives beside the suite driving it; it is outside the `crates/*` glob and
+# excluded from `verter_napi`'s package, so it is never published and never
+# part of the shipped addon.
+members = [
+  "crates/*",
+  "crates/verter_napi/tests/fixture_addon",
+  "xtask",
+]
 resolver = "2"
 
 [workspace.package]

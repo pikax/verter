@@ -256,6 +256,15 @@ import {
   SHIPPED_CFG_LANE_ENABLED,
   SHIPPED_CFG_SKIP_SUMMARY,
   SHIPPED_CFG_SKIP_VERDICT_NOTE,
+  // wasm JS-boundary lane — required on every real gate invocation, never path-filtered, never optional
+  WASM_LANE_ID,
+  WASM_LANE_TARGET,
+  WASM_LANE_RUNNER_ENV_KEY,
+  checkWasmLanePrerequisites,
+  wasmLaneProbeBudgetMs,
+  buildWasmLaneTestArgs,
+  evaluateWasmLanePackageRun,
+  decideWasmLaneCaseParity,
   // logging + time
   log,
   warn,
@@ -886,6 +895,16 @@ async function main() {
           laneResourceSplit.shippedCfg.buildJobs,
         )
       : null;
+  // The wasm JS-boundary lane runs SERIALLY — no other cargo is live while it builds — so it takes the
+  // WHOLE `opts.buildJobs` ceiling rather than a share of it. Its per-target runner override is written
+  // into the child env from the absolute path the preflight proved on PATH, so `.cargo/config.toml` never
+  // acquires a repo-wide runner every unrelated wasm invocation would inherit. `buildCargoEnv` runs FIRST
+  // (it strips and rebuilds whole namespaces) and the override is installed after, so the strip cannot
+  // remove it.
+  const wasmCargoEnv =
+    opts.mode === "gate"
+      ? buildCargoEnv(process.env, laneLayout.wasmJsBoundary.targetDir, undefined, opts.buildJobs)
+      : null;
   let telemetry = null;
   let telemetryReporter = null;
   let telemetryFinalized = false;
@@ -1145,6 +1164,7 @@ async function main() {
         laneLayout,
         surfaceCargoEnv,
         shippedCargoEnv,
+        wasmCargoEnv,
         laneResourceSplit,
       });
     }
@@ -1512,14 +1532,14 @@ function stepOutput(result) {
 function persistLaneOutput(lane, receipt) {
   try {
     const output =
-      receipt.laneId === "surface-1"
-        ? receipt.output
-        : `${receipt.check?.output || ""}\n${receipt.contract?.output || ""}`;
+      receipt.laneId === "shipped-cfg"
+        ? `${receipt.check?.output || ""}\n${receipt.contract?.output || ""}`
+        : receipt.output;
     writeFileSync(lane.outputFile, output, "utf8");
   } catch (error) {
     receipt.exitCode = EXIT_USAGE;
     receipt.messages.push({
-      phaseId: receipt.laneId === "surface-1" ? "surface-1" : "shipped-check",
+      phaseId: receipt.laneId === "shipped-cfg" ? "shipped-check" : receipt.laneId,
       level: "error",
       text: `gate setup failed writing ${receipt.laneId} buffered output: ${error?.message || error}`,
     });
@@ -1808,18 +1828,213 @@ async function runShippedCfgLane(opts, ctx, { allSuites, commandPlan }) {
   return persistLaneOutput(lane, receipt);
 }
 
+// ----------------------------------------------------------------------------------------------------
+// WASM JS-BOUNDARY LANE.
+//
+// The workspace's `#[wasm_bindgen_test]` cases exist because a deserializer can visit only the fields a
+// schema declares and thereby never reach the closed-shape refusal at all: the refusal must be proven
+// where a browser caller meets it, against a real JS object graph. They are `#[cfg(target_arch = "wasm32")]`,
+// so the host archive cannot contain them and Surface 1 can never execute them. This lane does.
+//
+// It is REQUIRED on every real gate invocation, bare and exhaustive, and is NOT path-filtered: a gate that
+// only runs it when `crates/verter_wasm/**` changed would miss every regression introduced from the
+// session/protocol side of the same boundary. `--prepare` runs no test and never reaches here.
+// ----------------------------------------------------------------------------------------------------
+function runWasmLanePrerequisitePreflight(ctx) {
+  const { repoRealpath, cargoEnv, deadlineMs } = ctx;
+  const startedAtMs = nowMs();
+  const prereq = checkWasmLanePrerequisites({
+    repoRoot: repoRealpath,
+    // The SAME constructed env the lane's cargo child receives, so the runner the preflight resolves and
+    // pins is the runner the lane executes — never a PATH the preflight saw and the lane did not.
+    env: cargoEnv,
+    timeoutMs: wasmLaneProbeBudgetMs(deadlineMs, nowMs()),
+  });
+  recordTelemetryPhaseSafe(ctx, "wasm-prerequisite", {
+    status: prereq.ok ? "ok" : "failed",
+    startedAtMs,
+  });
+  if (!prereq.ok) {
+    for (const line of prereq.lines) err(line);
+    return { ok: false, prereq };
+  }
+  log(
+    `wasm JS-boundary preflight: ${prereq.packages.length} package(s) ` +
+      `(${prereq.packages.map((pkg) => `${pkg.name}=${prereq.perPackage[pkg.name]}`).join(", ")}), ` +
+      `${prereq.discoveredCases} discovered case(s); runner ${prereq.runnerPath} pinned at ` +
+      `${prereq.expectedVersion} by this tree's wasm-bindgen dependency`,
+  );
+  return { ok: true, prereq };
+}
+
+async function runWasmJsBoundaryLane(opts, ctx, { prereq }) {
+  const { repoRealpath, deadlineMs, stallMs, memoryLimitBytes, laneLayout, wasmCargoEnv } = ctx;
+  const lane = laneLayout.wasmJsBoundary;
+  const laneEnv = { ...wasmCargoEnv, [WASM_LANE_RUNNER_ENV_KEY]: prereq.runnerPath };
+  const receipt = {
+    laneId: WASM_LANE_ID,
+    status: "not-run",
+    hardFailure: false,
+    exitCode: null,
+    failures: [],
+    coverage: { parseable: false, complete: false },
+    parity: {
+      complete: false,
+      matches: false,
+      discoveredCases: prereq.discoveredCases,
+      selectedCases: 0,
+    },
+    output: "",
+    messages: [],
+  };
+
+  let selectedTotal = 0;
+  let executedTotal = 0;
+  let passedTotal = 0;
+  let failedTotal = 0;
+  let ignoredTotal = 0;
+  let parseable = true;
+  let complete = true;
+  const startedAtMs = nowMs();
+
+  for (const pkg of prereq.packages) {
+    const args = buildWasmLaneTestArgs({ packageName: pkg.name, exhaustive: opts.exhaustive });
+    const runRes = await ctx.supervisor.runStep(WASM_LANE_ID, {
+      cmd: "cargo",
+      args,
+      cwd: repoRealpath,
+      env: laneEnv,
+      phase: "test",
+      deadlineMs,
+      stallMs,
+      targetDir: lane.targetDir,
+      memoryLimitBytes,
+      mirrorOutput: false,
+    });
+    receipt.output += `$ cargo ${args.join(" ")}\n${stepOutput(runRes)}\n`;
+
+    if (runRes.reason) {
+      receipt.status = runRes.reason === "CANCELLED" ? "cancelled" : "aborted";
+      receipt.exitCode = runRes.reason === "CANCELLED" ? EXIT_USAGE : mapStepReason(runRes);
+      receipt.messages.push({
+        phaseId: WASM_LANE_ID,
+        level: "error",
+        text: `wasm JS-boundary lane ${runRes.reason} after ${Math.round(runRes.durationMs / 1000)}s`,
+      });
+      recordContainedStepTelemetry(ctx, WASM_LANE_ID, runRes);
+      return persistLaneOutput(lane, receipt);
+    }
+    if (runRes.spawnError) {
+      receipt.status = "aborted";
+      receipt.exitCode = EXIT_USAGE;
+      receipt.messages.push({
+        phaseId: WASM_LANE_ID,
+        level: "error",
+        text: "could not launch 'cargo' for the wasm JS-boundary lane (command not found / not executable)",
+      });
+      recordContainedStepTelemetry(ctx, WASM_LANE_ID, runRes);
+      return persistLaneOutput(lane, receipt);
+    }
+
+    // Every per-package judgement — transcript completeness, the unaccounted-failure rows, and this
+    // package's own selected/executed/declared reconciliation — is made by gate-internals'
+    // `evaluateWasmLanePackageRun`, so weakening any of them has to revert that function and the lane
+    // self-test can drive all of it without a wasm toolchain.
+    const expected = prereq.perPackage[pkg.name] || 0;
+    const pkgRun = evaluateWasmLanePackageRun({
+      packageName: pkg.name,
+      expected,
+      text: stepOutput(runRes),
+      exitCode: runRes.code,
+    });
+    const summary = pkgRun.summary;
+    parseable = parseable && pkgRun.parseable;
+    complete = complete && pkgRun.complete;
+    selectedTotal += summary.selected;
+    executedTotal += summary.passed + summary.failed;
+    passedTotal += summary.passed;
+    failedTotal += summary.failed;
+    ignoredTotal += summary.ignored;
+    for (const failure of pkgRun.failures) receipt.failures.push(failure);
+
+    receipt.messages.push({
+      phaseId: WASM_LANE_ID,
+      level: "log",
+      text:
+        `WASM JS-BOUNDARY [${pkg.name}] done in ${Math.round(runRes.durationMs / 1000)}s: ` +
+        `${summary.selected} selected (source scan declares ${expected}), ${summary.passed} passed, ` +
+        `${summary.failed} failed, ${summary.ignored} ignored across ${summary.resultBlocks} harness ` +
+        `result block(s); run exit ${runRes.code}`,
+    });
+    recordContainedStepTelemetry(ctx, WASM_LANE_ID, runRes);
+  }
+
+  // ONE comparison, made in ONE place (gate-internals' `decideWasmLaneCaseParity`) so a regression that
+  // weakens it to "did anything run at all" has to revert that function rather than an inline copy here.
+  // EXECUTED is passed+failed, never the announced count: `running N tests` is printed before the ignore
+  // filter runs, so a `#[ignore]`d boundary case would otherwise reconcile perfectly while proving nothing.
+  const parity = decideWasmLaneCaseParity(selectedTotal, prereq.discoveredCases, executedTotal);
+  receipt.coverage = { parseable, complete };
+  receipt.parity = {
+    complete: true,
+    matches: parity === null,
+    discoveredCases: prereq.discoveredCases,
+    selectedCases: selectedTotal,
+    executedCases: executedTotal,
+  };
+  if (parity) {
+    receipt.status = "failed";
+    receipt.messages.push({ phaseId: WASM_LANE_ID, level: "error", text: parity.message });
+    if (receipt.failures.length === 0) {
+      receipt.exitCode = parity.exit;
+      return persistLaneOutput(lane, receipt);
+    }
+    // The run already named a cause — failing cases, or a non-zero exit with none, which is what a wasm32
+    // compile break looks like. That cause explains the count shortfall, and an infrastructure exit code
+    // would discard it: the reducer drops `failures` whenever an exit code is present, so the run would be
+    // reported as an inventory bug with its actual diagnostic thrown away. Carry the names instead; the
+    // unmatched parity still keeps lane coverage incomplete, so this cannot read as a pass.
+    receipt.hardFailure = true;
+    return persistLaneOutput(lane, receipt);
+  }
+
+  receipt.hardFailure = receipt.failures.length > 0 || !complete;
+  receipt.status = receipt.hardFailure ? "failed" : "ok";
+  if (!complete && receipt.failures.length === 0) {
+    receipt.failures.push({
+      surface: "wasm:lane",
+      name: "<wasm JS-boundary harness produced no terminal `test result:` line for an announced run — the lane did not finish>",
+    });
+  }
+  receipt.messages.push({
+    phaseId: WASM_LANE_ID,
+    level: "log",
+    text:
+      `WASM JS-BOUNDARY done in ${Math.round(nowMs() - startedAtMs) / 1000}s: ` +
+      `${executedTotal}/${prereq.discoveredCases} discovered case(s) EXECUTED ` +
+      `(${selectedTotal} selected), ${passedTotal} passed, ${failedTotal} failed, ${ignoredTotal} ` +
+      `ignored on ${WASM_LANE_TARGET}`,
+  });
+  return persistLaneOutput(lane, receipt);
+}
+
 function replayGateLaneTranscript(receipts, ctx, allSuites) {
   const segments = SHIPPED_CFG_LANE_ENABLED
     ? canonicalGateLaneTranscriptSegments(receipts)
     : canonicalGateLaneTranscriptSegments(receipts).filter(
-        (segment) => segment.phaseId === "surface-1",
+        (segment) => segment.phaseId === "surface-1" || segment.phaseId === WASM_LANE_ID,
       );
   for (const segment of segments) {
     log(segment.header);
     if (segment.output) {
       process.stderr.write(segment.output.endsWith("\n") ? segment.output : `${segment.output}\n`);
     }
-    const owner = segment.phaseId === "surface-1" ? receipts.surface : receipts.shipped;
+    const owner =
+      segment.phaseId === "surface-1"
+        ? receipts.surface
+        : segment.phaseId === WASM_LANE_ID
+          ? receipts.wasm
+          : receipts.shipped;
     for (const message of owner?.messages || []) {
       if (message.phaseId !== segment.phaseId) continue;
       if (message.level === "error") err(message.text);
@@ -1947,6 +2162,9 @@ async function runGate(opts, ctx) {
     ctx.laneLayout.shippedCfg.targetDir,
     ctx.laneLayout.shippedCfg.workDir,
     dirname(ctx.laneLayout.shippedCfg.outputFile),
+    ctx.laneLayout.wasmJsBoundary.targetDir,
+    ctx.laneLayout.wasmJsBoundary.workDir,
+    dirname(ctx.laneLayout.wasmJsBoundary.outputFile),
   ]) {
     mkdirSync(path, { recursive: true });
   }
@@ -1987,6 +2205,30 @@ async function runGate(opts, ctx) {
   // (either axis below 2), orchestrateGateLanes runs them serially instead — see its `concurrent` option.
   // Shipped remains internally serial in either case (check -> contract), while Surface consumes the
   // immutable front archive through its own extract root. While the lane is skipped, only Surface 1 runs.
+  // The wasm lane runs FIRST among the lanes, and ALONE. Serialized, it holds the whole build/memory
+  // ceiling with no other cargo live, and its receipt exists before Surface 1's local fail-fast can end the
+  // run — so no verdict can be reached without one. On a wasm infrastructure abort, or on a hard failure
+  // under the bare (fail-fast) policy, the host lanes are not started at all: the single fixed-order
+  // reducer below then sees a missing Surface receipt and reports the same FAIL it reports for any other
+  // incomplete coverage, so this shortcut cannot become a second verdict authority.
+  //
+  // Its prerequisites are established HERE rather than among the pre-archive preflights, because those are
+  // deliberately node-only: they run before Cargo exists in the gate's world at all. This check needs a
+  // working `cargo` and Rust toolchain, so it belongs with the Cargo work, immediately before the one lane
+  // that consumes it. A missing prerequisite is still a LOUD setup failure naming the exact tool and the
+  // command that produces it — the gate installs nothing (its verdict must not depend on a mutation it
+  // performed) and never degrades to a skip.
+  const wasmPreflight = runWasmLanePrerequisitePreflight(ctx);
+  if (!wasmPreflight.ok) return EXIT_USAGE;
+  const wasmReceipt = await runWasmJsBoundaryLane(opts, ctx, { prereq: wasmPreflight.prereq });
+  const wasmBlocks = wasmReceipt.exitCode !== null || (!opts.exhaustive && wasmReceipt.hardFailure);
+  if (wasmBlocks) {
+    err(
+      "wasm JS-boundary lane did not pass; the host lanes were not started " +
+        `(${wasmReceipt.exitCode !== null ? "lane infrastructure abort" : "local fail-fast"})`,
+    );
+  }
+
   const runSurfaceLane = () =>
     runSurface1Lane(opts, ctx, {
       allSuites,
@@ -1994,7 +2236,9 @@ async function runGate(opts, ctx) {
       freshnessToleranceAllowed,
     });
   let receipts;
-  if (SHIPPED_CFG_LANE_ENABLED) {
+  if (wasmBlocks) {
+    receipts = { surface: null, shipped: null };
+  } else if (SHIPPED_CFG_LANE_ENABLED) {
     receipts = await orchestrateGateLanes({
       exhaustive: opts.exhaustive,
       concurrent: ctx.laneResourceSplit.concurrent,
@@ -2016,6 +2260,7 @@ async function runGate(opts, ctx) {
     });
     receipts = { surface: await runSurfaceLane(), shipped: null };
   }
+  receipts.wasm = wasmReceipt;
   replayGateLaneTranscript(receipts, ctx, allSuites);
 
   if (!SHIPPED_CFG_LANE_ENABLED) {
@@ -2025,6 +2270,12 @@ async function runGate(opts, ctx) {
   // ---------- Aggregate verdict ----------
   receipts.shippedCfgLaneEnabled = SHIPPED_CFG_LANE_ENABLED;
   const decision = reduceGateLaneReceipts(receipts);
+  // A reader who sees only the last line must be able to tell that the wasm JS-boundary lane ran and how
+  // many cases it EXECUTED. A verdict that names only the host surfaces cannot distinguish a run that
+  // proved those refusals from one that never reached them.
+  const wasmVerdictNote =
+    `wasm JS-boundary lane executed ${receipts.wasm?.parity?.executedCases ?? "?"}/` +
+    `${receipts.wasm?.parity?.discoveredCases ?? "?"} discovered case(s) on ${WASM_LANE_TARGET}`;
   if (decision.exitCode !== null) return decision.exitCode;
   if (decision.verdict === "FAIL") {
     err(
@@ -2043,8 +2294,8 @@ async function runGate(opts, ctx) {
   }
   log(
     SHIPPED_CFG_LANE_ENABLED
-      ? "VERDICT: PASS (surface 1 + the shipped-cfg guard both green)"
-      : `VERDICT: PASS (surface 1 green; ${SHIPPED_CFG_SKIP_VERDICT_NOTE})`,
+      ? "VERDICT: PASS (surface 1 + the shipped-cfg guard both green; " + wasmVerdictNote + ")"
+      : `VERDICT: PASS (surface 1 green; ${wasmVerdictNote}; ${SHIPPED_CFG_SKIP_VERDICT_NOTE})`,
   );
   return EXIT_PASS;
 }

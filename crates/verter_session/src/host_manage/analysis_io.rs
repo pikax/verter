@@ -238,7 +238,7 @@ impl VerterHost {
                 macros: &script_analysis.macros,
                 bindings: &script_analysis.bindings,
             },
-            &raw,
+            &raw.data,
             // This builder's only caller is the content-override lane
             // (`compute_override_template_analysis`): the bytes are a
             // compile-profile override layer the store never published.
@@ -258,7 +258,7 @@ impl VerterHost {
             &script_analysis.style_vbind_roots,
         );
         Some(Arc::new(crate::template_convert::convert_raw_to_analysis(
-            &raw,
+            (&raw).into(),
             &imports,
             &class_domains,
             Some(&unused_ctx),
@@ -380,7 +380,7 @@ impl VerterHost {
                     macros: &snapshot.macros,
                     bindings: &snapshot.bindings,
                 },
-                &raw,
+                &raw.data,
                 // The lane's own bytes attestation, threaded in by the caller
                 // that captured them: a live scheduler/workspace read at one
                 // generation is store-published; the session-overlay entry
@@ -408,7 +408,7 @@ impl VerterHost {
                 &snapshot.style_vbind_roots,
             );
             let tpl = crate::template_convert::convert_raw_to_analysis(
-                &raw,
+                (&raw).into(),
                 &imports,
                 &class_domains,
                 Some(&unused_ctx),
@@ -479,7 +479,7 @@ impl VerterHost {
     /// 2. **Lock discipline.** Fact validation may enter broader host/cache
     ///    paths. No `derived_raw_cache` shard guard may cross that boundary or
     ///    overlap a writer such as `persist_raw_template_analysis`.
-    fn validated_raw_template_analysis(
+    pub(crate) fn validated_raw_template_analysis(
         &self,
         canonical: &str,
         source_generation: u64,
@@ -644,7 +644,7 @@ impl VerterHost {
                         framework_parse.as_deref(),
                         &source,
                         &self.provenance,
-                    );
+                    )?;
                     // Producer-side locator absolutization for the narrowed-scope
                     // rebuild lane (the artifact-facing builder is canonical-free;
                     // the stored-snapshot branch was absolutized at snapshot build).
@@ -809,7 +809,7 @@ impl VerterHost {
                     view,
                 )?;
                 let parsed = Arc::clone(structure.artifact());
-                let parse = crate::parse::carrier_snapshot_from_artifact(
+                let (parse, _) = crate::parse::carrier_snapshot_from_artifact(
                     canonical.as_str(),
                     &source,
                     self.config.effective_scope(),
@@ -1571,10 +1571,12 @@ impl VerterHost {
     /// canonical file, or `None` if the canonical has not been processed by the
     /// scheduler (WASM / unloaded / pre-parse routing).
     ///
-    /// Used by cache-key sites that need a stable `source_type` for the same
-    /// `(canonical_id, whole_hash)` pair regardless of whether the caller
-    /// currently holds the parsed SFC. See [`crate::host_executor::imported_eval_source_type`]
+    /// Cold IndexedReady materialization reads `source_type` from the same
+    /// held [`crate::host_executor::HostSourceData`] as parse facts and
+    /// eval-source — not through this reread. Tests still use it to pin
+    /// the stored scheduler value. See [`crate::host_executor::imported_eval_source_type`]
     /// for the pure function the scheduler invokes once at parse time.
+    #[cfg(test)]
     pub(crate) fn authoritative_source_type_for(
         &self,
         canonical: &str,
