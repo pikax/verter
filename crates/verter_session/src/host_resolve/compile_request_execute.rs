@@ -395,6 +395,13 @@ impl VerterHost {
                     // fails the whole request naming the kind, rather than
                     // aborting the caller's thread on a premise the
                     // accessor does not carry.
+                    //
+                    // No production input reaches this arm today — every
+                    // admitted IDE product publishes TSX, including for an
+                    // empty carrier — so unlike the Analysis arm below it
+                    // has no discriminating public-boundary test. It stays
+                    // because the accessor is an `Option` and the
+                    // alternative to handling `None` is a panic.
                     let Some(ide) = products.ide_companion() else {
                         return Err(CompileRequestFailure::ProductNotProduced {
                             canonical_id: canonical,

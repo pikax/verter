@@ -627,6 +627,42 @@ Feature-gated (`scheduler`): `VerterHost` holds an `Arc<Scheduler>`. During `ups
 - **Target-sensitive macro demand.** `compile_entry` requests runtime, TSC, or both from the TypeInfo producer based on `CompileTarget`. Empty output still replaces the semantic transitive-dependency axis with an empty set.
 - **Typed macro degradation.** Producer entries carry `Complete`, `Partial`, `Unresolved`, or `Unsupported` outcomes. The compiler accepts only a complete projection with the expected role; missing bundles, degraded entries, or role mismatches fail closed at the authored macro/type anchor. No member is silently reconstructed from parser semantics.
 
+### Canonical Typed Request Seam (`compile_request` / `compile_request_many`)
+
+`VerterHost::compile_request(canonical_id, CompileRequest)` executes a
+caller-supplied canonical compile request against a source the caller
+already registered. It is the typed alternative to the profile-derived
+routes above, and the two differ in WHO owns the demand:
+
+- **The request IS the demand document.** No `CompileProfile` is built from
+  it and none is consulted: the products the caller listed are the products
+  executed, in request order. An axis the bound execution cannot honour
+  refuses typed at construction or admission — never a silent default.
+- **Complete-only results.** A `CompileRequestResponse` carries the canonical
+  id, one diagnostics set for the whole transaction, and one
+  `CompiledProduct` row per requested kind. An admitted product whose payload
+  the carrier did not publish fails the WHOLE request as
+  `CompileRequestFailure::ProductNotProduced`, naming the kind — never a
+  partial response the caller has to inspect for holes.
+- **Runtime products publish addressed nodes.** `CompiledProduct::Runtime`
+  carries `CompiledVirtualNode` rows (`node`, `code`, `source_map`, `lang`,
+  `meta`) in stable node order. Those five fields are the equivalence
+  contract against `get_virtual_file`: `lang` is what a consumer routes on
+  and `meta.scope_id` is the scoped-CSS linkage, so both are compared, not
+  just the bytes.
+- **`compile_request_many(inputs, CompileRequestBatchOptions)`** registers each
+  canonical's source EXACTLY once for the whole batch and then executes each
+  input's own request, returning one entry per input in ORIGINAL input order.
+  Two inputs may name one canonical with different requests (one
+  registration, two executions); two inputs naming one canonical with
+  different BYTES is a conflict reported on both entries — the batch never
+  picks a winner. A per-input failure isolates to that entry.
+- **No compile cache slot.** This route consults and publishes none, so
+  distinct requests for one canonical are distinct compiles.
+
+Native-only (`#[cfg(not(target_arch = "wasm32"))]`), along with the bound
+framework host backends it executes through.
+
 ### LSP Integration
 
 LSP file ingestion goes through the one shared upsert engine: `did_open`/`did_change` call `VerterHost::upsert` (→ `upsert_many_with_priority` → one `Scheduler::submit_batch_atomic`), which owns generation tracking, request-context propagation, post-commit cache invalidation, and the canonical-uniqueness contract. No separate LSP-side `submit_request` shim — a file is never source-updated outside the engine (the sole direct `submit_request` is `host_lifecycle.rs` disk-reload with `source: None`, a read). `compile_blockers.rs` is deprecated -- the scheduler's blocker model replaces imperative hydration.

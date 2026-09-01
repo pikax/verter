@@ -150,26 +150,30 @@ fn analysis() -> CompileProduct {
 /// The nodes of the (single) runtime row, by kind.
 fn runtime_nodes(
     response: &crate::types::CompileRequestResponse,
-) -> Vec<(VirtualNodeKind, Arc<str>, Option<Arc<str>>)> {
+) -> Vec<&crate::types::CompiledVirtualNode> {
     response
         .products
         .iter()
         .find_map(|product| match product {
-            CompiledProduct::Runtime { nodes, .. } => Some(
-                nodes
-                    .iter()
-                    .map(|node| {
-                        (
-                            node.node.clone(),
-                            node.code.clone(),
-                            node.source_map.clone(),
-                        )
-                    })
-                    .collect(),
-            ),
+            CompiledProduct::Runtime { nodes, .. } => Some(nodes.iter().collect()),
             _ => None,
         })
         .expect("a runtime product row is present")
+}
+
+/// `VirtualMeta` as a comparable tuple. The scope id is the scoped-CSS
+/// linkage between a Main node and its style nodes, so a seam that
+/// published the right bytes under the wrong scope id would hand a
+/// consumer output whose styles no longer bind.
+fn meta_key(
+    meta: &crate::types::VirtualMeta,
+) -> (Option<&str>, Option<&str>, Option<usize>, Option<usize>) {
+    (
+        meta.scope_id.as_deref(),
+        meta.block_type.as_deref(),
+        meta.style_index,
+        meta.custom_index,
+    )
 }
 
 /// The seam's published node kinds for the (single) runtime row, as a
@@ -180,7 +184,7 @@ fn runtime_nodes(
 fn published_node_kinds(response: &crate::types::CompileRequestResponse) -> Vec<String> {
     let mut kinds: Vec<String> = runtime_nodes(response)
         .into_iter()
-        .map(|(node, _, _)| format!("{node:?}"))
+        .map(|node| format!("{:?}", node.node))
         .collect();
     kinds.sort();
     kinds
@@ -245,18 +249,31 @@ fn assert_runtime_nodes_match_legacy(
 
     let nodes = runtime_nodes(response);
     assert!(!nodes.is_empty(), "a zero-node runtime row proves nothing");
-    for (node, code, map) in nodes {
-        let (legacy_code, legacy_map) =
-            legacy_virtual_file(host, canonical_id, node.clone(), profile);
+    for published in nodes {
+        let node = &published.node;
+        let legacy = legacy_virtual_response(host, canonical_id, node.clone(), profile);
         assert_eq!(
-            code.as_ref(),
-            legacy_code.as_ref(),
+            published.code.as_ref(),
+            legacy.code.as_ref(),
             "{node:?} bytes must match the legacy route"
         );
         assert_eq!(
-            map.as_deref(),
-            legacy_map.as_deref(),
+            published.source_map.as_deref(),
+            legacy.source_map.as_deref(),
             "{node:?} source map must match the legacy route"
+        );
+        // A node carries more than bytes: consumers route on `lang` and
+        // bind scoped styles through `meta.scope_id`, so an equivalence
+        // that compares only code and map lets both drift silently.
+        assert_eq!(
+            published.lang.as_deref(),
+            legacy.lang.as_deref(),
+            "{node:?} output language must match the legacy route"
+        );
+        assert_eq!(
+            meta_key(&published.meta),
+            meta_key(&legacy.meta),
+            "{node:?} virtual metadata must match the legacy route"
         );
     }
 }
@@ -279,21 +296,15 @@ fn one_call_compiles_a_registered_source_from_its_canonical_request() {
     assert_eq!(response.products.len(), 1);
     let nodes = runtime_nodes(&response);
     assert!(
-        nodes
-            .iter()
-            .any(|(kind, _, _)| *kind == VirtualNodeKind::Main),
+        nodes.iter().any(|n| n.node == VirtualNodeKind::Main),
         "the runtime row publishes its assembled main module: {:?}",
-        nodes.iter().map(|(k, _, _)| k).collect::<Vec<_>>()
+        nodes.iter().map(|n| &n.node).collect::<Vec<_>>()
     );
+    assert!(nodes.iter().any(|n| n.node == VirtualNodeKind::Script));
+    assert!(nodes.iter().any(|n| n.node == VirtualNodeKind::Template));
     assert!(nodes
         .iter()
-        .any(|(kind, _, _)| *kind == VirtualNodeKind::Script));
-    assert!(nodes
-        .iter()
-        .any(|(kind, _, _)| *kind == VirtualNodeKind::Template));
-    assert!(nodes
-        .iter()
-        .any(|(kind, _, _)| matches!(kind, VirtualNodeKind::Style { index: 0 })));
+        .any(|n| matches!(n.node, VirtualNodeKind::Style { index: 0 })));
 }
 
 /// An alias resolves ONCE, at the entry: the response reports the
@@ -545,12 +556,12 @@ fn the_server_runtime_kind_is_its_own_demand_and_output() {
 
     let server_template = runtime_nodes(&server)
         .into_iter()
-        .find(|(kind, _, _)| *kind == VirtualNodeKind::Template)
-        .map(|(_, code, _)| code);
+        .find(|n| n.node == VirtualNodeKind::Template)
+        .map(|n| n.code.clone());
     let client_template = runtime_nodes(&client)
         .into_iter()
-        .find(|(kind, _, _)| *kind == VirtualNodeKind::Template)
-        .map(|(_, code, _)| code);
+        .find(|n| n.node == VirtualNodeKind::Template)
+        .map(|n| n.code.clone());
     assert_ne!(
         server_template, client_template,
         "the ssr and client runtime demands must not produce the same render output"
@@ -571,7 +582,7 @@ fn the_requests_source_map_axis_reaches_the_output() {
     assert!(
         runtime_nodes(&without)
             .iter()
-            .all(|(_, _, map)| map.is_none()),
+            .all(|n| n.source_map.is_none()),
         "no node carries a map when the request asked for none"
     );
 
@@ -579,7 +590,7 @@ fn the_requests_source_map_axis_reaches_the_output() {
         .compile_request("/src/App.vue", vue_request(vec![runtime_client(true)]))
         .expect("executes");
     assert!(
-        runtime_nodes(&with).iter().any(|(_, _, map)| map.is_some()),
+        runtime_nodes(&with).iter().any(|n| n.source_map.is_some()),
         "asking for maps produces at least one"
     );
 }
