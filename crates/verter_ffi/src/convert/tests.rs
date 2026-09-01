@@ -4078,3 +4078,251 @@ fn reasonless_partial_publishes_the_inherited_partiality_reason() {
          an empty reason list",
     );
 }
+
+// ── Unresolved-import prop surfaces vs a genuinely empty one ─────────
+
+/// The props type is imported from a module that does not exist at all.
+const MISSING_MODULE_SFC: &str = r#"<script setup lang="ts">
+import type { AbsentModuleProps } from './no-such-module'
+defineProps<AbsentModuleProps>();
+</script>
+<template><div /></template>
+"#;
+
+/// A real module that does NOT export the name the component imports.
+const PRESENT_MODULE_TS: &str = r#"
+export interface SomethingElse { other: string }
+"#;
+
+const MISSING_EXPORT_SFC: &str = r#"<script setup lang="ts">
+import type { AbsentExportProps } from './presentModule'
+defineProps<AbsentExportProps>();
+</script>
+<template><div /></template>
+"#;
+
+/// The resolvable control: the same import SHAPE, resolving for real. It
+/// proves the import-backed props path is live on this session, so an empty
+/// surface on the two unresolved components is a resolution failure and not
+/// a fixture that never declared anything.
+const RESOLVABLE_SOURCE_TS: &str = r#"
+export interface ResolvableProps { title: string; size: number }
+"#;
+
+const RESOLVABLE_SFC: &str = r#"<script setup lang="ts">
+import type { ResolvableProps } from './resolvableSource'
+defineProps<ResolvableProps>();
+</script>
+<template><div /></template>
+"#;
+
+fn unresolved_import_host() -> host::VerterHost {
+    let session = host::VerterHost::new_standalone(host::HostConfig::default());
+    for (canonical, source, language) in [
+        (
+            "/presentModule.ts",
+            PRESENT_MODULE_TS,
+            host::FileLanguage::script_ts(),
+        ),
+        (
+            "/resolvableSource.ts",
+            RESOLVABLE_SOURCE_TS,
+            host::FileLanguage::script_ts(),
+        ),
+        (
+            "/MissingModule.vue",
+            MISSING_MODULE_SFC,
+            host::FileLanguage::vue(),
+        ),
+        (
+            "/MissingExport.vue",
+            MISSING_EXPORT_SFC,
+            host::FileLanguage::vue(),
+        ),
+        ("/Resolvable.vue", RESOLVABLE_SFC, host::FileLanguage::vue()),
+        ("/Propsless.vue", PROPSLESS_SFC, host::FileLanguage::vue()),
+    ] {
+        let _ = session
+            .upsert(host::UpsertRequest {
+                canonical_id: Some(canonical.to_string()),
+                input_id: canonical.to_string(),
+                source: Arc::from(source),
+                file_language: language,
+                aliases: Vec::new(),
+            })
+            .expect("registered carrier");
+    }
+    session
+}
+
+/// A prop surface that is empty ONLY because its declaration owner could not
+/// be resolved must not publish the payload a genuinely props-less component
+/// publishes. Both unresolved shapes — the module that does not exist and the
+/// module that does not export the name — carry an authored declaration the
+/// resolver never reached, so the payload is a SUBSET of what was written.
+/// Publishing it as complete + exact + no-degradation is the wrong-complete
+/// outcome: the consumer cannot tell "nothing is declared" from "we failed to
+/// find what is declared".
+///
+/// Four ways, on both wire lanes: the two unresolved shapes must differ from
+/// BOTH the props-less component and the resolvable control, and the
+/// resolvable control proves the import-backed path is live.
+#[test]
+fn ffi_component_meta_distinguishes_unresolved_import_from_empty_surface() {
+    let session = unresolved_import_host();
+
+    // ── The control: the import-backed props path is LIVE ────────────
+    let resolvable = wire_payload(&session, "/Resolvable.vue");
+    assert_eq!(
+        resolvable
+            .props
+            .iter()
+            .map(|prop| prop.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["title", "size"],
+        "fixture premise: an imported props interface resolves on this \
+         session, so an empty surface elsewhere is a resolution failure",
+    );
+    assert_eq!(
+        resolvable.result_completeness,
+        FfiResultCompleteness::Complete,
+        "a fully resolved import-backed surface is complete",
+    );
+
+    // ── The props-less baseline stays complete + exact ───────────────
+    let propsless = wire_payload(&session, "/Propsless.vue");
+    assert!(
+        propsless.props.is_empty(),
+        "fixture premise: the props-less component publishes no props",
+    );
+    assert_eq!(
+        propsless.result_completeness,
+        FfiResultCompleteness::Complete,
+        "a genuinely props-less component is COMPLETE and empty",
+    );
+    let FfiComponentContractAvailability::Supported { contract } =
+        &propsless.component_public_contract
+    else {
+        panic!("fixture premise: the props-less component projects a contract")
+    };
+    assert!(
+        matches!(contract.exactness, FfiContractExactness::Exact),
+        "a complete, genuinely-empty surface stays exact",
+    );
+
+    // The published signature the two unresolved shapes must NOT reproduce:
+    // complete + exact + no degradation + no props.
+    let propsless_signature = serde_json::json!({
+        "resultCompleteness": serde_json::to_value(&propsless.result_completeness).unwrap(),
+        "contract": serde_json::to_value(&propsless.component_public_contract).unwrap(),
+        "props": serde_json::to_value(&propsless.props).unwrap(),
+    });
+
+    // ── Both unresolved shapes publish Partial(MissingDependency) ────
+    for (canonical, shape) in [
+        ("/MissingModule.vue", "the module does not exist"),
+        ("/MissingExport.vue", "the module does not export the name"),
+    ] {
+        let payload = wire_payload(&session, canonical);
+
+        // The SUBSET premise: the author declared a props type and the
+        // resolver published none of it. That is precisely why the
+        // completeness axis below has to carry the difference — the props
+        // lane cannot.
+        assert!(
+            payload.props.is_empty(),
+            "{canonical} ({shape}): fixture premise — the unresolved surface \
+             publishes no props, so only the completeness axis separates it \
+             from a props-less component",
+        );
+        let signature = serde_json::json!({
+            "resultCompleteness": serde_json::to_value(&payload.result_completeness).unwrap(),
+            "contract": serde_json::to_value(&payload.component_public_contract).unwrap(),
+            "props": serde_json::to_value(&payload.props).unwrap(),
+        });
+        assert_ne!(
+            signature, propsless_signature,
+            "{canonical} ({shape}) publishes a payload byte-identical to a \
+             genuinely props-less component — a consumer cannot tell \
+             \"nothing is declared\" from \"we failed to find what is \
+             declared\"",
+        );
+
+        let FfiResultCompleteness::Partial { reasons } = &payload.result_completeness else {
+            panic!(
+                "{canonical} ({shape}) authored a props declaration the \
+                 resolver never reached; publishing it as {:?} is \
+                 byte-identical to a props-less component",
+                payload.result_completeness,
+            );
+        };
+        assert!(
+            reasons.contains(&FfiSurfacePartialReason::MissingDependency),
+            "{canonical} ({shape}) degraded because an imported dependency \
+             owner could not be resolved — the class the taxonomy already \
+             names (got {reasons:?})",
+        );
+
+        let FfiComponentContractAvailability::Supported { contract } =
+            &payload.component_public_contract
+        else {
+            panic!("{canonical}: fixture premise: the component projects a contract")
+        };
+        assert!(
+            matches!(contract.exactness, FfiContractExactness::Degraded),
+            "{canonical} ({shape}): a partial result never claims an exact \
+             public contract",
+        );
+
+        // The sidecar-less lane has no resolution sidecar to read the state
+        // off, so it must carry the same degradation from the resolve.
+        let plain = sidecar_less_wire_payload(&session, canonical);
+        assert_eq!(
+            plain.result_completeness, payload.result_completeness,
+            "{canonical} ({shape}): the sidecar-less lane publishes the SAME \
+             partial state",
+        );
+
+        // The protobuf lane a NAPI consumer decodes carries it too.
+        let (kind, proto_reasons) = proto_completeness(&payload);
+        assert_eq!(
+            kind,
+            verter_protocol::verter::v1::ResultCompletenessKind::Partial as i32,
+            "{canonical} ({shape}): the protobuf lane carries the partial state",
+        );
+        assert!(
+            proto_reasons.contains(
+                &(verter_protocol::verter::v1::SurfacePartialReason::MissingDependency as i32)
+            ),
+            "{canonical} ({shape}): the protobuf lane names the missing \
+             dependency (got {proto_reasons:?})",
+        );
+    }
+
+    // ── Neither unresolved result is warm-admitted ───────────────────
+    // The resolvable control and the props-less component are the only two
+    // complete results; a warm partial would replay as complete forever.
+    let warm = session.project_type_store().component_meta_results();
+    assert_eq!(
+        warm.len(),
+        2,
+        "only the two COMPLETE results warm-admit: an unresolved-import \
+         result would poison the shared final-result cache",
+    );
+    for canonical in ["/MissingModule.vue", "/MissingExport.vue"] {
+        let refreshed = wire_payload(&session, canonical);
+        assert!(
+            matches!(
+                refreshed.result_completeness,
+                FfiResultCompleteness::Partial { .. }
+            ),
+            "{canonical}: a recomputed partial reproduces the partial state",
+        );
+    }
+    assert_eq!(
+        session.project_type_store().component_meta_results().len(),
+        2,
+        "the unresolved-import results are still refused warm admission on \
+         the second request",
+    );
+}

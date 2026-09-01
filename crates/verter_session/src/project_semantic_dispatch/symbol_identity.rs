@@ -658,6 +658,18 @@ fn partial_reason(reasons: PartialReasonSet) -> PropCallableRoleUnresolvedReason
     }
 }
 
+/// The typed [`PartialReasonSet`] one [`QueryError`] carrier contributes when
+/// a consumer refuses to publish a surface built on it.
+///
+/// The ONE composition of the two classifiers below, so a second consumer
+/// cannot spell a divergent class for the same carrier: an unresolved
+/// declaration is a missing dependency, a budget trip is a budget trip, and a
+/// cycle carrier is a same-path recursion.
+#[must_use]
+pub(crate) fn query_error_partial_reasons(error: &QueryError) -> PartialReasonSet {
+    reason_partial_set(query_error_reason(error))
+}
+
 fn query_error_reason(error: &QueryError) -> PropCallableRoleUnresolvedReason {
     match error {
         QueryError::Miss | QueryError::DeclPlaceholder { .. } | QueryError::RaiseMiss => {

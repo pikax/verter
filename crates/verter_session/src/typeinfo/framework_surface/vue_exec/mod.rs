@@ -179,6 +179,40 @@ pub(crate) struct UnresolvedSurfaceArm {
     pub(crate) owner: verter_type_expr::TopLevelOwnerId,
 }
 
+/// The typed partiality an UNRESOLVABLE macro-type-argument ROOT contributes.
+///
+/// `None` means the root resolved to a real surface the caller can project.
+/// Every `Some` is the resolver's OWN proof that the authored root could not
+/// be reached, so the surface the producer would publish is a SUBSET of what
+/// the author wrote — the case an empty published surface must never be
+/// confused with:
+///
+/// - an authored reference Navigate preserved as a carrier (`BareRef` /
+///   `ImportType`) — the declaration owner did not resolve, which is exactly
+///   the imported-dependency class the taxonomy already names;
+/// - a body the lowerer kept as raw text (`RawFallback`) — no structural
+///   surface was produced;
+/// - a typed failure carrier (`Opaque`), which names its own class through the
+///   shared query-error classification;
+/// - no interned node at all under the resolved id.
+fn unresolved_macro_root_partiality(
+    base: Option<&SemanticNodeData>,
+) -> Option<crate::semantic_query::PartialReasonSet> {
+    use crate::semantic_query::PartialReasonSet;
+
+    match base {
+        None => Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA),
+        Some(SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)) => {
+            Some(PartialReasonSet::MISSING_DEPENDENCY)
+        }
+        Some(SemanticNodeData::RawFallback { .. }) => Some(PartialReasonSet::SEMANTIC_QUERY_FAULT),
+        Some(SemanticNodeData::Opaque(error)) => Some(
+            crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(error),
+        ),
+        Some(_) => None,
+    }
+}
+
 /// Extract the unresolved SURFACE-COMPOSITION arm facts from a projection's
 /// walker diagnostics, name-sorted (then by declaring file) and deduplicated
 /// so consumers emit deterministically ordered reports.
@@ -629,19 +663,25 @@ impl VerterHost {
             crate::semantic_query::HotTypeRef::new(base_carrier),
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
         );
-        if matches!(
+        // Navigate preserves an authored reference as a carrier when its
+        // declaration cannot currently be resolved. That carrier is the
+        // resolver-owned proof that the root surface is unavailable, not an
+        // authoritative empty slot surface.
+        //
+        // Dropping the surface here publishes an EMPTY macro-DTO bundle, which
+        // is byte-identical to the bundle a component that authored no macro
+        // type at all publishes. So the drop RECORDS its typed partiality into
+        // the producer's cold-compute completeness scope: the empty bundle is
+        // returned to the caller as PARTIAL, is refused surface-store
+        // admission, and reaches the published payload as a degraded surface
+        // instead of a wrong-complete silence.
+        let unresolved_root = unresolved_macro_root_partiality(
             crate::project_semantic_dispatch::node_data_for(ctx, base).as_deref(),
-            None | Some(
-                SemanticNodeData::BareRef(_)
-                    | SemanticNodeData::ImportType(_)
-                    | SemanticNodeData::RawFallback { .. }
-                    | SemanticNodeData::Opaque(_)
-            )
-        ) {
-            // Navigate preserves an authored reference as a carrier when its
-            // declaration cannot currently be resolved. That carrier is the
-            // resolver-owned proof that the root surface is unavailable, not
-            // an authoritative empty slot surface.
+        );
+        if let Some(reasons) = unresolved_root {
+            crate::request_context::fold_result_completeness(
+                crate::semantic_query::ResultCompleteness::partial(reasons),
+            );
             return None;
         }
 
