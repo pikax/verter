@@ -5751,6 +5751,11 @@ export enum ExpansionStopReason {
   INFINITE_KEY_SPACE = 5,
 
   /**
+   * Also carries a construct that IS supported but whose producer had not
+   * run at the point the surface was read (a pending flow root). Renderers
+   * must not present this tag as "the construct is unsupported" without
+   * consulting the diagnostic's `context`, which names the specific gap.
+   *
    * @generated from enum value: EXPANSION_STOP_REASON_UNSUPPORTED_OPERATOR = 6;
    */
   UNSUPPORTED_OPERATOR = 6,

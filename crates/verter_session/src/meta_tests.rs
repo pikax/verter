@@ -28150,7 +28150,7 @@ defineEmits<{ change: [value: number]; close: [] }>()
         "/App.vue",
         analysis.clone(),
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("the untampered analysis must materialize");
     let (_a, _r, ok_types) = ok.into_parts();
@@ -28184,7 +28184,7 @@ defineEmits<{ change: [value: number]; close: [] }>()
         "/App.vue",
         tampered,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect_err(
         "a present-but-unraisable payload source must FAIL the output with a typed \
@@ -28268,7 +28268,7 @@ defineEmits<{ (event: 'change', value: number): boolean }>()
         "/App.vue",
         analysis,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect_err("a failed callable return must fail output materialization");
     assert_eq!(
@@ -29271,7 +29271,7 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
         "/App.vue",
         analysis,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("None sources never fail materialization");
     let (analysis, _resolution, types) = output.into_parts();
@@ -29358,7 +29358,7 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
         "/App.vue",
         analysis,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect_err("an unraisable present source must FAIL the output");
     assert_eq!(
@@ -29419,7 +29419,7 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
         "/App.vue",
         analysis,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect_err("an unraisable fallthrough source must FAIL the output");
     assert_eq!(
@@ -29471,7 +29471,7 @@ fn component_meta_output_recovers_after_missing_dependency_is_available() {
         "/App.vue",
         analysis.clone(),
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect_err("the dependency file does not exist yet — the output must fail typed");
     assert_eq!(err.lane, crate::meta_resolve::ComponentMetaOutputLane::Prop);
@@ -29485,7 +29485,7 @@ fn component_meta_output_recovers_after_missing_dependency_is_available() {
         "/App.vue",
         analysis,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("the SAME source succeeds once the dependency is available");
     let lanes = output.into_parts().2.into_lanes();
@@ -29542,7 +29542,7 @@ fn build_output_with_prop_source(
         "/App.vue",
         analysis,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
 }
 
@@ -30422,7 +30422,7 @@ defineProps<{ own: SharedAlias }>()
         "/Parent.vue",
         analysis,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("the nested composite inherited source materializes under its producing scope");
     let lanes = output.into_parts().2.into_lanes();
@@ -30542,7 +30542,7 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
         "/App.vue",
         analysis,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("closed sources materialize");
     let calls =
@@ -30637,7 +30637,7 @@ fn output_memo_hash_work_is_one_traversal_per_lane_slot() {
         "/App.vue",
         analysis,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("the repeated composite source materializes");
     let calls =
@@ -30784,7 +30784,7 @@ const cond = true
         "/App.vue",
         probe,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("the closed inherited source materializes");
     let calls =
@@ -30859,7 +30859,7 @@ fn output_registry_overlay_finalize_replaces_in_place_and_appends() {
         "/App.vue",
         analysis,
         Some(seed),
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("closed registry sources materialize");
     let (analysis, resolution, types) = output.into_parts();
@@ -31728,7 +31728,7 @@ defineEmits<{ save: [id: number] }>()
         "/App.vue",
         analysis.clone(),
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("a present source materializes");
     let (_analysis, _resolution, types) = output.into_parts();
@@ -31748,7 +31748,7 @@ defineEmits<{ save: [id: number] }>()
         "/App.vue",
         absent,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("schema absence keeps materializing the output");
     let (_analysis, _resolution, types) = output.into_parts();
@@ -31772,7 +31772,7 @@ defineEmits<{ save: [id: number] }>()
         "/App.vue",
         failed,
         None,
-        crate::semantic_query::ResultCompleteness::Complete,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("a typed failed publication remains an occurrence-owned output row");
     let (_analysis, _resolution, types, contract, _completeness) =
@@ -33983,5 +33983,257 @@ fn an_entry_form_over_a_call_spread_reaches_the_runtime_lane_intact() {
         !numeric.contains("1:"),
         "/src/F2NumericKey.vue: the numeric-named member does not reach the runtime props \
          option today — if it starts to, this assertion is the place that says so:\n{numeric}"
+    );
+}
+
+/// Build the fixture whose partiality is reachable ONLY through the extract
+/// phase: a WIDE child (24 inherited prop interfaces) whose surface the parent
+/// touches solely through its fallthrough compute, and a parent whose own
+/// macro surface is a single inline literal.
+///
+/// With a projection budget large enough for the parent's own resolve but too
+/// small for the fallthrough walk over the child's surface,
+/// `resolved.completeness` stays Complete while the extract scope trips —
+/// exactly the shape the resolve-phase term cannot see. A generous budget is
+/// the control: nothing trips, the result is Complete, and it warms.
+#[cfg(not(target_arch = "wasm32"))]
+fn extract_only_partial_project(projection_op_budget: usize) -> Arc<MetaProject> {
+    use std::fmt::Write as _;
+    let project = make_project_with_config(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget,
+        ..HostConfig::default()
+    });
+    let mut helper = String::new();
+    for n in 1..=24u32 {
+        let _ = writeln!(helper, "export interface P{n:02} {{ a{n:02}: string }}");
+    }
+    let _ = writeln!(
+        helper,
+        "export interface ChildProps extends {} {{ label: string }}",
+        (1..=24u32)
+            .map(|n| format!("P{n:02}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    project.upsert_base("/src/child_props.ts", &helper).unwrap();
+    project
+        .upsert_base(
+            "/src/WideChild.vue",
+            "<script setup lang=\"ts\">\nimport type { ChildProps } from './child_props'\ndefineProps<ChildProps>()\n</script>\n<template><div /></template>",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/WideParent.vue",
+            "<script setup lang=\"ts\">\nimport Child from '/src/WideChild.vue'\ndefineProps<{ title: string }>()\n</script>\n<template><Child label=\"x\" /></template>",
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/WideChild.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./child_props".to_string(),
+            resolved_canonical_id: Some("/src/child_props.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/WideParent.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "/src/WideChild.vue".to_string(),
+            resolved_canonical_id: Some("/src/WideChild.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project
+}
+
+/// The budget at which the parent's OWN resolve completes but the fallthrough
+/// extract trips. Measured on this fixture: the window is 4..=100 (below 4 the
+/// resolve itself is partial, so the resolve term would already carry it; at
+/// 150 and above nothing trips at all).
+#[cfg(not(target_arch = "wasm32"))]
+const EXTRACT_ONLY_PARTIAL_BUDGET: usize = 20;
+
+/// The completeness an OUTPUT ENVELOPE publishes must be the SAME merged
+/// signal the result-cache admission gate refuses on
+/// (`resolved.completeness.merge(extract_scope_completeness)`), never the
+/// resolve-phase term alone.
+///
+/// Extract-phase partiality has two sources the resolve phase cannot observe:
+/// the pre-choke macro-DTO read and the fallthrough cold compute. A component
+/// whose own macro surface resolves cleanly but whose fallthrough walk over a
+/// wide child root trips the projection fuse is partial ONLY in the extract
+/// scope. Publishing the resolve term alone makes that payload serialize as
+/// `Complete` while the very same compute permanently refuses to warm it — the
+/// wrong-complete outcome the wire field exists to prevent.
+///
+/// The two premise assertions pin the fixture in that exact state (own resolve
+/// Complete + admission refused), so a drift in the measured budget window
+/// fails loudly here instead of silently un-discriminating the test. The
+/// generous-budget control proves the merge does not blanket-degrade.
+///
+/// RED proof: pass `resolved.completeness` at the cold output entry instead of
+/// the merged signal and the envelope reports Complete while
+/// `has_owner_entry_in_test` stays false — the discriminating assertion fails.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn output_envelope_completeness_carries_extract_phase_partiality() {
+    let project = extract_only_partial_project(EXTRACT_ONLY_PARTIAL_BUDGET);
+    let host = project.host();
+
+    // PREMISE 1 — the parent's OWN resolve is Complete, so the resolve term
+    // alone cannot carry the partiality and the test discriminates.
+    let resolved = host
+        .resolve_component_meta(
+            "/src/WideParent.vue",
+            crate::types::ProjectionMode::Expanded,
+        )
+        .expect("the parent resolves");
+    assert!(
+        !resolved.completeness.is_partial(),
+        "the parent's own macro surface must resolve COMPLETE at this budget — otherwise the \
+         resolve-phase term already carries the partiality and this test proves nothing"
+    );
+
+    let (.., completeness) = host
+        .get_component_meta_output("/src/WideParent.vue")
+        .expect("the output envelope materializes")
+        .expect("the component resolves")
+        .into_parts_with_contract();
+
+    // PREMISE 2 — the merged gate permanently refuses this result warm
+    // admission. That refusal is what makes a `Complete` envelope wrong.
+    assert!(
+        !crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
+            host,
+            "/src/WideParent.vue"
+        ),
+        "the merged admission gate must refuse the extract-partial parent (the fixture's premise)"
+    );
+
+    // THE DISCRIMINATOR.
+    assert!(
+        completeness.is_partial(),
+        "the published envelope must report the MERGED completeness: this result's partiality \
+         lives entirely in the extract scope, so a `Complete` envelope is wrong-complete on a \
+         payload the same compute refuses to warm"
+    );
+
+    // CONTROL: a generous budget trips nothing → Complete envelope AND a warm
+    // entry, proving the merge does not blanket-degrade and the fixture's
+    // admission path is live.
+    let control = extract_only_partial_project(0);
+    let control_host = control.host();
+    let (.., control_completeness) = control_host
+        .get_component_meta_output("/src/WideParent.vue")
+        .expect("the control envelope materializes")
+        .expect("the control component resolves")
+        .into_parts_with_contract();
+    assert!(
+        !control_completeness.is_partial(),
+        "the generous-budget control must still publish Complete"
+    );
+    assert!(
+        crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
+            control_host,
+            "/src/WideParent.vue"
+        ),
+        "the control must warm, proving the admission path this fixture exercises is live"
+    );
+}
+
+/// The RESOLUTION-bearing output entry
+/// (`get_component_meta_output_with_resolution` — the audited NAPI / WASM /
+/// LSP surface) is a SEPARATE cold body with its own envelope-build call site.
+/// It must publish the same merged completeness: a per-entry fix that misses
+/// this lane leaves the audited surface wrong-complete while the plain entry
+/// is correct.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn resolution_bearing_output_envelope_carries_extract_phase_partiality() {
+    let project = extract_only_partial_project(EXTRACT_ONLY_PARTIAL_BUDGET);
+    let host = project.host();
+    let (output, _request_id) = host
+        .get_component_meta_output_with_resolution("/src/WideParent.vue")
+        .expect("the resolution-bearing envelope materializes");
+    let (.., completeness) = output
+        .expect("the component resolves")
+        .into_parts_with_contract();
+    assert!(
+        !crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
+            host,
+            "/src/WideParent.vue"
+        ),
+        "the merged admission gate must refuse the extract-partial parent (the fixture's premise)"
+    );
+    assert!(
+        completeness.is_partial(),
+        "the resolution-bearing envelope must report the MERGED completeness"
+    );
+
+    let control = extract_only_partial_project(0);
+    let (control_output, _) = control
+        .host()
+        .get_component_meta_output_with_resolution("/src/WideParent.vue")
+        .expect("the control envelope materializes");
+    let (.., control_completeness) = control_output
+        .expect("the control component resolves")
+        .into_parts_with_contract();
+    assert!(
+        !control_completeness.is_partial(),
+        "the generous-budget control must still publish Complete on the resolution-bearing entry"
+    );
+}
+
+/// The ENCODED-PAYLOAD lane (`resolve_one_payload_item`, shared by the scalar
+/// and batch payload surfaces) is the third envelope-build call site. Its
+/// merged signal is already a live local — it decides the payload-cache write
+/// forty lines below — so the envelope must carry that value and not the
+/// resolve term the two other entries used.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn payload_lane_envelope_carries_extract_phase_partiality() {
+    let encode_completeness = |output: crate::meta_resolve::ComponentMetaOutput| {
+        let (.., completeness) = output.into_parts_with_contract();
+        if completeness.is_partial() {
+            b"partial".to_vec()
+        } else {
+            b"complete".to_vec()
+        }
+    };
+
+    let project = extract_only_partial_project(EXTRACT_ONLY_PARTIAL_BUDGET);
+    let session = project.open_session_batch().expect("batch session");
+    let host = project.host();
+    let view = crate::session_view::HostViewRef::new(host);
+    let fixed = host.capture_batch_fixed_view(&view);
+    let payload = session
+        .resolve_one_payload_item("/src/WideParent.vue", &view, &fixed, encode_completeness)
+        .expect("the payload item resolves")
+        .expect("the component resolves");
+    assert_eq!(
+        payload, b"partial",
+        "the payload lane's envelope must report the MERGED completeness — the same signal it \
+         uses forty lines later to refuse the payload-cache write"
+    );
+
+    let control = extract_only_partial_project(0);
+    let control_session = control.open_session_batch().expect("batch session");
+    let control_host = control.host();
+    let control_view = crate::session_view::HostViewRef::new(control_host);
+    let control_fixed = control_host.capture_batch_fixed_view(&control_view);
+    let control_payload = control_session
+        .resolve_one_payload_item(
+            "/src/WideParent.vue",
+            &control_view,
+            &control_fixed,
+            encode_completeness,
+        )
+        .expect("the control payload item resolves")
+        .expect("the control component resolves");
+    assert_eq!(
+        control_payload, b"complete",
+        "the generous-budget control must still publish Complete on the payload lane"
     );
 }

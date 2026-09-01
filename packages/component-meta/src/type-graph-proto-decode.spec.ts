@@ -4,6 +4,7 @@ import {
   ComponentMetaPayloadSchema,
   createTestComponentMetaPayload,
   OriginGraphSchema,
+  SurfacePartialReasonSchema,
 } from "@verter/proto";
 import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
 
@@ -519,5 +520,137 @@ describe("typed property keys", () => {
     });
     const bytes = toBinary(ComponentMetaPayloadSchema, payload);
     expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 11, found 4/);
+  });
+});
+
+/**
+ * Parity between the closed `SurfacePartialReason` wire taxonomy and the
+ * native reason names the decoder publishes.
+ *
+ * The reason set has three hand-written mirrors (Rust `PartialReason`, the
+ * proto enum, the native string union) and only one of them is mechanically
+ * derived from another. Nothing pinned the decoder's mapping to the generated
+ * enum, so a type-valid edit — swapping two rows, or appending a proto value
+ * while grouping the native spelling logically — relabelled reasons with zero
+ * test movement: a budget trip reached consumers as `cancelled`. The typeinfo
+ * surface has this guard (`typeinfo_graph_taxonomy`); this is the
+ * component-meta analogue.
+ *
+ * The oracle is the GENERATED descriptor, never a hand-listed set: every
+ * value the schema declares is driven through the real decoder, and the
+ * expected native name is derived mechanically from that value's own proto
+ * name. Appending a reason to the proto without a decoder row fails here (and
+ * at `tsc`, because the decoder's map is a total `Record` over the enum);
+ * misspelling or transposing a row fails here.
+ */
+describe("surface partial reason taxonomy parity", () => {
+  const values = SurfacePartialReasonSchema.values;
+  const unspecified = values.find((value) => value.number === 0);
+  if (!unspecified) throw new Error("the closed taxonomy must declare an unspecified zero value");
+  // Derived, not hardcoded: the shared prefix is whatever the zero value
+  // carries in front of `UNSPECIFIED`.
+  const prefix = unspecified.name.replace(/UNSPECIFIED$/, "");
+  const named = values.filter((value) => value.number !== 0);
+
+  /** `SURFACE_PARTIAL_REASON_BUDGET_EXCEEDED` -> `budgetExceeded`. */
+  const nativeNameOf = (protoName: string): string =>
+    protoName
+      .slice(prefix.length)
+      .toLowerCase()
+      .replace(/_(.)/g, (_, c: string) => c.toUpperCase());
+
+  const decodeReasonsFor = (reasons: number[]): string[] => {
+    const base = createTestComponentMetaPayload();
+    const payload = create(ComponentMetaPayloadSchema, {
+      ...base,
+      body: { ...base.body!, resultCompleteness: { kind: 2, partialReasons: reasons } },
+    });
+    const decoded = decodeTypedComponentMetaPayload(
+      toBinary(ComponentMetaPayloadSchema, payload),
+    ).resultCompleteness;
+    if (decoded.kind !== "partial") throw new Error("fixture must decode as partial");
+    return decoded.reasons;
+  };
+
+  it("declares every reason the producer can emit", () => {
+    // A non-empty, contiguous 1..n taxonomy — so a reserved/removed tag shows
+    // up here rather than as a silently skipped decoder row.
+    expect(named.length).toBeGreaterThan(0);
+    expect(named.map((value) => value.number)).toEqual(
+      Array.from({ length: named.length }, (_, i) => i + 1),
+    );
+  });
+
+  it.each(named.map((value) => [value.number, value.name, nativeNameOf(value.name)] as const))(
+    "decodes wire reason %d (%s) as %s",
+    (number, _protoName, expected) => {
+      expect(decodeReasonsFor([number])).toEqual([expected]);
+    },
+  );
+
+  it("decodes the whole taxonomy in one payload without transposing a reason", () => {
+    // The per-value cases above would still pass under a mapping that is
+    // correct one-at-a-time; this drives all of them together in declaration
+    // order so a positional/offset regression shows as a shifted list.
+    expect(decodeReasonsFor(named.map((value) => value.number))).toEqual(
+      named.map((value) => nativeNameOf(value.name)),
+    );
+  });
+
+  it("fails closed on a reason tag the taxonomy does not declare", () => {
+    expect(() => decodeReasonsFor([named.length + 1])).toThrow(/unknown surface partial reason/);
+    expect(() => decodeReasonsFor([0])).toThrow(/unknown surface partial reason/);
+  });
+});
+
+/**
+ * `decodeResultCompleteness`'s fail-closed branches. The field exists so a
+ * degraded payload cannot read as whole, so every way a payload can fail to
+ * state its completeness must throw rather than default to complete.
+ *
+ * RED proof for the first case: simplify the function to
+ * `kind === PARTIAL ? { kind: "partial", ... } : { kind: "complete" }` and an
+ * UNSET kind reads as COMPLETE — the exact wrong-complete outcome — while
+ * every other test in this file still passes.
+ */
+describe("result completeness fail-closed branches", () => {
+  const decodeCompletenessOf = (completeness: Record<string, unknown>) => {
+    const base = createTestComponentMetaPayload();
+    const payload = create(ComponentMetaPayloadSchema, {
+      ...base,
+      body: { ...base.body!, resultCompleteness: completeness as never },
+    });
+    return decodeTypedComponentMetaPayload(toBinary(ComponentMetaPayloadSchema, payload))
+      .resultCompleteness;
+  };
+
+  it("rejects an unset completeness kind instead of reading it as complete", () => {
+    expect(() => decodeCompletenessOf({ kind: 0, partialReasons: [] })).toThrow(
+      /unknown result completeness 0/,
+    );
+  });
+
+  it("rejects an unknown completeness kind", () => {
+    expect(() => decodeCompletenessOf({ kind: 99, partialReasons: [] })).toThrow(
+      /unknown result completeness 99/,
+    );
+  });
+
+  it("rejects a partial surface that names no reason", () => {
+    expect(() => decodeCompletenessOf({ kind: 2, partialReasons: [] })).toThrow(
+      /partial surface carries no reason/,
+    );
+  });
+
+  it("rejects a complete surface that nonetheless names reasons", () => {
+    // Unreachable from the in-tree producer; a foreign producer sending it
+    // must not have its reasons silently dropped and be republished clean.
+    expect(() => decodeCompletenessOf({ kind: 1, partialReasons: [1] })).toThrow(
+      /complete surface carries partial reasons/,
+    );
+  });
+
+  it("still accepts the well-formed complete surface", () => {
+    expect(decodeCompletenessOf({ kind: 1, partialReasons: [] })).toEqual({ kind: "complete" });
   });
 });

@@ -4155,13 +4155,30 @@ fn flow_return_candidate_count(id: &str, script: &str) -> usize {
 
 /// `"key" in x` over a union arm whose key set the graph cannot decide
 /// (a type parameter, an index-signature surface, an unresolvable
-/// carrier) must keep that arm possible on BOTH edges: the checker
-/// narrows such an arm, so reading "cannot decide" as "does not carry
-/// the key" fabricates a dead edge and loses a return contributor from
-/// a result then certified complete and warm. An OPTIONAL member is
-/// decided per edge: its arm is retained EXACTLY on the negated edge
-/// (a value may lack the key) and retained as a degraded superset on
-/// the positive edge (the checker refines the key present). `Impossible`
+/// carrier) must keep that arm possible on BOTH edges. Retention is
+/// either EXACT or a typed-gap SUPERSET, and which one the checker
+/// gives depends on the edge and on whether a SIBLING arm settles the
+/// key:
+///
+/// - Where the checker also keeps the arm (the index-signature negated
+///   edge), reading "cannot decide" as "does not carry the key" would
+///   fabricate a dead edge and LOSE a return contributor from a result
+///   then certified complete and warm — the subset direction, the one
+///   that is never acceptable.
+/// - Where the checker resolves the union by a sibling arm that DOES
+///   declare the key (`T | { k: number }` on the positive edge, whose
+///   measured tsc 7.0.2 verdict is `0 | { k: number; }` — the `T` arm
+///   is dropped, NOT intersected with `Record<"k", unknown>`; that
+///   intersection is what a NON-union `in` subject gets), retaining the
+///   undecidable arm is a deliberate SUPERSET. It is admissible only
+///   behind the typed `FlowGap::GuardNarrowing`, which forces
+///   `ReturnOnly` and never warms — so a later exact decision cannot be
+///   shadowed by a cached wide answer.
+///
+/// An OPTIONAL member is decided per edge: its arm is retained EXACTLY
+/// on the negated edge (a value may lack the key) and retained as a
+/// degraded superset on the positive edge (the checker refines the key
+/// present). `Impossible`
 /// needs positive proof: only a closed surface's required member drops
 /// an arm on the negated edge, only a closed key-absent surface on the
 /// positive edge — those controls stay exact, gap-free, and warm.
@@ -4178,10 +4195,24 @@ fn unclassifiable_in_guard_arms_remain_possible_degrade_and_never_warm() {
         warm: bool,
     }
     let cases = [
+        // The type parameter is bounded by `object` so the fixture is a
+        // program the checker ACCEPTS: `"k" in x` requires an `object`
+        // right-hand side, and an unconstrained `T` makes the whole row a
+        // rejected program (`TS2322: Type 'T | { k: number; }' is not
+        // assignable to type 'object'`) whose "checker verdict" would be a
+        // reading off an errored compile. The bound does not change the
+        // verdict — both spellings measure `0 | { k: number; }` — it only
+        // makes the measurement legitimate.
+        //
+        // SUPERSET row: the checker drops the `T` arm here (the sibling
+        // `{ k: number }` settles the key for the union), while the graph
+        // cannot decide whether `T` carries `"k"` and keeps it. Admissible
+        // only behind the typed guard gap, ReturnOnly — the checker-exact
+        // rows below it carry `Degr::None` and warm.
         Case {
             id: "in_unclassified_type_param_positive",
-            script: "export function f<T>(x: T | { k: number }) { if (\"k\" in x) return x; return 0; }",
-            checker: "(T & Record<\"k\", unknown>) | { k: number } | 0",
+            script: "export function f<T extends object>(x: T | { k: number }) { if (\"k\" in x) return x; return 0; }",
+            checker: "0 | { k: number; }",
             rendered: "Union(TypeParam(T) | { k: number } | 0)",
             degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
             warm: false,

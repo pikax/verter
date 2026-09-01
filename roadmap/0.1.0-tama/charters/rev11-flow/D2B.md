@@ -147,9 +147,11 @@ This amends D2B-AC2/AC3 exactly as ruled — no exact narrowing capability was
 added; only fail-closed retention of unclassifiable arms. The required
 discriminating regressions are `unclassifiable_guard_arms_remain_possible_degrade_and_never_warm`
 (the `typeof` spelling) and `unclassifiable_in_guard_arms_remain_possible_degrade_and_never_warm`
-(the `instanceof` spelling, per the ruling's explicit requirement that a
-`typeof`-only repair would leave the measured class open) — both required
-alongside the six discriminating cutover tests named above.
+(the `in` spelling) — both required alongside the six discriminating cutover
+tests named above. The ruling's explicit `instanceof` requirement (a
+`typeof`-only repair would leave the measured class open) is met separately by
+`instanceof_narrows_by_the_checker_rule_and_gaps_only_unproven_arms`, which
+carries the `instanceof` retention/gap rows.
 
 ## Deletions and forbidden designs
 

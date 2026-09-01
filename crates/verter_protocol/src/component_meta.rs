@@ -2889,6 +2889,123 @@ mod tests {
     };
     use verter_type_expr::TypeExpr;
 
+    /// The surface-partial reason taxonomy has three hand-written mirrors —
+    /// the serialized Rust enum, the proto enum, and the TypeScript decoder's
+    /// native names — and only the serde spelling is mechanically derived
+    /// (`rename_all = "camelCase"` off the variant name). Nothing pinned the
+    /// serde spelling to the proto value it encodes as, so a `#[serde(rename)]`
+    /// on one variant, or a proto value renamed on its own, silently ships two
+    /// different public names for one reason.
+    ///
+    /// The closed loop this test completes:
+    ///
+    /// - A new Rust variant is a COMPILE error in
+    ///   `surface_partial_reason_to_proto` (exhaustive match).
+    /// - A new proto value with no Rust variant fails the coverage assertion:
+    ///   the mapped proto numbers must be exactly the contiguous `1..=N` the
+    ///   schema declares.
+    /// - A renamed serde spelling, or a renamed proto value, fails the
+    ///   name-parity assertion — the serde name must be the lowerCamelCase of
+    ///   the proto value's own name with the shared prefix removed.
+    ///
+    /// The expected name is DERIVED from `as_str_name()`, never hand-listed,
+    /// so this is a generated-enum-driven check rather than a second copy of
+    /// the taxonomy.
+    #[test]
+    fn surface_partial_reason_serde_and_proto_names_agree() {
+        use crate::types::FfiSurfacePartialReason as R;
+
+        // The one hand-written list in this test. It is validated for
+        // completeness below against the generated proto enum, so it cannot
+        // silently omit a reason.
+        const ALL: &[R] = &[
+            R::BudgetExceeded,
+            R::Cancelled,
+            R::SupersededGeneration,
+            R::UnstableState,
+            R::SamePathRecursion,
+            R::WalkerFatal,
+            R::Propagated,
+            R::DeferredEvaluationLimit,
+            R::StructuralFactDemandLimit,
+            R::SemanticQueryFault,
+            R::MissingSemanticNodeData,
+            R::ProjectionWorkLimit,
+            R::ConnectedQueryDepthLimit,
+            R::MissingDependency,
+            R::FlowReturnUninferred,
+            R::FlowReturnUnverified,
+            R::FlowReturnNoSurface,
+        ];
+
+        // `SURFACE_PARTIAL_REASON_UNSPECIFIED` -> the shared prefix, derived
+        // rather than spelled, so a schema-wide rename does not need a test
+        // edit to keep discriminating.
+        let prefix = proto::SurfacePartialReason::Unspecified
+            .as_str_name()
+            .strip_suffix("UNSPECIFIED")
+            .expect("the zero value names itself unspecified")
+            .to_string();
+
+        let mut mapped_numbers: Vec<i32> = Vec::with_capacity(ALL.len());
+        for reason in ALL {
+            let proto_value = super::surface_partial_reason_to_proto(*reason);
+            mapped_numbers.push(proto_value as i32);
+
+            let expected = lower_camel_case(
+                proto_value
+                    .as_str_name()
+                    .strip_prefix(prefix.as_str())
+                    .expect("every reason shares the taxonomy prefix"),
+            );
+            // The serialized form is the public JSON name the FFI lane emits.
+            let serialized = serde_json::to_string(reason).expect("a reason serializes");
+            assert_eq!(
+                serialized,
+                format!("\"{expected}\""),
+                "the serde spelling of {reason:?} must be the lowerCamelCase of its proto value \
+                 name ({}) — the FFI JSON lane and the proto lane are two public names for one \
+                 reason and must not diverge",
+                proto_value.as_str_name(),
+            );
+        }
+
+        // COVERAGE: the schema's reasons are a contiguous `1..=N` block (tag 0
+        // is the unspecified sentinel), so a proto value added without a Rust
+        // variant leaves a hole here.
+        mapped_numbers.sort_unstable();
+        let expected_numbers: Vec<i32> = (1..=ALL.len() as i32).collect();
+        assert_eq!(
+            mapped_numbers, expected_numbers,
+            "every declared `SurfacePartialReason` tag must have exactly one Rust variant mapped \
+             onto it — a gap means the proto grew a reason the Rust taxonomy cannot express"
+        );
+        assert!(
+            proto::SurfacePartialReason::try_from(ALL.len() as i32 + 1).is_err(),
+            "the taxonomy must end at tag {} — a higher declared tag is a reason with no Rust \
+             variant and no serde spelling",
+            ALL.len()
+        );
+    }
+
+    /// `SCREAMING_SNAKE` -> `lowerCamel`, the transform `serde`'s
+    /// `rename_all = "camelCase"` performs on a `PascalCase` variant name.
+    fn lower_camel_case(screaming_snake: &str) -> String {
+        let mut out = String::with_capacity(screaming_snake.len());
+        let mut upper_next = false;
+        for ch in screaming_snake.chars() {
+            if ch == '_' {
+                upper_next = true;
+            } else if upper_next {
+                out.push(ch);
+                upper_next = false;
+            } else {
+                out.extend(ch.to_lowercase());
+            }
+        }
+        out
+    }
+
     /// A6-06 wire half: an EXACT whole-return wrapper role and a TYPED
     /// degradation both survive the real encoder plus a prost decode, and stay
     /// DISTINGUISHABLE from each other and from an undemanded binding.

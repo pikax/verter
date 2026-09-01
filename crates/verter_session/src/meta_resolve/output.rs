@@ -29,6 +29,65 @@ use verter_type_expr::{PublicationResult, TypeExpr};
 
 use crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap;
 
+/// The completeness a component-meta OUTPUT ENVELOPE publishes on the wire.
+///
+/// A distinct type from the resolve-phase
+/// [`ResolvedComponentMetaState::completeness`](crate::meta_resolve::ResolvedComponentMetaState)
+/// so no output-bearing entry can pass the narrower term by accident. The
+/// value the wire must carry is the SAME merged signal the result-cache
+/// admission gate refuses on:
+/// `resolved.completeness.merge(extract_scope_completeness)`.
+///
+/// Extract-phase partiality (the pre-choke macro-DTO read and the fallthrough
+/// cold compute — both inside `extract_component_meta_from_resolved*`) is
+/// INVISIBLE to the resolve term: a component whose own macro surface resolves
+/// cleanly but whose root is a degraded child sees the degradation only there.
+/// Publishing the resolve term alone therefore serializes
+/// `resultCompleteness: complete` for a payload the same compute permanently
+/// refuses to warm — the wrong-complete outcome the field exists to prevent.
+/// Every `ResultCompleteness` reaching an envelope goes through one of the
+/// three named constructors below, so the claim a call site is making is
+/// spelled out at that call site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PublishedCompleteness(crate::semantic_query::ResultCompleteness);
+
+impl PublishedCompleteness {
+    /// A result with no partiality anywhere: hand-built parts, i.e. the
+    /// materializer unit tests that assemble an analysis by hand and have no
+    /// resolve or extract phase to merge. No production entry uses it — a
+    /// production envelope's completeness is always MEASURED.
+    #[cfg(test)]
+    pub(crate) const COMPLETE: Self = Self(crate::semantic_query::ResultCompleteness::Complete);
+
+    /// The COLD constructor: the resolve-phase term merged with the WHOLE
+    /// extract scope, i.e. exactly the signal
+    /// `component_meta_publish_decision*` gates admission on. Every cold
+    /// output-bearing entry MUST build its envelope completeness here.
+    pub(crate) fn merged(
+        resolve: crate::semantic_query::ResultCompleteness,
+        extract: crate::semantic_query::ResultCompleteness,
+    ) -> Self {
+        Self(resolve.merge(extract))
+    }
+
+    /// The WARM constructor: the completeness recorded on a cache entry that
+    /// was ADMITTED. Admission refuses every partial
+    /// (`if final_completeness.is_partial() { return_only }`), so a value that
+    /// reached a cache entry is by construction the merged signal — the warm
+    /// arms re-publish it rather than recomputing a merge they have no extract
+    /// phase for.
+    pub(crate) fn from_admitted_cache_entry(
+        cached: crate::semantic_query::ResultCompleteness,
+    ) -> Self {
+        Self(cached)
+    }
+
+    /// The carried value, for the envelope field and the wire projection.
+    pub(crate) fn get(self) -> crate::semantic_query::ResultCompleteness {
+        self.0
+    }
+}
+
 /// The session-owned, fully-materialized component-meta output envelope.
 ///
 /// PRIVATE fields; NON-`Clone`; constructible only by the terminal output

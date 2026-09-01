@@ -133,6 +133,7 @@ pub use crate::host_manage::component_meta_request_impl::{
     ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp,
     ResolvedTypeDeclaration, ResolvedTypeRegistryMeta,
 };
+pub(crate) use output::PublishedCompleteness;
 pub use output::{
     ComponentMetaOutput, ComponentMetaOutputError, ComponentMetaOutputFailure,
     ComponentMetaOutputLane, ComponentMetaResolutionOutput, InteriorSourceStep,

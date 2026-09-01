@@ -181,7 +181,7 @@ impl VerterHost {
             overlay,
         );
         let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        self.component_meta_with_resolution_cold(
+        let cold = self.component_meta_with_resolution_cold(
             canonical.as_str(),
             request_id,
             &view,
@@ -189,7 +189,8 @@ impl VerterHost {
             host_ctx_ref,
             &seed_fence,
             validated_at_generation,
-        )
+        )?;
+        Some((cold.analysis, cold.resolved))
     }
 
     /// The SHARED audited cold body: resolve PINNED to the caller's captured
@@ -216,10 +217,7 @@ impl VerterHost {
         host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext,
         seed_fence: &super::component_meta_entry::ColdSeedFence,
         validated_at_generation: u64,
-    ) -> Option<(
-        verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-        crate::meta_resolve::ResolvedComponentMetaState,
-    )> {
+    ) -> Option<super::component_meta_entry::ComponentMetaColdResult> {
         #[cfg(test)]
         super::component_meta_entry::run_cold_body_pre_resolve_hook();
         let canonical = canonical.to_string();
@@ -298,17 +296,28 @@ impl VerterHost {
                 )
             },
         );
-        let (analysis, resolved, _extract_completeness) = maybe_resolved_analysis?;
+        let (analysis, resolved, extract_completeness) = maybe_resolved_analysis?;
         // ONE merged admission signal: the resolve-phase completeness merged
         // with the whole-extract scope (macro-DTO read + fallthrough compute).
-
+        // The SAME value travels out to the caller: an output-bearing caller
+        // that re-derived it from `resolved.completeness` alone would drop
+        // every extract-phase partiality source and publish a wire payload as
+        // complete that this compute refused to warm.
+        //
         // Seal + admission decision — `publish_if_admissible` (by-value
         // fenced-serve consult + R20 finalise). An admitted write lets
         // subsequent identical calls short-circuit through
         // `try_with_resolution_cache_hit`; suppression is enforced inside
         // `publish_component_meta_cache_entry` via the merged
         // `final_completeness` signal.
-        Some((analysis, resolved))
+        Some(super::component_meta_entry::ComponentMetaColdResult {
+            completeness: crate::meta_resolve::PublishedCompleteness::merged(
+                resolved.completeness,
+                extract_completeness,
+            ),
+            resolved,
+            analysis,
+        })
     }
 
     /// Output-bearing AUDITED resolution entry: the wire consumers' (NAPI /
@@ -383,7 +392,9 @@ impl VerterHost {
                                 canonical.as_str(),
                                 analysis,
                                 Some(seed),
-                                resolution.completeness,
+                                crate::meta_resolve::PublishedCompleteness::from_admitted_cache_entry(
+                                    resolution.completeness,
+                                ),
                             )
                         });
                 return output
@@ -412,7 +423,11 @@ impl VerterHost {
             overlay,
         );
         let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        let Some((analysis, resolved)) = self.component_meta_with_resolution_cold(
+        let Some(super::component_meta_entry::ComponentMetaColdResult {
+            resolved,
+            analysis,
+            completeness,
+        }) = self.component_meta_with_resolution_cold(
             canonical.as_str(),
             request_id,
             &view,
@@ -420,7 +435,8 @@ impl VerterHost {
             host_ctx_ref,
             &seed_fence,
             validated_at_generation,
-        ) else {
+        )
+        else {
             return Ok((None, request_id));
         };
         let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed::from_resolved_state(
@@ -434,7 +450,7 @@ impl VerterHost {
                         canonical.as_str(),
                         analysis,
                         Some(seed),
-                        resolved.completeness,
+                        completeness,
                     )
                 });
         output

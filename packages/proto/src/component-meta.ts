@@ -13,6 +13,15 @@ import {
 
 export { ComponentMetaPayloadSchema, OriginGraphSchema };
 
+// The closed `SurfacePartialReason` taxonomy, re-exported so a decoder maps
+// wire reasons by GENERATED ENUM MEMBER rather than by ordinal position. The
+// runtime descriptor rides along so a parity test can drive every value the
+// schema actually declares instead of a hand-listed set.
+export {
+  SurfacePartialReason,
+  SurfacePartialReasonSchema,
+} from "./gen/verter/v1/component_meta_pb.js";
+
 export type ProtoRecord<TypeName extends string = string> = Message<TypeName> & Record<string, any>;
 
 export type ProtoTypeNode = ProtoRecord<"verter.v1.TypeNode"> & RawTypeNode;

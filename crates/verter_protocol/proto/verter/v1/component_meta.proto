@@ -1161,6 +1161,10 @@ enum ExpansionStopReason {
   EXPANSION_STOP_REASON_UNRESOLVED_REFERENCE = 3;
   EXPANSION_STOP_REASON_INDETERMINATE_CONDITIONAL = 4;
   EXPANSION_STOP_REASON_INFINITE_KEY_SPACE = 5;
+  // Also carries a construct that IS supported but whose producer had not
+  // run at the point the surface was read (a pending flow root). Renderers
+  // must not present this tag as "the construct is unsupported" without
+  // consulting the diagnostic's `context`, which names the specific gap.
   EXPANSION_STOP_REASON_UNSUPPORTED_OPERATOR = 6;
   EXPANSION_STOP_REASON_CONDITIONAL_CONTEXT_TRUNCATED = 7;
   EXPANSION_STOP_REASON_IDEMPOTENT_ARM = 8;

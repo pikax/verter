@@ -2804,23 +2804,23 @@ mod corpus_suite {
             ),
             (
                 "N56_arrow_predicate_annotated_binding",
-                "checker prints `{ v: string | A; }`; the renderer spells the same node `{ v: Union(DeclRef(A) | DeclRef(B) | string) }`",
+                "checker prints `{ v: string | A; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(DeclRef(A) | DeclRef(B) | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N57_object_literal_method_predicate",
-                "checker prints `{ v: string | A; }`; the renderer spells the same node `{ v: Union(DeclRef(A) | DeclRef(B) | string) }`",
+                "checker prints `{ v: string | A; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(DeclRef(A) | DeclRef(B) | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N59_generic_predicate_instantiated_at_call",
-                "checker prints `{ v: string; }`; the renderer spells the same node `{ v: Union(unknown | string) }`",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(unknown | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N60_class_method_assertion_narrows",
-                "checker prints `{ v: string; }`; the renderer spells the same node `{ v: Union(string | number) }`",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N62_annotated_const_assertion_narrows",
-                "checker prints `{ v: string; }`; the renderer spells the same node `{ v: Union(string | number) }`",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N64_boolean_literal_discriminant",
@@ -2832,15 +2832,15 @@ mod corpus_suite {
             ),
             (
                 "N69_in_operator_const_literal_key",
-                "checker prints `{ v: string | { a: string; }; }`; the renderer spells the same node `{ v: Union(string | { a: string } | { b: number }) }`",
+                "checker prints `{ v: string | { a: string; }; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(string | { a: string } | { b: number }) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N70_in_operator_numeric_key",
-                "checker prints `{ v: string | boolean; }`; the renderer spells the same node `{ v: Union(Opaque(UnmodeledPosition) | string) }`",
+                "checker prints `{ v: string | boolean; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(Opaque(UnmodeledPosition) | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N72_typeof_function_guard",
-                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(string | any) }`",
+                "checker prints `{ v: string | number; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(string | any) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N73_typeof_object_keeps_null",
@@ -2850,7 +2850,7 @@ mod corpus_suite {
                 // Equality-guard forms: the loose `== null` operator, and equality
     // against a const-typed literal binding or comparison target.
     "N76_loose_equality_null_removes_both",
-                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(string | null | undefined | number) }`",
+                "checker prints `{ v: string | number; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(string | null | undefined | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N77_strict_not_null_keeps_undefined",
@@ -2862,11 +2862,11 @@ mod corpus_suite {
             ),
             (
                 "N79_equality_against_const_literal_binding",
-                "checker prints `{ v: 5 | 15; }`; the renderer spells the same node `{ v: Union(5 | 10 | 15) }`",
+                "checker prints `{ v: 5 | 15; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(5 | 10 | 15) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N80_equality_against_const_literal_target_narrows",
-                "checker prints `{ v: \"a\"; }`; the renderer spells the same node `{ v: Union(\"a\" | \"b\") }`",
+                "checker prints `{ v: \"a\"; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(\"a\" | \"b\") }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N82_falsy_branch_keeps_empty_string_literal",
@@ -2902,7 +2902,7 @@ mod corpus_suite {
             ),
             (
                 "X105_closure_captures_narrowed_binding_in_guarded_arm",
-                "checker prints `() => string`; the renderer spells the same node `Union(() => Union(string | undefined) | () => string)`",
+                "checker prints `() => string`; the renderer spells the (KnownOwed-divergent) node `Union(() => Union(string | undefined) | () => string)` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "X111_guard_clause_return_then_use",

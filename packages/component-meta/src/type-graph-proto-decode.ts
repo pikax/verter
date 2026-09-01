@@ -1,6 +1,7 @@
 import { fromBinary } from "@bufbuild/protobuf";
 import {
   ComponentMetaPayloadSchema,
+  SurfacePartialReason,
   type ComponentMetaPayload,
   type ProtoRecord,
   type ProtoTypeNode,
@@ -184,25 +185,48 @@ const ACCEPTED_SURFACE_COMPLETENESS_LOWER_BOUND = 2;
 
 const RESULT_COMPLETENESS_COMPLETE = 1;
 const RESULT_COMPLETENESS_PARTIAL = 2;
-const SURFACE_PARTIAL_REASONS: readonly NativeSurfacePartialReason[] = [
-  "budgetExceeded",
-  "cancelled",
-  "supersededGeneration",
-  "unstableState",
-  "samePathRecursion",
-  "walkerFatal",
-  "propagated",
-  "deferredEvaluationLimit",
-  "structuralFactDemandLimit",
-  "semanticQueryFault",
-  "missingSemanticNodeData",
-  "projectionWorkLimit",
-  "connectedQueryDepthLimit",
-  "missingDependency",
-  "flowReturnUninferred",
-  "flowReturnUnverified",
-  "flowReturnNoSurface",
-];
+/**
+ * Wire `SurfacePartialReason` -> native reason, keyed on the GENERATED ENUM
+ * MEMBER rather than on an ordinal position.
+ *
+ * A positional array indexed by `value - 1` reads correctly only while the
+ * proto enum's declaration order and the array's order agree, and nothing in
+ * the type system relates the two: a contributor who appends a reason to the
+ * proto but groups it logically in the array silently relabels every reason
+ * from that index on, so a budget trip reaches consumers as `cancelled`.
+ * Keying on `SurfacePartialReason.X` removes the ordinal entirely — the
+ * mapping is order-independent by construction — and typing the literal as a
+ * total `Record` over the enum makes a proto reason with no native spelling a
+ * `tsc` error rather than a silent `undefined` at runtime. That the SPELLING
+ * on each row matches its enum member is pinned by the parity test, which
+ * drives every value the generated descriptor declares through the real
+ * decoder.
+ *
+ * `UNSPECIFIED` maps to `null`: a producer that could not name its reason is
+ * a fail-closed decode error, never a reason.
+ */
+const SURFACE_PARTIAL_REASON_BY_WIRE: Readonly<
+  Record<SurfacePartialReason, NativeSurfacePartialReason | null>
+> = {
+  [SurfacePartialReason.UNSPECIFIED]: null,
+  [SurfacePartialReason.BUDGET_EXCEEDED]: "budgetExceeded",
+  [SurfacePartialReason.CANCELLED]: "cancelled",
+  [SurfacePartialReason.SUPERSEDED_GENERATION]: "supersededGeneration",
+  [SurfacePartialReason.UNSTABLE_STATE]: "unstableState",
+  [SurfacePartialReason.SAME_PATH_RECURSION]: "samePathRecursion",
+  [SurfacePartialReason.WALKER_FATAL]: "walkerFatal",
+  [SurfacePartialReason.PROPAGATED]: "propagated",
+  [SurfacePartialReason.DEFERRED_EVALUATION_LIMIT]: "deferredEvaluationLimit",
+  [SurfacePartialReason.STRUCTURAL_FACT_DEMAND_LIMIT]: "structuralFactDemandLimit",
+  [SurfacePartialReason.SEMANTIC_QUERY_FAULT]: "semanticQueryFault",
+  [SurfacePartialReason.MISSING_SEMANTIC_NODE_DATA]: "missingSemanticNodeData",
+  [SurfacePartialReason.PROJECTION_WORK_LIMIT]: "projectionWorkLimit",
+  [SurfacePartialReason.CONNECTED_QUERY_DEPTH_LIMIT]: "connectedQueryDepthLimit",
+  [SurfacePartialReason.MISSING_DEPENDENCY]: "missingDependency",
+  [SurfacePartialReason.FLOW_RETURN_UNINFERRED]: "flowReturnUninferred",
+  [SurfacePartialReason.FLOW_RETURN_UNVERIFIED]: "flowReturnUnverified",
+  [SurfacePartialReason.FLOW_RETURN_NO_SURFACE]: "flowReturnNoSurface",
+};
 
 const ACCEPTED_PROP_KIND_DECLARED_PROP = 1;
 const ACCEPTED_PROP_KIND_ATTR = 2;
@@ -696,7 +720,10 @@ function decodeComponentMetaBody(
       Number(body.acceptedSurfaceCompleteness ?? 0),
     ),
     resultCompleteness: decodeResultCompleteness(
-      requireProtoMessage(body.resultCompleteness as ProtoRecord | undefined, "result completeness"),
+      requireProtoMessage(
+        body.resultCompleteness as ProtoRecord | undefined,
+        "result completeness",
+      ),
     ),
     ...maybe("rootInfo", rootInfo),
     rootReachability,
@@ -2297,20 +2324,32 @@ function decodeExpansionStopReason(
 }
 
 /**
- * The published surface's completeness. Fails closed on an unset or unknown
- * kind: a payload that cannot state whether its surface is whole must never
- * be read as whole.
+ * The published surface's completeness. Fails closed on an unset kind, an
+ * unknown kind, an unknown reason, a partial with no reason, and a complete
+ * that nonetheless names reasons: a payload that cannot state whether its
+ * surface is whole — or contradicts itself about it — must never be read as
+ * whole. Reading an unset kind as complete is the exact wrong-complete
+ * outcome this field exists to prevent, so the COMPLETE arm is an equality
+ * test and every other value falls through to a throw.
  */
 function decodeResultCompleteness(message: ProtoRecord): NativeResultCompleteness {
   const kind = Number(message.kind ?? 0);
+  const rawReasons = (message.partialReasons as number[] | undefined) ?? [];
   if (kind === RESULT_COMPLETENESS_COMPLETE) {
+    if (rawReasons.length > 0) {
+      // Unreachable from the in-tree producer (it emits reasons only on the
+      // partial arm), so this is a defensive rail against a foreign or future
+      // producer: silently dropping the reasons would republish a
+      // self-contradictory payload as cleanly complete.
+      throw graphError("component-meta complete surface carries partial reasons");
+    }
     return { kind: "complete" };
   }
   if (kind !== RESULT_COMPLETENESS_PARTIAL) {
     throw graphError(`component-meta payload has unknown result completeness ${kind}`);
   }
-  const reasons = ((message.partialReasons as number[] | undefined) ?? []).map((value) => {
-    const reason = SURFACE_PARTIAL_REASONS[Number(value) - 1];
+  const reasons = rawReasons.map((value) => {
+    const reason = SURFACE_PARTIAL_REASON_BY_WIRE[Number(value) as SurfacePartialReason];
     if (!reason) {
       throw graphError(`component-meta payload has unknown surface partial reason ${value}`);
     }

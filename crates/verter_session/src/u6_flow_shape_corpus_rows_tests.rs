@@ -5,9 +5,17 @@
 // Nothing else in the tree changes.
 //
 // The `checker` column is what tsgo 7.0.0-dev.20260526.1 prints for the
-// row's `probe` under `--noEmit --strict --ignoreConfig`; it is verified
-// live by `corpus_checker_column_matches_tsgo` whenever the pinned binary
-// is resolvable.
+// row's `probe` under `--noEmit --strict --ignoreConfig`. It is a RECORDED
+// measurement: nothing in the default build re-runs the checker — the suite
+// never invokes tsgo (a runtime tsgo driver is separately forbidden here),
+// so the column is only as good as the measurement whoever added the row
+// took. What IS enforced in-tree: the column must be non-empty and its
+// probe derivable (`oracle::every_row_records_the_checkers_answer`), every
+// deep-pinned row's live graph is compared against it semantically
+// (`corpus_suite::deep_pinned_rows_semantic_equality_follows_their_verdict`)
+// under the row's own `verdict`, and where the checker's print syntax
+// coincides with the renderer's the two are compared BYTE-for-byte
+// (`corpus_suite::checker_column_cross_validates_against_live_rendering`).
 
 /// THE corpus.
 pub(crate) const CORPUS: &[Row] = &[

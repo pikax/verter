@@ -600,7 +600,12 @@ fn finalize_resolved_type_registry_overlay(
 /// the sidecar (plus its registry name-overlay finalize) is optional. Reading
 /// it off the sidecar would publish every degraded sidecar-less payload as
 /// complete — the wrong-complete outcome, on the lane with the fewest other
-/// signals.
+/// signals. It is a
+/// [`PublishedCompleteness`](crate::meta_resolve::PublishedCompleteness), not
+/// a bare `ResultCompleteness`, so a cold entry cannot pass the resolve-phase
+/// term alone and drop the extract phase (the pre-choke macro-DTO read and the
+/// fallthrough compute): the wire value must be the same merged signal the
+/// result-cache admission gate refuses on.
 ///
 /// [`ComponentMetaOutput`]: crate::meta_resolve::ComponentMetaOutput
 pub(crate) fn build_component_meta_output(
@@ -608,9 +613,10 @@ pub(crate) fn build_component_meta_output(
     scope_canonical_id: &str,
     mut analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     resolution: Option<crate::meta_resolve::output::ComponentMetaResolutionSeed>,
-    completeness: crate::semantic_query::ResultCompleteness,
+    completeness: crate::meta_resolve::PublishedCompleteness,
 ) -> Result<crate::meta_resolve::ComponentMetaOutput, crate::meta_resolve::ComponentMetaOutputError>
 {
+    let completeness = completeness.get();
     #[cfg(test)]
     if OUTPUT_MATERIALIZE_FORCE_FAIL.with(|flag| {
         if flag.get() {
