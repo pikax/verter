@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O3
+predecessors=CCA1O3,CCA1O1A,CCA1O3C,CCA1O3D,CCA1O3E
 owner=compiler.compiler-bridge:direct WASM carrier-fixture capture typed host requests
 conflict_domains=compiler_execution,host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -44,16 +44,20 @@ Move the direct WASM carrier-fixture capture tool to CCA1O3's typed request whil
 ## Concrete surfaces and APIs
 
 - The sole production/tooling surface is `packages/playground/scripts/capture-wasm-carrier-fixtures.mjs`.
-- Owns the profile-bearing direct `wasm-bindgen` `upsert`, `ensureIdeCompiled`, and `getIde` calls used to produce the committed IDE/public-API fixture.
+- Owns the direct `wasm-bindgen` calls that produce the committed IDE/public-API fixture: a source-only `upsert` that states no compile demand, followed by one typed `compileRequest` in place of the `ensureIdeCompiled`/`getIde` pair.
 - The fixture sources, canonical IDs, source order, output bytes/maps, SFC-absolute span meaning, JavaScript UTF-16 offsets, and committed fixture schema remain unchanged. Equivalent output does not require golden regeneration.
 
 ## Exact predecessor contract
 
 - **CCA1O3:** implemented ledger row for “WASM typed host-request adapter”.
+- **CCA1O1A:** implemented ledger row for “Canonical Svelte custom-element prop-type admission”; the Svelte custom-element prop-type slot has its final shape, so no request this tool builds encodes a superseded closed vocabulary.
+- **CCA1O3C:** implemented ledger row for “Execution-proven WASM JS-boundary gate”; the browser boundary refusals this consumer relies on are proven by execution rather than by compilation alone.
+- **CCA1O3D:** implemented ledger row for “WASM typed host-request callable route”; the browser host object exposes one callable typed compile entry on its generated JavaScript surface, so this consumer has a reachable typed route to move onto.
+- **CCA1O3E:** implemented ledger row for “Live-WASM carrier-fixture freshness rail”; the committed carrier fixture is regenerated from the current browser artifact and checked against it, so this migration’s byte-equivalence evidence is read against a current baseline.
 
 ## Acceptance and evidence
 
-- The script contains no legacy WASM profile call and issues one typed Vue IDE request per fixture without an extra WASM call or source copy.
+- The script contains no legacy WASM profile call. Each fixture registers its source once and then issues exactly one typed Vue IDE `compileRequest` — no separate ensure, no cached read, no extra WASM call, and no source copied into the request.
 - `node --check`, WASM conversion fixtures, and the existing fixture freshness/consumer guards prove shape and output equivalence.
 
 ## Deletions, budgets, and aborts

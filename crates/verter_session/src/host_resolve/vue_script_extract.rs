@@ -5,12 +5,10 @@
 //! - `template_converter_inputs` — projects analysed imports and value bindings
 //!   into runtime component-linkage pairs. Semantic class domains are
 //!   owned by the project semantic dispatcher.
-//! - `extract_vue_script_content` — public Vue-SFC `<script>` /
-//!   `<script setup>` position-preserving source builder used by the
-//!   eval-program pipeline. It copies each script block's content to its
-//!   RAW SFC byte range and whitespace-blanks every non-script byte, so
-//!   every OXC-produced span is SFC-absolute by construction. Carrier
-//!   parser-owned spans are the sole geometry source.
+//! - `extract_vue_script_content` — test-only Vue-SFC `<script>` /
+//!   `<script setup>` position-preserving source builder. Production
+//!   eval-source is the catalog semantic authority. Carrier parser-owned
+//!   spans are the sole geometry source.
 //! - The `<script setup generic="…">` type-parameter reader
 //!   (`sfc_script_setup_type_params`) and the component-meta
 //!   `populate_ordered_sfc_structure` — Vue-semantic leaves that open the
@@ -111,6 +109,7 @@ pub(crate) fn indexed_script_setup_type_params(
 /// parser produces from this source is SFC-ABSOLUTE by construction — there is
 /// no compact-concatenation coordinate system to translate back from.
 ///
+#[cfg(test)]
 pub(crate) fn extract_vue_script_content(
     source: &str,
     parsed_sfc: &verter_compiler::parser::types::ParsedSfc,
@@ -125,6 +124,7 @@ pub(crate) fn extract_vue_script_content(
 
 /// Collect the sorted, de-duplicated `<script>` content byte ranges from a
 /// parsed SFC. Ranges are RAW SFC byte offsets `[start, end)`.
+#[cfg(test)]
 fn script_content_spans_from_parsed(
     parsed: &verter_compiler::parser::types::ParsedSfc,
 ) -> Option<Vec<(u32, u32)>> {
@@ -156,6 +156,7 @@ fn script_content_spans_from_parsed(
 /// UTF-8 safety: every replaced byte is a single-byte ASCII value and every
 /// preserved range is copied wholesale from valid UTF-8, so the result is valid
 /// UTF-8 and exactly `source.len()` bytes long.
+#[cfg(test)]
 pub(crate) fn build_position_preserving_script_source(
     source: &str,
     spans: &[(u32, u32)],

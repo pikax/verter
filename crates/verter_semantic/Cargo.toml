@@ -59,9 +59,6 @@ web-time = "1.1"
 
 [dev-dependencies]
 static_assertions = "1.1.0"
-# Compile-fail fixture proving `ResolverObservation`'s seal rejects an external,
-# host-shaped implementor.
-trybuild = "1.0"
 verter_test_support = { path = "../verter_test_support" }
 # Activates the `test-support` feature on `verter_css_syntax` for
 # `cargo test --package verter_semantic` (and example/bench) builds only —

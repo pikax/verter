@@ -11,7 +11,7 @@ Guide for setting up Rust development for Verter.
 - **[rustup](https://rustup.rs/)**. Do not install a toolchain by hand: `rust-toolchain.toml`
   pins the exact compiler version, plus `rustfmt`, `clippy`, and the
   `wasm32-unknown-unknown` target, and rustup installs all of them the first time you run
-  `cargo` in the repo. The pin exists because ~27 trybuild `.stderr` fixtures byte-pin
+  `cargo` in the repo. The pin exists in part because compile-contract `.stderr` fixtures byte-pin
   rustc's own diagnostic text; building on any other version reports failures that are not
   yours.
 - **wasm-bindgen CLI** for WASM glue generation: `cargo install wasm-bindgen-cli --version 0.2.122 --locked`
@@ -119,9 +119,11 @@ pnpm dist                # Publication-ready artifacts (native release, LSP, opt
 ## Testing
 
 ```bash
-# Run the canonical Rust pair
-cargo nextest run --workspace
-cargo test -p verter_session --tests
+# Run the canonical provider-free core Rust gate
+node scripts/gate.mjs
+
+# Run compile-fail Cargo contracts outside test discovery
+node scripts/compile-contracts.mjs
 
 # Run tests for a specific crate
 cargo test --package verter_compiler --verbose

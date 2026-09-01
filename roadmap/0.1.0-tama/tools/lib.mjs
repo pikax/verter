@@ -722,7 +722,9 @@ export function validateAuthority(authority, options = {}) {
       errors.push(`implementation ledger: duplicate node ${row.node_id}`);
     implemented.add(row.node_id);
     if (typeof row.commit_message !== "string" || row.commit_message.length === 0)
-      errors.push(`implementation ledger: ${row.node_id} commit_message must be a non-empty string`);
+      errors.push(
+        `implementation ledger: ${row.node_id} commit_message must be a non-empty string`,
+      );
     if (typeof row.commit_date !== "string" || !COMMIT_DATE_PATTERN.test(row.commit_date))
       errors.push(
         `implementation ledger: ${row.node_id} commit_date must be a timezone-bearing timestamp`,
@@ -859,6 +861,12 @@ export function packetFor(authority, state, id) {
   const node = authority.nodes.find((candidate) => candidate.id === id);
   if (!node) throw new Error(`unknown node ${id}`);
   const row = state.states.get(id);
+  if (row.status === "BLOCKED") {
+    const reason = row.missing_ancestors.length
+      ? `missing ancestors: ${row.missing_ancestors.join(", ")}`
+      : "node is not dispatchable";
+    throw new Error(`cannot create work packet for BLOCKED node ${id}; ${reason}`);
+  }
   const charter = fs.readFileSync(
     confinedFile(authority.packageRoot, node.charter, `${id} charter`),
     "utf8",

@@ -1,0 +1,23 @@
+error[E0599]: no method named `eval_source` found for reference `&C` in the current scope
+  --> tests/cases/compile-fail/carrier_compiler_eval_source_unnameable.rs:10:22
+   |
+10 |     let _ = compiler.eval_source(source, artifact);
+   |                      ^^^^^^^^^^^ method not found in `&C`
+   |
+   = help: items from traits can only be used if the type parameter is bounded by the trait
+help: the following trait defines an item `eval_source`, perhaps you need to restrict type parameter `C` with it:
+   |
+ 5 | fn generic_carrier_compiler<C: CarrierCompiler + FrameworkSemanticAuthority</* E */>>(
+   |                                                +++++++++++++++++++++++++++++++++++++
+
+error[E0599]: no method named `eval_source` found for struct `VueCarrierCompiler` in the current scope
+  --> tests/cases/compile-fail/carrier_compiler_eval_source_unnameable.rs:14:32
+   |
+14 |     let _ = VueCarrierCompiler.eval_source(source, artifact);
+   |                                ^^^^^^^^^^^ method not found in `VueCarrierCompiler`
+
+error[E0599]: no method named `eval_source` found for struct `SvelteCarrierCompiler` in the current scope
+  --> tests/cases/compile-fail/carrier_compiler_eval_source_unnameable.rs:18:35
+   |
+18 |     let _ = SvelteCarrierCompiler.eval_source(source, artifact);
+   |                                   ^^^^^^^^^^^ method not found in `SvelteCarrierCompiler`

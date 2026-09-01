@@ -1,32 +1,32 @@
 error[E0624]: method `context` is private
-  --> tests/cases/compile-fail/instantiate_key_context_not_extractable.rs:38:42
-   |
-38 |         let _ctx: InstantiateContext = k.context();
-   |                                          ^^^^^^^ private method
-   |
-  ::: src/semantic_query.rs
-   |
-   |     pub(crate) fn context(&self) -> InstantiateContext {
-   |     -------------------------------------------------- private method defined here
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/instantiate_key_context_not_extractable.rs
+  |
+  |         let _ctx: InstantiateContext = k.context();
+  |                                          ^^^^^^^ private method
+  |
+ ::: $WORKSPACE/crates/verter_session/src/semantic_query.rs
+  |
+  |     pub(crate) fn context(&self) -> InstantiateContext {
+  |     -------------------------------------------------- private method defined here
 
 error[E0624]: method `body_source` is private
-  --> tests/cases/compile-fail/instantiate_key_context_not_extractable.rs:39:25
-   |
-39 |         let _source = k.body_source();
-   |                         ^^^^^^^^^^^ private method
-   |
-  ::: src/semantic_query.rs
-   |
-   |     pub(crate) fn body_source(&self) -> InstantiateBodySource {
-   |     --------------------------------------------------------- private method defined here
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/instantiate_key_context_not_extractable.rs
+  |
+  |         let _source = k.body_source();
+  |                         ^^^^^^^^^^^ private method
+  |
+ ::: $WORKSPACE/crates/verter_session/src/semantic_query.rs
+  |
+  |     pub(crate) fn body_source(&self) -> InstantiateBodySource {
+  |     --------------------------------------------------------- private method defined here
 
 error[E0624]: method `args` is private
-  --> tests/cases/compile-fail/instantiate_key_context_not_extractable.rs:40:23
-   |
-40 |         let _args = k.args();
-   |                       ^^^^ private method
-   |
-  ::: src/semantic_query.rs
-   |
-   |     pub(crate) fn args(&self) -> &Arc<[SemanticNodeId]> {
-   |     --------------------------------------------------- private method defined here
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/instantiate_key_context_not_extractable.rs
+  |
+  |         let _args = k.args();
+  |                       ^^^^ private method
+  |
+ ::: $WORKSPACE/crates/verter_session/src/semantic_query.rs
+  |
+  |     pub(crate) fn args(&self) -> &Arc<[SemanticNodeId]> {
+  |     --------------------------------------------------- private method defined here

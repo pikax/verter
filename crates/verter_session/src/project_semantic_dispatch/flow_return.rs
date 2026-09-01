@@ -6223,7 +6223,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.dispatch.graph().node_data(node).as_deref()
         {
             if expanded.insert(node) {
-                for member in members.to_vec() {
+                for member in members.iter().copied() {
                     self.collect_enumerated_arms(member, arms, expanded, gapped);
                 }
             }

@@ -239,7 +239,7 @@ import IdeSurfaceChild from './IdeSurfaceChild.vue'
 );
 
 #[tokio::test(flavor = "multi_thread")]
-async fn svelte_contract_tsgo_template_completion_survives_provider_specialization() {
+async fn svelte_contract_template_completion_survives_provider_specialization_tsgo() {
     use crate::test_harness::{TestProviderKind, TestSessionBuilder};
 
     let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsgo)

@@ -88,7 +88,7 @@
 //!      unbounded escape-trait surface comes from the payload vault, not the
 //!      finite trait list). The out-of-crate visibility boundary is pinned by
 //!      the trybuild fixture `output_projector_not_impl_outside_crate.rs`
-//!      (`output_projector_non_owner_impl_is_compiler_sealed`).
+//!      (`output_projector_not_impl_outside_crate`).
 //!
 //! The tombstone's full record block lives on the
 //! `retired_kind_b_bridge_symbol_absent_from_production_source` guard below.

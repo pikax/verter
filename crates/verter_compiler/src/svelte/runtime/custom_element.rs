@@ -33,7 +33,7 @@
 //! [`OptionsCustomElementTextTag`]: crate::svelte::parser::OptionsCustomElementTextTag
 //! [`resolve_custom_element_expr`]: crate::svelte::parser::resolve_custom_element_expr
 
-use super::RuntimeLoweringDiagnostic;
+use super::{RuntimeLoweringDiagnostic, SvelteRuntimeOptions};
 use crate::svelte::parser::{
     AcceptedCustomElementValue, CustomElementDescriptor, CustomElementShadow, ParsedSvelte,
     SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue, SvelteElement, SvelteElementKind,
@@ -41,10 +41,50 @@ use crate::svelte::parser::{
 };
 use verter_span::Span;
 
+/// Compile-side custom-element selection folded from [`SvelteRuntimeOptions`].
+/// Inline `<svelte:options customElement>` still wins; a `customElement={null}`
+/// value falls back to this selection.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum CustomElementCompileSelection<'a> {
+    Descriptor(&'a CustomElementDescriptor),
+    Bare,
+    Disabled,
+}
+
+impl<'a> CustomElementCompileSelection<'a> {
+    pub(super) fn from_opts(opts: &'a SvelteRuntimeOptions) -> Self {
+        if let Some(descriptor) = opts.custom_element_descriptor.as_ref() {
+            Self::Descriptor(descriptor)
+        } else if opts.custom_element {
+            Self::Bare
+        } else {
+            Self::Disabled
+        }
+    }
+
+    fn fallback_descriptor(self) -> Option<CustomElementDescriptor> {
+        match self {
+            Self::Descriptor(descriptor) => Some(descriptor.clone()),
+            Self::Bare => Some(bare_custom_element_descriptor()),
+            Self::Disabled => None,
+        }
+    }
+}
+
+fn bare_custom_element_descriptor() -> CustomElementDescriptor {
+    CustomElementDescriptor {
+        tag: None,
+        shadow: CustomElementShadow::Open,
+        props: Vec::new(),
+        extend: None,
+        inject_styles: true,
+    }
+}
+
 /// Resolve the component's custom-element descriptor from the FIRST root
 /// `<svelte:options>` element's `customElement` attribute, falling back to the
-/// `customElement: true` compile option (`custom_element_option`). `None` means
-/// the component compiles as a plain component.
+/// compile-side selection. `None` means the component compiles as a plain
+/// component.
 ///
 /// FALLIBLE only on a broken upstream invariant: a `customElement` value shape
 /// the official-reject gate should have rejected (a boolean shorthand, a mixed
@@ -53,17 +93,9 @@ use verter_span::Span;
 /// plain component.
 pub(super) fn resolve_custom_element(
     parsed: &ParsedSvelte,
-    custom_element_option: bool,
+    compile_selection: CustomElementCompileSelection<'_>,
 ) -> Result<Option<CustomElementDescriptor>, RuntimeLoweringDiagnostic> {
-    let compile_option_descriptor = || {
-        custom_element_option.then(|| CustomElementDescriptor {
-            tag: None,
-            shadow: CustomElementShadow::Open,
-            props: Vec::new(),
-            extend: None,
-            inject_styles: true,
-        })
-    };
+    let compile_option_descriptor = || compile_selection.fallback_descriptor();
     // The FIRST ROOT-level options element (upstream's `findIndex` over the root
     // fragment); a nested one is an official reject caught upstream.
     let Some(attr) = first_root_options_custom_element_attr(&parsed.template) else {
@@ -161,7 +193,7 @@ mod tests {
     fn string_tag_lowering_consumes_only_the_retained_descriptor() {
         // Positive: resolution returns the parser-RETAINED string-tag descriptor.
         let parsed = parse_svelte(STRING_TAG_SRC);
-        let descriptor = resolve_custom_element(&parsed, false)
+        let descriptor = resolve_custom_element(&parsed, CustomElementCompileSelection::Disabled)
             .expect("a retained valid string tag resolves")
             .expect("a string-tag customElement yields a descriptor");
         assert_eq!(descriptor.tag.as_deref(), Some("my-el"));
@@ -175,7 +207,7 @@ mod tests {
         // `resolve_custom_element` can no longer perform: it does not take the source).
         let mut tampered = parse_svelte(STRING_TAG_SRC);
         tampered.options_custom_element_text_tags.clear();
-        let err = resolve_custom_element(&tampered, false)
+        let err = resolve_custom_element(&tampered, CustomElementCompileSelection::Disabled)
             .expect_err("a missing retained text-tag descriptor is a loud invariant failure");
         assert_eq!(err.code, "svelte-runtime-custom-element-descriptor");
     }

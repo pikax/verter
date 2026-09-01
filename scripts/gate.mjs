@@ -15,11 +15,9 @@
 //   `exit 0` means "the requested OPERATION succeeded" — it is scoped to the mode you ran, NOT a blanket
 //   gate pass. Concretely:
 //     * `node scripts/gate.mjs` and `node scripts/gate.mjs --exhaustive` are THE GATE. Their exit 0 means
-//       Surface 1 built AND passed (except the env-only typeinfo freshness PAIR, by exact name, AND only
-//       when the freshness-tooling preflight below proves `pnpm` is not resolvable AND `buf` is not
-//       resolvable — the condition under which the Rust byte-pin test skips; see FRESHNESS-TOOLING
-//       PREFLIGHT). The shipped-cfg guard is currently SKIPPED and is not part of this contract — a PASS
-//       is Surface 1 only. That, and only that, is the gate-pass contract.
+//       the provider-free core Surface 1 built AND passed. Real providers, Svelte conformance,
+//       compile contracts, and proto freshness are separate CI lanes. The shipped-cfg guard is
+//       currently SKIPPED and is not part of this contract — a PASS is core Surface 1 only.
 //     * `--prepare` is a WARM-PASS only. Its exit 0 means PREPARED (the archive built + the first-launch
 //       assessment was warmed) — tests were NOT run, so it is NEVER a gate pass. Its success output carries
 //       the `PREPARED_NOT_GATE` marker and contains no `PASS` token precisely so a CI `grep PASS` cannot
@@ -29,9 +27,9 @@
 //   either is a usage error, exit 127), so neither exit-0 mode can be reached with junk arguments.
 //
 // PURPOSE
-//   Builds the whole workspace test universe ONCE via `cargo nextest archive` (dev profile) and runs it
-//   with `cargo nextest run` (per-test PROCESS ISOLATION) — ONE full build, ONE full run, per the
-//   maintainer's SINGLE-TEST-UNIVERSE directive, refining ONE-BUILD-ONE-RUN.
+//   Builds the workspace test archive ONCE via `cargo nextest archive` (dev profile) and runs the
+//   provider-free core selection with `cargo nextest run` (per-test PROCESS ISOLATION) — ONE full build,
+//   ONE core run. Provider suites and Svelte conformance have separate execution models.
 //   See docs/contributing/gate-performance.md. That is SURFACE 1. Deliberate
 //   shared-process coverage — the class the former
 //   Surface 2 existed for — now lives INSIDE that one universe as
@@ -163,9 +161,8 @@
 //      TRUST MODEL. The verdict rests on nextest's own counts, not on the names: `runCount - passed`
 //      cannot be lowered by anything a test prints, whereas the status lines share a stream with
 //      captured test output and are forgeable. Naming is therefore advisory and the count is
-//      authoritative; the one route from `failures exist in the log` to a green verdict is the
-//      tolerance allowlist, so tolerance is refused outright whenever a failure was superseded by a
-//      pass. Residual, named rather than claimed away: no text-level rule can fully separate runner
+//      authoritative. Production enables no tolerated failure class: every selected non-pass is hard.
+//      Residual, named rather than claimed away: no text-level rule can fully separate runner
 //      output from test output on a shared stream - see GI-19 in docs/contributing/gate-integrity-ledger.md.
 //      NAMING, and its honest limit. Failing tests are listed by name with their status, including the
 //      compound (`FAIL + LEAK`) and retried (`TRY 3 FAIL`, `TRY 3 FL+LK`) status fields, with the LAST
@@ -177,80 +174,10 @@
 //      pinned in `NEXTEST_FAILURE_STATUSES` + `classifyNextestStatusField` from nextest's own status
 //      literals; widen it there, and only there, if a future nextest adds a spelling.
 //
-// BUILD-PREREQUISITE PREFLIGHT (gate mode only; runs FIRST, before everything below)
-//   Parts of the Rust suite load artifacts CARGO DOES NOT BUILD. The real-provider suites spawn the pinned
-//   `tsserver` with `--globalPlugins @verter/typescript-plugin --pluginProbeLocations
-//   packages/vue-vscode/node_modules`; that probe dir is a pnpm symlink to `packages/typescript-plugin`,
-//   whose `main` is `dist/index.js` — a `tsc -b` OUTPUT that `pnpm install` does NOT produce. With the
-//   symlink present but the `dist` absent, tsserver loads no plugin, cannot resolve `.vue`/`.svelte`
-//   carriers, and ~64 `*_tsserver` tests fail with `TS2307: Cannot find module './Comp.vue' or its
-//   corresponding type declarations.` — sixty-four opaque failures that read exactly like a compiler
-//   regression. CLAUDE.md's "Verification Must Prove Execution (MANDATORY)" requires a gate to prove
-//   "required source, build, and fixture prerequisites matched the tested tree"; a gate that cannot tell
-//   "the code is broken" from "an artifact was never built" fails that rule.
-//   So as its FIRST step — before the freshness preflight, before cargo, before any test — the gate LOADS
-//   that plugin entry in a child process (`require()` of the probe directory, exactly what tsserver
-//   resolves) and, on any load failure, FAILS CLOSED with exit 127 naming the probe target, the load
-//   error, the producing packages and the exact producer command (marker: `BUILD-PREREQUISITE MISSING`).
-//   A REAL LOAD, not a list of files to stat: the entry eagerly requires its emitted helpers and
-//   `@verter/language-shared`'s entry re-exports a dozen emitted siblings, so a stat list mirrors the emit
-//   graph and drifts — a tree with both `index.js` files present and one helper missing satisfies every
-//   stat and still throws inside tsserver. The load proves the transitive closure RESOLVES; it does NOT
-//   prove freshness, and a stale-but-loadable dist is a separate, deliberately out-of-scope problem.
-//   It does NOT build the artifacts (the verdict must not depend on a mutation the gate performed) and
-//   does NOT skip the affected tests (with no install at all those tests SKIP, the silent-pass half of the
-//   same rule). It precedes the freshness preflight because that preflight's `pnpm install` is precisely
-//   what converts the silent-skip state into the 64-failure state. `--prepare` is exempt: it builds the
-//   archive and runs no test.
-//   Two workspace packages produce the closure: the plugin, and `@verter/language-shared`.
-//   `@verter/native` is deliberately NOT among them (the plugin's `"files": ["src/index.ts"]` excludes
-//   `src/tsc/`, its only consumer), so the gate never demands a `napi build --release`.
-//
 // BF2 AUTHORITATIVE COVERAGE
 //   The oracle-backed `verter_session/bf2-authoritative` inventory runs in the separate required CI job
 //   driven by `scripts/bf2-authoritative.mjs`. It is intentionally absent from this archive and from this
 //   gate's prerequisite path so the core Rust lane and BF2 lane execute in parallel.
-//
-// FRESHNESS-TOOLING PREFLIGHT + VERDICT-GATED TOLERANCE (gate mode only)
-//   The two `typeinfo_proto_ts_freshness` byte-equality tests regenerate the committed TS proto bindings
-//   through the workspace `buf` + `oxfmt` binaries (resolved under `node_modules/.bin` first, PATH second).
-//   In a fresh `git worktree` nobody runs `pnpm install`, so those binaries can be absent. With `buf` absent the
-//   Rust byte-pin pair SKIPS and PASSES (no FAIL line); the real risk is the OPPOSITE — a blanket env-tolerance
-//   would swallow (a) a trivially-fixable missing `pnpm install` and (b) a GENUINE stale-binding regression
-//   (tools present, bindings drifted, the test RUNS and FAILS), which shares the same two test names. So AFTER the gate mutex is held and BEFORE
-//   the archive build, the gate runs a pure-Node preflight (inside the SAME deadline/stall/teardown model):
-//   Tolerance is BUF-ABSENCE-ONLY: it is allowed ONLY when `buf` is not resolvable — exactly the condition
-//   under which the Rust byte-pin test SKIPS (`locate_buf_binary(root)?` early-returns). With `buf` present
-//   the test RUNS; `oxfmt` is the test's CONDITIONAL formatter, so a missing `oxfmt` with `buf` available is a
-//   LOUD setup failure (exit 127), NOT tolerated and NOT a degraded un-oxfmt'd run. Whether to ATTEMPT the
-//   install is a POSITIVE-RESOLVE-BEFORE-INSTALL fact (`pnpm` resolved via PATH — platform-aware, with the
-//   Windows .CMD/.cmd/.exe/.bat suffixes — and the RESOLVED path is the exact binary the launcher runs:
-//   directly on POSIX / that resolved `.cmd` path quoted under `cmd.exe /d /s /c` on Windows; a local
-//   `node_modules/.bin/pnpm` shim the launcher never invokes does NOT count), NOT inferred from an install
-//   spawn failure:
-//     * both `node_modules/.bin` shims present up front      → tolerance DISABLED (no install).
-//     * a shim missing → resolve `pnpm` via PATH (platform-aware) as a POSITIVE fact:
-//         - pnpm NOT resolvable → re-resolve `buf`/`oxfmt` (the install is NOT run):
-//             · `buf` NOT resolvable                          → the Rust freshness pair SKIPS gracefully and
-//               PASSES (no `FAIL` line), so the gate reports an ORDINARY PASS. The verdict-gated tolerance is
-//               flipped ON here as a LATENT safety net — it surfaces PASS-WITH-TOLERATED only in the unusual
-//               case the pair produces a tolerated `FAIL` despite `buf` being absent (the skip path does not).
-//             · `buf` present + `oxfmt` present               → tolerance DISABLED (path-fallback).
-//             · `buf` present + `oxfmt` MISSING               → SETUP FAILURE, exit 127 (LOUD; ensure `oxfmt`)
-//               — never tolerated, never a degraded run.
-//         - pnpm IS resolvable → `pnpm install --frozen-lockfile` (never mutates the lockfile), then:
-//             · watchdog (MEMORY/TIMEOUT/STALL)               → propagated, never tolerated.
-//             · spawnError / launched non-zero                → SETUP FAILURE, exit 127 (LOUD, never
-//               PASS-WITH-TOLERATED) — e.g. a frozen-lockfile mismatch.
-//             · exit 0 → RE-RESOLVE `buf`/`oxfmt`: both present → tolerance DISABLED; `buf` missing OR `oxfmt`
-//               missing → SETUP FAILURE, exit 127.
-//   The verdict boundary is GATED on that result: PASS-WITH-TOLERATED can be reached ONLY when the preflight
-//   ALLOWED the tolerance (pnpm not resolvable AND `buf` not resolvable) AND the freshness pair actually
-//   produced a tolerated `FAIL` line. On a real buf-less runner the Rust pair SKIPS (no `FAIL`), so the gate
-//   reports an ordinary PASS and the allowance is never consumed — it is a latent net, not the normal
-//   buf-less verdict. Tools present/installed ⇒ a freshness-pair FAIL is a HARD failure; any other test,
-//   abnormal exit, missing summary, or count mismatch stays hard regardless.
-//   In CI deps are already installed, so the preflight is a cheap no-op.
 //
 // REPORT-ONLY TELEMETRY
 //   After mutex acquisition all startup probes share a separate hard aggregate reporting deadline. The
@@ -329,6 +256,15 @@ import {
   SHIPPED_CFG_LANE_ENABLED,
   SHIPPED_CFG_SKIP_SUMMARY,
   SHIPPED_CFG_SKIP_VERDICT_NOTE,
+  // wasm JS-boundary lane — required on every real gate invocation, never path-filtered, never optional
+  WASM_LANE_ID,
+  WASM_LANE_TARGET,
+  WASM_LANE_RUNNER_ENV_KEY,
+  checkWasmLanePrerequisites,
+  wasmLaneProbeBudgetMs,
+  buildWasmLaneTestArgs,
+  evaluateWasmLanePackageRun,
+  decideWasmLaneCaseParity,
   // logging + time
   log,
   warn,
@@ -366,9 +302,6 @@ import {
   recordGateAggregateForestPeak,
   summarizeGateTelemetry,
   summarizeNextestTimings,
-  // build-prerequisite preflight (the non-cargo artifacts the suite loads from disk)
-  checkBuildPrerequisites,
-  probeBudgetMs,
   // real conformance-harness preflight
   HARNESS_SMOKE_MARKER,
   CORE_HARNESS_SMOKE_MODES,
@@ -377,14 +310,6 @@ import {
   formatHarnessSmokeFailure,
   // archive builder — feature parity for the one workspace archive surface 1 builds
   buildNextestArchiveArgs,
-  // trybuild exclusion (interim, pending maintainer disposition) — filter builder + coverage guard
-  TRYBUILD_EXCLUDED_SUITES,
-  buildTrybuildExclusionFilterExpr,
-  buildCanonicalSurface1FilterExpr,
-  countTrybuildExclusionMatches,
-  // freshness-tooling preflight (verdict-gating authority)
-  preflightFreshnessTooling,
-  pnpmInstallCommand,
   vueMacroOracleGateCommands,
   ensureRequiredWindowsDebugSidecars,
   resolveSuiteBinary,
@@ -399,6 +324,10 @@ import {
   dirname,
   isAbsolute,
 } from "./gate-internals.mjs";
+import {
+  buildProviderLaneFilterExpr,
+  verifyProviderCiPartition,
+} from "./provider-ci-internals.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -966,6 +895,16 @@ async function main() {
           laneResourceSplit.shippedCfg.buildJobs,
         )
       : null;
+  // The wasm JS-boundary lane runs SERIALLY — no other cargo is live while it builds — so it takes the
+  // WHOLE `opts.buildJobs` ceiling rather than a share of it. Its per-target runner override is written
+  // into the child env from the absolute path the preflight proved on PATH, so `.cargo/config.toml` never
+  // acquires a repo-wide runner every unrelated wasm invocation would inherit. `buildCargoEnv` runs FIRST
+  // (it strips and rebuilds whole namespaces) and the override is installed after, so the strip cannot
+  // remove it.
+  const wasmCargoEnv =
+    opts.mode === "gate"
+      ? buildCargoEnv(process.env, laneLayout.wasmJsBoundary.targetDir, undefined, opts.buildJobs)
+      : null;
   let telemetry = null;
   let telemetryReporter = null;
   let telemetryFinalized = false;
@@ -1225,6 +1164,7 @@ async function main() {
         laneLayout,
         surfaceCargoEnv,
         shippedCargoEnv,
+        wasmCargoEnv,
         laneResourceSplit,
       });
     }
@@ -1265,44 +1205,16 @@ const VARIANT_DEBUG = {
   label: "workspace test universe (dev profile)",
 };
 
-// TRYBUILD EXCLUSION — interim, pending maintainer disposition (see TRYBUILD_EXCLUDED_SUITES in
-// gate-internals.mjs for why). Applied to surface 1's `--workspace` selection.
-const TRYBUILD_EXCLUSION_FILTER = buildTrybuildExclusionFilterExpr();
-
 // SHIPPED-CFG CONTRACT EXCLUSION. `verter_shipped_cfg_contract`'s tests are DELIBERATELY meaningless
 // under surface 1's dev-profile `--workspace` archive: its two profile-sanity canaries assert
 // `debug_assertions` and overflow-checks are OFF, which is true only under the alternate
 // `no-debug-assertions` profile the shipped-cfg guard runs it under (`runShippedCfgLane`). Excluded from
 // surface 1's selection here so the SAME package still runs — deliberately, under the right profile — a
 // few steps later, rather than failing surface 1 for behaving exactly as designed.
-const SURFACE_1_FILTER = buildCanonicalSurface1FilterExpr();
-
-// Shared coverage guard: verify every registered trybuild row matches real work in THIS archive's own
-// listing, log the exclusion LOUDLY (count + reason + filter string, never a silent skip), and return the
-// verified counts. Returns `{ error }` when a row went stale (zero matches) — the caller must fail closed.
-function verifyTrybuildExclusionCoverage(allSuites, surfaceLabel) {
-  const trybuild = countTrybuildExclusionMatches(allSuites);
-  if (trybuild.missing.length > 0) {
-    return {
-      error:
-        `TRYBUILD EXCLUSION SETUP FAILURE (${surfaceLabel}): the following registered row(s) matched ZERO ` +
-        "tests in this archive's own listing — a trybuild file was renamed, moved, or removed without " +
-        "updating TRYBUILD_EXCLUDED_SUITES in scripts/gate-internals.mjs: " +
-        trybuild.missing.map((m) => `package(${m.package}) test(/^${m.modulePrefix}/)`).join(", ") +
-        ". Refusing to run an exclusion filter that cannot prove it still excludes real tests.",
-    };
-  }
-  log(
-    `TRYBUILD EXCLUSION (${surfaceLabel}, INTERIM — pending maintainer disposition, not deletion): ` +
-      `excluding ${trybuild.total} trybuild compile-fail harness test(s) across ${TRYBUILD_EXCLUDED_SUITES.length} ` +
-      "registered file(s) in 6 crates (one trybuild::TestCases::new() invocation spawns a cargo build of " +
-      "the crate's full dependency closure — 98s cold / 0.8s warm measured, not a unit test). Still runnable " +
-      "directly; not deleted, not feature-gated. filter: '" +
-      TRYBUILD_EXCLUSION_FILTER +
-      "'",
-  );
-  return { trybuild };
-}
+// Third-party provider suites own explicit, serial libtest CI lanes. The
+// canonical nextest surface is provider-free so process-per-test isolation
+// cannot repeatedly initialize and contend on tsserver/tsgo engines.
+const SURFACE_1_FILTER = buildProviderLaneFilterExpr("core");
 
 // ----------------------------------------------------------------------------------------------------
 // Archive + list — the shared front half of the gate and --prepare (surface 1's ONE archive; the
@@ -1449,6 +1361,18 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
     err(`could not parse nextest list JSON: ${e.message}`);
     return { error: EXIT_USAGE, where: "list-parse", res: listRes };
   }
+  const providerPartition = verifyProviderCiPartition(listJson);
+  if (!providerPartition.ok) {
+    for (const detail of providerPartition.errors) {
+      err(`provider partition: ${detail}`);
+    }
+    return { error: EXIT_USAGE, where: "provider-partition", res: listRes };
+  }
+  log(
+    `provider partition verified: core=${providerPartition.counts.core}, ` +
+      `tsserver=${providerPartition.counts.tsserver}, tsgo=${providerPartition.counts.tsgo}; ` +
+      "provider suites are excluded from Surface 1 and run in dedicated libtest lanes",
+  );
   // TELEMETRY (report-only): the list/extract step's successful peak RSS retained in the phase/whole
   // summary + the total size of every suite binary this archive extracted.
   const extractedSizes = computeExtractedBinarySizes(listJson, extractDir);
@@ -1608,14 +1532,14 @@ function stepOutput(result) {
 function persistLaneOutput(lane, receipt) {
   try {
     const output =
-      receipt.laneId === "surface-1"
-        ? receipt.output
-        : `${receipt.check?.output || ""}\n${receipt.contract?.output || ""}`;
+      receipt.laneId === "shipped-cfg"
+        ? `${receipt.check?.output || ""}\n${receipt.contract?.output || ""}`
+        : receipt.output;
     writeFileSync(lane.outputFile, output, "utf8");
   } catch (error) {
     receipt.exitCode = EXIT_USAGE;
     receipt.messages.push({
-      phaseId: receipt.laneId === "surface-1" ? "surface-1" : "shipped-check",
+      phaseId: receipt.laneId === "shipped-cfg" ? "shipped-check" : receipt.laneId,
       level: "error",
       text: `gate setup failed writing ${receipt.laneId} buffered output: ${error?.message || error}`,
     });
@@ -1904,18 +1828,213 @@ async function runShippedCfgLane(opts, ctx, { allSuites, commandPlan }) {
   return persistLaneOutput(lane, receipt);
 }
 
+// ----------------------------------------------------------------------------------------------------
+// WASM JS-BOUNDARY LANE.
+//
+// The workspace's `#[wasm_bindgen_test]` cases exist because a deserializer can visit only the fields a
+// schema declares and thereby never reach the closed-shape refusal at all: the refusal must be proven
+// where a browser caller meets it, against a real JS object graph. They are `#[cfg(target_arch = "wasm32")]`,
+// so the host archive cannot contain them and Surface 1 can never execute them. This lane does.
+//
+// It is REQUIRED on every real gate invocation, bare and exhaustive, and is NOT path-filtered: a gate that
+// only runs it when `crates/verter_wasm/**` changed would miss every regression introduced from the
+// session/protocol side of the same boundary. `--prepare` runs no test and never reaches here.
+// ----------------------------------------------------------------------------------------------------
+function runWasmLanePrerequisitePreflight(ctx) {
+  const { repoRealpath, cargoEnv, deadlineMs } = ctx;
+  const startedAtMs = nowMs();
+  const prereq = checkWasmLanePrerequisites({
+    repoRoot: repoRealpath,
+    // The SAME constructed env the lane's cargo child receives, so the runner the preflight resolves and
+    // pins is the runner the lane executes — never a PATH the preflight saw and the lane did not.
+    env: cargoEnv,
+    timeoutMs: wasmLaneProbeBudgetMs(deadlineMs, nowMs()),
+  });
+  recordTelemetryPhaseSafe(ctx, "wasm-prerequisite", {
+    status: prereq.ok ? "ok" : "failed",
+    startedAtMs,
+  });
+  if (!prereq.ok) {
+    for (const line of prereq.lines) err(line);
+    return { ok: false, prereq };
+  }
+  log(
+    `wasm JS-boundary preflight: ${prereq.packages.length} package(s) ` +
+      `(${prereq.packages.map((pkg) => `${pkg.name}=${prereq.perPackage[pkg.name]}`).join(", ")}), ` +
+      `${prereq.discoveredCases} discovered case(s); runner ${prereq.runnerPath} pinned at ` +
+      `${prereq.expectedVersion} by this tree's wasm-bindgen dependency`,
+  );
+  return { ok: true, prereq };
+}
+
+async function runWasmJsBoundaryLane(opts, ctx, { prereq }) {
+  const { repoRealpath, deadlineMs, stallMs, memoryLimitBytes, laneLayout, wasmCargoEnv } = ctx;
+  const lane = laneLayout.wasmJsBoundary;
+  const laneEnv = { ...wasmCargoEnv, [WASM_LANE_RUNNER_ENV_KEY]: prereq.runnerPath };
+  const receipt = {
+    laneId: WASM_LANE_ID,
+    status: "not-run",
+    hardFailure: false,
+    exitCode: null,
+    failures: [],
+    coverage: { parseable: false, complete: false },
+    parity: {
+      complete: false,
+      matches: false,
+      discoveredCases: prereq.discoveredCases,
+      selectedCases: 0,
+    },
+    output: "",
+    messages: [],
+  };
+
+  let selectedTotal = 0;
+  let executedTotal = 0;
+  let passedTotal = 0;
+  let failedTotal = 0;
+  let ignoredTotal = 0;
+  let parseable = true;
+  let complete = true;
+  const startedAtMs = nowMs();
+
+  for (const pkg of prereq.packages) {
+    const args = buildWasmLaneTestArgs({ packageName: pkg.name, exhaustive: opts.exhaustive });
+    const runRes = await ctx.supervisor.runStep(WASM_LANE_ID, {
+      cmd: "cargo",
+      args,
+      cwd: repoRealpath,
+      env: laneEnv,
+      phase: "test",
+      deadlineMs,
+      stallMs,
+      targetDir: lane.targetDir,
+      memoryLimitBytes,
+      mirrorOutput: false,
+    });
+    receipt.output += `$ cargo ${args.join(" ")}\n${stepOutput(runRes)}\n`;
+
+    if (runRes.reason) {
+      receipt.status = runRes.reason === "CANCELLED" ? "cancelled" : "aborted";
+      receipt.exitCode = runRes.reason === "CANCELLED" ? EXIT_USAGE : mapStepReason(runRes);
+      receipt.messages.push({
+        phaseId: WASM_LANE_ID,
+        level: "error",
+        text: `wasm JS-boundary lane ${runRes.reason} after ${Math.round(runRes.durationMs / 1000)}s`,
+      });
+      recordContainedStepTelemetry(ctx, WASM_LANE_ID, runRes);
+      return persistLaneOutput(lane, receipt);
+    }
+    if (runRes.spawnError) {
+      receipt.status = "aborted";
+      receipt.exitCode = EXIT_USAGE;
+      receipt.messages.push({
+        phaseId: WASM_LANE_ID,
+        level: "error",
+        text: "could not launch 'cargo' for the wasm JS-boundary lane (command not found / not executable)",
+      });
+      recordContainedStepTelemetry(ctx, WASM_LANE_ID, runRes);
+      return persistLaneOutput(lane, receipt);
+    }
+
+    // Every per-package judgement — transcript completeness, the unaccounted-failure rows, and this
+    // package's own selected/executed/declared reconciliation — is made by gate-internals'
+    // `evaluateWasmLanePackageRun`, so weakening any of them has to revert that function and the lane
+    // self-test can drive all of it without a wasm toolchain.
+    const expected = prereq.perPackage[pkg.name] || 0;
+    const pkgRun = evaluateWasmLanePackageRun({
+      packageName: pkg.name,
+      expected,
+      text: stepOutput(runRes),
+      exitCode: runRes.code,
+    });
+    const summary = pkgRun.summary;
+    parseable = parseable && pkgRun.parseable;
+    complete = complete && pkgRun.complete;
+    selectedTotal += summary.selected;
+    executedTotal += summary.passed + summary.failed;
+    passedTotal += summary.passed;
+    failedTotal += summary.failed;
+    ignoredTotal += summary.ignored;
+    for (const failure of pkgRun.failures) receipt.failures.push(failure);
+
+    receipt.messages.push({
+      phaseId: WASM_LANE_ID,
+      level: "log",
+      text:
+        `WASM JS-BOUNDARY [${pkg.name}] done in ${Math.round(runRes.durationMs / 1000)}s: ` +
+        `${summary.selected} selected (source scan declares ${expected}), ${summary.passed} passed, ` +
+        `${summary.failed} failed, ${summary.ignored} ignored across ${summary.resultBlocks} harness ` +
+        `result block(s); run exit ${runRes.code}`,
+    });
+    recordContainedStepTelemetry(ctx, WASM_LANE_ID, runRes);
+  }
+
+  // ONE comparison, made in ONE place (gate-internals' `decideWasmLaneCaseParity`) so a regression that
+  // weakens it to "did anything run at all" has to revert that function rather than an inline copy here.
+  // EXECUTED is passed+failed, never the announced count: `running N tests` is printed before the ignore
+  // filter runs, so a `#[ignore]`d boundary case would otherwise reconcile perfectly while proving nothing.
+  const parity = decideWasmLaneCaseParity(selectedTotal, prereq.discoveredCases, executedTotal);
+  receipt.coverage = { parseable, complete };
+  receipt.parity = {
+    complete: true,
+    matches: parity === null,
+    discoveredCases: prereq.discoveredCases,
+    selectedCases: selectedTotal,
+    executedCases: executedTotal,
+  };
+  if (parity) {
+    receipt.status = "failed";
+    receipt.messages.push({ phaseId: WASM_LANE_ID, level: "error", text: parity.message });
+    if (receipt.failures.length === 0) {
+      receipt.exitCode = parity.exit;
+      return persistLaneOutput(lane, receipt);
+    }
+    // The run already named a cause — failing cases, or a non-zero exit with none, which is what a wasm32
+    // compile break looks like. That cause explains the count shortfall, and an infrastructure exit code
+    // would discard it: the reducer drops `failures` whenever an exit code is present, so the run would be
+    // reported as an inventory bug with its actual diagnostic thrown away. Carry the names instead; the
+    // unmatched parity still keeps lane coverage incomplete, so this cannot read as a pass.
+    receipt.hardFailure = true;
+    return persistLaneOutput(lane, receipt);
+  }
+
+  receipt.hardFailure = receipt.failures.length > 0 || !complete;
+  receipt.status = receipt.hardFailure ? "failed" : "ok";
+  if (!complete && receipt.failures.length === 0) {
+    receipt.failures.push({
+      surface: "wasm:lane",
+      name: "<wasm JS-boundary harness produced no terminal `test result:` line for an announced run — the lane did not finish>",
+    });
+  }
+  receipt.messages.push({
+    phaseId: WASM_LANE_ID,
+    level: "log",
+    text:
+      `WASM JS-BOUNDARY done in ${Math.round(nowMs() - startedAtMs) / 1000}s: ` +
+      `${executedTotal}/${prereq.discoveredCases} discovered case(s) EXECUTED ` +
+      `(${selectedTotal} selected), ${passedTotal} passed, ${failedTotal} failed, ${ignoredTotal} ` +
+      `ignored on ${WASM_LANE_TARGET}`,
+  });
+  return persistLaneOutput(lane, receipt);
+}
+
 function replayGateLaneTranscript(receipts, ctx, allSuites) {
   const segments = SHIPPED_CFG_LANE_ENABLED
     ? canonicalGateLaneTranscriptSegments(receipts)
     : canonicalGateLaneTranscriptSegments(receipts).filter(
-        (segment) => segment.phaseId === "surface-1",
+        (segment) => segment.phaseId === "surface-1" || segment.phaseId === WASM_LANE_ID,
       );
   for (const segment of segments) {
     log(segment.header);
     if (segment.output) {
       process.stderr.write(segment.output.endsWith("\n") ? segment.output : `${segment.output}\n`);
     }
-    const owner = segment.phaseId === "surface-1" ? receipts.surface : receipts.shipped;
+    const owner =
+      segment.phaseId === "surface-1"
+        ? receipts.surface
+        : segment.phaseId === WASM_LANE_ID
+          ? receipts.wasm
+          : receipts.shipped;
     for (const message of owner?.messages || []) {
       if (message.phaseId !== segment.phaseId) continue;
       if (message.level === "error") err(message.text);
@@ -2006,45 +2125,7 @@ async function runHarnessSmokeChecks(ctx) {
 async function runGate(opts, ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
 
-  // ---------- BUILD-PREREQUISITE PREFLIGHT (the FIRST step of the gate) ----------
-  // Parts of the suite load artifacts cargo does not build: the real-provider suites spawn the pinned
-  // tsserver with `--globalPlugins @verter/typescript-plugin`, whose entry is a `tsc -b` output that
-  // `pnpm install` does NOT produce. Without it tsserver resolves no carrier and ~64 `*_tsserver` tests
-  // fail with `TS2307: Cannot find module './Comp.vue'` — indistinguishable, from the gate's output, from
-  // a real compiler regression.
-  //
-  // The oracle is a REAL LOAD of that plugin entry in a child process, NOT a list of files to stat: the
-  // entry eagerly requires its emitted helpers and `@verter/language-shared`'s entry re-exports a dozen
-  // emitted siblings, so a stat list is a mirror of the emit graph that drifts (both `index.js` present +
-  // one helper missing passes every stat and still throws inside tsserver). It proves resolvability, NOT
-  // freshness — a stale-but-loadable dist is a separate, deliberately out-of-scope problem.
-  //
-  // Ordering: this is the first step of the gate proper. It runs BEFORE `preflightFreshnessTooling` ON
-  // PURPOSE — that preflight may `pnpm install`, and the install is exactly what converts the SILENT-SKIP
-  // state (no node_modules ⇒ no tsserver ⇒ the affected tests skip ⇒ a green gate that proved nothing)
-  // into the LOUD-FAILURE state. Checking first catches both with one actionable message. (The mutex,
-  // the runner target dir and the whole-gate deadline are established by `main` before runGate is
-  // entered; this precedes every install, every cargo step and every test, not every statement.)
-  // See `checkBuildPrerequisites` for why the gate refuses to build or to skip.
-  // The probe is bounded by the GATE's remaining wallclock, not by its own constant: it runs with the
-  // single-flight mutex held, so a probe that could outlive `--timeout` would hold the lock past the
-  // deadline that is supposed to release it.
-  const prerequisiteStartedAtMs = nowMs();
-  const prerequisites = checkBuildPrerequisites({
-    repoRoot: repoRealpath,
-    timeoutMs: probeBudgetMs(deadlineMs, nowMs()),
-  });
-  recordTelemetryPhaseSafe(ctx, "build-prerequisite", {
-    status: prerequisites.ok ? "ok" : "failed",
-    startedAtMs: prerequisiteStartedAtMs,
-  });
-  if (!prerequisites.ok) {
-    for (const line of prerequisites.lines) err(line);
-    return EXIT_USAGE;
-  }
-  log(`build-prerequisite preflight: SATISFIED — ${prerequisites.target} loaded`);
-
-  // ---------- REAL CONFORMANCE-HARNESS SMOKES (the gate's SECOND step) ----------
+  // ---------- REAL CONFORMANCE-HARNESS SMOKES (the gate's FIRST step) ----------
   // These smokes exercise the two broader runtime boundaries before Cargo pays to build the Rust universe:
   // the real Vapor DOM/runtime
   // preload and the real workspace-domain TypeScript virtual host. Both run through the same contained-step
@@ -2052,101 +2133,10 @@ async function runGate(opts, ctx) {
   const harnessSmokesOk = await runHarnessSmokeChecks(ctx);
   if (!harnessSmokesOk) return EXIT_USAGE;
 
-  // ---------- FRESHNESS-TOOLING PREFLIGHT (verdict-gating authority) ----------
-  // BEFORE the archive build (and inside the held mutex + containment model), self-ensure the typeinfo
-  // freshness tools (`buf` + `oxfmt`). The two byte-equality freshness tests regenerate the committed TS
-  // proto bindings through those binaries; in a fresh `git worktree` nobody runs `pnpm install`, so the
-  // tools can be absent — and with `buf` absent the Rust byte-pin pair SKIPS-and-PASSES (no FAIL line). The
-  // gate ensures the tooling so the byte-pin RUNS GENUINELY; it must NOT blanket-tolerate the env-only pair,
-  // because a GENUINE drift (tools present, bindings stale, the test RUNS and FAILS) shares those two names. It
-  // installs the frozen lockfile here and DISABLES the freshness tolerance when the tools are present, so a
-  // present/installed run treats a freshness FAIL as a HARD regression. Tolerance stays ENABLED only when
-  // pnpm is not resolvable AND `buf` is not resolvable (the Rust byte-pin would skip). `oxfmt` absence NEVER
-  // grants tolerance — with `buf` present, a missing `oxfmt` is a LOUD setup failure (a degraded un-oxfmt'd
-  // byte-compare can false-positive). A deterministic install failure (e.g. a frozen-lockfile mismatch) also
-  // FAILS LOUD as a setup error — never PASS-WITH-TOLERATED.
-  //
-  // `pnpm install --frozen-lockfile` runs through `runContainedStep` so it inherits the SAME whole-gate
-  // deadline + stall + teardown the cargo steps use (NOT an unbounded pre-mutex mutation). `--frozen-
-  // lockfile` never mutates the lockfile, so CI (deps already installed) makes the preflight a cheap no-op.
-  const freshnessStartedAtMs = nowMs();
-  const preflight = await preflightFreshnessTooling({
-    repoRoot: repoRealpath,
-    // The preflight's tool RESOLVER must see the SAME PATH the Rust test execution sees: `cargoEnv`
-    // (built at the top of runGate via `buildCargoEnv(process.env, …)`) has had implicit-CWD PATH
-    // components stripped, so neither the preflight verdict NOR the executed cargo/nextest/libtest tests
-    // resolve a tool from CWD. Passing the RAW `process.env` here would let the preflight's empty-PATH-
-    // skip decide "buf absent ⇒ tolerate" while the test (which honors an empty PATH component as CWD)
-    // resolves a CWD buf and RUNS — a fail-open where a real stale-binding regression is tolerated.
-    env: cargoEnv,
-    runInstall: ({ pnpmPath }) => {
-      // Resolve the platform-correct `pnpm install --frozen-lockfile` launch from the RESOLVED `pnpmPath`
-      // the preflight proved on PATH (the single source of truth — never a bare `pnpm` token). On Windows
-      // the resolved path is a `.cmd` shim that Node's `spawn(…, { shell:false })` cannot launch directly,
-      // so `pnpmInstallCommand` routes the QUOTED resolved path through a VERIFIED ABSOLUTE command processor
-      // (a case-insensitive absolute existing `ComSpec`, else `<SystemRoot>\System32\cmd.exe`) — a real
-      // `.exe` that spawns directly and stays the reapable tree root for `runContainedStep`'s `taskkill /T`
-      // teardown — with `windowsVerbatimArguments` so Node does not re-quote it. On POSIX it launches the
-      // resolved path DIRECTLY (no PATH re-search). Either way the containment model is unchanged — we keep
-      // the explicit command so the spawn remains `shell:false`.
-      const launch = pnpmInstallCommand(pnpmPath);
-      // On Windows `pnpmInstallCommand` SETUP-FAILS when no absolute command processor (a verified absolute
-      // `ComSpec`, else `<SystemRoot>\System32\cmd.exe`) can be resolved — it returns `{ setupFail, detail }`
-      // instead of a launch shape, refusing to spawn a bare/relative `cmd.exe`. Reuse the EXISTING setup-fail
-      // rail: synthesize a `runContainedStep`-shaped result with `spawnError: true`, which
-      // `preflightFreshnessTooling` already maps to action "setup-fail" ⇒ EXIT_USAGE (FAIL LOUD), rather than
-      // inventing a new error protocol.
-      if (launch.setupFail) {
-        return {
-          code: EXIT_USAGE,
-          reason: "",
-          durationMs: 0,
-          stdout: "",
-          stderr: launch.detail,
-          spawnError: true,
-        };
-      }
-      const { cmd, args, windowsVerbatimArguments } = launch;
-      return ctx.supervisor.runStep("front", {
-        cmd,
-        args,
-        windowsVerbatimArguments,
-        cwd: repoRealpath,
-        env: cargoEnv,
-        phase: "build", // install can be silent-ish while it links — allow artifact-growth as progress
-        deadlineMs,
-        stallMs,
-        targetDir: runnerTarget,
-        memoryLimitBytes,
-      });
-    },
-  });
-  recordTelemetryPhaseSafe(ctx, "freshness-tooling", {
-    status:
-      preflight.action === "watchdog"
-        ? "aborted"
-        : preflight.action === "setup-fail"
-          ? "failed"
-          : "ok",
-    startedAtMs: freshnessStartedAtMs,
-    peakRssBytes: preflight.installRes?.peakRssBytes || 0,
-    peakRssProcessCount: preflight.installRes?.peakRssProcessCount || 0,
-  });
-  if (preflight.action === "setup-fail") {
-    err(`gate setup failed ensuring freshness tooling: ${preflight.detail}`);
-    return EXIT_USAGE;
-  }
-  if (preflight.action === "watchdog" && preflight.installRes && preflight.installRes.reason) {
-    err(
-      `pnpm install ${preflight.installRes.reason} after ` +
-        `${Math.round((preflight.installRes.durationMs || 0) / 1000)}s while ensuring freshness tooling`,
-    );
-    return mapStepReason(preflight.installRes);
-  }
-  const freshnessToleranceAllowed = preflight.freshnessToleranceAllowed;
-  log(
-    `freshness-tooling preflight: ${preflight.action} — tolerance ${freshnessToleranceAllowed ? "ALLOWED (pnpm not resolvable AND buf not resolvable; the Rust byte-pin would skip)" : "DISABLED (tools present/installed; a freshness FAIL is a HARD regression)"}`,
-  );
+  // Proto regeneration freshness is not a Rust test. `pnpm proto:check` owns
+  // that contract in the lint/format CI lane, so Surface 1 has no tolerated
+  // freshness failure class.
+  const freshnessToleranceAllowed = false;
 
   const vueMacroOracleResult = await runVueMacroOracleChecks(ctx);
   if (vueMacroOracleResult !== EXIT_PASS) return vueMacroOracleResult;
@@ -2172,6 +2162,9 @@ async function runGate(opts, ctx) {
     ctx.laneLayout.shippedCfg.targetDir,
     ctx.laneLayout.shippedCfg.workDir,
     dirname(ctx.laneLayout.shippedCfg.outputFile),
+    ctx.laneLayout.wasmJsBoundary.targetDir,
+    ctx.laneLayout.wasmJsBoundary.workDir,
+    dirname(ctx.laneLayout.wasmJsBoundary.outputFile),
   ]) {
     mkdirSync(path, { recursive: true });
   }
@@ -2194,12 +2187,6 @@ async function runGate(opts, ctx) {
     `archive lists ${allSuites.length} suites; build-meta target-directory=${buildMetaTargetDir || "?"}`,
   );
 
-  const trybuildCov1 = verifyTrybuildExclusionCoverage(allSuites, "SURFACE 1 (dev archive)");
-  if (trybuildCov1.error) {
-    err(trybuildCov1.error);
-    return EXIT_USAGE;
-  }
-
   const commandPlan = buildGateLaneCommandPlan({
     archiveFile,
     surfaceExtractDir: ctx.laneLayout.surface1.extractDir,
@@ -2218,6 +2205,30 @@ async function runGate(opts, ctx) {
   // (either axis below 2), orchestrateGateLanes runs them serially instead — see its `concurrent` option.
   // Shipped remains internally serial in either case (check -> contract), while Surface consumes the
   // immutable front archive through its own extract root. While the lane is skipped, only Surface 1 runs.
+  // The wasm lane runs FIRST among the lanes, and ALONE. Serialized, it holds the whole build/memory
+  // ceiling with no other cargo live, and its receipt exists before Surface 1's local fail-fast can end the
+  // run — so no verdict can be reached without one. On a wasm infrastructure abort, or on a hard failure
+  // under the bare (fail-fast) policy, the host lanes are not started at all: the single fixed-order
+  // reducer below then sees a missing Surface receipt and reports the same FAIL it reports for any other
+  // incomplete coverage, so this shortcut cannot become a second verdict authority.
+  //
+  // Its prerequisites are established HERE rather than among the pre-archive preflights, because those are
+  // deliberately node-only: they run before Cargo exists in the gate's world at all. This check needs a
+  // working `cargo` and Rust toolchain, so it belongs with the Cargo work, immediately before the one lane
+  // that consumes it. A missing prerequisite is still a LOUD setup failure naming the exact tool and the
+  // command that produces it — the gate installs nothing (its verdict must not depend on a mutation it
+  // performed) and never degrades to a skip.
+  const wasmPreflight = runWasmLanePrerequisitePreflight(ctx);
+  if (!wasmPreflight.ok) return EXIT_USAGE;
+  const wasmReceipt = await runWasmJsBoundaryLane(opts, ctx, { prereq: wasmPreflight.prereq });
+  const wasmBlocks = wasmReceipt.exitCode !== null || (!opts.exhaustive && wasmReceipt.hardFailure);
+  if (wasmBlocks) {
+    err(
+      "wasm JS-boundary lane did not pass; the host lanes were not started " +
+        `(${wasmReceipt.exitCode !== null ? "lane infrastructure abort" : "local fail-fast"})`,
+    );
+  }
+
   const runSurfaceLane = () =>
     runSurface1Lane(opts, ctx, {
       allSuites,
@@ -2225,7 +2236,9 @@ async function runGate(opts, ctx) {
       freshnessToleranceAllowed,
     });
   let receipts;
-  if (SHIPPED_CFG_LANE_ENABLED) {
+  if (wasmBlocks) {
+    receipts = { surface: null, shipped: null };
+  } else if (SHIPPED_CFG_LANE_ENABLED) {
     receipts = await orchestrateGateLanes({
       exhaustive: opts.exhaustive,
       concurrent: ctx.laneResourceSplit.concurrent,
@@ -2247,16 +2260,9 @@ async function runGate(opts, ctx) {
     });
     receipts = { surface: await runSurfaceLane(), shipped: null };
   }
+  receipts.wasm = wasmReceipt;
   replayGateLaneTranscript(receipts, ctx, allSuites);
 
-  // Always stated at the tail of the run, regardless of verdict, so a reader who only reads the last few
-  // lines cannot mistake a green gate for full coverage: this run excluded a named, counted test class from
-  // surface 1 — see the earlier "TRYBUILD EXCLUSION" lines for the exact count and filter.
-  log(
-    "NOTE: this gate run excluded the trybuild compile-fail harness class (INTERIM, pending maintainer " +
-      "disposition — not deleted, not feature-gated, still runnable directly) from surface 1; " +
-      `see the "TRYBUILD EXCLUSION" lines above for exact counts.`,
-  );
   if (!SHIPPED_CFG_LANE_ENABLED) {
     log(SHIPPED_CFG_SKIP_SUMMARY);
   }
@@ -2264,7 +2270,12 @@ async function runGate(opts, ctx) {
   // ---------- Aggregate verdict ----------
   receipts.shippedCfgLaneEnabled = SHIPPED_CFG_LANE_ENABLED;
   const decision = reduceGateLaneReceipts(receipts);
-  const skipVerdictSuffix = SHIPPED_CFG_LANE_ENABLED ? "" : `; ${SHIPPED_CFG_SKIP_VERDICT_NOTE}`;
+  // A reader who sees only the last line must be able to tell that the wasm JS-boundary lane ran and how
+  // many cases it EXECUTED. A verdict that names only the host surfaces cannot distinguish a run that
+  // proved those refusals from one that never reached them.
+  const wasmVerdictNote =
+    `wasm JS-boundary lane executed ${receipts.wasm?.parity?.executedCases ?? "?"}/` +
+    `${receipts.wasm?.parity?.discoveredCases ?? "?"} discovered case(s) on ${WASM_LANE_TARGET}`;
   if (decision.exitCode !== null) return decision.exitCode;
   if (decision.verdict === "FAIL") {
     err(
@@ -2281,22 +2292,10 @@ async function runGate(opts, ctx) {
     );
     return EXIT_FAIL;
   }
-  if (decision.verdict === "PASS-WITH-TOLERATED") {
-    log(
-      "VERDICT: PASS-WITH-TOLERATED (only the env-only typeinfo_proto_ts_freshness pair produced an actual " +
-        "FAIL line, by exact name, AND the freshness-tooling preflight proved pnpm is not resolvable AND buf " +
-        "is not resolvable, so the pair is tolerated. This is the LATENT-net path: the normal buf-less runner " +
-        "SKIPS the Rust byte-pin (no FAIL line) and reaches the ordinary PASS below — this branch fires only " +
-        "when the pair somehow FAILED despite buf being absent. When the tools are present/installed this pair " +
-        "is a HARD failure" +
-        `${skipVerdictSuffix})`,
-    );
-    return EXIT_PASS;
-  }
   log(
     SHIPPED_CFG_LANE_ENABLED
-      ? "VERDICT: PASS (surface 1 + the shipped-cfg guard both green)"
-      : `VERDICT: PASS (surface 1 green; ${SHIPPED_CFG_SKIP_VERDICT_NOTE})`,
+      ? "VERDICT: PASS (surface 1 + the shipped-cfg guard both green; " + wasmVerdictNote + ")"
+      : `VERDICT: PASS (surface 1 green; ${wasmVerdictNote}; ${SHIPPED_CFG_SKIP_VERDICT_NOTE})`,
   );
   return EXIT_PASS;
 }

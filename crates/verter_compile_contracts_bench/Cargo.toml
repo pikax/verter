@@ -1,0 +1,22 @@
+[package]
+name = "verter_compile_contracts_bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Bench-feature compile-fail contract runner for verter_compiler"
+publish = false
+
+[[bin]]
+name = "verter_compile_contracts_bench"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+trybuild = "1.0"
+verter_compiler = { path = "../verter_compiler", features = ["bench"] }
+verter_css_syntax = { path = "../verter_css_syntax" }
+verter_language = { path = "../verter_language" }

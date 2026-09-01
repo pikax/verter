@@ -1,12 +1,9 @@
 // Negative control for the segmented-overwrite call-site guard.
 //
-// This fixture belongs to the bench-feature group in
-// `compiler_compile_fail.rs`. The canonical archive gate excludes the complete
-// trybuild class. Under the supported live
-// `cargo test -p verter_compiler --features bench --test main
-// bench_compiler_compile_fail_contracts_are_enforced`, trybuild's probe DOES see `bench`
-// (its fingerprint-directory lookup succeeds against a live, non-archived
-// build), reaching `SegmentedOverwriteAuthority::new()`'s own narrower
+// This fixture belongs to the bench-feature standalone compile-contract
+// runner invoked by `node scripts/compile-contracts.mjs`; it never enters
+// the Rust test inventory. The runner enables `verter_compiler/bench`,
+// reaching `SegmentedOverwriteAuthority::new()`'s own narrower
 // `pub(in crate::template::code_gen)` restriction instead — the item-level
 // claim this fixture was originally written to isolate.
 //

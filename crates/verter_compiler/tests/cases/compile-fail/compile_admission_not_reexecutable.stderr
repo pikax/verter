@@ -1,0 +1,21 @@
+error[E0382]: use of moved value: `admission`
+  --> tests/cases/compile-fail/compile_admission_not_reexecutable.rs:20:43
+   |
+14 |     admission: VueCompileAdmission,
+   |     --------- move occurs because `admission` has type `VueCompileAdmission`, which does not implement the `Copy` trait
+...
+19 |     let _ = backend.compile_host_products(admission, artifact, inputs, alloc);
+   |                                           --------- value moved here
+20 |     let _ = backend.compile_host_products(admission, artifact, inputs, alloc);
+   |                                           ^^^^^^^^^ value used here after move
+
+error[E0382]: use of moved value: `admission`
+  --> tests/cases/compile-fail/compile_admission_not_reexecutable.rs:31:44
+   |
+25 |     admission: SvelteCompileAdmission,
+   |     --------- move occurs because `admission` has type `SvelteCompileAdmission`, which does not implement the `Copy` trait
+...
+30 |     let _ = backend.compile_runtime_render(admission, artifact, inputs, alloc);
+   |                                            --------- value moved here
+31 |     let _ = backend.compile_runtime_render(admission, artifact, inputs, alloc);
+   |                                            ^^^^^^^^^ value used here after move

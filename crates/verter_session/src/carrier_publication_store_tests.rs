@@ -856,7 +856,15 @@ fn leader_panic_publishes_one_typed_terminal_and_audit_failure() {
 fn cancelled_request_never_enters_a_publication_lane() {
     let (source, grammar) = authorities();
     let accepted = accepted(&source, &grammar, 1, "<template>cancel</template>");
-    let store = CarrierPublicationStore::new(source, grammar);
+    let provenance = Arc::new(crate::types::MetaProvenance::default());
+    let store = CarrierPublicationStore::with_dependencies(
+        source,
+        grammar,
+        Arc::new(
+            crate::carrier_publication_store::persistence::InMemoryCarrierPersistence::default(),
+        ),
+        Arc::clone(&provenance),
+    );
     let cancellation = verter_scheduler::cancellation::CancellationToken::new();
     cancellation.cancel();
     let outcome = store.publish_or_get(
@@ -870,6 +878,44 @@ fn cancelled_request_never_enters_a_publication_lane() {
     );
     assert!(matches!(outcome, PublicationOutcome::Cancelled));
     assert_eq!(store.audit_snapshot(), Default::default());
+    assert_eq!(
+        provenance
+            .carrier_parses
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "a cancelled request must not parse"
+    );
+}
+
+#[test]
+fn elected_publication_parses_once_and_warm_get_does_not_reparse() {
+    let (source, grammar) = authorities();
+    let accepted = accepted(&source, &grammar, 1, "<template><p>once</p></template>");
+    let provenance = Arc::new(crate::types::MetaProvenance::default());
+    let store = CarrierPublicationStore::with_dependencies(
+        source,
+        grammar,
+        Arc::new(
+            crate::carrier_publication_store::persistence::InMemoryCarrierPersistence::default(),
+        ),
+        Arc::clone(&provenance),
+    );
+    let first = store.publish_or_get(&accepted, request(1, &accepted));
+    let second = store.publish_or_get(&accepted, request(2, &accepted));
+    assert!(matches!(first, PublicationOutcome::Published(_)));
+    assert!(second.into_envelope().is_some());
+    assert_eq!(
+        provenance
+            .carrier_parses
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        provenance
+            .sfc_parses
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
 }
 
 #[test]

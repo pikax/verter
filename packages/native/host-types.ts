@@ -449,3 +449,15 @@ export interface HostSelectorMatchResult {
   selectorEnd: number;
   matches: HostElementMatch[];
 }
+
+// =============================================================================
+// Host compile request
+// =============================================================================
+//
+// The tag-discriminated request the native host compile adapter decodes.
+// Its declarations are GENERATED from the Rust schema that decodes them
+// and byte-pinned, so a field, variant, optionality or closed vocabulary
+// cannot drift between the two. Everything above is unrelated hand-written
+// host and session API: it is neither generated nor pinned.
+
+export * from "./host-compile-request.generated";

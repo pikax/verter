@@ -77,7 +77,9 @@ pub(super) fn seed_admitted_from_prepared(
         let Some(css) = source.get(content.start as usize..content.end as usize) else {
             continue;
         };
-        if prepared.ir().source().text() != css || prepared.ir().source().origin() != content.start
+        if prepared.ir().source().text() != css
+            || prepared.ir().source().origin() != content.start
+            || prepared.ir().dialect() != CssDialect::Css
         {
             continue;
         }

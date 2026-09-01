@@ -1,0 +1,109 @@
+error[E0277]: the trait bound `BoundNativeHostRequest: Clone` is not satisfied
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:17:22
+   |
+17 |     requires_clone::<BoundNativeHostRequest>();
+   |                      ^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `BoundNativeHostRequest`
+   |
+note: required by a bound in `requires_clone`
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:11:22
+   |
+11 | fn requires_clone<T: Clone>() {}
+   |                      ^^^^^ required by this bound in `requires_clone`
+
+error[E0277]: the trait bound `BoundNativeHostRequest: Copy` is not satisfied
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:18:21
+   |
+18 |     requires_copy::<BoundNativeHostRequest>();
+   |                     ^^^^^^^^^^^^^^^^^^^^^^ the trait `Copy` is not implemented for `BoundNativeHostRequest`
+   |
+note: required by a bound in `requires_copy`
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:12:21
+   |
+12 | fn requires_copy<T: Copy>() {}
+   |                     ^^^^ required by this bound in `requires_copy`
+
+error[E0277]: the trait bound `BoundNativeHostRequest: serde::Serialize` is not satisfied
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:19:26
+   |
+19 |     requires_serialize::<BoundNativeHostRequest>();
+   |                          ^^^^^^^^^^^^^^^^^^^^^^ the trait `serde::Serialize` is not implemented for `BoundNativeHostRequest`
+   |
+   = note: for local types consider adding `#[derive(serde::Serialize)]` to your `BoundNativeHostRequest` type
+   = note: for types from other crates check whether the crate offers a `serde` feature flag
+   = help: the following other types implement trait `serde::Serialize`:
+             &'a T
+             &'a mut T
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+             (T0, T1, T2, T3, T4)
+           and $N others
+note: required by a bound in `requires_serialize`
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:13:26
+   |
+13 | fn requires_serialize<T: serde::Serialize>() {}
+   |                          ^^^^^^^^^^^^^^^^ required by this bound in `requires_serialize`
+
+error[E0277]: the trait bound `BoundNativeHostRequest: serde::Deserialize<'de>` is not satisfied
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:20:28
+   |
+20 |     requires_deserialize::<BoundNativeHostRequest>();
+   |                            ^^^^^^^^^^^^^^^^^^^^^^ the trait `for<'de> Deserialize<'de>` is not implemented for `BoundNativeHostRequest`
+   |
+   = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `BoundNativeHostRequest` type
+   = note: for types from other crates check whether the crate offers a `serde` feature flag
+   = help: the following other types implement trait `Deserialize<'de>`:
+             &'a [u8]
+             &'a std::path::Path
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and $N others
+note: required by a bound in `requires_deserialize`
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:14:28
+   |
+14 | fn requires_deserialize<T: for<'de> serde::Deserialize<'de>>() {}
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `requires_deserialize`
+
+error[E0616]: field `backend` of struct `BoundVueNativeHost` is private
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:23:21
+   |
+23 |         let _ = vue.backend;
+   |                     ^^^^^^^ private field
+
+error[E0624]: method `into_host_backend` is private
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:31:17
+   |
+31 |       let _ = vue.into_host_backend();
+   |                   ^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: src/host_resolve/native_host_binding.rs
+   |
+   | /     pub(crate) fn into_host_backend(
+   | |         self,
+   | |     ) -> (
+   | |         &'static VueHostIntegrationBackend,
+   | |         NativeHostRequestAttribution,
+   | |     ) {
+   | |_____- private method defined here
+
+error[E0624]: method `into_host_backend` is private
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:32:20
+   |
+32 |       let _ = svelte.into_host_backend();
+   |                      ^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: src/host_resolve/native_host_binding.rs
+   |
+   | /     pub(crate) fn into_host_backend(
+   | |         self,
+   | |     ) -> (
+   | |         &'static SvelteHostIntegrationBackend,
+   | |         NativeHostRequestAttribution,
+   | |     ) {
+   | |_____- private method defined here

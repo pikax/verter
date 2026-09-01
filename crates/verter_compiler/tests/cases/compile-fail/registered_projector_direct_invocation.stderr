@@ -8,7 +8,7 @@ note: the function `project_registered_carrier` is defined here
  --> src/framework_common/registered_carrier_projection.rs
   |
   | / pub(super) fn project_registered_carrier(
-  | |     known: &KnownRegisteredCompiler,
+  | |     known: Option<&KnownRegisteredCompiler>,
   | |     accepted: &AcceptedRegisteredCarrierSource,
   | | ) -> Result<RegisteredCarrierProjection, SyntaxReject> {
   | |______________________________________________________^

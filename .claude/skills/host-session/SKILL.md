@@ -102,7 +102,7 @@ Both TSGO and tsserver implement `TypeProvider`. Methods: hover, completions, di
 
 Per-engine availability matrix: `display_signature` — both engines wherever they answer; `kind` — tsserver-family only (LSP hover has no kind field; tsgo stays `None`, an accepted, pinned asymmetry — never prefix-sniffed); `documentation` — both (tsserver wire field / tsgo paragraph split); `range_start`/`range_end` — both (tsserver `quickinfo` `start`/`end`, tsgo LSP `hover.range`), fail-closed on unmappable positions.
 
-**The `DisplaySignature` brand is sealed**: private inner `String`; construction only via `DisplaySignature::from_provider_wire` with a `DisplaySignatureWireWitness` (obtainable only through a `TypeProvider` impl — `provider_wire_witness()`); the sole reader is the labelled `as_display_str()`; display rewrites derive through `with_display_rewrite`; no `Deserialize`, no `Deref`/`AsRef<str>`/`Into<String>`/`Display`. Primary rail = the ordinary compile; trybuild witness = `verter_type_runtime/tests/cases/compile_fail.rs` (`--features compile-fail`, out of the default gate — recorded as GI-20 in `docs/contributing/gate-integrity-ledger.md`). `$/verter/getBindingTypes` projects the signature onto the client wire as `Record<string, { displaySignature: string } | null>`; TS renders it verbatim (`packages/vue-vscode/src/bindingTypeDisplay.ts`) — any TS-side re-split of the display value is a Native-vs-Compat violation.
+**The `DisplaySignature` brand is sealed**: private inner `String`; construction only via `DisplaySignature::from_provider_wire` with a `DisplaySignatureWireWitness` (obtainable only through a `TypeProvider` impl — `provider_wire_witness()`); the sole reader is the labelled `as_display_str()`; display rewrites derive through `with_display_rewrite`; no `Deserialize`, no `Deref`/`AsRef<str>`/`Into<String>`/`Display`. Primary rail = the ordinary compile; trybuild witnesses under `verter_type_runtime/tests/cases/compile-fail/` run in the scheduled standalone lane via `node scripts/compile-contracts.mjs` (GI-20). `$/verter/getBindingTypes` projects the signature onto the client wire as `Record<string, { displaySignature: string } | null>`; TS renders it verbatim (`packages/vue-vscode/src/bindingTypeDisplay.ts`) — any TS-side re-split of the display value is a Native-vs-Compat violation.
 
 **Semantic tokens cross the trait boundary in Verter's published legend space.** `verter_type_runtime::semantic_tokens` is the single mapping owner: `VERTER_TOKEN_TYPES`/`VERTER_TOKEN_MODIFIERS` (the arrays `verter_lsp::capabilities` builds the advertised `SemanticTokensLegend` from — pinned by `advertised_semantic_token_legend_is_the_shared_owners_published_vocabulary`), `decode_classification_2020` + `map_classified_spans_2020` (the ONE tsserver-family `"format": "2020"` decoder — `((typeIdx + 1) << 8) | modifierSet` — consumed by both the managed tsserver provider and the extension provider), and `SemanticTokenLegendMap` (name-built remap: types by index, modifiers per BIT). tsgo advertises the `textDocument.semanticTokens` client capability (the engine gates the whole feature on it), retains the server-advertised legend from the `initialize` result — for the shared attach, from the relay's in-band `InitializedWitness.semantic_tokens_legend` via `WaitInitializedResult` — and remaps per token. Fail closed everywhere: an unmappable token type or modifier bit drops the token; a session with no retained legend returns no tokens. tsgo inlay hints ride the `workspace.configuration` client capability + the read loop's `workspace/configuration` responder answering the `typescript`/`javascript` sections with nested `inlayHints` preferences (TS inlay hints are preference-gated, default off).
 
@@ -620,12 +620,48 @@ Feature-gated (`scheduler`): `VerterHost` holds an `Arc<Scheduler>`. During `ups
 
 - **Worker count fixed at host construction** via `HostConfig::host_cpu_threads`. The host owns a `verter_scheduler::HostCpuPool` coordinator (shared by every host batch API); never resized per call. `CompileBatchOptions` carries only `priority` + `default_mode` — there is **NO** `threads` / `thread_count` / `num_threads` field (locked by `compile_batch_options_has_no_thread_field` static guard). A per-call concurrency cap (`CpuConcurrencySemaphore`) is a Block-7 design concept, not on the tree.
 - **Scheduler stage pools are configured independently at native host construction.** NAPI `HostConfig.schedulerCpuThreads` and `schedulerIoThreads` feed `SchedulerConfig::{cpu_threads,io_threads}` for both `VerterHost` and `ComponentMetaHost`; absent or zero values retain the scheduler defaults. They never resize or alias the host-owned outer coordinator pool above.
-- **Source upserts route through the one upsert engine.** `compile_many`'s source-updating stage calls `upsert_many_with_priority`, landing ONE `Scheduler::submit_batch_atomic` + ONE `wait_batch` for the whole batch (atomic admission — no per-file upsert fan-out).
+- **Source upserts route through the one upsert engine.** `compile_many`'s source-updating stage calls the status-only `upsert_many_for_compile` projection of that engine, landing ONE `Scheduler::submit_batch_atomic` + ONE `wait_batch` for the whole batch (atomic admission — no per-file upsert fan-out) while skipping the full `HostUpdateResult` payload that compile admission never reads. Public/single-file `upsert` retains the full result projection. Successful changed canonicals then publish through ONE workspace overlay batch and ONE parsed-edge batch: the overlay batch shares one session-root publication/content generation, and the edge batch shares one captured resolution world + edge-store lock. Relative edge results are request-locally reused only for the exact `(joined stem, resolver scope, phase, kind)` tuple. Resolver scope is the selected context for ordinary sources but the full importer identity for package-backed `node_modules` sources, whose package-boundary guard is importer-dependent. This is not a persistent cache, and a refused batch falls back to the ordinary per-owner recorder. `compile_many` has no lint stage: Stage B admits sources and Stage C compiles; lint runs only through the explicit lint APIs.
 - **Per-input requested mode, classifier-owned actual mode.** Each input carries a `requested_mode` (`CompileBatchInput.requested_mode`, defaulting to `CompileBatchOptions.default_mode` → `Session`). The `compile_cache_mode` classifier is SOLE authority for `actual_mode`: `Session` stays `Session` under every eligibility reason (its fact rail handles them); `Content` downgrades to `Stateless` on any reason (its pure key cannot represent cross-file / session-scoped input); `Stateless` is the floor. Compile dedup keyed by `(canonical, effective requested_mode)`.
 - **Svelte `cssHash` override — cache identity + fail-closed content admission.** A resolved Svelte `cssHash` override (the callback is resolved OUTSIDE the compiler; only the resolved `Option<String>` threads in) is COMPILE-OUTPUT PROFILE identity, carried on `CompileProfile.svelte_css_hash_override`. It participates automatically in BOTH cache keys — `compile_profile_hash` (the session slot u64) and `content_mode_profile_hash` (the Content pure key). Because the session slot addresses on the u64 alone, `CompileOutputNodeFactValidatedSession::lookup` ALSO re-checks the exact `Option<Arc<str>>` override on the slot against the live value (`slot.css_hash_override != live` misses), so a u64 collision can never serve a result with a different scope hash ("never wrong"). A user-supplied override is not provably content-deterministic, so `classify_compile_mode` pushes `DowngradeReason::CssHashOverridePresent` when one is present ⇒ a requested `Content` compile fail-closes to `Stateless`; `Session` caching stays safe via the profile identity + the exact slot check. The override never overloads Vue's `component_id`; a static guard bans `component_id` reads from Svelte CSS hashing.
 - **Session-only compile-tier prefetch.** The cold compute installs `prefetch_compile_tier_observation_targets` (cross-file import-route cache + dependency `IndexedReady` pre-population) ONLY for `actual_mode == Session`, because the compile-tier fact tracer it feeds is installed only for `Session`. `Content` / `Stateless` compile correctness (external `src=` resolution, macro-type collection, dep sync) is produced independently by `compile_entry`.
 - **Target-sensitive macro demand.** `compile_entry` requests runtime, TSC, or both from the TypeInfo producer based on `CompileTarget`. Empty output still replaces the semantic transitive-dependency axis with an empty set.
 - **Typed macro degradation.** Producer entries carry `Complete`, `Partial`, `Unresolved`, or `Unsupported` outcomes. The compiler accepts only a complete projection with the expected role; missing bundles, degraded entries, or role mismatches fail closed at the authored macro/type anchor. No member is silently reconstructed from parser semantics.
+
+### Canonical Typed Request Seam (`compile_request` / `compile_request_many`)
+
+`VerterHost::compile_request(canonical_id, CompileRequest)` executes a
+caller-supplied canonical compile request against a source the caller
+already registered. It is the typed alternative to the profile-derived
+routes above, and the two differ in WHO owns the demand:
+
+- **The request IS the demand document.** No `CompileProfile` is built from
+  it and none is consulted: the products the caller listed are the products
+  executed, in request order. An axis the bound execution cannot honour
+  refuses typed at construction or admission — never a silent default.
+- **Complete-only results.** A `CompileRequestResponse` carries the canonical
+  id, one diagnostics set for the whole transaction, and one
+  `CompiledProduct` row per requested kind. An admitted product whose payload
+  the carrier did not publish fails the WHOLE request as
+  `CompileRequestFailure::ProductNotProduced`, naming the kind — never a
+  partial response the caller has to inspect for holes.
+- **Runtime products publish addressed nodes.** `CompiledProduct::Runtime`
+  carries `CompiledVirtualNode` rows (`node`, `code`, `source_map`, `lang`,
+  `meta`) in stable node order. Those five fields are the equivalence
+  contract against `get_virtual_file`: `lang` is what a consumer routes on
+  and `meta.scope_id` is the scoped-CSS linkage, so both are compared, not
+  just the bytes.
+- **`compile_request_many(inputs, CompileRequestBatchOptions)`** registers each
+  canonical's source EXACTLY once for the whole batch and then executes each
+  input's own request, returning one entry per input in ORIGINAL input order.
+  Two inputs may name one canonical with different requests (one
+  registration, two executions); two inputs naming one canonical with
+  different BYTES is a conflict reported on both entries — the batch never
+  picks a winner. A per-input failure isolates to that entry.
+- **No compile cache slot.** This route consults and publishes none, so
+  distinct requests for one canonical are distinct compiles.
+
+Native-only (`#[cfg(not(target_arch = "wasm32"))]`), along with the bound
+framework host backends it executes through.
 
 ### LSP Integration
 

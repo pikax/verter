@@ -206,7 +206,7 @@ boundary; it contains no independently dispatchable subblocks.
 
 ## Acceptance IDs and discriminating proof
 
-Preflight evidence selection: preserve all four acceptance outcomes below, then
+Preflight evidence selection: preserve all five acceptance outcomes below, then
 select the smallest evidence set that actually discriminates the touched contract.
 Existing behavioral coverage, compiler/type/capability enforcement, static
 validation, canonical gates, bounded inspection, and benchmarks are valid when
@@ -241,6 +241,18 @@ accompanied by a terse rationale.
   closure pass — no unbounded global fingerprint or representative cache. Use
   applicable existing counters, inspection, or benchmarks; otherwise record a terse
   not-applicable rationale.
+- **TA1B-AC5 — environment-scoped callability:** classify `keyof`, string primitive,
+  and string-literal carriers through the existing apparent-type authority as
+  `Callable`, `SignatureFree`, or `Unknown`; never infer signature-freedom from the
+  raw graph shape. `Callable` and `Unknown` preserve the raw authored-order overload
+  carrier; only `SignatureFree` may enter `canonical_intersection`. A table-driven
+  two-project test demands the same interned carriers for `keyof { k: 0 }`, `string`,
+  and `"literal"`: one project's ambient `String` has a call signature and preserves
+  adversarial authored order with the pinned TypeScript overload result, while the
+  other's is signature-free and canonicalizes with ordering and deduplication. A
+  missing or unresolved ambient row remains raw and is not warm-admitted;
+  re-registering `String` invalidates the prior result; and neither project may
+  warm-hit the other's classification.
 - Every proposed new test must name a plausible regression or contract boundary not
   already discriminated; prose/format assertions are allowed only when those bytes
   are the public contract. Do not add implementation mirrors, duplicate
@@ -364,7 +376,7 @@ remaining site, this node cannot silently miss one, which is precisely why the
 architecture authority refused a split around the sites that happened to be published
 at measurement time.
 
-## Inherited observation — apparent-type callability is wider than the carriers already moved
+## Apparent-type callability policy
 
 The predecessor's closing round moved arrays, tuples and template literals from
 "provably yields no call signatures" to the fail-closed arm, after measuring against
@@ -372,15 +384,19 @@ the pinned compiler that a global interface augmentation makes values of all thr
 callable. Mapped types and object-spread programs were verified genuinely
 signature-free and stayed.
 
-The same argument extends further and was deliberately NOT acted on there: a `keyof`
-domain and the string primitive and string literal carriers are equally callable under
-a `String` augmentation. Moving them too would have broadly disabled the canonical
-route for member-value intersections, which is a scope decision this node is the right
-place to make rather than a closing round on its predecessor.
+The same argument extends further: a `keyof` domain and the string primitive and
+string-literal carriers are equally callable under a `String` augmentation. TA1B
+therefore owns a real, environment-scoped apparent-type callability classification;
+it must not decide from those carriers' raw graph shapes. This completes and consumes
+the existing `ApparentType` authority rather than introducing a parallel classifier.
 
-Decide it explicitly here. Either those carriers join the fail-closed arm — accepting
-that member-value intersections over string-shaped carriers keep their raw ordered form
-and lose canonicalization — or the classification gains a real apparent-type callability
-question rather than a shape guess. What is not acceptable is leaving a documented
-claim that those carriers never yield call signatures, because the compiler says
-otherwise and the consequence is a silently reversed overload set.
+The classification has three outcomes: `Callable`, `SignatureFree`, and `Unknown`.
+Resolve string primitives and literals through the demand project's ambient `String`
+surface. Reduce a `KeyOf` carrier through the existing semantic query, then classify
+the resulting apparent domain. `Callable` or `Unknown` preserves the raw authored-order
+overload carrier; only `SignatureFree` may enter `canonical_intersection`. Missing
+scope, ambient lookup failure, unresolved `keyof`, recursion, or budget exhaustion is
+`Unknown`, never proof of signature-freedom. Ambient reads enter the ordinary fact/read
+set, and no graph-only guess or global policy boolean is permitted. This preserves
+canonicalization for genuinely signature-free carriers without silently reversing an
+overload set when project-local augmentation makes the same carrier callable.

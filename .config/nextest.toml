@@ -5,10 +5,9 @@
 # Hang protection. A test flagged slow after `period` is TERMINATED after
 # `terminate-after` periods, so a wedged subprocess (e.g. a deadlocked
 # tsgo/tsserver child) is killed and reported as a timeout instead of stalling
-# the whole `--workspace` run indefinitely. Every test in this workspace
-# completes in seconds — EXCEPT the trybuild compile-fail tests, which shell out
-# to a real `cargo` build and are exempted below. For everything else 60s × 3 =
-# 180s is far past any legitimate test, so a trip is a genuine hang.
+# the whole `--workspace` run indefinitely. Compile-fail contracts live in a
+# standalone executable rather than the test inventory, so 60s × 3 is far past
+# any legitimate test and a trip is a genuine hang.
 slow-timeout = { period = "60s", terminate-after = 3 }
 
 [profile.ci]
@@ -35,43 +34,30 @@ filter = 'test(/shared_provider_live::(shared_provider_serves_real_vue_macro_car
 # that actually fires and reports its diagnostic message. 60s x 6 = 360s.
 slow-timeout = { period = "60s", terminate-after = 6 }
 
-# ── trybuild compile-fail tests: a real `cargo` build, not a unit test ───────
-# `hot_materialize_and_script_fact_structural_rails_smoke` is the combined
-# always-on structural-rail smoke. One trybuild invocation compiles all focused
-# fixtures by SPAWNING cargo against a generated crate in its own
-# `target/tests/trybuild` directory, which shares nothing with the main build,
-# so a cold run compiles verter_session's entire ~233-crate dependency closure
-# before the first fixture is even checked.
+# ── The real-JS request boundary addon ──────────────────────────────────────
+# `cases::real_js_host_request_boundary` loads a test-only Node addon to put
+# the native host compile request in front of live V8 objects. The addon is a
+# `cdylib` package `verter_napi` dev-depends on, so cargo links it while
+# building that suite's binary and leaves it in the same `deps` directory.
+# Nothing links the addon at runtime, so nextest does not carry it as one of
+# the suite's own dynamic dependencies; naming it here does, at the same
+# relative path, which is what makes it a sibling of the test binary in an
+# extracted archive exactly as it is in `target`.
 #
-# Measured on a 4-job Linux build: 83.5s cold, 1.4s warm. CI is always cold
-# (the trybuild target dir is not part of the cached `target` layout) and runs
-# on a 4-core runner alongside other tests, which is how release run
-# 30266787819 recorded exactly 180.005s — the 60s x 3 default, tripped by a
-# test that was still making progress.
+# Without this the suite would have to build the addon itself, and that build
+# links the native crate's whole dependency closure: minutes against a cold
+# target directory, which a workspace run reports as a hang and terminates,
+# cancelling every test it had not yet scheduled.
 #
-# The default budget encodes "no legitimate test takes minutes", which is true
-# of every test that does not invoke a compiler and false of this one. Raising
-# it here weakens nothing: the fixtures and their `.stderr` expectations are
-# unchanged, and a rail that goes hollow still fails because the fixture would
-# COMPILE. It only stops a real compile being reported as a hang.
-#
-# The durable fix is caching the trybuild target dir in CI, which turns this
-# into the 1.4s warm case; until then the budget has to fit a cold compile.
-[[profile.default.overrides]]
-filter = 'test(/^cases::g_compile::compile_fail::/)'
-slow-timeout = { period = "120s", terminate-after = 3 }
-
-[[profile.ci.overrides]]
-filter = 'test(/^cases::g_compile::compile_fail::/)'
-slow-timeout = { period = "120s", terminate-after = 3 }
-
-# verter_semantic's own trybuild compile-fail fixture (C1-AC-7) is the same
-# shape as the g_compile override above: a real spawned `cargo build` against
-# its own trybuild target dir, cold on every fresh worktree/CI run.
-[[profile.default.overrides]]
-filter = 'test(/^cases::resolver_observation_compile_fail::/)'
-slow-timeout = { period = "120s", terminate-after = 3 }
-
-[[profile.ci.overrides]]
-filter = 'test(/^cases::resolver_observation_compile_fail::/)'
-slow-timeout = { period = "120s", terminate-after = 3 }
+# `debug` is the dev profile's output directory, and the dev profile is what
+# the archive is built under. One entry per platform naming, because `include`
+# has no platform predicate.
+# `on-missing = "ignore"` is what lets the two inapplicable names be absent;
+# the applicable one going missing is caught by the suite, which fails by name
+# on an addon that is not beside it rather than rebuilding one.
+[profile.default.archive]
+include = [
+  { path = "debug/deps/libverter_napi_request_fixture.dylib", relative-to = "target", on-missing = "ignore" },
+  { path = "debug/deps/libverter_napi_request_fixture.so", relative-to = "target", on-missing = "ignore" },
+  { path = "debug/deps/verter_napi_request_fixture.dll", relative-to = "target", on-missing = "ignore" },
+]

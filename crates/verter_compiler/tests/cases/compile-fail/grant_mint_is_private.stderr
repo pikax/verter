@@ -1,0 +1,10 @@
+error[E0624]: associated function `mint` is private
+ --> tests/cases/compile-fail/grant_mint_is_private.rs:9:28
+  |
+9 |     ProductExecutionGrant::mint(ProductKind::IdeCompanion)
+  |                            ^^^^ private associated function
+  |
+ ::: src/framework_common/capability.rs
+  |
+  |     pub(crate) fn mint(admitted: ProductKind) -> Self {
+  |     ------------------------------------------------- private associated function defined here

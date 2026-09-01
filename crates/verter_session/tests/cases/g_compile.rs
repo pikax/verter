@@ -38,8 +38,6 @@ mod compile_cache_mode_stateless_bypass;
 mod compile_cache_overflow_return_only;
 #[path = "g_compile/compile_empty_macro_type_deps_clears_semantic_axis.rs"]
 mod compile_empty_macro_type_deps_clears_semantic_axis;
-#[path = "g_compile/compile_fail.rs"]
-mod compile_fail;
 #[path = "g_compile/compile_force_overflow_is_host_scoped.rs"]
 mod compile_force_overflow_is_host_scoped;
 #[path = "g_compile/compile_slot_single_candidate.rs"]

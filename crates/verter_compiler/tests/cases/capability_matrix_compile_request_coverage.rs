@@ -31,7 +31,7 @@
 
 use std::path::PathBuf;
 
-use verter_compiler::compile_request::svelte::SvelteCustomElementDescriptor;
+use verter_compiler::compile_request::svelte::AdmittedSvelteCustomElementDescriptor;
 use verter_compiler::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, DeclarationProductRequest,
     FrameworkCompileRequest, IdeProductRequest, PublicApiProductRequest, RuntimeProductRequest,
@@ -466,7 +466,9 @@ fn verify_cell(cell_id: &str) -> Result<(), &'static str> {
                 )],
                 FrameworkCompileRequest::Svelte(SvelteCompileRequest {
                     custom_element: Some(true),
-                    custom_element_descriptor: Some(SvelteCustomElementDescriptor::default()),
+                    custom_element_descriptor: Some(
+                        AdmittedSvelteCustomElementDescriptor::default(),
+                    ),
                     ..Default::default()
                 }),
                 None,

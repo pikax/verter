@@ -55,36 +55,43 @@ schema = 2
 "C3" = { status = "pending" }
 "C4" = { status = "pending" }
 "CAT0" = { status = "pending" }
-"CCA0" = { status = "pending" }
+"CCA0" = { status = "implemented", commit_message = "docs(core): lock compiler authority, policy, demand, and admission", commit_date = "2026-08-29T16:01:15+01:00" }
 "CCA1" = { status = "pending" }
-"CCA1A" = { status = "pending" }
-"CCA1B" = { status = "pending" }
-"CCA1C" = { status = "pending" }
-"CCA1D" = { status = "pending" }
-"CCA1D1" = { status = "pending" }
-"CCA1D2" = { status = "pending" }
-"CCA1E" = { status = "pending" }
-"CCA1F" = { status = "pending" }
-"CCA1G" = { status = "pending" }
-"CCA1GE" = { status = "pending" }
-"CCA1GT" = { status = "pending" }
-"CCA1H" = { status = "pending" }
-"CCA1I" = { status = "pending" }
-"CCA1J" = { status = "pending" }
-"CCA1K" = { status = "pending" }
-"CCA1L" = { status = "pending" }
-"CCA1M" = { status = "pending" }
-"CCA1M1" = { status = "pending" }
-"CCA1M2" = { status = "pending" }
-"CCA1M3" = { status = "pending" }
-"CCA1N" = { status = "pending" }
-"CCA1N1" = { status = "pending" }
-"CCA1N2" = { status = "pending" }
-"CCA1N3" = { status = "pending" }
-"CCA1N4" = { status = "pending" }
+"CCA1A" = { status = "implemented", commit_message = "feat(core): add typed compiler capability catalog", commit_date = "2026-08-29T22:40:00+01:00" }
+"CCA1B" = { status = "implemented", commit_message = "feat(core): register Vue carrier frontend parse backend", commit_date = "2026-08-29T23:30:00+01:00" }
+"CCA1C" = { status = "implemented", commit_message = "feat(core): register Svelte carrier frontend parse backend", commit_date = "2026-08-29T23:59:00+01:00" }
+"CCA1D" = { status = "implemented", commit_message = "docs(core): record registered frontend parse and publication convergence", commit_date = "2026-08-29T18:20:42+01:00" }
+"CCA1D1" = { status = "implemented", commit_message = "feat(core): route registered Vue/Svelte parse through catalog frontends", commit_date = "2026-08-29T21:30:00+01:00" }
+"CCA1D2" = { status = "implemented", commit_message = "feat(core): publish registered carrier artifacts through catalog frontends", commit_date = "2026-08-29T12:00:00+01:00" }
+"CCA1E" = { status = "implemented", commit_message = "feat(core): register Vue semantic authority backend", commit_date = "2026-08-29T18:28:19+01:00" }
+"CCA1F" = { status = "implemented", commit_message = "feat(core): register Svelte semantic authority backend", commit_date = "2026-08-29T18:48:10+01:00" }
+"CCA1G" = { status = "implemented", commit_message = "docs(core): record eval-source and template-fact catalog convergence", commit_date = "2026-08-30T02:29:21+01:00" }
+"CCA1GE" = { status = "implemented", commit_message = "feat(core): route eval-source through catalog semantic authorities", commit_date = "2026-08-29T20:53:53+01:00" }
+"CCA1GT" = { status = "implemented", commit_message = "feat(core): route template facts through catalog semantic authorities", commit_date = "2026-08-30T01:06:43+01:00" }
+"CCA1H" = { status = "implemented", commit_message = "feat(core): register Vue IDE projection backend", commit_date = "2026-08-30T03:02:21+01:00" }
+"CCA1I" = { status = "implemented", commit_message = "feat(core): register Svelte IDE projection backend", commit_date = "2026-08-30T04:18:58+01:00" }
+"CCA1J" = { status = "implemented", commit_message = "feat(core): route IDE projection through catalog backends", commit_date = "2026-08-30T05:24:37+01:00" }
+"CCA1K" = { status = "implemented", commit_message = "feat(core): register Vue runtime compiler backend", commit_date = "2026-08-30T06:42:48+01:00" }
+"CCA1L" = { status = "implemented", commit_message = "feat(core): register Svelte runtime compiler backend", commit_date = "2026-08-30T09:24:12+01:00" }
+"CCA1M" = { status = "implemented", commit_message = "docs(roadmap): confirm runtime compile route convergence", commit_date = "2026-08-30T17:23:00+01:00" }
+"CCA1M1" = { status = "implemented", commit_message = "refactor(core): delegate direct and batch compilation to runtime backends", commit_date = "2026-08-30T12:00:49+01:00" }
+"CCA1M2" = { status = "implemented", commit_message = "refactor(core): delegate compatibility bundle runtime construction to typed backends", commit_date = "2026-08-30T15:24:49+01:00" }
+"CCA1M3" = { status = "implemented", commit_message = "test(core): characterize the fixed-vue runtime-render route", commit_date = "2026-08-30T16:15:28+01:00" }
+"CCA1N" = { status = "implemented", commit_message = "docs(*): record native host-integration route convergence", commit_date = "2026-08-31T20:30:00+01:00" }
+"CCA1N1" = { status = "implemented", commit_message = "feat(core): add the vue host-integration backend with demand-scoped admission", commit_date = "2026-08-30T20:00:02+01:00" }
+"CCA1N2" = { status = "implemented", commit_message = "feat(core): add the svelte host-integration backend with demand-scoped admission", commit_date = "2026-08-30T21:45:00+01:00" }
+"CCA1N2A" = { status = "implemented", commit_message = "feat(core): add the request-scoped native host binding substrate", commit_date = "2026-08-30T22:28:21+01:00" }
+"CCA1N2B" = { status = "implemented", commit_message = "refactor(session): bind framework identity once per host compile attempt", commit_date = "2026-08-31T00:05:43+01:00" }
+"CCA1N2G" = { status = "implemented", commit_message = "refactor(core): select carrier grammar from registered catalog identity", commit_date = "2026-08-30T15:09:58+01:00" }
+"CCA1N3" = { status = "implemented", commit_message = "feat(session): route host-backed compile through bound framework host backends", commit_date = "2026-08-31T14:30:00+01:00" }
+"CCA1N3A" = { status = "implemented", commit_message = "fix(session): prepare framework execution inputs inside the bound arm", commit_date = "2026-08-31T19:00:00+01:00" }
+"CCA1N4" = { status = "implemented", commit_message = "feat(session): route runtime render through bound framework host backends", commit_date = "2026-08-31T10:47:35+01:00" }
+"CCA1N4A" = { status = "implemented", commit_message = "fix(session): state the runtime-render route record's real verification", commit_date = "2026-08-31T18:05:00+01:00" }
 "CCA1O" = { status = "pending" }
-"CCA1O1" = { status = "pending" }
-"CCA1O2" = { status = "pending" }
+"CCA1O1" = { status = "implemented", commit_message = "feat(*): add a framework-discriminated FFI host compile-request schema", commit_date = "2026-08-31T22:15:00+01:00" }
+"CCA1O1A" = { status = "implemented", commit_message = "refactor(*): decide the Svelte custom-element prop-type vocabulary once", commit_date = "2026-09-01T12:00:00+01:00" }
+"CCA1O1B" = { status = "implemented", commit_message = "feat(*): execute a caller-supplied canonical compile request", commit_date = "2026-09-01T18:00:00+01:00" }
+"CCA1O2" = { status = "implemented", commit_message = "feat(napi): add a tagged native host compile-request adapter", commit_date = "2026-08-31T21:14:14+01:00" }
 "CCA1O2A" = { status = "pending" }
 "CCA1O2B" = { status = "pending" }
 "CCA1O2C" = { status = "pending" }
@@ -92,9 +99,15 @@ schema = 2
 "CCA1O2E" = { status = "pending" }
 "CCA1O2F" = { status = "pending" }
 "CCA1O2G" = { status = "pending" }
-"CCA1O3" = { status = "pending" }
+"CCA1O2H" = { status = "implemented", commit_message = "fix(napi): refuse a request key stated as undefined", commit_date = "2026-09-01T00:56:27+01:00" }
+"CCA1O2I" = { status = "implemented", commit_message = "refactor(napi): generate the published host compile-request declaration", commit_date = "2026-09-01T14:00:00+01:00" }
+"CCA1O2J" = { status = "pending" }
+"CCA1O3" = { status = "implemented", commit_message = "feat(wasm): add a typed host compile-request adapter and local request DTOs", commit_date = "2026-08-31T22:30:00+01:00" }
 "CCA1O3A" = { status = "pending" }
 "CCA1O3B" = { status = "pending" }
+"CCA1O3C" = { status = "implemented", commit_message = "feat(ci): execute the wasm JavaScript-boundary tests in the canonical gate", commit_date = "2026-09-01T02:10:00+01:00" }
+"CCA1O3D" = { status = "pending" }
+"CCA1O3E" = { status = "implemented", commit_message = "test(*): check the committed carrier fixtures against the built wasm host", commit_date = "2026-09-01T09:00:00+01:00" }
 "CCA1O4" = { status = "pending" }
 "CCA1O4D" = { status = "pending" }
 "CCA1O5" = { status = "pending" }
@@ -144,6 +157,7 @@ schema = 2
 "CMP6" = { status = "pending" }
 "COX0" = { status = "pending" }
 "CPER0" = { status = "pending" }
+"CPER0M" = { status = "implemented", commit_message = "fix(napi): publish a coherent memory-audit peak and live-bytes pair", commit_date = "2026-09-01T01:30:00+01:00" }
 "CPER1" = { status = "pending" }
 "CPER2" = { status = "pending" }
 "CPER3" = { status = "pending" }
@@ -151,7 +165,7 @@ schema = 2
 "CPF1" = { status = "pending" }
 "D1" = { status = "implemented", commit_message = "feat(session): add private hermetic flow completeness foundation", commit_date = "2026-08-29T20:05:00+01:00" }
 "D2A" = { status = "implemented", commit_message = "feat(session): canonical flow demand and proof substrate", commit_date = "2026-08-30T09:46:00+01:00" }
-"D2B" = { status = "implemented", commit_message = "feat(session): route flow-return admission through the sole completeness proof", commit_date = "2026-08-30T17:32:00+01:00" }
+"D2B" = { status = "pending" }
 "D3C" = { status = "pending" }
 "D3I" = { status = "pending" }
 "D3P" = { status = "pending" }
@@ -571,13 +585,38 @@ gh_issue = 127
 sync_to_github = true
 
 [[github_issue]]
+node_id = "CCA1N2A"
+gh_issue = 445
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1N2B"
+gh_issue = 446
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1N2G"
+gh_issue = 447
+sync_to_github = true
+
+[[github_issue]]
 node_id = "CCA1N3"
 gh_issue = 128
 sync_to_github = true
 
 [[github_issue]]
+node_id = "CCA1N3A"
+gh_issue = 450
+sync_to_github = true
+
+[[github_issue]]
 node_id = "CCA1N4"
 gh_issue = 129
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1N4A"
+gh_issue = 449
 sync_to_github = true
 
 [[github_issue]]
@@ -588,6 +627,16 @@ sync_to_github = true
 [[github_issue]]
 node_id = "CCA1O1"
 gh_issue = 131
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O1A"
+gh_issue = 451
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O1B"
+gh_issue = 456
 sync_to_github = true
 
 [[github_issue]]
@@ -631,6 +680,21 @@ gh_issue = 139
 sync_to_github = true
 
 [[github_issue]]
+node_id = "CCA1O2H"
+gh_issue = 452
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O2I"
+gh_issue = 453
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O2J"
+gh_issue = 457
+sync_to_github = true
+
+[[github_issue]]
 node_id = "CCA1O3"
 gh_issue = 140
 sync_to_github = true
@@ -643,6 +707,21 @@ sync_to_github = true
 [[github_issue]]
 node_id = "CCA1O3B"
 gh_issue = 142
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O3C"
+gh_issue = 454
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O3D"
+gh_issue = 458
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O3E"
+gh_issue = 459
 sync_to_github = true
 
 [[github_issue]]
@@ -883,6 +962,11 @@ sync_to_github = true
 [[github_issue]]
 node_id = "CPER0"
 gh_issue = 262
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CPER0M"
+gh_issue = 455
 sync_to_github = true
 
 [[github_issue]]

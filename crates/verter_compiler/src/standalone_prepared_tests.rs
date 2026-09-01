@@ -95,6 +95,7 @@ fn vue_inputs() -> DirectExecutionInputs<'static> {
 
 static LEAKED_SVELTE_EXECUTION_INPUTS: &SvelteExecutionInputs = &SvelteExecutionInputs {
     css_hash_override: None,
+    prepared_styles: Vec::new(),
 };
 
 fn svelte_inputs() -> DirectExecutionInputs<'static> {
@@ -1940,5 +1941,387 @@ fn compile_batch_results_follow_input_order_not_group_order() {
     assert_ne!(
         by_input, by_group,
         "the fixture order is already group-major, so the assertion above proves nothing"
+    );
+}
+
+// ── Runtime-backend delegation (catalog-selected) ───────────────────
+
+/// The immutable runtime catalog holds exactly the two registered runtime
+/// rows — Vue and Svelte — keyed adapter × epoch × Runtime, each carrying
+/// the matching backend payload. A third runtime emitter, or a row whose
+/// payload disagrees with its identity, fails here.
+#[test]
+fn runtime_catalog_registers_exactly_the_vue_and_svelte_runtime_rows() {
+    let catalog = built_in_runtime_catalog();
+    assert_eq!(catalog.len(), 2, "exactly two runtime rows are registered");
+
+    let vue = registered_runtime_for(
+        &VueRuntimeBackend.adapter_id(),
+        &FrameworkEpochId::from_type::<VueSfcV3>(),
+    )
+    .expect("the Vue runtime row is catalog-selectable");
+    assert!(
+        matches!(vue, InstalledRuntimeBackend::Vue(_)),
+        "the Vue identity row must carry the Vue runtime backend"
+    );
+
+    let svelte = registered_runtime_for(
+        &SvelteRuntimeBackend.adapter_id(),
+        &FrameworkEpochId::from_type::<SvelteSfc5>(),
+    )
+    .expect("the Svelte runtime row is catalog-selectable");
+    assert!(
+        matches!(svelte, InstalledRuntimeBackend::Svelte(_)),
+        "the Svelte identity row must carry the Svelte runtime backend"
+    );
+
+    // A wrong epoch is a miss, never a framework fallback.
+    assert!(registered_runtime_for(
+        &VueRuntimeBackend.adapter_id(),
+        &FrameworkEpochId::from_type::<SvelteSfc5>(),
+    )
+    .is_none());
+
+    for row in catalog.iter() {
+        assert_eq!(
+            row.identity().capability(),
+            crate::framework_common::catalog::CatalogCapability::Runtime
+        );
+        assert!(row.identity().host_epoch().is_none());
+    }
+}
+
+/// Every compiler-local route — direct, prepared (first and repeat), and
+/// batch — reaches a runtime product only through the catalog-selected
+/// runtime backend. The per-thread delegation counter is the witness: a
+/// runtime compile increments it once per compile, and a request planning
+/// no runtime product never does.
+#[test]
+fn runtime_requests_on_every_route_delegate_to_the_catalog_runtime_backend() {
+    let compiler = StandaloneCompiler;
+    let runtime_request = vue_request(vec![CompileProduct::RuntimeClient(
+        RuntimeProductRequest::default(),
+    )]);
+    let svelte_runtime_request = svelte_request(vec![CompileProduct::RuntimeClient(
+        RuntimeProductRequest::default(),
+    )]);
+    let ide_request = vue_request(vec![CompileProduct::IdeCompanion(
+        IdeProductRequest::default(),
+    )]);
+
+    let before_ide = runtime_backend_delegation_count();
+    compiler
+        .compile(VUE_SIMPLE, &ide_request, vue_inputs())
+        .expect("IDE-only compile succeeds");
+    assert_eq!(
+        runtime_backend_delegation_count(),
+        before_ide,
+        "a request planning no runtime product must not touch the runtime backend"
+    );
+
+    let before_direct = runtime_backend_delegation_count();
+    compiler
+        .compile(VUE_SIMPLE, &runtime_request, vue_inputs())
+        .expect("direct Vue runtime compile succeeds");
+    assert_eq!(
+        runtime_backend_delegation_count(),
+        before_direct + 1,
+        "the direct Vue route must delegate its runtime request exactly once"
+    );
+
+    let prepared = compiler.prepare(VUE_SIMPLE, &runtime_request);
+    let before_prepared = runtime_backend_delegation_count();
+    compiler
+        .compile_prepared(VUE_SIMPLE, &prepared, &runtime_request, vue_inputs())
+        .expect("prepared-first Vue runtime compile succeeds");
+    compiler
+        .compile_prepared(VUE_SIMPLE, &prepared, &runtime_request, vue_inputs())
+        .expect("prepared-repeat Vue runtime compile succeeds");
+    assert_eq!(
+        runtime_backend_delegation_count(),
+        before_prepared + 2,
+        "each prepared Vue runtime compile must delegate exactly once"
+    );
+
+    let before_svelte = runtime_backend_delegation_count();
+    compiler
+        .compile(SVELTE_MARKUP_ONLY, &svelte_runtime_request, svelte_inputs())
+        .expect("direct Svelte runtime compile succeeds");
+    assert_eq!(
+        runtime_backend_delegation_count(),
+        before_svelte + 1,
+        "the direct Svelte route must delegate its runtime request exactly once"
+    );
+
+    let items = vec![
+        BatchCompileItem {
+            source: VUE_SIMPLE,
+            request: &runtime_request,
+            inputs: vue_inputs(),
+        },
+        BatchCompileItem {
+            source: SVELTE_MARKUP_ONLY,
+            request: &svelte_runtime_request,
+            inputs: svelte_inputs(),
+        },
+    ];
+    let before_batch = runtime_backend_delegation_count();
+    let batch = compiler.compile_batch(&items);
+    assert!(batch.results.iter().all(Result::is_ok));
+    assert_eq!(
+        runtime_backend_delegation_count(),
+        before_batch + 2,
+        "each batch runtime item must delegate exactly once"
+    );
+}
+
+/// A Vue request that co-plans a runtime product beside a non-runtime
+/// product reaches its runtime legs through the catalog-selected runtime
+/// backend exactly once, and the co-planned runtime artifact is
+/// byte-identical to what the runtime-only request publishes — one runtime
+/// construction behind both request shapes.
+#[test]
+fn mixed_product_runtime_legs_delegate_to_the_catalog_runtime_backend() {
+    let compiler = StandaloneCompiler;
+    let mixed_request = vue_request(vec![
+        CompileProduct::IdeCompanion(IdeProductRequest::default()),
+        CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+    ]);
+    let before = runtime_backend_delegation_count();
+    let mixed = compiler
+        .compile(VUE_SIMPLE, &mixed_request, vue_inputs())
+        .expect("mixed IDE + runtime compile succeeds");
+    assert_eq!(
+        runtime_backend_delegation_count(),
+        before + 1,
+        "a mixed-product Vue request must delegate its runtime legs to the \
+         catalog runtime backend exactly once"
+    );
+
+    let runtime_only = compiler
+        .compile(
+            VUE_SIMPLE,
+            &vue_request(vec![CompileProduct::RuntimeClient(
+                RuntimeProductRequest::default(),
+            )]),
+            vue_inputs(),
+        )
+        .expect("runtime-only compile succeeds");
+    let client_code = |output: &DirectCompileOutput| {
+        output
+            .artifacts
+            .artifacts()
+            .iter()
+            .find(|a| a.kind() == ProductKind::RuntimeClient)
+            .expect("client runtime artifact is published")
+            .code()
+            .to_string()
+    };
+    assert_eq!(
+        client_code(&mixed),
+        client_code(&runtime_only),
+        "the co-planned runtime leg must be byte-identical to the runtime-only \
+         request's — one runtime construction behind both request shapes"
+    );
+}
+
+/// A runtime-only direct compile publishes byte-identically to the
+/// catalog-selected backend's own parsed runtime core called directly —
+/// there is exactly one runtime construction behind both.
+#[test]
+fn direct_runtime_output_is_the_backend_parsed_core_output() {
+    let request = vue_request(vec![
+        CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+        CompileProduct::RuntimeServer(RuntimeProductRequest::default()),
+    ]);
+    let via_route = StandaloneCompiler
+        .compile(VUE_LARGE, &request, vue_inputs())
+        .expect("direct dual-runtime compile succeeds");
+    let parsed = crate::compile::parse_sfc(VUE_LARGE, None, None);
+    let via_core = compile_vue_parsed_runtime(
+        VUE_LARGE,
+        &parsed,
+        &request,
+        LEAKED_VUE_EXECUTION_INPUTS,
+        LEAKED_VUE_MACROS,
+        &RuntimeBlockContentInputs::default(),
+        &[],
+    )
+    .expect("parsed runtime core compile succeeds");
+    assert_eq!(
+        direct_compile_output_digest(&via_route),
+        direct_compile_output_digest(&via_core),
+        "the direct route and the runtime backend's parsed core must publish one identical result"
+    );
+}
+
+/// The direct runtime route threads the caller's resolved execution inputs
+/// into the runtime lowering even when no selected block content narrows
+/// the carrier: `runtime_template_hole` demands the inline shell's typed
+/// generated-template hole whether or not the carrier supplies a template
+/// block of its own.
+#[test]
+fn direct_runtime_compile_honors_caller_runtime_template_hole() {
+    let source = "<script setup lang=\"ts\">\nconst n = 1\n</script>\n";
+    let request = vue_request(vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+        inline: Some(true),
+        ..RuntimeProductRequest::default()
+    })]);
+    let execution = VueExecutionInputs {
+        runtime_template_hole: true,
+        ..VueExecutionInputs::default()
+    };
+    let output = StandaloneCompiler
+        .compile(
+            source,
+            &request,
+            DirectExecutionInputs::Vue {
+                execution: &execution,
+                macros: LEAKED_VUE_MACROS,
+            },
+        )
+        .expect("script-only inline runtime compile succeeds");
+    let client = output
+        .artifacts
+        .artifacts()
+        .iter()
+        .find(|a| a.kind() == ProductKind::RuntimeClient)
+        .expect("client runtime artifact is published");
+    assert!(
+        client.code().contains("verter-runtime-template-hole"),
+        "the caller-demanded generated-template hole must reach the published \
+         runtime shell:\n{}",
+        client.code()
+    );
+}
+
+/// A dual client+server runtime request publishes the PRIMARY (server)
+/// compile's diagnostics ONLY — exactly the set a server-only request
+/// reports. Both legs lower the same retained parse, so the secondary
+/// (client) leg's diagnostics are re-reports of the same source findings;
+/// appending them would double-publish every target-independent diagnostic.
+#[test]
+fn dual_runtime_compile_publishes_primary_diagnostics_only() {
+    let compiler = StandaloneCompiler;
+    let server_only = compiler
+        .compile(
+            VUE_DUPLICATE_DIRECTIVE,
+            &vue_request(vec![CompileProduct::RuntimeServer(
+                RuntimeProductRequest::default(),
+            )]),
+            vue_inputs(),
+        )
+        .expect("server-only compile succeeds");
+    assert!(
+        !server_only.diagnostics.is_empty(),
+        "fixture must produce a primary-leg diagnostic for this test to discriminate"
+    );
+    let dual = compiler
+        .compile(
+            VUE_DUPLICATE_DIRECTIVE,
+            &vue_request(vec![
+                CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+                CompileProduct::RuntimeServer(RuntimeProductRequest::default()),
+            ]),
+            vue_inputs(),
+        )
+        .expect("dual runtime compile succeeds");
+    assert_eq!(
+        dual.diagnostics, server_only.diagnostics,
+        "a dual-kind request must publish exactly the primary (server) \
+         compile's diagnostic set — never a duplicated secondary-leg copy"
+    );
+}
+
+/// The prepared and batch routes publish the SAME primary-only diagnostic
+/// set on a dual client+server runtime request as the direct route — each
+/// source finding appears exactly once, never re-appended from the
+/// secondary (client) leg's compile of the same retained parse.
+#[test]
+fn prepared_and_batch_dual_runtime_publish_primary_diagnostics_only() {
+    let compiler = StandaloneCompiler;
+    let server_request = vue_request(vec![CompileProduct::RuntimeServer(
+        RuntimeProductRequest::default(),
+    )]);
+    let expected = compiler
+        .compile(VUE_DUPLICATE_DIRECTIVE, &server_request, vue_inputs())
+        .expect("server-only compile succeeds")
+        .diagnostics;
+    assert!(
+        !expected.is_empty(),
+        "fixture must produce a primary-leg diagnostic for this test to discriminate"
+    );
+    let dual_request = vue_request(vec![
+        CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+        CompileProduct::RuntimeServer(RuntimeProductRequest::default()),
+    ]);
+
+    let prepared = compiler.prepare(VUE_DUPLICATE_DIRECTIVE, &dual_request);
+    let via_prepared = compiler
+        .compile_prepared(
+            VUE_DUPLICATE_DIRECTIVE,
+            &prepared,
+            &dual_request,
+            vue_inputs(),
+        )
+        .expect("prepared dual runtime compile succeeds");
+    assert_eq!(
+        via_prepared.diagnostics, expected,
+        "the prepared route must publish exactly the primary (server) \
+         compile's diagnostic set — each finding exactly once"
+    );
+
+    let items = vec![BatchCompileItem {
+        source: VUE_DUPLICATE_DIRECTIVE,
+        request: &dual_request,
+        inputs: vue_inputs(),
+    }];
+    let batch = compiler.compile_batch(&items);
+    let via_batch = batch.results[0]
+        .as_ref()
+        .expect("batch dual runtime compile succeeds");
+    assert_eq!(
+        via_batch.diagnostics, expected,
+        "the batch route must publish exactly the primary (server) \
+         compile's diagnostic set — each finding exactly once"
+    );
+}
+
+/// A MIXED-product request (a non-runtime product co-planned beside dual
+/// client+server runtime legs) publishes the primary compile's diagnostics
+/// only: the secondary (client) leg's diagnostics are byte-identical
+/// re-reports of the same source findings, and appending them would
+/// double-publish every target-independent diagnostic.
+#[test]
+fn mixed_product_compile_publishes_primary_diagnostics_only() {
+    let compiler = StandaloneCompiler;
+    let server_only = compiler
+        .compile(
+            VUE_DUPLICATE_DIRECTIVE,
+            &vue_request(vec![CompileProduct::RuntimeServer(
+                RuntimeProductRequest::default(),
+            )]),
+            vue_inputs(),
+        )
+        .expect("server-only compile succeeds");
+    assert!(
+        !server_only.diagnostics.is_empty(),
+        "fixture must produce a primary-leg diagnostic for this test to discriminate"
+    );
+    let mixed = compiler
+        .compile(
+            VUE_DUPLICATE_DIRECTIVE,
+            &vue_request(vec![
+                CompileProduct::IdeCompanion(IdeProductRequest::default()),
+                CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+                CompileProduct::RuntimeServer(RuntimeProductRequest::default()),
+            ]),
+            vue_inputs(),
+        )
+        .expect("mixed IDE + dual-runtime compile succeeds");
+    assert_eq!(
+        mixed.diagnostics, server_only.diagnostics,
+        "a mixed-product compile must publish exactly the primary (server) \
+         compile's diagnostic set — never a duplicated secondary-leg copy"
     );
 }

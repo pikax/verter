@@ -902,4 +902,47 @@ mod tests {
         assert_eq!(native[1].name, "nativeOnly");
         assert_eq!(native[1].span, untouched_span);
     }
+
+    /// The negotiated-encoding walker converts `expressionDiagnostics` spans:
+    /// a non-ASCII document with a malformed template expression must publish
+    /// UTF-16 offsets on that field, not raw UTF-8 byte offsets. Discriminates
+    /// the nested-`span` wire shape, which the walker (keyed on
+    /// `spanStart`/`spanEnd`) would silently leave unconverted.
+    #[test]
+    fn expression_diagnostic_spans_convert_to_negotiated_encoding() {
+        // "é" is 2 UTF-8 bytes / 1 UTF-16 unit; four of them shift the
+        // diagnostic span by 4 units between the two encodings.
+        let source = "éééé{{ count === }}";
+        let diag_start = source.find("count").unwrap() as u32;
+        let diag_end = diag_start + "count ===".len() as u32;
+        let snapshot = verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+            expression_diagnostics: vec![
+                verter_semantic::analysis::template::TemplateExpressionDiagnostic {
+                    severity:
+                        verter_semantic::analysis::template::TemplateDiagnosticSeverity::Error,
+                    code: "XInvalidExpression".to_string(),
+                    message: "invalid expression".to_string(),
+                    span: verter_span::Span::new(diag_start, diag_end),
+                },
+            ],
+            ..Default::default()
+        };
+        let mut json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        convert_analysis_spans_json(&mut json, source, &PositionEncodingKind::UTF16);
+        let diag = &json["expressionDiagnostics"][0];
+        assert_eq!(
+            diag["spanStart"],
+            diag_start - 4,
+            "spanStart must be converted to UTF-16 units"
+        );
+        assert_eq!(
+            diag["spanEnd"],
+            diag_end - 4,
+            "spanEnd must be converted to UTF-16 units"
+        );
+        assert!(
+            diag.get("span").is_none(),
+            "no nested span object may reach the wire"
+        );
+    }
 }

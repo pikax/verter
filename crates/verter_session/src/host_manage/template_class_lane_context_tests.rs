@@ -64,6 +64,7 @@ fn template_class_facts_for(host: &VerterHost, canonical: &str) {
         &host.provenance,
     )
     .expect("raw template data");
+    let raw = raw.data;
     let _ = host.build_template_class_semantic_facts(
         canonical,
         data.parse.whole_hash,

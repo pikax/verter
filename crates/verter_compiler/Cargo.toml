@@ -14,14 +14,13 @@ categories = ["compilers", "template-engine"]
 [features]
 # Exposes `template` (and `script`) as `pub` instead of `pub(crate)` — see
 # `src/lib.rs`. Primarily for the benchmark harness, but it also provides the
-# visibility surface required by the bench-feature trybuild fixtures in
-# `tests/cases/compiler_compile_fail.rs`: with `template`
+# visibility surface required by the bench-feature compile contracts: with `template`
 # `pub(crate)`, an external fixture
 # can't even NAME `template::code_gen::types::SegmentedOverwriteAuthority`,
 # so its compile failure would prove module-privacy, not the item-level
 # `pub(in ...)` restriction under test. Run that test with
 # `cargo test -p verter_compiler --features bench --test main
-# bench_compiler_compile_fail_contracts_are_enforced`.
+# `node scripts/compile-contracts.mjs` bench contract lane.
 bench = []
 dhat-heap = []
 # Gates the Svelte reference-drift / live-compiler harness
@@ -62,8 +61,7 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 # `pub(crate)` in every production build (see `template`'s own `bench`
 # feature gate above; this is deliberately a SEPARATE mechanism, since
 # `bench` widens `template`'s own visibility wholesale and interacts with
-# `trybuild`'s feature-detection fallback for the unrelated
-# bench-only fixtures in `compiler_compile_fail.rs`).
+# the unrelated bench-only compile-contract fixtures).
 test-support = []
 
 [dependencies]
@@ -121,7 +119,6 @@ proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
 tempfile = "3.27"
-trybuild = "1.0"
 # Activates the `test-support` feature on `verter_css_syntax` for
 # `cargo test --package verter_compiler` (and example/bench) builds only —
 # the `parse_inline_style_declarations` invocation counter the A17 "shared

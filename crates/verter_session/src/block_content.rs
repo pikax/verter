@@ -294,6 +294,37 @@ pub(crate) struct CompilerBlockContentCapture {
     pub(crate) stamp: BlockContentHashToken,
 }
 
+/// Which supplied-artifact bucket a block-content read may draw from.
+///
+/// A supplied (externally preprocessed) block artifact is admitted under
+/// the compile profile the admitting caller named, so a read has to state
+/// which bucket it is entitled to. The distinction is a property of the
+/// READING ROUTE, never of the content: a route with no channel for
+/// admitting supplied artifacts reads the registered carrier source alone
+/// and must not inherit another route's preprocessed bytes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SuppliedBlockScope<'p> {
+    /// Supplied artifacts admitted under this compile profile's bucket.
+    Profile(&'p CompileProfile),
+    /// No supplied bucket at all: the registered carrier source is the
+    /// sole content authority for this read. A block whose authored
+    /// dialect needs external preprocessing therefore refuses as
+    /// unavailable rather than silently borrowing another route's bytes.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    RegisteredSourceOnly,
+}
+
+impl SuppliedBlockScope<'_> {
+    /// The supplied-artifact bucket key, or `None` for a read entitled to
+    /// no bucket.
+    fn bucket(&self) -> Option<u64> {
+        match self {
+            Self::Profile(profile) => Some(compile_profile_hash(profile)),
+            Self::RegisteredSourceOnly => None,
+        }
+    }
+}
+
 pub(crate) struct CompilerStyleContentCapture {
     pub(crate) analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
     pub(crate) v_bind_vars: Vec<String>,
@@ -907,9 +938,28 @@ impl VerterHost {
         &self,
         query: BlockContentQuery,
     ) -> Result<BlockContentSnapshot, HostError> {
-        let canonical_id = self.resolve_alias_or_canonical(&query.canonical_id);
+        self.get_block_content_in_scope(
+            &query.canonical_id,
+            &query.block_token,
+            query.expected_basis_token.as_deref(),
+            SuppliedBlockScope::Profile(&query.compile_profile),
+        )
+    }
+
+    /// The one block-content read. The supplied-artifact bucket is stated
+    /// by the caller's [`SuppliedBlockScope`] rather than derived from a
+    /// compile profile here, so a route that admits no supplied artifacts
+    /// reads the registered carrier source without naming a profile.
+    pub(crate) fn get_block_content_in_scope(
+        &self,
+        query_canonical_id: &str,
+        query_block_token: &str,
+        expected_basis_token: Option<&str>,
+        scope: SuppliedBlockScope<'_>,
+    ) -> Result<BlockContentSnapshot, HostError> {
+        let canonical_id = self.resolve_alias_or_canonical(query_canonical_id);
         let block_token = crate::carrier_publication_store::ArtifactBlockToken::parse_untrusted(
-            query.block_token,
+            query_block_token.to_string(),
         )
         .ok_or(HostError::BlockContentRefused(
             BlockContentRefusal::MalformedToken,
@@ -917,11 +967,7 @@ impl VerterHost {
         let selected = self
             .selected_block(&canonical_id, &block_token)
             .map_err(HostError::BlockContentRefused)?;
-        if query
-            .expected_basis_token
-            .as_deref()
-            .is_some_and(|expected| expected != selected.basis_token.as_str())
-        {
+        if expected_basis_token.is_some_and(|expected| expected != selected.basis_token.as_str()) {
             return Ok(BlockContentSnapshot {
                 availability: BlockContentAvailability::Stale,
                 origin: None,
@@ -945,11 +991,12 @@ impl VerterHost {
             });
         }
 
-        let profile_hash = compile_profile_hash(&query.compile_profile);
-        let supplied = read_lock(&self.block_content.state)
-            .supplied
-            .get(&(canonical_id, profile_hash, selected.block_token.clone()))
-            .cloned();
+        let supplied = scope.bucket().and_then(|profile_hash| {
+            read_lock(&self.block_content.state)
+                .supplied
+                .get(&(canonical_id, profile_hash, selected.block_token.clone()))
+                .cloned()
+        });
         if let Some(supplied) = supplied {
             if supplied.owner_revision != selected.owner_revision
                 || supplied.artifact_token != selected.artifact_token
@@ -1029,7 +1076,7 @@ impl VerterHost {
     pub(crate) fn compiler_block_content_inputs(
         &self,
         canonical_id: &str,
-        profile: &CompileProfile,
+        scope: SuppliedBlockScope<'_>,
     ) -> Result<verter_compiler::framework_common::RuntimeBlockContentInputs, HostError> {
         use verter_compiler::framework_common::{
             RuntimeBlockContentInput, RuntimeBlockContentInputs,
@@ -1081,12 +1128,8 @@ impl VerterHost {
             let block_token = structure
                 .public_block_token(&block_ref)
                 .ok_or(HostError::BlockContentRefused(BlockContentRefusal::Missing))?;
-            let snapshot = self.get_block_content(BlockContentQuery {
-                canonical_id: canonical.clone(),
-                block_token: block_token.to_string(),
-                compile_profile: profile.clone(),
-                expected_basis_token: None,
-            })?;
+            let snapshot =
+                self.get_block_content_in_scope(&canonical, &block_token.to_string(), None, scope)?;
 
             match snapshot.availability {
                 BlockContentAvailability::NativeAvailable
@@ -1160,11 +1203,12 @@ impl VerterHost {
     pub(crate) fn capture_compiler_block_content(
         &self,
         canonical_id: &str,
-        profile: &CompileProfile,
+        scope: SuppliedBlockScope<'_>,
     ) -> Result<CompilerBlockContentCapture, HostError> {
-        let profile_hash = compile_profile_hash(profile);
-        let has_supplied = self.has_current_supplied_block_content(canonical_id, profile_hash);
-        let inputs = self.compiler_block_content_inputs(canonical_id, profile)?;
+        let has_supplied = scope.bucket().is_some_and(|profile_hash| {
+            self.has_current_supplied_block_content(canonical_id, profile_hash)
+        });
+        let inputs = self.compiler_block_content_inputs(canonical_id, scope)?;
         let stamp = compiler_block_content_stamp(has_supplied, &inputs);
         Ok(CompilerBlockContentCapture {
             has_supplied,
@@ -1179,7 +1223,7 @@ impl VerterHost {
     pub(crate) fn compiler_block_content_capture_is_current(
         &self,
         canonical_id: &str,
-        profile: &CompileProfile,
+        scope: SuppliedBlockScope<'_>,
         captured_whole_hash: verter_semantic::analysis::types::Hash16,
         captured_stamp: &BlockContentHashToken,
     ) -> bool {
@@ -1193,7 +1237,7 @@ impl VerterHost {
             });
         owner_is_current
             && self
-                .capture_compiler_block_content(canonical_id, profile)
+                .capture_compiler_block_content(canonical_id, scope)
                 .is_ok_and(|capture| capture.stamp == *captured_stamp)
     }
 
@@ -1202,10 +1246,11 @@ impl VerterHost {
         canonical_id: &str,
         styles: &Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
     ) -> Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>> {
-        let captured = self.capture_compiler_style_content_for_profile(
+        let default_profile = CompileProfile::default();
+        let captured = self.capture_compiler_style_content(
             canonical_id,
             styles,
-            &CompileProfile::default(),
+            SuppliedBlockScope::Profile(&default_profile),
         );
         if captured.analyses_changed {
             captured.analyses
@@ -1214,11 +1259,11 @@ impl VerterHost {
         }
     }
 
-    pub(crate) fn capture_compiler_style_content_for_profile(
+    pub(crate) fn capture_compiler_style_content(
         &self,
         canonical_id: &str,
         styles: &[verter_semantic::analysis::StyleBlockAnalysis],
-        profile: &CompileProfile,
+        scope: SuppliedBlockScope<'_>,
     ) -> CompilerStyleContentCapture {
         let mut hydrated = styles.to_vec();
         let mut v_bind_vars = Vec::new();
@@ -1233,12 +1278,12 @@ impl VerterHost {
             else {
                 continue;
             };
-            let Ok(snapshot) = self.get_block_content(BlockContentQuery {
-                canonical_id: canonical_id.to_string(),
-                block_token: block_token.to_string(),
-                compile_profile: profile.clone(),
-                expected_basis_token: None,
-            }) else {
+            let Ok(snapshot) = self.get_block_content_in_scope(
+                canonical_id,
+                &block_token.to_string(),
+                None,
+                scope,
+            ) else {
                 usage_complete = false;
                 continue;
             };

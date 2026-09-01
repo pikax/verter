@@ -52,7 +52,7 @@ Do not touch `framework_common/vue_bridge.rs`, the `CarrierCompiler` declaration
 ## Exact predecessor contract and binding laws
 
 - **CCA1T1:** `CarrierCompilerRegistry` and registry-only lookups are absent, so no production trait object can select the Svelte implementation.
-- Structural route evidence must also prove all Svelte frontend, semantic, projection, runtime, and host calls already select typed backends from immutable catalog identity.
+- Structural route evidence must also prove all Svelte frontend, semantic, projection, runtime, and host calls already select typed backends from immutable catalog identity, and that both the host-backed and runtime-render production lanes consume typed `CompileAdmission` issued by the Svelte `FrameworkHostIntegrationBackend` before this compatibility implementation is deleted.
 - Tests, comments, assertions, and diagnostics use durable backend/capability language only; no roadmap, node, phase, sequence, or deletion-history vocabulary may enter code or tests.
 
 ## Migration, deletions, acceptance, and performance

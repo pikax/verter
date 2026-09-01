@@ -1,9 +1,19 @@
 ---
 name: compiler-codegen
-description: "Rust compiler pipeline, template codegen (VDOM/IDE), CodeTransform, cached directives, strict slots, IDE error recovery, style preprocessing, CompileTarget"
+description: "Rust compiler pipeline, template codegen (VDOM/IDE), CodeTransform, cached directives, strict slots, IDE error recovery, style preprocessing, CompileTarget, compiler authority/policy/demand/admission"
 ---
 
 # Compiler & Codegen
+
+Compiler authority, policy, demand, and admission: **normative** text is
+[`roadmap/0.1.0-tama/contracts/compiler-architecture.md`](../../../roadmap/0.1.0-tama/contracts/compiler-architecture.md).
+The skill file
+[`references/authority-policy-demand.md`](references/authority-policy-demand.md)
+is an operational pointer only. The combined carrier-compiler registry remains
+a live migration seam, not the ratified owner. `DefaultCompilationContractId`
+is 1:1 with live `ProductKind` (no `facts` dump). `compile_bundle` is a
+combined product pass, not a third bus. Cheap Default facts are
+`FrameworkSemanticAuthority` over admitted parse only.
 
 ## Rust Compiler Architecture
 

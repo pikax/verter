@@ -288,13 +288,6 @@ import {
   SHIPPED_CFG_LANE_ENABLED,
   SHIPPED_CFG_SKIP_SUMMARY,
   SHIPPED_CFG_SKIP_VERDICT_NOTE,
-  // trybuild exclusion (interim, pending maintainer disposition) — GB13.
-  TRYBUILD_EXCLUDED_SUITES,
-  buildTrybuildExclusionFilterExpr,
-  trybuildSkipArgsForPackage,
-  countTrybuildExclusionMatches,
-  discoverCompilerTrybuildSourceModulePrefixes,
-  compilerTrybuildDriverUsesCanonicalConstructor,
   // reused by the gate-failure-triage parsing scenarios (GB14) so a nextest recap fixture is read through
   // the SAME extractor the live gate/triage share — no second nextest-output parser.
   extractNextestTerminalFailures,
@@ -1645,10 +1638,23 @@ async function main() {
       contract: { status: "ok", parseable: true, complete: true },
       parity: { complete: true, matches: true },
     };
+    // The wasm JS-boundary lane has no enable flag: every row below carries a complete wasm receipt, and
+    // the row set proves that omitting one, or handing over one whose executed-vs-discovered parity does
+    // not reconcile, cannot reach PASS.
+    const completeWasm = {
+      hardFailure: false,
+      failures: [],
+      coverage: { parseable: true, complete: true },
+      parity: { complete: true, matches: true, discoveredCases: 4, selectedCases: 4 },
+    };
     const receiptRows = [
-      [{ surface: completeSurface, shipped: completeShipped }, "PASS", true],
+      [{ surface: completeSurface, shipped: completeShipped, wasm: completeWasm }, "PASS", true],
       [
-        { surface: { ...completeSurface, toleratedOccurred: true }, shipped: completeShipped },
+        {
+          surface: { ...completeSurface, toleratedOccurred: true },
+          shipped: completeShipped,
+          wasm: completeWasm,
+        },
         "PASS-WITH-TOLERATED",
         true,
       ],
@@ -1660,11 +1666,12 @@ async function main() {
             failures: [{ surface: "nextest", name: "cases::real_failure" }],
           },
           shipped: completeShipped,
+          wasm: completeWasm,
         },
         "FAIL",
         true,
       ],
-      [{ surface: completeSurface, shipped: null }, "FAIL", false],
+      [{ surface: completeSurface, shipped: null, wasm: completeWasm }, "FAIL", false],
       [
         {
           surface: completeSurface,
@@ -1672,6 +1679,32 @@ async function main() {
             ...completeShipped,
             contract: { status: "not-run", parseable: false, complete: false },
           },
+          wasm: completeWasm,
+        },
+        "FAIL",
+        false,
+      ],
+      // A run that never produced a wasm receipt at all — the state this lane exists to make impossible.
+      [{ surface: completeSurface, shipped: completeShipped, wasm: null }, "FAIL", false],
+      // A wasm lane that ran but executed fewer cases than the tree declares.
+      [
+        {
+          surface: completeSurface,
+          shipped: completeShipped,
+          wasm: {
+            ...completeWasm,
+            parity: { complete: true, matches: false, discoveredCases: 4, selectedCases: 0 },
+          },
+        },
+        "FAIL",
+        false,
+      ],
+      // A wasm lane whose harness announced work and never closed it.
+      [
+        {
+          surface: completeSurface,
+          shipped: completeShipped,
+          wasm: { ...completeWasm, coverage: { parseable: true, complete: false } },
         },
         "FAIL",
         false,
@@ -1694,6 +1727,7 @@ async function main() {
     const skippedPass = reduceGateLaneReceipts({
       surface: completeSurface,
       shipped: null,
+      wasm: completeWasm,
       shippedCfgLaneEnabled: false,
     });
     if (skippedPass.verdict !== "PASS" || skippedPass.coverageComplete !== true) {
@@ -1706,6 +1740,7 @@ async function main() {
     const skippedIncomplete = reduceGateLaneReceipts({
       surface: { ...completeSurface, coverage: { parseable: false, complete: false } },
       shipped: null,
+      wasm: completeWasm,
       shippedCfgLaneEnabled: false,
     });
     if (
@@ -1716,6 +1751,24 @@ async function main() {
       fail(
         `(GB17.5) Surface-1-only skip must still FAIL on an incomplete Surface receipt, ` +
           `got ${JSON.stringify(skippedIncomplete)}`,
+      );
+      ok = false;
+    }
+
+    const wasmlessSkippedRun = reduceGateLaneReceipts({
+      surface: completeSurface,
+      shipped: null,
+      wasm: null,
+      shippedCfgLaneEnabled: false,
+    });
+    if (
+      wasmlessSkippedRun.verdict !== "FAIL" ||
+      wasmlessSkippedRun.coverageComplete !== false ||
+      !wasmlessSkippedRun.failures.some((row) => row.surface === "gate/incomplete")
+    ) {
+      fail(
+        "(GB17.5) the shipped-cfg skip path must NOT become a hole through which a run with no wasm " +
+          `JS-boundary receipt reaches PASS, got ${JSON.stringify(wasmlessSkippedRun)}`,
       );
       ok = false;
     }
@@ -2001,6 +2054,63 @@ async function main() {
       "utf8",
     );
 
+    // The wasm JS-boundary lane runs before the host lanes and refuses to proceed on a missing
+    // prerequisite, so the stand-in environment must MODEL that prerequisite or the gate never reaches the
+    // lanes under test here. Everything it needs is materialised into the same stub dir, which is first on
+    // PATH, so this scenario stays hermetic on a host with no wasm toolchain installed: a synthetic
+    // one-package workspace metadata document, a source root declaring one case, a `rustc` that reports an
+    // installed target lib directory, and a runner whose version matches the fixture's own declaration.
+    const wasmScanRoot = join(stubDir, "wasm-fixture", "src");
+    mkdirSync(wasmScanRoot, { recursive: true });
+    writeFileSync(
+      join(wasmScanRoot, "boundary.rs"),
+      "#[wasm_bindgen_test]\nfn the_stand_in_case() {}\n",
+      "utf8",
+    );
+    const wasmMetadataPath = join(stubDir, "wasm-metadata.json");
+    writeFileSync(
+      wasmMetadataPath,
+      JSON.stringify({
+        packages: [
+          {
+            name: "stand_in_wasm",
+            manifest_path: join(stubDir, "wasm-fixture", "Cargo.toml"),
+            dependencies: [
+              { name: "wasm-bindgen", kind: null, req: "^0.2.999" },
+              { name: "wasm-bindgen-test", kind: "dev", req: "^0.3.999" },
+            ],
+            targets: [{ kind: ["lib"], src_path: join(wasmScanRoot, "lib.rs"), test: true }],
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const wasmLibDir = join(stubDir, "wasm-target-lib");
+    mkdirSync(wasmLibDir, { recursive: true });
+    writeFileSync(join(wasmLibDir, "libcore-0000000000000000.rlib"), "", "utf8");
+    const rustcStub = join(stubDir, "rustc");
+    writeFileSync(rustcStub, `#!/usr/bin/env bash\nprintf '%s\\n' "${wasmLibDir}"\nexit 0\n`, {
+      mode: 0o755,
+    });
+    const runnerStub = join(stubDir, "wasm-bindgen-test-runner");
+    writeFileSync(
+      runnerStub,
+      "#!/usr/bin/env bash\nprintf 'wasm-bindgen-test-runner 0.2.999\\n'\nexit 0\n",
+      { mode: 0o755 },
+    );
+    for (const shim of [rustcStub, runnerStub]) {
+      try {
+        chmodSync(shim, 0o755);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    // The shipped-check arm matches `check --workspace` and not a bare `check`, because the gate's
+    // report-only Cargo timing-capability probe runs `cargo check --help` at startup regardless of which
+    // lanes are enabled. A bare `check` arm records that probe as a shipped-cfg lane invocation and this
+    // scenario then reports a lane running while it is disabled.
+    //
     // The stub dispatches on the REAL argv shape each production call site builds (buildNextestArchiveArgs
     // / the list step / buildSurface1RunArgs / buildShippedCfgCheckArgs / buildShippedCfgContractArgs) and
     // records the ACTUAL env + argv each per-lane invocation receives, then fails fast (archive/list
@@ -2009,7 +2119,13 @@ async function main() {
     writeFileSync(
       stubPath,
       `#!/usr/bin/env bash
-if [ "$1" = "nextest" ] && [ "$2" = "archive" ]; then
+if [ "$1" = "metadata" ]; then
+  cat "${wasmMetadataPath}"
+  exit 0
+elif [ "$1" = "test" ] && [ "$2" = "--target" ]; then
+  printf 'running 1 tests\\ntest the_stand_in_case ... ok\\n\\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 filtered out; finished in 0.00s\\n'
+  exit 0
+elif [ "$1" = "nextest" ] && [ "$2" = "archive" ]; then
   prev=""
   archfile=""
   for a in "$@"; do
@@ -2024,7 +2140,7 @@ elif [ "$1" = "nextest" ] && [ "$2" = "list" ]; then
 elif [ "$1" = "nextest" ] && [ "$2" = "run" ] && [ "$3" = "--archive-file" ]; then
   { printf 'CARGO_BUILD_JOBS=%s\\n' "$CARGO_BUILD_JOBS"; printf 'ARGS %s\\n' "$*"; } >> "${surfaceMarker}"
   exit 1
-elif [ "$1" = "check" ]; then
+elif [ "$1" = "check" ] && [ "$2" = "--workspace" ]; then
   { printf 'CARGO_BUILD_JOBS=%s\\n' "$CARGO_BUILD_JOBS"; printf 'ARGS %s\\n' "$*"; } >> "${shippedCheckMarker}"
   exit 0
 elif [ "$1" = "nextest" ] && [ "$2" = "run" ] && [ "$3" = "-p" ]; then
@@ -8799,17 +8915,19 @@ fi
         : "";
     if (
       supervisorFactoryCount !== 1 ||
-      productionRunStepCount !== 8 ||
+      productionRunStepCount !== 9 ||
       gateSource.includes("await runContainedStep({") ||
       !gateSource.includes('ctx.supervisor.runStep("surface-1", {') ||
       !gateSource.includes('ctx.supervisor.runStep("shipped-cfg", {') ||
+      !gateSource.includes("ctx.supervisor.runStep(WASM_LANE_ID, {") ||
       !teardownSource.includes('await supervisor.closeAndReapAll("GATE_TEARDOWN")') ||
       teardownSource.indexOf("await supervisor.closeAndReapAll") >
         teardownSource.indexOf("mutex.release()")
     ) {
       fail(
-        `(GB18.10) production must construct exactly one supervisor, route all eight currently ` +
-          `sequential contained commands through it (including Surface 1/shipped lanes), and await its ` +
+        `(GB18.10) production must construct exactly one supervisor, route all nine currently ` +
+          `sequential contained commands through it (including the wasm JS-boundary, Surface 1 and ` +
+          `shipped lanes), and await its ` +
           `close before mutex release; factory=${supervisorFactoryCount} runStep=${productionRunStepCount}`,
       );
       ok = false;
@@ -9424,232 +9542,6 @@ fi
       }
     }
   }
-
-  // --------------------------------------------------------------------------------------------------
-  // (GB13) TRYBUILD EXCLUSION (interim, pending maintainer disposition) — the registry, the filter/skip-arg
-  // builders, and the per-row zero-match LOUD-failure discriminator that `verifyTrybuildExclusionCoverage`
-  // in gate.mjs gates every surface on.
-  //
-  // THE REGRESSION THIS CATCHES: a trybuild file is renamed/moved/deleted and TRYBUILD_EXCLUDED_SUITES is
-  // not updated — the exclusion silently stops covering it (SILENT SKIP of the exclusion itself, not of a
-  // test) while every OTHER row still matches, so a naive "total > 0" check would stay green. The per-row
-  // `missing` discriminator is what makes that a hard, named setup failure instead.
-  // --------------------------------------------------------------------------------------------------
-  process.stderr.write("\n(GB13) TRYBUILD EXCLUSION (interim)\n");
-  {
-    let ok = true;
-
-    // The registry has one row per excluded driver across its six packages. Compiler coverage is checked
-    // independently against every source file that actually calls trybuild::TestCases::new().
-    const wantPackages = [
-      "verter_session",
-      "verter_language",
-      "verter_identity",
-      "verter_compiler",
-      "verter_audit",
-      "verter_type_runtime",
-    ];
-    if (TRYBUILD_EXCLUDED_SUITES.length !== wantPackages.length) {
-      fail(
-        `(GB13.1) TRYBUILD_EXCLUDED_SUITES must have ${wantPackages.length} rows across its six ` +
-          `registered packages; got ${TRYBUILD_EXCLUDED_SUITES.length}: ` +
-          JSON.stringify(TRYBUILD_EXCLUDED_SUITES),
-      );
-      ok = false;
-    }
-    const gotPackages = TRYBUILD_EXCLUDED_SUITES.map((s) => s.package).sort();
-    if (JSON.stringify(gotPackages) !== JSON.stringify([...wantPackages].sort())) {
-      fail(
-        `(GB13.1) TRYBUILD_EXCLUDED_SUITES packages must be exactly ${JSON.stringify([...wantPackages].sort())} ` +
-          `(order-independent); got ${JSON.stringify(gotPackages)}`,
-      );
-      ok = false;
-    }
-    for (const row of TRYBUILD_EXCLUDED_SUITES) {
-      if (!row.modulePrefix.startsWith("cases::") || !row.modulePrefix.endsWith("::")) {
-        fail(
-          `(GB13.1) every row's modulePrefix must be a "cases::...::" module path (so it anchors a whole ` +
-            `module, not a partial name); got ${JSON.stringify(row)}`,
-        );
-        ok = false;
-      }
-    }
-
-    const discoveredCompilerSources = discoverCompilerTrybuildSourceModulePrefixes(REPO_REALPATH);
-    const registeredCompilerSources = TRYBUILD_EXCLUDED_SUITES.filter(
-      (row) => row.package === "verter_compiler",
-    )
-      .map((row) => row.modulePrefix)
-      .sort();
-    if (JSON.stringify(registeredCompilerSources) !== JSON.stringify(discoveredCompilerSources)) {
-      fail(
-        `(GB13.1) verter_compiler registry rows must exactly cover every source module that calls ` +
-          `trybuild::TestCases::new(); registered=${JSON.stringify(registeredCompilerSources)} ` +
-          `discovered=${JSON.stringify(discoveredCompilerSources)}`,
-      );
-      ok = false;
-    }
-    if (
-      !compilerTrybuildDriverUsesCanonicalConstructor(
-        "fn guard() { let tests = trybuild::TestCases::new(); }",
-        "synthetic-canonical.rs",
-      )
-    ) {
-      fail("(GB13.1) the canonical fully-qualified trybuild constructor must be discovered");
-      ok = false;
-    }
-    for (const [label, source] of [
-      ["imported", "use trybuild::TestCases; fn guard() { let tests = TestCases::new(); }"],
-      [
-        "renamed-import",
-        "use trybuild::TestCases as Cases; fn guard() { let tests = Cases::new(); }",
-      ],
-      ["crate-alias", "use trybuild as tb; fn guard() { let tests = tb::TestCases::new(); }"],
-      [
-        "constructor-reference",
-        "fn guard() { let constructor = trybuild::TestCases::new; let tests = constructor(); }",
-      ],
-    ]) {
-      try {
-        compilerTrybuildDriverUsesCanonicalConstructor(source, `synthetic-${label}.rs`);
-        fail(`(GB13.1) unsupported ${label} trybuild constructor spelling must fail closed`);
-        ok = false;
-      } catch (error) {
-        if (!/must call `trybuild::TestCases::new/.test(String(error))) {
-          fail(`(GB13.1) unsupported ${label} constructor reported the wrong error: ${error}`);
-          ok = false;
-        }
-      }
-    }
-
-    // The filterset: `not (...)`, one `(package(pkg) and test(/^prefix/))` arm per row, parenthesized so
-    // composing it into the current Surface-1 filter via `and` cannot change precedence.
-    const filterExpr = buildTrybuildExclusionFilterExpr();
-    if (!filterExpr.startsWith("not (") || !filterExpr.endsWith(")")) {
-      fail(`(GB13.2) the filter must be a single negated group "not (...)"; got '${filterExpr}'`);
-      ok = false;
-    }
-    for (const row of TRYBUILD_EXCLUDED_SUITES) {
-      const arm = `(package(${row.package}) and test(/^${row.modulePrefix}/))`;
-      if (!filterExpr.includes(arm)) {
-        fail(`(GB13.2) the filter must contain the arm ${arm}; got '${filterExpr}'`);
-        ok = false;
-      }
-    }
-
-    // Legacy Surface-2 selftest fixture: direct libtest had no `-E`, only `--skip <prefix>`; gate.mjs no
-    // longer uses this helper.
-    const sessionSkip = trybuildSkipArgsForPackage("verter_session");
-    if (
-      sessionSkip.length !== 2 ||
-      sessionSkip[0] !== "--skip" ||
-      sessionSkip[1] !== "cases::g_compile::compile_fail::"
-    ) {
-      fail(
-        `(GB13.3) trybuildSkipArgsForPackage("verter_session") must be exactly ["--skip", ` +
-          `"cases::g_compile::compile_fail::"]; got ${JSON.stringify(sessionSkip)}`,
-      );
-      ok = false;
-    }
-    const noRowsSkip = trybuildSkipArgsForPackage("verter_workspace");
-    if (noRowsSkip.length !== 0) {
-      fail(
-        `(GB13.3) a package with NO registered rows must get zero --skip args (discriminates a real match ` +
-          `from an accidental blanket skip); got ${JSON.stringify(noRowsSkip)}`,
-      );
-      ok = false;
-    }
-
-    // countTrybuildExclusionMatches: build a synthetic archive listing with exactly one real testcase per
-    // registered row, PLUS two adversarial false-positive testcases that must NEVER be counted — mirroring
-    // the two real same-substring, different-module tests this exclusion must never touch
-    // (verter_lsp's external_ts::membership_reconciler::tests::absent_compile_failed_removes and
-    // verter_session's types::tests::compile_failure_code_classification).
-    const completeSuites = [];
-    for (const row of TRYBUILD_EXCLUDED_SUITES) {
-      completeSuites.push({
-        "package-name": row.package,
-        testcases: { [`${row.modulePrefix}some_harness_fn`]: { kind: "test", ignored: false } },
-      });
-    }
-    completeSuites.push({
-      "package-name": "verter_lsp",
-      testcases: {
-        "external_ts::membership_reconciler::tests::absent_compile_failed_removes": {
-          kind: "test",
-          ignored: false,
-        },
-      },
-    });
-    completeSuites.push({
-      "package-name": "verter_session",
-      testcases: {
-        "types::tests::compile_failure_code_classification": { kind: "test", ignored: false },
-      },
-    });
-    const complete = countTrybuildExclusionMatches(completeSuites);
-    if (complete.total !== TRYBUILD_EXCLUDED_SUITES.length) {
-      fail(
-        `(GB13.4) a complete listing must count exactly ${TRYBUILD_EXCLUDED_SUITES.length} trybuild ` +
-          `testcase(s) (one per row) and must NOT count the two adversarial same-substring false positives; ` +
-          `got total=${complete.total}`,
-      );
-      ok = false;
-    }
-    if (complete.missing.length !== 0) {
-      fail(
-        `(GB13.4) a complete listing must report zero missing rows; got ${JSON.stringify(complete.missing)}`,
-      );
-      ok = false;
-    }
-
-    // THE ZERO-MATCH LOUD-FAILURE DISCRIMINATOR — a renamed/moved/deleted trybuild file (here: dropping the
-    // verter_audit testcase, modelling `attribution_compile_fail.rs` renamed without updating the registry)
-    // must be reported as exactly that ONE missing row, never silently folded into a still-nonzero total.
-    const staleSuites = completeSuites.filter(
-      (s) =>
-        !(
-          s["package-name"] === "verter_audit" &&
-          "cases::attribution_compile_fail::some_harness_fn" in (s.testcases || {})
-        ),
-    );
-    const stale = countTrybuildExclusionMatches(staleSuites);
-    if (
-      stale.missing.length !== 1 ||
-      stale.missing[0].package !== "verter_audit" ||
-      stale.missing[0].modulePrefix !== "cases::attribution_compile_fail::"
-    ) {
-      fail(
-        "(GB13.5) dropping the verter_audit testcase must report missing=[{package:verter_audit, " +
-          `modulePrefix:'cases::attribution_compile_fail::'}]; got ${JSON.stringify(stale.missing)} ` +
-          "— this is the exact discriminator gate.mjs's verifyTrybuildExclusionCoverage fails the gate on " +
-          "(a stale row is a hard setup failure on every surface, never a silent pass).",
-      );
-      ok = false;
-    }
-    if (stale.total !== TRYBUILD_EXCLUDED_SUITES.length - 1) {
-      fail(
-        `(GB13.5) dropping one row's testcase must reduce total by exactly 1 (the other rows still match); ` +
-          `got total=${stale.total}`,
-      );
-      ok = false;
-    }
-
-    if (ok) {
-      pass(
-        "(GB13) TRYBUILD EXCLUSION: TRYBUILD_EXCLUDED_SUITES names the excluded trybuild drivers across " +
-          "six registered packages and exactly covers the compiler's source-derived driver set; " +
-          "buildTrybuildExclusionFilterExpr emits one package+test arm per row inside a single " +
-          "negated group; trybuildSkipArgsForPackage returns the exact --skip pair for verter_session and " +
-          "nothing for an unregistered package; countTrybuildExclusionMatches counts exactly the registered " +
-          "rows against a real listing shape while ignoring two adversarial same-substring lookalikes, and " +
-          "DISCRIMINATES a single stale/renamed row as a named missing entry rather than folding it into a " +
-          "still-nonzero total.",
-      );
-    }
-  }
-
-  // --------------------------------------------------------------------------------------------------
   // (GB14) GATE-FAILURE TRIAGE — pure parsing/classification contract of triage-gate-failure.mjs
   // (triage-gate-internals.mjs). PLATFORM-INDEPENDENT and cargo-free: fixture text in, no spawn, no
   // filesystem beyond what is already imported. The REAL end-to-end proof — planted REAL/FLAKY/INTERACTION

@@ -17,17 +17,5 @@ mod chunk_003;
 mod chunk_004;
 #[path = "component_meta_audit_corpus/chunk_005.rs"]
 mod chunk_005;
-#[path = "component_meta_audit_corpus/chunk_006.rs"]
-mod chunk_006;
-#[path = "component_meta_audit_corpus/chunk_007.rs"]
-mod chunk_007;
-#[path = "component_meta_audit_corpus/chunk_008.rs"]
-mod chunk_008;
-#[path = "component_meta_audit_corpus/chunk_009.rs"]
-mod chunk_009;
-#[path = "component_meta_audit_corpus/chunk_010.rs"]
-mod chunk_010;
-#[path = "component_meta_audit_corpus/chunk_011.rs"]
-mod chunk_011;
 #[path = "component_meta_audit_corpus/chunk_harness.rs"]
 mod chunk_harness;

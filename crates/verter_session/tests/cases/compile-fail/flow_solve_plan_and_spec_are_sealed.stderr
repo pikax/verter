@@ -1,19 +1,19 @@
 error[E0616]: field `basis` of struct `FlowDemandPlan` is private
-  --> tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs:22:10
-   |
-22 |     plan.basis = todo!();
-   |          ^^^^^ private field
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
+  |
+  |     plan.basis = todo!();
+  |          ^^^^^ private field
 
 error[E0616]: field `work_order` of struct `FlowDemandPlan` is private
-  --> tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs:23:10
-   |
-23 |     plan.work_order = todo!();
-   |          ^^^^^^^^^^ private field
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
+  |
+  |     plan.work_order = todo!();
+  |          ^^^^^^^^^^ private field
 
 error[E0616]: field `subject` of struct `FlowDemandPlan` is private
-  --> tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs:24:19
+  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
    |
-24 |     let _ = &plan.subject;
+   |     let _ = &plan.subject;
    |                   ^^^^^^^ private field
    |
 help: a method `subject` also exists, call it with parentheses
@@ -22,9 +22,9 @@ help: a method `subject` also exists, call it with parentheses
    |                          ++
 
 error[E0599]: no method named `obligation_specs_mut` found for mutable reference `&mut FlowDemandPlan` in the current scope
-  --> tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs:30:28
+  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
    |
-30 |     let _: &mut [_] = plan.obligation_specs_mut();
+   |     let _: &mut [_] = plan.obligation_specs_mut();
    |                            ^^^^^^^^^^^^^^^^^^^^
    |
 help: there is a method `obligation_specs` with a similar name
@@ -34,9 +34,9 @@ help: there is a method `obligation_specs` with a similar name
    |
 
 error[E0599]: no method named `work_order_mut` found for mutable reference `&mut FlowDemandPlan` in the current scope
-  --> tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs:31:28
+  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
    |
-31 |     let _: &mut [_] = plan.work_order_mut();
+   |     let _: &mut [_] = plan.work_order_mut();
    |                            ^^^^^^^^^^^^^^
    |
 help: there is a method `work_order` with a similar name
@@ -46,37 +46,37 @@ help: there is a method `work_order` with a similar name
    |
 
 error[E0624]: associated function `new` is private
-  --> tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs:37:33
-   |
-37 |       let _ = FlowObligationSpec::new(todo!(), todo!(), todo!(), todo!(), todo!(), todo!());
-   |                                   ^^^ private associated function
-   |
-  ::: src/project_semantic_dispatch/dispatch_txn.rs
-   |
-   | /         pub(in crate::project_semantic_dispatch) fn new(
-   | |             id: FlowObligationId, requirement: FlowRequirement,
-   | |             origin: FlowObligationOrigin, basis: FlowObligationBasis,
-   | |             expected_dependencies: Arc<[FlowObligationId]>,
-   | |             expected_suboperations: Arc<[SemanticQueryKeyTag]>,
-   | |         ) -> Self {
-   | |_________________- private associated function defined here
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
+  |
+  |       let _ = FlowObligationSpec::new(todo!(), todo!(), todo!(), todo!(), todo!(), todo!());
+  |                                   ^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/verter_session/src/project_semantic_dispatch/dispatch_txn.rs
+  |
+  | /         pub(in crate::project_semantic_dispatch) fn new(
+  | |             id: FlowObligationId, requirement: FlowRequirement,
+  | |             origin: FlowObligationOrigin, basis: FlowObligationBasis,
+  | |             expected_dependencies: Arc<[FlowObligationId]>,
+  | |             expected_suboperations: Arc<[SemanticQueryKeyTag]>,
+  | |         ) -> Self {
+  | |_________________- private associated function defined here
 
 error[E0616]: field `basis` of struct `FlowObligationSpec` is private
-  --> tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs:42:10
-   |
-42 |     spec.basis = todo!();
-   |          ^^^^^ private field
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
+  |
+  |     spec.basis = todo!();
+  |          ^^^^^ private field
 
 error[E0616]: field `expected_dependencies` of struct `FlowObligationSpec` is private
-  --> tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs:43:10
-   |
-43 |     spec.expected_dependencies = todo!();
-   |          ^^^^^^^^^^^^^^^^^^^^^ private field
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
+  |
+  |     spec.expected_dependencies = todo!();
+  |          ^^^^^^^^^^^^^^^^^^^^^ private field
 
 error[E0616]: field `expected_suboperations` of struct `FlowObligationSpec` is private
-  --> tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs:44:19
+  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
    |
-44 |     let _ = &spec.expected_suboperations;
+   |     let _ = &spec.expected_suboperations;
    |                   ^^^^^^^^^^^^^^^^^^^^^^ private field
    |
 help: a method `expected_suboperations` also exists, call it with parentheses
@@ -85,13 +85,13 @@ help: a method `expected_suboperations` also exists, call it with parentheses
    |                                         ++
 
 error[E0277]: the trait bound `SealedFlowCompletion: Clone` is not satisfied
-  --> tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs:50:20
-   |
-50 |     assert_clone::<SealedFlowCompletion>();
-   |                    ^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `SealedFlowCompletion`
-   |
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
+  |
+  |     assert_clone::<SealedFlowCompletion>();
+  |                    ^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `SealedFlowCompletion`
+  |
 note: required by a bound in `assert_clone`
-  --> tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs:49:24
-   |
-49 |     fn assert_clone<T: Clone>() {}
-   |                        ^^^^^ required by this bound in `assert_clone`
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
+  |
+  |     fn assert_clone<T: Clone>() {}
+  |                        ^^^^^ required by this bound in `assert_clone`

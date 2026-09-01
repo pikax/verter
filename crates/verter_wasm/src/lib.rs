@@ -21,6 +21,7 @@
 use std::panic::AssertUnwindSafe;
 
 use serde::{Deserialize, Serialize};
+use verter_compiler::compile_request::{CompileRequest, CompileRequestError};
 use verter_ffi::convert::*;
 use verter_ffi::types::*;
 use verter_protocol::types::{FfiComponentMeta, FfiComponentMetaResolution};
@@ -31,6 +32,8 @@ use verter_session::component_meta_audit::{
 use wasm_bindgen::prelude::*;
 
 mod audit;
+#[cfg(test)]
+mod host_compile_request_tests;
 mod typeinfo;
 use audit::{
     audit_record_list_to_json_string, audit_record_to_json_string, kind_matches_wasm,
@@ -114,9 +117,27 @@ pub fn init() {
 // Helpers
 // =============================================================================
 
+/// Decode a JS value into an input schema.
+///
+/// The payload is materialised as `serde_json::Value` FIRST, rather than fed
+/// straight to the schema through `serde_wasm_bindgen::Deserializer`. That
+/// deserializer answers a struct by reading only the keys the struct
+/// declares, so a key the schema does NOT declare is never visited and
+/// `deny_unknown_fields` never fires — measured on the built artifact, a
+/// `compileProfile` carrying an unknown key, or the other framework's
+/// option key, was accepted and silently ignored despite the attribute and
+/// the doc comment promising refusal.
+///
+/// Going through `serde_json::Value` puts every own key of the payload in
+/// front of the schema, which is what makes the attribute mean what it
+/// says. It is the same materialisation
+/// [`host_compile_request_from_js`] already performs for the same reason;
+/// this makes the legacy routes agree with it instead of being the lax half
+/// of one boundary.
 fn parse_wasm_input<T: serde::de::DeserializeOwned>(value: JsValue) -> Result<T, JsValue> {
-    serde_wasm_bindgen::from_value(value)
-        .map_err(|e| JsValue::from_str(&format!("Invalid host input: {}", e)))
+    let wire: serde_json::Value = serde_wasm_bindgen::from_value(value)
+        .map_err(|e| JsValue::from_str(&format!("Invalid host input: {}", e)))?;
+    T::deserialize(wire).map_err(|e| JsValue::from_str(&format!("Invalid host input: {}", e)))
 }
 
 fn to_wasm_value<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
@@ -250,6 +271,103 @@ fn default_known_dependency_extensions() -> Vec<String> {
         ".vue".to_string(),
         ".svelte".to_string(),
     ]
+}
+
+// =============================================================================
+// Framework-discriminated host compile request (JS → canonical request)
+// =============================================================================
+//
+// The typed request adapter owns exactly one thing: carrying a JS payload
+// through the shared wire schema into the canonical `CompileRequest`
+// constructor without inventing a value or a rule on the way. Two
+// authorities meet here and this binding is neither of them — serde
+// decides whether the payload matches the schema, and the canonical
+// constructor decides whether the decoded request is admissible.
+//
+// The legacy `HostCompileProfile`-shaped entry points below are untouched
+// and still serve every call; nothing routes through this adapter yet.
+
+/// Why a JS host compile request did not become a canonical
+/// [`CompileRequest`].
+///
+/// The two arms are the two authorities, deliberately kept apart: a caller
+/// that sent a key the schema does not have is told so as a schema
+/// refusal, and a caller whose well-formed request the compiler refuses is
+/// told which rule refused it. Neither arm is rewritten as the other, and
+/// this binding adds no third refusal vocabulary of its own.
+#[derive(Debug)]
+pub enum HostCompileRequestError<DecodeError> {
+    /// The payload did not match the wire schema: an unknown field, the
+    /// other framework's option key, an unknown framework or enum
+    /// variant, an absent required field, a value of the wrong type, or a
+    /// JS value that is not a representable payload at all.
+    Decode(DecodeError),
+    /// The payload decoded, and the canonical request refused it.
+    Request(CompileRequestError),
+}
+
+impl<DecodeError: std::fmt::Display> std::fmt::Display for HostCompileRequestError<DecodeError> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decode(error) => write!(formatter, "invalid host compile request: {error}"),
+            // `CompileRequestError` has no `Display`, so its `Debug` form
+            // is what there is; it carries the refusing rule and the option
+            // row it names. Rendered verbatim rather than re-worded, because
+            // a prose sentence here would be a second refusal vocabulary to
+            // keep in sync with the canonical one.
+            Self::Request(error) => write!(formatter, "refused host compile request: {error:?}"),
+        }
+    }
+}
+
+/// Decodes a framework-discriminated host compile request and hands the
+/// decoded payload straight to the canonical constructor.
+///
+/// The wire form is `serde_json::Value`, which puts every own key of the
+/// payload in front of the schema, so `deny_unknown_fields` decides an
+/// unknown key and the other framework's option key alike. The JS boundary
+/// ([`host_compile_request_from_js`]) materialises its payload into this
+/// same representation before reaching here, and it is the representation
+/// this adapter's tests drive.
+///
+/// Decode and construction are one step on purpose — there is no
+/// intermediate a caller could hold, adjust, and submit without the
+/// canonical constructor having seen it.
+pub fn host_compile_request_from_wire(
+    wire: serde_json::Value,
+    profiles: &HostResolvedCompileProfiles,
+) -> Result<CompileRequest, HostCompileRequestError<serde_json::Error>> {
+    let request =
+        FfiHostCompileRequest::deserialize(wire).map_err(HostCompileRequestError::Decode)?;
+    ffi_host_compile_request_to_compile_request(request, profiles)
+        .map_err(HostCompileRequestError::Request)
+}
+
+/// The JS-boundary form of [`host_compile_request_from_wire`]: a JS value
+/// in, a canonical request out, with either authority's refusal rendered
+/// as the thrown JS error.
+///
+/// The JS value is materialised as `serde_json::Value` first, and not fed
+/// to the schema through `serde_wasm_bindgen::Deserializer`. That
+/// deserializer answers a struct with only the fields the struct declares,
+/// so a key the schema does not have is never visited and
+/// `deny_unknown_fields` never fires — an unknown key, and the other
+/// framework's option key, would both be silently accepted here. Going
+/// through `serde_json::Value` puts every own key of the payload in front
+/// of the schema, and makes this boundary decode through the exact
+/// representation the adapter's tests drive. It also widens what is
+/// accepted: a payload built as a JS `Map` graph now converts and is judged
+/// on its keys, where feeding it to the schema directly refused it as a
+/// sequence before the schema saw a key at all.
+pub fn host_compile_request_from_js(
+    wire: JsValue,
+    profiles: &HostResolvedCompileProfiles,
+) -> Result<CompileRequest, JsValue> {
+    let wire: serde_json::Value = serde_wasm_bindgen::from_value(wire)
+        .map_err(HostCompileRequestError::Decode)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    host_compile_request_from_wire(wire, profiles)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 // =============================================================================
@@ -1694,6 +1812,70 @@ defineProps<{ value: Unsafe }>()
             assert!(absent.value.is_none(), "{canonical}: value must be null");
             assert!(absent.error.is_none(), "{canonical}: error must be null");
         }
+    }
+
+    /// `deny_unknown_fields` on the legacy input schemas must actually
+    /// FIRE at the JS boundary.
+    ///
+    /// It did not, for as long as `parse_wasm_input` fed the JS value
+    /// straight to `serde_wasm_bindgen::Deserializer`: that deserializer
+    /// answers a struct by reading only the keys the struct declares, so an
+    /// undeclared key was never visited and the attribute never ran. The
+    /// schema was closed on paper and open in practice — measured on the
+    /// built artifact, a `compileProfile` carrying an unknown key compiled
+    /// happily.
+    ///
+    /// This is a JS-object-graph test, not a `serde_json::Value` one, on
+    /// purpose: the defect lives in the JS→Rust decode step, and a fixture
+    /// that never becomes a JS object cannot reach it.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn an_unknown_key_on_a_legacy_input_is_refused_at_the_js_boundary() {
+        use wasm_bindgen::JsValue;
+
+        let payload = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &payload,
+            &JsValue::from_str("filename"),
+            &JsValue::from_str("App.vue"),
+        )
+        .expect("declared key sets");
+        js_sys::Reflect::set(
+            &payload,
+            &JsValue::from_str("totallyUnknownKey"),
+            &JsValue::from_f64(1.0),
+        )
+        .expect("undeclared key sets");
+
+        // `FfiCompileProfile` is not `Debug`, so match rather than
+        // `expect_err` — the Ok arm still has to fail loudly.
+        let refusal = match crate::parse_wasm_input::<verter_protocol::types::FfiCompileProfile>(
+            payload.into(),
+        ) {
+            Ok(_) => panic!("an undeclared key must refuse, not be dropped"),
+            Err(error) => error
+                .as_string()
+                .expect("the refusal reaches JS as a string"),
+        };
+        assert!(
+            refusal.contains("totallyUnknownKey"),
+            "the refusal must NAME the offending key, got {refusal:?}"
+        );
+
+        // The control. Without it, a decoder that refused every payload —
+        // or a harness that never ran the fixture — would read as proof.
+        let accepted = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &accepted,
+            &JsValue::from_str("filename"),
+            &JsValue::from_str("App.vue"),
+        )
+        .expect("declared key sets");
+        assert!(
+            crate::parse_wasm_input::<verter_protocol::types::FfiCompileProfile>(accepted.into())
+                .is_ok(),
+            "a payload of declared keys only still decodes"
+        );
     }
 
     #[cfg(target_arch = "wasm32")]

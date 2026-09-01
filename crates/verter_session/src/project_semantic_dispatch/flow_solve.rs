@@ -120,6 +120,9 @@ pub struct FlowRequirement { pub operation: SemanticQueryKeyTag, pub requirement
 /// wildcard-free match over the family vocabulary.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+// The shared `Facts` postfix distinguishes expansion rules from the matching
+// fact-family discriminants; it is domain information, not naming noise.
+#[allow(clippy::enum_variant_names)]
 pub enum FlowExpansionRule {
     BindingSlotFacts, ReturnSiteFacts, SelectedEdgeFacts, CallSiteFacts,
     GuardPredicateFacts, ContextualTargetFacts, CaptureFacts, SemanticRelationFacts,

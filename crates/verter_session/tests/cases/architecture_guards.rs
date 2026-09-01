@@ -3047,6 +3047,18 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "compile_blockers_serve_seam_hook",
             "Compile-blockers single-generation snapshot regression pin (source_move_inside_the_compile_blockers_window_never_serves_a_generation_mix): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired in the source-capture→products-assembly window for deterministic mid-flight mutation choreography. Compiled out in production builds. NOT a cache.",
         ),
+        // - `indexed_source_capture_seam_hook` (NOT a cache):
+        //     `#[cfg(test)] indexed_source_capture_seam_hook` is the
+        //     sibling single-cell hook slot fired inside the base
+        //     `IndexedReady` materialise flight (after the source
+        //     snapshot is held, before remaining IndexedReady products
+        //     are assembled from that object) so fence tests can land a
+        //     content upsert deterministically in that window. Compiled
+        //     out in production builds.
+        (
+            "indexed_source_capture_seam_hook",
+            "IndexedReady snapshot-coherence regression pin (source_move_between_parse_facts_and_eval_source_never_serves_torn_identity): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired after the source snapshot is held so every content-addressed IndexedReady product stays one snapshot object. Compiled out in production builds. NOT a cache.",
+        ),
         // - `parse_env_override` (NOT a cache):
         //     `#[cfg(test)] parse_env_override` is a single-cell
         //     `Mutex<Option<Hash16>>` test-only override of the live
@@ -5162,6 +5174,11 @@ pub(crate) mod foundations_guards {
     pub fn guard2_allowlist() -> BTreeSet<String> {
         let mut set: BTreeSet<String> = [
             "crates/verter_workspace/src/native_fs.rs",
+            // Declaration generator behind `required-features`, absent from
+            // every default build: its one write rewrites a committed
+            // declaration whose bytes a freshness guard pins. Build-time
+            // source-tree output, not workspace/semantic/overlay state.
+            "crates/verter_napi/src/bin/generate_host_compile_request_ts.rs",
             "crates/verter_workspace/src/config.rs",
             "crates/verter_workspace/src/snapshot_builder.rs",
             "crates/verter_workspace/src/vite_config.rs",
@@ -5657,6 +5674,14 @@ pub(crate) mod foundations_guards {
         // assembler's own signature, so a caller outside this crate cannot
         // name its return type without them.
         "pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment}",
+        // Sealed request-scoped native host binding substrate
+        // (`BoundNativeHostRequest` + its typed unavailable outcomes).
+        // Public so the out-of-crate seal is provable: the trybuild
+        // fixture `tests/cases/compile-fail/native_host_binding_sealed.rs`
+        // must NAME the type to prove it is not Clone/Copy/serializable
+        // and that the framework-specific host binding is unreachable
+        // outside the single by-value consumption seam.
+        "pub use host_resolve::native_host_binding::",
         // The exhaustive uncomposable-input-map taxonomy carried by
         // `AssembleMapFailure`, so a caller can discriminate the exact sub-code
         // and its family rather than matching on a rendered message. Also
@@ -9191,6 +9216,10 @@ pub(crate) mod foundations_guards {
     /// code change that routes the I/O through `NativeFs` /
     /// `WorkspaceAccess` (or a deletion of the callsite).
     pub const D14_ALLOW_LIST: &[(&str, &str)] = &[
+        (
+            "crates/verter_napi/src/bin/generate_host_compile_request_ts.rs",
+            "Declaration generator, not a runtime path. It is a `[[bin]]` behind `required-features = [\"generate-host-request-ts\"]`, so it is absent from every default build including the published addon; a developer runs it to rewrite one committed file whose bytes a freshness guard then pins. The SOLE `std::fs::` call writes that generated declaration to a path derived from the manifest directory. It touches no workspace, semantic, overlay or VFS state, and routing a build-time source-tree write through the disk boundary would give a generator a session it has no other use for.",
+        ),
         (
             "crates/verter_bench/src/css_gate.rs",
             "Measurement-runner provenance probe (dev/CI-only bench crate, never published). The SOLE `std::fs::` call reads `/proc/loadavg` on Linux to stamp system load into a captured measurement record, mirroring the macOS branch that shells out to `sysctl -n vm.loadavg`. A kernel-synthesised pseudo-file describing the MACHINE, not workspace, semantic, overlay or VFS state — and routing it through the disk boundary would key a path cache on a file whose contents differ on every read. The runner's own artifact I/O (reading a committed baseline, writing a captured record) routes through `NativeFs` and is deliberately NOT covered by this entry.",

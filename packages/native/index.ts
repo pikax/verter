@@ -407,6 +407,37 @@ export type {
   HostSelectorMatchResult,
   HostDependencyResolution,
   HostIdeProjectConfig,
+  HostVueBackend,
+  HostVueWhitespace,
+  HostVueParsePad,
+  HostVueCssModuleScopeBehaviour,
+  HostVueCssModuleLocalsConvention,
+  HostVueAssetUrlOptions,
+  HostVueAssetUrlTransform,
+  HostVueCssModules,
+  HostVueCompileOptions,
+  HostSvelteNamespace,
+  HostSvelteFragments,
+  HostSvelteRunes,
+  HostSvelteCss,
+  HostSvelteCustomElementProp,
+  HostSvelteCustomElementDescriptor,
+  HostSvelteCompatibility,
+  HostSvelteCompileOptions,
+  HostCompileIdentity,
+  HostRuntimeProductOptions,
+  HostIdeProductOptions,
+  HostAnalysisProductOptions,
+  HostRuntimeClientProduct,
+  HostRuntimeServerProduct,
+  HostIdeCompanionProduct,
+  HostPublicApiProduct,
+  HostDeclarationsProduct,
+  HostAnalysisProduct,
+  HostRequestedProduct,
+  HostVueCompileRequest,
+  HostSvelteCompileRequest,
+  HostCompileRequest,
 } from "./host-types";
 
 import type {
@@ -713,6 +744,7 @@ export declare class VerterHost {
   /**
    * Compile a batch of carrier inputs through the production host
    * path (scheduler + dispatch + compile_cache).
+   * This does not run lint rules; call `lint` explicitly when wanted.
    *
    * Each input's source language is derived from its `canonicalId`, so
    * the id must carry the carrier's extension: `App.vue` compiles as

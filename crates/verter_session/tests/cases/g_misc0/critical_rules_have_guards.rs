@@ -593,7 +593,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // carrier/payload field privacy (regardless of spelled type) by
             // `output_carrier_payload_fields_are_private`; the out-of-crate
             // visibility boundary by
-            // `output_projector_non_owner_impl_is_compiler_sealed`; and the
+            // `output_projector_not_impl_outside_crate`; and the
             // mintable `TestOutputCap` capability staying `#[cfg(test)]`-gated
             // by `test_output_cap_not_visible_or_mintable_in_non_test_builds`
             // (the carrier TRAIT escapes have an accidental-regression CANARY —
@@ -710,7 +710,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "output_projector_owner_registration_inventory",
             "output_carriers_have_no_inherent_typeexpr_escape_method",
             "output_carrier_payload_fields_are_private",
-            "output_projector_non_owner_impl_is_compiler_sealed",
+            "output_projector_not_impl_outside_crate",
             "test_output_cap_not_visible_or_mintable_in_non_test_builds",
             "output_cap_mint_scope_is_per_leaf_not_subtree",
             "cross_sink_raw_authority_to_type_expr_boundary",
@@ -753,11 +753,11 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // descriptor and the cardinality matches the documented
             // baselines.
             "typeinfo_graph_taxonomy",
-            // (2) Wire-compat: byte-equal TS freshness against the
-            // canonical `buf generate` + `oxfmt` output. Drift —
-            // schema edit without regen, hand-edit, formatter
-            // mismatch — surfaces as a named diff.
-            "typeinfo_proto_ts_freshness",
+            // (2) The Rust structural contract pins schema inventory,
+            // schema-version parity, and the generated source header.
+            // Byte-equal regeneration is owned by `pnpm proto:check`
+            // in the lint/format CI lane, outside nextest.
+            "typeinfo_proto_ts_contract",
             // (3) Audit envelope parity: every `RequestKind`
             // variant has a matching `RequestKindPayload` arm; the
             // `TypeInfoGraph` substrate is wired end-to-end.

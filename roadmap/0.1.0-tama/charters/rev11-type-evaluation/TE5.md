@@ -103,20 +103,21 @@ dispatchable subblocks.
 - No `SemanticRecipeId`, general recipe graph, bytecode/instruction tape, closures, function pointers, trait-object evaluator, arbitrary generic force trait, AST/OXC reference, stored `TypeExpr`, arbitrary env map, source text/hash/span identity, or consumer-owned recursive walker.
 - No second relation, distributivity, truthiness, canonical-algebra, mapper, generic-instantiation, projection, route, cache, or native-checker authority.
 - Never warm cancelled, budgeted, unstable, recursive, missing, signature-overflow, fact-invalid, or partial work; never backfill work a candidate did not materialize; never exceed or silently grow a family cap.
-- Do not add direct TE predecessor edges to G1, E2, G2, or native-checker nodes. Their dependency is transitive through D8. Do not touch D2B or its existing TA1B/TA2 inconsistency.
+- Do not add direct TE predecessor edges to G1, E2, G2, or native-checker nodes. Their dependency is transitive through D8. Do not change D2B's implementation scope; TA1B and TA2 remain required predecessors, and D2B cannot return to implemented until both are implemented.
 - Do not widen public `TypeInfo`, native checker, flow semantics, relation policy, truthiness, canonical algebra, display, component-meta, or wire contracts.
 
-## Budgets and mandatory rescope
+## Budgets and rescope
 
-- Target ceiling: 800 production LOC, 8 production files, 2 related crates/packages.
-- Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or if closure requires a new graph/cache/IR, public/wire change, unsafe/concurrency redesign, or semantic change outside TE1–TE4. The named eight-file mutation surface is the target; a ninth file requires rescope review.
+- Planning reference: 800 production LOC, 8 production files, 2 related crates/packages; the named eight-file mutation surface remains the expected footprint.
+- Numeric rescope signal: 1,500 production LOC or 12 files. Crossing it, or touching a ninth file, requires a scope-coherence investigation under `contracts/sizing.md`, not automatic rescope.
+- Architect rescope remains mandatory when the candidate spans 3 unrelated crates/packages, or closure requires a new graph/cache/IR, a public/wire change, unsafe/concurrency redesign, or semantic change outside TE1–TE4.
 - Correctness budget: zero bypasses, dead-operand semantic work, identity aliasing, stale/unsatisfied reuse, wrong-complete result, or warm degraded work.
 - Performance budget: dead-operand counters exactly 0; one cold winner per key; repeated warm candidate delta 0; all family sizes at or below `candidate_cap`; equivalent demanded-work parse, dispatch, allocation, latency, and retained-origin counts may not regress.
 
 ## Abort conditions
 
 - Stop before mutation if TE4 lacks an implemented row, the entrance inventory cannot fit one review context, or one forcing authority cannot be structurally enforced without changing ratified operator meaning.
-- Stop if closure would require a second graph/resolver/cache, a new cache/admission mechanism rather than enforcement of TE1–TE4's landed contracts, public/native/wire expansion, direct successor edges, or repair of D2B's unrelated inconsistency.
+- Stop if closure would require a second graph/resolver/cache, a new cache/admission mechanism rather than enforcement of TE1–TE4's landed contracts, public/native/wire expansion, direct successor edges, or changes to D2B's unrelated implementation scope.
 - Abort on any residual selectable bypass, dead-work counter, stale/nominal-only reuse, warm partial, candidate growth, concurrency divergence, or unexplained output/performance regression.
 
 ## Targeted verification

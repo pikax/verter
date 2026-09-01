@@ -94,11 +94,24 @@ const LAYER_7_HARNESSES: &[&str] = &[
     // production [dependencies] is empty and whose `verter_session` edge is
     // [dev-dependencies]-only — never depended ON by anything.
     "verter_shipped_cfg_contract",
+    // A non-shipping Node addon a `verter_napi` integration test loads to
+    // drive real JS values across the native boundary. It is excluded from
+    // `verter_napi`'s published package and is never built by the release
+    // `napi build`; its single incoming edge is that crate's
+    // [dev-dependencies], which is outside this test's tracked production
+    // closure. It exists so the boundary's own behaviour can be observed
+    // rather than asserted from a Rust model of it.
+    "verter_napi_request_fixture",
 ];
 
-/// Build tooling, not a layer. Checked by
-/// `xtask_is_never_a_production_dependency_of_a_layered_crate`.
-const REPOSITORY_TOOLING_NOT_IN_THE_LAYER_MATRIX: &[&str] = &["xtask"];
+/// Build/test tooling, not a production layer. Checked by
+/// `repository_tooling_is_never_a_production_dependency_of_a_layered_crate`.
+const REPOSITORY_TOOLING_NOT_IN_THE_LAYER_MATRIX: &[&str] = &[
+    "xtask",
+    "verter_compile_contracts",
+    "verter_compile_contracts_bench",
+    "verter_compile_contracts_session_variants",
+];
 
 fn layer_map() -> HashMap<&'static str, u8> {
     let mut m = HashMap::new();
@@ -487,12 +500,12 @@ fn the_ratified_exception_records_its_target_condition_precisely() {
     );
 }
 
-/// `xtask` is repository tooling, never a production dependency of any
+/// Repository tooling is never a production dependency of any
 /// layered crate — it has no row in the layer matrix at all, so a silent
 /// new edge into it would otherwise pass the main assertion vacuously
 /// (nothing in `layers` would ever flag it as "upward").
 #[test]
-fn xtask_is_never_a_production_dependency_of_a_layered_crate() {
+fn repository_tooling_is_never_a_production_dependency_of_a_layered_crate() {
     let metadata = workspace_metadata();
     let graph = ResolveGraph::from_metadata(&metadata);
     let layers = layer_map();

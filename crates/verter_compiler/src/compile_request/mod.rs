@@ -19,8 +19,9 @@ pub mod vue;
 
 pub use capability::{CapabilityCell, CapabilityDisposition};
 pub use product::{
-    AnalysisProductRequest, CompileProduct, DeclarationProductRequest, IdeProductRequest,
-    ProductKind, PublicApiProductRequest, RuntimeProductRequest, RuntimeStyleProcessing,
+    unroutable_host_request_axis, AnalysisProductRequest, CompileProduct,
+    DeclarationProductRequest, IdeProductRequest, ProductKind, PublicApiProductRequest,
+    RuntimeProductRequest, RuntimeStyleProcessing, UnroutableHostRequestAxis,
 };
 pub use svelte::{SvelteCompileRequest, SvelteOption, SvelteOptionAttempt, SvelteOptionClass};
 pub use vue::{VueBackendRequest, VueCompileRequest, VueOption, VueOptionAttempt, VueOptionClass};
@@ -35,6 +36,21 @@ use verter_identity::profile::TypeScriptSemanticProfileId;
 pub enum FrameworkOption {
     Vue(VueOption),
     Svelte(SvelteOption),
+}
+
+/// A Verter request axis that only the Vue projection implements.
+///
+/// These are not official-framework options (see [`FrameworkOption`] for
+/// those) — they are Verter's own IDE-companion and request axes, and the
+/// Svelte backend reads none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VueOnlyAxis {
+    /// The generated types module the Vue TSX projection imports from.
+    TypesModuleName,
+    /// Vue conditional-root narrowing in the TSX projection.
+    ConditionalRootNarrowing,
+    /// Vue strict slot typing in the TSX projection.
+    StrictSlots,
 }
 
 /// Every reason canonical request construction (or, for the two
@@ -68,6 +84,14 @@ pub enum CompileRequestError {
     /// post-parse resolution (`<template vapor>` + an `SSR` product) — see
     /// [`CompileRequest::resolve_vue_backend`].
     SsrVaporBackendUnsupported,
+    /// A [`VueOnlyAxis`] set on a Svelte request. The Svelte backend reads
+    /// none of these, so admitting the request would silently DROP the
+    /// axis — the one outcome the admission contract forbids. Refused on
+    /// presence, exactly like the Vue-only `inline` axis, which keeps its
+    /// own older arm ([`Self::InlineSsrUnsupported`]) because its refusal
+    /// predates this taxonomy and is asserted by name across the
+    /// transports.
+    VueOnlyAxisOnSvelteRequest(VueOnlyAxis),
     /// Inline assembly requested together with SSR — the SSR capability has
     /// no inline axis; an operation absent from the matrix is unsupported.
     /// Never silently demoted to non-inline.
@@ -221,13 +245,44 @@ impl CompileRequest {
             if inline_requested && ssr_requested {
                 return Err(CompileRequestError::InlineSsrUnsupported);
             }
-        } else if inline_requested {
-            // `inline` is a Vue-only axis (official `compileScript({
-            // inlineTemplate })` production topology); Svelte has no such
-            // concept, so a caller who somehow sets it on a Svelte request
-            // gets the same typed refusal rather than a silently-ignored
-            // field.
-            return Err(CompileRequestError::InlineSsrUnsupported);
+        } else {
+            if inline_requested {
+                // `inline` is a Vue-only axis (official `compileScript({
+                // inlineTemplate })` production topology); Svelte has no such
+                // concept, so a caller who somehow sets it on a Svelte request
+                // gets the same typed refusal rather than a silently-ignored
+                // field.
+                return Err(CompileRequestError::InlineSsrUnsupported);
+            }
+            // The IDE-companion axes, same rule. A bool axis is "present"
+            // only when explicitly true: `false` IS the Svelte behaviour, so
+            // refusing it would reject every default request.
+            //
+            // `component_id` is deliberately NOT here. It rides the request's
+            // SHARED identity block, existing Svelte wire payloads set it, and
+            // the Svelte backend does not read it — a real gap, but closing it
+            // changes an accepted wire shape and belongs to a wire decision
+            // rather than to this one.
+            for product in &products {
+                let CompileProduct::IdeCompanion(ide) = product else {
+                    continue;
+                };
+                if ide.types_module_name.is_some() {
+                    return Err(CompileRequestError::VueOnlyAxisOnSvelteRequest(
+                        VueOnlyAxis::TypesModuleName,
+                    ));
+                }
+                if ide.conditional_root_narrowing {
+                    return Err(CompileRequestError::VueOnlyAxisOnSvelteRequest(
+                        VueOnlyAxis::ConditionalRootNarrowing,
+                    ));
+                }
+                if ide.strict_slots {
+                    return Err(CompileRequestError::VueOnlyAxisOnSvelteRequest(
+                        VueOnlyAxis::StrictSlots,
+                    ));
+                }
+            }
         }
 
         Ok(Self {
@@ -255,6 +310,24 @@ impl CompileRequest {
 
     pub fn filename(&self) -> Option<&str> {
         self.filename.as_deref()
+    }
+
+    /// Bind the carrier file name to the source identity this request
+    /// executes against, when the caller stated none.
+    ///
+    /// `filename` is SOURCE identity, not demand: it names the carrier the
+    /// compile runs over, and it reaches the component name, the scoped
+    /// style hash, and every emitted source map's `sources` entry. A
+    /// caller that hands an execution entry a canonical id has already
+    /// stated that identity, so an unset slot is filled from it rather
+    /// than compiled as an anonymous carrier — which would silently yield
+    /// a different component name, a different scope hash, and maps with
+    /// no source. A caller-stated name always wins; this never overwrites
+    /// one.
+    pub fn bind_default_filename(&mut self, canonical_id: &str) {
+        if self.filename.is_none() {
+            self.filename = Some(canonical_id.to_string());
+        }
     }
 
     pub fn component_id(&self) -> Option<&str> {
@@ -696,6 +769,117 @@ mod tests {
                 requested: RuntimeStyleProcessing::AuthoredOnly,
             }
         );
+    }
+
+    // ── Vue-only axes on a Svelte request ─────────────────────────────
+    // The Svelte backend reads none of these, so admitting them would
+    // DROP the axis silently. Each arm is its own case: one shared
+    // "any Vue axis refuses" test would pass while three of the four
+    // went unchecked.
+
+    fn svelte_ide(ide: IdeProductRequest) -> Result<CompileRequest, CompileRequestError> {
+        CompileRequest::new(
+            vec![CompileProduct::IdeCompanion(ide)],
+            FrameworkCompileRequest::Svelte(SvelteCompileRequest::default()),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+    }
+
+    /// `component_id` rides the request's SHARED identity block, so it stays
+    /// admitted on a Svelte request even though the Svelte backend does not
+    /// read it: existing wire payloads set it, and refusing it changes an
+    /// accepted wire shape — a wire decision, not part of closing the
+    /// IDE-axis gap. Pinned so the exemption reads as a stated boundary
+    /// rather than an oversight.
+    #[test]
+    fn a_svelte_request_still_admits_a_component_id() {
+        CompileRequest::new(
+            vec![CompileProduct::RuntimeClient(
+                RuntimeProductRequest::default(),
+            )],
+            FrameworkCompileRequest::Svelte(SvelteCompileRequest::default()),
+            None,
+            None,
+            Some("c-2".to_string()),
+            false,
+            false,
+        )
+        .expect("the shared identity axis stays admitted on a Svelte request");
+    }
+
+    #[test]
+    fn svelte_ide_companion_refuses_a_types_module_name() {
+        let err = svelte_ide(IdeProductRequest {
+            types_module_name: Some("./types".to_string()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CompileRequestError::VueOnlyAxisOnSvelteRequest(VueOnlyAxis::TypesModuleName)
+        );
+    }
+
+    #[test]
+    fn svelte_ide_companion_refuses_conditional_root_narrowing() {
+        let err = svelte_ide(IdeProductRequest {
+            conditional_root_narrowing: true,
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CompileRequestError::VueOnlyAxisOnSvelteRequest(VueOnlyAxis::ConditionalRootNarrowing)
+        );
+    }
+
+    #[test]
+    fn svelte_ide_companion_refuses_strict_slots() {
+        let err = svelte_ide(IdeProductRequest {
+            strict_slots: true,
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CompileRequestError::VueOnlyAxisOnSvelteRequest(VueOnlyAxis::StrictSlots)
+        );
+    }
+
+    /// The bool axes default to `false`, which IS the Svelte behaviour —
+    /// refusing on a `false` would reject every ordinary Svelte request.
+    /// This is the test that keeps the refusal presence-based rather than
+    /// field-based.
+    #[test]
+    fn a_default_svelte_ide_companion_still_constructs() {
+        svelte_ide(IdeProductRequest::default())
+            .expect("the Vue-only axes are absent by default, so nothing is dropped");
+    }
+
+    /// The same axes on a VUE request are honoured, not refused — the
+    /// refusal is about the Svelte backend not reading them, not about
+    /// the axes being invalid.
+    #[test]
+    fn the_same_axes_construct_on_a_vue_request() {
+        CompileRequest::new(
+            vec![CompileProduct::IdeCompanion(IdeProductRequest {
+                types_module_name: Some("./types".to_string()),
+                conditional_root_narrowing: true,
+                strict_slots: true,
+                ..Default::default()
+            })],
+            vue_req(VueBackendRequest::Vdom),
+            None,
+            None,
+            Some("data-v-abc123".to_string()),
+            false,
+            false,
+        )
+        .expect("every Vue-only axis is honoured on a Vue request");
     }
 
     #[test]

@@ -40,6 +40,6 @@ Resolved by maintainer direction (2026-08-29): no pull requests. D1+D2 land dire
 ## Consequences
 
 - D1 can dispatch as a private hermetic checkpoint with source-verified type boundaries; its abort condition no longer fires on retracted concept mappings.
-- D2's cutover gate is now enforceable as a two-step external requirement (rows/mapping, then ratification), and its deletion discipline names the legacy admission path.
+- D2's capability-matrix gate is waived and non-blocking; its deletion discipline still names the legacy admission path.
 - RESIDUAL-NON-CALL-ANY-FABRICATION ownership is consistent across D1–D8 and matches the debt record; no charter assigns it to D6 or D8.
-- `dispatchable`, budgets, review profiles, and the DAG topology are unchanged; the correction is authority text plus the renamed D2 external-requirement field.
+- At the time of this correction, `dispatchable`, budgets, review profiles, and the DAG topology are unchanged; the correction is authority text plus the explicit waiver.

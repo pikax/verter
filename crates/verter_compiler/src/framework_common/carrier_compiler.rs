@@ -1,8 +1,9 @@
 //! Carrier-compiler trait and framework-neutral I/O.
 //!
-//! One trait per carrier: parse, position-preserving eval-source
-//! blanking, IDE codegen, template-fact extraction. Vue is the
-//! reference (`vue_bridge::VueCarrierCompiler`). Script facts go
+//! One trait per carrier: parse, IDE codegen, runtime bundle.
+//! Vue is the reference (`vue_bridge::VueCarrierCompiler`). Eval-source
+//! and template facts belong to
+//! [`super::capability::FrameworkSemanticAuthority`]. Script facts go
 //! through the host `ScriptFactProvider` seam — not this trait.
 //!
 //! Each adapter's IDE codegen owns its own
@@ -18,7 +19,6 @@ use verter_language::{
 
 use super::FrameworkParseArtifact;
 
-use crate::compile::template_data::RawTemplateData;
 use crate::compile::types::{CompileDiagnosticSeverity, DestructuredBlockMeta};
 
 /// IDE-codegen options threaded into [`CarrierCompiler::compile_ide`].
@@ -340,20 +340,41 @@ pub enum CompileUnsupported {
     /// enforced at `CompileRequest::new` (before any carrier compile is
     /// attempted at all); this is the residual post-parse half.
     RequestExecutionRefused(crate::compile_request::CompileRequestError),
+    /// A product leg was demanded without (or with the wrong) consume-once
+    /// execution grant for it. Product-backend legs execute only under a
+    /// grant carved off the demand's admission (or minted crate-privately
+    /// by the registry bundle route); a demanded-but-ungranted leg fails
+    /// closed instead of executing without admission evidence.
+    ProductExecutionUngranted {
+        /// The demanded product whose execution grant was absent or wrong.
+        product: crate::compile_request::ProductKind,
+    },
 }
 
-/// Framework-neutral template facts extracted from a carrier parse.
-///
-/// A thin neutral wrapper over the compiler-native [`RawTemplateData`]
-/// (component usages, bindings, elements, directives) so the host's
-/// template-analysis conversion reaches one shape regardless of
-/// framework. Vue populates it from the existing `TEMPLATE_DATA` codegen;
-/// an empty `data` is the honest answer for a carrier with no template.
-#[derive(Debug, Default)]
-pub struct TemplateFacts {
-    /// The extracted raw template data (default-empty when the carrier has
-    /// no template region).
-    pub data: RawTemplateData,
+/// The registry-dispatched routes' grant mint: the
+/// [`CarrierCompiler::compile_bundle`] / [`CarrierCompiler::compile_ide`]
+/// entries mint their leg grants directly from the neutral option demand
+/// at the route boundary, because those routes carry no host-issued
+/// admission. Crate-private: an external caller reaches a product backend
+/// only through an admission carve, so grant minting authority never
+/// leaves the crate.
+pub(crate) fn registry_route_execution_grants(
+    opts: &RuntimeCompileOptions,
+) -> super::capability::ProductExecutionGrants {
+    use super::capability::{ProductExecutionGrant, ProductExecutionGrants};
+    use crate::compile_request::ProductKind;
+    ProductExecutionGrants {
+        runtime: opts.want_runtime.then(|| {
+            ProductExecutionGrant::mint(if opts.ssr {
+                ProductKind::RuntimeServer
+            } else {
+                ProductKind::RuntimeClient
+            })
+        }),
+        projection: opts
+            .want_ide
+            .then(|| ProductExecutionGrant::mint(ProductKind::IdeCompanion)),
+    }
 }
 
 /// Runtime-codegen options threaded into [`CarrierCompiler::compile_bundle`].
@@ -375,6 +396,13 @@ pub struct RuntimeCompileOptions {
     pub custom_element: bool,
     /// Generate source maps for the produced runtime output.
     pub source_map: bool,
+    /// Per-leg override for the IDE companion's own source-map demand.
+    /// `None` couples the IDE leg to [`source_map`](Self::source_map) (the
+    /// compatibility route's historical behavior); `Some(x)` is read ONLY
+    /// by the IDE projection leg, so a request-derived caller can honor
+    /// `RuntimeProductRequest.runtime_source_map` and
+    /// `IdeProductRequest.want_source_map` independently.
+    pub ide_source_map: Option<bool>,
     /// Server-side rendering mode (the carrier emits its SSR backend).
     pub ssr: bool,
     /// Style-pipeline ownership for this runtime product. Vue's authored-only mode
@@ -432,8 +460,8 @@ pub struct RuntimeCompileOptions {
     /// When true, ALSO request the IDE (`tsx`) artifact in the same pass so
     /// the host populates its `CachedTsx` slot from one compile.
     pub want_ide: bool,
-    /// When true, ALSO extract framework-neutral template facts in the same
-    /// pass (for template analysis).
+    /// When true, ALSO fill framework-neutral template facts in the same
+    /// pass from the catalog semantic authority (for template analysis).
     pub want_template_data: bool,
     /// Types module name for IDE/TSX helper imports (default `"$verter/types"`).
     pub types_module_name: Option<String>,
@@ -481,6 +509,7 @@ impl Default for RuntimeCompileOptions {
             is_production: false,
             custom_element: false,
             source_map: false,
+            ide_source_map: None,
             ssr: false,
             style_processing: crate::compile_request::RuntimeStyleProcessing::Complete,
             runtime_module_name: None,
@@ -744,8 +773,18 @@ pub struct RuntimeCompileOutput {
     /// the carrier projects one.
     pub tsx: Option<IdeOutput>,
     /// Framework-neutral template facts, present when `want_template_data`
-    /// was requested AND the carrier extracts them.
-    pub template_data: Option<RawTemplateData>,
+    /// was requested AND the catalog semantic authority produced them.
+    /// Catalog miss / parse-key mismatch / producer failure stay `None`
+    /// (typed refusal). A valid template-free carrier is `Some` empty facts.
+    ///
+    /// The product keeps the extraction's own diagnostics attached to the
+    /// data: the bundle producer additionally publishes them on
+    /// [`Self::diagnostics`] (its route's channel, deduplicated), while the
+    /// attached copy travels with the facts so every downstream conversion
+    /// of the data carries the same diagnostic set — a consumer that takes
+    /// the data and drops the diagnostics erases the file's template
+    /// expression errors on its route.
+    pub template_data: Option<super::registered_carrier_projection::TemplateFactsProduct>,
     /// Diagnostics emitted during the runtime compile. The host lifts these
     /// into its `DiagnosticsSnapshot`; an error here fails the compile.
     pub diagnostics: Vec<RuntimeDiagnostic>,
@@ -913,16 +952,6 @@ pub trait CarrierCompiler: Send + Sync {
         opts: &ParseOptions,
     ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject>;
 
-    /// Build the POSITION-PRESERVING eval source for `source`.
-    ///
-    /// The result is byte-for-byte the SAME LENGTH as `source`: every
-    /// script region's bytes sit at their RAW carrier offsets and every
-    /// other byte is whitespace-blanked (line terminators preserved so
-    /// line/column geometry is unchanged). Because the script text sits at
-    /// its raw offsets, every span the downstream TS parser produces is
-    /// carrier-absolute by construction.
-    fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str>;
-
     /// Generate the IDE (TSX/JSX) artifact for the carrier, or a typed
     /// [`CompileUnsupported`].
     ///
@@ -935,9 +964,6 @@ pub trait CarrierCompiler: Send + Sync {
         artifact: &FrameworkParseArtifact,
         opts: &IdeCompileOptions,
     ) -> Result<IdeOutput, CompileUnsupported>;
-
-    /// Extract framework-neutral template facts from the carrier parse.
-    fn template_data(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts;
 
     /// Produce the framework-neutral RUNTIME bundle for the carrier.
     ///
@@ -956,10 +982,12 @@ pub trait CarrierCompiler: Send + Sync {
     ///
     /// The carrier produces exactly the products the request asked for: the
     /// runtime module and its side-files under `want_runtime`, the IDE artifact
-    /// under `want_ide`, template facts under `want_template_data`. It attempts
-    /// the runtime compile only under `want_runtime`, so a request that did not
-    /// ask for a runtime product can never be refused one — and a request that
-    /// IS refused publishes nothing at all.
+    /// under `want_ide`. Template facts under `want_template_data` are filled
+    /// from the catalog semantic authority — `compile_bundle` does not
+    /// independently extract them. It attempts the runtime compile only under
+    /// `want_runtime`, so a request that did not ask for a runtime product can
+    /// never be refused one — and a request that IS refused publishes nothing
+    /// at all.
     ///
     /// The adapter's codegen owns its own `CodeTransform` (the single
     /// source of truth for generated-code edits); the returned `code` /
@@ -1133,21 +1161,6 @@ mod contract_tests {
             )))
         }
 
-        fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
-            let src = source.as_bytes();
-            let mut out: Vec<u8> = src
-                .iter()
-                .map(|&b| if b == b'\n' || b == b'\r' { b } else { b' ' })
-                .collect();
-            for region in artifact.script_regions() {
-                let (s, e) = (region.span.start as usize, region.span.end as usize);
-                if s <= e && e <= src.len() {
-                    out[s..e].copy_from_slice(&src[s..e]);
-                }
-            }
-            Arc::from(String::from_utf8(out).unwrap().as_str())
-        }
-
         fn compile_ide(
             &self,
             _source: &str,
@@ -1160,14 +1173,6 @@ mod contract_tests {
             Err(CompileUnsupported::NoIdeProjection {
                 adapter_id: self.adapter_id(),
             })
-        }
-
-        fn template_data(
-            &self,
-            _source: &str,
-            _artifact: &FrameworkParseArtifact,
-        ) -> TemplateFacts {
-            TemplateFacts::default()
         }
 
         fn compile_bundle(
@@ -1189,61 +1194,6 @@ mod contract_tests {
     fn adapter_id_is_the_registration_key() {
         let compiler = FixtureCompiler;
         assert_eq!(compiler.adapter_id(), FrameworkAdapterId::new("fixture"));
-    }
-
-    #[test]
-    fn eval_source_is_position_preserving_same_length_with_script_bytes_at_raw_offsets() {
-        let compiler = FixtureCompiler;
-        // `markup @@const x = 1@@ trailing` — the script run is between @@.
-        let source = "markup @@const x = 1@@ trailing\nsecond line";
-        let artifact = compiler.registered(source);
-        let eval = compiler.eval_source(source, &artifact);
-
-        // Length invariant: byte-for-byte same length.
-        assert_eq!(
-            eval.len(),
-            source.len(),
-            "eval source must be position-preserving (same byte length)"
-        );
-
-        // The script region's bytes sit at their RAW offsets, unchanged.
-        let region = artifact.script_regions()[0].span;
-        let (s, e) = (region.start as usize, region.end as usize);
-        assert_eq!(
-            &eval[s..e],
-            "const x = 1",
-            "script bytes must be copied verbatim at their raw carrier offsets"
-        );
-        assert_eq!(&source[s..e], &eval[s..e]);
-
-        // Every non-script, non-line-terminator byte is blanked to a space.
-        for (i, (&sb, eb)) in source.as_bytes().iter().zip(eval.bytes()).enumerate() {
-            if i >= s && i < e {
-                continue; // script region — verified above
-            }
-            if sb == b'\n' || sb == b'\r' {
-                assert_eq!(eb, sb, "line terminators are preserved at offset {i}");
-            } else {
-                assert_eq!(eb, b' ', "non-script byte at offset {i} must be blanked");
-            }
-        }
-    }
-
-    #[test]
-    fn eval_source_with_no_script_region_is_all_blank_same_length() {
-        let compiler = FixtureCompiler;
-        let source = "no script here\njust markup";
-        let artifact = compiler.registered(source);
-        assert!(artifact.script_regions().is_empty());
-        let eval = compiler.eval_source(source, &artifact);
-        assert_eq!(eval.len(), source.len());
-        for (&sb, eb) in source.as_bytes().iter().zip(eval.bytes()) {
-            if sb == b'\n' || sb == b'\r' {
-                assert_eq!(eb, sb);
-            } else {
-                assert_eq!(eb, b' ');
-            }
-        }
     }
 
     #[test]

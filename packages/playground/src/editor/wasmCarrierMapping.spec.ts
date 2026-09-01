@@ -80,16 +80,14 @@ describe("wasm_strict_no_snap_mapping (#3)", () => {
     ).toBeNull();
   });
 
-  it("a carrier WITHOUT a source map (the Svelte declaration surface) contributes no mapper — spans drop, never identity-map", () => {
+  it("a carrier WITHOUT a source map contributes no mapper — spans drop, never identity-map", () => {
     const declPath = `${VROOT}/Comp.d.svelte.ts`;
+    // Real captured carrier code, deliberately registered map-less: whether any
+    // particular surface currently ships a map is the host's business, so the
+    // precondition is stated here rather than borrowed from a fixture surface.
     const set = buildCarrierMapperSet([
-      {
-        providerPath: declPath,
-        code: fixtures.compSvelte.decl!.code,
-        sourceMap: fixtures.compSvelte.decl!.sourceMap, // null in the fixture
-      },
+      { providerPath: declPath, code: fixtures.compSvelte.decl!.code, sourceMap: null },
     ]);
-    expect(fixtures.compSvelte.decl!.sourceMap).toBeNull();
     expect(set.forCarrier(declPath)).toBeUndefined();
     expect(
       set.mapWorkspaceEditToSource([{ carrierPath: declPath, spans: [{ start: 0, end: 4 }] }]),

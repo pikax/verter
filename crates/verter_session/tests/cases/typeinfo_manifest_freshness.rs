@@ -21,7 +21,7 @@
 //! files must be regenerated and committed in the same change.
 //!
 //! This guard mirrors the proto-bindings freshness pattern
-//! (`crates/verter_protocol/tests/cases/typeinfo_proto_ts_freshness.rs`): it
+//! (`scripts/check-proto-generated.mjs`): it
 //! invokes the generator in `--check` mode, which regenerates each
 //! tracked output in memory and byte-compares against the committed file
 //! WITHOUT writing the tree, exiting non-zero (status 6) on any drift and

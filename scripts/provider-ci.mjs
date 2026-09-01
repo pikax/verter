@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 
 import {
   PROVIDER_CI_LANES,
+  PROVIDER_LIVE_SELECTORS,
   buildProviderLaneFilterExpr,
   verifyProviderCiPartition,
 } from "./provider-ci-internals.mjs";
@@ -14,6 +15,7 @@ function usage() {
   return (
     "Usage:\n" +
     "  node scripts/provider-ci.mjs filter <core|tsserver|tsgo>\n" +
+    "  node scripts/provider-ci.mjs run <tsserver|tsgo>\n" +
     "  node scripts/provider-ci.mjs verify --archive-file <path>\n"
   );
 }
@@ -61,11 +63,87 @@ function verifyArchive(args) {
   return 0;
 }
 
+function selectorCargoInvocation(selector) {
+  const args = ["test", "--locked", "--no-fail-fast", "-p", selector.package];
+  const libtestArgs = ["--test-threads=1"];
+  switch (selector.kind) {
+    case "package":
+      break;
+    case "prefix":
+      args.push(selector.value);
+      break;
+    case "regex":
+      args.push("real_provider_tests::");
+      libtestArgs.push("--skip", selector.lane === "tsserver" ? "_tsgo" : "_tsserver");
+      break;
+    case "exact":
+      throw new Error("exact selectors expand to one cargo invocation per test");
+    default:
+      throw new Error(`unknown provider CI selector kind: ${selector.kind}`);
+  }
+  return { args: [...args, "--", ...libtestArgs], label: selector.label };
+}
+
+export function providerCargoInvocations(lane) {
+  if (!PROVIDER_CI_LANES.includes(lane) || lane === "core") {
+    throw new Error(`provider runner requires a live lane, got '${lane}'`);
+  }
+  return PROVIDER_LIVE_SELECTORS.filter((selector) => selector.lane === lane).flatMap(
+    (selector) => {
+      if (selector.kind !== "exact") return [selectorCargoInvocation(selector)];
+      return selector.values.map((testName) => ({
+        args: [
+          "test",
+          "--locked",
+          "--no-fail-fast",
+          "-p",
+          selector.package,
+          testName,
+          "--",
+          "--exact",
+          "--test-threads=1",
+        ],
+        label: `${selector.label}: ${testName}`,
+      }));
+    },
+  );
+}
+
+function runProviderLane(lane) {
+  let failed = false;
+  for (const invocation of providerCargoInvocations(lane)) {
+    process.stderr.write(`\nPROVIDER CI (${lane}): ${invocation.label}\n`);
+    const result = spawnSync("cargo", invocation.args, {
+      stdio: "inherit",
+      windowsHide: true,
+    });
+    if (result.error) {
+      process.stderr.write(`PROVIDER CI: could not start cargo: ${result.error.message}\n`);
+      failed = true;
+      continue;
+    }
+    if (result.signal) {
+      process.stderr.write(`PROVIDER CI: cargo was killed by ${result.signal}\n`);
+      failed = true;
+      continue;
+    }
+    if (result.status !== 0) failed = true;
+  }
+  return failed ? 1 : 0;
+}
+
 export function main(args = process.argv.slice(2)) {
   if (args[0] === "filter" && args.length === 2) {
     if (!PROVIDER_CI_LANES.includes(args[1])) return fail(`unknown lane '${args[1]}'\n${usage()}`);
     process.stdout.write(buildProviderLaneFilterExpr(args[1]));
     return 0;
+  }
+  if (args[0] === "run" && args.length === 2) {
+    try {
+      return runProviderLane(args[1]);
+    } catch (error) {
+      return fail(`${error.message}\n${usage()}`);
+    }
   }
   if (args[0] === "verify") return verifyArchive(args.slice(1));
   return fail(usage());

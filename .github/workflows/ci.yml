@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      proto: ${{ steps.filter.outputs.proto }}
       js: ${{ steps.filter.outputs.js }}
       wasm: ${{ steps.filter.outputs.wasm }}
       playground: ${{ steps.filter.outputs.playground }}
@@ -26,7 +27,6 @@ jobs:
       dx: ${{ steps.filter.outputs.dx }}
       editor_lsp: ${{ steps.filter.outputs.editor_lsp }}
       svelte_oracle: ${{ steps.filter.outputs.svelte_oracle }}
-      svelte_conformance: ${{ steps.filter.outputs.svelte_conformance }}
       svelte_client_smokes: ${{ steps.filter.outputs.svelte_client_smokes }}
       svelte_perf: ${{ steps.filter.outputs.svelte_perf }}
       editors: ${{ steps.filter.outputs.editors }}
@@ -67,6 +67,14 @@ jobs:
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - '.github/workflows/ci.yml'
+            proto:
+              - 'crates/verter_protocol/proto/**'
+              - 'packages/proto/src/gen/**'
+              - 'buf.gen.yaml'
+              - 'scripts/check-proto-generated.mjs'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - '.github/workflows/ci.yml'
             js:
               - 'packages/**'
               - '!packages/playground/**'
@@ -85,17 +93,29 @@ jobs:
               # release graph; release-only changes must execute that guard.
               - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
+            # Gates `wasm-build` ALONE, which both builds the browser artifact
+            # and verifies the committed carrier fixture against it. So this
+            # filter decides whether that fixture check runs at all, and it must
+            # cover everything the artifact is built from — a crate that is in
+            # the build closure but not here changes carrier output while the
+            # check that would catch it is skipped.
+            #
+            # `crates/**` rather than an enumerated closure: the closure derived
+            # from `cargo metadata` (verter_wasm's transitive normal + build
+            # dependencies that are workspace members) is 27 crates, and an
+            # enumerated list silently goes stale the next time one of them
+            # takes a new dependency — the exact failure this check exists to
+            # end. A directory wildcard cannot drift. The cost is that
+            # `wasm-build` also runs for the 19 workspace crates outside the
+            # closure; over-running a cached build is cheap, under-running the
+            # freshness check is not. Manifests and the lockfile are included
+            # because a dependency bump (an OXC version, say) moves compiler
+            # output without touching a single crate path.
             wasm:
-              - 'crates/verter_compiler/**'
-              - 'crates/verter_parser/**'
-              - 'crates/verter_session/**'
-              - 'crates/verter_workspace/**'
-              - 'crates/verter_semantic/**'
-              - 'crates/verter_ffi/**'
-              - 'crates/verter_wasm/**'
-              - 'crates/verter_diagnostics/**'
-              - 'crates/verter_actions/**'
-              - 'crates/verter_span/**'
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
               - 'packages/wasm/**'
               - '.cargo/**'
               - '.github/workflows/ci.yml'
@@ -210,12 +230,6 @@ jobs:
               - 'crates/verter_compiler/Cargo.toml'
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
-            svelte_conformance:
-              - 'crates/verter_svelte_conformance/**'
-              - 'scripts/gen-svelte-goldens.mjs'
-              - 'scripts/svelte-golden-lib.mjs'
-              - 'pnpm-lock.yaml'
-              - '.github/workflows/ci.yml'
             svelte_client_smokes:
               - 'crates/verter_compiler/src/svelte/**'
               - 'packages/svelte-runtime-tests/**'
@@ -300,6 +314,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  proto-fmt:
+    name: Proto Generated Format/Freshness
+    needs: detect-changes
+    if: needs.detect-changes.outputs.proto == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm proto:check
+
   rust-clippy:
     name: Rust Clippy
     needs: detect-changes
@@ -358,9 +388,9 @@ jobs:
       - name: Clippy (wasm32-unknown-unknown)
         run: cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings
 
-  # Build the default-feature Rust test universe once. The three jobs below
-  # consume this exact archive, so splitting the real provider engines adds
-  # execution capacity without paying for three workspace compiles.
+  # Build the provider-free default-feature Rust test universe once. Real
+  # providers have separate serial libtest jobs below because each third-party
+  # engine needs explicit initialization and lifecycle management.
   rust-test-build:
     name: Rust Test Build
     needs: detect-changes
@@ -375,6 +405,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          # REQUIRED by the gate's wasm JavaScript-boundary lane. Those tests are
+          # `#[cfg(target_arch = "wasm32")]`, so no host-target run can execute
+          # them; without this target the gate's prerequisite preflight fails
+          # loudly rather than skipping them.
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           # Job-scoped by default. The previous shared
@@ -442,16 +478,10 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: pnpm
-      # Core owns generated-binding and compiler-tool freshness tests. Install
-      # their pinned buf/oxfmt/TypeScript tools so they cannot skip vacuously.
+      # Core still owns generated-binding and compiler-tool tests that use the
+      # workspace's pinned JavaScript toolchain. Proto freshness has its own
+      # lint-style job and real providers have their own lifecycle jobs below.
       - run: pnpm install --frozen-lockfile
-      # A nextest archive contains the already-linked test executables, not the
-      # Cargo registry sources required by tests that deliberately spawn Cargo
-      # at runtime (for example trybuild privacy checks). Prime the locked
-      # registry on each fresh Core consumer before nextest makes those nested
-      # Cargo invocations offline.
-      - name: Fetch dependencies for runtime compile tests
-        run: cargo fetch --locked
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - name: Download the shared Rust test archive
@@ -489,13 +519,22 @@ jobs:
 
   rust-tsserver-live:
     name: Rust Test (tsserver)
-    needs: [detect-changes, rust-test-build]
+    needs: detect-changes
     if: needs.detect-changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 95
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-provider-tsserver-v1"
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-provider-tsserver
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
@@ -506,55 +545,32 @@ jobs:
       # location. pnpm install creates the symlink but not these build outputs.
       - name: Build the tsserver plugin prerequisites
         run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      - name: Download the shared Rust test archive
-        uses: actions/download-artifact@v7
-        with:
-          name: rust-nextest-archive
-          path: artifacts
-      - name: Run tsserver Rust tests from the shared archive
+      - name: Run serial tsserver provider tests
         env:
           VERTER_REQUIRE_TSSERVER: "1"
-          NEXTEST_PROFILE: ci
-        run: |
-          mkdir -p target/rust-nextest-archive
-          export VERTER_NEXTEST_FILTER="$(node scripts/provider-ci.mjs filter tsserver)"
-          cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast -E "$VERTER_NEXTEST_FILTER"
+        run: node scripts/provider-ci.mjs run tsserver
       # These source-level plugin specs do not import @verter/native. The two
       # src/tsc specs that do are retained in native-test below.
       - name: Native-free TypeScript plugin tests
         run: pnpm vitest run packages/typescript-plugin/src --exclude 'packages/typescript-plugin/src/tsc/**'
-      - name: Locate nextest JUnit report
-        if: always()
-        id: junit
-        run: |
-          found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
-          if [ -z "$found" ]; then
-            echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
-            find target -type d -name nextest -print 2>/dev/null || true
-            exit 1
-          fi
-          echo "path=$found" >> "$GITHUB_OUTPUT"
-          echo "JUnit report: $found"
-      - name: Test report
-        if: always() && steps.junit.outputs.path != ''
-        uses: dorny/test-reporter@v3
-        with:
-          name: Rust tsserver Test Results
-          path: ${{ steps.junit.outputs.path }}
-          reporter: java-junit
-          fail-on-error: false
-
   rust-tsgo-live:
     name: Rust Test (tsgo)
-    needs: [detect-changes, rust-test-build]
+    needs: detect-changes
     if: needs.detect-changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 95
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-provider-tsgo-v1"
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-provider-tsgo
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
@@ -562,46 +578,14 @@ jobs:
           cache: pnpm
       # The lockfile install provides the pinned project-local tsgo engine.
       - run: pnpm install --frozen-lockfile
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      - name: Download the shared Rust test archive
-        uses: actions/download-artifact@v7
-        with:
-          name: rust-nextest-archive
-          path: artifacts
-      - name: Run tsgo Rust tests from the shared archive
+      - name: Run serial tsgo provider tests
         env:
           VERTER_REQUIRE_TSGO: "1"
-          NEXTEST_PROFILE: ci
-        run: |
-          mkdir -p target/rust-nextest-archive
-          export VERTER_NEXTEST_FILTER="$(node scripts/provider-ci.mjs filter tsgo)"
-          cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast -E "$VERTER_NEXTEST_FILTER"
-      - name: Locate nextest JUnit report
-        if: always()
-        id: junit
-        run: |
-          found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
-          if [ -z "$found" ]; then
-            echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
-            find target -type d -name nextest -print 2>/dev/null || true
-            exit 1
-          fi
-          echo "path=$found" >> "$GITHUB_OUTPUT"
-          echo "JUnit report: $found"
-      - name: Test report
-        if: always() && steps.junit.outputs.path != ''
-        uses: dorny/test-reporter@v3
-        with:
-          name: Rust tsgo Test Results
-          path: ${{ steps.junit.outputs.path }}
-          reporter: java-junit
-          fail-on-error: false
+        run: node scripts/provider-ci.mjs run tsgo
 
-  # Required and parallel with the shared archive build. The canonical archive
-  # excludes the registered trybuild drivers at execution time so their nested
-  # Cargo work does not inflate the core lane; this job owns the consolidated
-  # compiler driver and its deterministic generated-artifact freshness guard.
+  # Required and parallel with the shared archive build. Compile-fail fixtures
+  # are standalone Cargo work, not test cases, so this job owns their cached
+  # execution outside the nextest inventory.
   compiler-contracts:
     name: Compiler Contracts
     needs: detect-changes
@@ -614,6 +598,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          # A trybuild `.stderr` is EXACT rustc output, and rustc renders the
+          # snippet behind a `help:` that points into the standard library only
+          # when the library source is present. Without `rust-src` those lines
+          # vanish and a fixture whose expectation was blessed on an ordinary
+          # developer machine (where rustup installs it) mismatches for a reason
+          # that has nothing to do with the seal it protects.
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
         with:
           key: compiler-contracts
@@ -627,15 +619,15 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
       - name: Verify compiler contracts lane and cache ownership
         run: node --test scripts/compiler-ci-lane-selftest.mjs
-      - name: Run grouped compiler trybuild and generated-artifact contracts
+      - name: Run workspace compile contracts
+        run: node scripts/compile-contracts.mjs
+      - name: Verify generated Svelte artifacts
         run: >-
-          cargo nextest run --package verter_compiler --test main
-          -E 'test(/^cases::compiler_compile_fail::default_compiler_compile_fail_contracts_are_enforced$/)
-          or test(/^cases::svelte_generated_artifacts_freshness::generated_svelte_artifacts_match_their_authoritative_inputs$/)'
+          cargo test --package verter_compiler --test main
+          cases::svelte_generated_artifacts_freshness::generated_svelte_artifacts_match_their_authoritative_inputs
+          -- --exact
       # The workspace archive unifies verter_svelte_conformance's
       # `conformance-trace` dev feature into verter_compiler. This isolated
       # package build is a different feature configuration, so it cannot be
@@ -804,7 +796,7 @@ jobs:
   svelte-conformance:
     name: Svelte CSS Conformance (manifest + goldens drift)
     needs: detect-changes
-    if: needs.detect-changes.outputs.svelte_conformance == 'true'
+    if: needs.detect-changes.outputs.rust == 'true' || needs.detect-changes.outputs.svelte_oracle == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -821,6 +813,11 @@ jobs:
       # Installs the pinned `svelte` devDependency the conformance golden
       # check compiles against.
       - run: pnpm install --frozen-lockfile
+      - name: Run consolidated Rust conformance tests
+        run: >-
+          cargo test --no-fail-fast -p verter_svelte_conformance
+          --features conformance-tests --lib --bin verter_svelte_conformance
+          --test main -- --test-threads=4
       # The committed fixture corpus + review artifacts against the typed
       # Rust manifest (also builds the CLI the golden check spawns for its
       # emit-plan).
@@ -1031,6 +1028,36 @@ jobs:
         run: pnpm --filter @verter/wasm build
       - name: Smoke test WASM
         run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
+      # The committed carrier fixture the playground's in-context
+      # LanguageService guards load is a snapshot of real host output. Those
+      # guards read the snapshot, never the host, so nothing else in the suite
+      # notices when compiler output moves and the snapshot does not. This runs
+      # here because this is the job that HAS the artifact: it compares against
+      # the bytes just built, and its path filter is the artifact's own build
+      # closure, so every change that can move carrier output reaches it.
+      # Unconditional and non-advisory — a difference fails the job.
+      #
+      # Invoked as the script, not `pnpm --filter ... run check:wasm-fixtures`:
+      # pnpm exits 0 when a filter matches no package AND when a matched
+      # package has no such script (`--fail-if-no-match` fixes only the first),
+      # so renaming either the package or the script would turn this step into
+      # a green no-op. The script resolves every path from its own location and
+      # needs no workspace resolution.
+      - name: Verify committed carrier fixtures against the built WASM
+        run: node packages/playground/scripts/capture-wasm-carrier-fixtures.mjs --check
+      # The workspace's `#[wasm_bindgen_test]` cases prove the closed-shape
+      # refusals where a browser caller meets them — against a real JS object
+      # graph, on the wasm target. They are `#[cfg(target_arch = "wasm32")]`,
+      # so the shared nextest archive the Rust lanes run CANNOT contain a
+      # single one; only a wasm-target run executes them.
+      #
+      # This is that run, and it lives here because this is the job already
+      # provisioned for it: the `wasm32-unknown-unknown` target and the pinned
+      # `wasm-bindgen-cli` above are exactly what the lane needs. The local
+      # gate runs the same lane through the same `gate-internals.mjs`
+      # helpers, so the two cannot disagree on what passing means.
+      - name: WASM JavaScript-boundary lane
+        run: node scripts/wasm-js-boundary-lane.mjs --exhaustive
       # Shared with playground-test so wasm32 is compiled ONCE per run.
       - name: Upload WASM build
         uses: actions/upload-artifact@v6
@@ -1804,6 +1831,7 @@ jobs:
       - detect-changes
       - tama-roadmap
       - rust-fmt
+      - proto-fmt
       - rust-clippy
       - rust-build-configs
       - rust-test-build

@@ -270,6 +270,23 @@ test("packets carry advisory sizing and train-level review obligations", () => {
   assert.match(packet, /current amendments/u);
 });
 
+// @ai-generated - Guards the readiness boundary between state derivation and packet output.
+test("blocked nodes cannot emit work packets", () => {
+  const authority = loadAuthority();
+  const state = deriveState(authority);
+  const row = state.states.get("D1");
+  state.states.set("D1", {
+    ...row,
+    status: "BLOCKED",
+    missing_ancestors: ["A0"],
+  });
+
+  assert.throws(
+    () => packetFor(authority, state, "D1"),
+    /cannot create work packet for BLOCKED node D1; missing ancestors: A0/u,
+  );
+});
+
 test("strict validation cheaply covers schemas, charters, catalogs, and GitHub nodes", () => {
   const authority = loadAuthority();
   assert.deepEqual(validateAuthority(authority, { strict: true }), []);

@@ -1,7 +1,7 @@
 use super::*;
 use crate::changes::WorkspaceChange;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use crate::types::ExactResolution;
+use crate::types::{ExactResolution, ParsedEdge};
 use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 /// The temp directory's REAL path, for filesystem operations.
@@ -74,6 +74,50 @@ fn read_file_from_disk() {
     );
     // Negative: should not be None
     assert!(content.is_some());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn filesystem_record_parsed_edges_many_preserves_every_owner() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let root = canonical_temp_root(&dir);
+    let dep = root.join("dep.ts");
+    let owner_a = root.join("a.ts");
+    let owner_b = root.join("b.ts");
+    std::fs::write(&dep, "export const value = 1;").expect("write dep");
+    std::fs::write(&owner_a, "import { value } from './dep';").expect("write owner a");
+    std::fs::write(&owner_b, "import { value } from './dep';").expect("write owner b");
+
+    let dep = temp_canonical_id(&dep);
+    let owner_a = temp_canonical_id(&owner_a);
+    let owner_b = temp_canonical_id(&owner_b);
+    let workspace = FilesystemWorkspace::new(FilesystemOptions {
+        roots: vec![temp_canonical_id(&root)],
+        eager_preload: false,
+    });
+    let relative = || {
+        vec![ParsedEdge::Relative {
+            specifier: "./dep".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+        }]
+    };
+    WorkspaceAccess::record_parsed_edges_many(
+        &workspace,
+        &[(owner_a.clone(), relative()), (owner_b.clone(), relative())],
+    );
+
+    assert_eq!(
+        WorkspaceRead::forward_deps_for(&workspace, &owner_a),
+        vec![dep.clone()]
+    );
+    assert_eq!(
+        WorkspaceRead::forward_deps_for(&workspace, &owner_b),
+        vec![dep.clone()]
+    );
+    assert_eq!(
+        WorkspaceRead::reverse_deps_for(&workspace, &dep),
+        vec![owner_a, owner_b]
+    );
 }
 
 #[test]

@@ -1,11 +1,10 @@
-//! `impl VerterHost` — resolve and virtual file retrieval methods,
-//! split across sub-modules per the Tier 2 §4 god-module split
-//! (debt-and-deferred-fixes plan).
+//! `impl VerterHost` — resolve and virtual file retrieval methods, split
+//! across sub-modules by concern.
 //!
-//! Public surface unchanged: every item that was reachable through
-//! `crate::host_resolve::*` before the split is re-exported below so
-//! existing callers (`crate::resolver_store`, `crate::host_manage`,
-//! `crate::frontier_tests`, etc.) compile without modification.
+//! `crate::host_resolve::*` is the module's whole public surface: every
+//! item a sub-module owns is re-exported here, so a caller
+//! (`crate::resolver_store`, `crate::host_manage`, …) names this module
+//! and never a sub-module path.
 //!
 //! Cross-file component-meta / analysis rule: host-backed consumers share
 //! one resolver and one traversal policy.
@@ -20,10 +19,16 @@
 //!   repeated wildcard re-export scans are expensive.
 //!
 //! Module layout:
-//! - [`compile_request_build`] — the canonical `CompileRequest`
-//!   construction/derivation pair `compile_entry` /
-//!   `compile_entry_runtime_render` route every compile through.
+//! - [`compile_request_build`] — the bound compile lanes' session side:
+//!   the framework host-backend demand constructors, the host-backed
+//!   bound execution dispatch (`execute_bound_host_products`) with its
+//!   arm-local framework execution-input preparation, refusal mapping,
+//!   and the shared result carriers both `compile_entry` and
+//!   `compile_entry_runtime_render` consume.
 //! - [`frontier_helpers`] — route-cache and wildcard-ranking helpers.
+//! - [`native_host_binding`] — the sealed request-scoped
+//!   `BoundNativeHostRequest` binding substrate over the registered
+//!   framework host-integration catalog.
 //! - [`dependency_resolution`] — import-route + dependency canonical
 //!   resolution.
 //! - [`frontier_engine`] — named-type export route resolution.
@@ -40,6 +45,7 @@ mod external_type_resolution;
 pub(crate) mod fallthrough_props;
 mod frontier_engine;
 mod frontier_helpers;
+pub mod native_host_binding;
 mod route_surface;
 mod rune_ambient;
 mod virtual_file_pipeline;
@@ -62,8 +68,9 @@ pub(crate) use rune_ambient::{
     merge_rune_ambient_into_env, merge_rune_ambient_inventory_into_env, rune_ambient_has_type,
     rune_ambient_has_value, rune_ambient_type_decl, rune_ambient_value_decl,
 };
+#[cfg(test)]
+pub(crate) use vue_script_extract::extract_vue_script_content;
 pub(crate) use vue_script_extract::{
-    build_position_preserving_script_source, extract_vue_script_content,
     indexed_script_setup_type_params, ordered_sfc_structure_analysis,
     populate_ordered_sfc_structure, sfc_script_setup_type_params, template_converter_inputs,
 };
@@ -90,6 +97,28 @@ pub use virtual_file_pipeline::CompileForceOverflowGuard;
 pub use virtual_file_pipeline::{
     compile_tier_prefetch_invocations, reset_compile_tier_prefetch_invocations,
 };
+
+// Test-only introspection for the host-backed bound compile lane: the
+// lane tests match on the typed transaction outcome directly.
+#[cfg(test)]
+pub(crate) use virtual_file_pipeline::CompileEntryOutcome;
+
+// The caller-supplied canonical-request execution route: the session
+// entry, its lane, and the virtual-node publication both lanes share.
+#[cfg(not(target_arch = "wasm32"))]
+mod compile_request_execute;
+
+// The canonical-request compile seam's own tests, housed with the route
+// they drive.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "../compile_request_seam_tests.rs"]
+mod compile_request_seam_tests;
+
+// The bound host-backed compile lane's own tests, housed with the routes
+// they drive (same `#[path]` pattern as the sibling suites below).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "../host_backed_lane_tests.rs"]
+mod host_backed_lane_tests;
 
 #[cfg(test)]
 #[path = "../host_resolve_tests.rs"]

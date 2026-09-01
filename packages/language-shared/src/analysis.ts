@@ -358,6 +358,23 @@ export interface CommentDirective {
   affectsNextLine: boolean;
 }
 
+/** Severity of a {@link TemplateExpressionDiagnostic}. */
+export type TemplateDiagnosticSeverity = "error" | "warning" | "info";
+
+/**
+ * One diagnostic emitted by the template-facts extraction pass
+ * (a template expression parse error), carried on
+ * {@link TemplateAnalysisSnapshot.expressionDiagnostics}.
+ */
+export interface TemplateExpressionDiagnostic {
+  severity: TemplateDiagnosticSeverity;
+  /** The compiler-defined code string (e.g. `XInvalidExpression`). */
+  code: string;
+  message: string;
+  spanStart: number;
+  spanEnd: number;
+}
+
 export interface TemplateAnalysisSnapshot {
   components: TemplateComponentUsage[];
   bindingOccurrences: TemplateBindingOccurrence[];
@@ -380,6 +397,11 @@ export interface TemplateAnalysisSnapshot {
   propDefinitions?: AnalyzedPropDefinition[];
   /** Skipped from JSON when empty. */
   emitDefinitions?: AnalyzedEmitDefinition[];
+  /**
+   * Diagnostics produced by the template-facts extraction pass itself
+   * (template expression parse errors). Skipped from JSON when empty.
+   */
+  expressionDiagnostics?: TemplateExpressionDiagnostic[];
   /** Skipped from JSON when empty. */
   commentDirectives?: CommentDirective[];
   /** Skipped from JSON when empty. */

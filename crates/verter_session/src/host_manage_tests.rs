@@ -97,6 +97,7 @@ fn template_class_facts_for(
         &host.provenance,
     )
     .expect("raw template data");
+    let raw = raw.data;
     host.build_template_class_semantic_facts(
         canonical,
         data.parse.whole_hash,
@@ -408,7 +409,7 @@ fn clear_framework_parse(host: &VerterHost) {
 // in `component_meta_audit/structured_event.rs`.
 
 #[test]
-fn build_eval_script_source_without_parse_artifact_fails_closed() {
+fn build_eval_script_source_without_parse_artifact_is_zero_work() {
     let source = r#"<script lang="ts">
 interface Props {
   label: string
@@ -419,17 +420,9 @@ defineProps<Props>()
 </script>
 <template><div /></template>"#;
 
-    let extracted = VerterHost::build_eval_script_source("/App.vue", source, None);
     assert!(
-        extracted
-            .bytes()
-            .all(|byte| matches!(byte, b' ' | b'\r' | b'\n')),
-        "a registered carrier without its parse artifact must not be rescanned: {extracted:?}"
-    );
-    assert_eq!(
-        extracted.len(),
-        source.len(),
-        "fail-closed blanking preserves offsets"
+        VerterHost::build_eval_script_source("/App.vue", source, None).is_none(),
+        "a classified carrier without its parse artifact must refuse before parse or publication"
     );
 }
 
@@ -454,30 +447,25 @@ export type Real = string | { path: string }
 
     for canonical in ["/dep.ts", "/dep.d.ts", "/dep.tsx", "/dep.mjs"] {
         let (eval, extracted) =
-            VerterHost::build_eval_script_source_with_extraction(canonical, source, None);
+            VerterHost::build_eval_script_source_with_extraction(canonical, source, None)
+                .unwrap_or_else(|| panic!("{canonical}: a non-carrier file passes through"));
         assert!(
             !extracted,
             "{canonical}: a non-carrier file must never report script extraction"
         );
         assert_eq!(
-            eval, source,
+            eval.as_ref(),
+            source,
             "{canonical}: a non-carrier file's source passes through unchanged"
         );
     }
 
-    // Control: the SAME text under a carrier canonical enters the carrier
-    // extraction path, but without its parse artifact it fails closed rather
-    // than falling back to a raw script scan.
-    let (eval, extracted) =
-        VerterHost::build_eval_script_source_with_extraction("/Doc.vue", source, None);
+    // Control: the SAME text under a carrier canonical without its parse
+    // artifact is typed refusal — never a raw script scan and never a
+    // blanked IndexedReady body.
     assert!(
-        extracted,
-        "a carrier canonical still reports the fail-closed extraction path"
-    );
-    assert!(
-        eval.bytes()
-            .all(|byte| matches!(byte, b' ' | b'\r' | b'\n')),
-        "artifact-less carrier extraction must preserve offsets while blanking bytes, got: {eval}"
+        VerterHost::build_eval_script_source_with_extraction("/Doc.vue", source, None).is_none(),
+        "an artifact-less carrier must refuse eval-source rather than blank or scan"
     );
 }
 
@@ -14743,14 +14731,14 @@ export interface LinkProps extends SharedProps {
         entry.export_signatures.is_some(),
         "export-only shallow state should still capture export signatures",
     );
-    // The materialiser performs ZERO import resolution now — the artifact
-    // it publishes is a pure parse/index product — so the only producer
-    // re-entering Engine here is the scheduler dependency producer.
+    // The indexed materialiser publishes a pure parse/index product, and
+    // ordinary forward edges are workspace-owned rather than duplicated in
+    // the scheduler dependency producer. Neither path resolves this
+    // non-macro import during shallow materialisation.
     assert_eq!(
         ws.resolve_count("/src/Link.vue", "./shared"),
-        1,
-        "only the scheduler dependency producer resolves during materialisation; \
-         the indexed materialiser must resolve nothing",
+        0,
+        "non-macro imports must not re-enter Engine during shallow materialisation",
     );
 }
 
@@ -18609,4 +18597,52 @@ mod resolve_eval_dependency_probe_contract_tests {
              the type-companion fallback probes",
         );
     }
+}
+
+/// The overlay source-registration route takes its carrier grammar from
+/// the registered frontend catalog row (adapter × carrier language) and
+/// fails closed on a catalog miss — never another framework's grammar.
+#[test]
+fn overlay_structure_grammar_comes_from_registered_catalog_identity() {
+    use verter_language::{FileLanguage, FrameworkAdapterId, LanguageId};
+
+    let host = Arc::new(make_host());
+    let vue_canonical = "/overlay/App.vue";
+    let svelte_canonical = "/overlay/App.svelte";
+    let miss_canonical = "/overlay/App.html";
+    let vue_src: Arc<str> = Arc::from("<template><div/></template>");
+    let svelte_src: Arc<str> = Arc::from("<div/>");
+
+    let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
+    overlays.insert(vue_canonical.to_string(), Arc::clone(&vue_src));
+    overlays.insert(svelte_canonical.to_string(), Arc::clone(&svelte_src));
+    overlays.insert(miss_canonical.to_string(), Arc::clone(&vue_src));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+
+    // Registered identities: the catalog row's grammar fact is accepted
+    // end-to-end by the host's grammar authority on the overlay route.
+    for (canonical, source, language) in [
+        (vue_canonical, &vue_src, FileLanguage::vue()),
+        (svelte_canonical, &svelte_src, FileLanguage::svelte()),
+    ] {
+        assert!(
+            host.registered_overlay_structure(canonical, Arc::clone(source), &language, &view)
+                .is_some(),
+            "the registered catalog grammar for {language:?} must be accepted \
+             on the overlay route",
+        );
+    }
+
+    // Catalog miss: a same-adapter NON-carrier-registered row has no
+    // frontend catalog row, so the overlay route fails closed instead of
+    // falling through to another framework's grammar.
+    let unregistered = FileLanguage::Framework {
+        adapter_id: FrameworkAdapterId::vue(),
+        language_id: LanguageId::new("html"),
+    };
+    assert!(
+        host.registered_overlay_structure(miss_canonical, vue_src, &unregistered, &view)
+            .is_none(),
+        "a carrier row without a registered frontend catalog row must fail closed",
+    );
 }

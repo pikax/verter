@@ -19,8 +19,9 @@ use super::official_reject;
 use super::official_rule::OfficialRejection;
 use super::parse_refusal::parse_domain_gate;
 use super::{
-    lower_parsed_svelte_to_ir, plan_client_topology, resolve_svelte_compile_options,
-    RuntimeLoweringErrors, SvelteRuntimeOptions, UnsupportedSvelteRuntimeSurface,
+    custom_element, lower_parsed_svelte_to_ir_resolved, plan_client_topology,
+    resolve_svelte_compile_options, RuntimeLoweringErrors, SvelteRuntimeOptions,
+    UnsupportedSvelteRuntimeSurface,
 };
 
 /// The exact invariant that prevented a generated client source map from being
@@ -158,6 +159,19 @@ pub fn compile_client<'a>(
     // object threads into the per-option codegen consumers via the IR's `root_options`.
     let resolved = resolve_svelte_compile_options(source, parsed, opts)
         .map_err(ClientCompileError::Unsupported)?;
+    // Resolve the custom-element descriptor ONCE after the official-reject
+    // gate and thread the SAME value into css-mode planning and lowering.
+    let custom_element = match custom_element::resolve_custom_element(
+        parsed,
+        custom_element::CustomElementCompileSelection::from_opts(opts),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(diagnostic) => {
+            let mut errors = RuntimeLoweringErrors::default();
+            errors.push(diagnostic.code, diagnostic.message, diagnostic.span);
+            return Err(ClientCompileError::Lowering(errors));
+        }
+    };
     // (2) `parse_domain_gate` — refuse the PARSE-DOMAIN surfaces the runtime IR
     // does not carry (a `<style>` with an unprovable css output mode or a failed
     // css analysis — css analysis runs before template lowering, so a css
@@ -169,12 +183,14 @@ pub fn compile_client<'a>(
     // descriptor); only its invalid forms remain rejected — as exact-code
     // official rejects by the gate above, never here. An ACCEPTED `<style>`
     // hands its parsed + analyzed body forward as the pre-lowering style stage.
-    let prepared_style = parse_domain_gate(source, parsed, opts, &mut admitted)
-        .map_err(ClientCompileError::Unsupported)?;
+    let prepared_style =
+        parse_domain_gate(source, parsed, opts, &mut admitted, custom_element.as_ref())
+            .map_err(ClientCompileError::Unsupported)?;
     // (3) Lower to the BROAD runtime IR (the shared substrate). The broad IR may
     // exist; it just never reaches emission.
-    let mut ir = lower_parsed_svelte_to_ir(source, parsed, opts, alloc)
-        .map_err(ClientCompileError::Lowering)?;
+    let mut ir =
+        lower_parsed_svelte_to_ir_resolved(source, parsed, opts, alloc, Some(custom_element))
+            .map_err(ClientCompileError::Lowering)?;
     // Thread the resolved compile-options into the IR the codegen consumers read
     // (the fragments strategy, the whitespace + comment retention, the disclose-version
     // import toggle). The namespace is html-only (a non-`html` namespace was refused at

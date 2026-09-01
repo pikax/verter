@@ -22,8 +22,18 @@ pub(crate) struct TestForceKnobs {
     pub(crate) last_upsert_priority: parking_lot::Mutex<Option<verter_scheduler::stage::Priority>>,
     /// Number of `compile_one_in_batch` invocations.
     pub(crate) compile_one_call_count: std::sync::atomic::AtomicUsize,
+    /// Number of full public `HostUpdateResult` payloads materialized by
+    /// scheduler-backed admission. `compile_many` needs only success/failure
+    /// and must leave this at zero.
+    pub(crate) upsert_result_materialization_count: std::sync::atomic::AtomicUsize,
     /// Encoded `CallerKind` observed by the latest compile worker.
     pub(crate) compile_one_caller_kind_tag: std::sync::atomic::AtomicU8,
+    /// Seam fired inside the base `IndexedReady` materialise flight after the
+    /// scheduler source snapshot is held and before remaining products are
+    /// assembled from it. Fence tests install a content upsert here to assert
+    /// every content-addressed product stays one snapshot object — never an
+    /// independent later scheduler read.
+    pub(crate) indexed_source_capture_seam_hook: SeamHook,
     /// Deterministic entry/release rendezvous for the once-per-SFC Vue macro
     /// scheduled closure. The first barrier reports that the winner entered;
     /// the second holds it while a sibling joins and the winner is cancelled.
@@ -287,5 +297,21 @@ impl TestForceKnobs {
         if let Some(barrier) = barrier {
             barrier.wait();
         }
+    }
+}
+
+/// Test-only callback slot; manual `Debug` because `dyn Fn` has none.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct SeamHook(
+    pub(crate) parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+);
+
+#[cfg(test)]
+impl std::fmt::Debug for SeamHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeamHook")
+            .field("installed", &self.0.lock().is_some())
+            .finish()
     }
 }

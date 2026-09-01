@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O3
+predecessors=CCA1O3,CCA1O1A,CCA1O3C,CCA1O3D
 owner=compiler.compiler-bridge:playground typed WASM host request route
 conflict_domains=compiler_execution,host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -44,17 +44,20 @@ Move the playground runtime consumer to CCA1O3's typed WASM request while all WA
 ## Concrete surfaces and boundary
 
 - The sole production surface is `packages/playground/src/core/compiler.ts`; focused evidence is `packages/playground/src/core/compiler.spec.ts`.
-- Own Vue/Svelte framework/product request construction for upsert, virtual products, IDE materialization/read, SSR/client modes, source maps, and runtime requests.
+- Own Vue/Svelte framework/product request construction for source-only upsert, virtual products, IDE compilation, SSR/client modes, source maps, and runtime requests. The IDE path becomes one typed `compileRequest` instead of materialization followed by a cached read.
 - WASM package declarations, Rust binding decoders, fixture capture, transport probe, and all profile deletion are excluded.
 
 ## Exact predecessor contract
 
 - **CCA1O3:** typed WASM adapter and the complete WASM-local compatibility DTO family coexist with the legacy route.
+- **CCA1O1A:** implemented ledger row for “Canonical Svelte custom-element prop-type admission”; the Svelte custom-element prop-type slot has its final shape, so playground request construction encodes no superseded closed vocabulary.
+- **CCA1O3C:** implemented ledger row for “Execution-proven WASM JS-boundary gate”; the browser boundary refusals this runtime consumer depends on are proven by execution rather than by compilation alone.
+- **CCA1O3D:** implemented ledger row for “WASM typed host-request callable route”; the browser host object exposes one callable typed compile entry on its generated JavaScript surface, so this consumer has a reachable typed route to move onto.
 
 ## Invariants and acceptance
 
 - Preserve output/map/diagnostic bytes, cache and cancellation behavior, canonical IDs, product ordering, SFC-absolute Rust spans, and JavaScript UTF-16 offsets.
-- Each profile-bearing playground call becomes one typed WASM call with no duplicate compile/source copy.
+- Each profile-bearing playground call becomes one typed WASM call — including the IDE path, where the former ensure-then-read pair collapses into one `compileRequest` — with no duplicate compile and no source copied into a request.
 - The playground production file contains no local `HostCompileProfile` interface or legacy request field while the binding-local legacy route remains intact for tools.
 
 ## Deletions, budget, and verification

@@ -659,6 +659,8 @@ pub struct SchedulerDag {
     pub(in crate::dag) analysis_blocker_demand: FxHashMap<DepKey, usize>,
     #[cfg(test)]
     analysis_demand_probe_count: std::cell::Cell<usize>,
+    #[cfg(test)]
+    highest_priority_node_visit_count: std::cell::Cell<usize>,
     /// Persistent record of terminal producer failures, keyed by the
     /// failed prerequisite's [`DepKey`]. A waiter admission consulting
     /// the dead-producer matrix BEFORE the matching producer
@@ -986,6 +988,8 @@ impl SchedulerDag {
             analysis_blocker_demand: FxHashMap::default(),
             #[cfg(test)]
             analysis_demand_probe_count: std::cell::Cell::new(0),
+            #[cfg(test)]
+            highest_priority_node_visit_count: std::cell::Cell::new(0),
             terminal_dep_failures: FxHashMap::default(),
             canonical_index: CanonicalReverseIndex::default(),
             retirement_floor: FxHashMap::default(),
@@ -2652,8 +2656,15 @@ impl SchedulerDag {
         // generation)` — pending or dispatched alike — so a fresh
         // stage transition inherits the urgency of any outstanding
         // request at this generation.
+        let tokens = self.canonical_index.node_tokens.get(canonical.as_ref())?;
         let mut best: Option<Priority> = None;
-        for node in self.nodes.values() {
+        for token in tokens {
+            #[cfg(test)]
+            self.highest_priority_node_visit_count
+                .set(self.highest_priority_node_visit_count.get() + 1);
+            let Some(node) = self.nodes.get(token) else {
+                continue;
+            };
             if node.cancelled {
                 continue;
             }
@@ -2666,6 +2677,16 @@ impl SchedulerDag {
             }
         }
         best
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reset_highest_priority_node_visit_count(&self) {
+        self.highest_priority_node_visit_count.set(0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_highest_priority_node_visit_count(&self) -> usize {
+        self.highest_priority_node_visit_count.get()
     }
 
     /// Profile hashes and priorities for every pending Artifact waiter
