@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O2,CCA1O2H,CCA1O2I
+predecessors=CCA1O2,CCA1O2H,CCA1O2I,CCA1O2J
 owner=compiler.compiler-bridge:repository native comparison-tool typed host requests
 conflict_domains=compiler_execution,host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -45,13 +45,14 @@ Move the three repository comparison tools that pass legacy native compile profi
 
 - Tooling surfaces are exactly `scripts/compare-per-file.mjs`, `scripts/ssr-baseline/compare.mjs`, and `scripts/vue-behavior-compare/run.mjs`.
 - Owns each named tool's profile-bearing `getVirtualFile` request and its framework/product/options construction. Corpus discovery, official-compiler baselines, normalization, reporting, and file traversal are excluded.
-- Canonical input IDs, source bytes, output bytes/maps/diagnostics, and serialized offsets remain identical; one old native call becomes one typed native call.
+- Canonical input IDs, source bytes, output bytes/maps/diagnostics, and serialized offsets remain identical; one old native call becomes one typed `compileRequest` against an already registered source, with no source copied into the request.
 
 ## Exact predecessor contract
 
 - **CCA1O2:** implemented ledger row for “NAPI typed host-request adapter”.
 - **CCA1O2H:** implemented ledger row for “NAPI own-property closedness repair”; the native decode refuses an own unknown or cross-framework key whatever its value, so the typed route this caller moves onto is closed as declared.
 - **CCA1O2I:** implemented ledger row for “Generated native host-request TypeScript mirror”; the request declarations this caller is written against are generated from the Rust schema and byte-pinned, so they cannot drift from the decoder.
+- **CCA1O2J:** implemented ledger row for “NAPI typed host-request callable route”; the native host object exposes callable typed compile and batch routes, so this consumer has a reachable typed route to move onto.
 
 ## Acceptance and evidence
 

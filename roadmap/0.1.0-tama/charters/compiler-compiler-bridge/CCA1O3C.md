@@ -55,7 +55,7 @@ Outcome: one execution-proven lane inside the canonical gate runs the workspace'
 
 ## Exact predecessor contract
 
-- **CCA1O3:** implemented ledger row for “WASM typed host-request adapter”; the typed browser request, its JavaScript entry point, and the boundary tests the lane executes exist.
+- **CCA1O3:** implemented ledger row for “WASM typed host-request adapter”; the typed browser request and the boundary tests the lane executes exist. That request is decoded by Rust helpers only — no callable JavaScript route to it exists yet, and installing one is owned elsewhere.
 
 ## Acceptance and evidence
 

@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O2,CCA1O2H,CCA1O2I
+predecessors=CCA1O2,CCA1O2H,CCA1O2I,CCA1O2J
 owner=compiler.compiler-bridge:native benchmark typed host request population
 conflict_domains=compiler_execution,host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -44,7 +44,7 @@ Move the complete native benchmark population that supplies a legacy compile pro
 ## Concrete surfaces and APIs
 
 - Production/tooling surfaces are exactly `packages/benchmark/src/compilers/verter.ts`, `packages/benchmark/src/perf/axis-a-child.ts`, `packages/benchmark/src/svelte-perf-fence.ts`, and `packages/benchmark/src/verter-mt-worker.mjs`; focused evidence may update `packages/benchmark/src/perf/axis-a-child.spec.ts`.
-- Owns the explicit-profile `upsert`, `getVirtualFile`, and positional `getIde` calls in those four files. Profile-free benchmark calls and benchmark algorithms are excluded.
+- Owns the explicit-profile `upsert`, `getVirtualFile`, and positional `getIde` calls in those four files. The registration becomes a source-only `upsert`, and every compile becomes one typed `compileRequest`. Profile-free benchmark calls and benchmark algorithms are excluded.
 - Each migrated call constructs one framework-discriminated request with the same products and options. Timed regions, warmup, process isolation, content hashing, and measured call count remain unchanged.
 - Canonical IDs, output bytes/maps/diagnostics, and serialized span/offset coordinate semantics remain unchanged.
 
@@ -53,10 +53,11 @@ Move the complete native benchmark population that supplies a legacy compile pro
 - **CCA1O2:** implemented ledger row for “NAPI typed host-request adapter”.
 - **CCA1O2H:** implemented ledger row for “NAPI own-property closedness repair”; the native decode refuses an own unknown or cross-framework key whatever its value, so the typed route this caller moves onto is closed as declared.
 - **CCA1O2I:** implemented ledger row for “Generated native host-request TypeScript mirror”; the request declarations this caller is written against are generated from the Rust schema and byte-pinned, so they cannot drift from the decoder.
+- **CCA1O2J:** implemented ledger row for “NAPI typed host-request callable route”; the native host object exposes callable typed compile and batch routes, so this consumer has a reachable typed route to move onto.
 
 ## Acceptance and evidence
 
-- The four named production files contain no legacy `compileProfile` field or positional legacy IDE profile; every former profile-bearing call uses the typed request.
+- The four named production files contain no legacy `compileProfile` field or positional legacy IDE profile; every former profile-bearing call is one typed `compileRequest` against an already registered source, with no ensure-then-read pair left.
 - Benchmark fixtures preserve framework, product, SSR/client, source-map, target, and refusal intent without an extra native call or source copy.
 - The existing axis-A unit boundary and package type checks prove request shape and missing-carrier behavior; performance comparison semantics are byte-for-byte unchanged.
 

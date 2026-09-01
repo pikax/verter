@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O3,CCA1O1A,CCA1O3C
+predecessors=CCA1O3,CCA1O1A,CCA1O3C,CCA1O3D
 owner=compiler.compiler-bridge:WASM transport-surface probe typed host requests
 conflict_domains=compiler_execution,host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -44,7 +44,7 @@ Move the direct WASM transport-surface probe to CCA1O3's typed request while the
 ## Concrete surfaces and APIs
 
 - The sole production/tooling surface is `packages/wasm/scripts/probe-transport-surface.mjs`.
-- Owns every profile-bearing `getVirtualFile`, `getIde`, and `ensureIdeCompiled` probe case in that file, including Vue/Svelte success, optional-product, structural-absence, and refusal variants.
+- Owns every profile-bearing `getVirtualFile`, `getIde`, and `ensureIdeCompiled` probe case in that file, including Vue/Svelte success, optional-product, structural-absence, and refusal variants. Each becomes one typed `compileRequest`; the IDE cases stop being an ensure-then-read pair.
 - Exported-surface enumeration, missing-versus-refused classification, canonical IDs, output/map/diagnostic normalization, SFC-absolute span meaning, and JavaScript UTF-16 offsets remain unchanged.
 
 ## Exact predecessor contract
@@ -52,10 +52,11 @@ Move the direct WASM transport-surface probe to CCA1O3's typed request while the
 - **CCA1O3:** implemented ledger row for “WASM typed host-request adapter”.
 - **CCA1O1A:** implemented ledger row for “Canonical Svelte custom-element prop-type admission”; the Svelte custom-element prop-type slot has its final shape, so the probe cases encode no superseded closed vocabulary.
 - **CCA1O3C:** implemented ledger row for “Execution-proven WASM JS-boundary gate”; the browser boundary refusals this probe classifies are proven by execution rather than by compilation alone.
+- **CCA1O3D:** implemented ledger row for “WASM typed host-request callable route”; the browser host object exposes one callable typed compile entry on its generated JavaScript surface, so this consumer has a reachable typed route to move onto.
 
 ## Acceptance and evidence
 
-- The probe contains no legacy profile request or positional IDE profile and exercises the typed Vue/Svelte request variants through the same number of WASM calls.
+- The probe contains no legacy profile request or positional IDE profile and exercises the typed Vue/Svelte request variants. Every probe axis survives, and each former ensure-then-read IDE case is one typed call; no case gains a WASM call or copies a source into its request.
 - Probe output keys, ordering, output/map/refusal classification, canonical IDs, and serialized offsets are equivalent.
 - `node --check`, WASM request-conversion fixtures, and the existing native/WASM transport comparison prove shape and behavior.
 

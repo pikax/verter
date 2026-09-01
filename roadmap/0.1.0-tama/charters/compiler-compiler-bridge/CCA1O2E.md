@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O2,CCA1O2H,CCA1O2I
+predecessors=CCA1O2,CCA1O2H,CCA1O2I,CCA1O2J
 owner=compiler.compiler-bridge:native transport-surface probe typed host requests
 conflict_domains=compiler_execution,host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -44,7 +44,7 @@ Move the native binding's direct transport-surface probe to CCA1O2's typed reque
 ## Concrete surfaces and APIs
 
 - The sole production/tooling surface is `packages/native/scripts/probe-transport-surface.mjs`.
-- Owns every profile-bearing `getVirtualFile`, `getIde`, `ensureIdeCompiled`, and runtime-render `compileMany` probe case in that file, including success, refusal, optional-product, ordering, and audit variants.
+- Owns every profile-bearing `getVirtualFile`, `getIde`, `ensureIdeCompiled`, and runtime-render `compileMany` probe case in that file, including success, refusal, optional-product, ordering, and audit variants. Each becomes one typed call — `compileRequest` for the single-file cases, the typed plural route for the batch cases — and the IDE cases stop being an ensure-then-read pair.
 - Surface enumeration, result normalization, refusal-vs-missing distinctions, audit attribution, canonical IDs, and UTF-16/public span encoding remain unchanged.
 
 ## Exact predecessor contract
@@ -52,10 +52,11 @@ Move the native binding's direct transport-surface probe to CCA1O2's typed reque
 - **CCA1O2:** implemented ledger row for “NAPI typed host-request adapter”.
 - **CCA1O2H:** implemented ledger row for “NAPI own-property closedness repair”; the native decode refuses an own unknown or cross-framework key whatever its value, so the typed route this caller moves onto is closed as declared.
 - **CCA1O2I:** implemented ledger row for “Generated native host-request TypeScript mirror”; the request declarations this caller is written against are generated from the Rust schema and byte-pinned, so they cannot drift from the decoder.
+- **CCA1O2J:** implemented ledger row for “NAPI typed host-request callable route”; the native host object exposes callable typed compile and batch routes, so this consumer has a reachable typed route to move onto.
 
 ## Acceptance and evidence
 
-- The probe contains no legacy general or render compile-profile object and exercises the typed Vue/Svelte request variants through the same number of binding calls.
+- The probe contains no legacy general or render compile-profile object and exercises the typed Vue/Svelte request variants. Every probe axis survives, and each former ensure-then-read IDE case is one typed call; no case gains a binding call or copies a source into its request.
 - Probe output keys, ordering, output/map/refusal classification, diagnostics, audit fields, canonical IDs, and serialized offsets are equivalent.
 
 ## Deletions, budgets, and aborts
