@@ -5357,8 +5357,10 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
     // the same descent the content half performs.
     for (name, expected) in [
         ("ctObj", "{a:number}|2"),
-        // The recorded dedup divergence: the checker publishes ONE arm.
-        ("ctObjBoth", "{a:number}|{a:number}"),
+        // Two branches returning the same object shape are ONE arm, exactly
+        // as the checker publishes it: the arms differ only in where they
+        // were written, and source coordinates are not constituent identity.
+        ("ctObjBoth", "{a:number}"),
         ("ctObjDisjoint", "{a:number}|{b:number}"),
         ("ctObjLocalRead", "2|{a:number}"),
         ("ctObjMethod", "2|{m():number}"),
