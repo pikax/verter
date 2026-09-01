@@ -270,6 +270,7 @@ jobs:
         run: |
           node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict
           node --test roadmap/0.1.0-tama/tools/implementation-ledger.test.mjs
+          node --test roadmap/0.1.0-tama/tools/ledger.test.mjs
       - name: CI aggregate completeness
         run: |
           node scripts/check-ci-aggregate.mjs
