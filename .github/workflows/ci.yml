@@ -1032,6 +1032,19 @@ jobs:
       # needs no workspace resolution.
       - name: Verify committed carrier fixtures against the built WASM
         run: node packages/playground/scripts/capture-wasm-carrier-fixtures.mjs --check
+      # The workspace's `#[wasm_bindgen_test]` cases prove the closed-shape
+      # refusals where a browser caller meets them — against a real JS object
+      # graph, on the wasm target. They are `#[cfg(target_arch = "wasm32")]`,
+      # so the shared nextest archive the Rust lanes run CANNOT contain a
+      # single one; only a wasm-target run executes them.
+      #
+      # This is that run, and it lives here because this is the job already
+      # provisioned for it: the `wasm32-unknown-unknown` target and the pinned
+      # `wasm-bindgen-cli` above are exactly what the lane needs. The local
+      # gate runs the same lane through the same `gate-internals.mjs`
+      # helpers, so the two cannot disagree on what passing means.
+      - name: WASM JavaScript-boundary lane
+        run: node scripts/wasm-js-boundary-lane.mjs --exhaustive
       # Shared with playground-test so wasm32 is compiled ONCE per run.
       - name: Upload WASM build
         uses: actions/upload-artifact@v6
