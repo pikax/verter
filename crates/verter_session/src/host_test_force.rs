@@ -22,6 +22,10 @@ pub(crate) struct TestForceKnobs {
     pub(crate) last_upsert_priority: parking_lot::Mutex<Option<verter_scheduler::stage::Priority>>,
     /// Number of `compile_one_in_batch` invocations.
     pub(crate) compile_one_call_count: std::sync::atomic::AtomicUsize,
+    /// Number of full public `HostUpdateResult` payloads materialized by
+    /// scheduler-backed admission. `compile_many` needs only success/failure
+    /// and must leave this at zero.
+    pub(crate) upsert_result_materialization_count: std::sync::atomic::AtomicUsize,
     /// Encoded `CallerKind` observed by the latest compile worker.
     pub(crate) compile_one_caller_kind_tag: std::sync::atomic::AtomicU8,
     /// Deterministic entry/release rendezvous for the once-per-SFC Vue macro

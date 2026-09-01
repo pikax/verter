@@ -14743,14 +14743,14 @@ export interface LinkProps extends SharedProps {
         entry.export_signatures.is_some(),
         "export-only shallow state should still capture export signatures",
     );
-    // The materialiser performs ZERO import resolution now — the artifact
-    // it publishes is a pure parse/index product — so the only producer
-    // re-entering Engine here is the scheduler dependency producer.
+    // The indexed materialiser publishes a pure parse/index product, and
+    // ordinary forward edges are workspace-owned rather than duplicated in
+    // the scheduler dependency producer. Neither path resolves this
+    // non-macro import during shallow materialisation.
     assert_eq!(
         ws.resolve_count("/src/Link.vue", "./shared"),
-        1,
-        "only the scheduler dependency producer resolves during materialisation; \
-         the indexed materialiser must resolve nothing",
+        0,
+        "non-macro imports must not re-enter Engine during shallow materialisation",
     );
 }
 

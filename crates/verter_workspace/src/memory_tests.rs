@@ -660,6 +660,144 @@ fn record_parsed_edges_relative_updates_forward_reverse() {
 }
 
 #[test]
+fn record_parsed_edges_many_preserves_each_owners_forward_and_reverse_edges() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    for (id, source) in [
+        ("/src/dep.ts", "export const value = 1;"),
+        ("/src/a.ts", "import { value } from './dep';"),
+        ("/src/b.ts", "import { value } from './dep';"),
+        ("/src/c.ts", "import type { value } from './dep';"),
+        ("/src/d.ts", "import type { value } from './dep';"),
+    ] {
+        ws.inject_file(id.to_string(), Arc::from(source));
+    }
+    set_fallback_projects(&ws, &["/src"]);
+
+    ws.record_parsed_edges_many(&[
+        (
+            "/src/a.ts".to_string(),
+            vec![ParsedEdge::Relative {
+                specifier: "./dep".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+            }],
+        ),
+        (
+            "/src/b.ts".to_string(),
+            vec![ParsedEdge::Relative {
+                specifier: "./dep".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+            }],
+        ),
+        (
+            "/src/c.ts".to_string(),
+            vec![ParsedEdge::Relative {
+                specifier: "./dep".to_string(),
+                kind: ResolveRequestKind::TypeImport,
+            }],
+        ),
+        (
+            "/src/d.ts".to_string(),
+            vec![ParsedEdge::Relative {
+                specifier: "./dep".to_string(),
+                kind: ResolveRequestKind::TypeImport,
+            }],
+        ),
+    ]);
+
+    assert_eq!(ws.forward_deps_for("/src/a.ts"), vec!["/src/dep.ts"]);
+    assert_eq!(ws.forward_deps_for("/src/b.ts"), vec!["/src/dep.ts"]);
+    assert_eq!(ws.forward_deps_for("/src/c.ts"), vec!["/src/dep.ts"]);
+    assert_eq!(ws.forward_deps_for("/src/d.ts"), vec!["/src/dep.ts"]);
+    assert_eq!(
+        ws.reverse_deps_for("/src/dep.ts"),
+        vec!["/src/a.ts", "/src/b.ts", "/src/c.ts", "/src/d.ts"]
+    );
+    assert_eq!(
+        ws.engine
+            .parsed_relative_batch_resolution_count_for_test(),
+        2,
+        "bulk recording must resolve once per joined target/context/import-kind, not once per owner"
+    );
+}
+
+#[test]
+fn record_parsed_edges_many_keeps_unowned_package_boundaries_order_independent() {
+    let package_owner = "/proj/node_modules/pkgname/src/index.ts";
+    let source_owner = "/proj/src/main.ts";
+    let leak = "/proj/outside/leak.ts";
+
+    let make_workspace = || {
+        let ws = MemoryWorkspace::new(MemoryOptions::default());
+        for (id, source) in [
+            (leak, "export const leaked = true;"),
+            (source_owner, "import { leaked } from '../outside/leak';"),
+            (
+                package_owner,
+                "import { leaked } from '../../../outside/leak';",
+            ),
+            (
+                "/proj/node_modules/pkgname/package.json",
+                "{\"name\":\"pkgname\"}",
+            ),
+        ] {
+            ws.inject_file(id.to_string(), Arc::from(source));
+        }
+        set_fallback_projects(&ws, &["/proj"]);
+        ws
+    };
+    let package_record = || {
+        (
+            package_owner.to_string(),
+            vec![ParsedEdge::Relative {
+                specifier: "../../../outside/leak".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+            }],
+        )
+    };
+    let source_record = || {
+        (
+            source_owner.to_string(),
+            vec![ParsedEdge::Relative {
+                specifier: "../outside/leak".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+            }],
+        )
+    };
+
+    let baseline = make_workspace();
+    let (owner, edges) = package_record();
+    baseline.record_parsed_edges(&owner, &edges);
+    let (owner, edges) = source_record();
+    baseline.record_parsed_edges(&owner, &edges);
+    let expected_package_forward = baseline.forward_deps_for(package_owner);
+    let expected_source_forward = baseline.forward_deps_for(source_owner);
+    let expected_reverse = baseline.reverse_deps_for(leak);
+
+    for package_first in [true, false] {
+        let ws = make_workspace();
+
+        let records = if package_first {
+            vec![package_record(), source_record()]
+        } else {
+            vec![source_record(), package_record()]
+        };
+
+        ws.record_parsed_edges_many(&records);
+
+        assert_eq!(
+            ws.forward_deps_for(package_owner),
+            expected_package_forward,
+            "a package-relative import must not escape its package boundary"
+        );
+        assert_eq!(ws.forward_deps_for(source_owner), expected_source_forward);
+        assert_eq!(ws.reverse_deps_for(leak), expected_reverse);
+    }
+
+    assert!(expected_package_forward.is_empty());
+    assert_eq!(expected_source_forward, vec![leak]);
+}
+
+#[test]
 fn record_parsed_edges_bare_stored_not_resolved() {
     let ws = MemoryWorkspace::new(MemoryOptions::default());
 

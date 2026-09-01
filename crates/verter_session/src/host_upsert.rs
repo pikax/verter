@@ -20,7 +20,9 @@ use verter_scheduler::stage::Priority;
 /// One per-request outcome from the shared upsert engine
 /// [`VerterHost::upsert_many_with_priority`]. `result` is the same
 /// `Result<HostUpdateResult, HostError>` the single-file
-/// [`VerterHost::upsert`] returns.
+/// [`VerterHost::upsert`] returns. Compile-only admission requests a
+/// status-only payload, represented by `Ok(None)`, because that caller never
+/// exposes the public update projection.
 ///
 /// `canonical_id` is the request's resolved canonical on every arm —
 /// including the failure arms, whose `result` `HostError` carries no
@@ -33,7 +35,20 @@ use verter_scheduler::stage::Priority;
 pub(crate) struct UpsertBatchOutcome {
     #[cfg(not(target_arch = "wasm32"))]
     pub canonical_id: String,
-    pub result: Result<HostUpdateResult, HostError>,
+    pub result: Result<Option<HostUpdateResult>, HostError>,
+    workspace_commit: Option<WorkspaceParsedCommit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpsertResultDemand {
+    Full,
+    StatusOnly,
+}
+
+struct WorkspaceParsedCommit {
+    canonical_id: String,
+    source: Arc<str>,
+    parsed_edges: Vec<verter_workspace::ParsedEdge>,
 }
 
 /// The per-canonical state captured BEFORE the atomic batch is
@@ -70,7 +85,11 @@ impl UpsertBatchTxn {
     /// one [`UpsertBatchOutcome`]. Every index is mapped — a partial
     /// failure never early-returns, so the result `Vec` always has one
     /// outcome per submitted request, in input order.
-    fn finish(self, host: &VerterHost) -> Vec<UpsertBatchOutcome> {
+    fn finish(
+        self,
+        host: &VerterHost,
+        result_demand: UpsertResultDemand,
+    ) -> Vec<UpsertBatchOutcome> {
         let UpsertBatchTxn { prepared, batch } = self;
         // ONE input-order wait. `wait_batch` returns `state[i]` for the
         // i-th submitted request regardless of completion order.
@@ -83,7 +102,13 @@ impl UpsertBatchTxn {
             prepared.len(),
             "wait_batch must return one completion state per submitted request"
         );
-        Self::map_states(host, prepared, states)
+        let mut outcomes = Self::map_states(host, prepared, states, true, result_demand);
+        let workspace_commits = outcomes
+            .iter_mut()
+            .filter_map(|outcome| outcome.workspace_commit.take())
+            .collect();
+        host.finish_workspace_batch(workspace_commits);
+        outcomes
     }
 
     /// The completion-state → [`UpsertBatchOutcome`] mapper: zip each
@@ -104,6 +129,8 @@ impl UpsertBatchTxn {
         host: &VerterHost,
         prepared: Vec<PreparedUpsertCommit>,
         states: Vec<verter_scheduler::job::CompletionState<verter_scheduler::job::RequestResult>>,
+        defer_workspace_commit: bool,
+        result_demand: UpsertResultDemand,
     ) -> Vec<UpsertBatchOutcome> {
         use verter_scheduler::job::CompletionState;
 
@@ -118,18 +145,25 @@ impl UpsertBatchTxn {
                 // target gate as its sole consumer.
                 #[cfg(not(target_arch = "wasm32"))]
                 let canonical_id = prepared.canonical_id.clone();
-                let result = match state {
-                    CompletionState::Ready(ready) => {
-                        host.finish_upsert_post_commit(prepared, ready)
-                    }
-                    CompletionState::Failed(e) => Err(HostError::Scheduler(e)),
-                    CompletionState::Superseded => Err(HostError::Superseded),
-                    CompletionState::Shutdown => Err(HostError::Shutdown),
+                let (result, workspace_commit) = match state {
+                    CompletionState::Ready(ready) => match host.finish_upsert_post_commit(
+                        prepared,
+                        ready,
+                        defer_workspace_commit,
+                        result_demand,
+                    ) {
+                        Ok((result, workspace_commit)) => (Ok(result), workspace_commit),
+                        Err(error) => (Err(error), None),
+                    },
+                    CompletionState::Failed(e) => (Err(HostError::Scheduler(e)), None),
+                    CompletionState::Superseded => (Err(HostError::Superseded), None),
+                    CompletionState::Shutdown => (Err(HostError::Shutdown), None),
                 };
                 UpsertBatchOutcome {
                     #[cfg(not(target_arch = "wasm32"))]
                     canonical_id,
                     result,
+                    workspace_commit,
                 }
             })
             .collect()
@@ -156,7 +190,7 @@ impl UpsertBatchTxn {
             states.len(),
             "finish_from_states requires one completion state per prepared entry"
         );
-        Self::map_states(host, prepared, states)
+        Self::map_states(host, prepared, states, false, UpsertResultDemand::Full)
     }
 }
 
@@ -244,7 +278,13 @@ impl VerterHost {
         self.upsert_many_with_priority(vec![req], priority)
             .into_iter()
             .next()
-            .map(|outcome| outcome.result)
+            .map(|outcome| {
+                outcome.result.and_then(|result| {
+                    result.ok_or_else(|| HostError::MissingSource {
+                        canonical_id: canonical_id.clone(),
+                    })
+                })
+            })
             .unwrap_or_else(|| {
                 // Unreachable: a non-empty input yields one outcome. Keep
                 // a typed error rather than panicking on an impossible
@@ -259,9 +299,10 @@ impl VerterHost {
     ///
     /// This is the SOLE scheduler-backed upsert path. The public
     /// single-file [`Self::upsert_with_priority`] collapses onto it as a
-    /// 1-element batch, and `compile_many`'s Stage B drives it directly
-    /// with the deduped per-canonical request list. There is no
-    /// hand-rolled per-file submit/wait anywhere else.
+    /// 1-element batch, and `compile_many`'s Stage B drives the same private
+    /// engine through [`Self::upsert_many_for_compile`] with the deduped
+    /// per-canonical request list. There is no hand-rolled per-file submit/wait
+    /// anywhere else.
     ///
     /// Flow:
     /// 1. Empty input short-circuits to an empty `Vec`.
@@ -301,6 +342,31 @@ impl VerterHost {
         requests: Vec<UpsertRequest>,
         priority: Priority,
     ) -> Vec<UpsertBatchOutcome> {
+        self.upsert_many_with_priority_and_demand(requests, priority, UpsertResultDemand::Full)
+    }
+
+    /// Compile-only source admission. Runs the identical scheduler, host-state,
+    /// and workspace commit path as [`Self::upsert_many_with_priority`] while
+    /// omitting the public [`HostUpdateResult`] projection that `compile_many`
+    /// never reads.
+    pub(crate) fn upsert_many_for_compile(
+        &self,
+        requests: Vec<UpsertRequest>,
+        priority: Priority,
+    ) -> Vec<UpsertBatchOutcome> {
+        self.upsert_many_with_priority_and_demand(
+            requests,
+            priority,
+            UpsertResultDemand::StatusOnly,
+        )
+    }
+
+    fn upsert_many_with_priority_and_demand(
+        &self,
+        requests: Vec<UpsertRequest>,
+        priority: Priority,
+        result_demand: UpsertResultDemand,
+    ) -> Vec<UpsertBatchOutcome> {
         // 1. Empty input: no submission, no wake, no accounting.
         if requests.is_empty() {
             return Vec::new();
@@ -315,7 +381,8 @@ impl VerterHost {
         //      first, capture context once, prepare each request, ONE
         //      `submit_batch_atomic`).
         // 6:   drive it (ONE `wait_batch`, then per-index post-commit).
-        self.submit_upsert_batch(requests, priority).finish(self)
+        self.submit_upsert_batch(requests, priority)
+            .finish(self, result_demand)
     }
 
     /// Build the in-flight upsert transaction: resolve and uniqueness-
@@ -533,7 +600,9 @@ impl VerterHost {
         &self,
         prepared: PreparedUpsertCommit,
         ready: verter_scheduler::job::RequestResult,
-    ) -> Result<HostUpdateResult, HostError> {
+        defer_workspace_commit: bool,
+        result_demand: UpsertResultDemand,
+    ) -> Result<(Option<HostUpdateResult>, Option<WorkspaceParsedCommit>), HostError> {
         use crate::host_executor::HostSourceData;
         use verter_scheduler::job::RequestResult;
         verter_workspace::probe_scope!(UPSERT_POST_COMMIT);
@@ -663,6 +732,9 @@ impl VerterHost {
                     self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
                 }
             }
+            if result_demand == UpsertResultDemand::StatusOnly {
+                return Ok((None, None));
+            }
             // Cache-state is a no-op, but the *result* is still a full
             // description of the live parse: bundlers re-resolve external
             // `<style src>` / `<template src>` / `<script src>` on every
@@ -687,30 +759,40 @@ impl VerterHost {
                 .collect();
             let preprocessor_requests =
                 self.materialize_preprocessor_requests(&canonical_id, &parse.preprocessor_requests);
-            return Ok(HostUpdateResult {
-                canonical_id,
-                changed: false,
-                slice_changes: SliceChanges::default(),
-                changed_virtual_nodes: Vec::new(),
-                removed_virtual_nodes: Vec::new(),
-                changed_virtual_ids: Vec::new(),
-                removed_virtual_ids: Vec::new(),
-                changed_lsp_ids: Vec::new(),
-                removed_lsp_ids: Vec::new(),
-                diagnostics: DiagnosticsSnapshot::default(),
-                external_source_requests: parse.external_requests.clone(),
-                import_specifiers,
-                module_references,
-                preprocessor_requests,
-                export_signatures: parse.export_signatures.clone(),
-                parse_duration_ms,
-            });
+            #[cfg(test)]
+            self.test_force
+                .upsert_result_materialization_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok((
+                Some(HostUpdateResult {
+                    canonical_id,
+                    changed: false,
+                    slice_changes: SliceChanges::default(),
+                    changed_virtual_nodes: Vec::new(),
+                    removed_virtual_nodes: Vec::new(),
+                    changed_virtual_ids: Vec::new(),
+                    removed_virtual_ids: Vec::new(),
+                    changed_lsp_ids: Vec::new(),
+                    removed_lsp_ids: Vec::new(),
+                    diagnostics: DiagnosticsSnapshot::default(),
+                    external_source_requests: parse.external_requests.clone(),
+                    import_specifiers,
+                    module_references,
+                    preprocessor_requests,
+                    export_signatures: parse.export_signatures.clone(),
+                    parse_duration_ms,
+                }),
+                None,
+            ));
         }
 
-        // Resolve the complete dependency batch only for a genuine content
-        // transition. The byte-identical fast path above is a strict no-op and
-        // must not reopen resolution. Every companion decision below goes
-        // through the Engine before any durable per-domain state mutates.
+        // Rebuild the parse-derived dependency bookkeeping only for a genuine
+        // content transition. `DependencyState.dependencies` stores authored
+        // external targets plus joined relative stems; it is not a durable
+        // resolution-answer cache. The workspace parsed-edge transaction below
+        // owns extension probing, candidate selection, and the fully resolved
+        // reverse graph. Re-normalizing every joined stem here would duplicate
+        // that resolver work once per owner during bulk admission.
         let new_deps: BTreeSet<String> = parse
             .external_requests
             .iter()
@@ -721,10 +803,7 @@ impl VerterHost {
                     .imports
                     .iter()
                     .filter(|imp| imp.source.starts_with('.'))
-                    .map(|imp| {
-                        let resolved = crate::id::resolve_external(&canonical_id, &imp.source);
-                        self.normalized_analysis_canonical(&resolved).into_owned()
-                    }),
+                    .map(|imp| crate::id::resolve_external(&canonical_id, &imp.source)),
             )
             .collect();
 
@@ -875,18 +954,7 @@ impl VerterHost {
         }
         crate::host_manage::push_cache_drained_at_upsert("dependency_cache", &canonical_id);
 
-        // ── Build result data from parse ──
         write_lock(&self.block_content.state).supersede_owner(&canonical_id);
-        let result_data = UpsertResultData {
-            new_meta: parse.meta.clone(),
-            parse_diagnostics: parse.parse_diagnostics.clone(),
-            imports: parse.script_analysis.imports.clone(),
-            module_references: parse.script_analysis.module_references.clone(),
-            external_requests: parse.external_requests.clone(),
-            preprocessor_requests: self
-                .materialize_preprocessor_requests(&canonical_id, &parse.preprocessor_requests),
-            export_signatures: parse.export_signatures.clone(),
-        };
 
         // ── Post-commit: parse-domain producer contract ──
         //
@@ -909,25 +977,61 @@ impl VerterHost {
         // affected-files reporting). The reverse graph is content-
         // addressed bookkeeping only — it is NOT wired to cache
         // invalidation; cross-file consumers revalidate lazily on read.
-        self.record_parsed_edges_to_vfs(&canonical_id, &result_data);
+        let parsed_edges = Self::build_parsed_edges_from_analysis(
+            &canonical_id,
+            &parse.external_requests,
+            &parse.script_analysis.imports,
+            &parse.script_analysis.module_references,
+        );
+        if !defer_workspace_commit {
+            self.ws().record_parsed_edges(&canonical_id, &parsed_edges);
+        }
         crate::host_manage::push_cache_drained_at_upsert("workspace_parsed_edges", &canonical_id);
 
-        // Through the host wrapper rail (not a raw `ws()` call): the
-        // wrapper's artifact-only eviction arm is a no-op here — the
-        // canonical was just upserted, so the scheduler is its content
-        // authority — but ONE notify path keeps the perimeter auditable.
-        self.notify_upsert(&canonical_id, req.source.clone());
+        // Scheduler-tracked canonicals are not artifact-only, but keep the
+        // single-file and batch overlay mutations behind host-owned wrappers
+        // so the content-authority perimeter remains auditable.
+        if !defer_workspace_commit {
+            self.notify_upsert(&canonical_id, req.source.clone());
+        }
 
-        let result = build_upsert_result(
-            canonical_id.clone(),
-            result_data,
-            &changes,
-            &prev_nodes,
-            &old_host_data
-                .map(|h| h.parse.meta.clone())
-                .unwrap_or_default(),
-            parse_duration_ms,
-        );
+        let workspace_commit = defer_workspace_commit.then(|| WorkspaceParsedCommit {
+            canonical_id: canonical_id.clone(),
+            source: req.source.clone(),
+            parsed_edges,
+        });
+
+        let result = match result_demand {
+            UpsertResultDemand::StatusOnly => None,
+            UpsertResultDemand::Full => {
+                #[cfg(test)]
+                self.test_force
+                    .upsert_result_materialization_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let result_data = UpsertResultData {
+                    new_meta: parse.meta.clone(),
+                    parse_diagnostics: parse.parse_diagnostics.clone(),
+                    imports: parse.script_analysis.imports.clone(),
+                    module_references: parse.script_analysis.module_references.clone(),
+                    external_requests: parse.external_requests.clone(),
+                    preprocessor_requests: self.materialize_preprocessor_requests(
+                        &canonical_id,
+                        &parse.preprocessor_requests,
+                    ),
+                    export_signatures: parse.export_signatures.clone(),
+                };
+                Some(build_upsert_result(
+                    canonical_id.clone(),
+                    result_data,
+                    &changes,
+                    &prev_nodes,
+                    &old_host_data
+                        .map(|h| h.parse.meta.clone())
+                        .unwrap_or_default(),
+                    parse_duration_ms,
+                )?)
+            }
+        };
         if let Some(old_source_snap) = old_source_snap.as_ref() {
             let _ = self.materialize_committed_unchanged_carrier_route_interface(
                 &canonical_id,
@@ -938,18 +1042,33 @@ impl VerterHost {
         }
         self.bump_store_view_epoch();
         crate::host_manage::push_cache_drained_at_upsert("store_view_epoch", &canonical_id);
-        result
+        Ok((result, workspace_commit))
     }
 
-    /// Sync parsed edges to VFS (thin wrapper around the shared edge builder).
-    fn record_parsed_edges_to_vfs(&self, canonical_id: &str, result_data: &UpsertResultData) {
-        let parsed_edges = Self::build_parsed_edges_from_analysis(
-            canonical_id,
-            &result_data.external_requests,
-            &result_data.imports,
-            &result_data.module_references,
-        );
-        self.ws().record_parsed_edges(canonical_id, &parsed_edges);
+    fn finish_workspace_batch(&self, commits: Vec<WorkspaceParsedCommit>) {
+        if commits.is_empty() {
+            return;
+        }
+
+        // Publish every admitted source into the overlay before resolving
+        // any cross-file parsed edge. A compile-many batch is atomically
+        // admitted by the scheduler, so its dependency resolver must see the
+        // same complete source population instead of the caller's input order.
+        let overlay_records = commits
+            .iter()
+            .map(|commit| (commit.canonical_id.clone(), Arc::clone(&commit.source)))
+            .collect::<Vec<_>>();
+        self.notify_upsert_many(&overlay_records);
+
+        let records = commits
+            .into_iter()
+            .map(|commit| (commit.canonical_id, commit.parsed_edges))
+            .collect::<Vec<_>>();
+        self.ws().record_parsed_edges_many(&records);
+    }
+
+    fn notify_upsert_many(&self, records: &[(String, Arc<str>)]) {
+        self.ws().notify_upsert_many(records);
     }
 
     /// Build the set of `ParsedEdge` records from a file's parse analysis.

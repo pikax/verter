@@ -2715,6 +2715,9 @@ impl NapiVerterHost {
     /// only that input's entry receives a `compiler panic: ...`
     /// error message; the rest of the batch completes normally.
     ///
+    /// This entry point never runs lint rules. Lint remains an explicit,
+    /// independent [`Self::lint`] operation.
+    ///
     /// `options.priority` is `"interactive"` or `"background"`;
     /// invalid strings return a NAPI error. Default is `"background"`.
     #[napi(js_name = "compileMany")]
@@ -3685,6 +3688,31 @@ pub struct NapiCompileBatchEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compile_many_boundary_delegates_directly_without_linting() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("pub fn compile_many(")
+            .expect("compileMany NAPI entry point must exist");
+        let end = source[start..]
+            .find("// Typed audit entry-points")
+            .map(|offset| start + offset)
+            .expect("compileMany must end before the typed audit entry points");
+        let body = &source[start..end];
+
+        assert_eq!(
+            body.matches("self.inner.compile_many(").count(),
+            1,
+            "the native boundary must delegate exactly once to the host batch compiler"
+        );
+        for forbidden in ["Linter::", "lint_with_source(", ".lint("] {
+            assert!(
+                !body.contains(forbidden),
+                "compileMany must never enter the lint subsystem; found `{forbidden}`"
+            );
+        }
+    }
 
     /// The per-file `ssrModuleId` used to have no channel on
     /// `NapiCompileProfile` at all — honored on the batch `runtime-render`

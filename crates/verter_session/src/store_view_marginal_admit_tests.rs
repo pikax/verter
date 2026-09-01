@@ -7,12 +7,12 @@
 //! per-owner work while separately accounting for legitimate admission cost.
 //!
 //! Every measured window is split so it contains ONLY builder work. A
-//! newly-admitted file's own cold resolution during `upsert` is legitimate
-//! work owed by the admission, not by the builder; the earlier
-//! whole-window form of the gate folded it in and so demanded a zero no
-//! correct implementation could produce. The admission is now performed
-//! outside the window and its cost pinned separately — N-independent and
-//! non-zero — so nothing is excluded without being accounted for.
+//! newly-admitted file's own parse during `upsert` is legitimate work owed by
+//! admission, not by the builder. Ordinary import resolution is workspace-owned,
+//! however, and this fixture's `./dep` decision is already warm: admitting one
+//! more owner must reuse it without another resolver miss. Admission is therefore
+//! performed outside the build window and its observable routing cost is pinned
+//! separately as zero at every host size.
 //!
 //! The import-route half of the old N-term is gone. Its digest
 //! (`DerivedFactKind::ImportRoute`) summarised an owner's RESOLVED
@@ -180,12 +180,10 @@ fn recompile_existing_deltas(n: usize) -> AdmitDeltas {
 
 /// The ADMISSION's own cost, with no store-view read in the window at all.
 ///
-/// A brand-new file's first resolution is genuinely cold work: the
-/// scheduler extracts its dependencies and the resolver walks `./dep` for
-/// the first time from this importer. That is legitimate and it is NOT
-/// store-view build work, so the build gate must not measure it — but it
-/// must still be pinned, because "the build is O(1)" is worthless if the
-/// admission it was moved out of is O(N).
+/// A brand-new owner still has to parse, but ordinary import resolution is
+/// workspace-owned and `./dep` already has a reusable workspace decision from
+/// fixture construction. This window pins that admission neither reopens an
+/// owner nor rematerialises or re-resolves the already-warm dependency.
 fn admission_only_deltas(n: usize) -> AdmitDeltas {
     let host = host_with_n_materialized_files(n);
     // Warm the view cache first, so nothing in the window is a store-view
@@ -363,14 +361,11 @@ fn the_owner_visit_counter_moves_only_inside_a_build_scope() {
 /// `IndexedReady` materialisations, zero import-resolution misses, at
 /// N = 250 / 1,000 / 3,000.
 ///
-/// The measurement window deliberately EXCLUDES the admission itself. The
-/// newly-admitted file's own cold resolution during `upsert` is legitimate
-/// work owed by the admission, not by the builder, and folding it into a
-/// build measurement was the defect in this gate's original whole-window
-/// form — it made the required zero unreachable for a correct
-/// implementation. That excluded cost is not dropped: it is pinned
-/// separately, as N-independent and non-zero, by
-/// [`admission_cold_work_is_n_independent_but_not_zero`].
+/// The measurement window deliberately EXCLUDES the admission itself because
+/// parse work is not store-view build work. The routing counters for that
+/// excluded window are still pinned separately: the dependency decision is
+/// already warm, so admission must add zero routing work at every host size in
+/// [`admission_reuses_existing_workspace_resolution_at_any_host_size`].
 ///
 /// What the window does contain is a genuine build, forced and proven: the
 /// admission advances the validation token, so the cached view cannot be
@@ -389,35 +384,23 @@ fn marginal_admit_reopens_no_routing_regardless_of_host_size() {
     );
 }
 
-/// The other half of the split: what admitting a file legitimately costs.
+/// The other half of the split: admission must reuse existing workspace facts.
 ///
-/// Excluding this from the build gate above is only honest if it is pinned
-/// somewhere, so it is pinned here — and pinned in BOTH directions. It must
-/// be identical at N = 250 / 1,000 / 3,000, because a brand-new file's own
-/// cold resolution has nothing to do with how many other files the host
-/// holds; and it must be non-zero, because a zero would mean the admission
-/// resolved nothing and the "excluded" cost this test exists to account for
-/// never happened.
+/// `./dep` was resolved while constructing every fixture, so a new owner must
+/// not cause another resolver miss. The separate anti-vacuity control above
+/// resolves a genuinely cold dependency and proves the miss counter moves.
 #[test]
-fn admission_cold_work_is_n_independent_but_not_zero() {
+fn admission_reuses_existing_workspace_resolution_at_any_host_size() {
     let measured = measure_across_host_sizes(
         "admitting ONE new file, no view read in the window",
         admission_only_deltas,
     );
-    let (_, first) = measured[0];
-    assert!(
-        first.resolution_misses > 0,
-        "the admission must do REAL cold resolution work — a zero here means \
-         the build gate is excluding nothing and this split proves nothing: \
-         {measured:?}"
-    );
     for &(n, deltas) in &measured {
         assert_eq!(
-            deltas, first,
-            "the admitted file's own cold work must not depend on how many \
-             OTHER files the host holds — at N={n} it differs from the N={} \
-             reading. Full table: {measured:?}",
-            measured[0].0
+            deltas, NO_WORK,
+            "at N={n}, admitting a new owner of the already-resolved `./dep` \
+             must reuse workspace resolution and perform no store-view, \
+             materialisation, or resolver-miss work. Full table: {measured:?}"
         );
     }
 }

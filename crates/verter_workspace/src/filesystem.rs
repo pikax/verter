@@ -663,6 +663,70 @@ impl FilesystemWorkspace {
         }
         None
     }
+
+    fn record_parsed_edges_many_with_frozen_evidence(
+        &self,
+        records: &[(String, Vec<crate::types::ParsedEdge>)],
+    ) -> Option<()> {
+        crate::probe_scope!(RECORD_EDGES_FROZEN);
+        if records.is_empty() {
+            return Some(());
+        }
+        let published = self.load_published()?;
+        let mut input_ledgers: Vec<_> = records
+            .iter()
+            .map(|_| {
+                crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets)
+            })
+            .collect();
+
+        loop {
+            let recorder = FilesystemResolutionRecorder::new(self, Arc::clone(&published));
+            for ((canonical_id, edges), ledger) in records.iter().zip(input_ledgers.iter_mut()) {
+                self.engine.observe_parsed_edge_evidence_in_operation(
+                    &recorder,
+                    canonical_id,
+                    edges,
+                    ledger,
+                );
+                ledger.discard_staged_loaded_inputs();
+            }
+
+            let frozen = recorder.freeze();
+            if !frozen.revalidate() {
+                if input_ledgers
+                    .iter_mut()
+                    .any(|ledger| ledger.charge_outer_restart(self).is_err())
+                {
+                    break;
+                }
+                continue;
+            }
+
+            let final_valid = std::cell::Cell::new(true);
+            let committed = self.engine.record_parsed_edges_many_in_operation(
+                &frozen,
+                records,
+                &mut input_ledgers,
+                &|| {
+                    let valid = frozen.complete() && frozen.revalidate();
+                    final_valid.set(valid);
+                    valid
+                },
+            );
+            if committed {
+                return Some(());
+            }
+            if final_valid.get()
+                || input_ledgers
+                    .iter_mut()
+                    .any(|ledger| ledger.charge_outer_restart(self).is_err())
+            {
+                break;
+            }
+        }
+        None
+    }
 }
 
 struct FilesystemResolutionObservations {
@@ -2266,6 +2330,31 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         );
     }
 
+    fn record_parsed_edges_many(&self, records: &[(String, Vec<crate::types::ParsedEdge>)]) {
+        if self
+            .record_parsed_edges_many_with_frozen_evidence(records)
+            .is_none()
+        {
+            for (canonical_id, edges) in records {
+                self.record_parsed_edges_with_frozen_evidence(
+                    canonical_id,
+                    edges,
+                    |reader, ledger, valid| {
+                        self.engine
+                            .record_parsed_edges_in_operation(
+                                reader,
+                                canonical_id,
+                                edges,
+                                ledger,
+                                valid,
+                            )
+                            .then_some(())
+                    },
+                );
+            }
+        }
+    }
+
     fn set_exact_resolutions(
         &self,
         canonical_id: &str,
@@ -2328,6 +2417,10 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
             }
             ((), changed)
         });
+    }
+
+    fn notify_upsert_many(&self, records: &[(String, Arc<str>)]) {
+        self.engine.mutate_overlay_upsert_many(records);
     }
 
     fn notify_close(&self, canonical_id: &str) {
