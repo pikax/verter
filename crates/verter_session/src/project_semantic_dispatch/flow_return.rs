@@ -272,14 +272,20 @@ pub(crate) mod flow_admission_fault_injection {
         pub(crate) unserved_demand_site: AtomicBool,
 
         /// When armed, the INJECTED unproven member's own demand
-        /// preparation runs under the zero obligation budget, so the
-        /// member records a budget refusal while the enclosing root — of
-        /// any domain, including a flow root that plans a demand of its
-        /// own — prepares normally. Consumed by the injection (one shot).
-        /// It exists because the cause under test must provably come from
-        /// the MEMBER: a globally armed budget slot would refuse the
+        /// preparation sees its file unserved and refuses, while the
+        /// enclosing root — of any domain, including a flow root that
+        /// plans a demand of its own — prepares normally. Consumed by
+        /// the injection (one shot).
+        ///
+        /// It exists because the cause under test must provably come
+        /// from the MEMBER: a globally armed slot would refuse the
         /// root's own preparation too, and the resulting class would say
         /// nothing about whether a member's cause survives its deferral.
+        /// It refuses at the demand SITE rather than by shrinking a
+        /// budget because a zero budget is satisfied by an empty
+        /// obligation set — the member would then plan cleanly, record
+        /// no cause, and the test would silently depend on how many
+        /// obligations that particular member happens to plan.
         pub(crate) refuse_injected_member_demand: AtomicBool,
 
         /// When armed, `finalize_flow_demand` sees convergence evidence
@@ -1759,15 +1765,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .swap(false, std::sync::atomic::Ordering::Relaxed);
         if refuse_member {
             knobs
-                .zero_obligation_budget
+                .unserved_demand_site
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         self.prepare_flow_return_demand(&key, idx);
-        if refuse_member {
-            knobs
-                .zero_obligation_budget
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-        }
+        // The one-shot is consumed by the member's own derivation above;
+        // clear it regardless so an unconsumed arm can never leak into
+        // the enclosing root's later reads.
+        knobs
+            .unserved_demand_site
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let provenance = match self.flow_demand_carrier_of(&key) {
             Some(carrier) => carrier.provenance,
             None => self.current_flow_evaluation_provenance(),

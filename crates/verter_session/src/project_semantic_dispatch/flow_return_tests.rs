@@ -7624,9 +7624,9 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
 ///
 /// The refusal is scoped to the INJECTED MEMBER's own preparation, so
 /// the class under test can only have come from the member — a globally
-/// armed budget slot would also refuse a flow root's own preparation and
-/// prove nothing. The control leaves that slot disarmed: the same member
-/// is still refused (its discharge report is missing), records no cause,
+/// armed slot would also refuse a flow root's own preparation and prove
+/// nothing. The control leaves that slot disarmed: the same member is
+/// still refused (its discharge report is missing), records no cause,
 /// and the root keeps the contained class alone.
 ///
 /// Mutation: dropping the member's cause at any of the three drain
@@ -7716,10 +7716,10 @@ fn refused_member_cause_reaches_the_root_that_consumed_its_value() {
                 );
                 assert_eq!(
                     read.partial_reasons
-                        .contains(PartialReasonSet::BUDGET_EXCEEDED),
+                        .contains(PartialReasonSet::UNSTABLE_STATE),
                     armed,
-                    "{label} armed={armed}: the member's budget refusal must reach the root's \
-                     rails as the faulting class it is — and must not appear when no member \
+                    "{label} armed={armed}: the member's refusal must reach the root's rails \
+                     as the faulting class it is — and must not appear when no member \
                      recorded a cause, got {:?}",
                     read.partial_reasons
                 );
