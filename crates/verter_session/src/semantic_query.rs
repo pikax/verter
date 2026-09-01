@@ -8044,18 +8044,21 @@ pub enum SemanticNodeData {
     Alias(SemanticNodeId),
     Object(SurfaceView),
     ObjectSpreadProgram(ObjectSpreadProgram),
-    /// Union composite. The payload is the OPAQUE [`composite::CompositeList`]
-    /// carrier: construction requires an explicit
-    /// [`composite::CompositeCarrierCategory`] mint (the canonical algebra
-    /// for derived composites; a sealed per-category bypass for authored
-    /// shells, ordered carriers, preserving rebuilds and the
+    /// Union composite. The payload is the OPAQUE, KIND-BOUND
+    /// [`composite::CompositeList`] carrier: construction requires an
+    /// explicit [`composite::CompositeCarrierCategory`] mint (the canonical
+    /// algebra for derived composites; a sealed per-category bypass for
+    /// authored shells, ordered carriers, preserving rebuilds and the
     /// normalize-query subject), so a raw member list cannot become a
-    /// semantic union without classifying its carrier semantics. Reads
-    /// deref to `[SemanticNodeId]`.
-    Union(composite::CompositeList),
+    /// semantic union without classifying its carrier semantics — and the
+    /// [`composite::UnionKind`] type parameter pins the payload to THIS
+    /// variant, so a payload extracted from a union cannot be replayed
+    /// into [`Self::Intersection`] (compile error). Reads deref to
+    /// [`composite::CompositeMembers`], then to `[SemanticNodeId]`.
+    Union(composite::CompositeList<composite::UnionKind>),
     /// Intersection composite — same opaque payload discipline as
-    /// [`Self::Union`].
-    Intersection(composite::CompositeList),
+    /// [`Self::Union`], kind-bound to [`composite::IntersectionKind`].
+    Intersection(composite::CompositeList<composite::IntersectionKind>),
     Primitive(PrimitiveKind),
     /// Literal-value carrier. Preserves exact literal identity
     /// (`"idle"`, `42`, `true`) so unions of literals don't collapse
@@ -8400,6 +8403,20 @@ pub enum SemanticNodeData {
 }
 
 impl SemanticNodeData {
+    /// The kind-erased composite payload of a [`Self::Union`] /
+    /// [`Self::Intersection`] arm — the uniform binding for readers that
+    /// handle both composite kinds in one arm (the kind-bound payload
+    /// types differ, so a joint or-pattern cannot bind them directly).
+    /// `None` for every other variant.
+    #[must_use]
+    pub fn composite_members(&self) -> Option<&composite::CompositeMembers> {
+        match self {
+            Self::Union(list) => Some(list),
+            Self::Intersection(list) => Some(list),
+            _ => None,
+        }
+    }
+
     /// Stable discriminant index used by arena instrumentation
     /// to bucket per-variant push counts on
     /// [`crate::types::MetaProvenance::node_arena_pushes_per_discriminant`].

@@ -2243,8 +2243,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match graph.node_data(node).as_deref() {
                 Some(SemanticNodeData::TypeParam { .. }) => out.push(node),
                 Some(SemanticNodeData::Alias(inner)) => stack.push(*inner),
-                Some(SemanticNodeData::Union(members))
-                | Some(SemanticNodeData::Intersection(members)) => {
+                Some(
+                    composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
+                ) => {
+                    let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());
                 }
                 _ => {}

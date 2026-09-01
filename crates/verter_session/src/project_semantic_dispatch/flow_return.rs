@@ -1443,19 +1443,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// storage, no `MergedDecl` or other ordered merge carrier, no
     /// already-sealed completion, and no display path.
     ///
-    /// Scope is deliberately the TOP-LEVEL composite only — the one
-    /// composite shape flow construction itself derives is the join
-    /// UNION, and "normalization normalizes only the already-demanded
-    /// semantic portion". A UNION top re-closes through the canonical
-    /// authority (flatten, lattice absorption, structural `T | T = T`);
-    /// on an already-canonical join this is a no-op returning the same
-    /// interned node — the idempotence law. An INTERSECTION top is left
-    /// untouched: flow never derives one (the join is union-kinded, and
-    /// a singleton join returns its contributor unchanged), so an
-    /// intersection top IS its original constructor-owned carrier —
-    /// possibly an order-sensitive heritage or overload carrier the
-    /// commutative route must not reorder. Every other shape passes
-    /// through verbatim.
+    /// Scope is deliberately the TOP-LEVEL composite only — the join flow
+    /// construction derives is UNION-kinded, and "normalization normalizes
+    /// only the already-demanded semantic portion". A UNION top re-closes
+    /// through the canonical authority (flatten, lattice absorption,
+    /// structural `T | T = T`) — with an O(1) canonicality test first: a
+    /// top whose payload carries the at-rest `Canonical` origin category
+    /// was minted by the canonical authority, so its list IS in canonical
+    /// form (canonicalization is deterministic over immutable node data)
+    /// and the closure returns it unchanged WITHOUT re-running the
+    /// pipeline — no evidence deposit and no evidence-epoch advance on
+    /// the pure no-op path. A non-`Canonical`-tagged top (including a
+    /// canonical-form list that first interned under a bypass mint —
+    /// the first-wins tag) pays the full idempotent re-close.
+    ///
+    /// An INTERSECTION top passes through verbatim — but NOT because flow
+    /// cannot derive one. It can: the per-key substitution inside this
+    /// same close path rebuilds intersections (`substitute.rs`), and
+    /// predicate narrowing constructs one directly. The passthrough is
+    /// sound because every flow-derived intersection top is already
+    /// closed by its constructor — predicate narrowing and the
+    /// order-safe substitution arm route through the canonical
+    /// authority, while the possibly-callable substitution arm is an
+    /// overload-ORDERED carrier the commutative route must not reorder —
+    /// and it is checker-faithful: the pinned compiler preserves the
+    /// same duplicated intersection for the composed-generic case
+    /// (`declare function tag<T>(v: T): T & (() => void)` composed over
+    /// a function argument declaration-emits
+    /// `(() => void) & (() => void)`, measured against tsc 7.0.2).
+    /// Every other shape passes through verbatim.
     ///
     /// Canonicalization evidence deposits ambiently through the single
     /// disposition funnel: inspected file self-roots reach the enclosing
@@ -1469,6 +1485,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let SemanticNodeData::Union(members) = &*data else {
             return result;
         };
+        if members.origin_category()
+            == crate::semantic_query::composite::CompositeOriginCategory::Canonical
+        {
+            // O(1) canonicality: a canonical-minted list is canonical form;
+            // re-closing it is the idempotence no-op — skip the pipeline.
+            return result;
+        }
         let members: Vec<crate::semantic_query::SemanticNodeId> = members.iter().copied().collect();
         drop(data);
         let closed = self.intern_normalized_union_or_intersection(&members, true);
@@ -10023,8 +10046,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             match graph.node_data(node).as_deref() {
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => return true,
                 Some(SemanticNodeData::Alias(target)) => pending.push(*target),
-                Some(SemanticNodeData::Union(arms))
-                | Some(SemanticNodeData::Intersection(arms)) => {
+                Some(
+                    composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
+                ) => {
+                    let arms = composite.composite_members().expect("composite arm");
                     pending.extend(arms.iter().copied());
                 }
                 _ => {}

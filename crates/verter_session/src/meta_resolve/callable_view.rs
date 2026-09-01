@@ -265,7 +265,8 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             // `never`) and is therefore NOT callable — matching
             // `realize_callable_member`, whose intersection arm already refuses
             // when any arm (incl. `undefined`) fails to realize.
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 let is_intersection = matches!(data.as_ref(), SemanticNodeData::Intersection(_));
                 let arms = arms.members_arc();
                 drop(data);
@@ -776,7 +777,8 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             // view OWNS the arm recursion (the normalizer never iterates `Union`):
             // recurse per arm (fail-closed on ANY non-snippet arm) and combine by
             // index.
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 let arms = arms.members_arc();
                 drop(data);
                 let mut per_arm: Vec<Vec<PositionalParamNode>> = Vec::with_capacity(arms.len());
@@ -874,7 +876,8 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 out.push(normalized);
                 Some(())
             }
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 // Same nullish split as `classify_single_callable`: a `Union`
                 // narrows a nullish arm away; an `Intersection` collapses to
                 // `never` on one (`Fn & undefined`) → not slot-callable.

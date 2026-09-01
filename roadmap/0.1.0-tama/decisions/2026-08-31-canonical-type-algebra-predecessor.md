@@ -403,9 +403,23 @@ satisfy it. Recorded here because no in-tree evidence convention exists.
 
 The seal adds no cache, counter, retained candidate or global fingerprint. Its memo
 change only SUPPRESSES publishes. Canonicalization at the newly routed sites runs on
-changed paths only, under budgets the substrate node already established, and the
-pre-seal closure re-interns an already-canonical top to the same node. There is no new
-repeated work to count.
+changed paths only, under budgets the substrate node already established.
+
+CORRECTED TWICE. First, review measured that the closure was NOT free. It early-returns
+only after the full canonical pipeline has already run — flatten with per-member root
+recording, the dedup comparator, absorption, sort and re-intern — so every union-top
+flow close pays that pipeline and deposits non-trivial canonical evidence, advancing
+the evidence epoch even on the pure no-op path. The original wording here, that it
+re-interns an already-canonical top with no new repeated work to count, was inaccurate
+and is retracted rather than quietly amended.
+
+Two consequences were checked. The epoch advance cannot suppress a substitution
+publish, because a substitution walk never calls flow and each substitution captures
+its own epoch baseline after any prior bump. But an incomplete canonicalization inside
+the closure is a new suppression ingress: with a build frame it folds cache-suppress
+onto the enclosing flow build, and without one it marks the whole request partial. The
+direction is safe — it suppresses and never promotes — and no incomplete deposit was
+observed on that path, but the breadth is unquantified.
 
 One real cost is disclosed rather than measured. The evidence-blind-replay fence makes
 the cross-request substitution memo permanently unpublishable for any walk whose
@@ -420,4 +434,13 @@ not attempted here.
 No counters or soak were built to quantify it, per the charter. The trade is stated so
 a later owner can find it, not buried in a measurement that would have had to be
 invented.
+
+Then the review round that followed made it free: a canonically-tagged union top now
+skips the pipeline entirely on an O(1) tag test, with no evidence deposit and no epoch
+advance, and the tag's own semantics guarantee that skip is exactly the idempotence
+no-op. The paragraph above therefore describes the state between those two rounds and
+is retained rather than deleted, because the measurement that produced it is what
+forced the cheap path to exist. For the common case the closure is now O(1); the
+pipeline still runs, with its evidence deposit and epoch advance, for a top that is not
+canonically tagged.
 

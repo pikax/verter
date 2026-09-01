@@ -445,7 +445,8 @@ fn cycle_gate_has_complex_surface(
         SemanticNodeData::Alias(inner) => {
             cycle_gate_has_complex_surface(graph, *inner, depth + 1, reasons)
         }
-        SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+        composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+            let members = composite.composite_members().expect("composite arm");
             members
                 .iter()
                 .any(|&m| cycle_gate_has_complex_surface(graph, m, depth + 1, reasons))
@@ -512,7 +513,8 @@ fn cycle_gate_body_contains_recursive_ref(
                 }
             }
             SemanticNodeData::Alias(inner) => stack.push(*inner),
-            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let members = composite.composite_members().expect("composite arm");
                 for &m in members.iter() {
                     stack.push(m);
                 }
@@ -647,7 +649,8 @@ fn cycle_gate_collect_ref_identities(
                 }
             }
             SemanticNodeData::Alias(inner) => stack.push(*inner),
-            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let members = composite.composite_members().expect("composite arm");
                 for &m in members.iter() {
                     stack.push(m);
                 }

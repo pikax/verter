@@ -6515,7 +6515,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Alias(target) => stack.push(*target),
-                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());
                 }
                 SemanticNodeData::Array { element, .. } => stack.push(*element),
@@ -9312,7 +9313,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match data.as_ref() {
                 SemanticNodeData::Infer { .. } => return true,
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
-                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let members = composite.composite_members().expect("composite arm");
                     for member in members.iter() {
                         stack.push(*member);
                     }
@@ -10104,6 +10106,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         self.deposit_canonical_evidence(composite.evidence);
         composite.node
+    }
+
+    /// Whether a member-wise composite REBUILD may re-decide its arm list
+    /// through the canonical authority — the carrier-semantics dispatch for
+    /// projection/expansion/realization rebuild sites, driven by the
+    /// original payload's at-rest [`CompositeOriginCategory`] fact.
+    ///
+    /// A rebuild of a `Canonical` or `AuthoredShell` composite is a DERIVED
+    /// result (the authored shell stays recoverable through the original
+    /// node and origin evidence), so it routes canonical. Every other
+    /// category preserves verbatim: `OrderedCarrier` order IS overload
+    /// precedence; `PreservingRebuild` lost its original's category, so
+    /// re-deciding is unproven; `QuerySubject` shape is caller contract;
+    /// `TestFixture` is a deliberately raw fixture.
+    ///
+    /// INTERSECTION rebuilds additionally fail CLOSED on callability —
+    /// mirroring the substitution split: when any rebuilt arm may
+    /// contribute call signatures the rebuilt list is an overload-ordered
+    /// carrier and the commutative route must not reorder it. (This guard
+    /// also neutralizes the one order-bearing first-wins tag collision —
+    /// see the `composite` module docs' identity discipline.)
+    ///
+    /// EXHAUSTIVE over the category registry — no wildcard arm.
+    pub(crate) fn composite_rebuild_re_decides(
+        &self,
+        category: crate::semantic_query::composite::CompositeOriginCategory,
+        rebuilt: &[SemanticNodeId],
+        is_union: bool,
+    ) -> bool {
+        use crate::semantic_query::composite::CompositeOriginCategory as C;
+        let derived = match category {
+            C::Canonical | C::AuthoredShell => true,
+            C::OrderedCarrier | C::PreservingRebuild | C::QuerySubject => false,
+            #[cfg(any(test, feature = "test-support"))]
+            C::TestFixture => false,
+        };
+        derived
+            && (is_union
+                || !rebuilt.iter().any(|&arm| {
+                    super::walk::value_may_contribute_call_signatures(self.graph(), arm)
+                }))
     }
 }
 

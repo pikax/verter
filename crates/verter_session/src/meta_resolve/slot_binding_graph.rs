@@ -324,7 +324,8 @@ fn accumulate_lowered_node_carrier_deps(
             SemanticNodeData::Alias(inner) => {
                 stack.push(*inner);
             }
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 for arm in arms.iter() {
                     stack.push(*arm);
                 }
@@ -574,9 +575,12 @@ fn node_contains_free_type_param(
         SemanticNodeData::Alias(inner) => {
             node_contains_free_type_param(dispatch, *inner, depth + 1)
         }
-        SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => members
-            .iter()
-            .any(|m| node_contains_free_type_param(dispatch, *m, depth + 1)),
+        composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+            let members = composite.composite_members().expect("composite arm");
+            members
+                .iter()
+                .any(|m| node_contains_free_type_param(dispatch, *m, depth + 1))
+        }
         SemanticNodeData::Array { element, .. } => {
             node_contains_free_type_param(dispatch, *element, depth + 1)
         }
@@ -1515,7 +1519,8 @@ fn node_reaches_non_owner_ref(
                 || matches!(index, crate::semantic_query::IndexKey::Computed(inner) if recur(*inner))
         }
         SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
-        SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+        composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+            let members = composite.composite_members().expect("composite arm");
             members.iter().copied().any(recur)
         }
         SemanticNodeData::MergedDecl {

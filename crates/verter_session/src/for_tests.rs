@@ -919,6 +919,6 @@ pub fn dispatch_flow_demand_footprint_for_tests(
 /// category variant, so the production mint surface stays unforgeable
 /// from outside the crate.
 #[rustfmt::skip]
-pub fn composite_fixture_for_tests(members: std::sync::Arc<[crate::semantic_query::SemanticNodeId]>) -> crate::semantic_query::composite::CompositeList {
+pub fn composite_fixture_for_tests<K: crate::semantic_query::composite::CompositeKind>(members: std::sync::Arc<[crate::semantic_query::SemanticNodeId]>) -> crate::semantic_query::composite::CompositeList<K> {
     crate::semantic_query::composite::CompositeList::test_fixture(members)
 }

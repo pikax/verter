@@ -584,4 +584,5 @@ fn composite_mint_unforgeable_outside_crate() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/composite_mint_unforgeable.rs");
     t.compile_fail("tests/cases/compile-fail/composite_struct_literal_forge.rs");
+    t.compile_fail("tests/cases/compile-fail/composite_replay_cross_kind.rs");
 }

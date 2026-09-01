@@ -2998,7 +2998,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             match data.as_ref() {
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
-                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());
                 }
                 SemanticNodeData::Array { element, .. } => stack.push(*element),
@@ -3711,7 +3712,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Alias(inner) => stack.push((*inner, shadowed)),
-                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().map(|member| (*member, shadowed)));
                 }
                 SemanticNodeData::Array { element, .. } => stack.push((*element, shadowed)),

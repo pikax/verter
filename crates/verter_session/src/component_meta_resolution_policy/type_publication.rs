@@ -538,8 +538,12 @@ fn normalized_projection_shape_equivalent(
                     stack.push((left.value_type, right.value_type));
                 }
             }
-            (SemanticNodeData::Union(left), SemanticNodeData::Union(right))
-            | (SemanticNodeData::Intersection(left), SemanticNodeData::Intersection(right)) => {
+            (
+                left @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
+                right @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
+            ) if left.discriminant_index() == right.discriminant_index() => {
+                let left = left.composite_members().expect("composite arm");
+                let right = right.composite_members().expect("composite arm");
                 if left.len() != right.len() {
                     return Some(false);
                 }
@@ -1066,7 +1070,8 @@ fn collect_macro_participating_refs(
         }
         match ctx.node_data(node).as_deref() {
             Some(SemanticNodeData::Alias(target)) => worklist.push(*target),
-            Some(SemanticNodeData::Union(arms)) | Some(SemanticNodeData::Intersection(arms)) => {
+            Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
+                let arms = composite.composite_members().expect("composite arm");
                 worklist.extend(arms.iter().copied());
             }
             Some(SemanticNodeData::Array { element, .. }) => worklist.push(*element),
@@ -1204,7 +1209,8 @@ fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>)
         match data.as_ref() {
             SemanticNodeData::ImportType(_) => return true,
             SemanticNodeData::Alias(target) => worklist.push(*target),
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 worklist.extend(arms.iter().copied());
             }
             SemanticNodeData::Array { element, .. } | SemanticNodeData::KeyOf { base: element } => {

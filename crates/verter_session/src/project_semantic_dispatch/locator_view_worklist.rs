@@ -1189,7 +1189,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .filter(|_| remaining == 0)
                     .map(|default| (default, context))
             }
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 arms.get(index).map(|child| (*child, context))
             }
             SemanticNodeData::MergedDecl { contributors: arms } => {
@@ -1291,7 +1292,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         context: ProjectionReductionContext,
     ) -> ProjectionChildPlan<'data> {
         match data {
-            SemanticNodeData::Union(children) | SemanticNodeData::Intersection(children) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let children = composite.composite_members().expect("composite arm");
                 ProjectionChildPlan::Uniform { children, context }
             }
             SemanticNodeData::MergedDecl {

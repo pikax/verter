@@ -903,3 +903,94 @@ mod query_error_raise_routing {
         );
     }
 }
+
+/// `ClosedTypeFact::LeafUnion` is the DECIDED result of a fully closed
+/// reduction — a derived composite, not authored syntax and not a
+/// locator-shape shell. Raising it therefore routes through the canonical
+/// authority: duplicate decided leaves collapse (`"a" | "a"` is the one
+/// literal), never a duplicate-arm `Union(literalA, literalA)`.
+#[test]
+fn closed_leaf_union_with_duplicate_leaves_raises_to_the_singleton_literal() {
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let source = SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(Arc::from(
+        vec![
+            LeafTypeFact::StringLiteral("a".to_string()),
+            LeafTypeFact::StringLiteral("a".to_string()),
+        ]
+        .into_boxed_slice(),
+    )));
+    let raised = dispatch
+        .raise_semantic_type_source_to_hot(
+            &source,
+            navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
+        )
+        .at_optional_boundary()
+        .expect("a closed leaf union must raise");
+
+    let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
+    match data.as_deref() {
+        Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
+            assert_eq!(value, "a", "the surviving literal is the decided leaf");
+        }
+        other => panic!(
+            "the decided `\"a\" | \"a\"` reduction must raise to the singleton \
+             literal through the canonical authority, got {other:?}"
+        ),
+    }
+}
+
+/// The nested `FactOrLocator::LeafUnion` position composes exactly like the
+/// top-level arm: a decided duplicate-leaf union collapses through the
+/// canonical authority inside its containing fact shell.
+#[test]
+fn nested_leaf_union_with_duplicate_leaves_composes_the_singleton_literal() {
+    use verter_type_expr::facts::{TupleElementFact, TuplePayloadFact};
+
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let source = SemanticTypeSource::Closed(ClosedTypeFact::Tuple(TuplePayloadFact {
+        readonly: false,
+        elements: Arc::from(
+            vec![TupleElementFact {
+                label: Some("payload".to_string()),
+                optional: false,
+                rest: false,
+                ty: FactOrLocator::LeafUnion(Arc::from(
+                    vec![
+                        LeafTypeFact::StringLiteral("a".to_string()),
+                        LeafTypeFact::StringLiteral("a".to_string()),
+                    ]
+                    .into_boxed_slice(),
+                )),
+            }]
+            .into_boxed_slice(),
+        ),
+    }));
+    let raised = dispatch
+        .raise_semantic_type_source_to_hot(
+            &source,
+            navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
+        )
+        .at_optional_boundary()
+        .expect("a closed tuple with a duplicate-leaf union element must raise");
+
+    let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
+    let Some(SemanticNodeData::Tuple { elements, .. }) = data.as_deref() else {
+        panic!("the closed tuple must compose a Tuple node, got {data:?}");
+    };
+    let element_data = crate::project_semantic_dispatch::node_data_for(&host, elements[0].value);
+    match element_data.as_deref() {
+        Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
+            assert_eq!(value, "a", "the surviving literal is the decided leaf");
+        }
+        other => panic!(
+            "the nested decided `\"a\" | \"a\"` reduction must compose the \
+             singleton literal through the canonical authority, got {other:?}"
+        ),
+    }
+}

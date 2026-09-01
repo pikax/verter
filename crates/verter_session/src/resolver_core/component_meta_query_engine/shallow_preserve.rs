@@ -514,7 +514,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     )
                 })
             }
-            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let members = composite.composite_members().expect("composite arm");
                 members.iter().any(|&member| {
                     self.node_contains_imported_utility_route(
                         scope_canonical_id,
@@ -810,7 +811,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     depth + 1,
                 )
             }),
-            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let members = composite.composite_members().expect("composite arm");
                 members.iter().any(|&member| {
                     self.node_has_imported_generic_route(
                         scope_canonical_id,
@@ -961,7 +963,8 @@ fn node_references_type_param_names(
                 || matches!(index, crate::semantic_query::IndexKey::Computed(inner) if recur(*inner))
         }
         SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
-        SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+        composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+            let members = composite.composite_members().expect("composite arm");
             members.iter().any(|&m| recur(m))
         }
         SemanticNodeData::MergedDecl {

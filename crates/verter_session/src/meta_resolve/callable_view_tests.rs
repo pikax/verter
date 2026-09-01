@@ -3607,3 +3607,36 @@ fn validated_snippet_params_conditional_is_present_bindingless() {
         "a `Snippet<Cond>` (open conditional `Params`) is a PRESENT, binding-less slot (dropped pre-fix)"
     );
 }
+
+/// Realizing a DERIVED (authored-shell) union of slot-callable arms whose
+/// realizations coincide rebuilds through the canonical authority: two
+/// distinct alias arms onto the one Function realize to that Function,
+/// never `Union(f, f)`. (An overload-ORDERED carrier keeps its verbatim
+/// rebuild — the canonical route applies only where the origin category
+/// proves re-deciding safe.)
+#[test]
+fn realize_of_derived_union_collapses_duplicate_realized_arms() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    let f = function(&graph, vec![], void);
+    let via_one = alias(&graph, f);
+    let via_two = alias(&graph, via_one);
+    assert_ne!(via_one, via_two, "the two alias arms are distinct nodes");
+
+    // The production shape: `default: SlotA | SlotB` raises an AUTHORED
+    // union shell of reference carriers.
+    let authored = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
+            vec![via_one, via_two].into_boxed_slice(),
+        )),
+    ));
+    assert_eq!(
+        realize_callable_member(&dispatch, authored, navigate()),
+        Some(f),
+        "both arms realize to the one Function — the derived rebuild \
+         collapses to it instead of publishing `Union(f, f)`"
+    );
+}

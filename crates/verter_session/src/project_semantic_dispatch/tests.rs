@@ -29315,11 +29315,14 @@ fn pre_seal_closure_canonicalizes_union_top_and_is_idempotent() {
     );
 }
 
-/// An INTERSECTION top passes through the pre-seal closure verbatim:
-/// flow never derives one (the join is union-kinded; a singleton join
-/// returns its contributor unchanged), so an intersection top is its
-/// original constructor-owned carrier — possibly an order-sensitive
-/// heritage or overload carrier the commutative route must not reorder.
+/// An INTERSECTION top passes through the pre-seal closure verbatim —
+/// NOT because flow cannot derive one (substitution inside the close
+/// path rebuilds intersections, and predicate narrowing constructs one),
+/// but because every flow-derived intersection top is already closed by
+/// its constructor or is an overload-ordered carrier the commutative
+/// route must not reorder; the pinned compiler preserves the same
+/// duplicated intersection for the composed-generic case (measured, see
+/// `close_flow_result_pre_seal`).
 #[test]
 fn pre_seal_closure_leaves_intersection_top_untouched() {
     use crate::semantic_query::FlowReturnResult;
@@ -29345,5 +29348,273 @@ fn pre_seal_closure_leaves_intersection_top_untouched() {
         inter,
         "an intersection top is constructor-owned and passes through the \
          pre-seal closure verbatim"
+    );
+}
+
+/// The pre-seal closure's canonicality test is O(1): a union top MINTED by
+/// the canonical authority is already closed, so the closure returns it
+/// unchanged WITHOUT re-running the canonical pipeline — no evidence
+/// deposit and no evidence-epoch advance. (The epoch is what makes the
+/// cross-request substitute memo unpublishable for walks that observed
+/// file-scoped roots, so a pure no-op close must not burn it; the
+/// file-scoped members below make the pipeline's deposit observable.)
+#[test]
+fn pre_seal_closure_skips_the_pipeline_for_a_canonical_tagged_union_top() {
+    use crate::semantic_query::FlowReturnResult;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let file_scope = |canonical: &str, hash: u8| NodeScopeId::File {
+        canonical_id: Arc::from(canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [hash; 16],
+        local_scope: None,
+    };
+    let a = graph.intern_node_with_scope(
+        SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String("a".to_string())),
+        file_scope("/w/pre-seal-skip-a.ts", 7),
+    );
+    let b = graph.intern_node_with_scope(
+        SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String("b".to_string())),
+        file_scope("/w/pre-seal-skip-b.ts", 9),
+    );
+    let top = dispatch.intern_normalized_union_or_intersection(&[a, b], true);
+    assert!(
+        matches!(
+            graph.node_data(top).as_deref(),
+            Some(SemanticNodeData::Union(_))
+        ),
+        "the fixture needs a multi-arm canonical union top"
+    );
+
+    let epoch_before = dispatch.canonical_evidence_epoch.get();
+    let closed =
+        dispatch.close_flow_result_pre_seal(FlowReturnResult::new(&graph, top, false, None));
+    assert_eq!(
+        closed.return_type(),
+        top,
+        "a canonical top re-closes to itself (idempotence)"
+    );
+    assert_eq!(
+        dispatch.canonical_evidence_epoch.get(),
+        epoch_before,
+        "a canonical-tagged top skips the pipeline: no evidence deposit, no \
+         evidence-epoch advance on the no-op path"
+    );
+}
+
+/// An empty-path `Expanded` projection whose arm expansion lands on a node
+/// the union already carries (`A | <A's own object>`: the reference arm
+/// expands to the sibling arm's node) rebuilds a DERIVED projection
+/// result, not an ordered carrier: it routes through the canonical
+/// authority, so the duplicate constituents collapse to the shared object
+/// instead of publishing `Union(sharedObject, sharedObject)`.
+#[test]
+fn expanded_projection_of_alias_twin_union_collapses_to_the_shared_object() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/alias-twin-union.ts",
+        "export type A = { x: string };\n",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(
+            "/w/alias-twin-union.ts",
+            "A",
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let shared_object = outcome.ok().flatten().expect("A must resolve");
+    assert!(
+        matches!(
+            graph.node_data(shared_object).as_deref(),
+            Some(SemanticNodeData::Object(_))
+        ),
+        "the fixture needs A's materialised object"
+    );
+    let whole_hash = host
+        .shallow_file_state("/w/alias-twin-union.ts")
+        .expect("the fixture file must have shallow state")
+        .whole_hash;
+    let placeholder = graph.intern_node(SemanticNodeData::Opaque(
+        crate::semantic_query::QueryError::DeclPlaceholder {
+            canonical_id: Arc::from("/w/alias-twin-union.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name: Arc::from("A"),
+            whole_hash,
+        },
+    ));
+    let base = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
+            vec![placeholder, shared_object].into_boxed_slice(),
+        )),
+    ));
+    let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    });
+    let QueryResult::Value(SemanticQueryOutput { value: result, .. }) = projected else {
+        panic!("the duplicate-expansion union must project, got {projected:?}");
+    };
+    assert_eq!(
+        result,
+        shared_object,
+        "the reference arm expands onto the sibling's object — the derived \
+         rebuild must collapse `obj | obj` to the one object, got {:?}",
+        graph.node_data(result)
+    );
+}
+
+/// An `Instantiate` whose generic locator VIEW projection reduces BOTH
+/// union arms to the same node (`T["a"] | T["b"]` over a source whose two
+/// members share one value type) rebuilds a DERIVED projection result: it
+/// routes through the canonical authority, so the instantiated body is
+/// the one shared member type, never `Union(string, string)`. (The
+/// substitution walk is not on this route — the view worklist applies the
+/// binding and reduces the operator in-view — so this pins the locator
+/// view worklist's rebuild specifically.)
+#[test]
+fn instantiation_of_duplicate_projection_union_collapses_to_the_shared_arm() {
+    use crate::semantic_query::{InstantiateContext, InstantiateKey, SemanticQueryKey};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/dup-param-union.ts",
+        "export type Src = { a: string; b: string };\n\
+         export type Both<T> = T[\"a\"] | T[\"b\"];\n",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(
+            "/w/dup-param-union.ts",
+            "Src",
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let src_node = outcome.ok().flatten().expect("Src must resolve");
+
+    let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
+        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("/w/dup-param-union.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("Both"),
+        ),
+        Arc::from(vec![src_node].into_boxed_slice()),
+        InstantiateContext::non_file(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+            BodySourceWitness::mint_for_unit_tests(),
+        ),
+    )));
+    let QueryResult::Value(result) = read.value else {
+        panic!(
+            "`Both<Src>` must instantiate to a value, got {:?}",
+            read.value
+        );
+    };
+    let data = graph.node_data(result);
+    assert!(
+        matches!(
+            data.as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+        ),
+        "both projected arms are the one `string` node — the derived \
+         projection rebuild must collapse to it, got {data:?}"
+    );
+}
+
+/// Substitution's canonical composite routes intern the DERIVED rebuild
+/// under `Global` (a derived multi-arm composite has no lexical scope; its
+/// file dependence rides the canonical evidence and observed self-roots),
+/// while the possibly-callable intersection rebuild — an overload-ordered
+/// carrier — PRESERVES the origin shell's `File` scope. The one prior
+/// regression for the `intern_preserving_scope` invariant exercises an
+/// `Object` shell only; this pins the composite split explicitly.
+#[test]
+fn substituted_union_interns_global_while_callable_intersection_preserves_scope() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let file_scope = || NodeScopeId::File {
+        canonical_id: Arc::from("/w/subst-composite-scope.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [11; 16],
+        local_scope: None,
+    };
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+
+    // UNION: `T | string` under a File-scoped authored shell; `T := number`
+    // routes the changed rebuild through the canonical authority — Global.
+    let union_node = graph.intern_node_with_scope(
+        SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
+                vec![parameter_node, string_node].into_boxed_slice(),
+            )),
+        ),
+        file_scope(),
+    );
+    let substituted =
+        dispatch.substitute_semantic_type_param(union_node, parameter_node, number_node);
+    assert!(
+        matches!(
+            graph.node_data(substituted).as_deref(),
+            Some(SemanticNodeData::Union(_))
+        ),
+        "`number | string` keeps both arms"
+    );
+    assert_eq!(
+        graph.node_scope(substituted),
+        Some(NodeScopeId::Global),
+        "a substituted DERIVED union interns under Global — the origin File \
+         scope is deliberately NOT copied onto the canonical rebuild"
+    );
+
+    // INTERSECTION with a possibly-callable contributor: the substituted
+    // rebuild is an overload-ordered carrier and PRESERVES the origin
+    // shell's File scope.
+    let callable = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
+        params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new().into_boxed_slice()),
+        return_type: string_node,
+        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string_node),
+        signature_span: None,
+        return_type_span: None,
+    });
+    let intersection_node = graph.intern_node_with_scope(
+        SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
+                vec![callable, parameter_node].into_boxed_slice(),
+            )),
+        ),
+        file_scope(),
+    );
+    let substituted =
+        dispatch.substitute_semantic_type_param(intersection_node, parameter_node, number_node);
+    assert_eq!(
+        graph.node_scope(substituted),
+        Some(file_scope()),
+        "a possibly-callable substituted intersection is an overload-ordered \
+         carrier and keeps its origin File scope"
     );
 }

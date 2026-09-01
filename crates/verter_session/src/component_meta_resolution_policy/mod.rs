@@ -446,7 +446,8 @@ fn harvest_role_bearing_refs_node<F: FnMut(&str)>(
         };
         match data.as_ref() {
             SemanticNodeData::Alias(target) => worklist.push(*target),
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 worklist.extend(arms.iter().copied());
             }
             SemanticNodeData::Array { element, .. } => worklist.push(*element),

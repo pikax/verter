@@ -508,9 +508,13 @@ pub(super) fn indexed_access_targets_macro_participating(
         Some(SemanticNodeData::Alias(target)) => {
             indexed_access_targets_macro_participating(*target, ctx)
         }
-        Some(SemanticNodeData::Union(arms)) | Some(SemanticNodeData::Intersection(arms)) => arms
-            .iter()
-            .any(|arm| indexed_access_targets_macro_participating(*arm, ctx)),
+        Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
+            composite
+                .composite_members()
+                .expect("composite arm")
+                .iter()
+                .any(|arm| indexed_access_targets_macro_participating(*arm, ctx))
+        }
         _ => false,
     }
 }

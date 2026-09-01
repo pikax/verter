@@ -287,9 +287,11 @@ fn realize_callable_member_inner(
         // unresolved alias carriers. If ANY arm does not realize to a callable
         // the whole composite is not slot-callable (`None`) — the slot
         // normalizer then classifies the member non-slot.
-        SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+        composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
             let is_union = matches!(data.as_ref(), SemanticNodeData::Union(_));
-            let arms = arms.members_arc();
+            let members = composite.composite_members().expect("composite arm");
+            let category = members.origin_category();
+            let arms = members.members_arc();
             drop(data);
             let mut realized_arms: Vec<crate::semantic_query::SemanticNodeId> =
                 Vec::with_capacity(arms.len());
@@ -305,17 +307,29 @@ fn realize_callable_member_inner(
             if realized_arms.iter().zip(arms.iter()).all(|(a, b)| a == b) {
                 return Some(node);
             }
-            // Order- and arity-preserving rebuild: realized arms replace
-            // the originals 1:1, and the composite may be an
-            // overload-ordered carrier (slot-callable arms), so order is
-            // never re-decided here.
-            let boxed = crate::semantic_query::composite::CompositeList::preserving_rebuild(
-                Arc::from(realized_arms.into_boxed_slice()),
-            );
+            // Carrier-semantics dispatch on the original composite's
+            // at-rest origin category: realizing a canonical/authored
+            // composite is a DERIVED result and routes through the
+            // canonical authority (two alias arms realizing to the one
+            // Function collapse to it instead of `Union(f, f)`); an
+            // overload-ORDERED carrier — and, fail-closed, any
+            // intersection whose realized arms may carry call signatures
+            // — keeps its verbatim order- and arity-preserving rebuild.
+            if dispatch.composite_rebuild_re_decides(category, &realized_arms, is_union) {
+                return Some(
+                    dispatch.intern_normalized_union_or_intersection(&realized_arms, is_union),
+                );
+            }
+            let realized: Arc<[crate::semantic_query::SemanticNodeId]> =
+                Arc::from(realized_arms.into_boxed_slice());
             let rebuilt = if is_union {
-                SemanticNodeData::Union(boxed)
+                SemanticNodeData::Union(
+                    crate::semantic_query::composite::CompositeList::preserving_rebuild(realized),
+                )
             } else {
-                SemanticNodeData::Intersection(boxed)
+                SemanticNodeData::Intersection(
+                    crate::semantic_query::composite::CompositeList::preserving_rebuild(realized),
+                )
             };
             Some(
                 dispatch

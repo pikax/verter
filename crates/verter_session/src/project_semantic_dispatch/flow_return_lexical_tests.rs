@@ -3951,7 +3951,8 @@ fn reachable_type_param_names(
             SemanticNodeData::TypeParam { display_name, .. } => {
                 names.push(display_name.to_string());
             }
-            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let members = composite.composite_members().expect("composite arm");
                 stack.extend(members.iter().copied());
             }
             SemanticNodeData::Array { element, .. } => stack.push(*element),

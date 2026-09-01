@@ -354,15 +354,18 @@ impl ProjectSemanticDispatch<'_> {
             }
             SemanticTypeSource::Closed(fact) => match fact {
                 ClosedTypeFact::Leaf(leaf) => self.raise_leaf_fact(leaf, &ctx).into(),
-                // A closed leaf-union composes directly: each leaf lowers
-                // through the shared in-scope lowerer and the ordered union
-                // node is interned as data (a decided result — no
-                // re-resolution, no normalization pass). The mint is the
-                // authored/decided-shape SHELL bypass: the arm list is a
-                // fact-decided form in fact order under the owning file's
-                // scope, and normalizing it here would be a reduction
-                // inside fact lowering — a derived composite built FROM it
-                // still routes canonical at its own construction site.
+                // A closed leaf-union is the DECIDED result of a fully
+                // closed reduction — a DERIVED composite, not authored
+                // syntax and not a locator-shape shell. Each leaf lowers
+                // through the shared in-scope lowerer, and the union
+                // constructs through the canonical authority with the
+                // multi-arm result re-anchored to the owning fact scope
+                // (see [`Self::raise_closed_leaf_union`]): duplicate
+                // decided leaves collapse, a singleton unwraps to its
+                // member, and the evidence funnel roots any file-scoped
+                // inspected arm. Display never reads this node's arm
+                // order — the output sink renders `Closed(LeafUnion)`
+                // from the FACT's ordered leaves directly.
                 ClosedTypeFact::LeafUnion(leaves) => {
                     let scope = self.raise_scope(&ctx);
                     let members: Vec<SemanticNodeId> = leaves
@@ -380,14 +383,7 @@ impl ProjectSemanticDispatch<'_> {
                         })
                         .collect();
                     SourceRaiseOutcome::Raised(HotTypeRef::new(
-                        self.graph().intern_node_with_scope(
-                            SemanticNodeData::Union(
-                                crate::semantic_query::composite::CompositeList::authored_shell(
-                                    Arc::from(members.into_boxed_slice()),
-                                ),
-                            ),
-                            scope,
-                        ),
+                        self.raise_closed_leaf_union(&members, &scope),
                     ))
                 }
                 ClosedTypeFact::Object(object) => {
@@ -1021,7 +1017,8 @@ impl ProjectSemanticDispatch<'_> {
                 // the shared heap worklist. Validation therefore inspects the
                 // resulting graph directly; it never recursively re-demands
                 // each suffix (which would be both stackful and quadratic).
-                SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms) => {
+                composite @ (SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_)) => {
+                    let arms = composite.composite_members().expect("composite arm");
                     pending.extend(arms.iter().copied());
                 }
                 _ if super::raise::node_is_unknown_materializing_failure(self, current) => {

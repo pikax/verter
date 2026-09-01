@@ -3842,23 +3842,43 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             results.push(parent);
             return;
         }
-        // Order- and arity-preserving rebuild of the ORIGINAL composite's
-        // arms with their expansion results: the rebuilt list inherits the
-        // original carrier's semantics (an ordered carrier stays ordered),
-        // so this site must not re-decide them.
-        let rebuilt = match kind {
-            ExpansionCombineKind::Intersection => {
-                self.graph().intern_node(SemanticNodeData::Intersection(
+        // Carrier-semantics dispatch on the ORIGINAL composite's at-rest
+        // origin category: the expansion of a canonical/authored composite
+        // is a DERIVED projection result and routes through the canonical
+        // authority (two reference arms expanding to the same surface
+        // collapse — `T | T = T` over the expansion output — while the
+        // authored shell stays recoverable via `parent`); an ordered
+        // carrier (or any category whose order was not proven re-decidable)
+        // keeps the order- and arity-preserving rebuild verbatim.
+        let is_union = matches!(kind, ExpansionCombineKind::Union);
+        let category = self
+            .graph()
+            .node_data(parent)
+            .as_deref()
+            .and_then(SemanticNodeData::composite_members)
+            .map(crate::semantic_query::composite::CompositeMembers::origin_category);
+        let re_decides = category.is_some_and(|category| {
+            self.dispatch
+                .composite_rebuild_re_decides(category, &expanded, is_union)
+        });
+        let rebuilt = if re_decides {
+            self.dispatch
+                .intern_normalized_union_or_intersection(&expanded, is_union)
+        } else {
+            match kind {
+                ExpansionCombineKind::Intersection => {
+                    self.graph().intern_node(SemanticNodeData::Intersection(
+                        crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                            Arc::from(expanded.into_boxed_slice()),
+                        ),
+                    ))
+                }
+                ExpansionCombineKind::Union => self.graph().intern_node(SemanticNodeData::Union(
                     crate::semantic_query::composite::CompositeList::preserving_rebuild(Arc::from(
                         expanded.into_boxed_slice(),
                     )),
-                ))
-            }
-            ExpansionCombineKind::Union => self.graph().intern_node(SemanticNodeData::Union(
-                crate::semantic_query::composite::CompositeList::preserving_rebuild(Arc::from(
-                    expanded.into_boxed_slice(),
                 )),
-            )),
+            }
         };
         results.push(rebuilt);
     }
@@ -6616,7 +6636,8 @@ pub(super) fn value_may_contribute_call_signatures(
             }
             // Transparent carriers / composites — classify what they carry.
             SemanticNodeData::Alias(inner) => stack.push(*inner),
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 stack.extend(arms.iter().copied());
             }
             SemanticNodeData::SyntheticBinding { value_node, .. } => {

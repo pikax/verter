@@ -11,12 +11,21 @@
 //! the change-tracking avoids the wasted recursive walk and
 //! allocations on the hot substitute path.
 //!
-//! Both helpers operate on immutable `SemanticNodeData` and publish
-//! new shell identity via [`SemanticGraphStore::intern_preserving_scope`]
+//! Both helpers operate on immutable `SemanticNodeData`. Non-composite
+//! shells (objects, arrays, tuples, aliases, `MergedDecl`, ...) publish
+//! rebuilt identity via [`SemanticGraphStore::intern_preserving_scope`]
 //! so the rebuilt shell's scope is preserved from the origin shell.
-//! The caller's completion fence observes the new dep-signature
-//! through the shared memo once the substituted result enters a
-//! build flow.
+//! Composite rebuilds SPLIT by carrier semantics: a changed union and a
+//! provably order-safe changed intersection are DERIVED composites and
+//! route through the canonical authority, which interns a multi-arm
+//! result under `Global` BY DESIGN (a derived composite has no lexical
+//! scope; its file dependence rides the canonical evidence deposit and
+//! observed self-roots, and the evidence-blind-replay fence below keeps
+//! the cross-request memo from replaying an under-rooted entry) — while
+//! a possibly-callable changed intersection is an overload-ordered
+//! carrier and keeps `intern_preserving_scope`. The caller's completion
+//! fence observes the new dep-signature through the shared memo once
+//! the substituted result enters a build flow.
 //!
 //! **Binder identity contract.** Binder matching is done by
 //! `SemanticNodeId` equality (the binder's interned `TypeParam`
@@ -1098,7 +1107,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stack.extend(program.child_nodes());
                 }
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
-                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let members = composite.composite_members().expect("composite arm");
                     for member in members.iter() {
                         stack.push(*member);
                     }
@@ -1245,7 +1255,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::Alias(t) => {
                     stack.push(*t);
                 }
-                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let members = composite.composite_members().expect("composite arm");
                     for member in members.iter() {
                         stack.push(*member);
                     }

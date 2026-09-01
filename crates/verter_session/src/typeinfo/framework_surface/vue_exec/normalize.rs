@@ -1315,7 +1315,8 @@ fn authored_candidate_matches_member_value(
     // shape or a stable unresolved carrier — fails the proof and therefore
     // selects the graph-native merged replay source.
     match node_data_for(dispatch.ctx, member_value).as_deref() {
-        Some(SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms)) => {
+        Some(composite @ (SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_))) => {
+            let arms = composite.composite_members().expect("composite arm");
             !arms.is_empty()
                 && arms.iter().all(|&arm| {
                     crate::project_semantic_dispatch::raise::raised_shape_eq_nodes(

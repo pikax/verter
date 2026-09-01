@@ -815,7 +815,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             }
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 if is_whole_surface_published(parent_context) {
                     for arm in arms.iter() {
                         stack.push(ReduceFrame::descend(*arm, parent_context));
@@ -4216,7 +4217,8 @@ impl<'a> OpenWalk<'a> {
             SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_) => false,
 
             // --- composites: open iff any arm is open ---
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 arms.iter().any(|a| self.node_is_open(ctx, *a))
             }
             SemanticNodeData::MergedDecl { contributors } => {

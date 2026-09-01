@@ -297,7 +297,8 @@ fn push_child_ids(data: &SemanticNodeData, out: &mut Vec<SemanticNodeId>) -> boo
             out.extend(program.child_nodes());
             true
         }
-        D::Union(members) | D::Intersection(members) => {
+        composite @ (D::Union(_) | D::Intersection(_)) => {
+            let members = composite.composite_members().expect("composite arm");
             out.extend(members.iter().copied());
             true
         }
@@ -721,16 +722,25 @@ fn canonicalize(
         [] => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
         [only] => *only,
         _ => {
-            let list = crate::semantic_query::composite::CompositeList::minted(
-                Arc::from(kept.into_boxed_slice()),
-                crate::semantic_query::composite::CompositeCarrierCategory::Canonical(
-                    CanonicalMint { _sealed: () },
-                ),
-            );
+            let members: Arc<[SemanticNodeId]> = Arc::from(kept.into_boxed_slice());
             if is_union {
-                graph.intern_node(SemanticNodeData::Union(list))
+                graph.intern_node(SemanticNodeData::Union(
+                    crate::semantic_query::composite::CompositeList::minted(
+                        members,
+                        crate::semantic_query::composite::CompositeCarrierCategory::Canonical(
+                            CanonicalMint { _sealed: () },
+                        ),
+                    ),
+                ))
             } else {
-                graph.intern_node(SemanticNodeData::Intersection(list))
+                graph.intern_node(SemanticNodeData::Intersection(
+                    crate::semantic_query::composite::CompositeList::minted(
+                        members,
+                        crate::semantic_query::composite::CompositeCarrierCategory::Canonical(
+                            CanonicalMint { _sealed: () },
+                        ),
+                    ),
+                ))
             }
         }
     };
@@ -1218,15 +1228,8 @@ fn compare_shallow(
         // fast path already admitted identical programs; an unequal pair
         // stays Distinct (both arms kept) rather than descending a program.
         (D::ObjectSpreadProgram(_), D::ObjectSpreadProgram(_)) => false,
-        (D::Union(a), D::Union(b)) | (D::Intersection(a), D::Intersection(b)) => {
-            if a.len() != b.len() {
-                return false;
-            }
-            for (ca, cb) in a.iter().zip(b.iter()) {
-                work.push((*ca, *cb));
-            }
-            true
-        }
+        (D::Union(a), D::Union(b)) => compare_composite_members(a, b, work),
+        (D::Intersection(a), D::Intersection(b)) => compare_composite_members(a, b, work),
         // Childless payloads: payload equality was the fast path; an unequal
         // pair is Distinct.
         (D::Primitive(_), D::Primitive(_))
@@ -1567,4 +1570,21 @@ fn compare_shallow(
         // arms' exhaustiveness.
         _ => false,
     }
+}
+
+/// Shallow composite-pair descent shared by the two same-kind
+/// [`compare_shallow`] arms: arity must match, and each member pair
+/// descends structurally.
+fn compare_composite_members<K: crate::semantic_query::composite::CompositeKind>(
+    a: &crate::semantic_query::composite::CompositeList<K>,
+    b: &crate::semantic_query::composite::CompositeList<K>,
+    work: &mut Vec<(SemanticNodeId, SemanticNodeId)>,
+) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for (ca, cb) in a.iter().zip(b.iter()) {
+        work.push((*ca, *cb));
+    }
+    true
 }

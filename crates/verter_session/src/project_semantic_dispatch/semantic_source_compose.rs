@@ -66,6 +66,33 @@ impl ProjectSemanticDispatch<'_> {
     /// Intern the typed-miss carrier for an absent / unraisable interior
     /// position of a composed fact shell. The miss is a genuine typed
     /// non-result the demand side re-derives — never a fabricated body.
+    /// Construct a decided leaf-union through the canonical authority,
+    /// then re-anchor a surviving MULTI-ARM union to the owning fact
+    /// scope. The canonical route is what makes the decided reduction
+    /// honest (`"a" | "a"` collapses to the one literal, a singleton
+    /// unwraps to its member with that member's own scope, absorbers
+    /// apply, evidence deposits through the single funnel); the re-anchor
+    /// is what keeps the replay PATH-INDEPENDENT — the authored lowering
+    /// of the same union interns under the owning file scope, and a
+    /// closed-fact replay of the identical decided value must hash-cons
+    /// with it, never fork instantiation/cache identity onto a
+    /// scope-split twin. The re-anchored payload keeps its `Canonical`
+    /// origin category (the list IS canonical form); anchoring is a
+    /// same-kind, value-identical re-intern, not a second mint.
+    pub(in crate::project_semantic_dispatch) fn raise_closed_leaf_union(
+        &self,
+        members: &[SemanticNodeId],
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        let node = self.intern_normalized_union_or_intersection(members, true);
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(list)) => self
+                .graph()
+                .intern_node_with_scope(SemanticNodeData::Union(list.clone()), scope.clone()),
+            _ => node,
+        }
+    }
+
     fn miss_node(&self, scope: &NodeScopeId) -> SemanticNodeId {
         self.graph()
             .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope.clone())
@@ -127,11 +154,13 @@ impl ProjectSemanticDispatch<'_> {
         match value {
             FactOrLocator::Leaf(leaf) => required(&|| self.raise_leaf_fact(leaf, ctx)),
             // A closed union of leaves composes exactly as the top-level
-            // `ClosedTypeFact::LeafUnion` source arm: each leaf lowers
-            // through the shared in-scope lowerer and the ORDERED union node
-            // is interned as data (a decided result — no re-resolution, no
-            // normalization pass; the authored/decided-shape SHELL bypass,
-            // same rationale as the top-level arm).
+            // `ClosedTypeFact::LeafUnion` source arm: the DECIDED result of
+            // a fully closed reduction is a DERIVED composite, so it
+            // constructs through the canonical authority with the multi-arm
+            // result re-anchored to the owning fact scope (see
+            // [`Self::raise_closed_leaf_union`]) — duplicate leaves
+            // collapse, a singleton unwraps. Display reads the FACT's
+            // ordered leaves, not this node's arm order.
             FactOrLocator::LeafUnion(leaves) => {
                 let members: Vec<SemanticNodeId> = leaves
                     .iter()
@@ -147,14 +176,7 @@ impl ProjectSemanticDispatch<'_> {
                         )
                     })
                     .collect();
-                self.graph().intern_node_with_scope(
-                    SemanticNodeData::Union(
-                        crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
-                            members.into_boxed_slice(),
-                        )),
-                    ),
-                    scope.clone(),
-                )
+                self.intern_normalized_union_or_intersection(&members, true)
             }
             FactOrLocator::Locator(slot) => required(&|| {
                 self.raise_body_slot(slot, ctx.scope_canonical_id)

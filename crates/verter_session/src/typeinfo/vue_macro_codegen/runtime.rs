@@ -36,7 +36,8 @@ pub(super) fn direct_member_dependency_is_missing(
         };
         match data.as_ref() {
             SemanticNodeData::Alias(inner) => work.push((*inner, tracked_dependency)),
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 work.extend(arms.iter().copied().map(|arm| (arm, tracked_dependency)));
             }
             SemanticNodeData::BareRef(_) => {

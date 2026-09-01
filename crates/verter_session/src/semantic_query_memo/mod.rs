@@ -892,13 +892,27 @@ impl SemanticGraphStore {
     /// Intern a rebuilt shell `data` while preserving the scope of
     /// an `origin` shell.
     ///
-    /// **Invariant.** When a rebuilt shell `X'` is derived from `X`
+    /// **Invariant.** When a rebuilt SHELL `X'` is derived from `X`
     /// with substituted sub-expressions,
     /// `node_scope(X') == node_scope(X)`. Used by
     /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`]
     /// and any other shell-rebuild site that would otherwise call
     /// the scope-less `intern_node` and drop the origin scope under
     /// the compound `(payload, scope)` interning.
+    ///
+    /// **Deliberate exception — derived composites.** A substituted
+    /// union (and a provably order-safe substituted intersection) is a
+    /// DERIVED composite: it routes through the canonical authority,
+    /// NOT through this helper, and a multi-arm canonical result
+    /// interns under [`NodeScopeId::Global`] — a derived composite has
+    /// no lexical scope, contributors retain their own scopes, and the
+    /// file dependence rides the canonical evidence / observed
+    /// self-roots rather than `NodeScopeId`. Overload-ordered
+    /// (possibly-callable) substituted intersections still preserve
+    /// scope through this helper. Copying the origin `File` scope onto
+    /// a canonical composite would re-split canonical identity by
+    /// scope, re-creating the cross-scope duplicate class the algebra
+    /// exists to collapse.
     ///
     /// Falls back to [`NodeScopeId::Global`] when `origin`'s sidecar
     /// is empty (`origin` is out of bounds) — these cases are
