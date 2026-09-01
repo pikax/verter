@@ -2866,6 +2866,175 @@ fn frameless_incomplete_canonical_evidence_marks_request_partial() {
     );
 }
 
+/// The FRAMED twin of the frameless disposition: with an ACTIVE cold-build
+/// taint frame, an `Incomplete` canonical-evidence deposit must taint the
+/// frame's RESULT-PARTIAL rail (which the build output copies onto the
+/// returned `CacheRead` and the read funnel folds into the request sticky),
+/// not only `cache_suppress`. `cache_suppress` alone suppresses the
+/// intermediate memo publishes while the VALUE still flows upward as
+/// complete — the enclosing publication's read set cannot represent the
+/// unproven canonicalization (`incomplete` "is NOT subsumable by any read
+/// set"), so component-meta / typeinfo promotion would warm-admit an
+/// unproven-canonical value that the SAME deposit at top level already
+/// refuses. Partiality of the deposit must be frame-position-independent.
+///
+/// The COMPLETE leg is the AC3 fence: a deposit that carries only file
+/// self-roots (a complete canonicalization) must leave BOTH partial rails
+/// clean — a legitimately complete nested build stays complete and
+/// warm-capable.
+#[test]
+fn framed_incomplete_canonical_evidence_taints_frame_partial_not_only_suppressed() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // Incomplete evidence through the real producer: an over-deep alias
+    // chain makes the canonicalization UNDECIDED (same fixture as the
+    // frameless twin).
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+    let mut aliased = never;
+    for _ in 0..9 {
+        aliased = graph.intern_node(SemanticNodeData::Alias(aliased));
+    }
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let union = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+        &graph,
+        &[aliased, string],
+    );
+    assert!(union.evidence.incomplete, "fixture produces incompleteness");
+
+    let guard =
+        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    dispatch.deposit_canonical_evidence(union.evidence);
+    let frame = guard.finish();
+    assert!(
+        frame.cache_suppress,
+        "an Incomplete deposit suppresses the enclosing build's memo publish"
+    );
+    assert!(
+        frame.result_is_partial,
+        "an Incomplete deposit under an active cold-build frame must mark the \
+         frame RESULT-PARTIAL — cache_suppress alone lets the value flow to \
+         the enclosing publication as complete and warm-admissible, while \
+         the identical frameless deposit marks the request partial"
+    );
+
+    // AC3 fence: a COMPLETE deposit (roots only) leaves the frame clean.
+    let complete_guard =
+        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    let mut complete =
+        crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+    complete
+        .inspected_file_roots
+        .push((Arc::from("/w/frame_complete.ts"), [7u8; 16]));
+    dispatch.deposit_canonical_evidence(complete);
+    let clean = complete_guard.finish();
+    assert!(
+        !clean.result_is_partial && !clean.cache_suppress,
+        "a complete roots-only deposit must not taint either partial rail — \
+         a legitimately complete nested build stays complete and warm-capable"
+    );
+    assert_eq!(
+        clean.observed_self_roots.len(),
+        1,
+        "the complete deposit still records its file self-root on the frame"
+    );
+}
+
+/// Projecting a member THROUGH an intersection joins the per-arm member
+/// values as an intersection whose ARM ORDER is overload precedence:
+/// `(A & B).m` with callable `m` on both arms calls A's signature first
+/// (measured against the pinned checker — `interface A { m(x: string):
+/// "fromA" }`, `interface B { m(x: string): "fromB" }`, `(ab.m("s"))` is
+/// `"fromA"`). The walker's intersection join must therefore mint the
+/// ORDER-PRESERVING carrier for possibly-callable contributors — the same
+/// carrier-semantics split the member-value merge applies — instead of
+/// routing them through the commutative canonical sort, which orders by
+/// interned node id and can front the second declaration's overloads.
+/// The fixture interns B's callable FIRST so the id order is adversarial
+/// to the declaration order.
+#[test]
+fn path_projection_through_intersection_keeps_callable_member_order() {
+    use crate::semantic_query::{SurfaceEntry, SurfaceView};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let callable_obj = |ret: SemanticNodeId| {
+        graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+            vec![SurfaceEntry::CallSignature(ret)],
+            None,
+            false,
+        )))
+    };
+    // Adversarial interning order: B's callable value FIRST, so an
+    // id-ordered commutative rebuild fronts it.
+    let value_b = callable_obj(number);
+    let value_a = callable_obj(string);
+    assert!(value_b.0 < value_a.0, "fixture needs the reversed ordinals");
+
+    let member_obj = |value: SemanticNodeId| {
+        let member = crate::semantic_query::SurfaceMember {
+            key: crate::semantic_query::AuthoredPropertyKey::string("m"),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: None,
+        };
+        graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+            vec![SurfaceEntry::Member(member)],
+            None,
+            false,
+        )))
+    };
+    let obj_a = member_obj(value_a);
+    let obj_b = member_obj(value_b);
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![obj_a, obj_b].into_boxed_slice(),
+        )),
+    ));
+
+    let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("m"),
+            )]
+            .into_boxed_slice(),
+        ),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
+    });
+    let QueryResult::Value(joined) = read.value else {
+        panic!("member projection through the intersection produces a value");
+    };
+    match graph.node_data(joined).as_deref() {
+        Some(SemanticNodeData::Intersection(arms)) => {
+            assert_eq!(
+                arms.as_ref(),
+                &[value_a, value_b],
+                "declaration order IS the overload order for a member \
+                 projected through an intersection — the commutative \
+                 canonical sort must not reorder possibly-callable \
+                 contributors"
+            );
+        }
+        other => panic!("expected the joined member intersection, got {other:?}"),
+    }
+}
+
 /// `intern_string_literal_union` documents "always a `Union`, even at arity
 /// 1". Duplicate NAMES intern to one literal id, so the arity gate must key
 /// on the DEDUPLICATED id set: `["a", "a"]` is arity 1 and takes the same
@@ -6868,6 +7037,69 @@ fn key_of_records_source_members() {
 // ──────────────────────────────────────────────────────────────────
 
 use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
+
+/// A homomorphic mapped type over a RESOLVED EMPTY object source
+/// (`Partial<{}>`, `{ [K in keyof {}]: ... }`) is a legitimately complete
+/// EMPTY surface — the checker reduces `Partial<{}>` to `{}`. The
+/// resolved-empty source must not be conflated with an UNPROJECTED
+/// source: the deferral exists for a source whose surface has not
+/// projected yet (keys and modifiers must enumerate together on the
+/// re-dispatch), while a source that RESOLVED to zero members has a
+/// CLOSED, empty key domain and materialises the empty object —
+/// complete, exact, and warm-capable, never a deferred `Mapped` carrier
+/// that every re-dispatch returns unchanged.
+#[test]
+fn homomorphic_mapped_over_resolved_empty_source_publishes_empty_object() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let source = simple_object(&graph, &[]);
+    let key_space = graph.intern_node(SemanticNodeData::KeyOf { base: source });
+    let value_placeholder = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let binder = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let mapper = MapperKey {
+        parameter_node: binder,
+        key_space,
+        value_expr: value_placeholder,
+        optionality: OptionalityMod::Add,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: crate::semantic_query::MapperKind::Identity,
+    };
+
+    let read = dispatch.execute_read(SemanticQueryKey::MappedType {
+        source,
+        mapper,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    });
+    let QueryResult::Value(id) = read.value else {
+        panic!("Partial<{{}}> produces a value, got {:?}", read.value);
+    };
+    match graph.node_data(id).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            assert!(
+                view.positive_members().is_empty(),
+                "the empty source maps to the empty surface"
+            );
+        }
+        other => panic!(
+            "a resolved-empty homomorphic source materialises the empty \
+             object, never the deferred Mapped carrier — got {other:?}"
+        ),
+    }
+    assert!(
+        !read.result_is_partial,
+        "a legitimately empty mapped surface is complete, never partial"
+    );
+}
 
 /// Different `(optionality, readonly)` combinations on the same
 /// `(source, key_space, value_expr)` produce distinct mapped

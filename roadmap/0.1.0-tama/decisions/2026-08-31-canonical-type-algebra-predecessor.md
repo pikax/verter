@@ -20,7 +20,7 @@ measured against the pinned checker and the live public boundary
   produces the same shape but rides a degradation and never warms.
 - **C** `type C1 = { x: string }; type C2 = { x: number }; (v: C1 & C2) => v.x` —
   checker `{ v: never }`, substrate `{ v: Intersection(number & string) }`, clean and warm.
-- **D** `type Tag = ` + "`item-${string}`" + ` | "none"` under a truthiness guard —
+- **D** ``type Tag = `item-${string}` | "none"`` under a truthiness guard —
   the checker excludes `""` from the falsy edge; the substrate keeps both arms,
   clean and warm.
 

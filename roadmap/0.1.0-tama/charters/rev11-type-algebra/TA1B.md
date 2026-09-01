@@ -408,3 +408,16 @@ question rather than a shape guess. What is not acceptable is leaving a document
 claim that those carriers never yield call signatures, because the compiler says
 otherwise and the consequence is a silently reversed overload set.
 
+RESOLVED in the landed implementation
+(`walk.rs::value_may_contribute_call_signatures`): the augmentable
+apparent-type carriers — a deferred `keyof` shell, and every surface whose
+global backing interface user code may legally augment with a call signature
+(`Array` / `String`, so arrays, tuples, and template literals) — joined the
+fail-closed possibly-callable arm and preserve their raw ordered form. SCALAR
+primitive and literal arms alone stay on the canonical route, by the measured
+order-safety argument rather than a shape guess: different-domain scalar pairs
+collapse to `never` before any ordering exists, and same-domain scalar arms
+share one backing interface's signature list, so commutative reordering is
+unobservable to overload resolution. No documented never-callable claim
+remains for the augmentable carriers.
+

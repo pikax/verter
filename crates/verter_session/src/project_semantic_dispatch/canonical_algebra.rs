@@ -56,9 +56,11 @@
 //! `ProjectSemanticDispatch::intern_normalized_union_or_intersection`
 //! (`build.rs`) or by threading the evidence up to the nearest
 //! dispatch-holding caller. Under an active cold-build frame the roots join
-//! the frame's self-root set and `incomplete` folds `cache_suppress`;
-//! without a frame the roots are subsumed by the site's own fact-railed
-//! read set while `incomplete` marks the REQUEST result partial, so the
+//! the frame's self-root set and `incomplete` folds `cache_suppress` AND
+//! `result_is_partial` (the frame's partial reaches the request sticky
+//! through the returned read's rails); without a frame the roots are
+//! subsumed by the site's own fact-railed read set while `incomplete`
+//! marks the REQUEST result partial directly. Either way the
 //! enclosing publication refuses warm promotion. The one exception is a
 //! site whose evidence is PROVABLY empty (all arms freshly-interned
 //! `Global` childless nodes), which asserts that instead of threading.

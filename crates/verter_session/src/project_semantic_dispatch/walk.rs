@@ -3524,9 +3524,27 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// Combine the top `arm_count` entries from `results` using the
     /// intersection contributor rule: opaque arms drop,
     /// surviving contributors intersect. Zero contributors → `Opaque(Miss)`.
+    ///
+    /// The join is a MEMBER-VALUE intersection, so it applies the same
+    /// carrier-semantics split as the member-value merge
+    /// (`merge_value_nodes_recursive`): a POSSIBLY-callable contributor
+    /// makes the joined value an overload-ordered carrier — call
+    /// resolution over an intersected member tries signatures in
+    /// DECLARATION order (measured against the pinned checker:
+    /// `interface A { m(x: string): "fromA" }` / `interface B { m(x:
+    /// string): "fromB" }`, `(ab: A & B).m("s")` is `"fromA"`), and the
+    /// commutative canonical sort orders by interned node id, which can
+    /// front the later declaration's overloads. Provably signature-free
+    /// contributors keep the canonical route — including the
+    /// proven-disjoint scalar collapse (`string & number = never`) the
+    /// checker applies to a member projected through an intersection.
     fn join_intersection(&self, arm_count: usize, results: &mut Vec<SemanticNodeId>) {
         let split = results.len().saturating_sub(arm_count);
-        let partials: Vec<SemanticNodeId> = results.drain(split..).collect();
+        let mut partials: Vec<SemanticNodeId> = results.drain(split..).collect();
+        // Arm `Step` frames push in declaration order and pop LIFO, so the
+        // drained per-arm results arrive REVERSED; restore declaration
+        // order before it becomes overload precedence.
+        partials.reverse();
         let contributors: Vec<SemanticNodeId> = partials
             .into_iter()
             .filter(|r| {
@@ -3538,10 +3556,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .collect();
         if contributors.is_empty() {
             results.push(self.opaque_miss());
+        } else if contributors.len() >= 2
+            && contributors
+                .iter()
+                .any(|v| value_may_contribute_call_signatures(self.graph(), *v))
+        {
+            // Overload-ordered carrier: a deliberate bypass of the
+            // canonical (commutative) authority — reordering is
+            // checker-observable through overload selection. The
+            // classification fails CLOSED (order preserved) on anything
+            // undecidable from the graph alone.
+            results.push(self.graph().intern_node(SemanticNodeData::Intersection(
+                crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
+                    contributors.into_boxed_slice(),
+                )),
+            )));
         } else {
-            // Canonical construction — includes the proven-disjoint scalar
-            // collapse (`string & number = never`) the checker applies to a
-            // member projected through an intersection.
             results.push(
                 self.dispatch
                     .intern_normalized_union_or_intersection(&contributors, false),

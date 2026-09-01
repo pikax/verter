@@ -7827,11 +7827,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // through the source's heritage) is not re-lifted as the
         // anonymous `PROPAGATED` bridge downstream.
         let mut mapped_partial_reasons = crate::semantic_query::PartialReasonSet::empty();
+        let source_projection = self.source_members_for_published_projection(source, context);
+        // A source that RESOLVED (to any surface, including an EMPTY one)
+        // is distinct from a source that did NOT project: only the latter
+        // defers a homomorphic mapping — see the resolved-empty arm below.
+        let source_surface_resolved = source_projection.is_some();
         let (source_members, source_member_reasons): (
             Vec<SurfaceMember>,
             crate::semantic_query::PartialReasonSet,
-        ) = self
-            .source_members_for_published_projection(source, context)
+        ) = source_projection
             .unwrap_or_else(|| (Vec::new(), crate::semantic_query::PartialReasonSet::empty()));
         mapped_partial_reasons = mapped_partial_reasons.union(source_member_reasons);
         let source_member_keys = |members: &[SurfaceMember]| {
@@ -7849,11 +7853,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // would synthesize every produced member non-optional /
         // non-readonly, so the build defers exactly as an unenumerable
         // keyspace does — the re-dispatch enumerates keys AND the
-        // source surface together.
-        let homomorphic_over_unprojected_source = source_members.is_empty()
+        // source surface together. A source that RESOLVED to an EMPTY
+        // surface is NOT that case: its key domain is CLOSED and empty
+        // (`Partial<{}>` is `{}` at the checker), so the build proceeds
+        // with zero keys and materialises the empty object — complete
+        // and warm-capable, never a deferred carrier every re-dispatch
+        // returns unchanged. The resolved-empty classification is DIRECT:
+        // the source node's own data must be a plainly empty `Object`
+        // (no members, signatures, index signatures, or keyspace). A
+        // projection that merely SYNTHESISED an empty surface for an
+        // open carrier — an `infer T` mapped source, an unbound generic
+        // — is NOT closed-and-empty: the deferred shell must survive for
+        // the reverse-inference and re-dispatch machinery, and an
+        // index-signature-bearing source keeps its deferral (homomorphic
+        // mapping preserves index signatures, which zero keys cannot).
+        let homomorphic_over_source = matches!(
+            graph.node_data(mapper.key_space).as_deref(),
+            Some(SemanticNodeData::KeyOf { base }) if *base == source
+        );
+        let homomorphic_over_unprojected_source =
+            source_members.is_empty() && !source_surface_resolved && homomorphic_over_source;
+        let resolved_empty_homomorphic_source = source_members.is_empty()
+            && homomorphic_over_source
             && matches!(
-                graph.node_data(mapper.key_space).as_deref(),
-                Some(SemanticNodeData::KeyOf { base }) if *base == source
+                graph.node_data(source).as_deref(),
+                Some(SemanticNodeData::Object(view))
+                    if view.entries.is_empty()
+                        && view.positive_members().is_empty()
+                        && view.call_signatures.is_empty()
+                        && view.construct_signatures.is_empty()
+                        && view.index_signatures.is_empty()
+                        && view.keyspace.is_none()
             );
         let keys: Vec<super::enumerate::KeyDomainKey> = if !source_members.is_empty() {
             if self.uses_synthetic_mapped_key_names(&source_members) {
@@ -7864,6 +7894,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } else {
                 source_member_keys(&source_members)
             }
+        } else if resolved_empty_homomorphic_source {
+            Vec::new()
         } else if let Some(keys) = (!homomorphic_over_unprojected_source)
             .then(|| self.key_literals_from_keyspace_node(mapper.key_space))
             .flatten()

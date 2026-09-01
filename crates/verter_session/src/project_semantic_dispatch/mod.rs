@@ -897,15 +897,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// With an ACTIVE cold-build taint frame: the inspected file self-roots
     /// extend the frame's root set (deduplicated), and an incomplete
-    /// comparison folds `cache_suppress` — ReturnOnly, never a warm
-    /// canonical result.
+    /// comparison folds BOTH rails — `cache_suppress` (the build's memo
+    /// publish is refused) AND `result_is_partial` (the build's returned
+    /// `CacheRead` carries the partial, which the read funnel folds into
+    /// the request sticky). `incomplete` is NOT subsumable by any read
+    /// set, so suppressing only the intermediate memo would still hand the
+    /// enclosing publication a warm-admissible "complete" value; the
+    /// partial disposition of the deposit is frame-position-independent.
     ///
     /// With NO active frame (a top-level graph consumer outside any cold
     /// build — projector member merges, typeinfo surface joins): the roots
     /// are subsumed by the caller's own fact-railed read set (every arm
     /// reached such a caller through fact-recorded reads on the same rail
-    /// that validates its publication), but `incomplete` is NOT subsumable
-    /// by any read set — it marks the REQUEST result partial, so the
+    /// that validates its publication), but `incomplete` — for the same
+    /// reason as above — marks the REQUEST result partial directly, so the
     /// enclosing publication (component-meta warm gate, typeinfo
     /// promotion) refuses warm admission of the unproven-canonical value.
     pub(super) fn deposit_canonical_evidence(
@@ -920,7 +925,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if self.build_local_taint.borrow().is_empty() {
                 crate::request_context::mark_request_result_partial();
             } else {
-                self.fold_into_top_build_local_taint(false, true);
+                self.fold_into_top_build_local_taint(true, true);
             }
         }
         if evidence.inspected_file_roots.is_empty() {

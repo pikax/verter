@@ -664,10 +664,21 @@ fn partial_reason(reasons: PartialReasonSet) -> PropCallableRoleUnresolvedReason
 /// The ONE composition of the two classifiers below, so a second consumer
 /// cannot spell a divergent class for the same carrier: an unresolved
 /// declaration is a missing dependency, a budget trip is a budget trip, and a
-/// cycle carrier is a same-path recursion.
+/// cycle carrier is a same-path recursion. `Cancelled` / `UnstableState`
+/// keep their DEDICATED bits (matching the runtime-side classifier in
+/// `broad_runtime`): the coarse role enum below has no arm for them (a
+/// cancelled read IS a `Fault` role), but the partial CLASS is
+/// consumer-observable — `partial_failure`'s Cancelled / UnstableState
+/// arms and the connected-limit cancel fast path branch on the exact bit,
+/// and collapsing it to `SEMANTIC_QUERY_FAULT` would misclassify an
+/// operational interruption as a semantic fault.
 #[must_use]
 pub(crate) fn query_error_partial_reasons(error: &QueryError) -> PartialReasonSet {
-    reason_partial_set(query_error_reason(error))
+    match error {
+        QueryError::Cancelled => PartialReasonSet::CANCELLED,
+        QueryError::UnstableState { .. } => PartialReasonSet::UNSTABLE_STATE,
+        other => reason_partial_set(query_error_reason(other)),
+    }
 }
 
 fn query_error_reason(error: &QueryError) -> PropCallableRoleUnresolvedReason {
@@ -758,6 +769,32 @@ mod tests {
             SymbolIdentityDemandOutcome::Partial(
                 PropCallableRoleUnresolvedReason::MissingDependency
             )
+        );
+    }
+
+    /// `Cancelled` / `UnstableState` carriers keep their DEDICATED partial
+    /// classes through the shared carrier classification — the same bits the
+    /// runtime-side classifier returns for the same carriers — so consumers
+    /// that branch on the exact class (`partial_failure`'s Cancelled /
+    /// UnstableState arms, the connected-limit cancel fast path) observe the
+    /// operational cause rather than the generic semantic-fault class. The
+    /// coarse role outcome stays `Fault` (the role enum has no cancel arm).
+    #[test]
+    fn cancelled_and_unstable_carriers_keep_dedicated_partial_classes() {
+        assert_eq!(
+            query_error_partial_reasons(&QueryError::Cancelled),
+            PartialReasonSet::CANCELLED,
+            "a cancelled carrier must classify as CANCELLED, not SEMANTIC_QUERY_FAULT"
+        );
+        assert_eq!(
+            query_error_partial_reasons(&QueryError::UnstableState { attempts: 3 }),
+            PartialReasonSet::UNSTABLE_STATE,
+            "a torn-state carrier must classify as UNSTABLE_STATE, not SEMANTIC_QUERY_FAULT"
+        );
+        assert_eq!(
+            demand_error(QueryError::Cancelled),
+            SymbolIdentityDemandOutcome::Partial(PropCallableRoleUnresolvedReason::Fault),
+            "the coarse role classification keeps its Fault arm"
         );
     }
 

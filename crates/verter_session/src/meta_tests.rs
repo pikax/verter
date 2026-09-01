@@ -27244,6 +27244,64 @@ withDefaults(defineProps<{ orientation?: string, count?: number, active?: boolea
     }
 }
 
+/// A Keep-modifier homomorphic mapped type over an IMPORTED interface
+/// (`{ [K in keyof ImportedProps]: ImportedProps[K] }`) inherits each
+/// member's optionality from the source — `orientation?: string` stays
+/// OPTIONAL through the identity mapping (TS `Keep` semantics). The
+/// mapped enumeration must resolve the imported source's MEMBER surface,
+/// not only its key names: a names-only enumeration would default `Keep`
+/// to required/mutable and publish `orientation` as a required prop.
+/// Pins both directions — the optional member stays optional (never
+/// modifier-defaulted) AND both members publish (never a blanket
+/// deferral that drops the surface).
+#[test]
+fn keep_modifier_homomorphic_mapped_over_import_inherits_optionality() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface ImportedProps {
+  orientation?: string
+  count: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { ImportedProps } from './types'
+
+defineProps<{ [K in keyof ImportedProps]: ImportedProps[K] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Comp.vue")
+        .expect("component meta resolves");
+
+    let prop = |name: &str| {
+        meta.props
+            .iter()
+            .find(|prop| prop.name == name)
+            .unwrap_or_else(|| panic!("prop {name} must be published: {:?}", meta.props))
+    };
+    assert!(
+        !prop("orientation").required,
+        "Keep optionality inherits from the imported source member — \
+         `orientation?` stays optional through the identity mapping"
+    );
+    assert!(
+        prop("count").required,
+        "a required source member stays required through the identity mapping"
+    );
+}
+
 #[test]
 fn cross_file_prop_jsdoc_survives_homomorphic_mapped_types() {
     let project = make_project();

@@ -2910,15 +2910,10 @@ impl Engine {
         )
     }
 
-    // The eight inputs are independently meaningful and none is derivable
-    // from another: the read view, the evidence source it folds, the root the
-    // caller expects to still be published, the importing file, the specifier,
-    // the resolution context, the mutable input-resolution ledger, and the
-    // caller's final revalidation. Bundling them into a parameter struct would
-    // carry two lifetimes plus a `&mut` and a `&dyn Fn`, and every caller would
-    // build it inline at the call site — the same arguments in the same order,
-    // one indirection further from the signature that documents them.
-    #[allow(clippy::too_many_arguments)]
+    // Six inputs plus the `ResolutionOperation` carrier (which bundles the
+    // expected published root, the mutable input-resolution ledger, and the
+    // caller's final revalidation): each remaining parameter is
+    // independently meaningful and none is derivable from another.
     pub(crate) fn resolve_import_outcome_for_published_in_operation(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
@@ -3315,15 +3310,10 @@ impl Engine {
         conflict
     }
 
-    // The eight inputs are independently meaningful and none is derivable
-    // from another: the read view, the evidence source it folds, the root the
-    // caller expects to still be published, the importing file, the specifier,
-    // the resolution context, the mutable input-resolution ledger, and the
-    // caller's final revalidation. Bundling them into a parameter struct would
-    // carry two lifetimes plus a `&mut` and a `&dyn Fn`, and every caller would
-    // build it inline at the call site — the same arguments in the same order,
-    // one indirection further from the signature that documents them.
-    #[allow(clippy::too_many_arguments)]
+    // Six inputs plus the `ResolutionOperation` carrier it destructures
+    // (the expected published root, the mutable input-resolution ledger,
+    // and the caller's final revalidation): each remaining parameter is
+    // independently meaningful and none is derivable from another.
     fn resolve_import_outcome_in_published(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,

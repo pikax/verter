@@ -114,11 +114,12 @@ surviving a `switch` join (finding B), and an unreduced provably-conflicting
 intersection (finding C) — publish correct and warm once routed through this
 substrate via the interning funnel and the live dispatch join.
 
-The layering this node owns is the ruling's **canonical semantic types** layer: it
-owns "universal algebraic laws and reusable facts: `T | never = T`, `T | T = T`,
-flattening, provably disjoint scalar intersections to `never`, truthiness-domain
-classification" (truthiness-domain classification is TA2's node; this node supplies
-only the union/intersection half) and may assume "raw evidence is complete. It may
+The layering this node owns is the union/intersection half of the ruling's
+**canonical semantic types** layer. The ruling defines that layer as "universal
+algebraic laws and reusable facts: `T | never = T`, `T | T = T`, flattening,
+provably disjoint scalar intersections to `never`, truthiness-domain
+classification" — of which truthiness-domain classification is OWNED BY TA2, not
+this node; TA1A implements no truthiness work. The layer may assume "raw evidence is complete. It may
 preserve source carriers through origin sidecars, but may not retain redundant
 algebra members merely to preserve provenance." It does NOT own the raw-flow-evidence
 layer, the TypeScript-compatible-inference layer, or the display layer. Per the

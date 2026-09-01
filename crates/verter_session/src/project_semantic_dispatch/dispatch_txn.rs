@@ -1673,6 +1673,29 @@ pub(crate) mod flow_obligation_state {
             handle
         }
 
+        /// TEST-ONLY: install a demand whose obligation set is EMPTY — a
+        /// state no constructible [`FlowDemandPlan`] produces (the planner
+        /// always plans one family-coverage obligation per required fact
+        /// family plus one per contract domain from the closed registry, so
+        /// a successfully built plan carries a non-empty spec set). The
+        /// runtime's convergence/seal gates refuse an empty proof universe
+        /// rather than passing it by vacuous truth; this installer keeps
+        /// that refusal discriminable by a test.
+        #[cfg(test)]
+        pub fn install_flow_demand_without_obligations_for_tests(&mut self, plan: &FlowDemandPlan) -> FlowDemandHandle {
+            let handle = FlowDemandHandle {
+                index: u32::try_from(self.flow_demands.len()).unwrap_or(u32::MAX),
+                identity: self.instance_identity,
+            };
+            self.flow_demands.push(InstalledFlowDemand {
+                basis: plan.basis().clone(),
+                obligations: Vec::new(),
+                convergence: FlowConvergenceObservation { policy: plan.convergence(), iterations: 0, stable: false },
+                phase: FlowDemandPhase::Discharging,
+            });
+            handle
+        }
+
         /// Transition Pending → Running.
         pub fn start_flow_obligation(&mut self, handle: FlowDemandHandle, id: FlowObligationId) -> Result<(), FlowTransitionError> {
             self.transition(handle, id, |state| matches!(state, ObligationState::Pending).then_some(ObligationState::Running))
@@ -1797,7 +1820,14 @@ pub(crate) mod flow_obligation_state {
             match demand.phase {
                 FlowDemandPhase::Converged | FlowDemandPhase::Sealed => return Err(FlowTransitionError::IllegalTransition),
                 FlowDemandPhase::Discharging | FlowDemandPhase::ExpansionClosed => {
-                    if !demand.obligations.iter().all(|record| matches!(record.state, ObligationState::Discharged(_))) {
+                    // An EMPTY obligation universe is not a discharged one:
+                    // `all(Discharged)` is vacuously true over it, and a
+                    // demand that installed nothing has proved nothing (no
+                    // constructible plan is empty — family-coverage +
+                    // domain obligations come from the closed registry).
+                    if demand.obligations.is_empty()
+                        || !demand.obligations.iter().all(|record| matches!(record.state, ObligationState::Discharged(_)))
+                    {
                         return Err(FlowTransitionError::IllegalTransition);
                     }
                 }
@@ -1811,7 +1841,8 @@ pub(crate) mod flow_obligation_state {
         }
 
         /// Mint the ONE sealed completion artifact of this solve
-        /// (Converged → Sealed). Mints ONLY when every installed
+        /// (Converged → Sealed). Mints ONLY when at least one obligation is
+        /// installed and every installed
         /// obligation is `Discharged` (each with spec-validated evidence),
         /// the runtime observed convergence, and the value payload carries
         /// no degradation. The artifact binds the installed basis, the
@@ -1823,7 +1854,13 @@ pub(crate) mod flow_obligation_state {
         pub fn seal_flow_completion(&mut self, handle: FlowDemandHandle, value: FlowReturnResult) -> Result<SealedFlowCompletion, FlowSealError> {
             let Some(demand) = self.flow_demand_mut(handle) else { return Err(FlowSealError::NoDemandInstalled) };
             if demand.phase == FlowDemandPhase::Sealed { return Err(FlowSealError::AlreadySealed); }
-            if !demand.obligations.iter().all(|record| matches!(record.state, ObligationState::Discharged(_))) {
+            // An EMPTY obligation universe never seals: `all(Discharged)` is
+            // vacuously true over it, and an empty `proofs` slice would be
+            // an evidence-free completion from the sole warm-admission
+            // authority (defense in depth beside the convergence gate).
+            if demand.obligations.is_empty()
+                || !demand.obligations.iter().all(|record| matches!(record.state, ObligationState::Discharged(_)))
+            {
                 return Err(FlowSealError::UndischargedObligations);
             }
             let observation = demand.convergence;
