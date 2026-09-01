@@ -254,6 +254,10 @@ pub(crate) struct RelationInferBindings {
 enum RootClose {
     /// A decided binary judgement — publish the payload.
     Decided(RelationPayload),
+    /// A decided judgement whose mixed component consumed UNPROVEN
+    /// flow-member values — PUBLIC payload, never admitted (the
+    /// flow-poisoned twin of the budget arm's ReturnOnly-but-public).
+    DecidedReturnOnly(RelationPayload),
     /// Budget exhaustion — PUBLIC payload, never admitted (three-layer
     /// non-admission).
     BudgetExceeded(RelationPayload),
@@ -307,9 +311,9 @@ pub(super) struct DrainedRelationMember {
 
 /// A flow-return-domain view over a drained tagged pending member. The
 /// outcome is final at pop (a same-slot recursive backedge is a
-/// coinductive hold decided by the seed check); the close admits
-/// `Complete` outcomes or poisons the whole tagged component on a
-/// `Degraded` one.
+/// coinductive hold decided by the seed check); the close fails the whole
+/// tagged component on a `NoValue` outcome, and admits an evaluated member
+/// ONLY through its own finalizer proof.
 pub(super) struct DrainedFlowReturnMember {
     pub(super) key: crate::semantic_query::FlowReturnKey,
     pub(super) outcome: super::dispatch_txn::FlowReturnPendingOutcome,
@@ -327,6 +331,19 @@ pub(super) struct DrainedFlowReturnMember {
     /// Whether the member's own contributors were all FRESH literals —
     /// the post-convergence literal-widening input.
     pub(super) fresh_seed: bool,
+    /// The member's own installed demand carrier (handle + plan +
+    /// provenance), when its demand was prepared. The member finalizes
+    /// against EXACTLY this demand at the close.
+    pub(super) flow_demand: Option<super::dispatch_txn::flow_obligation_state::FlowDemandCarrier>,
+    /// The member's typed discharge report, produced once by its
+    /// evaluation and applied centrally at the close.
+    pub(super) discharge: Option<super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
+    /// The member's OWN evaluation provenance, carried through the
+    /// deferral: finalization triangulates it against the carrier (a
+    /// same-store, same-generation FOREIGN demand's evidence is refused)
+    /// rather than reconstructing it from the carrier — that comparison
+    /// would be tautological.
+    pub(super) provenance: super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance,
 }
 
 type DrainedCallResult = (
@@ -335,8 +352,15 @@ type DrainedCallResult = (
     crate::semantic_query::ResolvedCallResult,
 );
 
+/// The mixed component's discharge result: the prefix entries' outcomes,
+/// the call members' results, and the runtime-observed convergence of the
+/// joint fixed point (the flow-side passes the discharge actually ran).
 type MixedDischargeResult = Result<
-    (Vec<FlowReturnPendingOutcome>, Vec<DrainedCallResult>),
+    (
+        Vec<FlowReturnPendingOutcome>,
+        Vec<DrainedCallResult>,
+        super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence,
+    ),
     crate::semantic_query::ResolveCallFailure,
 >;
 
@@ -347,6 +371,14 @@ pub(super) struct RelationDischargeOutcome {
     /// The caller-return step of an inline relation SCC root (or of a
     /// session-delta root, which never publishes).
     pub(super) self_step: Option<RelationStep>,
+    /// One or more DRAINED flow members finalized UNPROVEN, so the whole
+    /// member batch was refused (the torn-component rule). The mixed
+    /// equation already consumed those members' evaluated values, so the
+    /// root's own outcome is NON-ADMISSIBLE too: every consumer treats
+    /// `self_publish` / `self_step` as ReturnOnly — the verdict still
+    /// flows to the caller, and nothing warms around an unproven
+    /// flow-derived value.
+    pub(super) flow_batch_unproven: bool,
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -461,6 +493,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match other {
                     RootClose::BudgetExceeded(_) => "BudgetExceeded",
                     RootClose::Undecided => "Undecided",
+                    RootClose::DecidedReturnOnly(_) => "DecidedReturnOnly",
                     RootClose::Decided(_) => unreachable!(),
                 }
             ),
@@ -509,6 +542,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match other {
                     RootClose::BudgetExceeded(_) => "BudgetExceeded",
                     RootClose::Undecided => "Undecided",
+                    RootClose::DecidedReturnOnly(_) => "DecidedReturnOnly",
                     RootClose::Decided(_) => unreachable!(),
                 }
             ),
@@ -905,6 +939,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let idx = self.relation_frame_open(key, InferenceOccurrence::ARGUMENT_COVARIANT);
         let mut bindings: Vec<InferBinding> = Vec::new();
         let verdict = self.reduce_relation(key, &mut bindings);
+        #[cfg(any(test, feature = "test-support"))]
+        self.inject_unproven_flow_member_for_tests(idx);
         match self.relation_frame_close_root(idx, verdict, bindings) {
             RootClose::Decided(payload) => {
                 let observed_self_roots = self.relation_completed_publication_roots(key);
@@ -913,6 +949,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     fence,
                 ))
                 .with_observed_self_roots(observed_self_roots)
+            }
+            RootClose::DecidedReturnOnly(payload) => {
+                let observed_self_roots =
+                    self.observed_self_roots_from_nodes([key.source, key.target]);
+                let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<
+                    SemanticQueryValue,
+                > = (
+                    QueryResult::Value(SemanticQueryValue::Relation(payload)),
+                    fence,
+                )
+                    .into();
+                // ReturnOnly-but-public: the verdict was computed around a
+                // mixed component whose flow members finalized UNPROVEN —
+                // the value flows to the caller, the memo refuses
+                // admission (no warm entry, no fact signature, no
+                // reverse-index metadata), and the frame close already
+                // marked the request partial.
+                output.cache_suppress = true;
+                output.observed_self_roots = observed_self_roots;
+                output
             }
             RootClose::BudgetExceeded(payload) => {
                 let observed_self_roots =
@@ -1016,6 +1072,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // through the provisional path above.
                 match close {
                     RootClose::Decided(payload) => relation_step_from_payload(&payload),
+                    RootClose::DecidedReturnOnly(payload) => relation_step_from_payload(&payload),
                     RootClose::BudgetExceeded(payload) => relation_step_from_payload(&payload),
                     RootClose::Undecided => RelationStep::Unknown,
                 }
@@ -1197,6 +1254,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self_roots: state.self_roots,
                         materialized: state.materialized,
                         fresh_seed: state.fresh_seed,
+                        flow_demand: state.flow_demand,
+                        discharge: state.discharge,
+                        provenance: state.provenance,
                     });
                 }
                 PendingObligationDomain::ResolveCall(state) => {
@@ -1252,12 +1312,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // every flight aborts). The check runs post-discharge because the
         // fixed point resurrects hold-only empty cycles — poisoning on
         // the pre-discharge outcome condemns members the close recovers.
-        let (_prefix_outcomes, call_results) = match self.discharge_mixed_component_to_fixed_point(
-            Vec::new(),
-            &mut flow_members,
-            &mut call_members,
-            &initial_substitution,
-        ) {
+        let (_prefix_outcomes, call_results, flow_convergence) = match self
+            .discharge_mixed_component_to_fixed_point(
+                Vec::new(),
+                &mut flow_members,
+                &mut call_members,
+                &initial_substitution,
+            ) {
             Ok(ok) => ok,
             Err(failure) => {
                 self.relation_abort_inline_flight(inline_flight.as_ref());
@@ -1270,6 +1331,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if let Some(session) = member.staged_session {
                         self.abandon_session(session);
                     }
+                }
+                // Record the component failure on every installed flow
+                // demand (failure detection on the ledger — never an
+                // admission decision).
+                let flow_failure = match failure {
+                    crate::semantic_query::ResolveCallFailure::Budget => {
+                        crate::semantic_query::FlowReturnFailure::Budget(
+                            verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                        )
+                    }
+                    _ => crate::semantic_query::FlowReturnFailure::Unresolved,
+                };
+                for member in &flow_members {
+                    let _ = self.fail_flow_demand(member.flow_demand.as_ref(), flow_failure);
                 }
                 return FramePop::RootClose(match failure {
                     crate::semantic_query::ResolveCallFailure::Budget => {
@@ -1318,6 +1393,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             self.flow_return_abort_drained_flights(&flow_members);
             self.resolve_call_abort_drained_flights(&call_results);
+            // Record the failure on every installed flow demand of the
+            // component (failure detection on the ledger — never an
+            // admission decision).
+            for member in &flow_members {
+                let failure = match &member.outcome {
+                    FlowReturnPendingOutcome::NoValue { failure, .. } => *failure,
+                    FlowReturnPendingOutcome::EvaluatedValue(_) => {
+                        crate::semantic_query::FlowReturnFailure::Unresolved
+                    }
+                };
+                let _ = self.fail_flow_demand(member.flow_demand.as_ref(), failure);
+            }
             // Release WITHOUT publish (no entry / fact signature /
             // backfill / reverse-index metadata). The machinery root
             // surfaces the public `BudgetExceeded` payload when a budget
@@ -1349,8 +1436,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             None,
             call_results,
             cyclic,
+            &flow_convergence,
         ) {
             Ok(outcome) => {
+                if outcome.flow_batch_unproven {
+                    // The mixed equation consumed UNPROVEN flow-member
+                    // values: the root's verdict still flows to the
+                    // caller, but nothing composed over it may warm —
+                    // the same funnel primitives the inline flow-root
+                    // refusal folds (an answer composed around an
+                    // unproven flow value must not warm).
+                    self.fold_cache_read_rails(
+                        true,
+                        true,
+                        crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+                    );
+                    if let Some(step) = outcome.self_step {
+                        return FramePop::Provisional(step);
+                    }
+                    return FramePop::RootClose(RootClose::DecidedReturnOnly(
+                        outcome
+                            .self_publish
+                            .expect("the machinery root always produces its own payload"),
+                    ));
+                }
                 if let Some(step) = outcome.self_step {
                     return FramePop::Provisional(step);
                 }
@@ -1396,6 +1505,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// a poisoned relation member); `cap` carries the budget edge when
     /// one drove the abort. The helper aborts every flight it owns; the
     /// caller aborts its own root flight.
+    ///
+    /// Flow members are proof-gated HERE: each drained flow member
+    /// finalizes against its own installed demand (its typed discharge
+    /// report applied centrally, the component's observed convergence
+    /// replayed, the seal, the finalizer) and enters the publish queue
+    /// ONLY with its own `CompleteFlowResult`. One unproven member refuses
+    /// the WHOLE member batch — the torn-component rule — while the
+    /// root's own admission is unaffected.
     #[allow(clippy::type_complexity)]
     pub(super) fn relation_discharge_and_route(
         &self,
@@ -1422,6 +1539,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::ResolvedCallResult,
         )>,
         cyclic: bool,
+        flow_convergence: &super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence,
     ) -> Result<RelationDischargeOutcome, Option<RecursionOrBudgetCap>> {
         // Discharge verdicts — a member recorded POSITIVE that consumed
         // assumptions re-discharges against the converged state when ANY
@@ -1709,6 +1827,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.relation_abort_inline_flight(inline_flight.as_ref());
             }
         }
+        // The call sessions commit before the flow members finalize: the
+        // session state feeds this transaction's remaining work regardless
+        // of how the flow members close.
         let staged_call_sessions = call_members
             .iter()
             .filter_map(|(_, state, _)| state.staged_session)
@@ -1726,6 +1847,96 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.resolve_call_abort_drained_flights(&call_members);
             return Err(None);
         }
+        // Proof-gate the flow members BEFORE anything queues: each member
+        // finalizes against its OWN installed demand (its typed discharge
+        // report applied centrally, the component's observed convergence
+        // replayed, the seal, the finalizer) and enters the publish queue
+        // ONLY with its own `CompleteFlowResult`. One unproven member
+        // refuses the WHOLE member batch (the torn-component rule): every
+        // member flight aborts, nothing queues, and the ROOT's outcome is
+        // marked non-admissible too — the mixed equation consumed the
+        // members' evaluated values, so the root's verdict may still flow
+        // to the caller but must never warm (`ReturnOnly`).
+        let mut proven_flow_members = Vec::with_capacity(flow_members.len());
+        let mut flow_batch_unproven = false;
+        for member in flow_members {
+            // The member's per-key substitution applies BEFORE its value
+            // leaves the component: the pop substituted only the
+            // caller-return clone, so the value channel, the finalizer's
+            // proof, and the publish all carry the INSTANTIATED value —
+            // exactly as the root's own close substitutes before it
+            // finalizes.
+            let outcome = match member.outcome {
+                FlowReturnPendingOutcome::EvaluatedValue(result) => {
+                    FlowReturnPendingOutcome::EvaluatedValue(
+                        self.apply_frame_key_substitution(&member.key, result),
+                    )
+                }
+                no_value => no_value,
+            };
+            // The VALUE channel: every member whose close produced an
+            // evaluated value records it for the shared return equation's
+            // override reads — proven or not. Admission is the proof
+            // typing below, never this channel.
+            if let FlowReturnPendingOutcome::EvaluatedValue(result) = &outcome {
+                self.dispatch_txn
+                    .borrow_mut()
+                    .flow
+                    .closed_values
+                    .push((member.key.clone(), result.clone()));
+            }
+            let verdict = match &outcome {
+                FlowReturnPendingOutcome::EvaluatedValue(result) => {
+                    // The member's OWN evaluation provenance, carried
+                    // through the deferral — never reconstructed from the
+                    // demand carrier, which would trivialize the
+                    // triangulation.
+                    self.finalize_flow_demand(
+                        member.flow_demand.as_ref(),
+                        member.discharge.as_ref(),
+                        flow_convergence,
+                        member.provenance,
+                        result,
+                    )
+                }
+                // A no-value member fails the component at the close
+                // (both close paths poison it before routing); it never
+                // enters the publish queue regardless.
+                FlowReturnPendingOutcome::NoValue { failure, .. } => {
+                    let _ = self.fail_flow_demand(member.flow_demand.as_ref(), *failure);
+                    None
+                }
+            };
+            match verdict {
+                Some(super::flow_solve::FlowSolveOutcome::Complete(proof)) => {
+                    proven_flow_members.push(super::dispatch_txn::CompletedFlowReturnMember {
+                        key: member.key,
+                        result: proof,
+                        inline_flight: member.inline_flight,
+                        self_roots: member.self_roots,
+                        materialized: member.materialized,
+                    });
+                }
+                _ => {
+                    flow_batch_unproven = true;
+                    self.flow_return_abort_inline_flight(member.inline_flight.as_ref());
+                }
+            }
+        }
+        if flow_batch_unproven {
+            for member in &completed {
+                self.relation_abort_inline_flight(member.inline_flight.as_ref());
+            }
+            for member in &proven_flow_members {
+                self.flow_return_abort_inline_flight(member.inline_flight.as_ref());
+            }
+            self.resolve_call_abort_drained_flights(&call_members);
+            return Ok(RelationDischargeOutcome {
+                self_publish,
+                self_step,
+                flow_batch_unproven: true,
+            });
+        }
         let mut rootless_flights = Vec::new();
         {
             let mut txn = self.dispatch_txn.borrow_mut();
@@ -1733,22 +1944,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let _ = txn.relation.session_admission.drain(session);
             }
             txn.relation.completed_members.extend(completed);
-            for member in flow_members {
-                let FlowReturnPendingOutcome::Complete(result) = member.outcome else {
-                    unreachable!(
-                        "a degraded flow member poisons the whole tagged component at the close"
-                    )
-                };
-                txn.flow
-                    .completed_members
-                    .push(super::dispatch_txn::CompletedFlowReturnMember {
-                        key: member.key,
-                        result,
-                        inline_flight: member.inline_flight,
-                        self_roots: member.self_roots,
-                        materialized: member.materialized,
-                    });
-            }
+            txn.flow.completed_members.extend(proven_flow_members);
             for (key, state, result) in call_members {
                 // A rootless winner has no stable occurrence to key a
                 // shared entry on: it stays transaction-local, so its
@@ -1770,6 +1966,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Ok(RelationDischargeOutcome {
             self_publish,
             self_step,
+            flow_batch_unproven: false,
         })
     }
 
@@ -1986,6 +2183,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .map(|entry| entry.outcome.clone())
             .collect();
         let bound = prefix_entries.len() + flow_members.len() + call_members.len() + 1;
+        // The observed convergence of the joint fixed point: every
+        // flow-side pass the discharge runs, accumulated across the mixed
+        // passes. The loop exits only on a stable pass (the call results
+        // stopped moving, with the flow side already final against them).
+        let mut observed_iterations: u32 = 0;
         for _pass in 0..bound {
             if !prefix_entries.is_empty() || !flow_members.is_empty() {
                 let mut entries = prefix_entries.clone();
@@ -2000,7 +2202,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         fresh_seed: member.fresh_seed,
                     });
                 }
-                self.discharge_flow_component_to_fixed_point(&mut entries, &call_result_map);
+                let observed =
+                    self.discharge_flow_component_to_fixed_point(&mut entries, &call_result_map);
+                observed_iterations = observed_iterations.saturating_add(observed.iterations);
                 let split = entries.len() - flow_members.len();
                 prefix_outcomes = entries[..split]
                     .iter()
@@ -2011,7 +2215,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             if call_members.is_empty() {
-                return Ok((prefix_outcomes, Vec::new()));
+                return Ok((
+                    prefix_outcomes,
+                    Vec::new(),
+                    super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence {
+                        iterations: observed_iterations,
+                        stable: true,
+                    },
+                ));
             }
             // The overrides the call equation reads its flow hold targets
             // from: the JUST-discharged drained members AND any prefix
@@ -2024,14 +2235,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             > = flow_members
                 .iter()
                 .filter_map(|member| match &member.outcome {
-                    FlowReturnPendingOutcome::Complete(result) => {
+                    FlowReturnPendingOutcome::EvaluatedValue(result) => {
                         Some((member.key.clone(), result.return_type()))
                     }
                     FlowReturnPendingOutcome::NoValue { .. } => None,
                 })
                 .collect();
             for (entry, outcome) in prefix_entries.iter().zip(prefix_outcomes.iter()) {
-                if let FlowReturnPendingOutcome::Complete(result) = outcome {
+                if let FlowReturnPendingOutcome::EvaluatedValue(result) = outcome {
                     flow_overrides.insert(entry.key.clone(), result.return_type());
                 }
             }
@@ -2053,7 +2264,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 })
                 .collect();
             if new_map == call_result_map {
-                return Ok((prefix_outcomes, new_results));
+                return Ok((
+                    prefix_outcomes,
+                    new_results,
+                    super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence {
+                        iterations: observed_iterations,
+                        stable: true,
+                    },
+                ));
             }
             call_result_map = new_map;
         }
@@ -2133,6 +2351,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn relation_abort_completed_members(&self) {
         let (members, flow_members, call_members) = {
             let mut txn = self.dispatch_txn.borrow_mut();
+            txn.flow.closed_values.clear();
             (
                 std::mem::take(&mut txn.relation.completed_members),
                 std::mem::take(&mut txn.flow.completed_members),
@@ -2260,6 +2479,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) {
         let (members, flow_members, call_members) = {
             let mut txn = self.dispatch_txn.borrow_mut();
+            txn.flow.closed_values.clear();
             (
                 std::mem::take(&mut txn.relation.completed_members),
                 std::mem::take(&mut txn.flow.completed_members),
@@ -4635,6 +4855,126 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Expand a single relate pair into direct result(s) or sub-work
     /// items. Pushes exactly one net result onto `results` by the time all
     /// sub-work drains.
+    /// Relate a string literal against a template-literal pattern by the
+    /// pattern's quasi skeleton, deciding ONLY what the skeleton proves;
+    /// every undecidable shape returns `None` and stays deferred.
+    ///
+    /// The skeleton match treats every placeholder as an arbitrary
+    /// string — an OVER-approximation of the template's denoted set, so
+    /// a failed match is a proof of NON-membership while a successful
+    /// match alone proves nothing. Verdicts:
+    ///
+    /// - literal → template: no skeleton match ⇒ `NotAssignable`
+    ///   (over-approximated set excludes the literal). A match with
+    ///   every placeholder typed `string` ⇒ `Assignable` (each gap
+    ///   slice is a string). Any other match ⇒ `None` (a `number`
+    ///   placeholder constrains its slice beyond the skeleton).
+    /// - template → literal: only when every placeholder provably
+    ///   denotes a NONEMPTY string set (a scalar primitive or a
+    ///   literal — `never` denotes the empty template, which IS
+    ///   assignable to anything): no skeleton match ⇒ `NotAssignable`
+    ///   (two disjoint nonempty sets); a match ⇒ `None` (subset of a
+    ///   singleton needs the template to BE that singleton).
+    ///
+    /// Quasis are stored as RAW source text; a quasi carrying an escape
+    /// (`\\`) is not cooked-comparable and bails to `None`.
+    fn relate_string_literal_and_template(
+        &self,
+        source_data: &SemanticNodeData,
+        target_data: &SemanticNodeData,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult> {
+        fn skeleton_comparable(quasis: &[Arc<str>], expressions: &[SemanticNodeId]) -> bool {
+            quasis.len() == expressions.len() + 1
+                && quasis.iter().all(|quasi| !quasi.contains('\\'))
+        }
+        /// Whether `text` is producible from the quasi skeleton with
+        /// every placeholder read as an arbitrary (possibly empty)
+        /// string. Leftmost placement of each middle quasi is complete:
+        /// both candidate remainders are suffixes of the same text, so
+        /// the final `ends_with` verdict is placement-independent.
+        fn skeleton_matches(text: &str, quasis: &[Arc<str>]) -> bool {
+            let first = quasis.first().map(|q| q.as_ref()).unwrap_or("");
+            let last = quasis.last().map(|q| q.as_ref()).unwrap_or("");
+            if quasis.len() == 1 {
+                return text == first;
+            }
+            let Some(mut rest) = text.strip_prefix(first) else {
+                return false;
+            };
+            for quasi in &quasis[1..quasis.len() - 1] {
+                match rest.find(quasi.as_ref()) {
+                    Some(pos) => rest = &rest[pos + quasi.len()..],
+                    None => return false,
+                }
+            }
+            rest.ends_with(last)
+        }
+        let placeholder_is_any_string = |id: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(id).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            )
+        };
+        let placeholder_denotes_nonempty = |id: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(id).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::String
+                        | PrimitiveKind::Number
+                        | PrimitiveKind::BigInt
+                        | PrimitiveKind::Boolean
+                        | PrimitiveKind::Null
+                        | PrimitiveKind::Undefined
+                )) | Some(SemanticNodeData::Literal(_))
+            )
+        };
+        match (source_data, target_data) {
+            (
+                SemanticNodeData::Literal(LiteralValue::String(text)),
+                SemanticNodeData::TemplateLiteral {
+                    quasis,
+                    expressions,
+                },
+            ) if skeleton_comparable(quasis, expressions) => {
+                if !skeleton_matches(text, quasis) {
+                    return Some(RelationResult::NotAssignable);
+                }
+                if expressions.iter().copied().all(placeholder_is_any_string) {
+                    return Some(assignable(bindings));
+                }
+                None
+            }
+            (
+                SemanticNodeData::TemplateLiteral {
+                    quasis,
+                    expressions,
+                },
+                SemanticNodeData::Literal(LiteralValue::String(text)),
+            ) if skeleton_comparable(quasis, expressions) => {
+                if expressions.is_empty() {
+                    return Some(if skeleton_matches(text, quasis) {
+                        assignable(bindings)
+                    } else {
+                        RelationResult::NotAssignable
+                    });
+                }
+                if !expressions
+                    .iter()
+                    .copied()
+                    .all(placeholder_denotes_nonempty)
+                {
+                    return None;
+                }
+                if !skeleton_matches(text, quasis) {
+                    return Some(RelationResult::NotAssignable);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn expand_pair(
         &self,
         source: SemanticNodeId,
@@ -4799,6 +5139,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             results.push(RelationResult::Unknown);
+            return;
+        }
+
+        // ── String literal vs template-literal pattern: decided by the
+        //    quasi skeleton where that is provably sound, BEFORE the
+        //    deferred gate silently defers the pair. An undecidable pair
+        //    still falls through to Unknown. ─────────────────────────────
+        if let Some(result) =
+            self.relate_string_literal_and_template(&source_data, &target_data, bindings)
+        {
+            results.push(result);
             return;
         }
 
@@ -6197,50 +6548,18 @@ fn distribute_and<F>(
     push_forward_work(work, forward);
 }
 
-/// O(tag) disjointness for the contravariant-candidate intersection
-/// collapse: `true` ONLY for pairs whose intersection is provably empty at
-/// tag level — distinct concrete primitives (modulo the
-/// `undefined`/`void` widening pair), distinct literals, or a literal
-/// against a mismatched base primitive. Conservative `false` for every
-/// other shape (the structural Intersection carrier is kept).
+/// Proven tag-level disjointness for the contravariant-candidate
+/// intersection collapse — delegates to the canonical algebra's single
+/// proven-disjoint authority ([`super::canonical_algebra::tag_level_disjoint`]),
+/// so the relation engine and canonical intersection construction share one
+/// implementation. Conservative `false` for every undecided shape (the
+/// structural Intersection carrier is kept).
 fn tag_level_disjoint(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     a: SemanticNodeId,
     b: SemanticNodeId,
 ) -> bool {
-    let (Some(a_data), Some(b_data)) = (graph.node_data(a), graph.node_data(b)) else {
-        return false;
-    };
-    fn literal_base(lit: &LiteralValue) -> PrimitiveKind {
-        match lit {
-            LiteralValue::String(_) => PrimitiveKind::String,
-            LiteralValue::Number(_) => PrimitiveKind::Number,
-            LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
-            LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
-        }
-    }
-    fn concrete(kind: PrimitiveKind) -> bool {
-        !matches!(
-            kind,
-            PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Never
-        )
-    }
-    match (&*a_data, &*b_data) {
-        (SemanticNodeData::Primitive(x), SemanticNodeData::Primitive(y)) => {
-            let widening_pair = matches!(
-                (*x, *y),
-                (PrimitiveKind::Undefined, PrimitiveKind::Void)
-                    | (PrimitiveKind::Void, PrimitiveKind::Undefined)
-            );
-            concrete(*x) && concrete(*y) && x != y && !widening_pair
-        }
-        (SemanticNodeData::Literal(x), SemanticNodeData::Literal(y)) => x != y,
-        (SemanticNodeData::Literal(lit), SemanticNodeData::Primitive(prim))
-        | (SemanticNodeData::Primitive(prim), SemanticNodeData::Literal(lit)) => {
-            concrete(*prim) && literal_base(lit) != *prim
-        }
-        _ => false,
-    }
+    super::canonical_algebra::tag_level_disjoint(graph, a, b)
 }
 
 #[cfg(test)]

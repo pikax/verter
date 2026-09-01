@@ -3582,16 +3582,17 @@ fn props_reader_applies_intersection_rules_to_intersection_carriers() {
         .iter()
         .find(|member| member.string_name() == Some("x"))
         .expect("x publishes");
+    // The same-key collision INTERSECTS the values (never unions or
+    // overrides them); `string & number` is PROVABLY disjoint, so the
+    // canonical intersection reduces it to `never` (checker-confirmed).
     let value_data = graph.node_data(x.value).expect("x value interned");
-    let SemanticNodeData::Intersection(arms) = &*value_data else {
-        panic!(
-            "intersection rule: a same-key collision intersects the values; observed {:?}",
-            *value_data
-        )
-    };
     assert!(
-        arms.contains(&string) && arms.contains(&number),
-        "the intersected value carries both contributors: {arms:?}"
+        matches!(
+            &*value_data,
+            SemanticNodeData::Primitive(PrimitiveKind::Never)
+        ),
+        "the disjoint same-key collision reduces to `never`; observed {:?}",
+        *value_data
     );
 
     // `{readonly x: string} & {...T, x: number}` — readonly in ANY arm
@@ -3817,16 +3818,17 @@ fn intersection_merge_collapses_dual_spelling_members() {
         "one JS property — one intersected member; observed {} members",
         view.positive_members().len()
     );
+    // The collision INTERSECTS the values (never a first-spelling
+    // override); `string & number` is PROVABLY disjoint, so the canonical
+    // intersection reduces it to `never` (checker-confirmed).
     let value_data = graph.node_data(colliding[0].value).expect("value interned");
-    let SemanticNodeData::Intersection(arms) = &*value_data else {
-        panic!(
-            "the collision INTERSECTS the values; observed {:?}",
-            *value_data
-        )
-    };
     assert!(
-        arms.contains(&string) && arms.contains(&number),
-        "both spellings' values intersect: {arms:?}"
+        matches!(
+            &*value_data,
+            SemanticNodeData::Primitive(PrimitiveKind::Never)
+        ),
+        "the disjoint collision reduces to `never`; observed {:?}",
+        *value_data
     );
 }
 

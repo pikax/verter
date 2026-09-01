@@ -172,6 +172,7 @@ oxc_ast = { workspace = true }
 oxc_ast_visit = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
+oxc_syntax = { workspace = true }
 rustc-hash = { workspace = true }
 self_cell = { workspace = true }
 smallvec = "1.15"
@@ -248,12 +249,13 @@ toml = "1.1"
 verter_scheduler = { path = "../verter_scheduler", features = ["test-support"] }
 # Activates the `test-support` feature on `verter_semantic` for
 # `cargo test --package verter_session` (and example/bench) builds only —
-# the flow-slice hash invocation counter
-# (`compute_flow_slice_hash_thread_invocations`) that the hash-then-lower
-# behavioral guard (`hash_then_lower_round_trip_serves_lowered_slice_ir`)
-# binds to. The regular dependency above does NOT enable the feature, so
-# production builds compile `compute_flow_slice_hash` without the counter
-# TLS or its increment. Same idiom as the `verter_scheduler` edge above.
+# the flow-slice hash / plan invocation counters
+# (`compute_flow_slice_hash_thread_invocations`,
+# `return_path_peeker_plan_thread_invocations`) that the hash-then-lower
+# behavioral guards bind to. The regular dependency above does NOT enable
+# the feature, so production builds compile the hasher and the planner
+# without the counter TLS or the increments. Same idiom as the
+# `verter_scheduler` edge above.
 verter_semantic = { path = "../verter_semantic", features = ["test-support"] }
 # Self-edge that activates `verter_session`'s OWN `test-support` feature for its
 # test / example / bench targets ONLY (the integration binary `tests/cases/**`

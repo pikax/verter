@@ -168,71 +168,54 @@ fn error_any_never_propagation_lattice() {
 
     let kind = |id: SemanticNodeId| graph.node_data(id).map(|d| (*d).clone());
 
+    // The union / intersection lattice laws now live INSIDE the canonical
+    // algebra; every construction routes through the one canonical
+    // builder pair, so the laws are exercised at the authority itself —
+    // not via retired per-reducer hooks.
+    use crate::project_semantic_dispatch::canonical_algebra;
     // union: X | never = X (the `never` arm is dropped, singleton folds).
-    let u = absorbed_node(
-        dispatch
-            .absorb_union(&[string, never])
-            .expect("X|never absorbs"),
-    );
+    let u = canonical_algebra::canonical_union(graph, &[string, never]).node;
     assert_eq!(
         kind(u),
         Some(SemanticNodeData::Primitive(PrimitiveKind::String)),
         "X | never = X"
     );
     // union: X | any = any.
-    let u = absorbed_node(
-        dispatch
-            .absorb_union(&[string, any])
-            .expect("X|any absorbs"),
-    );
+    let u = canonical_algebra::canonical_union(graph, &[string, any]).node;
     assert_eq!(
         kind(u),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Any)),
         "X | any = any"
     );
     // union: X | unknown = unknown.
-    let u = absorbed_node(
-        dispatch
-            .absorb_union(&[string, unknown])
-            .expect("X|unknown absorbs"),
-    );
+    let u = canonical_algebra::canonical_union(graph, &[string, unknown]).node;
     assert_eq!(
         kind(u),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
         "X | unknown = unknown"
     );
-    // union: NO absorption for a plain union of ordinary types.
+    // union: NO absorption for a plain union of ordinary types — the
+    // canonical form keeps both arms.
+    let u = canonical_algebra::canonical_union(graph, &[string, number]).node;
     assert!(
-        dispatch.absorb_union(&[string, number]).is_none(),
-        "string | number must NOT fast-reject"
+        matches!(kind(u), Some(SemanticNodeData::Union(members)) if members.len() == 2),
+        "string | number must stay a two-arm union"
     );
 
     // intersection: X & never = never; X & unknown = X; X & any = any.
-    let i = absorbed_node(
-        dispatch
-            .absorb_intersection(&[string, never])
-            .expect("X&never absorbs"),
-    );
+    let i = canonical_algebra::canonical_intersection(graph, &[string, never]).node;
     assert_eq!(
         kind(i),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Never)),
         "X & never = never"
     );
-    let i = absorbed_node(
-        dispatch
-            .absorb_intersection(&[string, unknown])
-            .expect("X&unknown absorbs"),
-    );
+    let i = canonical_algebra::canonical_intersection(graph, &[string, unknown]).node;
     assert_eq!(
         kind(i),
         Some(SemanticNodeData::Primitive(PrimitiveKind::String)),
         "X & unknown = X"
     );
-    let i = absorbed_node(
-        dispatch
-            .absorb_intersection(&[string, any])
-            .expect("X&any absorbs"),
-    );
+    let i = canonical_algebra::canonical_intersection(graph, &[string, any]).node;
     assert_eq!(
         kind(i),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Any)),

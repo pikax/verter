@@ -90,6 +90,7 @@ pub(crate) mod absorb;
 mod apparent_type;
 mod broad_runtime;
 pub(crate) mod build;
+pub(crate) mod canonical_algebra;
 pub(crate) mod carrier;
 pub(crate) mod cycle_gate;
 pub(crate) mod enumerate;
@@ -121,6 +122,11 @@ pub(crate) mod flow_return_positional_tests;
 pub(crate) mod flow_return_root_gate_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_tests;
+// The completeness-proof layer for flow-bearing operations: production-live
+// (the flow evaluator's demand preparation installs demands from here and
+// the component close finalizes through it), and the `FlowReturnKey`
+// constructor derives its result-contract identity from this registry.
+pub(crate) mod flow_solve;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
 mod output_materialization_guards;
@@ -397,7 +403,7 @@ pub struct ProjectSemanticDispatch<'a> {
 /// build folds every nested read's `result_is_partial` / `cache_suppress`
 /// into before its memo-admission decision. See
 /// [`ProjectSemanticDispatch::build_local_taint`].
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct BuildLocalTaint {
     /// OR of every nested read's `result_is_partial` observed while this
     /// frame was the top of the build-local stack. A genuine partial.
@@ -412,6 +418,15 @@ pub(super) struct BuildLocalTaint {
     /// class a nested producer named survives out through the returned
     /// `CacheRead` instead of being re-lifted as the anonymous bridge.
     pub(super) partial_reasons: crate::semantic_query::PartialReasonSet,
+    /// File self-roots deposited by canonical union/intersection
+    /// construction while this frame was on top
+    /// ([`ProjectSemanticDispatch::deposit_canonical_evidence`]): one
+    /// `(canonical, observed_whole_hash)` per file-scoped node the canonical
+    /// identity walk inspected — INCLUDING discarded structural duplicates
+    /// and descendants reached through `Global` intermediates. Folded onto
+    /// the enclosing build's `QueryBuildOutput.observed_self_roots` so an
+    /// edit to a discarded duplicate's file misses the warm read.
+    pub(super) observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
 }
 
 /// Panic-safe RAII guard for a cold-build-local taint frame.
@@ -854,6 +869,76 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// value-only caller. No-op when no frame is on the stack (no active cold
     /// build — e.g. a top-level read from the projector, which routes
     /// partiality through the request sticky instead).
+    /// Deposit one canonicalization's freshness evidence
+    /// ([`canonical_algebra::CanonicalEvidence`]) — the SINGLE evidence
+    /// disposition point for every canonical construction site.
+    ///
+    /// With an ACTIVE cold-build taint frame: the inspected file self-roots
+    /// extend the frame's root set (deduplicated), and an incomplete
+    /// comparison folds `cache_suppress` — ReturnOnly, never a warm
+    /// canonical result.
+    ///
+    /// With NO active frame (a top-level graph consumer outside any cold
+    /// build — projector member merges, typeinfo surface joins): the roots
+    /// are subsumed by the caller's own fact-railed read set (every arm
+    /// reached such a caller through fact-recorded reads on the same rail
+    /// that validates its publication), but `incomplete` is NOT subsumable
+    /// by any read set — it marks the REQUEST result partial, so the
+    /// enclosing publication (component-meta warm gate, typeinfo
+    /// promotion) refuses warm admission of the unproven-canonical value.
+    pub(super) fn deposit_canonical_evidence(
+        &self,
+        evidence: canonical_algebra::CanonicalEvidence,
+    ) {
+        if evidence.incomplete {
+            if self.build_local_taint.borrow().is_empty() {
+                crate::request_context::mark_request_result_partial();
+            } else {
+                self.fold_into_top_build_local_taint(false, true);
+            }
+        }
+        if evidence.inspected_file_roots.is_empty() {
+            return;
+        }
+        if let Some(top) = self.build_local_taint.borrow_mut().last_mut() {
+            for root in evidence.inspected_file_roots {
+                if !top
+                    .observed_self_roots
+                    .iter()
+                    .any(|(c, h)| *c == root.0 && *h == root.1)
+                {
+                    top.observed_self_roots.push(root);
+                }
+            }
+        }
+    }
+
+    /// Re-fold a finished nested observation frame into the ENCLOSING
+    /// build-local frame — taint rails AND the canonical-construction
+    /// self-roots the nested frame accumulated, so a root deposited under a
+    /// nested observation still reaches the enclosing build's memo entry.
+    pub(super) fn fold_observed_frame_into_top(&self, observed: &BuildLocalTaint) {
+        self.fold_into_top_build_local_taint_with(
+            observed.result_is_partial,
+            observed.cache_suppress,
+            observed.partial_reasons,
+        );
+        if observed.observed_self_roots.is_empty() {
+            return;
+        }
+        if let Some(top) = self.build_local_taint.borrow_mut().last_mut() {
+            for root in &observed.observed_self_roots {
+                if !top
+                    .observed_self_roots
+                    .iter()
+                    .any(|(c, h)| c == &root.0 && *h == root.1)
+                {
+                    top.observed_self_roots.push(root.clone());
+                }
+            }
+        }
+    }
+
     pub(super) fn fold_into_top_build_local_taint(
         &self,
         result_is_partial: bool,
@@ -918,26 +1003,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::request_context::mark_request_result_partial_from_read_with(reasons);
         }
         self.fold_into_top_build_local_taint_with(result_is_partial, cache_suppress, reasons);
-    }
-
-    /// [`Self::fold_cache_read_rails`] for the ONE sealed function-return
-    /// consumer: the same two rails, folded under the NAMED class the
-    /// outcome's own classification produced instead of the
-    /// boolean-bridge `PROPAGATED`.
-    ///
-    /// The classes have to be named because the consumers disagree about
-    /// what they mean, and a boolean cannot carry that: publishing the
-    /// inferred type makes any of them a genuine partial, while emitting
-    /// the authored declaration for an external checker leaves the output
-    /// complete, and emitting a runtime option object derived from the
-    /// value sits in between (safe for a faithful surface, unsafe for an
-    /// unverified one).
-    pub(super) fn fold_flow_return_consumer_rails(
-        &self,
-        reasons: crate::semantic_query::PartialReasonSet,
-    ) {
-        crate::request_context::mark_request_result_partial_with_reasons(reasons);
-        self.fold_into_top_build_local_taint_with(true, true, reasons);
     }
 
     /// Bump the per-request type-resolution audit counters (hop / mode /
@@ -2644,21 +2709,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::ApparentType { base, context } => {
                     self.build_apparent_type(*base, context)
                 }
-                // ResolveAmbientNamespace / ResolveEnum / FlowNarrowingAt /
-                // ContextualTypeAt —
+                // ResolveAmbientNamespace / ResolveEnum —
                 // non-producing: these variants have no execute-side reducer.
                 // The build returns `Opaque(Miss)` verbatim (mirroring the
                 // `Relate` arm above); an `Error` result is never
-                // warm-published, so nothing is admitted or cached. Returning
-                // a fabricated narrowed / contextual node for `FlowNarrowingAt`
-                // / `ContextualTypeAt` (whose flow / contextual engines land in
-                // U6) would be a stub; `Miss` is the honest non-result.
+                // warm-published, so nothing is admitted or cached.
                 SemanticQueryKey::ResolveAmbientNamespace { .. }
-                | SemanticQueryKey::ResolveEnum { .. }
-                | SemanticQueryKey::FlowNarrowingAt { .. }
-                | SemanticQueryKey::ContextualTypeAt { .. } => {
+                | SemanticQueryKey::ResolveEnum { .. } => {
                     let fence = self.project_generation_signature();
                     (QueryResult::Error(QueryError::Miss), fence).into()
+                }
+                // FlowNarrowingAt / ContextualTypeAt — flow roots whose
+                // reducers are pending (the registry's `PendingReducer`
+                // rows). The typed-gap route validates the registry row and
+                // surfaces the operation-specific `FlowGap` as a typed
+                // partial: `Error(Miss)` + partial/ReturnOnly rails, no
+                // graph, no plan, no demand. Returning a fabricated
+                // narrowed / contextual node would be a stub; `Miss` is the
+                // honest non-result.
+                SemanticQueryKey::FlowNarrowingAt { .. }
+                | SemanticQueryKey::ContextualTypeAt { .. } => {
+                    let fence = self.project_generation_signature();
+                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                        (QueryResult::Error(QueryError::Miss), fence).into();
+                    if let Some(gap) = flow_solve::typed_gap_for_pending_root(key_for_build.tag())
+                    {
+                        // The reducer for this root does not exist yet:
+                        // the answer is genuinely absent — mark the
+                        // no-surface partial class so the universal read
+                        // funnel gates any enclosing warm admission, and
+                        // surface the OPERATION-SPECIFIC typed gap on the
+                        // read's diagnostic rail (the recorded reason, not
+                        // just its presence).
+                        output.cache_suppress = true;
+                        output.result_is_partial = true;
+                        output.partial_reasons =
+                            crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE;
+                        output
+                            .walker_diagnostics
+                            .push(crate::project_semantic_dispatch::walk::ShallowDiagnostic::PendingFlowRoot { gap });
+                    }
+                    output
                 }
                 // LowerLocator — LIVE producer. The two-phase locator-shape
                 // build: worker-side lease-only deref of the authored body,
@@ -2772,6 +2863,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             output.result_is_partial |= build_local.result_is_partial;
             output.cache_suppress |= build_local.cache_suppress;
             output.partial_reasons = output.partial_reasons.union(build_local.partial_reasons);
+            // Canonical-construction self-roots deposited during this build
+            // (discarded structural duplicates included) join the build's
+            // own observed roots on the memo entry.
+            for root in build_local.observed_self_roots {
+                if !output
+                    .observed_self_roots
+                    .iter()
+                    .any(|(c, h)| *c == root.0 && *h == root.1)
+                {
+                    output.observed_self_roots.push(root);
+                }
+            }
             // ReturnOnly never publishes — fenced-serve arm. A build
             // whose traced scope consumed a FENCED (ReturnOnly)
             // `IndexedReady` serve computed its value basis from a
@@ -3453,6 +3556,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         crate::component_meta_materialize::materialize_component_meta_structure(self.ctx, key)
     }
 
+    /// Test seam: the flow-demand ledger footprint of this dispatch —
+    /// `(installed demand count, reserved demand storage capacity)`. The
+    /// no-flow allocation contract: an ordinary query and every pending
+    /// typed-gap root install zero demands and reserve zero capacity (a
+    /// default `Vec` holds no heap storage).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn flow_demand_footprint_for_tests(&self) -> (usize, usize) {
+        let txn = self.dispatch_txn.borrow();
+        (
+            txn.obligations.flow_demand_count(),
+            txn.obligations.flow_demand_storage_capacity(),
+        )
+    }
+
     /// `Pick<base, members>` via the existing builtin
     /// Pick dispatch (`build_builtin_utility` Pick arm at `build.rs:870`).
     ///
@@ -3689,7 +3806,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if members.is_empty() {
             return graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
         }
-        let lit_ids: Vec<SemanticNodeId> = members
+        let mut lit_ids: Vec<SemanticNodeId> = members
             .iter()
             .map(|m| {
                 graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -3697,9 +3814,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )))
             })
             .collect();
-        graph.intern_node(SemanticNodeData::Union(Arc::from(
-            lit_ids.into_boxed_slice(),
-        )))
+        // Duplicate NAMES intern to one literal id, so the arity gate below
+        // keys on the DEDUPLICATED id set — `["a", "a"]` is arity 1 and
+        // must take the same uniform Union shell as `["a"]`, never fold to
+        // a bare `Literal` through the funnel.
+        {
+            let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+            lit_ids.retain(|id| seen.insert(*id));
+        }
+        // Multi-arm inputs route through the canonical authority. The
+        // arity-1 case is a DELIBERATE raw bypass, preserved by caller
+        // contract (see the doc above: "always uniformly `Union` even at
+        // arity 1, for caller uniformity"): the shell is a query-argument
+        // key-domain carrier for `Pick` / `Omit` `Instantiate` calls, not a
+        // published semantic result, and the canonical singleton fold would
+        // return the bare literal and break that uniformity. All arms are
+        // `Global`-scoped literals — no freshness evidence exists to lose.
+        match lit_ids.as_slice() {
+            [_] => graph.intern_node(SemanticNodeData::Union(Arc::from(
+                lit_ids.into_boxed_slice(),
+            ))),
+            _ => self.intern_normalized_union_or_intersection(&lit_ids, true),
+        }
     }
 }
 

@@ -2192,17 +2192,18 @@ import { obj } from './obj'
 /// the ONLY thing that says the answer is not complete is the
 /// degradation channel itself.
 ///
-/// The sealed consumer entry
-/// (`ProjectSemanticDispatch::execute_function_return_source`) is what
-/// carries that fact outward, by folding the cache-read rails. Without
-/// the fold the enclosing composition reports COMPLETE and WARMS around a
-/// degraded interior — which is the defect the fold was landed for, and
-/// which nothing in the suite discriminated until this row.
+/// The `FlowReturn` build itself carries that fact outward: the
+/// finalizer-outcome adapter translates the degraded verdict once into
+/// the build's own partial rails, and the universal read funnel folds
+/// them into every enclosing composition at the read boundary. Without
+/// that propagation the enclosing composition reports COMPLETE and WARMS
+/// around a degraded interior — the defect this row exists to
+/// discriminate.
 ///
-/// Mutation recipe: emptying the `consumer_fold` match arms at the sealed
-/// entry leaves the whole rest of the suite green and fails exactly this
-/// test — first on `synthesis_should_suppress`, and on the warm replay if
-/// that assertion is removed.
+/// Mutation recipe: clearing the partial rails on the degraded arm of
+/// `build_flow_return` leaves the whole rest of the suite green and
+/// fails exactly this test — first on `synthesis_should_suppress`, and
+/// on the warm replay if that assertion is removed.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_degraded_success_with_a_usable_value_still_gates_the_enclosing_result() {
@@ -2324,6 +2325,17 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
             "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => [\"s\", new Box()]; return { label: \"x\", made: f() } }",
             "{ label: string; made: (string | Box)[] }",
         ),
+        // A `switch` whose DISCRIMINANT is not a reference this half
+        // represents carries no clause relation the evaluator can apply.
+        // The checker narrows nothing here either, so the surface it
+        // publishes is the same one — but silence about a relation is
+        // not proof there is none, and this half has no proof to offer:
+        // the dispatch degrades rather than reporting COMPLETE.
+        (
+            "/src/U1SwitchUnmodeledDispatch.vue",
+            "function makeProps() { switch (1 as number) { case 1: return { label: \"x\" } } return { label: \"y\" } }",
+            "{ label: string }",
+        ),
     ];
 
     for (canonical, script, checker) in NO_ANSWER {
@@ -2406,11 +2418,17 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
     );
 
     // The switch / try statement-position return shapes the no-answer set
-    // lost: both now publish the checker's surface, COMPLETE and warm.
+    // lost: both publish the checker's surface, COMPLETE and warm. The
+    // switch shape is the MODELED dispatch — a represented discriminant
+    // against a literal case relation, the one pair the slice content
+    // carries. A dispatch outside that pair degrades instead
+    // (`U1SwitchUnmodeledDispatch` in the no-answer set above), because
+    // this half cannot carry the clause relation to the evaluator and
+    // "no call and no write" is not evidence that none exists.
     for (canonical, script) in [
         (
             "/src/U1Switch.vue",
-            "function makeProps() { switch (1 as number) { case 1: return { label: \"x\" } } return { label: \"y\" } }",
+            "function makeProps(k: number) { switch (k) { case 1: return { label: \"x\" } } return { label: \"y\" } }",
         ),
         (
             "/src/U1Try.vue",
@@ -22195,18 +22213,6 @@ export interface ProjectClickEvent {
     // semantics `authored_intersection_duplicate_does_not_shadow` pins) and is
     // distinct from interface heritage, which DOES shadow.
 
-    /// An intersection arm `&TypeExpr` contains `expected` when it (or one of its
-    /// intersection / union arms) is that primitive.
-    fn intersection_contains_primitive(expr: &TypeExpr, expected: PrimitiveName) -> bool {
-        match expr {
-            TypeExpr::Primitive(name) => *name == expected,
-            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
-                .iter()
-                .any(|ty| intersection_contains_primitive(ty, expected)),
-            _ => false,
-        }
-    }
-
     let project_only = meta
         .accepted_props
         .iter()
@@ -22218,19 +22224,15 @@ export interface ProjectClickEvent {
         project_only.publication.result().selected_source(),
         "projectOnly accepted prop",
     );
-    // POSITIVE: the conflicting member is the value-intersection of both arms.
+    // POSITIVE: the conflicting member is the value-intersection of both
+    // arms; `number & string` is PROVABLY disjoint at tag level, so the
+    // canonical intersection reduces it to `never` (checker-confirmed:
+    // `IsNever<number & string>` is `true`) — the value-intersect rule
+    // applied, never a last-arm override.
     assert!(
-        matches!(&project_only_ty, TypeExpr::Intersection(_)),
+        matches!(&project_only_ty, TypeExpr::Primitive(PrimitiveName::Never)),
         "projectOnly must value-intersect the conflicting fallback (`number & \
-         string`), not override; got: {project_only_ty:?}"
-    );
-    assert!(
-        intersection_contains_primitive(&project_only_ty, PrimitiveName::Number),
-        "projectOnly intersection must retain the fallback `number` arm; got: {project_only_ty:?}"
-    );
-    assert!(
-        intersection_contains_primitive(&project_only_ty, PrimitiveName::String),
-        "projectOnly intersection must retain the tag-local `string` arm; got: {project_only_ty:?}"
+         string` reduces to `never`), not override; got: {project_only_ty:?}"
     );
     // NEGATIVE: it must NOT have collapsed to the old last-arm override `string`.
     assert!(

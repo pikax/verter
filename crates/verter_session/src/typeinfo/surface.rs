@@ -408,34 +408,30 @@ impl TypeInfoSurface {
     /// view is never absence evidence, and the joined view is typeinfo output
     /// that never re-enters binary semantic relation.
     #[must_use]
-    pub fn from_spread_projection(
+    pub(crate) fn from_spread_projection(
         graph: &SemanticGraphStore,
         formula: &crate::semantic_query::ObjectProjectionFormula,
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> Option<Self> {
         use crate::semantic_query::{
             AuthoredPropertyKey, ObjectSignatureKind, PositiveKeyPresence, ProjectionEvidence,
             PropertyKey,
         };
 
-        fn union_value(graph: &SemanticGraphStore, values: Vec<SemanticNodeId>) -> SemanticNodeId {
-            let mut arms: Vec<SemanticNodeId> = Vec::new();
-            for value in values {
-                match graph.node_data(value).as_deref() {
-                    Some(SemanticNodeData::Union(nested)) => {
-                        for arm in nested.iter().copied() {
-                            if !arms.contains(&arm) {
-                                arms.push(arm);
-                            }
-                        }
-                    }
-                    _ if !arms.contains(&value) => arms.push(value),
-                    _ => {}
-                }
-            }
-            match arms.as_slice() {
-                [only] => *only,
-                _ => graph.intern_node(SemanticNodeData::Union(Arc::from(arms))),
-            }
+        fn union_value(
+            graph: &SemanticGraphStore,
+            values: Vec<SemanticNodeId>,
+            evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+        ) -> SemanticNodeId {
+            // Canonical construction: the joined per-alternative value union
+            // routes through the one authority (recursive flatten +
+            // structural dedup replace the hand-rolled one-level splice);
+            // the evidence threads to the caller's disposition boundary.
+            let composite = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+                graph, &values,
+            );
+            evidence.absorb(composite.evidence);
+            composite.node
         }
 
         let alternatives = formula.alternatives();
@@ -543,7 +539,7 @@ impl TypeInfoSurface {
                         crate::semantic_query::QueryError::OpenSurface,
                     ))
                 } else {
-                    union_value(graph, join.values)
+                    union_value(graph, join.values, evidence)
                 };
                 build_member(
                     graph,
@@ -578,7 +574,7 @@ impl TypeInfoSurface {
             .filter(|(.., values, _)| !values.is_empty())
             .map(|(_, key_type, values, readonly)| TypeInfoIndexSignature {
                 key_type,
-                value_type: union_value(graph, values),
+                value_type: union_value(graph, values, evidence),
                 key_span: None,
                 value_span: None,
                 declaration_span: None,

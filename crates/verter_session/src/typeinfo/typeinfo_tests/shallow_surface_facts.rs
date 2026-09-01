@@ -175,8 +175,12 @@ fn interface_heritage_duplicate_shadows() {
 // (7) P2-1 NEGATIVE — authored intersection duplicate does NOT shadow.
 //
 // `type AuthoredIntersection = HeritageBase & { dup: string }` with
-// `HeritageBase.dup: number` => `AuthoredIntersection['dup']` is the
-// intersection `number & string`, NOT plain `string`.
+// `HeritageBase.dup: number` => the member intersects BOTH arms — it is
+// never a first-wins shadow to plain `string` OR plain `number`. The
+// intersection of the two PROVABLY disjoint scalar arms reduces to
+// `never` (canonical intersection algebra; the checker agrees:
+// `IsNever<AuthoredIntersection["dup"]>` is `true` under the pinned
+// tsgo AND tsc — `string & number` has no inhabitant).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -187,16 +191,22 @@ fn authored_intersection_duplicate_does_not_shadow() {
     let expr = shallow_surface_expr(&host, FILE, "AuthoredIntersection");
     let props = object_props(&expr);
 
-    // The duplicate `dup` must be the intersection of both arms (`number &
-    // string`), NOT a shadow.
+    // The duplicate `dup` reduces to `never` — the checker-faithful
+    // intersection of the two disjoint arms.
     let dup_ty = &props["dup"].ty;
-    assert_expr_contains_primitive(dup_ty, PrimitiveName::Number);
-    assert_expr_contains_primitive(dup_ty, PrimitiveName::String);
-    // NEGATIVE: must NOT have collapsed to plain `string` (the shadow bug).
     assert!(
-        !matches!(dup_ty, TypeExpr::Primitive(PrimitiveName::String)),
-        "authored intersection must NOT shadow — `dup` must stay `number & \
-         string`, not collapse to plain `string`; got {dup_ty:?}"
+        matches!(dup_ty, TypeExpr::Primitive(PrimitiveName::Never)),
+        "`number & string` is provably disjoint at tag level and reduces to \
+         `never`; got {dup_ty:?}"
+    );
+    // NEGATIVE: must NOT have first-wins-shadowed to either plain arm
+    // (the shadow bug this test exists for).
+    assert!(
+        !matches!(
+            dup_ty,
+            TypeExpr::Primitive(PrimitiveName::String) | TypeExpr::Primitive(PrimitiveName::Number)
+        ),
+        "authored intersection must NOT shadow to a single arm; got {dup_ty:?}"
     );
     assert!(props.contains_key("baseOnly"), "referenced member survives");
     assert!(props.contains_key("authoredOnly"), "own member survives");

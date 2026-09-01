@@ -223,6 +223,26 @@ node_id = "PGF0"
 commit_message = "fix(session): separate project-shape and route-publication fences"
 commit_date = "2026-08-30T14:48:45+01:00"
 
+[[implemented]]
+node_id = "D1"
+commit_message = "feat(session): add private hermetic flow completeness foundation"
+commit_date = "2026-08-29T20:05:00+01:00"
+
+[[implemented]]
+node_id = "D2A"
+commit_message = "feat(session): canonical flow demand and proof substrate"
+commit_date = "2026-08-30T09:46:00+01:00"
+
+[[implemented]]
+node_id = "D2B"
+commit_message = "feat(session): route flow-return admission through the sole completeness proof"
+commit_date = "2026-08-30T17:32:00+01:00"
+
+[[implemented]]
+node_id = "TA1A"
+commit_message = "feat(session): canonical union and intersection algebra with structural constituent identity"
+commit_date = "2026-08-31T18:30:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
@@ -505,11 +525,11 @@ node_id = "D1"
 gh_issue = 173
 sync_to_github = true
 [[github_issue]]
-node_id = "D2"
+node_id = "D2B"
 gh_issue = 174
 sync_to_github = true
 [[github_issue]]
-node_id = "D3"
+node_id = "D3C"
 gh_issue = 175
 sync_to_github = true
 [[github_issue]]

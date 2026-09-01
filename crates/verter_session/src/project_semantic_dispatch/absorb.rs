@@ -14,7 +14,7 @@
 //!
 //! - **Cheap `node_data` peek ONLY.** No `execute`, no `evaluate_deferred`,
 //!   no resolver work. The peek follows transparent [`Alias`](crate::semantic_query::SemanticNodeData::Alias)
-//!   redirects (a pure arena hop) up to [`ALIAS_PEEK_HOPS`] but never reduces
+//!   redirects (a pure arena hop) up to the shared alias-hop bound (`canonical_algebra::ALIAS_PEEK_HOPS`) but never reduces
 //!   an operator or resolves a declaration.
 //! - **`any` / `never` / `unknown` results are `Clean`** (legitimately
 //!   cacheable). **`error` rides [`Opaque(QueryError)`](crate::semantic_query::SemanticNodeData::Opaque)**:
@@ -45,13 +45,6 @@ use crate::semantic_query::{
 
 use super::ProjectSemanticDispatch;
 
-/// Maximum transparent [`Alias`](SemanticNodeData::Alias) hops the fast-reject
-/// peek follows before giving up. Absorption is an optimisation + a
-/// correctness fix for DIRECT lattice-extreme operands; a longer alias chain
-/// falls through to the structural reducer, which resolves it via the normal
-/// machinery. The bound keeps the peek O(1) and immune to alias cycles.
-const ALIAS_PEEK_HOPS: usize = 8;
-
 /// A lattice-extreme operand the §22 absorption table reacts to.
 /// `pub(super)` so the shared conditional branch-selection oracle
 /// (`build.rs::conditional_branch_selection`) can route `any` / `error`
@@ -68,39 +61,18 @@ pub(super) enum SpecialKind {
 
 impl ProjectSemanticDispatch<'_> {
     /// Classify `id` as a lattice extreme, following transparent `Alias`
-    /// redirects (bounded by [`ALIAS_PEEK_HOPS`]). Returns the kind AND the
+    /// redirects (bounded by the shared alias-hop bound (`canonical_algebra::ALIAS_PEEK_HOPS`)). Returns the kind AND the
     /// resolved node id (so an `error` operand can be reused verbatim as the
     /// absorbed result, preserving its `QueryError` payload + node identity —
     /// the error CARRIER).
     pub(super) fn peek_special(&self, id: SemanticNodeId) -> Option<(SpecialKind, SemanticNodeId)> {
-        let mut cur = id;
-        // At most ALIAS_PEEK_HOPS hops; a longer chain / alias cycle → None.
-        // bounded-loop: ALIAS_PEEK_HOPS transparent Alias redirects.
-        for _ in 0..ALIAS_PEEK_HOPS {
-            let data = self.graph().node_data(cur)?;
-            match &*data {
-                SemanticNodeData::Alias(inner) => {
-                    let next = *inner;
-                    drop(data);
-                    cur = next;
-                    continue;
-                }
-                SemanticNodeData::Primitive(PrimitiveKind::Any) => {
-                    return Some((SpecialKind::Any, cur))
-                }
-                SemanticNodeData::Primitive(PrimitiveKind::Never) => {
-                    return Some((SpecialKind::Never, cur))
-                }
-                SemanticNodeData::Primitive(PrimitiveKind::Unknown) => {
-                    return Some((SpecialKind::Unknown, cur))
-                }
-                SemanticNodeData::Opaque(err) if err.is_error_type() => {
-                    return Some((SpecialKind::Error, cur))
-                }
-                _ => return None,
-            }
-        }
-        None
+        // Shared body: the graph-level canonical-algebra peek (single alias-
+        // hop / extreme-classification implementation). The absorb-table
+        // callers root their absorbed outputs from the operand set
+        // (`absorbed_output`) and make no canonical claim (an undecided peek
+        // simply skips the fast-reject), so the peek runs evidence-free —
+        // no per-call allocation, lock traffic, or root recording.
+        super::canonical_algebra::peek_special_via_graph(self.graph(), id, None)
     }
 
     /// Intern a bare primitive node.
@@ -174,121 +146,13 @@ impl ProjectSemanticDispatch<'_> {
         .with_observed_self_roots(observed)
     }
 
-    // ── Union ───────────────────────────────────────────────────────────
-    /// §22.2 union absorption: `X | any = any`, `X | unknown = unknown`,
-    /// `X | never = X` (drop every `never` arm; all-`never` ⇒ `never`),
-    /// `X | error = error` (carrier-dominating).
-    pub(crate) fn absorb_union(&self, members: &[SemanticNodeId]) -> Option<QueryBuildOutput> {
-        let mut has_any = false;
-        let mut has_unknown = false;
-        let mut error_node: Option<SemanticNodeId> = None;
-        let mut has_never = false;
-        for &m in members {
-            match self.peek_special(m) {
-                Some((SpecialKind::Any, _)) => has_any = true,
-                Some((SpecialKind::Unknown, _)) => has_unknown = true,
-                Some((SpecialKind::Error, id)) => {
-                    if error_node.is_none() {
-                        error_node = Some(id);
-                    }
-                }
-                Some((SpecialKind::Never, _)) => has_never = true,
-                None => {}
-            }
-        }
-        // Error dominates so the error CARRIER is never hidden behind a Clean
-        // `any`/`unknown` (relation/display keep seeing the error type).
-        if let Some(err) = error_node {
-            return Some(self.absorbed_output(err, members.iter().copied()));
-        }
-        if has_any {
-            return Some(self.absorbed_output(
-                self.primitive_node(PrimitiveKind::Any),
-                members.iter().copied(),
-            ));
-        }
-        if has_unknown {
-            return Some(self.absorbed_output(
-                self.primitive_node(PrimitiveKind::Unknown),
-                members.iter().copied(),
-            ));
-        }
-        if has_never {
-            // `X | never = X`: drop the `never` arms and re-normalise the
-            // remainder. An all-`never` union folds to `never`
-            // (`intern_*` interns `Never` for an empty member set).
-            let kept: Vec<SemanticNodeId> = members
-                .iter()
-                .copied()
-                .filter(|&m| !matches!(self.peek_special(m), Some((SpecialKind::Never, _))))
-                .collect();
-            let node =
-                self.intern_normalized_union_or_intersection(&kept, /* is_union */ true);
-            return Some(self.absorbed_output(node, members.iter().copied()));
-        }
-        None
-    }
+    // The union / intersection §22 absorption arms live INSIDE the
+    // canonical algebra (`canonical_algebra::canonical_union` /
+    // `canonical_intersection`), which every construction funnel routes
+    // through — the former per-reducer `absorb_union` / `absorb_intersection`
+    // entry hooks are deleted with them.
 
     // ── Intersection ──────────────────────────────────────────────────────
-    /// §22.2 intersection absorption: `X & never = never`, `X & any = any`,
-    /// `X & unknown = X` (drop every `unknown` arm; all-`unknown` ⇒ `unknown`),
-    /// `X & error = error` (carrier-dominating).
-    pub(crate) fn absorb_intersection(
-        &self,
-        members: &[SemanticNodeId],
-    ) -> Option<QueryBuildOutput> {
-        let mut has_any = false;
-        let mut has_never = false;
-        let mut has_unknown = false;
-        let mut error_node: Option<SemanticNodeId> = None;
-        for &m in members {
-            match self.peek_special(m) {
-                Some((SpecialKind::Any, _)) => has_any = true,
-                Some((SpecialKind::Never, _)) => has_never = true,
-                Some((SpecialKind::Unknown, _)) => has_unknown = true,
-                Some((SpecialKind::Error, id)) if error_node.is_none() => {
-                    error_node = Some(id);
-                }
-                Some((SpecialKind::Error, _)) | None => {}
-            }
-        }
-        // Error dominates so the error CARRIER is never hidden.
-        if let Some(err) = error_node {
-            return Some(self.absorbed_output(err, members.iter().copied()));
-        }
-        if has_never {
-            return Some(self.absorbed_output(
-                self.primitive_node(PrimitiveKind::Never),
-                members.iter().copied(),
-            ));
-        }
-        if has_any {
-            return Some(self.absorbed_output(
-                self.primitive_node(PrimitiveKind::Any),
-                members.iter().copied(),
-            ));
-        }
-        if has_unknown {
-            // `X & unknown = X`: drop the `unknown` arms. An all-`unknown`
-            // intersection is `unknown`.
-            let kept: Vec<SemanticNodeId> = members
-                .iter()
-                .copied()
-                .filter(|&m| !matches!(self.peek_special(m), Some((SpecialKind::Unknown, _))))
-                .collect();
-            if kept.is_empty() {
-                return Some(self.absorbed_output(
-                    self.primitive_node(PrimitiveKind::Unknown),
-                    members.iter().copied(),
-                ));
-            }
-            let node =
-                self.intern_normalized_union_or_intersection(&kept, /* is_union */ false);
-            return Some(self.absorbed_output(node, members.iter().copied()));
-        }
-        None
-    }
-
     // ── keyof ───────────────────────────────────────────────────────────
     /// §22.2 `keyof` absorption: `keyof any = string | number | symbol`,
     /// `keyof never = string | number | symbol` (TS quirk),
@@ -460,7 +324,7 @@ impl ProjectSemanticDispatch<'_> {
     /// `error` carriers and every non-extreme operand return `None` — the
     /// utility's structural arm (and its deferred `Opaque` shell semantics)
     /// stays authoritative. `peek_special` follows transparent `Alias`
-    /// redirects, bounded by [`ALIAS_PEEK_HOPS`].
+    /// redirects, bounded by the shared alias-hop bound (`canonical_algebra::ALIAS_PEEK_HOPS`).
     pub(crate) fn absorb_builtin_utility_degenerate(
         &self,
         name: &str,

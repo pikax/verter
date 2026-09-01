@@ -456,6 +456,13 @@ pub struct SkeletonExprSite {
     pub shape: SkeletonExprShape,
     /// Identifier reads attributed to this site.
     pub reads: Arc<[SkeletonRead]>,
+    /// The captured names of the nested function value (arrow / function
+    /// expression) this site holds: the nested frame's free reads, already
+    /// interned into THIS frame's name table, deduplicated by name. A
+    /// subset of `reads`' roots, recorded separately so a consumer can
+    /// tell "the closure here captures this enclosing name" from "this
+    /// expression itself reads the name". Empty for a non-closure site.
+    pub captures: Arc<[FlowNameId]>,
     /// Call / construct footprints attributed to this site.
     pub calls: Arc<[SkeletonCall]>,
 }
@@ -918,6 +925,7 @@ struct SiteDraft {
     parent: Option<SkeletonExprSiteId>,
     shape: SkeletonExprShape,
     reads: Vec<SkeletonRead>,
+    captures: Vec<FlowNameId>,
     calls: Vec<SkeletonCall>,
 }
 
@@ -1027,6 +1035,7 @@ impl SkeletonBuilder {
             parent,
             shape: SkeletonExprShape::Other,
             reads: Vec::new(),
+            captures: Vec::new(),
             calls: Vec::new(),
         });
         id
@@ -1225,6 +1234,10 @@ impl SkeletonBuilder {
     /// frame reads. Record those free reads on the function-value site so the
     /// value frontier selects the reaching outer definitions that seed the
     /// nested evaluator. Reads resolved by the nested frame remain there.
+    /// The captured NAME roots are ALSO recorded on the site's `captures`
+    /// (deduplicated by name), so a consumer can enumerate the closure's
+    /// captured-binding subjects without re-deriving them from the read
+    /// footprint.
     fn push_nested_capture_reads(
         &mut self,
         site: SkeletonExprSiteId,
@@ -1248,12 +1261,17 @@ impl SkeletonBuilder {
                 }
             }
         }
+        let mut capture_names: Vec<FlowNameId> = Vec::new();
         for (name, path) in captures {
             let name = self.intern(name.as_ref());
+            if !capture_names.contains(&name) {
+                capture_names.push(name);
+            }
             self.sites[site.index()]
                 .reads
                 .push(SkeletonRead { name, path });
         }
+        self.sites[site.index()].captures = capture_names;
     }
 
     /// `span` is the call expression's ABSOLUTE position; the recorded
@@ -1662,6 +1680,7 @@ impl SkeletonBuilder {
                         parent: draft.parent,
                         shape: draft.shape,
                         reads: Arc::from(draft.reads.into_boxed_slice()),
+                        captures: Arc::from(draft.captures.into_boxed_slice()),
                         calls: Arc::from(draft.calls.into_boxed_slice()),
                     })
                     .collect::<Vec<_>>()

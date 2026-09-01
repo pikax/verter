@@ -42,6 +42,27 @@ use super::{
 #[path = "peeker_tests.rs"]
 mod peeker_tests;
 
+#[cfg(feature = "test-support")]
+thread_local! {
+    /// Per-thread count of [`ReturnPathPeeker::plan`] executions — the
+    /// behavioral half of the plan-once guarantee: one cold demand runs
+    /// the planner exactly once, and the lowering / demand-plan assembly
+    /// reuse the retained plan instead of re-planning. Thread-local
+    /// (cache-runtime computes run on the demanding thread), observability
+    /// only: never key material, never a fact. Compiled only under the
+    /// `test-support` feature (a consumer DEV-dependency edge), so
+    /// production builds carry neither the TLS nor the increment.
+    static PLAN_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of [`ReturnPathPeeker::plan`] executions performed on the
+/// CALLING thread. Guard observability only — see the thread-local's doc.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn return_path_peeker_plan_thread_invocations() -> u64 {
+    PLAN_INVOCATIONS.with(std::cell::Cell::get)
+}
+
 // ---------------------------------------------------------------------------
 // Demand
 // ---------------------------------------------------------------------------
@@ -223,6 +244,8 @@ impl<'g> ReturnPathPeeker<'g> {
         demand: &SliceDemand,
         budget: &FlowSliceBudget,
     ) -> Result<ReturnSlicePlan, FlowSliceBudgetExceeded> {
+        #[cfg(feature = "test-support")]
+        PLAN_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
         let return_origins = demand
             .origins
             .iter()

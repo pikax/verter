@@ -129,9 +129,14 @@ fn mixed_seeded_call_flow_cycle_converges_for_both_members() {
     assert_eq!(solved, vec![number, number]);
 }
 
-/// The production flow-root close routes both solved members into the same
-/// completed batch. Mutation recipe: omit the ResolveCall drain/equation arm;
-/// only the flow member is queued.
+/// The production flow-root close drains the solved ResolveCall member
+/// into its completed batch and hands the caller the solved value, while
+/// the flow root itself — closed here WITHOUT a finalizer proof — never
+/// enters the flow publish batch: batch membership is proof-typed, so an
+/// unproven root aborts its own entry instead of staging a raw value.
+/// Mutation recipe: omit the ResolveCall drain/equation arm and the call
+/// member is never queued; stage the flow member from the raw evaluated
+/// value and the zero-member assert fails.
 #[test]
 fn mixed_seeded_component_close_stages_both_domains() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -162,7 +167,7 @@ fn mixed_seeded_component_close_stages_both_domains() {
     assert!(matches!(
         dispatch.flow_frame_close_for_tests(
             idx,
-            FlowReturnPendingOutcome::Complete(FlowReturnResult::new(
+            FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
                 dispatch.graph(),
                 number,
                 false,
@@ -173,7 +178,12 @@ fn mixed_seeded_component_close_stages_both_domains() {
         FlowReturnStep::Complete(ref result) if result.return_type() == number
     ));
     let txn = dispatch.dispatch_txn.borrow();
-    assert_eq!(txn.flow.completed_members.len(), 1);
+    assert_eq!(
+        txn.flow.completed_members.len(),
+        0,
+        "batch membership is proof-typed: an unproven flow root aborts its own \
+         entry while its usable value still flows to the caller"
+    );
     assert_eq!(txn.call.completed_members.len(), 1);
     assert_eq!(
         super::return_equation::resolved_call_return_type(
@@ -423,7 +433,7 @@ fn call_budget_trip_poisons_the_whole_mixed_component() {
 
     let step = dispatch.flow_frame_close_for_tests(
         idx,
-        FlowReturnPendingOutcome::Complete(FlowReturnResult::new(
+        FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
             dispatch.graph(),
             number,
             false,
@@ -504,7 +514,7 @@ fn refused_call_commit_leaves_the_relation_ledger_undrained() {
     assert!(matches!(
         dispatch.flow_frame_close_for_tests(
             idx,
-            FlowReturnPendingOutcome::Complete(FlowReturnResult::new(
+            FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
                 dispatch.graph(),
                 number,
                 false,
@@ -578,7 +588,7 @@ fn mixed_component_relation_member_flip_publishes_nothing() {
     assert!(matches!(
         dispatch.flow_frame_close_for_tests(
             idx,
-            FlowReturnPendingOutcome::Complete(FlowReturnResult::new(
+            FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
                 dispatch.graph(),
                 number,
                 false,

@@ -11,19 +11,24 @@
 //! [`FlowReturnDegradation::UnresolvedValue`] in when the value reaches a
 //! semantic-miss carrier the evaluation could not attribute to a position.
 //!
-//! THREE channels decide warm-vs-`ReturnOnly` on that one field:
-//!
-//! 1. the root build's `cache_suppress`
-//!    (`ProjectSemanticDispatch::build_flow_return`) — the `FlowReturn`
-//!    query's OWN admission;
-//! 2. the SCC batch member publish;
-//! 3. the sealed consumer entry's cache-read fold
-//!    (`ProjectSemanticDispatch::execute_function_return_source`) — the
-//!    ENCLOSING composition's admission, folded on every non-clean arm.
+//! Warm-vs-`ReturnOnly` admission has ONE positive authority: the flow
+//! finalizer's `CompleteFlowResult` proof token
+//! ([`crate::project_semantic_dispatch::flow_solve`]). A degraded verdict
+//! never seals (`FlowSealError::DegradedValue`), so no proof mints for it;
+//! the root build's finalizer-outcome adapter translates that refusal ONCE
+//! into the build's `result_is_partial` / `cache_suppress` / `partial_reasons`
+//! rails, and the universal read funnel (`fold_cache_read_rails`) propagates
+//! those rails into every enclosing composition. SCC members are proof-typed
+//! at the publish boundary, so an unproven member is unrepresentable in the
+//! batch. The family memo's `FlowReturn` proof gate
+//! (`semantic_query_memo`) is a NEGATIVE veto fence over that design: it
+//! refuses a build whose `flow_completion` token is absent or mismatched —
+//! and marks the refused read partial/suppressed so no parent warms around
+//! the veto — but it can never PROMOTE a proofless result.
 //!
 //! The family memo's warm READ carries a `debug_assert!` that no degraded
 //! success is ever stored; that assertion compiles out in release and is a
-//! consistency check, NOT a fourth channel.
+//! consistency check, not an admission channel.
 //!
 //! A struct literal is unrepresentable outside this file (`E0451`), and a
 //! post-construction `result.return_type = …` is unrepresentable too
@@ -63,14 +68,16 @@ pub struct FlowReturnResult {
     /// value carries an unresolved semantic carrier. `Some` gates the
     /// result to `ReturnOnly`; `None` is the warm-admissible arm.
     ///
-    /// PRIVATE by construction. Every one of the three admission channels
-    /// that reads it — the root build's `cache_suppress`, the SCC batch
-    /// publish, and the sealed consumer entry's cache-read fold — decides
-    /// warm-vs-`ReturnOnly` on it alone, so a `None` over a value that is
-    /// not actually known would be a warm-admitted lie at all three. The
-    /// only way to obtain a `FlowReturnResult` is [`Self::new`], which
-    /// derives this field from the RESULT NODE rather than accepting a
-    /// caller's word for it. See [`FlowReturnDegradation::UnresolvedValue`].
+    /// PRIVATE by construction. The verdict gates warm admission through
+    /// the proof layer alone: a `Some` here can never seal
+    /// (`FlowSealError::DegradedValue`), so no `CompleteFlowResult` mints
+    /// and the result is `ReturnOnly` at every admission boundary — the
+    /// root build's finalizer-outcome adapter, the proof-typed SCC member
+    /// batch, and the family memo's proof gate. A `None` over a value that
+    /// is not actually known would therefore be a warm-admitted lie at all
+    /// three. The only way to obtain a `FlowReturnResult` is [`Self::new`],
+    /// which derives this field from the RESULT NODE rather than accepting
+    /// a caller's word for it. See [`FlowReturnDegradation::UnresolvedValue`].
     degradation: Option<FlowReturnDegradation>,
 }
 

@@ -199,14 +199,6 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             .into_complete_node()
     }
 
-    fn intern(&self, data: SemanticNodeData) -> SemanticNodeId {
-        self.dispatch
-            .ctx
-            .project_type_store()
-            .semantic_graph()
-            .intern_node(data)
-    }
-
     /// Normalize the root to its underlying callable node through the shared
     /// carrier-shell normalizer. Returns a `Function` node, or a
     /// `Union` / `Intersection` of realized `Function` arms, or `None` when the
@@ -816,12 +808,11 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 // The first arm's label names the position.
                 let label = per_arm[0][i].label.clone();
                 let tys: Vec<SemanticNodeId> = per_arm.iter().map(|arm| arm[i].ty).collect();
-                let ty = match tys.len() {
-                    1 => tys[0],
-                    _ => self.intern(SemanticNodeData::Intersection(Arc::from(
-                        tys.into_boxed_slice(),
-                    ))),
-                };
+                // Canonical construction: the per-position parameter
+                // intersection routes through the one authority.
+                let ty = self
+                    .dispatch
+                    .intern_normalized_union_or_intersection(&tys, false);
                 PositionalParamNode { label, ty }
             })
             .collect()
@@ -965,10 +956,12 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         let first_param = if all_arms_have_first_param {
             match first_params.len() {
                 0 => None,
-                1 => Some(first_params[0]),
-                _ => Some(self.intern(SemanticNodeData::Intersection(Arc::from(
-                    first_params.into_boxed_slice(),
-                )))),
+                // Canonical construction: the per-arm first-param
+                // intersection routes through the one authority.
+                _ => Some(
+                    self.dispatch
+                        .intern_normalized_union_or_intersection(&first_params, false),
+                ),
             }
         } else {
             None
@@ -976,14 +969,12 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         // Returns: combine per the caller's arm kind.
         let return_type = match returns.len() {
             0 => None,
-            1 => Some(returns[0]),
-            _ => {
-                let boxed: Arc<[SemanticNodeId]> = Arc::from(returns.into_boxed_slice());
-                Some(self.intern(match combine {
-                    ArmCombineNode::Intersection => SemanticNodeData::Intersection(boxed),
-                    ArmCombineNode::Union => SemanticNodeData::Union(boxed),
-                }))
-            }
+            // Canonical construction: the combined per-arm return composite
+            // routes through the one authority in the caller's arm kind.
+            _ => Some(self.dispatch.intern_normalized_union_or_intersection(
+                &returns,
+                matches!(combine, ArmCombineNode::Union),
+            )),
         };
         Some(SlotCallableNodeParts {
             first_param,

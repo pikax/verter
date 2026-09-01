@@ -684,25 +684,12 @@ fn slot_param_and_return_every_arm_has_first_param_intersects() {
     let first_mat = dispatch
         .materialize_output_type_expr_for_test(first_param)
         .expect("the combined first param materializes");
-    let TypeExpr::Intersection(first_arms) = &first_mat else {
-        panic!("the combined first param is an Intersection of both arms, got {first_mat:?}");
-    };
-    assert_eq!(
-        first_arms.len(),
-        2,
-        "the intersection carries both first params"
-    );
+    // The combined first param intersects both arms; `number & string` is
+    // PROVABLY disjoint, so the canonical intersection reduces it to
+    // `never` (checker-confirmed) — never a single-arm override.
     assert!(
-        first_arms
-            .iter()
-            .any(|a| matches!(a, TypeExpr::Primitive(PrimitiveName::Number))),
-        "one arm's first param is `number`"
-    );
-    assert!(
-        first_arms
-            .iter()
-            .any(|a| matches!(a, TypeExpr::Primitive(PrimitiveName::String))),
-        "the other arm's first param is `string`"
+        matches!(&first_mat, TypeExpr::Primitive(PrimitiveName::Never)),
+        "the disjoint combined first param reduces to `never`, got {first_mat:?}"
     );
     let union_ret = dispatch
         .materialize_output_type_expr_for_test(
@@ -743,22 +730,14 @@ fn slot_param_and_return_every_arm_has_first_param_intersects() {
                 .expect("Intersection combine yields a return"),
         )
         .expect("the combined return materializes");
-    let TypeExpr::Intersection(isect_ret_arms) = &isect_ret else {
-        panic!("ArmCombineNode::Intersection must combine the DISTINCT returns into an Intersection, got {isect_ret:?}");
-    };
-    assert_eq!(
-        isect_ret_arms.len(),
-        2,
-        "the Intersection return carries both arms' returns"
-    );
+    // `boolean & object` is PROVABLY disjoint at tag level (checker-
+    // confirmed: `IsNever<boolean & object>` is `true`), so the
+    // Intersection combiner's canonical result is `never` — still DISTINCT
+    // from the Union combiner's two-arm `boolean | object`, which is what
+    // keeps the combiner mode discriminating.
     assert!(
-        isect_ret_arms
-            .iter()
-            .any(|a| matches!(a, TypeExpr::Primitive(PrimitiveName::Boolean)))
-            && isect_ret_arms
-                .iter()
-                .any(|a| matches!(a, TypeExpr::Primitive(PrimitiveName::Object))),
-        "the Intersection return carries both `boolean` and `object`"
+        matches!(&isect_ret, TypeExpr::Primitive(PrimitiveName::Never)),
+        "ArmCombineNode::Intersection over disjoint returns reduces to `never`, got {isect_ret:?}"
     );
 }
 
@@ -3412,15 +3391,12 @@ fn validated_snippet_params_union_combines_by_index() {
         "one position across both arms (shortest caps)"
     );
     assert_eq!(params[0].label.as_deref(), Some("a"));
+    // `string & number` is PROVABLY disjoint — the canonical intersection
+    // reduces the combined binding to `never` (checker-confirmed), never a
+    // single-arm override.
     match node_data_for(dispatch.ctx, params[0].ty).as_deref() {
-        Some(SemanticNodeData::Intersection(arms)) => {
-            assert_eq!(
-                arms.as_ref(),
-                &[a, b][..],
-                "the combined position type is the intersection of both arms, in arm order"
-            );
-        }
-        other => panic!("the combined binding type is an `Intersection` node, got {other:?}"),
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {}
+        other => panic!("the disjoint combined binding reduces to `never`, got {other:?}"),
     }
 }
 

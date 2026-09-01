@@ -37,6 +37,10 @@ enum ResolveCallRootClose {
         ResolvedCallResult,
         Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     ),
+    /// A complete result whose mixed component consumed UNPROVEN
+    /// flow-member values: the value flows to the caller, the build is
+    /// cache-suppressed — never queued, never warm.
+    CompleteReturnOnly(ResolvedCallResult),
     Degraded(ResolveCallFailure),
 }
 
@@ -162,7 +166,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let outcome = self.run_resolve_call(&key);
         match self.resolve_call_frame_pop(idx, outcome, false) {
             ResolveCallFramePop::Provisional(step) => step,
-            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, _)) => {
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, _))
+            | ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(result)) => {
                 ResolveCallStep::Complete(result)
             }
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure)) => {
@@ -214,6 +219,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let idx = self.resolve_call_frame_open(key);
         let outcome = self.run_resolve_call(key);
+        #[cfg(any(test, feature = "test-support"))]
+        self.inject_unproven_flow_member_for_tests(idx);
         match self.resolve_call_frame_pop(idx, outcome, true) {
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, self_roots)) => {
                 // A rootless winner has no stable occurrence to key a
@@ -226,6 +233,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ))
                 .with_observed_self_roots(self_roots);
                 output.cache_suppress |= !admits;
+                output
+            }
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(result)) => {
+                // ReturnOnly-but-public: the value was composed around a
+                // mixed component whose flow members finalized UNPROVEN —
+                // the caller receives it, the memo refuses admission, and
+                // the frame close already marked the request partial.
+                let mut output: QueryBuildOutput<SemanticQueryValue> = (
+                    QueryResult::Value(SemanticQueryValue::ResolveCall(Arc::new(result))),
+                    fence,
+                )
+                    .into();
+                output.cache_suppress = true;
                 output
             }
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure)) => {
@@ -392,6 +412,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self_roots: state.self_roots,
                         materialized: state.materialized,
                         fresh_seed: state.fresh_seed,
+                        flow_demand: state.flow_demand,
+                        discharge: state.discharge,
+                        provenance: state.provenance,
                     });
                 }
                 PendingObligationDomain::ResolveCall(state) => {
@@ -490,6 +513,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut root_result = None;
         let mut call_results = Vec::new();
         let mut converged = false;
+        // The observed convergence of the joint fixed point: every
+        // flow-side pass the discharge runs, accumulated across passes.
+        let mut observed_iterations: u32 = 0;
         for _pass in 0..bound {
             if !flow_members.is_empty() {
                 let mut entries: Vec<super::dispatch_txn::FlowDischargeEntry> =
@@ -502,7 +528,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         fresh_seed: member.fresh_seed,
                     });
                 }
-                self.discharge_flow_component_to_fixed_point(&mut entries, &call_value_map);
+                let observed =
+                    self.discharge_flow_component_to_fixed_point(&mut entries, &call_value_map);
+                observed_iterations = observed_iterations.saturating_add(observed.iterations);
                 for (member, entry) in flow_members.iter_mut().zip(entries) {
                     member.outcome = entry.outcome;
                 }
@@ -536,7 +564,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             > = flow_members
                 .iter()
                 .filter_map(|member| match &member.outcome {
-                    super::dispatch_txn::FlowReturnPendingOutcome::Complete(result) => {
+                    super::dispatch_txn::FlowReturnPendingOutcome::EvaluatedValue(result) => {
                         Some((member.key.clone(), result.return_type()))
                     }
                     super::dispatch_txn::FlowReturnPendingOutcome::NoValue { .. } => None,
@@ -673,19 +701,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some((root_key.clone(), root_result.clone(), root.staged_session)),
             call_results,
             cyclic,
+            &super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence {
+                iterations: observed_iterations,
+                stable: true,
+            },
         );
-        if let Err(cap) = discharge {
-            if let Some(session) = root.staged_session {
-                self.abandon_session(session);
+        let discharge = match discharge {
+            Ok(outcome) => outcome,
+            Err(cap) => {
+                if let Some(session) = root.staged_session {
+                    self.abandon_session(session);
+                }
+                self.resolve_call_abort_inline_flight(root.inline_flight.as_ref());
+                return ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(
+                    if cap.is_some() {
+                        ResolveCallFailure::Budget
+                    } else {
+                        ResolveCallFailure::Undecidable
+                    },
+                ));
+            }
+        };
+        if discharge.flow_batch_unproven {
+            // The root's return equation consumed UNPROVEN flow-member
+            // values (the member batch was refused at the proof gate):
+            // the call's value still flows to the caller, but the root is
+            // NON-ADMISSIBLE — never queued, never warm — and the
+            // enclosing build/request take the same rails the inline
+            // flow-root refusal folds.
+            self.fold_cache_read_rails(
+                true,
+                true,
+                crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+            );
+            if machinery_root {
+                return ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(
+                    root_result,
+                ));
             }
             self.resolve_call_abort_inline_flight(root.inline_flight.as_ref());
-            return ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(
-                if cap.is_some() {
-                    ResolveCallFailure::Budget
-                } else {
-                    ResolveCallFailure::Undecidable
-                },
-            ));
+            return ResolveCallFramePop::Provisional(ResolveCallStep::Complete(root_result));
         }
 
         if !machinery_root {
@@ -1599,14 +1654,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if generic_rest.is_some_and(|(_, rest_start)| index >= rest_start) {
                 continue;
             }
-            let Some(target) = mapped_parameter_type(
+            let mut canonical_evidence =
+                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+            let mapped = mapped_parameter_type(
                 ordinary_params,
                 rest,
                 index,
                 arguments.len(),
                 *argument,
                 graph,
-            ) else {
+                &mut canonical_evidence,
+            );
+            self.deposit_canonical_evidence(canonical_evidence);
+            let Some(target) = mapped else {
                 self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
@@ -1889,14 +1949,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if deferred_generic_rest.is_some_and(|(_, rest_start)| index >= rest_start) {
                 continue;
             }
-            let Some(target) = mapped_parameter_type(
+            let mut canonical_evidence =
+                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+            let mapped = mapped_parameter_type(
                 ordinary_params,
                 substituted_rest,
                 index,
                 arguments.len(),
                 *argument,
                 graph,
-            ) else {
+                &mut canonical_evidence,
+            );
+            self.deposit_canonical_evidence(canonical_evidence);
+            let Some(target) = mapped else {
                 self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
@@ -2101,6 +2166,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         excess_property_check: bool,
     ) -> RelationStep {
         if !budget.relation() {
+            self.dispatch_txn.borrow_mut().call.undecided_relations += 1;
             return RelationStep::BudgetExceeded(crate::semantic_query::RecursionOrBudgetCap {
                 kind: crate::semantic_query::BudgetExceededKind::CallResolutionBudget,
                 limit: MAX_APPLICABILITY_RELATIONS as u32,
@@ -2110,14 +2176,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key.source_freshness = self.freshness_for_source_node(freshness_origin);
         key.policy.excess_property_check =
             excess_property_check && key.source_freshness == FreshnessKey::Fresh;
-        if binding_enabled {
+        let step = if binding_enabled {
             self.execute_relate(key)
         } else {
             self.dispatch_txn.borrow_mut().begin_binding_disabled();
             let step = self.execute_relate(key);
             self.dispatch_txn.borrow_mut().end_binding_disabled();
             step
+        };
+        // An undecided relation outcome the call consumed: the flow
+        // evaluator's per-call snapshot reads this to refuse claiming a
+        // relation obligation whose judgement was never decided.
+        if matches!(
+            step,
+            RelationStep::Unknown | RelationStep::BudgetExceeded(_)
+        ) {
+            self.dispatch_txn.borrow_mut().call.undecided_relations += 1;
         }
+        step
     }
 
     /// The transaction's monotonic accepted-deposit counter (bumped at
@@ -2599,6 +2675,7 @@ fn mapped_parameter_type(
     argument_count: usize,
     argument: CallArgument,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
+    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Option<SemanticNodeId> {
     // An INDEFINITE spread supplies an unknown-length tail, so it never
     // maps onto a positional slot — it relates against the rest parameter's
@@ -2606,7 +2683,7 @@ fn mapped_parameter_type(
     if !argument.indefinite_spread {
         if let Some(param) = params.get(index) {
             if !param.rest {
-                return Some(optional_parameter_target(param, graph));
+                return Some(optional_parameter_target(param, graph, evidence));
             }
         }
     }
@@ -2669,6 +2746,7 @@ fn mapped_parameter_type(
 fn optional_parameter_target(
     param: &FunctionParam,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
+    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> SemanticNodeId {
     if !param.optional {
         return param.ty;
@@ -2677,20 +2755,16 @@ fn optional_parameter_target(
     if param.ty == undefined {
         return param.ty;
     }
-    match graph.node_data(param.ty).as_deref() {
-        Some(SemanticNodeData::Union(members)) => {
-            if members.contains(&undefined) {
-                param.ty
-            } else {
-                let mut arms = members.to_vec();
-                arms.push(undefined);
-                graph.intern_node(SemanticNodeData::Union(Arc::from(arms.into_boxed_slice())))
-            }
-        }
-        _ => graph.intern_node(SemanticNodeData::Union(Arc::from(
-            vec![param.ty, undefined].into_boxed_slice(),
-        ))),
-    }
+    // Canonical construction: the optional-parameter relation target
+    // (`T | undefined`) routes through the one authority (which also
+    // flattens a union-typed `T`); the evidence threads to the caller's
+    // disposition boundary.
+    let composite = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+        graph,
+        &[param.ty, undefined],
+    );
+    evidence.absorb(composite.evidence);
+    composite.node
 }
 
 /// The relation target for an indefinite spread landing at `offset` inside
@@ -2720,7 +2794,8 @@ fn tuple_suffix_target(
     }
 }
 
-fn union_self_roots(
+/// Union `source`'s self-roots into `target`, one root per canonical.
+pub(super) fn union_self_roots(
     target: &mut Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     source: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
 ) {

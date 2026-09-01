@@ -219,6 +219,7 @@ fn flow_return_key() -> FlowReturnKey {
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
             policy: crate::semantic_query::FlowReturnPolicy {},
         },
+        result_contract: super::super::flow_solve::flow_return_result_contract_id(),
     }
 }
 
@@ -739,6 +740,7 @@ fn nearest_relate_walks_past_flow_frames_to_the_nearest_relation_ancestor() {
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
             policy: crate::semantic_query::FlowReturnPolicy {},
         },
+        result_contract: super::super::flow_solve::flow_return_result_contract_id(),
     };
     stack.push_relate(relation_key(501), occurrence, 0);
     stack.push_flow_return(flow_key("nested"), 0);
@@ -943,4 +945,107 @@ fn return_equation_identity_spans_flow_return_and_resolve_call() {
         },
         ReturnDomainMetadata::FlowReturn { .. }
     ));
+}
+
+/// The flow-demand carriers: the in-flight flow frame and the deferred
+/// SCC member each carry the demand's `FlowDemandCarrier` (handle + plan +
+/// provenance) — the member's demand SURVIVES the pop so the component
+/// close finalizes the member against exactly its own demand. The slot
+/// defaults to `None` (a demand the planner refused installs nothing) and
+/// round-trips a carrier when set.
+#[test]
+fn flow_demand_carriers_default_none_and_round_trip() {
+    use crate::for_tests::{
+        flow_graph_fixture_for_tests, flow_return_result_contract_id, FlowDemandRequest,
+        FlowResourcePolicy,
+    };
+    use crate::semantic_query::{
+        CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
+        FlowReturnKey, FlowReturnPolicy, ReturnProjectionDemand, SemanticQueryKey,
+    };
+
+    let fixture = flow_graph_fixture_for_tests("function carry_me(x) { return x; }\n", 31);
+    let query = SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
+        function: FlowFunctionSlotIdentity {
+            declaration_slot: crate::semantic_query::ResolvedDeclSlotIdentity::value_slot(
+                Arc::from("/flow_solve_fixture.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("carry_me"),
+                0,
+                [0; 16],
+                [0; 16],
+            ),
+            function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        },
+        normalized_type_args: Arc::from([]),
+        context: FlowReturnContext {
+            parse_env_hash: [0; 16],
+            resolve_env_hash: [0; 16],
+            type_env_hash: [0; 16],
+            lib_env_hash: [0; 16],
+            project_identity: [0; 16],
+            type_substitution: CanonicalTypeSubstitution::empty(),
+            policy: FlowReturnPolicy {},
+        },
+        demand: ReturnProjectionDemand::whole_return(),
+        input: FlowInputContext::empty(),
+        result_contract: flow_return_result_contract_id(),
+    }));
+    let provenance = super::flow_obligation_state::FlowEvaluationProvenance::new(7, 3, 5, 0);
+    let plan = fixture
+        .build_plan(FlowDemandRequest {
+            query,
+            input_basis: verter_identity::identity::InputBasisId::from_canonical(&provenance),
+            resources: FlowResourcePolicy::default(),
+            additional_requirements: Arc::from([]),
+        })
+        .expect("the carrier fixture plans");
+    let mut runtime = ObligationRuntime::default();
+    let carrier = super::flow_obligation_state::FlowDemandCarrier {
+        handle: runtime.install_flow_demand(&plan),
+        plan: Arc::new(plan),
+        provenance,
+    };
+
+    // The in-flight frame carrier.
+    let mut frame = FlowReturnFrameState::default();
+    assert!(
+        frame.flow_demand.is_none(),
+        "a fresh flow frame carries no demand carrier"
+    );
+    frame.flow_demand = Some(carrier.clone());
+    assert_eq!(
+        frame.flow_demand.as_ref().map(|carrier| carrier.handle),
+        Some(carrier.handle),
+        "the frame carrier round-trips its handle"
+    );
+
+    // The deferred SCC member carrier.
+    let mut pending = FlowReturnPendingState {
+        outcome: FlowReturnPendingOutcome::NoValue {
+            failure: FlowReturnFailure::Budget(
+                verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+            ),
+            degradation: None,
+        },
+        inline_flight: None,
+        holds: Vec::new(),
+        self_roots: Vec::new(),
+        materialized: crate::semantic_query::demand::MaterializedSet::default(),
+        fresh_seed: false,
+        flow_demand: None,
+        discharge: None,
+        provenance,
+    };
+    assert!(
+        pending.flow_demand.is_none(),
+        "a deferred flow member carries no demand carrier by default"
+    );
+    pending.flow_demand = Some(carrier.clone());
+    assert_eq!(
+        pending.flow_demand.as_ref().map(|carrier| carrier.handle),
+        Some(carrier.handle),
+        "the pending carrier round-trips its handle"
+    );
 }

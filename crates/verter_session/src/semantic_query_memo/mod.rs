@@ -2721,6 +2721,7 @@ impl SemanticGraphStore {
             self_root_canonicals,
             pending_prefix_backfills,
             satisfied_projection,
+            flow_completion,
         } = build_output;
         let result = prepared::enforce_projection_value_shape(prepared.key(), result);
         // §3.4 default: a non-path build (`Instantiate`, `KeyOf`,
@@ -2832,8 +2833,41 @@ impl SemanticGraphStore {
             "§1 invariant violated at memo admission: result_is_partial \
              without cache_suppress would launder a partial into the family memo"
         );
+        // The flow-proof admission gate: a `FlowReturn` build admits ONLY
+        // with the finalizer's proof token, and the token must name THIS
+        // key (the key embeds the result contract, so a contract mismatch
+        // is a key mismatch) and THIS value. The token is the sole
+        // positive completeness authority; this fence may veto (a foreign
+        // or mismatched token refuses), never promote.
+        let flow_proof_ok = match prepared.key() {
+            SemanticQueryKey::FlowReturn(key) => match (&flow_completion, &result) {
+                (Some(proof), QueryResult::Value(SemanticQueryValue::FlowReturn(value))) => {
+                    proof.key() == key.as_ref() && proof.value() == value.as_ref()
+                }
+                _ => false,
+            },
+            _ => true,
+        };
+        // A vetoed value is UNPROVEN, not merely unpublished: force the
+        // partial/suppression rails onto the read so the winner's returned
+        // `CacheRead` — and every joiner's inherited in-flight state —
+        // propagates the taint instead of the build's original clean
+        // flags. Without this a parent memo could warm around the veto.
+        // A build that already admitted partiality keeps its OWN precise
+        // reason classes — the veto adds nothing to say over them.
+        let (cache_suppress, result_is_partial, partial_reasons) =
+            if !flow_proof_ok && !result_is_partial && matches!(result, QueryResult::Value(_)) {
+                (
+                    true,
+                    true,
+                    partial_reasons
+                        .union(crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+                )
+            } else {
+                (cache_suppress, result_is_partial, partial_reasons)
+            };
         let publish_carrier: Option<&crate::fact_signature_helpers::ReadSetSignature> =
-            if cache_suppress || result_is_partial {
+            if cache_suppress || result_is_partial || !flow_proof_ok {
                 None
             } else {
                 Some(&broadcast_carrier)

@@ -1802,9 +1802,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 arm_group_nodes.push(arm_node);
             }
-            let result_node = self.graph().intern_node(SemanticNodeData::Union(Arc::from(
-                arm_group_nodes.into_boxed_slice(),
-            )));
+            // Canonical construction: the per-arm overload-set union of a
+            // union callee (arm order carries no overload precedence).
+            let result_node = self.intern_normalized_union_or_intersection(&arm_group_nodes, true);
             let mut observed_self_roots = self.observed_self_roots_from_nodes(
                 std::iter::once(callee).chain(type_args.iter().copied()),
             );
@@ -5618,15 +5618,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     {
                         let survivors: Vec<SemanticNodeId> =
                             arms.iter().copied().filter(|a| !nullish(*a)).collect();
-                        Some(match survivors.len() {
-                            0 => {
-                                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-                            }
-                            1 => survivors[0],
-                            _ => graph.intern_node(SemanticNodeData::Union(Arc::from(
-                                survivors.into_boxed_slice(),
-                            ))),
-                        })
+                        // Canonical construction: the utility-reducer
+                        // survivor union (empty folds to `never`, singleton
+                        // to the member — the canonical folds).
+                        Some(self.intern_normalized_union_or_intersection(&survivors, true))
                     }
                     _ if nullish(arg) => {
                         Some(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)))
@@ -7193,6 +7188,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // Recursive / budget-exceeded sentinel — never warm-published,
                 // so it records nothing the §3.4 gate could reuse.
                 satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+                flow_completion: None,
             };
         }
         // Emit a whole-path `ProjectPath` edge on the result so consumers
@@ -7259,6 +7255,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self_root_canonicals: Arc::from([]),
             pending_prefix_backfills,
             satisfied_projection,
+            flow_completion: None,
         }
     }
 
@@ -7452,15 +7449,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
         let ids: Vec<SemanticNodeId> = member_literals.into_iter().map(|(id, _)| id).collect();
-        Some(if ids.is_empty() {
-            self.graph()
-                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-        } else if ids.len() == 1 {
-            ids[0]
-        } else {
-            self.graph()
-                .intern_node(SemanticNodeData::Union(Arc::from(ids.into_boxed_slice())))
-        })
+        // Canonical construction: the enumerated `keyof` key union (empty
+        // folds to `never`, singleton to the lone key — the canonical folds).
+        Some(self.intern_normalized_union_or_intersection(&ids, true))
     }
 
     pub(super) fn uses_synthetic_mapped_key_names(&self, members: &[SurfaceMember]) -> bool {
@@ -7618,8 +7609,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
         let single_closed = matches!(formula.alternatives(), [only] if only.closed().is_some());
-        let members =
-            super::walk::spread_formula_positive_members_for_macro(self.graph(), &formula);
+        let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let members = super::walk::spread_formula_positive_members_for_macro(
+            self.graph(),
+            &formula,
+            &mut canonical_evidence,
+        );
+        self.deposit_canonical_evidence(canonical_evidence);
         Some((members, !single_closed))
     }
 
@@ -8113,9 +8109,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .is_some_and(|k| k.element_access_collides(&produced_name))
                 }) {
                     if existing.value != value {
-                        existing.value = graph.intern_node(SemanticNodeData::Union(Arc::from(
-                            vec![existing.value, value].into_boxed_slice(),
-                        )));
+                        // Canonical construction: duplicate produced names
+                        // UNION their per-K values through the one authority.
+                        existing.value = self.intern_normalized_union_or_intersection(
+                            &[existing.value, value],
+                            true,
+                        );
                     }
                     project_member_edges.push((value, produced_name.clone()));
                     continue;
@@ -9402,64 +9401,57 @@ impl<'a> ProjectSemanticDispatch<'a> {
         false
     }
 
-    /// Union normalization. Structurally sorts + dedups the supplied members
-    /// and publishes the canonical union node. Singleton unions fold to
-    /// their only member; empty unions fold to `Primitive(Never)`.
+    /// Union normalization — the `NormalizeUnion` query builder. Routes
+    /// through the canonical algebra (recursive flattening, §22 lattice
+    /// absorption, literal subsumption, structural `T | T = T`), threading
+    /// the canonicalization's freshness evidence onto the memo entry
+    /// EXPLICITLY: the inspected-root set (discarded duplicates and
+    /// `Global`-intermediate descendants included) joins the direct-member
+    /// self-roots, and an incomplete comparison sets `cache_suppress`
+    /// (ReturnOnly — never a warm canonical result).
     ///
-    /// Emits one `Normalize` origin edge from the result to each
-    /// contributing source member. The edge lets walkers
-    /// recover the pre-canonical input set even after dedup / sorting.
-    /// Single-member / empty folds emit no edge — the result IS one of
-    /// the inputs (or a fresh Never node) and there's no canonicalisation
-    /// fact to record.
+    /// Emits one `Normalize` origin edge from the result to EVERY
+    /// contributing source member whenever the input had more than one
+    /// member — lattice-extreme and proven-disjoint folds included — so
+    /// provenance recovery finds the pre-canonical input set even after
+    /// absorption / dedup / sorting (`NormalizeIntersection([string,
+    /// number])` records `string` and `number` on the shared `never`).
+    /// Edges landing on a shared `Global` primitive are accepted growth:
+    /// the derivation store deduplicates identical edges, and each edge is
+    /// a true "some normalization folded these contributors here" fact.
     pub(super) fn build_normalize_union(
         &self,
         members: &Arc<[SemanticNodeId]>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         verter_audit::attribute!(NormalizeUnion);
-        // §22 fast-reject: `X|any=any`, `X|never=X`, `X|unknown=unknown`,
-        // `X|error=error`. Runs BEFORE structural normalization.
-        if let Some(absorbed) = self.absorb_union(members) {
-            return absorbed;
-        }
-        let node = self.intern_normalized_union_or_intersection(members, /* is_union */ true);
-        let fence = self.project_generation_signature();
-        if members.len() > 1 {
-            self.graph().record_origin_edge(
-                node,
-                OriginEdgeKind::Normalize,
-                Arc::clone(members),
-                OriginMeta::None,
-                Arc::clone(&fence),
-            );
-        }
-        // Self-version rooting: the normalised union depends on every
-        // contributing member node. Root the memo entry on the file
-        // content version each file-derived member was lowered from.
-        let observed_self_roots = self.observed_self_roots_from_nodes(members.iter().copied());
-        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-            QueryResult::Value(node),
-            fence,
-        ))
-        .with_observed_self_roots(observed_self_roots)
+        self.build_normalize_composite(members, /* is_union */ true)
     }
 
-    /// Intersection normalization. Structurally sorts + dedups; singleton
-    /// folds to the only member; empty folds to `Primitive(Never)`.
-    ///
-    /// Emits one `Normalize` origin edge from the result to each
-    /// contributing source member.
+    /// Intersection normalization — the `NormalizeIntersection` query
+    /// builder. Same canonical routing, evidence threading, and origin-edge
+    /// discipline as [`Self::build_normalize_union`]; the algebra
+    /// additionally applies the intersection lattice laws and the
+    /// PROVEN-disjoint scalar collapse (`string & number = never`).
     pub(super) fn build_normalize_intersection(
         &self,
         members: &Arc<[SemanticNodeId]>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         verter_audit::attribute!(NormalizeIntersection);
-        // §22 fast-reject: `X&never=never`, `X&any=any`, `X&unknown=X`,
-        // `X&error=error`. Runs BEFORE structural normalization.
-        if let Some(absorbed) = self.absorb_intersection(members) {
-            return absorbed;
-        }
-        let node = self.intern_normalized_union_or_intersection(members, /* is_union */ false);
+        self.build_normalize_composite(members, /* is_union */ false)
+    }
+
+    /// Shared body of the two normalization builders.
+    fn build_normalize_composite(
+        &self,
+        members: &Arc<[SemanticNodeId]>,
+        is_union: bool,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let composite = if is_union {
+            super::canonical_algebra::canonical_union(self.graph(), members)
+        } else {
+            super::canonical_algebra::canonical_intersection(self.graph(), members)
+        };
+        let node = composite.node;
         let fence = self.project_generation_signature();
         if members.len() > 1 {
             self.graph().record_origin_edge(
@@ -9470,16 +9462,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Arc::clone(&fence),
             );
         }
-        // Self-version rooting: the normalised intersection depends on
-        // every contributing member node. Root the memo entry on the
-        // file content version each file-derived member was lowered
-        // from.
-        let observed_self_roots = self.observed_self_roots_from_nodes(members.iter().copied());
-        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+        // Self-version rooting: the normalised composite depends on every
+        // contributing member node AND on every file-scoped node the
+        // canonical identity walk inspected — including discarded
+        // duplicates, whose file edits must miss the warm read even though
+        // the duplicate no longer appears in the result.
+        let mut observed_self_roots = self.observed_self_roots_from_nodes(members.iter().copied());
+        for root in composite.evidence.inspected_file_roots {
+            if !observed_self_roots
+                .iter()
+                .any(|(c, h)| *c == root.0 && *h == root.1)
+            {
+                observed_self_roots.push(root);
+            }
+        }
+        let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
             QueryResult::Value(node),
             fence,
         ))
-        .with_observed_self_roots(observed_self_roots)
+        .with_observed_self_roots(observed_self_roots);
+        // An incomplete or budget-tripped canonical comparison is
+        // ReturnOnly: the value flows to the caller, the memo refuses
+        // admission.
+        output.cache_suppress |= composite.evidence.incomplete;
+        output
     }
 
     /// Literal-preserving string-intrinsic transform shared by the
@@ -10067,75 +10073,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
         output
     }
 
-    pub(super) fn intern_normalized_union_or_intersection(
+    /// The dispatch-level canonical-composite funnel: every dispatch-context
+    /// union / intersection CONSTRUCTION routes here, and this routes through
+    /// the canonical algebra
+    /// ([`canonical_algebra::canonical_union`] /
+    /// [`canonical_algebra::canonical_intersection`]) — recursive flattening,
+    /// lattice absorption, structural `T | T = T`, proven-disjoint scalar
+    /// intersection collapse. The canonicalization's freshness evidence is
+    /// deposited ambiently on the active cold-build taint frame
+    /// ([`Self::deposit_canonical_evidence`]): inspected file self-roots
+    /// (discarded duplicates included) reach the enclosing build's memo
+    /// entry, and an `Incomplete` comparison folds `cache_suppress`
+    /// (ReturnOnly — never a warm canonical result).
+    pub(crate) fn intern_normalized_union_or_intersection(
         &self,
         members: &[SemanticNodeId],
         is_union: bool,
     ) -> SemanticNodeId {
-        // Union CONSTRUCTION normalizes two ways, both mirroring the
-        // checker's own `getUnionType`: member unions FLATTEN (a union is
-        // never an arm of a union), and a literal arm whose primitive the
-        // union already carries is SUBSUMED (`string | "a"` is `string`
-        // — the literal adds no inhabitant). Intersections intern as
-        // given.
-        let mut sorted: Vec<SemanticNodeId> = if is_union {
-            let mut flat: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
-            for member in members {
-                match self.graph().node_data(*member).as_deref() {
-                    Some(SemanticNodeData::Union(nested)) => flat.extend(nested.iter().copied()),
-                    _ => flat.push(*member),
-                }
-            }
-            let carries_primitive = |kind: PrimitiveKind, flat: &[SemanticNodeId]| {
-                flat.iter().any(|member| {
-                    matches!(
-                        self.graph().node_data(*member).as_deref(),
-                        Some(SemanticNodeData::Primitive(primitive)) if *primitive == kind
-                    )
-                })
-            };
-            let mut kept: Vec<SemanticNodeId> = Vec::with_capacity(flat.len());
-            for member in flat.iter().copied() {
-                let literal_primitive = match self.graph().node_data(member).as_deref() {
-                    Some(SemanticNodeData::Literal(
-                        crate::semantic_query::LiteralValue::String(_),
-                    )) => Some(PrimitiveKind::String),
-                    Some(SemanticNodeData::Literal(
-                        crate::semantic_query::LiteralValue::Number(_),
-                    )) => Some(PrimitiveKind::Number),
-                    Some(SemanticNodeData::Literal(
-                        crate::semantic_query::LiteralValue::BigInt(_),
-                    )) => Some(PrimitiveKind::BigInt),
-                    Some(SemanticNodeData::Literal(
-                        crate::semantic_query::LiteralValue::Boolean(_),
-                    )) => Some(PrimitiveKind::Boolean),
-                    _ => None,
-                };
-                if !literal_primitive.is_some_and(|kind| carries_primitive(kind, &flat)) {
-                    kept.push(member);
-                }
-            }
-            kept
+        let composite = if is_union {
+            super::canonical_algebra::canonical_union(self.graph(), members)
         } else {
-            members.to_vec()
+            super::canonical_algebra::canonical_intersection(self.graph(), members)
         };
-        sorted.sort_by_key(|id| id.0);
-        sorted.dedup();
-        if sorted.is_empty() {
-            return self
-                .graph()
-                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
-        }
-        if sorted.len() == 1 {
-            return sorted[0];
-        }
-        let boxed: Arc<[SemanticNodeId]> = Arc::from(sorted.into_boxed_slice());
-        if is_union {
-            self.graph().intern_node(SemanticNodeData::Union(boxed))
-        } else {
-            self.graph()
-                .intern_node(SemanticNodeData::Intersection(boxed))
-        }
+        self.deposit_canonical_evidence(composite.evidence);
+        composite.node
     }
 }
 

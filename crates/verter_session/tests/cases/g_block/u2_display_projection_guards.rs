@@ -1046,6 +1046,39 @@ fn merged_decl_display_preserves_heritage_arms_like_graph_reduction() {
     assert_eq!(display_render, "Base & { x: number }");
 }
 
+/// The heritage-arm sequence the graph reducer builds is the AUTHORED order
+/// (`extends A, B` → `[a_ref, b_ref, own_object]`), never a re-sorted one — a
+/// `sort_by_key(node id)` reordering is just as much a regression as an
+/// outright reversal, and either is invisible to a reader that only checks
+/// membership. `b_ref` is interned BEFORE `a_ref` so `B`'s node id is LOWER
+/// than `A`'s: an authored-order-preserving reducer renders `"A & B & …"`
+/// regardless, while a canonical-sort-by-id reducer would visibly swap them
+/// to `"B & A & …"` — a mutation a same-shape two-arm fixture (whose single
+/// heritage ref has no sibling to swap past) cannot expose.
+#[test]
+fn merged_decl_reduction_preserves_authored_multi_heritage_arm_order() {
+    let store = SemanticGraphStore::new();
+    let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    // Interned in REVERSE of authored order so `B`'s id < `A`'s id.
+    let b_ref = declref(&store, "B");
+    let a_ref = declref(&store, "A");
+    let own = object(&store, vec![member("x", number_id, false)], vec![], vec![]);
+    // `interface Foo extends A, B { x: number }`.
+    let contributor = store.intern_node(SemanticNodeData::Intersection(Arc::from([
+        a_ref, b_ref, own,
+    ])));
+    let contributors = [contributor];
+
+    let reduced =
+        verter_session::for_tests::reduce_merged_decl_to_graph_node(&store, &contributors);
+    assert_eq!(
+        render(&store, reduced),
+        "A & B & { x: number }",
+        "heritage arms must render in AUTHORED order (`extends A, B`), not \
+         re-sorted by node id or otherwise reordered"
+    );
+}
+
 #[test]
 fn display_source_does_not_call_graph_interning_or_dispatch() {
     let display_rs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

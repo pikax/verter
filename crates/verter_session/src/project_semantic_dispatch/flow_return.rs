@@ -14,18 +14,30 @@
 //! recursion through coinductive holds. Content outside the demanded
 //! slice never lowers and never evaluates.
 //!
-//! Only a COMPLETE evaluation admits into the family memo; every degraded
-//! shape is a typed `FlowReturnFailure` through `ReturnOnly` (never
-//! admitted, never `never`).
+//! Admission is proof-gated: every cold frame installs its own flow
+//! demand (`prepare_flow_return_demand`), the evaluation reports the
+//! obligations it completed, the component close replays the
+//! runtime-observed convergence, and the finalizer mints the sole
+//! warm-admission proof (`CompleteFlowResult`). Only a proof-bearing
+//! result admits into the family memo; a partial keeps its usable value
+//! (ReturnOnly), and every no-value shape is a typed `FlowReturnFailure`
+//! through `ReturnOnly` (never admitted, never `never`).
 
 use std::sync::Arc;
 
+use super::call_resolve::union_self_roots;
+use super::dispatch_txn::flow_obligation_state::{
+    FlowDemandCarrier, FlowEvaluationProvenance, ObservedFlowConvergence,
+};
 use super::dispatch_txn::{
     CompletedFlowReturnMember, FlowReturnPendingOutcome, FlowReturnPendingState,
     ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
 };
 use super::flow_return_callee::{
     CallValue, CalleeClause, CalleeClauseLookup, HeldCallee, ReturnOrigin, SignatureCall,
+};
+use super::flow_solve::{
+    FlowPartialReason, FlowSolveOutcome, NoValueFlowResult, PartialFlowResult,
 };
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
@@ -38,6 +50,12 @@ use crate::semantic_query::{
 
 /// The consumer outcome of one sealed function-return demand
 /// ([`ProjectSemanticDispatch::execute_function_return_source`]).
+///
+/// The per-outcome admission fold this type once carried is retired: the
+/// `FlowReturn` build's own output rails carry the partial classes now,
+/// and the universal read funnel (`fold_cache_read_rails` at the shared
+/// cold-build helper's return) propagates them into the enclosing
+/// composition.
 #[derive(Debug)]
 pub(crate) enum FunctionReturnNode {
     /// A DECLARED return lowered through the memoized locator rail.
@@ -60,43 +78,6 @@ pub(crate) enum FunctionReturnNode {
     /// No recoverable return carrier (a bodiless overload or a synthesized
     /// signature) — the consumer's absent-position arm.
     Absent,
-}
-
-/// What one [`FunctionReturnNode`] does to the ENCLOSING composition's
-/// admission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConsumerFold {
-    /// A complete answer: nothing folds.
-    Clean,
-    /// The answer is NOT complete — either a usable value with an opaque
-    /// interior, or no value at all. BOTH rails fold: the request-partial
-    /// sticky (gating component-meta / shape / materialize warm) and the
-    /// build-local taint.
-    ///
-    /// The two shapes fold ALIKE, and that is the decision. Suppressing
-    /// only the build-local taint for the no-value shape left the request
-    /// unmarked, so `get_component_meta` published the surface as
-    /// COMPLETE and WARM: six measured programs answered `props: []`,
-    /// `synthesis_should_suppress: false`, with a warm cache hit on
-    /// replay, where the checker has an answer. "The consumer decides
-    /// what a contained failure means for its own surface" is true of the
-    /// VALUE — which is why the value still returns — but it is not true
-    /// of the ADMISSION rail: a surface built around a failure the
-    /// consumer could not see is not a complete result, and publishing it
-    /// warm is the wrong-and-warm class this substrate exists to close.
-    /// Localisation is the POSITIONAL rule's job, and it does that job
-    /// one level down, inside the evaluator, where the marker keeps every
-    /// modelled sibling; by the time a no-value outcome reaches HERE the
-    /// evaluation has already declined to localise it.
-    ///
-    /// The carried reason set is what the consumers disagree over, and it
-    /// is derived per-OUTCOME rather than per-arm: see
-    /// [`degradation_reason_class`] for a degraded success (whose surface
-    /// is either faithful or merely unverified) and
-    /// [`NO_VALUE_REASON_CLASS`] for a no-value outcome (which has no
-    /// surface at all, so only a consumer that splices the AUTHORED
-    /// declaration can contain it).
-    Partial(PartialReasonSet),
 }
 
 /// The partial class EVERY typed NO-VALUE [`FlowReturnFailure`] carries:
@@ -189,58 +170,191 @@ fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReason
     }
 }
 
-impl FunctionReturnNode {
-    /// How this outcome folds into the enclosing composition's admission.
-    ///
-    /// The exhaustive match is the point: a new arm does not compile until
-    /// it has said what it does to the enclosing result, which is what one
-    /// classification at the ONE sealed consumer entry buys over a
-    /// condition re-spelled at each call site.
-    ///
-    /// Only two of the five arms are LIVE at that entry
-    /// ([`ProjectSemanticDispatch::execute_function_return_source`] calls
-    /// this inside its `Flow` arm alone, and its `Declared` / `Absent`
-    /// arms return before reaching it), so [`Self::Declared`],
-    /// [`Self::Absent`] and [`Self::DeclaredMiss`] are classified here for
-    /// the TYPE, not for a live call. They are still stated, because the
-    /// classification is a property of the outcome rather than of the one
-    /// site that currently asks.
-    pub(crate) fn consumer_fold(&self) -> ConsumerFold {
-        match self {
-            // A declared locator that raised, and a body-derived result
-            // with NO degradation, are the two complete answers. An ABSENT
-            // return carrier is a FACT about the signature (a bodiless
-            // overload, a synthesized signature), not a failure to compute
-            // one.
-            Self::Declared(_) | Self::Absent => ConsumerFold::Clean,
-            Self::Flow(result) => match result.degradation() {
-                None => ConsumerFold::Clean,
-                Some(degradation) => ConsumerFold::Partial(degradation_reason_class(degradation)),
-            },
-            // A declared locator that could not be raised is a RESOLUTION
-            // miss rather than a body-derived inference, but it lands on
-            // the same side of the consumer axis: the TSC splice is
-            // unaffected, a value-derived surface is not.
-            Self::DeclaredMiss => ConsumerFold::Partial(NO_VALUE_REASON_CLASS),
-            Self::NoValue(_) => ConsumerFold::Partial(NO_VALUE_REASON_CLASS),
+/// Veto-side fault injection for the flow admission guards' negative
+/// legs. Each slot can only make the pipeline REFUSE more — strip the
+/// finalizer's proof token off an otherwise-clean root build, or drop
+/// one claim off an otherwise-complete discharge report — so an armed
+/// slot can never mint, promote, or warm anything. The slots exist to
+/// let a test present the adversarial inputs the production pipeline is
+/// built never to produce (a proofless clean value at the memo gate; a
+/// report leaving one planned obligation pending), proving the guards
+/// discriminate rather than ride along.
+///
+/// The slots are PER-HOST (a [`FlowAdmissionFaultKnobs`] field on
+/// `VerterHost`), never process-global: a test arming one on its own
+/// host cannot perturb a concurrent unrelated test running on a
+/// different host in the same process. Production reads each slot as a
+/// relaxed atomic load inside `cfg(any(test, feature = "test-support"))`
+/// blocks only — a shipped build compiles to no field and no load.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod flow_admission_fault_injection {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The per-host flow-admission fault slots. One instance per
+    /// `VerterHost`; every slot defaults to disarmed.
+    #[derive(Debug, Default)]
+    pub(crate) struct FlowAdmissionFaultKnobs {
+        /// When armed, `build_flow_return` removes the `flow_completion`
+        /// proof token from its build output while leaving the boolean
+        /// rails untouched — the exact shape the memo's flow-proof gate
+        /// must refuse.
+        pub(crate) strip_root_proof: AtomicBool,
+
+        /// When armed, `finalize_flow_demand` applies the evaluator's
+        /// discharge report with its LAST claim removed, leaving exactly
+        /// one planned obligation pending at the seal.
+        pub(crate) drop_last_discharge_claim: AtomicBool,
+
+        /// When armed, `finalize_flow_demand` sees evaluation evidence
+        /// whose provenance is NOT this evaluation's one-shot mint —
+        /// modelling evidence that did not originate from
+        /// `evaluate_flow_return`.
+        pub(crate) foreign_evaluation_evidence: AtomicBool,
+
+        /// When armed, `finalize_flow_demand` sees evaluation evidence
+        /// whose provenance carries the carrier's OWN store/generation/
+        /// runtime but a DIFFERENT demand ordinal — modelling a
+        /// same-store, same-generation value or report produced by
+        /// ANOTHER demand of the same runtime.
+        pub(crate) foreign_demand_provenance: AtomicBool,
+
+        /// When armed, `prepare_flow_return_demand` stamps the installed
+        /// demand carrier with a provenance from another store/generation
+        /// — modelling a demand handle and value pair minted elsewhere.
+        pub(crate) stale_demand_carrier: AtomicBool,
+
+        /// When armed, `finalize_flow_demand` sees convergence evidence
+        /// with ZERO observed iterations — modelling a caller-fabricated
+        /// claim the discharge driver never produced.
+        pub(crate) unobserved_convergence: AtomicBool,
+
+        /// When armed, `evaluate_flow_return` assembles its execution
+        /// witness with the evaluator's recorded call evidence dropped —
+        /// modelling an evaluation that claims call obligations whose
+        /// work it never performed.
+        pub(crate) suppress_call_evidence: AtomicBool,
+
+        /// When armed, `evaluate_flow_return` assembles its execution
+        /// witness with every recorded call marked relation-undecided —
+        /// modelling a call whose consumed relation outcomes were never
+        /// decided.
+        pub(crate) undecided_relation_evidence: AtomicBool,
+
+        /// When armed, `evaluate_flow_return` assembles its execution
+        /// witness with the evaluator's walk ledger marked aborted —
+        /// modelling an evaluation whose structural walk did not run to
+        /// completion (an early exit leaving the ledger short).
+        pub(crate) short_execution_ledger: AtomicBool,
+
+        /// When set, the next MACHINERY-ROOT close of ANY domain (a
+        /// relation, call, or flow root build) drains one extra flow
+        /// member: this key's REAL prepared demand, popped provisionally
+        /// beneath the open root with an evaluated value but NO discharge
+        /// report, so its planned obligations stay pending and the
+        /// component close finalizes it UNPROVEN — the torn mixed
+        /// component the production pipeline is built never to leave
+        /// behind. Consumed by the injection (one shot); see
+        /// `ProjectSemanticDispatch::inject_unproven_flow_member_for_tests`.
+        pub(crate) unproven_flow_member:
+            std::sync::Mutex<Option<crate::semantic_query::FlowReturnKey>>,
+
+        /// When armed (`Some`), every FLOW-root close records the
+        /// canonicals of the component carrier it composed — the
+        /// self-root union the root AND its batched members publish on —
+        /// whether or not the component then admits. An observation seam,
+        /// not a fault: a degraded component publishes no entry to read the
+        /// carrier back from, and its composition must still be provable.
+        /// See `ProjectSemanticDispatch::record_flow_root_carrier_for_tests`.
+        pub(crate) flow_root_carrier_probe: std::sync::Mutex<Option<Vec<std::sync::Arc<str>>>>,
+    }
+
+    /// RAII arm/disarm for one slot of one host's knobs.
+    // Constructed by the in-crate admission tests only; the lib-only
+    // `test-support` build compiles the slots for the application sites
+    // without constructing a guard.
+    #[allow(dead_code)]
+    pub(crate) struct Guard<'h>(&'h AtomicBool);
+
+    #[allow(dead_code)]
+    impl<'h> Guard<'h> {
+        pub(crate) fn arm(slot: &'h AtomicBool) -> Self {
+            slot.store(true, Ordering::Relaxed);
+            Self(slot)
+        }
+    }
+
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Relaxed);
         }
     }
 }
 
+/// The typed reason an installed demand is not provable: the first
+/// non-discharged obligation explains the refusal — a typed gap, a
+/// failure, or an obligation the evaluation never completed.
+fn unproven_flow_reason(
+    runtime: &super::dispatch_txn::ObligationRuntime,
+    handle: super::dispatch_txn::flow_obligation_state::FlowDemandHandle,
+) -> FlowPartialReason {
+    use super::dispatch_txn::flow_obligation_state::ObligationState;
+    runtime
+        .flow_obligations(handle)
+        .and_then(|records| {
+            records.iter().find_map(|record| match &record.state {
+                ObligationState::Gap(gap) => Some(FlowPartialReason::Gap(*gap)),
+                ObligationState::Failed(failure) => Some(FlowPartialReason::Failed(*failure)),
+                ObligationState::Pending | ObligationState::Running => {
+                    Some(FlowPartialReason::IncompleteObligations)
+                }
+                ObligationState::Discharged(_) => None,
+            })
+        })
+        .unwrap_or(FlowPartialReason::NoDemandInstalled)
+}
+
 /// The popped root's close outcome.
 enum FlowRootClose {
-    /// Complete evaluation: the result (possibly a DEGRADED success —
-    /// the caller still receives the value; only admission is refused),
-    /// the component's UNIONED self-roots (every drained member's file
-    /// roots across both domains), and the materialised point set the
-    /// root's compute actually produced (§3.4).
-    Complete(
-        FlowReturnResult,
-        Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
-        crate::semantic_query::demand::MaterializedSet,
-    ),
+    /// The root evaluated a value (possibly a DEGRADED success — the
+    /// caller still receives it; only admission is refused). This is the
+    /// PRE-PROOF value arm: completeness is claimed only by the
+    /// finalizer's verdict riding inside.
+    EvaluatedValue(Box<EvaluatedFlowRoot>),
     /// Typed NO-VALUE failure — `ReturnOnly`, never admitted.
     NoValue(FlowReturnFailure),
+}
+
+/// The root close's evaluated-value payload: the final value (post
+/// component fixed point, literal widening, and per-key substitution), the
+/// component's UNIONED self-roots (every drained member's file roots
+/// across both domains), the materialised point set the root's compute
+/// actually produced (§3.4), and the finalizer's verdict over the root's
+/// own demand. `verdict` is `None` only when the root's demand could not
+/// be planned at all — unproven either way, never warm without the token.
+struct EvaluatedFlowRoot {
+    result: FlowReturnResult,
+    scc_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    materialized: crate::semantic_query::demand::MaterializedSet,
+    verdict: Option<super::flow_solve::FlowSolveOutcome>,
+}
+
+/// The shared demand-site of one flow demand — derived ONCE by
+/// [`ProjectSemanticDispatch::flow_slice_demand_site`] and consumed by both
+/// the demand preparation and the content evaluation.
+struct FlowSliceDemandSite {
+    /// The served indexed state of the function's own file (pinned).
+    indexed: Arc<crate::project_type_store::IndexedReady>,
+    /// The function's own file roots.
+    self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// The content-pinned function identity.
+    slice_key_function: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+    /// The hash-node key (function + demand identity).
+    slice_key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
+    /// The demanded member for a member-projection demand.
+    demanded_member: Option<Arc<str>>,
+    /// The frame's binding inventory — the cross-frame binding authority
+    /// the demand planner resolves slot identities against.
+    inventory: super::flow_solve::FlowBindingInventory,
 }
 
 /// One flow frame's evaluation result, before the frame closes.
@@ -257,6 +371,18 @@ struct FlowEvaluationOutcome {
     /// FRESH literal (and no bare-return / fallthrough arm joined) — the
     /// post-convergence literal-widening input.
     fresh_seed: bool,
+    /// The evaluator's typed discharge report: which planned obligations
+    /// of the frame's installed demand the evaluation actually completed.
+    /// `Some` only on an evaluated-value outcome over an installed demand;
+    /// applied centrally at the frame's SCC close through
+    /// `ObligationRuntime::apply_flow_discharge_report` — never through
+    /// scattered per-obligation calls.
+    discharge: Option<super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
+    /// The evaluation provenance minted at this evaluation's start: binds
+    /// the value, the discharge report, and the convergence evidence of
+    /// THIS evaluation to the serving store and request generation. The
+    /// finalization driver refuses anything else as a typed partial.
+    provenance: super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance,
 }
 
 /// The §3.4 materialised point set a FAILED frame evaluation records.
@@ -369,7 +495,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Demand-parameterised half of [`Self::flow_return_key_for`].
     /// Input axis stays the canonical empty point: no production
     /// contextual-input producer exists. A non-empty point is a
-    /// distinct cache/re-entry identity.
+    /// distinct cache/re-entry identity. The result contract is derived
+    /// HERE — the ONLY derivation point — from the closed flow-operation
+    /// registry; no caller ever selects it.
     pub(crate) fn flow_return_key_with_demand(
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
@@ -387,6 +515,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             context: self.flow_return_context_for(identity.anchor.canonical_id.as_ref()),
             demand,
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         }
     }
 
@@ -671,42 +800,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
-                let node = match self.execute_flow_return(self.flow_return_key_for(identity)) {
-                    // A DEGRADED SUCCESS stays usable — the consumer keeps
-                    // the value (interning a miss would be the opposite
-                    // collapse).
+                // A DEGRADED SUCCESS stays usable — the consumer keeps
+                // the value (interning a miss would be the opposite
+                // collapse). The admission rails are NOT folded here:
+                // the `FlowReturn` build's own output carries them (the
+                // finalizer-outcome adapter in `build_flow_return`), and
+                // the universal read funnel propagates them into this
+                // enclosing composition when the read returns.
+                match self.execute_flow_return(self.flow_return_key_for(identity)) {
                     FlowReturnStep::Complete(result) => FunctionReturnNode::Flow(result),
                     FlowReturnStep::NoValue(failure) => FunctionReturnNode::NoValue(failure),
                     // A hold surfacing at a consumer is a demand reentering
                     // its own in-flight component: undecided here, ReturnOnly.
+                    // The hold produces NO memo read, so the universal read
+                    // funnel cannot carry its rails: the consumption point
+                    // marks the enclosing build itself — an answer composed
+                    // around an undecided interior must not warm.
                     FlowReturnStep::Hold(_) => {
+                        crate::request_context::mark_request_result_partial_from_read_with(
+                            NO_VALUE_REASON_CLASS,
+                        );
+                        self.fold_into_top_build_local_taint_with(
+                            true,
+                            true,
+                            NO_VALUE_REASON_CLASS,
+                        );
                         FunctionReturnNode::NoValue(FlowReturnFailure::Unresolved)
                     }
-                };
-                // THE cache-read fold — ONE call site, EVERY non-clean arm,
-                // no `degradation.is_some()` condition at THAT entry. (The
-                // bit is still read for questions that are not the
-                // consumer's fold: this module's own admission gate,
-                // `scc_publish`'s component-wide publication gate, and the
-                // TSC projection's inferred-class-member row.)
-                //
-                // `build_flow_return` sets `cache_suppress` on the
-                // `FlowReturn` query's OWN output. That says nothing about
-                // the ENCLOSING composition, and the four consumers each
-                // turn a no-value failure into `Opaque(Miss)` / `miss_node`
-                // — two of them with no taint at all. So a failure was
-                // laundered into a warm-admitted enclosing result exactly
-                // as a degraded success was before the success arm was
-                // folded; the asymmetry was never a decision.
-                //
-                // Which RAILS fold is a per-arm FACT, not a per-call-site
-                // condition, so it is decided once by the exhaustive
-                // [`FunctionReturnNode::consumer_fold`] classification.
-                match node.consumer_fold() {
-                    ConsumerFold::Clean => {}
-                    ConsumerFold::Partial(reasons) => self.fold_flow_return_consumer_rails(reasons),
                 }
-                node
             }
             verter_type_expr::facts::FunctionReturnSource::Absent => FunctionReturnNode::Absent,
         }
@@ -818,17 +939,52 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::PathSegment::Index(_) => return None,
         };
         let identity = self.flow_return_callee_for_typeof_arg(callee_arg)?;
+        // The member demand rides the CANONICAL identity point plus the
+        // authored member path — the only demand shape the proof planner
+        // represents. (The evaluator reads only the path; the walker's
+        // `Navigate` policy axes are not the flow demand's semantics.)
         let demand = crate::semantic_query::ReturnProjectionDemand {
-            point: crate::semantic_query::demand::Demand::navigate(
-                crate::semantic_query::demand::ProjectionPath::from_segments([
-                    crate::semantic_query::PathSegment::Member(
-                        crate::semantic_query::PropertyKey::identifier(Arc::clone(&member_name)),
-                    ),
-                ]),
-            ),
+            point: {
+                let mut point = crate::semantic_query::demand::Demand::identity();
+                point.projection.path =
+                    crate::semantic_query::demand::ProjectionPath::from_segments([
+                        crate::semantic_query::PathSegment::Member(
+                            crate::semantic_query::PropertyKey::identifier(Arc::clone(
+                                &member_name,
+                            )),
+                        ),
+                    ]);
+                point
+            },
         };
         let key = self.flow_return_key_with_demand(&identity, demand);
-        match self.execute_flow_return(key) {
+        // The member-demand dispatch is a PROBE with a structured
+        // fall-through: a decline (`None`) hands the segment to the
+        // generic `Instantiate` unwrap, which re-derives the answer AND
+        // its own rails through its own reads. The probe's observations
+        // therefore propagate only when its result is CONSUMED — a
+        // declined probe's typed refusal (`UnmodeledDemandPoint` for a
+        // spread-provisioned or absent member, a degraded success, an
+        // in-flight hold) must not mark the enclosing build or the
+        // request partial around a fall-through route that answers
+        // cleanly. All three observation channels are scoped: the
+        // build-local taint frame, the per-cold-compute completeness
+        // scope, and the request-level partial sticky (deferred — the
+        // sticky has no un-mark).
+        let sticky_defer = crate::request_context::DeferredPartialStickyScope::enter();
+        let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let observation =
+            crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let step = self.execute_flow_return(key);
+        let observed = observation.finish();
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        completeness_scope.discard();
+        drop(sticky_defer);
+        if matches!(&step, FlowReturnStep::Complete(result) if result.degradation().is_none()) {
+            crate::request_context::fold_result_completeness(completeness);
+            self.fold_observed_frame_into_top(&observed);
+        }
+        match step {
             FlowReturnStep::Complete(result) if result.degradation().is_none() => {
                 // `ReturnType<…>` is a signature UTILITY, not a call: it
                 // has no call site to be argument-free at, so every free
@@ -1050,6 +1206,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) {
         let (relation_members, flow_members, call_members) = {
             let mut txn = self.dispatch_txn.borrow_mut();
+            // The published component's members are warm in the store; the
+            // transaction-local value channel's work is done.
+            txn.flow.closed_values.clear();
             (
                 std::mem::take(&mut txn.relation.completed_members),
                 std::mem::take(&mut txn.flow.completed_members),
@@ -1082,18 +1241,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ));
         }
         let idx = self.flow_frame_open(&key);
+        self.prepare_flow_return_demand(&key, idx);
         let evaluated = self.evaluate_flow_return(&key);
         self.flow_frame_close(idx, evaluated)
     }
 
     /// The family cold-build arm (the `execute(FlowReturn)` reducer).
-    /// Runs the root frame and maps the close onto the admission boundary:
-    /// a NON-DEGRADED `Complete` ⇒ publish, carrying the compute-recorded
-    /// `satisfied_projection`; a DEGRADED SUCCESS ⇒ the value RETURNS
-    /// through the SUCCESS carrier with admission suppressed (`ReturnOnly`
-    /// — no memo entry, no fact signature, no reverse-index metadata); a
-    /// NO-VALUE failure ⇒ `Error(Miss)`, suppressed admission, the typed
-    /// failure riding the transaction's root-failure channel.
+    /// Runs the root frame and maps the close onto the admission boundary
+    /// through the finalizer's verdict:
+    ///
+    /// - `Complete(proof)` ⇒ publish: the value is extracted from the
+    ///   proof token, which rides the build output
+    ///   (`QueryBuildOutput.flow_completion`) to the family memo's proof
+    ///   gate — the ONLY warm-admission authority;
+    /// - `Partial` (or no plannable demand) ⇒ the usable value RETURNS
+    ///   through the success carrier with admission suppressed
+    ///   (`ReturnOnly` — no memo entry, no fact signature, no
+    ///   reverse-index metadata) and the partial rails set ONCE here;
+    /// - `NoValue` ⇒ `Error(Miss)`, suppressed admission, the typed
+    ///   failure riding the transaction's root-failure channel.
+    ///
+    /// The universal read funnel folds these rails into the enclosing
+    /// composition's build when this read returns — there is no
+    /// consumer-side fold.
     pub(super) fn build_flow_return(
         &self,
         key: &FlowReturnKey,
@@ -1101,12 +1271,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
         verter_audit::attribute_scope!(FlowGraphBuild);
         let fence = self.project_generation_signature();
         let idx = self.flow_frame_open(key);
+        self.prepare_flow_return_demand(key, idx);
         let evaluated = self.evaluate_flow_return(key);
-        match self.flow_frame_close_root(idx, evaluated) {
-            FlowRootClose::Complete(result, scc_self_roots, materialized) => {
-                let degraded = result.degradation().is_some();
+        #[cfg(any(test, feature = "test-support"))]
+        self.inject_unproven_flow_member_for_tests(idx);
+        #[allow(unused_mut)]
+        let mut built: QueryBuildOutput<SemanticQueryValue> = match self
+            .flow_frame_close_root(idx, evaluated)
+        {
+            FlowRootClose::EvaluatedValue(root) => {
+                let EvaluatedFlowRoot {
+                    result,
+                    scc_self_roots,
+                    materialized,
+                    verdict,
+                } = *root;
+                // The no-value verdict cannot arise on the
+                // evaluated-value close arm (the evaluation failed →
+                // the `NoValue` close below); fail closed regardless.
+                if let Some(FlowSolveOutcome::NoValue(no_value)) = verdict {
+                    self.dispatch_txn.borrow_mut().flow.last_root_failure = Some(no_value.failure);
+                    let mut output: QueryBuildOutput<SemanticQueryValue> =
+                        (QueryResult::Error(QueryError::Miss), fence).into();
+                    output.cache_suppress = true;
+                    output.result_is_partial = true;
+                    output.partial_reasons = NO_VALUE_REASON_CLASS;
+                    return output;
+                }
+                let proof = match &verdict {
+                    Some(FlowSolveOutcome::Complete(proof)) => Some(proof.clone()),
+                    _ => None,
+                };
+                // The published value is extracted from the proof token
+                // when one exists; the raw evaluated value flows to the
+                // caller either way (a degraded success stays usable).
+                let published = match &proof {
+                    Some(proof) => proof.value().clone(),
+                    None => result,
+                };
                 let mut output: QueryBuildOutput<SemanticQueryValue> = QueryBuildOutput::from((
-                    QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(result))),
+                    QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(published))),
                     fence,
                 ))
                 .with_observed_self_roots(scc_self_roots);
@@ -1115,12 +1319,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // by the evaluation, never the nominal request echoed at
                 // publish time.
                 output.satisfied_projection = materialized;
-                if degraded {
-                    // Degraded SUCCESS: a usable value, ReturnOnly by the
-                    // split result/carrier contract — it may warm only
-                    // under an explicit fact-rooted admission row, and
-                    // none exists.
-                    output.cache_suppress = true;
+                match verdict {
+                    Some(FlowSolveOutcome::Complete(proof)) => {
+                        output.flow_completion = Some(proof);
+                    }
+                    // The finalizer-outcome adapter: translate the partial
+                    // ONCE into the build's own rails (the displaced root
+                    // channel). The value still flows to the caller; the
+                    // memo refuses admission — the proof gate and the
+                    // boolean rails now agree.
+                    Some(FlowSolveOutcome::Partial(partial)) => {
+                        output.cache_suppress = true;
+                        output.result_is_partial = true;
+                        output.partial_reasons = match partial.value.degradation() {
+                            Some(degradation) => degradation_reason_class(degradation),
+                            None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+                        };
+                    }
+                    // The demand could not be planned at all (a typed
+                    // planning refusal — an over-budget obligation set or
+                    // an unrepresentable demand): unproven, ReturnOnly.
+                    None => {
+                        output.cache_suppress = true;
+                        output.result_is_partial = true;
+                        output.partial_reasons = PartialReasonSet::FLOW_RETURN_UNVERIFIED;
+                    }
+                    // Handled above.
+                    Some(FlowSolveOutcome::NoValue(_)) => unreachable!(),
                 }
                 output
             }
@@ -1130,12 +1355,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // ReturnOnly: the failure flows to the caller through the
                 // transaction's root-failure channel, the memo refuses
                 // admission (no warm entry, no fact signature, no
-                // reverse-index metadata).
+                // reverse-index metadata), and the request marks partial —
+                // the universal read funnel propagates both rails into the
+                // enclosing build.
                 self.dispatch_txn.borrow_mut().flow.last_root_failure = Some(failure);
                 output.cache_suppress = true;
+                output.result_is_partial = true;
+                output.partial_reasons = NO_VALUE_REASON_CLASS;
                 output
             }
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .strip_root_proof
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            built.flow_completion = None;
         }
+        built
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1167,7 +1407,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match self.flow_frame_pop(idx, evaluated, false) {
             FlowFramePop::Provisional(step) => step,
             FlowFramePop::RootClose(close) => match close {
-                FlowRootClose::Complete(result, _, _) => FlowReturnStep::Complete(result),
+                FlowRootClose::EvaluatedValue(root) => FlowReturnStep::Complete(root.result),
                 FlowRootClose::NoValue(failure) => FlowReturnStep::NoValue(failure),
             },
         }
@@ -1177,7 +1417,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// result — the instantiation transfer for a body-derived callee
     /// demanded under a call's final ordered mapping. Empty substitution
     /// (the canonical production key) is a no-op.
-    fn apply_frame_key_substitution(
+    pub(super) fn apply_frame_key_substitution(
         &self,
         key: &FlowReturnKey,
         result: FlowReturnResult,
@@ -1207,6 +1447,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         outcome: FlowReturnPendingOutcome,
         holds: Vec<super::dispatch_txn::ReturnObligationIdentity>,
     ) -> FlowReturnStep {
+        self.flow_frame_close_with_evidence_for_tests(idx, outcome, holds, None)
+    }
+
+    /// Test seam: [`Self::flow_frame_close_for_tests`] carrying the
+    /// evaluation's discharge report as well — the proof-layer evidence a
+    /// staged member finalizes against at the component close.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)] // exercised by the return-equation close tests
+    pub(super) fn flow_frame_close_with_evidence_for_tests(
+        &self,
+        idx: usize,
+        outcome: FlowReturnPendingOutcome,
+        holds: Vec<super::dispatch_txn::ReturnObligationIdentity>,
+        discharge: Option<super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
+    ) -> FlowReturnStep {
         let holds = holds
             .into_iter()
             .filter_map(|identity| match identity {
@@ -1216,6 +1471,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 super::dispatch_txn::ReturnObligationIdentity::FlowReturn(_) => None,
             })
             .collect();
+        // The staged close's evaluation provenance: the frame's installed
+        // demand carrier's own token when one exists (the seam stages the
+        // close of an evaluation that carrier served), else the bare
+        // freshness mint, which can never match a real carrier.
+        let provenance = {
+            let txn = self.dispatch_txn.borrow();
+            txn.reentry()
+                .frame(idx)
+                .and_then(|frame| match &frame.domain {
+                    ObligationFrameDomain::FlowReturn(state) => state.flow_demand.clone(),
+                    _ => None,
+                })
+                .map(|carrier| carrier.provenance)
+                .unwrap_or_else(|| self.current_flow_evaluation_provenance())
+        };
         self.flow_frame_close(
             idx,
             FlowEvaluationOutcome {
@@ -1224,6 +1494,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 holds,
                 materialized: crate::semantic_query::demand::MaterializedSet::empty(),
                 fresh_seed: false,
+                discharge,
+                provenance,
             },
         )
     }
@@ -1236,6 +1508,591 @@ impl<'a> ProjectSemanticDispatch<'a> {
                  empty below it, so no open assumption can target a deeper frame"
             ),
         }
+    }
+
+    /// Test-only: record the component carrier a FLOW-root close composed
+    /// into the armed
+    /// [`flow_admission_fault_injection::FlowAdmissionFaultKnobs::flow_root_carrier_probe`]
+    /// slot (its canonicals, in composition order); a no-op while the
+    /// slot is disarmed.
+    #[cfg(any(test, feature = "test-support"))]
+    fn record_flow_root_carrier_for_tests(
+        &self,
+        roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
+    ) {
+        let mut probe = self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .flow_root_carrier_probe
+            .lock()
+            .expect("the flow-root carrier probe is never poisoned");
+        if let Some(recorded) = probe.as_mut() {
+            *recorded = roots
+                .iter()
+                .map(|(canonical, _)| Arc::clone(canonical))
+                .collect();
+        }
+    }
+
+    /// Test-only: leave ONE unproven provisional flow member on the
+    /// pending ledger beneath the OPEN machinery-root frame `root_idx`,
+    /// so the root's close drains it exactly as an organic torn component
+    /// would. Fires once per set
+    /// [`flow_admission_fault_injection::FlowAdmissionFaultKnobs::unproven_flow_member`]
+    /// slot (the slot is consumed) and is a no-op while the slot is empty.
+    ///
+    /// The member takes the REAL provisional path — frame push, demand
+    /// preparation over the key's actual function, an assumption edge to
+    /// the root, and the non-root pop — with an evaluated value but NO
+    /// discharge report: its planned obligations stay pending, so the
+    /// component close finalizes it unproven. The pipeline is built never
+    /// to produce this member on its own; the slot presents it so each
+    /// root-close consumer can be proven to refuse warming around it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn inject_unproven_flow_member_for_tests(&self, root_idx: usize) {
+        let key = self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .unproven_flow_member
+            .lock()
+            .expect("the unproven-member fault slot is never poisoned")
+            .take();
+        let Some(key) = key else {
+            return;
+        };
+        let idx = {
+            let mut txn = self.dispatch_txn.borrow_mut();
+            let watermark = txn.obligations.pending().pending_len();
+            txn.reentry_mut().push_flow_return(key.clone(), watermark)
+        };
+        self.prepare_flow_return_demand(&key, idx);
+        let provenance = match self.flow_demand_carrier_of(&key) {
+            Some(carrier) => carrier.provenance,
+            None => self.current_flow_evaluation_provenance(),
+        };
+        // The member ASSUMES the root: that back-edge is what makes its
+        // pop provisional (a deposit at or above the root's drain
+        // watermark) instead of a root close of its own.
+        self.dispatch_txn
+            .borrow_mut()
+            .obligations
+            .record_assumption(root_idx);
+        let number = self
+            .graph()
+            .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::Number,
+            ));
+        let value = crate::semantic_query::FlowReturnResult::new(self.graph(), number, false, None);
+        let pop = self.flow_frame_pop(
+            idx,
+            FlowEvaluationOutcome {
+                outcome: FlowReturnPendingOutcome::EvaluatedValue(value),
+                self_roots: Vec::new(),
+                holds: Vec::new(),
+                materialized: crate::semantic_query::demand::MaterializedSet::empty(),
+                fresh_seed: false,
+                discharge: None,
+                provenance,
+            },
+            false,
+        );
+        assert!(
+            matches!(pop, FlowFramePop::Provisional(_)),
+            "the injected member assumes the open root, so its pop is provisional"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // The flow-solve proof wiring
+    // ──────────────────────────────────────────────────────────────────
+
+    /// The dispatch's current evaluation FRESHNESS mint: the semantic
+    /// store's instance identity, the live project generation, and THIS
+    /// dispatch's obligation-runtime instance identity. The demand-unique
+    /// axis is NOT knowable here — the mint carries the sentinel ordinal
+    /// no installed demand ever bears, and only
+    /// [`FlowEvaluationProvenance::freshness_axes`] of a minted token may
+    /// be compared against it. Demand preparation derives the real token
+    /// (freshness axes + the demand's ledger ordinal) from this mint; the
+    /// finalization driver accepts evidence only when the evidence token
+    /// IS the demand carrier's own token and the carrier's freshness axes
+    /// equal a FRESH mint's: a value, report, or convergence claim from
+    /// another demand, another runtime, another store, or a stale request
+    /// generation is a typed partial, never a proof.
+    pub(super) fn current_flow_evaluation_provenance(&self) -> FlowEvaluationProvenance {
+        let store_identity = Arc::as_ptr(self.graph()) as *const () as usize as u64;
+        let runtime_identity = self.dispatch_txn.borrow().obligations.instance_identity();
+        FlowEvaluationProvenance::new(
+            store_identity,
+            self.ctx.project_type_store().project_generation(),
+            runtime_identity,
+            // The sentinel ordinal: no installed demand bears it (ledger
+            // ordinals are small counting numbers), so a bare freshness
+            // mint can never pose as one demand's evidence.
+            u64::MAX,
+        )
+    }
+
+    /// Prepare one cold flow demand's proof layer — IMMEDIATELY after the
+    /// frame opens and before content evaluation (the root path
+    /// [`Self::build_flow_return`] and the inline path
+    /// [`Self::execute_flow_return_inline`] both call here): plan the
+    /// demand ONCE over the store-minted bound graph and the retained
+    /// structural selection — the same cold planning run the hash node
+    /// retained, never a re-plan — and install the per-demand obligation
+    /// set on the frame. A refusal at any step installs nothing: the
+    /// evaluation still runs (values are the evaluator's), but no proof
+    /// can mint and the close finalizes unproven (`ReturnOnly`).
+    pub(super) fn prepare_flow_return_demand(&self, key: &FlowReturnKey, frame_idx: usize) {
+        use super::flow_solve::{build_flow_demand_plan, FlowDemandRequest, FlowResourcePolicy};
+        let Ok(site) = self.flow_slice_demand_site(key) else {
+            return;
+        };
+        let flow_slice = self.ctx.project_type_store().flow_slice();
+        // The retained structural plan of the ONE cold planning run (the
+        // hash node's published outcome) — the demand planner assembles
+        // obligations FROM it; it never invokes the slice planner again.
+        let planned = match crate::cache_runtime::lookup(
+            flow_slice.hash_node(),
+            site.slice_key.clone(),
+            self.ctx,
+        ) {
+            Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(planned)) => {
+                planned
+            }
+            // An over-budget plan or a torn view installs no demand: the
+            // evaluation's own hash-node lookup reaches the same outcome
+            // and fails closed with the typed failure.
+            _ => return,
+        };
+        let Some(bound) = flow_slice.bound_graph_for(&site.slice_key_function) else {
+            return;
+        };
+        // The demand-unique axis of this demand's provenance: the ledger
+        // ordinal the install below receives (installation appends, so the
+        // peek IS the ordinal; the assertion after install pins it).
+        let demand_ordinal = self.dispatch_txn.borrow().obligations.flow_demand_count() as u64;
+        let provenance = {
+            let freshness = self.current_flow_evaluation_provenance();
+            let (store_identity, request_generation, runtime_identity) = freshness.freshness_axes();
+            FlowEvaluationProvenance::new(
+                store_identity,
+                request_generation,
+                runtime_identity,
+                demand_ordinal,
+            )
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        let provenance = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .stale_demand_carrier
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
+                u64::MAX - 1,
+                0,
+                0,
+                0,
+            )
+        } else {
+            provenance
+        };
+        let request = FlowDemandRequest {
+            query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+            // The in-flight observation identity of this demand: derived
+            // from the SAME provenance mint the carrier and the evaluation
+            // outcome bear — never a cache-candidate axis.
+            input_basis: verter_identity::identity::InputBasisId::from_canonical(&provenance),
+            resources: FlowResourcePolicy::default(),
+            additional_requirements: Arc::from([]),
+        };
+        let Ok(plan) = build_flow_demand_plan(request, &bound, &planned, &site.inventory) else {
+            return;
+        };
+        flow_slice.note_demand_planned();
+        let plan = Arc::new(plan);
+        let mut txn = self.dispatch_txn.borrow_mut();
+        let handle = txn.obligations.install_flow_demand(&plan);
+        verter_debug_assert!(
+            handle.slot_index() == demand_ordinal,
+            "the peeked ledger ordinal must be the installed demand's slot: \
+             the provenance binds to exactly this demand"
+        );
+        if let Some(state) = txn
+            .reentry_mut()
+            .frame_mut_for_update(frame_idx)
+            .and_then(super::dispatch_txn::ObligationFrame::flow_return_mut)
+        {
+            state.flow_demand = Some(FlowDemandCarrier {
+                handle,
+                plan,
+                provenance,
+            });
+        }
+    }
+
+    /// The open frame's installed demand carrier for `key`, when this
+    /// frame was prepared.
+    pub(super) fn flow_demand_carrier_of(&self, key: &FlowReturnKey) -> Option<FlowDemandCarrier> {
+        let txn = self.dispatch_txn.borrow();
+        let idx = txn
+            .reentry()
+            .find(&ObligationIdentity::FlowReturn(key.clone()))?;
+        txn.reentry()
+            .frame(idx)
+            .and_then(|frame| match &frame.domain {
+                ObligationFrameDomain::FlowReturn(state) => state.flow_demand.clone(),
+                _ => None,
+            })
+    }
+
+    /// The evaluator's typed discharge report for one evaluated frame:
+    /// which planned obligations the evaluation ACTUALLY completed,
+    /// claimed from the run's own execution witness — never from the
+    /// plan's expectations. Built ONCE, at the end of the evaluation.
+    ///
+    /// Per-basis evidence sources:
+    /// - STRUCTURAL bases (sites, bindings, guards, contextual targets,
+    ///   captured bindings, edges) claim from the retained selection whose
+    ///   lowered IR the evaluation executed — a node the executed
+    ///   selection does not hold is never claimed;
+    /// - the WHOLE-SLICE bases (family coverage, contract domains) claim
+    ///   only when the executed selection IS the plan's retained selection
+    ///   (the enumeration input and the executed content are one);
+    /// - CALL bases claim only from a recorded decided call occurrence
+    ///   (the evaluator's call-sink evidence — a value or a coinductive
+    ///   hold, never an unmodelled or degraded outcome);
+    /// - RELATION bases additionally require every relation outcome the
+    ///   occurrence's resolution consumed to be DECIDED (`Unknown` /
+    ///   `BudgetExceeded` are not evidence);
+    /// - gap-installed bases (`UnmodeledBinding` / `Capture`) are never
+    ///   claimed.
+    ///
+    /// An obligation without evaluator-produced evidence stays unclaimed,
+    /// so the demand cannot seal and finalizes unproven (`ReturnOnly`).
+    /// The runtime still re-validates every claim against the obligation's
+    /// spec at application time.
+    fn flow_evaluation_discharge_report(
+        &self,
+        carrier: &FlowDemandCarrier,
+        witness: &FlowExecutionWitness<'_>,
+    ) -> super::dispatch_txn::flow_obligation_state::FlowDischargeReport {
+        use super::dispatch_txn::flow_obligation_state::{
+            FlowDischargeEntry, FlowDischargeReport, FlowObligationBasis, FlowSuboperationEvidence,
+            ObligationState,
+        };
+        let txn = self.dispatch_txn.borrow();
+        let Some(records) = txn.obligations.flow_obligations(carrier.handle) else {
+            return FlowDischargeReport::new(Vec::new());
+        };
+        // The whole-slice witness: the walk-completed selection the
+        // evaluation executed is exactly the retained selection the
+        // plan's obligations expanded from. A short/aborted walk yields
+        // NO executed selection at all, and a torn view between the two
+        // lookups executes a DIFFERENT slice — neither claims exhaustive
+        // enumeration.
+        let whole_selection_executed =
+            witness.executed_selection == Some(carrier.plan.structural_selection());
+        // The decided call evidence of one planned call occurrence:
+        // `None` = the evaluation never evaluated it; `Some(decided)` =
+        // it did, with `decided` the conjunction of every recorded
+        // occurrence's relation-decided bit.
+        let call_evidence_for = |site: verter_semantic::analysis::flow::SkeletonExprSiteId,
+                                 call_ordinal: u32| {
+            let call = witness
+                .skeleton
+                .expr_site(site)
+                .calls
+                .get(call_ordinal as usize)?;
+            let mut relations_decided: Option<bool> = None;
+            for evidence in witness.calls {
+                let evaluated = verter_semantic::analysis::flow::FrameSpan::rebase(
+                    witness.anchor,
+                    evidence.span,
+                );
+                if evaluated == call.span {
+                    let decided = relations_decided.get_or_insert(true);
+                    *decided &= evidence.relations_decided;
+                }
+            }
+            relations_decided
+        };
+        let entries = carrier
+            .plan
+            .obligation_specs()
+            .iter()
+            .filter(|spec| {
+                records.iter().any(|record| {
+                    record.spec.id() == spec.id()
+                        && matches!(record.state, ObligationState::Pending)
+                })
+            })
+            .filter(|spec| match spec.basis() {
+                FlowObligationBasis::FamilyCoverage { .. }
+                | FlowObligationBasis::DemandRoot { .. } => whole_selection_executed,
+                FlowObligationBasis::Site { node, .. }
+                | FlowObligationBasis::Binding { node, .. }
+                | FlowObligationBasis::Guard { node, .. }
+                | FlowObligationBasis::ContextualTarget { node, .. }
+                | FlowObligationBasis::CapturedBinding { node, .. } => witness
+                    .executed_selection
+                    .is_some_and(|selection| selection.is_selected(*node)),
+                FlowObligationBasis::Edge { from, to, .. } => {
+                    witness.executed_selection.is_some_and(|selection| {
+                        selection.is_selected(*from) && selection.is_selected(*to)
+                    })
+                }
+                FlowObligationBasis::CallSite {
+                    site, call_ordinal, ..
+                } => call_evidence_for(*site, *call_ordinal).is_some(),
+                FlowObligationBasis::SemanticRelation {
+                    site, call_ordinal, ..
+                } => call_evidence_for(*site, *call_ordinal) == Some(true),
+                FlowObligationBasis::UnmodeledBinding { .. }
+                | FlowObligationBasis::Capture { .. } => false,
+            })
+            .map(|spec| FlowDischargeEntry {
+                obligation: spec.id(),
+                dependencies: Arc::from(spec.expected_dependencies()),
+                suboperations: spec
+                    .expected_suboperations()
+                    .iter()
+                    .map(|operation| FlowSuboperationEvidence {
+                        operation: *operation,
+                        result_contract: carrier.plan.basis().result_contract.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        FlowDischargeReport::new(entries)
+    }
+
+    /// The ONE finalization driver for one evaluated flow demand: the
+    /// central application of the evaluator's typed discharge report (in
+    /// the plan's deterministic work order), the replay of the
+    /// runtime-observed component convergence into the demand's own
+    /// observation log, the seal, and the finalizer. Runs ONLY after the
+    /// component fixed point, the literal widening, and the per-key
+    /// substitution — the proof covers exactly `result`.
+    ///
+    /// Returns `None` when the frame carries no installed demand (the
+    /// demand could not be planned): unproven, never warm.
+    pub(super) fn finalize_flow_demand(
+        &self,
+        carrier: Option<&FlowDemandCarrier>,
+        discharge: Option<&super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
+        convergence: &ObservedFlowConvergence,
+        provenance: FlowEvaluationProvenance,
+        result: &FlowReturnResult,
+    ) -> Option<FlowSolveOutcome> {
+        use super::dispatch_txn::flow_obligation_state::FlowSealError;
+        let carrier = carrier?;
+        #[cfg(any(test, feature = "test-support"))]
+        let provenance = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .foreign_evaluation_evidence
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+            )
+        } else if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .foreign_demand_provenance
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            // A same-store, same-generation, same-runtime token of ANOTHER
+            // demand: the freshness axes pass; the demand ordinal betrays
+            // it.
+            let (store_identity, request_generation, runtime_identity) =
+                carrier.provenance.freshness_axes();
+            super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
+                store_identity,
+                request_generation,
+                runtime_identity,
+                carrier.provenance.demand_ordinal() ^ 1,
+            )
+        } else {
+            provenance
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        let unobserved_convergence;
+        #[cfg(any(test, feature = "test-support"))]
+        let convergence = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .unobserved_convergence
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            unobserved_convergence = ObservedFlowConvergence {
+                iterations: 0,
+                stable: true,
+            };
+            &unobserved_convergence
+        } else {
+            convergence
+        };
+        let plan = &carrier.plan;
+        let basis = plan.basis().clone();
+        let partial = |reason: FlowPartialReason| {
+            Some(FlowSolveOutcome::Partial(PartialFlowResult {
+                basis,
+                reason,
+                value: result.clone(),
+            }))
+        };
+        // Provenance triangulation: the evaluation's evidence token must
+        // BE the installed demand carrier's own token (the demand-unique
+        // ordinal included), and the carrier's freshness axes must equal
+        // the dispatch's CURRENT mint — a value, report, or convergence
+        // claim from another demand, another store, or a stale request
+        // generation is a typed partial, never a proof.
+        let current = self.current_flow_evaluation_provenance();
+        if provenance != carrier.provenance
+            || carrier.provenance.freshness_axes() != current.freshness_axes()
+        {
+            return partial(FlowPartialReason::ForeignProvenance);
+        }
+        let mut txn = self.dispatch_txn.borrow_mut();
+        let runtime = &mut txn.obligations;
+        #[cfg(any(test, feature = "test-support"))]
+        let dropped_claim_report;
+        #[cfg(any(test, feature = "test-support"))]
+        let discharge = match discharge {
+            Some(report)
+                if self
+                    .ctx
+                    .host_for_fact_tracer_install()
+                    .flow_fault_injection
+                    .drop_last_discharge_claim
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    && !report.entries().is_empty() =>
+            {
+                let entries = report.entries();
+                dropped_claim_report =
+                    super::dispatch_txn::flow_obligation_state::FlowDischargeReport::new(
+                        entries[..entries.len() - 1].to_vec(),
+                    );
+                Some(&dropped_claim_report)
+            }
+            other => other,
+        };
+        // The central report application: deterministic, in the plan's
+        // work order, every claim re-validated against its spec.
+        if let Some(report) = discharge {
+            if runtime
+                .apply_flow_discharge_report(carrier.handle, plan, report)
+                .is_err()
+            {
+                return partial(unproven_flow_reason(runtime, carrier.handle));
+            }
+        }
+        // Replay the observed component convergence: the runtime counts
+        // the iterations itself, so the sealed evidence comes from the
+        // runtime's own log, never from the caller. The count itself must
+        // come from the discharge driver's real observation — every close
+        // routes its root through the fixed point, so a zero here is not
+        // evidence at all: refuse it rather than fabricate an iteration.
+        if convergence.iterations == 0 {
+            return partial(FlowPartialReason::NonConverged);
+        }
+        for _ in 1..convergence.iterations {
+            if runtime
+                .observe_flow_iteration(carrier.handle, true)
+                .is_err()
+            {
+                return partial(FlowPartialReason::NonConverged);
+            }
+        }
+        if !convergence.stable {
+            return partial(FlowPartialReason::NonConverged);
+        }
+        if let Err(error) = runtime.observe_flow_iteration(carrier.handle, false) {
+            return partial(match error {
+                super::dispatch_txn::flow_obligation_state::FlowTransitionError::ConvergenceBudget => {
+                    FlowPartialReason::NonConverged
+                }
+                _ => unproven_flow_reason(runtime, carrier.handle),
+            });
+        }
+        match runtime.seal_flow_completion(carrier.handle, result.clone()) {
+            Ok(sealed) => Some(super::flow_solve::finalize_flow_solve(
+                runtime,
+                carrier.handle,
+                plan,
+                sealed,
+            )),
+            Err(error) => partial(match error {
+                FlowSealError::DegradedValue => FlowPartialReason::DegradedValue,
+                FlowSealError::NonConverged => FlowPartialReason::NonConverged,
+                FlowSealError::UndischargedObligations => {
+                    unproven_flow_reason(runtime, carrier.handle)
+                }
+                FlowSealError::NoDemandInstalled => FlowPartialReason::NoDemandInstalled,
+                FlowSealError::AlreadySealed => {
+                    FlowPartialReason::Failed(super::flow_solve::FlowFailure {
+                        class: super::flow_solve::FlowFailureClass::Internal,
+                    })
+                }
+            }),
+        }
+    }
+
+    /// Record a typed failure on one installed demand: every still-open
+    /// obligation transitions to `Failed` under the failure's class, and
+    /// the demand's no-value verdict is produced (the typed failure plus
+    /// the proof-state reason). Failure detection on the ledger — never
+    /// an admission decision; a no-value outcome never warms.
+    pub(super) fn fail_flow_demand(
+        &self,
+        carrier: Option<&FlowDemandCarrier>,
+        failure: FlowReturnFailure,
+    ) -> Option<FlowSolveOutcome> {
+        use super::dispatch_txn::flow_obligation_state::ObligationState;
+        let carrier = carrier?;
+        let class = match failure {
+            FlowReturnFailure::Budget(_) => super::flow_solve::FlowFailureClass::BudgetExhausted,
+            _ => super::flow_solve::FlowFailureClass::Internal,
+        };
+        let record = super::flow_solve::FlowFailure { class };
+        let open: Vec<_> = {
+            let txn = self.dispatch_txn.borrow();
+            txn.obligations
+                .flow_obligations(carrier.handle)
+                .into_iter()
+                .flatten()
+                .filter(|record| {
+                    matches!(
+                        record.state,
+                        ObligationState::Pending | ObligationState::Running
+                    )
+                })
+                .map(|record| record.spec.id())
+                .collect()
+        };
+        let mut txn = self.dispatch_txn.borrow_mut();
+        for id in open {
+            let _ = txn
+                .obligations
+                .fail_flow_obligation(carrier.handle, id, record);
+        }
+        Some(FlowSolveOutcome::NoValue(NoValueFlowResult {
+            basis: carrier.plan.basis().clone(),
+            reason: FlowPartialReason::Failed(record),
+            failure,
+        }))
     }
 
     /// The shared flow frame-pop + tagged SCC close. On a non-root pop the
@@ -1256,6 +2113,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             mut holds,
             materialized,
             fresh_seed,
+            discharge,
+            provenance,
         } = evaluated;
         let popped = self.dispatch_txn.borrow_mut().reentry_mut().pop();
         let self_cycle = popped.assumption_targets.contains(&idx);
@@ -1270,6 +2129,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             unreachable!("a flow code path pops a flow frame");
         };
         let inline_flight = flow_state.inline_flight;
+        // The frame's installed demand carrier (handle + plan +
+        // provenance), installed by `prepare_flow_return_demand` at frame
+        // open. It rides the deferral so the component close finalizes the
+        // member against EXACTLY its own demand.
+        let flow_demand = flow_state.flow_demand;
         // Tagged holds recorded against this frame by indexed call
         // evaluation while it was active ride into the close with the
         // evaluator's own holds — a resolved-call dependency joins the
@@ -1305,9 +2169,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if !is_scc_root {
             // PROVISIONAL member: defer to the tagged ledger, propagate the
             // still-open lowlink to the parent, and return the caller-return
-            // step. NEVER publishes here.
+            // step. NEVER publishes here. The member's demand carrier and
+            // its typed discharge report ride the deferral to the close.
             let step = match &outcome {
-                FlowReturnPendingOutcome::Complete(result) => FlowReturnStep::Complete(
+                FlowReturnPendingOutcome::EvaluatedValue(result) => FlowReturnStep::Complete(
                     self.apply_frame_key_substitution(&root_key, result.clone()),
                 ),
                 FlowReturnPendingOutcome::NoValue { failure, .. } => {
@@ -1325,6 +2190,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self_roots,
                     materialized,
                     fresh_seed,
+                    flow_demand,
+                    discharge,
+                    provenance,
                 }),
             });
             return FlowFramePop::Provisional(step);
@@ -1379,6 +2247,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self_roots: state.self_roots,
                         materialized: state.materialized,
                         fresh_seed: state.fresh_seed,
+                        flow_demand: state.flow_demand,
+                        discharge: state.discharge,
+                        provenance: state.provenance,
                     });
                 }
             }
@@ -1412,21 +2283,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             })
             .collect();
-        let mut prefix_entries = Vec::new();
-        if !flow_members.is_empty() || !holds.is_empty() {
-            prefix_entries.push(super::dispatch_txn::FlowDischargeEntry {
-                key: root_key.clone(),
-                outcome: outcome.clone(),
-                holds: holds.clone(),
-                fresh_seed,
-            });
-        }
-        let (prefix_outcomes, call_results) = match self.discharge_mixed_component_to_fixed_point(
-            prefix_entries,
-            &mut flow_members,
-            &mut call_members,
-            &replay_substitution,
-        ) {
+        // The root ALWAYS enters the fixed-point input — a hold-free solo
+        // root included: its convergence evidence then comes from the real
+        // discharge driver (one observed no-progress pass for a solo
+        // entry), never from a caller-fabricated zero-iteration claim.
+        let prefix_entries = vec![super::dispatch_txn::FlowDischargeEntry {
+            key: root_key.clone(),
+            outcome: outcome.clone(),
+            holds: holds.clone(),
+            fresh_seed,
+        }];
+        let (prefix_outcomes, call_results, convergence) = match self
+            .discharge_mixed_component_to_fixed_point(
+                prefix_entries,
+                &mut flow_members,
+                &mut call_members,
+                &replay_substitution,
+            ) {
             Ok(ok) => ok,
             Err(failure) => {
                 self.flow_return_abort_inline_flight(inline_flight.as_ref());
@@ -1442,8 +2315,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 // The component's OWN failure outranks the solver's: a
                 // frame budget edge and a no-value flow outcome are the
-                // poison the equation failure merely rides.
-                return FlowFramePop::RootClose(FlowRootClose::NoValue(if budget_cap.is_some() {
+                // poison the equation failure merely rides. Record the
+                // failure on every installed demand of the component
+                // (failure detection on the ledger — never an admission
+                // decision).
+                let failure = if budget_cap.is_some() {
                     FlowReturnFailure::Budget(
                         verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
                     )
@@ -1451,23 +2327,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     failure
                 } else {
                     match failure {
-                            crate::semantic_query::ResolveCallFailure::Budget => {
-                                FlowReturnFailure::Budget(
-                                    verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
-                                )
-                            }
-                            _ => FlowReturnFailure::Unresolved,
+                        crate::semantic_query::ResolveCallFailure::Budget => {
+                            FlowReturnFailure::Budget(
+                                verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                            )
                         }
-                }));
+                        _ => FlowReturnFailure::Unresolved,
+                    }
+                };
+                let _ = self.fail_flow_demand(flow_demand.as_ref(), failure);
+                for member in &flow_members {
+                    let _ = self.fail_flow_demand(member.flow_demand.as_ref(), failure);
+                }
+                return FlowFramePop::RootClose(FlowRootClose::NoValue(failure));
             }
         };
         if let Some(root_outcome) = prefix_outcomes.into_iter().next() {
             outcome = root_outcome;
         }
-        // Atomic admission: a degraded flow outcome anywhere in the
-        // component (the root included) poisons the WHOLE tagged
-        // component — nothing publishes, every flight aborts.
-        let component_degraded = matches!(outcome, FlowReturnPendingOutcome::NoValue { .. })
+        // Component failure detection: a no-value flow outcome anywhere in
+        // the component (the root included), or an undecided / budgeted
+        // relation member, fails the WHOLE tagged component — nothing
+        // publishes, every flight aborts, and every installed demand
+        // records the failure on its ledger. This is failure detection,
+        // not a completeness authority: warm admission is the finalizer's
+        // alone, decided per member below.
+        let component_failed = matches!(outcome, FlowReturnPendingOutcome::NoValue { .. })
             || flow_members
                 .iter()
                 .any(|member| matches!(member.outcome, FlowReturnPendingOutcome::NoValue { .. }))
@@ -1478,14 +2363,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         | super::dispatch_txn::PendingVerdict::BudgetExceeded(_)
                 )
             });
-        if component_degraded {
+        if component_failed {
             self.flow_return_abort_inline_flight(inline_flight.as_ref());
             for member in &relation_members {
                 self.relation_abort_inline_flight(member.inline_flight.as_ref());
             }
             self.flow_return_abort_drained_flights(&flow_members);
             self.resolve_call_abort_drained_flights(&call_results);
-            return FlowFramePop::RootClose(FlowRootClose::NoValue(match outcome {
+            let failure = match outcome {
                 FlowReturnPendingOutcome::NoValue { failure, .. } => failure,
                 _ => {
                     if budget_cap.is_some() {
@@ -1496,23 +2381,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         FlowReturnFailure::Unresolved
                     }
                 }
-            }));
+            };
+            let _ = self.fail_flow_demand(flow_demand.as_ref(), failure);
+            for member in &flow_members {
+                let _ = self.fail_flow_demand(member.flow_demand.as_ref(), failure);
+            }
+            return FlowFramePop::RootClose(FlowRootClose::NoValue(failure));
         }
         // The published component's self-roots are the UNION of every
-        // drained member's roots across BOTH domains (the root's own file,
-        // every drained flow member's file, and every relation member's
-        // observed node roots): a cross-file edit invalidates the whole
-        // component.
+        // drained member's roots across ALL THREE domains (the root's own
+        // file, every drained flow member's file, every drained CALL
+        // member's observed roots — its callee, receiver, arguments and
+        // explicit type arguments, which can live in files no flow member
+        // touches — and every relation member's observed node roots), plus
+        // the members already completed under this root that the drain
+        // publishes on the same carrier: a cross-file edit invalidates the
+        // whole component.
         let mut scc_self_roots = self_roots.clone();
         for member in &flow_members {
-            for root in &member.self_roots {
-                if !scc_self_roots
-                    .iter()
-                    .any(|(canonical, _)| canonical == &root.0)
-                {
-                    scc_self_roots.push(root.clone());
-                }
-            }
+            union_self_roots(&mut scc_self_roots, &member.self_roots);
+        }
+        for (_, state, _) in &call_results {
+            union_self_roots(&mut scc_self_roots, &state.self_roots);
         }
         if !relation_members.is_empty() {
             let mut nodes = Vec::with_capacity(relation_members.len() * 2);
@@ -1520,45 +2410,90 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 nodes.push(member.key.source);
                 nodes.push(member.key.target);
             }
-            for root in self.observed_self_roots_from_nodes(nodes) {
-                if !scc_self_roots
-                    .iter()
-                    .any(|(canonical, _)| canonical == &root.0)
-                {
-                    scc_self_roots.push(root);
-                }
-            }
+            union_self_roots(
+                &mut scc_self_roots,
+                &self.observed_self_roots_from_nodes(nodes),
+            );
         }
+        {
+            let txn = self.dispatch_txn.borrow();
+            for member in &txn.flow.completed_members {
+                union_self_roots(&mut scc_self_roots, &member.self_roots);
+            }
+            for member in &txn.call.completed_members {
+                union_self_roots(&mut scc_self_roots, &member.self_roots);
+            }
+            let relation_nodes = txn
+                .relation
+                .completed_members
+                .iter()
+                .flat_map(|member| [member.key.source, member.key.target]);
+            union_self_roots(
+                &mut scc_self_roots,
+                &self.observed_self_roots_from_nodes(relation_nodes),
+            );
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        self.record_flow_root_carrier_for_tests(&scc_self_roots);
         // The drained members discharge through the shared coordinator
         // (no relation root — every relation member routes to the
-        // completed batch; the flow and call members queue beside them).
-        if (!relation_members.is_empty() || !flow_members.is_empty() || !call_results.is_empty())
-            && self
-                .relation_discharge_and_route(
-                    false,
-                    None,
-                    relation_members,
-                    flow_members,
-                    None,
-                    call_results,
-                    cyclic,
-                )
-                .is_err()
-        {
-            self.flow_return_abort_inline_flight(inline_flight.as_ref());
-            return FlowFramePop::RootClose(FlowRootClose::NoValue(FlowReturnFailure::Unresolved));
+        // completed batch; the flow members FINALIZE there — each enters
+        // the batch only with its own proof — and the call members queue
+        // beside them). A refused member batch poisons the ROOT's own
+        // admission below: the root's fixed point consumed the members'
+        // evaluated values, so its verdict may flow but must never warm.
+        let mut member_batch_unproven = false;
+        if !relation_members.is_empty() || !flow_members.is_empty() || !call_results.is_empty() {
+            match self.relation_discharge_and_route(
+                false,
+                None,
+                relation_members,
+                flow_members,
+                None,
+                call_results,
+                cyclic,
+                &convergence,
+            ) {
+                Ok(outcome) => member_batch_unproven = outcome.flow_batch_unproven,
+                Err(_) => {
+                    self.flow_return_abort_inline_flight(inline_flight.as_ref());
+                    let _ =
+                        self.fail_flow_demand(flow_demand.as_ref(), FlowReturnFailure::Unresolved);
+                    return FlowFramePop::RootClose(FlowRootClose::NoValue(
+                        FlowReturnFailure::Unresolved,
+                    ));
+                }
+            }
         }
         // The root's own outcome: the machinery root publishes through
         // the family singleflight; an inline root batch-publishes with
         // the SCC drain and the caller consumes the computed step.
         match outcome {
-            FlowReturnPendingOutcome::Complete(result) => {
+            FlowReturnPendingOutcome::EvaluatedValue(result) => {
                 // The CALLER's mapping applies exactly here, where the
                 // value leaves this frame: the component's internal fixed
                 // point runs in this frame's own binders, and the admitted
                 // value under an instantiation key is the instantiated
                 // return — one transfer point for both publish channels.
                 let result = self.apply_frame_key_substitution(&root_key, result);
+                // FINALIZE the root's own demand — after the component
+                // fixed point, the literal widening, and the per-key
+                // substitution: the proof covers exactly this value. A
+                // refused member batch withholds the root's own proof
+                // outright: the fixed point consumed the unproven
+                // members' values, so no verdict over this result may
+                // admit (`ReturnOnly` — the value still flows).
+                let verdict = if member_batch_unproven {
+                    None
+                } else {
+                    self.finalize_flow_demand(
+                        flow_demand.as_ref(),
+                        discharge.as_ref(),
+                        &convergence,
+                        provenance,
+                        &result,
+                    )
+                };
                 if machinery_root {
                     // The machinery root publishes through the family
                     // singleflight, which owns the root's own admission —
@@ -1569,26 +2504,63 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         "a machinery root publishes through the family singleflight \
                          and must never hold an inline flight to drop"
                     );
-                    FlowFramePop::RootClose(FlowRootClose::Complete(
-                        result,
-                        scc_self_roots,
-                        materialized,
-                    ))
-                } else {
-                    self.dispatch_txn.borrow_mut().flow.completed_members.push(
-                        CompletedFlowReturnMember {
-                            key: root_key,
-                            result: result.clone(),
-                            inline_flight,
-                            self_roots,
+                    FlowFramePop::RootClose(FlowRootClose::EvaluatedValue(Box::new(
+                        EvaluatedFlowRoot {
+                            result,
+                            scc_self_roots,
                             materialized,
+                            verdict,
                         },
-                    );
+                    )))
+                } else {
+                    // The VALUE channel: the inline root's own evaluated
+                    // value joins the closed-member overrides the shared
+                    // return equation reads (proven or not)...
+                    self.dispatch_txn
+                        .borrow_mut()
+                        .flow
+                        .closed_values
+                        .push((root_key.clone(), result.clone()));
+                    // An inline root enters the batched publish ONLY with
+                    // its own proof; an unproven outcome aborts its flight
+                    // (the usable value still flows to the caller).
+                    match &verdict {
+                        Some(FlowSolveOutcome::Complete(proof)) => {
+                            self.dispatch_txn.borrow_mut().flow.completed_members.push(
+                                CompletedFlowReturnMember {
+                                    key: root_key,
+                                    result: proof.clone(),
+                                    inline_flight,
+                                    self_roots,
+                                    materialized,
+                                },
+                            );
+                        }
+                        _ => {
+                            self.flow_return_abort_inline_flight(inline_flight.as_ref());
+                            // The inline path produces NO memo read, so the
+                            // universal read funnel never sees this refusal:
+                            // fold it into the ENCLOSING build's rails here
+                            // (the same funnel primitives the consumer-side
+                            // hold arm uses) — an answer composed around an
+                            // unproven flow value must not warm.
+                            let reasons = match &verdict {
+                                Some(FlowSolveOutcome::Partial(partial)) => {
+                                    match partial.value.degradation() {
+                                        Some(degradation) => degradation_reason_class(degradation),
+                                        None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+                                    }
+                                }
+                                _ => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+                            };
+                            self.fold_cache_read_rails(true, true, reasons);
+                        }
+                    }
                     FlowFramePop::Provisional(FlowReturnStep::Complete(result))
                 }
             }
             FlowReturnPendingOutcome::NoValue { .. } => {
-                unreachable!("a degraded root poisons the component above")
+                unreachable!("a failed root fails the component above")
             }
         }
     }
@@ -1607,7 +2579,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         entries: &mut [super::dispatch_txn::FlowDischargeEntry],
         call_results: &rustc_hash::FxHashMap<crate::semantic_query::ResolveCallKey, SemanticNodeId>,
-    ) {
+    ) -> ObservedFlowConvergence {
         let index: rustc_hash::FxHashMap<&FlowReturnKey, usize> = entries
             .iter()
             .enumerate()
@@ -1616,7 +2588,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut current: Vec<Option<FlowReturnResult>> = entries
             .iter()
             .map(|entry| match &entry.outcome {
-                FlowReturnPendingOutcome::Complete(result) => Some(result.clone()),
+                FlowReturnPendingOutcome::EvaluatedValue(result) => Some(result.clone()),
                 // A failed member has no SEED of its own. Its observed
                 // degradation is NOT lost with the seed — it is read back
                 // from the entry's own outcome below, so a member the
@@ -1624,7 +2596,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 FlowReturnPendingOutcome::NoValue { .. } => None,
             })
             .collect();
+        // The runtime-observed convergence of this discharge: the passes
+        // the fixed point actually ran (including the final stable pass).
+        let mut iterations: u32 = 0;
         loop {
+            iterations = iterations.saturating_add(1);
             let mut progressed = false;
             for i in 0..entries.len() {
                 let mut arms: Vec<SemanticNodeId> = Vec::new();
@@ -1744,7 +2720,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // never produced.
             if !matches!(
                 entry.outcome,
-                FlowReturnPendingOutcome::Complete(_)
+                FlowReturnPendingOutcome::EvaluatedValue(_)
                     | FlowReturnPendingOutcome::NoValue {
                         failure: FlowReturnFailure::EmptyCycle,
                         ..
@@ -1761,7 +2737,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } else {
                 result
             };
-            entry.outcome = FlowReturnPendingOutcome::Complete(result);
+            entry.outcome = FlowReturnPendingOutcome::EvaluatedValue(result);
+        }
+        // The loop above exits only on a no-progress pass: the component
+        // reached its fixed point.
+        ObservedFlowConvergence {
+            iterations,
+            stable: true,
         }
     }
 
@@ -1907,6 +2889,123 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// The shared demand-site derivation of one flow demand: the demand
+    /// gate, the served function entry, the content-pinned slice keys, the
+    /// demanded member, and the frame's binding inventory. Derived ONCE
+    /// here for both the demand preparation
+    /// ([`Self::prepare_flow_return_demand`] — the proof planning) and the
+    /// content evaluation ([`Self::evaluate_flow_return`]), so the proof
+    /// layer and the evaluator can never disagree about which slice a
+    /// demand addresses. The `Err` arm carries the typed failure the
+    /// evaluation reports plus the self-roots observed so far.
+    fn flow_slice_demand_site(
+        &self,
+        key: &FlowReturnKey,
+    ) -> Result<
+        FlowSliceDemandSite,
+        (
+            FlowReturnFailure,
+            Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+        ),
+    > {
+        // The evaluation models the whole-return point and the
+        // single-named-member projection point, both at the empty input
+        // point. Any other demand/input point fails CLOSED with a typed
+        // no-value outcome — never a silently widened whole-return result,
+        // never a sibling materialisation the narrower demand did not ask
+        // for.
+        if !key.input.is_empty() {
+            return Err((FlowReturnFailure::UnmodeledDemandPoint, Vec::new()));
+        }
+        let demanded_member: Option<Arc<str>> = if key.demand.is_whole_return() {
+            None
+        } else {
+            match flow_demanded_member_name(&key.demand) {
+                Some(name) => Some(name),
+                None => {
+                    return Err((FlowReturnFailure::UnmodeledDemandPoint, Vec::new()));
+                }
+            }
+        };
+        let canonical = key.function.declaration_slot.defining_canonical.as_ref();
+        let owner = key.function.declaration_slot.owner;
+        let name = key.function.declaration_slot.merged_symbol_name.as_ref();
+        let Some(serve) = self.ctx.ensure_indexed_ready_serve(canonical) else {
+            return Err((FlowReturnFailure::Missing, Vec::new()));
+        };
+        let indexed = serve.indexed;
+        let self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
+            vec![(Arc::from(canonical), indexed.whole_hash)];
+        let index = indexed.shallow_state.decl_bodies().function_program_index();
+        // The KEYED lookup, not a scan: a function position is named by
+        // its whole program key, and "the first entry that looks close
+        // enough" is exactly the shape that hands over the wrong callee.
+        let Some(entry) = index
+            .value_function(
+                owner,
+                name,
+                &key.function.function_part,
+                key.function.overload_ordinal,
+            )
+            .map(|matched| matched.entry())
+        else {
+            return Err((FlowReturnFailure::Missing, self_roots));
+        };
+        // A body whose own bytes could not be read has no exact-content
+        // axis, so no content-addressed key can be built for it: fail
+        // closed rather than key on a constant every unreadable body
+        // shares.
+        let Some(flow_body_exact_hash) = entry.flow_body_exact_hash else {
+            return Err((FlowReturnFailure::Unresolved, self_roots));
+        };
+        // The source axes come from the request-bound artifact identity
+        // (the served `IndexedReady` through the canonical
+        // `FileArtifactKey` identity) — never path reclassification, never
+        // a constant. A serving artifact whose exact parse identity cannot
+        // be recomputed fails closed: no content-addressed key may name a
+        // source it cannot verify.
+        let Some(source_key) = crate::file_artifact_store::FileArtifactKey::for_source_identity(
+            Arc::from(canonical),
+            indexed.whole_hash,
+            indexed.raw_source.as_ref(),
+            indexed.file_language.clone(),
+            indexed.framework_parse.as_deref(),
+            indexed.parse_env_hash,
+        ) else {
+            return Err((FlowReturnFailure::Unresolved, self_roots));
+        };
+        let slice_key_function = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+            canonical_id: Arc::from(canonical),
+            function: entry.key.clone(),
+            flow_body_stable_hash: entry.flow_body_stable_hash,
+            flow_body_exact_hash,
+            parse_env_hash: key.context.parse_env_hash,
+            parse_key: source_key.parse_key,
+            file_language: source_key.file_language_id,
+            build_toolchain_fingerprint:
+                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+        };
+        let slice_key = crate::cache_runtime::flow_slice_node::FlowSliceHashKey {
+            function: slice_key_function.clone(),
+            demand: crate::cache_runtime::flow_slice_node::FlowSliceDemandIdentity {
+                projection_path: match demanded_member.as_ref() {
+                    Some(member) => Arc::from(vec![Arc::clone(member)].into_boxed_slice()),
+                    None => Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                },
+            },
+        };
+        Ok(FlowSliceDemandSite {
+            indexed,
+            self_roots,
+            slice_key_function,
+            slice_key,
+            demanded_member,
+            inventory: super::flow_solve::FlowBindingInventory {
+                bindings: Arc::clone(&entry.bindings),
+            },
+        })
+    }
+
     /// Evaluate one demanded function through its flow IR. Reads the
     /// whole-body identity from the per-file `FunctionProgramIndex`
     /// (recording the `ProgramAnalysisFactRef::FlowBody` fact rail),
@@ -1919,10 +3018,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// ACTUALLY produced (§3.4) — recorded here, at the one place the
     /// compute knows what it served.
     ///
+    /// The demand site is derived ONCE ([`Self::flow_slice_demand_site`]),
+    /// shared with the demand preparation, so the proof layer and the
+    /// evaluator can never disagree about which slice a demand addresses.
+    /// On an evaluated value the outcome carries the typed discharge
+    /// report of the frame's installed demand.
+    ///
     /// [`MaterializedSet`]: crate::semantic_query::demand::MaterializedSet
     fn evaluate_flow_return(&self, key: &FlowReturnKey) -> FlowEvaluationOutcome {
         verter_audit::attribute_scope!(FlowSliceCompute);
         use crate::semantic_query::demand::{MaterializedPoint, MaterializedSet};
+        // The frame's installed demand carrier (installed by
+        // `prepare_flow_return_demand` at frame open): the report at the
+        // end of this evaluation claims against exactly this demand.
+        let demand_carrier = self.flow_demand_carrier_of(key);
+        // The evaluation provenance is bound HERE, at the evaluation's
+        // start: the installed demand's OWN token when one is installed —
+        // so the value, the discharge report, and the convergence evidence
+        // of THIS evaluation carry exactly THIS demand's identity — and
+        // otherwise the bare freshness mint (sentinel ordinal), which can
+        // never match a real carrier at finalization.
+        let provenance = demand_carrier
+            .as_ref()
+            .map(|carrier| carrier.provenance)
+            .unwrap_or_else(|| self.current_flow_evaluation_provenance());
         // Every call site of this closure fails BEFORE the evaluator
         // runs, so no degradation has been observed yet: `None` is the
         // honest value, not a dropped one.
@@ -1938,6 +3057,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     holds: Vec::new(),
                     materialized: MaterializedSet::empty(),
                     fresh_seed: false,
+                    discharge: None,
+                    provenance,
                 }
             };
         // Cold-path start event: every cold whole-function evaluation
@@ -1954,32 +3075,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // other demand/input point fails CLOSED with a typed no-value
         // outcome — never a silently widened whole-return result, never
         // a sibling materialisation the narrower demand did not ask for.
-        if !key.input.is_empty() {
-            return degraded(FlowReturnFailure::UnmodeledDemandPoint, Vec::new());
-        }
-        let demanded_member: Option<Arc<str>> = if key.demand.is_whole_return() {
-            None
-        } else {
-            match flow_demanded_member_name(&key.demand) {
-                Some(name) => Some(name),
-                None => {
-                    return degraded(FlowReturnFailure::UnmodeledDemandPoint, Vec::new());
-                }
-            }
+        // (The gate lives in the shared demand-site derivation.)
+        let site = match self.flow_slice_demand_site(key) {
+            Ok(site) => site,
+            Err((failure, self_roots)) => return degraded(failure, self_roots),
         };
+        let FlowSliceDemandSite {
+            indexed,
+            self_roots,
+            slice_key_function,
+            slice_key,
+            demanded_member,
+            inventory: _,
+        } = site;
         let canonical = key.function.declaration_slot.defining_canonical.as_ref();
         let owner = key.function.declaration_slot.owner;
         let name = key.function.declaration_slot.merged_symbol_name.as_ref();
-        let Some(serve) = self.ctx.ensure_indexed_ready_serve(canonical) else {
-            return degraded(FlowReturnFailure::Missing, Vec::new());
-        };
-        let indexed = serve.indexed;
-        let self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
-            vec![(Arc::from(canonical), indexed.whole_hash)];
         let index = indexed.shallow_state.decl_bodies().function_program_index();
         // The KEYED lookup, not a scan: a function position is named by
         // its whole program key, and "the first entry that looks close
         // enough" is exactly the shape that hands over the wrong callee.
+        // The demand site already proved this entry over this pinned
+        // serve; the re-lookup is deterministic.
         let Some(entry) = index
             .value_function(
                 owner,
@@ -2008,33 +3125,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // memo refuses (`ReturnOnly` — the fourth non-admission layer,
         // on top of the planner's typed refusal, the hash node's
         // `ReturnOnly`, and the unaddressable lowered store).
-        // A body whose own bytes could not be read has no exact-content
-        // axis, so no content-addressed key can be built for it: fail
-        // closed rather than key on a constant every unreadable body
-        // shares.
-        let Some(flow_body_exact_hash) = entry.flow_body_exact_hash else {
-            return degraded(FlowReturnFailure::Unresolved, self_roots);
-        };
-        let slice_key_function = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
-            canonical_id: Arc::from(canonical),
-            function: entry.key.clone(),
-            flow_body_stable_hash: entry.flow_body_stable_hash,
-            flow_body_exact_hash,
-            parse_env_hash: key.context.parse_env_hash,
-            build_toolchain_fingerprint:
-                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
-        };
-        let slice_key = crate::cache_runtime::flow_slice_node::FlowSliceHashKey {
-            function: slice_key_function.clone(),
-            demand: crate::cache_runtime::flow_slice_node::FlowSliceDemandIdentity {
-                projection_path: match demanded_member.as_ref() {
-                    Some(member) => Arc::from(vec![Arc::clone(member)].into_boxed_slice()),
-                    None => Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-                },
-            },
-        };
         let flow_slice = self.ctx.project_type_store().flow_slice();
-        let lowered =
+        let (planned, lowered) =
             match crate::cache_runtime::lookup(flow_slice.hash_node(), slice_key.clone(), self.ctx)
             {
                 None => {
@@ -2063,16 +3155,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     );
                 }
                 Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(
-                    slice_hash,
+                    planned,
                 )) => {
                     // Hash-then-lower: the minted slice identity keys the
                     // lowered-slice artifact (the key is unconstructible
                     // without it), and the lowered node lowers ONLY the
-                    // planned slice. A lowered miss on the pinned content is
+                    // retained plan. A lowered miss on the pinned content is
                     // a torn view — undecided, never a fabricated slice.
                     let lowered_key = crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey {
                         hash_key: slice_key,
-                        slice_hash,
+                        slice_hash: planned.hash(),
                     };
                     match crate::cache_runtime::lookup(
                         flow_slice.lowered_node(),
@@ -2082,7 +3174,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         None => {
                             return degraded(FlowReturnFailure::Unresolved, self_roots);
                         }
-                        Some(lowered) => lowered,
+                        Some(lowered) => (planned, lowered),
                     }
                 }
             };
@@ -2106,13 +3198,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(skeleton) = flow_slice.skeleton_for(&slice_key_function, self.ctx) else {
             return degraded(FlowReturnFailure::Unresolved, self_roots);
         };
-        let Some(ir) = indexed
-            .shallow_state
-            .decl_bodies()
-            .flow_slice_content(entry, selection, skeleton)
-        else {
+        let Some(ir) = indexed.shallow_state.decl_bodies().flow_slice_content(
+            entry,
+            selection,
+            Arc::clone(&skeleton),
+        ) else {
             return degraded(FlowReturnFailure::Missing, self_roots);
         };
+        // The frame anchor the skeleton's call footprint was rebased onto
+        // (the function node's own start) — the witness pairs the
+        // evaluator's absolute call spans with the skeleton's
+        // frame-relative twins through it.
+        let frame_anchor = entry.span.start;
         // A budget edge in one SELECTED leaf's expression lowering stops
         // the whole evaluation with the typed reason.
         if let Some(reason) = ir.budget_failure {
@@ -2307,11 +3404,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             throw_points: Vec::new(),
             collect_throw_points: false,
             scope_shadows: Vec::new(),
+            call_evidence: Vec::new(),
+            executed_walk: ExecutedSliceWalk::default(),
         };
         let holds;
         let degradation;
         let bare_return_seen;
         let implicit_undefined_seen;
+        let mut call_evidence;
+        let mut executed_walk;
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
@@ -2320,7 +3421,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
             degradation = evaluator.degradation;
             bare_return_seen = evaluator.bare_return_seen;
             implicit_undefined_seen = evaluator.implicit_undefined_seen;
+            call_evidence = std::mem::take(&mut evaluator.call_evidence);
+            executed_walk = evaluator.executed_walk;
             (outcome, body_falls_through)
+        };
+        // A call the lowering DECIDED ABOVE (folded into a surviving
+        // decided leaf, or sitting in a control position) never feeds the
+        // demanded value its return, and no relation was consumed for it:
+        // containment evidence, same ledger.
+        call_evidence.extend(
+            ir.decided_above_call_spans
+                .iter()
+                .map(|span| FlowCallEvidence {
+                    span: *span,
+                    relations_decided: true,
+                }),
+        );
+        #[cfg(any(test, feature = "test-support"))]
+        let call_evidence = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .suppress_call_evidence
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            Vec::new()
+        } else if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .undecided_relation_evidence
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            call_evidence
+                .into_iter()
+                .map(|evidence| FlowCallEvidence {
+                    relations_decided: false,
+                    ..evidence
+                })
+                .collect()
+        } else {
+            call_evidence
         };
         // Both failure exits carry the degradation the evaluation had
         // ALREADY observed, and both classify freshness identically: an
@@ -2338,11 +3479,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // express a frame failure at all; without this read the budget
         // class would be laundered into `UnmodeledPosition` and the
         // request would attribute a resource edge as a semantic one.
+        // A tripped budget also SHORTENS the walk ledger: positions past
+        // the trip degraded under the resource edge, so the run must not
+        // claim a completed structural walk.
         let contributors = match self.connected_demand_trip() {
-            Some(_) => Err(FlowReturnFailure::Budget(
-                verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
-            )),
+            Some(_) => {
+                executed_walk.aborted = true;
+                Err(FlowReturnFailure::Budget(
+                    verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                ))
+            }
             None => contributors,
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .short_execution_ledger
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            executed_walk.aborted = true;
+        }
+        // The evaluation's execution witness: what THIS run actually did —
+        // the walk-ledger-gated executed selection, the frame identity to
+        // pair call spans through, and the per-occurrence call evidence.
+        // The discharge-report producer claims obligations from it, never
+        // from the plan's own expectations: a short or aborted walk
+        // ledger yields NO executed selection.
+        let witness = FlowExecutionWitness {
+            executed_selection: executed_walk.completed_selection(planned.selection()),
+            skeleton: &skeleton,
+            anchor: frame_anchor,
+            calls: &call_evidence,
         };
         let contributors = match contributors {
             Ok(contributors) => contributors,
@@ -2356,6 +3525,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     holds,
                     materialized: failure_materialized_set(failure, key),
                     fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
+                    // A hold-only empty cycle DID evaluate its whole slice
+                    // — the component discharge resurrects its value from
+                    // the join — so its discharge report is real evidence.
+                    // Every other failure truncated the evaluation: no
+                    // report.
+                    discharge: if matches!(failure, FlowReturnFailure::EmptyCycle) {
+                        demand_carrier
+                            .as_ref()
+                            .map(|carrier| self.flow_evaluation_discharge_report(carrier, &witness))
+                    } else {
+                        None
+                    },
+                    provenance,
                 };
             }
         };
@@ -2382,6 +3564,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     holds,
                     materialized: failure_materialized_set(failure, key),
                     fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
+                    // A hold-only empty cycle DID evaluate its whole slice
+                    // — the component discharge resurrects its value from
+                    // the join — so its discharge report is real evidence.
+                    // Every other failure truncated the evaluation: no
+                    // report.
+                    discharge: if matches!(failure, FlowReturnFailure::EmptyCycle) {
+                        demand_carrier
+                            .as_ref()
+                            .map(|carrier| self.flow_evaluation_discharge_report(carrier, &witness))
+                    } else {
+                        None
+                    },
+                    provenance,
                 };
             }
         };
@@ -2391,12 +3586,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the compute, never re-derived from the nominal key at publish.
         let materialized =
             MaterializedSet::single(MaterializedPoint::new(key.demand.point.clone()));
+        // The typed discharge report of this evaluation: which planned
+        // obligations of the frame's installed demand the evaluation
+        // actually completed. Built ONCE here, at the successful end —
+        // the sole evidence producer of the proof layer.
+        let discharge = demand_carrier
+            .as_ref()
+            .map(|carrier| self.flow_evaluation_discharge_report(carrier, &witness));
         FlowEvaluationOutcome {
-            outcome: FlowReturnPendingOutcome::Complete(result),
+            outcome: FlowReturnPendingOutcome::EvaluatedValue(result),
             self_roots,
             holds,
             materialized,
             fresh_seed,
+            discharge,
+            provenance,
         }
     }
 
@@ -2809,6 +4013,54 @@ enum GuardNarrowing {
     Impossible,
 }
 
+/// One union arm's verdict against a runtime guard test. `NoMatch` is
+/// PROVED non-inhabitance of the tested edge — never "unrecognized". An
+/// arm the graph cannot classify (`any`, `unknown`, a memberless `{}`
+/// surface, an unresolved carrier, an undecided relation) is
+/// `Unclassified`: the checker still narrows such an arm, so it stays
+/// possible on BOTH edges of the test and the narrow records the typed
+/// guard gap instead of silently deciding either reading. This is what
+/// keeps [`GuardNarrowing::Impossible`] a positive proof: a branch goes
+/// dead only when every arm is proved off its edge.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArmGuardClass {
+    Match,
+    NoMatch,
+    Unclassified,
+}
+
+/// One union arm's key-presence verdict for a `"key" in subject` test.
+/// The `in` guard needs one more state than [`ArmGuardClass`] because an
+/// OPTIONAL member is its own proof shape: the arm provably stays on
+/// BOTH edges exactly as declared — a value of the arm's type may lack
+/// the key (negated edge), and the checker's positive edge keeps the arm
+/// UNCHANGED too (measured: `if ("k" in x) x.k` reads `string |
+/// undefined` for `k?: string`, byte-identical to the guard-free read —
+/// `in` establishes key PRESENCE and says nothing about the value; the
+/// absent-key `undefined` is the member READ's own fact, folded at
+/// `project_segments_navigate`). `Always`/`Never` are per-edge PROOFS (a
+/// required member / a proven-absent key on a closed surface); `Unknown`
+/// proves nothing and keeps the arm on both edges with the gap recorded.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InArmPresence {
+    Always,
+    Never,
+    Optional,
+    Unknown,
+}
+
+/// Whether the evaluator genuinely CONSUMED a type-predicate fact, and
+/// whether every relation outcome that consumption asked was decided —
+/// the verdict the predicate call's guard-application evidence records
+/// from. `NotConsumed` (a frame-shadowed target, an unmodelled subject)
+/// deposits no evidence at all; `Undecided` deposits the call span with
+/// its relation obligation left unclaimed.
+enum PredicateNarrowConsumption {
+    NotConsumed,
+    Decided,
+    Undecided,
+}
+
 #[derive(Default)]
 struct NodeDisjointness {
     provably_disjoint: bool,
@@ -3088,6 +4340,101 @@ struct FlowEvaluator<'d, 'b> {
     /// is the reaching-definitions rule a wholesale layer restore cannot
     /// express.
     scope_shadows: Vec<ScopeShadow>,
+    /// The call occurrences this evaluation ACTUALLY evaluated to a
+    /// decided value or coinductive hold, recorded at the one call sink
+    /// (`eval_call`) — the evaluator-origin evidence the discharge-report
+    /// producer claims call and relation obligations from. A call the
+    /// evaluation never performed, or one it could only degrade, records
+    /// nothing, so its obligations stay unclaimed and the demand
+    /// finalizes unproven.
+    call_evidence: Vec<FlowCallEvidence>,
+    /// The structural walk ledger of THIS run, recorded at the walk
+    /// sites (`eval_region`'s recording shell and its statement loop) —
+    /// see [`ExecutedSliceWalk`]. The execution witness yields an
+    /// executed selection only from a complete, unaborted ledger.
+    executed_walk: ExecutedSliceWalk,
+}
+
+/// The evaluator-recorded structural execution ledger of one run: how
+/// many regions of the slice content the walk entered and completed, how
+/// many statements it executed, and whether any abortive exit truncated
+/// it (an unsupported construct, a member-demand mismatch, a budget
+/// trip). Recorded exclusively at the evaluator's own walk sites, never
+/// assigned from the plan. The witness claims the plan's retained
+/// selection as EXECUTED only when the ledger is complete: the content
+/// the walk ran over is derived from exactly that selection (the lowered
+/// artifact is content-addressed to the plan's slice hash), so a
+/// complete walk over it is a walk of the selection — and a short
+/// ledger claims nothing.
+#[derive(Debug, Default, Clone, Copy)]
+struct ExecutedSliceWalk {
+    /// Region walks entered.
+    regions_entered: u32,
+    /// Region walks that ran to their own control-flow end.
+    regions_completed: u32,
+    /// Statements the walk actually executed.
+    statements_executed: u32,
+    /// An abortive exit truncated the walk.
+    aborted: bool,
+}
+
+impl ExecutedSliceWalk {
+    /// The plan's retained selection, yielded as EXECUTED only when this
+    /// ledger records a complete, unaborted walk (every entered region
+    /// ran to its own end, and the root region was entered at all). A
+    /// short or aborted ledger yields nothing — the discharge producer
+    /// then claims no structural obligation.
+    fn completed_selection<'p>(
+        &self,
+        selection: &'p verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan,
+    ) -> Option<&'p verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan> {
+        (!self.aborted
+            && self.regions_entered == self.regions_completed
+            && self.regions_entered > 0)
+            .then_some(selection)
+    }
+
+    /// Fold a NESTED function body's walk into this ledger: the nested
+    /// content is part of the same slice selection, so its regions,
+    /// statements, and aborts belong to the enclosing run's walk.
+    fn absorb(&mut self, nested: ExecutedSliceWalk) {
+        self.regions_entered = self.regions_entered.saturating_add(nested.regions_entered);
+        self.regions_completed = self
+            .regions_completed
+            .saturating_add(nested.regions_completed);
+        self.statements_executed = self
+            .statements_executed
+            .saturating_add(nested.statements_executed);
+        self.aborted |= nested.aborted;
+    }
+}
+
+/// One evaluated call occurrence's evidence: the authored call
+/// expression's span (the identity the skeleton's call footprint shares)
+/// and whether every relation outcome the call's resolution consumed was
+/// DECIDED (`Unknown` / `BudgetExceeded` are not evidence).
+#[derive(Clone, Copy)]
+struct FlowCallEvidence {
+    span: verter_span::Span,
+    relations_decided: bool,
+}
+
+/// One evaluation run's execution witness — what the run ACTUALLY did:
+/// the selection whose derived content the walk EXECUTED TO COMPLETION
+/// (`None` when the evaluator's own walk ledger is short or aborted —
+/// no structural obligation is then claimable), the frame identity its
+/// call evidence pairs against the skeleton footprint through (`anchor`
+/// is the function node's own start — the same ingress the skeleton's
+/// `FrameSpan`s were rebased with), and the call-sink evidence ledger.
+/// The discharge-report producer consumes it once; the plan's own
+/// expectations never substitute for it — `executed_selection` is
+/// yielded by [`ExecutedSliceWalk::completed_selection`], never assigned
+/// from the plan unconditionally.
+struct FlowExecutionWitness<'w> {
+    executed_selection: Option<&'w verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan>,
+    skeleton: &'w verter_semantic::analysis::flow::FunctionBodySkeleton,
+    anchor: u32,
+    calls: &'w [FlowCallEvidence],
 }
 
 /// One return-site contribution: the evaluated node plus whether it came
@@ -3594,15 +4941,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Apply the checker's assignment typing rule to a preserved RHS literal.
-    /// Annotated unions select their comparable declared constituents;
-    /// annotated non-unions retain the declared type; an unannotated target
-    /// gets the ordinary widening-literal value.
-    fn assignment_node_for_target(
+    /// The declared authority governing a write target, after the same
+    /// lazy destructured-parameter bootstrap assignment application uses —
+    /// so RHS evaluation context and target authority cannot diverge.
+    /// `None` is an EVOLVING target: no annotation supplies a type, the
+    /// binding's type is the join of what the writes assign.
+    fn target_declared_node(
         &mut self,
         target: &crate::flow_slice_content::SliceNarrowSubject,
-        value: SemanticNodeId,
-    ) -> SemanticNodeId {
+    ) -> Option<SemanticNodeId> {
         if let crate::flow_slice_content::SliceNarrowRoot::Local(name) = &target.root {
             if !self.locals.contains_key(name.as_ref())
                 && !self.var_locals.contains_key(name.as_ref())
@@ -3610,7 +4957,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.seed_destructured_param_element(name.as_ref());
             }
         }
-        let declared = match &target.root {
+        match &target.root {
             crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
                 self.params.get(*ordinal as usize).copied()
             }
@@ -3621,9 +4968,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.var_declared_locals.get(name.as_ref()).copied()
                 }
             }
-        };
-        let Some(declared) = declared else {
-            let widened = widen_literal_node(self.dispatch, value);
+        }
+    }
+
+    /// Apply the checker's assignment typing rule to an evaluated RHS.
+    /// Annotated unions select their comparable declared constituents;
+    /// annotated non-unions retain the declared type; an EVOLVING target
+    /// keeps the value as evaluated — the freshness-directed widening
+    /// already happened at [`Self::eval_evolving_rhs`], the one place the
+    /// fresh/pinned split is known (a bare literal widens, a
+    /// const-asserted or otherwise pinned literal stays — the checker's
+    /// own fresh/regular literal split, measured per assignment).
+    fn assignment_node_for_target(
+        &mut self,
+        target: &crate::flow_slice_content::SliceNarrowSubject,
+        value: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let Some(declared) = self.target_declared_node(target) else {
             // Reuse an equivalent reaching-definition arm when one already
             // exists. Primitive nodes can originate in distinct lowered
             // arenas; joining two ids that both spell `number` would otherwise
@@ -3642,16 +5003,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .or_else(|| self.var_locals.get(name.as_ref()).copied()),
             };
             if let Some(current) = current {
-                let widened_data = self.dispatch.graph().node_data(widened);
+                let value_data = self.dispatch.graph().node_data(value);
                 if let Some(existing) = self
                     .union_arms_or_self(current)
                     .into_iter()
-                    .find(|node| self.dispatch.graph().node_data(*node) == widened_data)
+                    .find(|node| self.dispatch.graph().node_data(*node) == value_data)
                 {
                     return existing;
                 }
             }
-            return widened;
+            return value;
         };
         match self.dispatch.union_arms_of(declared) {
             Some(arms) => self.assignment_reduced_union(declared, &arms, value),
@@ -3659,33 +5020,126 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Whether a write target is governed by a declared union. The check
-    /// performs the same lazy destructured-parameter bootstrap as assignment
-    /// application so RHS context and target authority cannot diverge.
-    fn target_has_declared_union(
+    /// Evaluate an applied write's right-hand side for an EVOLVING target
+    /// (no declared authority), applying the checker's per-assignment
+    /// literal widening: a FRESH position — a bare literal, a fresh
+    /// ternary arm, a read of a widening-literal `const` — widens to its
+    /// primitive; a PINNED position — a const assertion, a type
+    /// assertion, a pinned-`const` read, a callee's literal return —
+    /// keeps its literal. A fresh and a pinned spelling of the SAME
+    /// literal collapse to the pinned literal BEFORE widening (measured:
+    /// `let v; v = c ? 1 : 1 as const` reads `1`, never `number` — the
+    /// checker's union collapse keeps the regular literal).
+    fn eval_evolving_rhs(
         &mut self,
-        target: &crate::flow_slice_content::SliceNarrowSubject,
-    ) -> bool {
-        if let crate::flow_slice_content::SliceNarrowRoot::Local(name) = &target.root {
-            if !self.locals.contains_key(name.as_ref())
-                && !self.var_locals.contains_key(name.as_ref())
-            {
-                self.seed_destructured_param_element(name.as_ref());
-            }
-        }
-        let declared = match &target.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
-                self.params.get(*ordinal as usize).copied()
-            }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
-                if self.locals.contains_key(name.as_ref()) {
-                    self.declared_locals.get(name.as_ref()).copied()
-                } else {
-                    self.var_declared_locals.get(name.as_ref()).copied()
+        expr: &crate::flow_slice_content::SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+    ) -> Positional<SemanticNodeId> {
+        if let (
+            crate::flow_slice_content::SliceExpr::Union { .. },
+            crate::flow_slice_content::SliceFreshness::PerArm(_),
+        ) = (expr, freshness)
+        {
+            let mut parts: Vec<(SemanticNodeId, bool)> = Vec::new();
+            self.collect_evolving_parts(expr, freshness, &mut parts);
+            // Pinned-wins collapse of equal constituents, THEN widen the
+            // surviving fresh ones. Node data (not id) is the equality,
+            // exactly as the reaching-definition dedup below compares.
+            let mut merged: Vec<(SemanticNodeId, bool)> = Vec::new();
+            for (node, fresh) in parts {
+                let data = self.dispatch.graph().node_data(node);
+                match merged
+                    .iter_mut()
+                    .find(|(existing, _)| self.dispatch.graph().node_data(*existing) == data)
+                {
+                    Some((_, existing_fresh)) => *existing_fresh &= fresh,
+                    None => merged.push((node, fresh)),
                 }
             }
+            let nodes: Vec<SemanticNodeId> = merged
+                .into_iter()
+                .map(|(node, fresh)| {
+                    if fresh {
+                        widen_literal_node(self.dispatch, node)
+                    } else {
+                        node
+                    }
+                })
+                .collect();
+            return Positional::Value(
+                self.dispatch
+                    .intern_normalized_union_or_intersection(&nodes, true),
+            );
+        }
+        let outcome = self.eval_expr(expr);
+        let Positional::Value(node) = outcome else {
+            return outcome;
         };
-        declared.is_some_and(|node| self.dispatch.union_arms_of(node).is_some())
+        let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
+            || self.reads_widening_literal_local(expr);
+        Positional::Value(if fresh {
+            widen_literal_node(self.dispatch, node)
+        } else {
+            node
+        })
+    }
+
+    /// The recursive collector behind [`Self::eval_evolving_rhs`]: a
+    /// ternary's arms evaluate under the SAME guard scoping as the
+    /// ordinary `SliceExpr::Union` evaluation (positive reading on the
+    /// consequent, negated on the alternate, arm-scoped narrows) and each
+    /// contributes `(node, fresh)`. The freshness tree mirrors the
+    /// lowering's own descent, so a Union/PerArm pair aligns by
+    /// construction; a mismatch means the mirror missed a form — the
+    /// widening decision is then UNPROVEN, so the whole position fails
+    /// toward the typed gap (unwidened, degraded, never warm) rather than
+    /// guessing either direction.
+    fn collect_evolving_parts(
+        &mut self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+        parts: &mut Vec<(SemanticNodeId, bool)>,
+    ) {
+        if let crate::flow_slice_content::SliceExpr::Union { arms, guard } = expr {
+            match freshness {
+                crate::flow_slice_content::SliceFreshness::PerArm(facts)
+                    if facts.len() == arms.len() =>
+                {
+                    for (index, (arm, fact)) in arms.iter().zip(facts.iter()).enumerate() {
+                        let holds_before = self.holds.len();
+                        let narrow_len = self.narrowings.len();
+                        let possible = self.apply_guard_scoped(guard, index == 0);
+                        if !possible
+                            && !guard_has_subject_matching(guard, &|subject| {
+                                slice_expr_is_exact_subject_read(arm, subject)
+                            })
+                        {
+                            self.record_degradation(FlowReturnDegradation::FlowGap(
+                                crate::semantic_query::FlowGap::GuardNarrowing,
+                            ));
+                        }
+                        if possible {
+                            self.collect_evolving_parts(arm, fact, parts);
+                        } else {
+                            self.holds.truncate(holds_before);
+                        }
+                        self.narrowings.truncate(narrow_len);
+                    }
+                    return;
+                }
+                _ => {
+                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                        crate::semantic_query::FlowGap::UnmodeledExpression,
+                    ));
+                }
+            }
+        }
+        let holds_before = self.holds.len();
+        let outcome = self.eval_expr(expr);
+        let node = self.settle_composite_part(outcome, holds_before);
+        let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
+            || self.reads_widening_literal_local(expr);
+        parts.push((node, fresh));
     }
 
     /// Read the newest narrow fact for exactly `subject`, if a guard
@@ -4607,37 +6061,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         } else {
             self.read_local(head)
         }?;
-        let path: Arc<[crate::semantic_query::PathSegment]> = Arc::from(
-            value_ref.path[1..]
-                .iter()
-                .map(|segment| {
-                    crate::semantic_query::PathSegment::Member(
-                        crate::semantic_query::PropertyKey::identifier(Arc::from(segment.as_str())),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
-        // The member walk may widen a ROOTLESS callable (a function-typed
-        // parameter's signature) to its ambient apparent surface; that
-        // widening scopes its registry lookup by the lexical demand site,
-        // which rides this guard (see `apparent_type.rs`).
-        let _demand_scope = super::LexicalDemandScopeGuard::push(
-            &self.dispatch.lexical_demand_scope,
-            Arc::from(self.canonical),
-        );
-        match self.dispatch.execute_type_node(
-            crate::semantic_query::SemanticQueryKey::ProjectPath {
-                base: root,
-                path,
-                context: crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Navigate,
-                ),
-            },
-        ) {
-            crate::semantic_query::QueryResult::Value(output) => Some(output.value),
-            _ => None,
-        }
+        let segments: Vec<Arc<str>> = value_ref.path[1..]
+            .iter()
+            .map(|segment| Arc::from(segment.as_str()))
+            .collect();
+        self.project_segments_navigate(root, &segments)
     }
 
     /// tsc's `getAssignmentReducedType`: the union of the DECLARED
@@ -4735,11 +6163,87 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     // ── Guard narrowing ─────────────────────────────────────────────
 
     /// The union arms of `node`, or `node` itself when it is not a
-    /// union — the iteration domain every narrow filters.
+    /// LITERAL union node. This is the assignment path's
+    /// reaching-definition dedup domain only — a narrow's iteration
+    /// domain is [`Self::enumerated_union_arms_or_self`], which
+    /// additionally enumerates through identity carriers.
     fn union_arms_or_self(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
         match self.dispatch.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.to_vec(),
             _ => vec![node],
+        }
+    }
+
+    /// The iteration domain every narrow filters: the union arms of
+    /// `node`, enumerated THROUGH identity carriers. An alias /
+    /// merged-decl / `DeclRef` / `InstantiationRef` subject peels
+    /// through the one shared `Instantiate` dispatch
+    /// ([`ProjectSemanticDispatch::unwrap_identity_carrier_for_relation`]
+    /// — the same unwrap the `in` classifier and the relation engine
+    /// use), and a union found behind the carrier contributes its
+    /// members, recursively, so an alias of an alias flattens exactly
+    /// as the checker's union normalization does. A non-union arm stays
+    /// the ORIGINAL node: the published narrow keeps the authored
+    /// carrier, not its expansion. Treating a carrier as ONE opaque arm
+    /// was a defect: every narrow computed over an alias-typed subject
+    /// found nothing to filter and published the WHOLE alias — a
+    /// superset of the checker's type — complete and warm.
+    ///
+    /// A carrier the engine cannot resolve stays one opaque arm AND
+    /// records the typed `FlowGap::GuardNarrowing`: the narrow then
+    /// retains a superset (the sound direction — dropping a real
+    /// contributor is strictly worse than widening) and the gap keeps
+    /// it `ReturnOnly`, never warm. "Nothing filtered" must mean PROVED
+    /// unchanged, never "could not enumerate".
+    fn enumerated_union_arms_or_self(&mut self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        let mut arms = Vec::new();
+        let mut expanded = rustc_hash::FxHashSet::default();
+        let mut gapped = false;
+        self.collect_enumerated_arms(node, &mut arms, &mut expanded, &mut gapped);
+        if gapped {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        arms
+    }
+
+    /// [`Self::enumerated_union_arms_or_self`]'s recursion. `expanded`
+    /// holds every union node whose members were already contributed, so
+    /// a cyclic carrier chain terminates without dropping or duplicating
+    /// a contributor.
+    fn collect_enumerated_arms(
+        &self,
+        node: SemanticNodeId,
+        arms: &mut Vec<SemanticNodeId>,
+        expanded: &mut rustc_hash::FxHashSet<SemanticNodeId>,
+        gapped: &mut bool,
+    ) {
+        if let Some(SemanticNodeData::Union(members)) =
+            self.dispatch.graph().node_data(node).as_deref()
+        {
+            if expanded.insert(node) {
+                for member in members.to_vec() {
+                    self.collect_enumerated_arms(member, arms, expanded, gapped);
+                }
+            }
+            return;
+        }
+        match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+            super::relation::IdentityCarrierUnwrap::Concrete(concrete)
+                if concrete != node
+                    && matches!(
+                        self.dispatch.graph().node_data(concrete).as_deref(),
+                        Some(SemanticNodeData::Union(_))
+                    ) =>
+            {
+                self.collect_enumerated_arms(concrete, arms, expanded, gapped);
+            }
+            super::relation::IdentityCarrierUnwrap::Concrete(_) => arms.push(node),
+            super::relation::IdentityCarrierUnwrap::Unresolvable => {
+                arms.push(node);
+                *gapped = true;
+            }
         }
     }
 
@@ -4791,9 +6295,47 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         base: SemanticNodeId,
         segments: &[Arc<str>],
     ) -> Option<SemanticNodeId> {
-        if segments.is_empty() {
+        // The TERMINAL hop's member optionality folds into the read's
+        // value: reading `x.k` where `k` is declared optional includes
+        // the absent-key `undefined` — the checker's member-READ rule
+        // (indexed access included; measured under `--strict`,
+        // `exactOptionalPropertyTypes` off — the oracle profile).
+        // Presence of a key and non-`undefined`-ness of its value are two
+        // different facts: an `in` guard establishes the first and never
+        // strips the second, so the fold lives HERE, on the read, not in
+        // any guard. Terminal ONLY: an intermediate optional hop read
+        // without a discharging narrow is an error program, and the
+        // checker's own recovery projects the tail off the non-`undefined`
+        // part — folding mid-path would instead miss the tail on the
+        // fabricated `undefined` arm. The fold is PROOF-gated
+        // ([`Self::member_read_optionality`]): only a surface that
+        // provably declares the member optional folds; an undecidable
+        // surface keeps the shared projection's answer unchanged.
+        let Some((terminal, prefix)) = segments.split_last() else {
             return Some(base);
-        }
+        };
+        let parent = if prefix.is_empty() {
+            base
+        } else {
+            self.project_path_navigate(base, prefix)?
+        };
+        let optional = self.member_read_optionality(parent, terminal.as_ref()) == Some(true);
+        let value = self.project_path_navigate(parent, std::slice::from_ref(terminal))?;
+        Some(if optional {
+            self.fold_optional_read_undefined(value)
+        } else {
+            value
+        })
+    }
+
+    /// The shared `ProjectPath { mode: Navigate }` walk over a non-empty
+    /// member path — the projection half of
+    /// [`Self::project_segments_navigate`].
+    fn project_path_navigate(
+        &mut self,
+        base: SemanticNodeId,
+        segments: &[Arc<str>],
+    ) -> Option<SemanticNodeId> {
         let path: Arc<[crate::semantic_query::PathSegment]> = Arc::from(
             segments
                 .iter()
@@ -4825,6 +6367,92 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::semantic_query::QueryResult::Value(output) => Some(output.value),
             _ => None,
         }
+    }
+
+    /// Whether reading member `key` off `base` provably includes the
+    /// absent-key `undefined`: `Some(true)` when a surface declares the
+    /// member OPTIONAL (for a union, on ANY arm — that arm's read carries
+    /// `undefined`, so the union's does), `Some(false)` when every arm
+    /// declares it required, `None` when nothing is proved (a type
+    /// parameter, an index-signature surface, an unresolvable carrier, a
+    /// proven-absent key — the projection's own miss answers those).
+    /// Union arms flatten on a seen-guarded worklist; each non-union arm
+    /// answers through THE key-presence authority
+    /// ([`Self::arm_in_presence`], heritage/intersection arms included),
+    /// so the `in` guard and the member read can never disagree about a
+    /// key's declaration.
+    fn member_read_optionality(&mut self, base: SemanticNodeId, key: &str) -> Option<bool> {
+        let mut pending = vec![base];
+        let mut seen: Vec<SemanticNodeId> = Vec::new();
+        let mut any_optional = false;
+        let mut all_required = true;
+        while let Some(node) = pending.pop() {
+            if seen.contains(&node) {
+                continue;
+            }
+            seen.push(node);
+            let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => {
+                    all_required = false;
+                    continue;
+                }
+            };
+            if concrete != node {
+                if seen.contains(&concrete) {
+                    continue;
+                }
+                seen.push(concrete);
+            }
+            if let Some(SemanticNodeData::Union(arms)) =
+                self.dispatch.graph().node_data(concrete).as_deref()
+            {
+                pending.extend(arms.iter().copied());
+                continue;
+            }
+            match self.arm_in_presence(concrete, key) {
+                InArmPresence::Optional => any_optional = true,
+                InArmPresence::Always => {}
+                InArmPresence::Never | InArmPresence::Unknown => all_required = false,
+            }
+        }
+        if any_optional {
+            Some(true)
+        } else if all_required {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Union the absent-key `undefined` into an optional member's read
+    /// value. `any` / `unknown` absorb it, and a value that already
+    /// carries an `undefined` arm (the member's own explicit
+    /// `| undefined`) gains no duplicate.
+    fn fold_optional_read_undefined(&mut self, value: SemanticNodeId) -> SemanticNodeId {
+        let data = self.dispatch.graph().node_data(value);
+        match data.as_deref() {
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Undefined,
+            )) => return value,
+            Some(SemanticNodeData::Union(arms)) => {
+                let arms: Vec<SemanticNodeId> = arms.to_vec();
+                if arms.iter().any(|arm| self.arm_reduces_to_undefined(*arm)) {
+                    return value;
+                }
+            }
+            _ => {
+                if self.arm_reduces_to_undefined(value) {
+                    return value;
+                }
+            }
+        }
+        let undefined = self
+            .dispatch
+            .graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+        self.dispatch
+            .intern_normalized_union_or_intersection(&[value, undefined], true)
     }
 
     /// `a` is assignable to `b`, through the crate's SOLE relation
@@ -4980,7 +6608,40 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 subject,
                 target,
                 negated,
-            } => self.narrow_to_predicate_target(subject, target, *negated == positive),
+                call,
+            } => {
+                // A predicate call in a control test is NEVER decided
+                // above the call — its result selects the narrowing. The
+                // guard application here is the one place its result is
+                // actually consumed, so this is where its call evidence
+                // is recorded: a genuinely consumed fact deposits the
+                // call span with the narrowing computation's decidedness
+                // (an undecided relation leaves the relation obligation
+                // unclaimed), and a fact the evaluator could not consume
+                // at all (shadowed target, unmodelled subject) deposits
+                // nothing — the demand stays unproven.
+                let (fact, consumption) = self.narrow_to_predicate_target_consuming(
+                    subject,
+                    target,
+                    *negated == positive,
+                );
+                match consumption {
+                    PredicateNarrowConsumption::NotConsumed => {}
+                    PredicateNarrowConsumption::Decided => {
+                        self.call_evidence.push(FlowCallEvidence {
+                            span: *call,
+                            relations_decided: true,
+                        });
+                    }
+                    PredicateNarrowConsumption::Undecided => {
+                        self.call_evidence.push(FlowCallEvidence {
+                            span: *call,
+                            relations_decided: false,
+                        });
+                    }
+                }
+                fact
+            }
             // A conjunction applies every fact at once; its NEGATION is
             // the disjunction of the negated facts (De Morgan — the same
             // symmetry the lowering's `!` uses).
@@ -5110,7 +6771,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let Some(current) = self.subject_current_node(subject) else {
             return GuardNarrowing::Unchanged;
         };
-        let arms = self.union_arms_or_self(current);
+        let arms = self.enumerated_union_arms_or_self(current);
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in &arms {
             match keep(self, *arm) {
@@ -5132,32 +6793,52 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// `typeof subject === "kind"`: keep the arms whose runtime type the
-    /// comparison names; negation drops them.
+    /// comparison names; negation drops them. An arm the graph cannot
+    /// classify stays on BOTH edges and degrades the result — the
+    /// checker narrows `unknown` / `any` under a `typeof` test, so
+    /// dropping such an arm would fabricate a dead branch and silently
+    /// lose that branch's return contributor.
     fn narrow_typeof(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         kind: crate::flow_slice_content::SliceTypeofKind,
         negated: bool,
     ) -> GuardNarrowing {
-        self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(this.arm_typeof_matches(arm, kind) != negated)
-        })
+        let mut unclassified = false;
+        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+            Some(match this.arm_typeof_class(arm, kind) {
+                ArmGuardClass::Match => !negated,
+                ArmGuardClass::NoMatch => negated,
+                ArmGuardClass::Unclassified => {
+                    unclassified = true;
+                    true
+                }
+            })
+        });
+        if unclassified {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        fact
     }
 
-    /// Whether one union arm's runtime type is the one a `typeof`
+    /// One union arm's verdict against the runtime type a `typeof`
     /// comparison names. A primitive is its own kind (`null` is the
     /// operator's `"object"` quirk); a literal its primitive's; objects,
     /// arrays, tuples and spread programs are `"object"`, signatures
-    /// `"function"`. Anything the graph cannot classify — an unresolved
-    /// reference, `any`, `unknown` — matches NEITHER reading, so the
-    /// positive filter drops it and the negated one keeps it.
-    fn arm_typeof_matches(
+    /// `"function"`; `never` is uninhabited, off both edges. Anything
+    /// the graph cannot place under exactly one runtime kind — `any`,
+    /// `unknown`, a memberless `{}` surface (primitives inhabit it), an
+    /// unresolved carrier — is `Unclassified`: `NoMatch` means PROVED
+    /// non-inhabitance of the tested edge, never "unrecognized".
+    fn arm_typeof_class(
         &self,
         arm: SemanticNodeId,
         kind: crate::flow_slice_content::SliceTypeofKind,
-    ) -> bool {
+    ) -> ArmGuardClass {
         use crate::flow_slice_content::SliceTypeofKind;
-        let primitive = match self.dispatch.graph().node_data(arm).as_deref() {
+        let classified = match self.dispatch.graph().node_data(arm).as_deref() {
             Some(SemanticNodeData::Primitive(primitive)) => match primitive {
                 PrimitiveKind::String => Some(SliceTypeofKind::String),
                 PrimitiveKind::Number => Some(SliceTypeofKind::Number),
@@ -5166,6 +6847,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 PrimitiveKind::Symbol => Some(SliceTypeofKind::Symbol),
                 PrimitiveKind::Undefined => Some(SliceTypeofKind::Undefined),
                 PrimitiveKind::Null | PrimitiveKind::Object => Some(SliceTypeofKind::Object),
+                PrimitiveKind::Never => return ArmGuardClass::NoMatch,
                 _ => None,
             },
             Some(SemanticNodeData::Literal(literal)) => match literal {
@@ -5174,14 +6856,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 crate::semantic_query::LiteralValue::BigInt(_) => Some(SliceTypeofKind::BigInt),
                 crate::semantic_query::LiteralValue::Boolean(_) => Some(SliceTypeofKind::Boolean),
             },
-            Some(SemanticNodeData::Object(_))
-            | Some(SemanticNodeData::ObjectSpreadProgram(_))
+            Some(SemanticNodeData::Object(surface)) => {
+                if surface.closed().is_empty() {
+                    None
+                } else {
+                    Some(SliceTypeofKind::Object)
+                }
+            }
+            Some(SemanticNodeData::ObjectSpreadProgram(_))
             | Some(SemanticNodeData::Array { .. })
             | Some(SemanticNodeData::Tuple { .. }) => Some(SliceTypeofKind::Object),
             Some(SemanticNodeData::Signature { .. }) => Some(SliceTypeofKind::Function),
+            // A template-literal type denotes only strings, whatever its
+            // placeholders resolve to.
+            Some(SemanticNodeData::TemplateLiteral { .. }) => Some(SliceTypeofKind::String),
             _ => None,
         };
-        primitive == Some(kind)
+        match classified {
+            Some(observed) if observed == kind => ArmGuardClass::Match,
+            Some(_) => ArmGuardClass::NoMatch,
+            None => ArmGuardClass::Unclassified,
+        }
     }
 
     /// A bare truthiness test keeps every arm that CAN take the requested
@@ -5193,6 +6888,48 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         negated: bool,
     ) -> GuardNarrowing {
+        // A truthiness test over a PROPERTY narrows two references, both
+        // measured from the checker: the tested reference itself (below),
+        // and the property's PARENT — per-arm, an arm survives the tested
+        // edge iff ANY leaf of its projected member can take it, so a
+        // literal discriminant (`ok: true` / `ok: false`) filters both
+        // edges while a broad member (`v: string`) keeps its arm on the
+        // falsy edge (`""` inhabits it). The parent fact rides the
+        // narrowing overlay directly; the leaf fact is the returned
+        // narrow, so both land under the same guard scope.
+        if !subject.path.is_empty() {
+            let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
+                root: subject.root.clone(),
+                path: Arc::from(
+                    subject.path[..subject.path.len() - 1]
+                        .to_vec()
+                        .into_boxed_slice(),
+                ),
+            };
+            let last: Arc<[Arc<str>]> = Arc::from(
+                subject.path[subject.path.len() - 1..]
+                    .to_vec()
+                    .into_boxed_slice(),
+            );
+            let parent_fact = self.narrow_arms_by(&parent_subject, &parent_subject, |this, arm| {
+                let member = this.project_segments_navigate(arm, &last)?;
+                let leaves = this.enumerated_union_arms_or_self(member);
+                Some(leaves.iter().any(|leaf| {
+                    if negated {
+                        this.arm_can_be_falsy(*leaf)
+                    } else {
+                        this.arm_can_be_truthy(*leaf)
+                    }
+                }))
+            });
+            match parent_fact {
+                GuardNarrowing::Impossible => return GuardNarrowing::Impossible,
+                GuardNarrowing::Narrowed(fact_subject, node) => {
+                    self.narrowings.push((fact_subject, node));
+                }
+                GuardNarrowing::Unchanged => {}
+            }
+        }
         self.narrow_arms_by(subject, subject, |this, arm| {
             Some(if negated {
                 this.arm_can_be_falsy(arm)
@@ -5266,8 +7003,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// narrows, `x === "a"` over `x: string`) the positive reading narrows
     /// the subject to the literal itself — the checker's own rule for a
     /// literal strictly narrower than the declared type. A non-empty path
-    /// is a DISCRIMINANT, filtering the ROOT's arms by whether the literal
-    /// is assignable to the arm's member type at the path.
+    /// is a DISCRIMINANT, filtering the arms of the tested property's
+    /// PARENT reference — the root itself for a one-segment path, the
+    /// enclosing reference for a deeper one. The checker never selects a
+    /// ROOT arm through a nested discriminant: doing so DROPS the
+    /// constituents whose nested member differs (a SUBSET of the
+    /// checker's type — strictly worse than widening), while the parent
+    /// reference is exactly what it narrows (`m.meta.kind === "one"`
+    /// narrows `m.meta`, never `m`).
     fn narrow_eq_literal(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
@@ -5279,6 +7022,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         let literal_node = self.lower_body_type(&literal_ty);
         if subject.path.is_empty() {
+            // An arm whose relation to the literal the oracle cannot
+            // decide (a deferred form such as a template-literal arm)
+            // stays possible on BOTH edges and degrades the result: the
+            // checker decides such relations (`"none"` is off the
+            // `` `item-${string}` `` edge), so treating "undecided" as
+            // "proved unchanged" published a superset clean and warm.
+            let mut undecided = false;
             let narrowed = self.narrow_arms_by(subject, subject, |this, arm| {
                 if matches!(
                     this.dispatch.graph().node_data(arm).as_deref(),
@@ -5288,8 +7038,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ) {
                     return None;
                 }
-                let forward = this.assignable(arm, literal_node)?;
-                let backward = this.assignable(literal_node, arm)?;
+                let (Some(forward), Some(backward)) = (
+                    this.assignable(arm, literal_node),
+                    this.assignable(literal_node, arm),
+                ) else {
+                    undecided = true;
+                    return Some(true);
+                };
                 // The positive edge keeps overlapping arms. The negative
                 // edge drops only an arm wholly covered by the literal: a
                 // broad `string` can exclude `"a"` and remain `string`, so
@@ -5300,6 +7055,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     forward || backward
                 })
             });
+            if undecided {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+            }
             if matches!(narrowed, GuardNarrowing::Unchanged) && !negated {
                 // No arm was filtered. The literal can still be a STRICT
                 // subtype of the subject's whole type — then the literal
@@ -5317,27 +7077,56 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             narrowed
         } else {
-            // The discriminant narrows the ROOT, so the fact lands at the
-            // root subject: a later read of ANY member of the binding
-            // resolves against the surviving arms.
-            let root_subject = crate::flow_slice_content::SliceNarrowSubject {
+            // The discriminant narrows the tested property's PARENT
+            // reference, so the fact lands at the parent subject: a
+            // later read of the parent, or of any member projected from
+            // it, resolves against the surviving arms — while the root
+            // keeps every constituent for two segments and beyond.
+            let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
                 root: subject.root.clone(),
-                path: Arc::from(Vec::new().into_boxed_slice()),
+                path: Arc::from(
+                    subject.path[..subject.path.len() - 1]
+                        .to_vec()
+                        .into_boxed_slice(),
+                ),
             };
-            let path = subject.path.clone();
-            self.narrow_arms_by(&root_subject, &root_subject, |this, arm| {
-                let member = this.project_segments_navigate(arm, &path)?;
-                if negated {
-                    // Excluding one literal removes a root arm only when
+            let last: Arc<[Arc<str>]> = Arc::from(
+                subject.path[subject.path.len() - 1..]
+                    .to_vec()
+                    .into_boxed_slice(),
+            );
+            // A parent arm whose projected discriminant the relation
+            // oracle cannot compare stays possible on BOTH edges and
+            // degrades the result — undecided is never "proved off this
+            // edge" nor "proved unchanged".
+            let mut undecided = false;
+            let narrowed = self.narrow_arms_by(&parent_subject, &parent_subject, |this, arm| {
+                let member = this.project_segments_navigate(arm, &last)?;
+                let verdict = if negated {
+                    // Excluding one literal removes a parent arm only when
                     // the projected member is wholly that literal. A named
                     // alias can project a broad discriminant union without
                     // exposing its root constituents; `"a"` fits
                     // `"a" | "b"`, but its negative edge remains possible.
-                    Some(!this.assignable(member, literal_node)?)
+                    this.assignable(member, literal_node)
+                        .map(|covered| !covered)
                 } else {
-                    Some(this.assignable(literal_node, member)?)
+                    this.assignable(literal_node, member)
+                };
+                match verdict {
+                    Some(keep) => Some(keep),
+                    None => {
+                        undecided = true;
+                        Some(true)
+                    }
                 }
-            })
+            });
+            if undecided {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+            }
+            narrowed
         }
     }
 
@@ -5352,6 +7141,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         node: SemanticNodeId,
     ) {
+        // A fact about a PATH reference (a nested discriminant's parent)
+        // cannot ride the reaching-definition layers — those carry whole
+        // bindings — so it rides the state's narrowing overlay. The
+        // fall-through JOIN intersects overlays, so a deep fact two
+        // edges disagree on is dropped there: the joined start then
+        // reads the un-narrowed parent — a checker-superset, the sound
+        // direction — never another clause's value.
+        if !subject.path.is_empty() {
+            state.narrowings.push((subject.clone(), node));
+            return;
+        }
         match &subject.root {
             crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
                 state.param_writes.insert(*ordinal, node);
@@ -5366,30 +7166,36 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// The switch discriminant's arms that NO case test covers: the
-    /// remainder the default clause's dispatch edge narrows to, and —
-    /// when empty with no default authored — the proof the
+    /// The arms of the discriminant's PARENT reference that NO case test
+    /// covers: the remainder the default clause's dispatch edge narrows
+    /// to, and — when empty with no default authored — the proof the
     /// no-matching-case path is dead (the ONE exhaustiveness verdict).
     /// `None` when anything is undecidable (a projection miss, an
-    /// undecided relation): the caller then narrows nothing and keeps the
-    /// no-match path live.
+    /// undecided relation): the caller then narrows nothing, keeps the
+    /// no-match path live, and DEGRADES — a declined probe leaves a
+    /// checker-superset on those edges, never a clean one.
     ///
-    /// "Covers" is MUTUAL assignability between the arm and the test
-    /// literal (projected through the discriminant path for a member
-    /// discriminant): a broad arm a literal merely fits (`string` under
-    /// `case "a":`) is NOT covered — the checker's default edge keeps it.
-    /// Returns the surviving arms and the arm count, so the caller can
-    /// tell "no narrow established" (survivors == arms) from a real one.
+    /// "Covers" is per-LEAF mutual assignability between the arm's
+    /// projected member and a test literal
+    /// ([`Self::switch_member_covered`]): a broad leaf a literal merely
+    /// fits (`string` under `case "a":`) is NOT covered — the checker's
+    /// default edge keeps it. Returns the surviving arms and the arm
+    /// count, so the caller can tell "no narrow established"
+    /// (survivors == arms) from a real one.
     fn switch_discriminant_remainder(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         tests: &[crate::flow_slice_content::SliceGuardLiteral],
     ) -> Option<(Vec<SemanticNodeId>, usize)> {
-        // The narrow lands at the ROOT (a member-path discriminant
-        // narrows the binding itself), so the arms are the root's. The
-        // probe reads the live layers WITHOUT folding a membership flag:
-        // asking about coverage is not an observation of the binding's
-        // value, so it must not degrade one.
+        // The narrow lands at the tested property's PARENT reference
+        // (the root itself for a whole-subject or one-segment
+        // discriminant), so the arms are the parent's — a nested
+        // discriminant must never select among ROOT arms: that DROPS the
+        // constituents whose nested member differs, a subset of the
+        // checker's type. The probe reads the live layers WITHOUT
+        // folding a membership flag: asking about coverage is not an
+        // observation of the binding's value, so it must not degrade
+        // one.
         let root_subject = crate::flow_slice_content::SliceNarrowSubject {
             root: subject.root.clone(),
             path: Arc::from(Vec::new().into_boxed_slice()),
@@ -5410,15 +7216,38 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .copied()?,
             }
         };
-        let arms = self.union_arms_or_self(root);
+        let parent = if subject.path.len() > 1 {
+            let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
+                root: subject.root.clone(),
+                path: Arc::from(
+                    subject.path[..subject.path.len() - 1]
+                        .to_vec()
+                        .into_boxed_slice(),
+                ),
+            };
+            if let Some(node) = self.narrowed_read(&parent_subject) {
+                node
+            } else {
+                self.project_segments_navigate(root, &subject.path[..subject.path.len() - 1])?
+            }
+        } else {
+            root
+        };
+        let arms = self.enumerated_union_arms_or_self(parent);
         // `boolean` decomposes into its two literal arms for coverage —
         // the checker's own reading of `case true:` / `case false:` over
-        // a boolean discriminant.
+        // a boolean discriminant. The check peels the arm's identity
+        // carrier so an alias to `boolean` decomposes exactly as the
+        // authored primitive does.
         let arms: Vec<SemanticNodeId> = arms
             .into_iter()
             .flat_map(|arm| {
+                let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+                    super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
+                    super::relation::IdentityCarrierUnwrap::Unresolvable => arm,
+                };
                 if matches!(
-                    self.dispatch.graph().node_data(arm).as_deref(),
+                    self.dispatch.graph().node_data(concrete).as_deref(),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
                 ) {
                     let graph = self.dispatch.graph();
@@ -5444,28 +7273,98 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             test_nodes.push(self.lower_body_type(&ty));
         }
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
-        'arms: for arm in &arms {
-            for test in &test_nodes {
-                let covered = if subject.path.is_empty() {
-                    self.assignable(*arm, *test)? && self.assignable(*test, *arm)?
-                } else {
-                    let member = self.project_segments_navigate(*arm, &subject.path)?;
-                    self.assignable(*test, member)? && self.assignable(member, *test)?
-                };
-                if covered {
-                    continue 'arms;
-                }
+        for arm in &arms {
+            let member = if subject.path.is_empty() {
+                *arm
+            } else {
+                self.project_segments_navigate(*arm, &subject.path[subject.path.len() - 1..])?
+            };
+            if !self.switch_member_covered(member, &test_nodes)? {
+                survivors.push(*arm);
             }
-            survivors.push(*arm);
         }
         let total = arms.len();
         Some((survivors, total))
     }
 
-    /// `subject instanceof Ctor`: keep the arms assignable to the
-    /// constructor's instance type (resolved as a bare type reference in
-    /// owner scope — the same lowering any authored annotation of that
-    /// name takes).
+    /// Whether every runtime value of one arm's tested member is matched
+    /// by some carried case test — the coverage relation behind the
+    /// switch remainder and the exhaustiveness verdict. Coverage is
+    /// decided per LEAF of the member: its enumerated union arms, with a
+    /// `boolean` leaf decomposing into its two literals — the checker's
+    /// own reading, which proves `case "a"` + `case "b"` exhaustive over
+    /// a `kind: "a" | "b"` member exactly as over two discriminated
+    /// arms. `None` when a leaf relation is undecided or the member's
+    /// arms cannot be enumerated: coverage is then unknowable and the
+    /// whole probe declines — the callers degrade instead of publishing
+    /// a clean unnarrowed edge or a false liveness verdict.
+    fn switch_member_covered(
+        &mut self,
+        member: SemanticNodeId,
+        tests: &[SemanticNodeId],
+    ) -> Option<bool> {
+        let mut leaves = Vec::new();
+        let mut expanded = rustc_hash::FxHashSet::default();
+        let mut gapped = false;
+        self.collect_enumerated_arms(member, &mut leaves, &mut expanded, &mut gapped);
+        if gapped {
+            return None;
+        }
+        let leaves: Vec<SemanticNodeId> = leaves
+            .into_iter()
+            .flat_map(|leaf| {
+                let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(leaf) {
+                    super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
+                    super::relation::IdentityCarrierUnwrap::Unresolvable => leaf,
+                };
+                if matches!(
+                    self.dispatch.graph().node_data(concrete).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+                ) {
+                    let graph = self.dispatch.graph();
+                    vec![
+                        graph.intern_node(SemanticNodeData::Literal(
+                            crate::semantic_query::LiteralValue::Boolean(true),
+                        )),
+                        graph.intern_node(SemanticNodeData::Literal(
+                            crate::semantic_query::LiteralValue::Boolean(false),
+                        )),
+                    ]
+                } else {
+                    vec![leaf]
+                }
+            })
+            .collect();
+        'leaves: for leaf in &leaves {
+            for test in tests {
+                if self.assignable(*leaf, *test)? && self.assignable(*test, *leaf)? {
+                    continue 'leaves;
+                }
+            }
+            return Some(false);
+        }
+        Some(true)
+    }
+
+    /// `subject instanceof Ctor`, applying the checker's own per-arm
+    /// narrowing (the same rule [`Self::narrow_to_predicate_target`]
+    /// applies to `x is T`): on the positive edge an arm assignable to
+    /// the constructor's instance type survives as itself, an arm the
+    /// instance type is assignable to narrows TO the instance type (the
+    /// downcast reading), and an unrelated arm keeps the checker's
+    /// intersection unless provably disjoint — the one proved dead
+    /// reading. The negated edge drops only an arm proved to BE the
+    /// tested class (node identity with the instance type); structural
+    /// assignability alone cannot prove derivation, so an assignable
+    /// but non-identical arm stays possible, degraded. The instance
+    /// type resolves as a bare type reference in owner scope — the same
+    /// lowering any authored annotation of that name takes. The
+    /// lowering mints this fact only for a constructor name it proved
+    /// to be the module's single same-file `class` declaration left
+    /// free by the frame, which is exactly when that type reference IS
+    /// the compared value's instance type; every other right-hand side
+    /// reaches the evaluator as a typed gap, never as a fact over the
+    /// wrong binding.
     fn narrow_instanceof(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
@@ -5484,33 +7383,292 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         ) else {
             return GuardNarrowing::Unchanged;
         };
-        self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(this.assignable(arm, instance)? != negated)
-        })
+        if negated {
+            // The checker's negated edge drops only an arm PROVED to be
+            // the tested class family; every other arm stays exactly as
+            // declared. Structural assignability over-approximates that
+            // proof — a same-shape but underived arm is assignable yet
+            // the checker keeps it — so the only structural proof of
+            // "this arm IS the tested class" is node identity with the
+            // instance type. An assignable-but-not-identical arm may or
+            // may not be derived: it stays possible, degraded.
+            let mut gapped = false;
+            let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+                if this.instanceof_arm_is_unclassifiable(arm) {
+                    gapped = true;
+                    return Some(true);
+                }
+                Some(match this.assignable(arm, instance) {
+                    Some(true) => {
+                        if arm == instance {
+                            false
+                        } else {
+                            gapped = true;
+                            true
+                        }
+                    }
+                    Some(false) => true,
+                    None => {
+                        gapped = true;
+                        true
+                    }
+                })
+            });
+            if gapped {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+            }
+            return fact;
+        }
+        // The positive edge is the checker's own per-arm rule, the same
+        // rule `narrow_to_predicate_target` applies to `x is T`: an arm
+        // assignable to the instance type survives as itself; an arm the
+        // instance type is assignable to narrows TO the instance type
+        // (the downcast reading — `x: Base` guarded by `instanceof Sub`
+        // reads `Sub`); an arm related in neither direction keeps the
+        // checker's intersection unless the two are provably disjoint
+        // (a primitive arm against a class instance), which is the one
+        // proved dead reading. Arms the graph cannot classify or relate
+        // stay possible, degraded.
+        let Some(current) = self.subject_current_node(subject) else {
+            return GuardNarrowing::Unchanged;
+        };
+        let arms = self.enumerated_union_arms_or_self(current);
+        let mut out: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        let mut changed = false;
+        let mut gapped = false;
+        for arm in &arms {
+            if self.instanceof_arm_is_unclassifiable(*arm) {
+                out.push(*arm);
+                gapped = true;
+                continue;
+            }
+            match self.assignable(*arm, instance) {
+                Some(true) => out.push(*arm),
+                Some(false) => {
+                    match self.assignable(instance, *arm) {
+                        Some(true) => {
+                            out.push(instance);
+                            changed = true;
+                        }
+                        Some(false) => {
+                            // The instance type is a CLASS instance by
+                            // the fact-minting rule, so a primitive or
+                            // literal arm is proved off the positive
+                            // edge outright — no primitive value is a
+                            // class instance, and the checker drops such
+                            // arms rather than intersect them.
+                            if self.arm_is_non_object_runtime_value(*arm) {
+                                changed = true;
+                            } else {
+                                let relation = self.nodes_provably_disjoint(*arm, instance);
+                                if relation.nominal_identity_missing {
+                                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                                        crate::semantic_query::FlowGap::NominalRelation,
+                                    ));
+                                }
+                                if relation.provably_disjoint {
+                                    changed = true;
+                                } else {
+                                    out.push(
+                                        self.dispatch.intern_normalized_union_or_intersection(
+                                            &[*arm, instance],
+                                            false,
+                                        ),
+                                    );
+                                    changed = true;
+                                }
+                            }
+                        }
+                        None => {
+                            out.push(*arm);
+                            gapped = true;
+                        }
+                    }
+                }
+                None => {
+                    out.push(*arm);
+                    gapped = true;
+                }
+            }
+        }
+        if gapped {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        if out.is_empty() {
+            return GuardNarrowing::Impossible;
+        }
+        if !changed && out.len() == arms.len() {
+            return GuardNarrowing::Unchanged;
+        }
+        let node = self
+            .dispatch
+            .intern_normalized_union_or_intersection(&out, true);
+        GuardNarrowing::Narrowed(subject.clone(), node)
     }
 
-    /// `"key" in subject`: keep the arms that CARRY the member; negation
-    /// keeps the ones that do not. The projection answers a miss as an
-    /// Opaque MARKER NODE, not as a walk failure — "carries the member"
-    /// is decided by the node being a real value, never an Opaque one.
+    /// Whether one union arm is beyond `instanceof` classification
+    /// entirely: a top-shaped arm (`any`, `unknown`, a memberless `{}`
+    /// surface), an Opaque carrier, or a node with no data. The checker
+    /// narrows those arms to the instance type; without that capability
+    /// they stay possible on both edges and degrade the result instead
+    /// of killing a branch.
+    fn instanceof_arm_is_unclassifiable(&self, arm: SemanticNodeId) -> bool {
+        match self.dispatch.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown))
+            | Some(SemanticNodeData::Opaque(_))
+            | None => true,
+            Some(SemanticNodeData::Object(surface)) => surface.closed().is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Whether one union arm's runtime values are never objects — a
+    /// scalar primitive or a literal. Such an arm cannot inhabit the
+    /// positive edge of an `instanceof` test against a class instance
+    /// type, so it is proved off that edge without consulting the
+    /// relation oracle. `object` is object-like and the top/uninhabited
+    /// kinds are classified elsewhere, so none of them answer here.
+    fn arm_is_non_object_runtime_value(&self, arm: SemanticNodeId) -> bool {
+        match self.dispatch.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::Primitive(primitive)) => matches!(
+                primitive,
+                PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::Symbol
+                    | PrimitiveKind::Undefined
+                    | PrimitiveKind::Null
+                    | PrimitiveKind::Void
+                    | PrimitiveKind::Never
+            ),
+            Some(SemanticNodeData::Literal(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// `"key" in subject`: keep the arms proved to carry the member;
+    /// negation keeps the ones proved not to. Proof is per edge and
+    /// per arm ([`InArmPresence`]): a closed surface's REQUIRED member
+    /// proves the arm off the negated edge, a closed surface with the
+    /// key ABSENT proves it off the positive edge, and an OPTIONAL
+    /// member proves EXACT retention on both edges — the checker keeps
+    /// an optional arm unchanged on the positive edge (presence of the
+    /// key is a separate fact from the value's non-`undefined`-ness,
+    /// which the member READ carries), so no gap rides it. An arm whose
+    /// key set the graph cannot decide — a type parameter, an
+    /// index-signature surface, an unresolvable carrier — stays
+    /// possible on BOTH edges and records the typed guard gap: the
+    /// checker narrows such an arm, so dropping it would fabricate a
+    /// dead edge and silently lose that edge's return contributor.
     fn narrow_in(
         &mut self,
         key: &Arc<str>,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         negated: bool,
     ) -> GuardNarrowing {
-        let segments: [Arc<str>; 1] = [Arc::clone(key)];
-        self.narrow_arms_by(subject, subject, |this, arm| {
-            let carries = this
-                .project_segments_navigate(arm, &segments)
-                .is_some_and(|node| {
-                    !matches!(
-                        this.dispatch.graph().node_data(node).as_deref(),
-                        Some(SemanticNodeData::Opaque(_))
-                    )
-                });
-            Some(carries != negated)
-        })
+        let mut gapped = false;
+        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+            Some(match this.arm_in_presence(arm, key) {
+                InArmPresence::Always => !negated,
+                InArmPresence::Never => negated,
+                InArmPresence::Optional => true,
+                InArmPresence::Unknown => {
+                    gapped = true;
+                    true
+                }
+            })
+        });
+        if gapped {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        fact
+    }
+
+    /// One union arm's key-presence verdict for `"key" in subject`,
+    /// decided from the arm's OWN closed surface(s): identity carriers
+    /// unwrap through the shared instantiate dispatch; a closed object
+    /// surface (no index signature) answers directly — a required member
+    /// is `Always`, a proven-absent key `Never`, an optional member
+    /// `Optional` — and an INTERSECTION (a heritage arm, `extends`
+    /// included) folds its constituents by the checker's own rule: the
+    /// member is required if ANY constituent declares it required (every
+    /// value of the intersection carries it — decisive even beside an
+    /// undecidable sibling), optional if every decidable constituent is
+    /// optional-or-absent with at least one optional, absent only when
+    /// EVERY constituent proves absence. Any other shape — a type
+    /// parameter, an open index-signature surface, a primitive, a nested
+    /// union, an unresolvable carrier — is `Unknown` (for the whole
+    /// intersection unless a required constituent already decided it):
+    /// nothing about the runtime key set is proved, so neither edge of
+    /// the test may drop the arm. Constituents walk on a seen-guarded
+    /// worklist, cycle-safe by revisit discharge.
+    fn arm_in_presence(&mut self, arm: SemanticNodeId, key: &str) -> InArmPresence {
+        let mut pending = vec![arm];
+        let mut seen: Vec<SemanticNodeId> = Vec::new();
+        let mut any_required = false;
+        let mut any_optional = false;
+        let mut any_unknown = false;
+        while let Some(node) = pending.pop() {
+            if seen.contains(&node) {
+                continue;
+            }
+            seen.push(node);
+            let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => {
+                    any_unknown = true;
+                    continue;
+                }
+            };
+            if concrete != node {
+                if seen.contains(&concrete) {
+                    continue;
+                }
+                seen.push(concrete);
+            }
+            match self.dispatch.graph().node_data(concrete).as_deref() {
+                Some(SemanticNodeData::Intersection(arms)) => {
+                    pending.extend(arms.iter().copied());
+                }
+                Some(SemanticNodeData::Object(surface)) => {
+                    if surface.closed().has_index_signature()
+                        || !surface.index_signatures.is_empty()
+                    {
+                        any_unknown = true;
+                        continue;
+                    }
+                    match surface.project_string_key(key) {
+                        crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                            if member.optional {
+                                any_optional = true;
+                            } else {
+                                any_required = true;
+                            }
+                        }
+                        crate::semantic_query::SurfaceKeyProjection::AbsentProven => {}
+                    }
+                }
+                _ => {
+                    any_unknown = true;
+                }
+            }
+        }
+        if any_required {
+            InArmPresence::Always
+        } else if any_unknown {
+            InArmPresence::Unknown
+        } else if any_optional {
+            InArmPresence::Optional
+        } else {
+            InArmPresence::Never
+        }
     }
 
     /// A user-defined predicate's narrow (`x is T` or `asserts x is T`):
@@ -5520,44 +7678,79 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// for a predicate whose target is a strict subtype of the declared
     /// type). The target lowers like a declarator annotation — a
     /// frame-shadowed answer establishes nothing.
+    ///
+    /// The assertion-statement caller: the guard twin consumes the
+    /// consumption verdict too and records the predicate call's
+    /// evidence from it.
     fn narrow_to_predicate_target(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         target: &crate::flow_slice_content::GatedType,
         negated: bool,
     ) -> GuardNarrowing {
+        self.narrow_to_predicate_target_consuming(subject, target, negated)
+            .0
+    }
+
+    /// [`Self::narrow_to_predicate_target`] carrying the CONSUMPTION
+    /// verdict — whether the evaluator genuinely consumed the predicate
+    /// fact, and whether every relation outcome that consumption asked
+    /// was decided. This is what the guard twin's call evidence is
+    /// recorded from: a fact the evaluator could not consume at all (a
+    /// frame-shadowed target, an unmodelled subject) is
+    /// [`PredicateNarrowConsumption::NotConsumed`] — no evidence; a
+    /// consumed fact whose relation oracle answered `None` anywhere is
+    /// [`PredicateNarrowConsumption::Undecided`] — evidence with the
+    /// relation obligation left unclaimed.
+    fn narrow_to_predicate_target_consuming(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        target: &crate::flow_slice_content::GatedType,
+        negated: bool,
+    ) -> (GuardNarrowing, PredicateNarrowConsumption) {
+        use PredicateNarrowConsumption as Consumption;
         if target
             .shadowed()
             .iter()
             .any(|name| self.owner_scope_answers_name(name))
         {
-            return GuardNarrowing::Unchanged;
+            return (GuardNarrowing::Unchanged, Consumption::NotConsumed);
         }
         let target_node = self.lower_body_type(target.ty());
-        let Some(current) = self.subject_current_node(subject) else {
-            return GuardNarrowing::Unchanged;
-        };
+        if self.subject_current_node(subject).is_none() {
+            return (GuardNarrowing::Unchanged, Consumption::NotConsumed);
+        }
         if !negated {
-            let arms = self.union_arms_or_self(current);
+            let current = self
+                .subject_current_node(subject)
+                .expect("the subject answered just above");
+            let arms = self.enumerated_union_arms_or_self(current);
             let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
             for arm in &arms {
                 match self.assignable(*arm, target_node) {
                     Some(true) => survivors.push(*arm),
                     Some(false) => {}
-                    None => return GuardNarrowing::Unchanged,
+                    None => return (GuardNarrowing::Unchanged, Consumption::Undecided),
                 }
             }
             if !survivors.is_empty() {
                 if survivors.len() == arms.len() {
-                    return GuardNarrowing::Unchanged;
+                    return (GuardNarrowing::Unchanged, Consumption::Decided);
                 }
                 let node = self
                     .dispatch
                     .intern_normalized_union_or_intersection(&survivors, true);
-                return GuardNarrowing::Narrowed(subject.clone(), node);
+                return (
+                    GuardNarrowing::Narrowed(subject.clone(), node),
+                    Consumption::Decided,
+                );
             }
-            if self.assignable(target_node, current) == Some(true) {
-                return GuardNarrowing::Narrowed(subject.clone(), target_node);
+            let reverse = self.assignable(target_node, current);
+            if reverse == Some(true) {
+                return (
+                    GuardNarrowing::Narrowed(subject.clone(), target_node),
+                    Consumption::Decided,
+                );
             }
             let relation = self.nodes_provably_disjoint(current, target_node);
             if relation.nominal_identity_missing {
@@ -5565,17 +7758,42 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     crate::semantic_query::FlowGap::NominalRelation,
                 ));
             }
+            // An undecided REVERSE relation leaves the choice between the
+            // target narrow and the intersection fallback unproven: the
+            // value keeps the checker's intersection rule, the relation
+            // obligation stays unclaimed.
+            let consumption = if reverse.is_none() {
+                Consumption::Undecided
+            } else {
+                Consumption::Decided
+            };
             if !relation.provably_disjoint {
                 let intersection = self
                     .dispatch
                     .intern_normalized_union_or_intersection(&[current, target_node], false);
-                return GuardNarrowing::Narrowed(subject.clone(), intersection);
+                return (
+                    GuardNarrowing::Narrowed(subject.clone(), intersection),
+                    consumption,
+                );
             }
-            return GuardNarrowing::Impossible;
+            return (GuardNarrowing::Impossible, consumption);
         }
-        self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(this.assignable(arm, target_node)? != negated)
-        })
+        let mut undecided = false;
+        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+            match this.assignable(arm, target_node) {
+                Some(kept) => Some(kept != negated),
+                None => {
+                    undecided = true;
+                    None
+                }
+            }
+        });
+        let consumption = if undecided {
+            Consumption::Undecided
+        } else {
+            Consumption::Decided
+        };
+        (fact, consumption)
     }
 
     /// Whether one local carries a WIDENING literal, in the layer that
@@ -5732,7 +7950,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Evaluate one region, returning its contributor nodes and whether
     /// the region falls through (mirrors the IR's reachability — this
     /// recomputes nothing, it only evaluates contributors).
+    ///
+    /// The recording shell of the structural walk ledger: region entry,
+    /// completion, and every abortive `Err` exit are recorded HERE — at
+    /// the walk itself, never reconstructed from the plan — so the
+    /// execution witness can only claim a selection whose derived
+    /// content this run actually walked to completion.
     fn eval_region(
+        &mut self,
+        region: &crate::flow_slice_content::SliceRegion,
+    ) -> (Result<Vec<FlowContribution>, FlowReturnFailure>, bool) {
+        self.executed_walk.regions_entered = self.executed_walk.regions_entered.saturating_add(1);
+        let outcome = self.eval_region_statements(region);
+        match &outcome.0 {
+            Ok(_) => {
+                self.executed_walk.regions_completed =
+                    self.executed_walk.regions_completed.saturating_add(1);
+            }
+            Err(_) => self.executed_walk.aborted = true,
+        }
+        outcome
+    }
+
+    /// The statement walk of [`Self::eval_region`] (the recording shell
+    /// wraps every entry and exit).
+    fn eval_region_statements(
         &mut self,
         region: &crate::flow_slice_content::SliceRegion,
     ) -> (Result<Vec<FlowContribution>, FlowReturnFailure>, bool) {
@@ -5748,6 +7990,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if !path_alive {
                 break;
             }
+            self.executed_walk.statements_executed =
+                self.executed_walk.statements_executed.saturating_add(1);
             match statement {
                 crate::flow_slice_content::SliceStatement::Gap(gap) => {
                     self.pending_statement_gap.get_or_insert(*gap);
@@ -5953,6 +8197,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         ))
                     } else {
                         implicit_alternate_falls = self.apply_guard_scoped(guard, false);
+                        // The IMPLICIT alternate's impossibility takes the
+                        // same fail-close as an explicit arm's: the
+                        // checker keeps a fall-through contribution that
+                        // never reads the subject (narrowing
+                        // impossibility collapses subject READS to
+                        // `never`, it does not remove the edge), so
+                        // dropping the fall-through must ride the typed
+                        // guard gap — degraded, never a silent warm drop.
+                        if !implicit_alternate_falls
+                            && slice_statements_have_non_subject_return(
+                                region.statements.iter().skip(statement_index + 1),
+                                &|expr| slice_expr_is_exact_guard_subject_read(expr, guard),
+                            )
+                        {
+                            self.record_degradation(FlowReturnDegradation::FlowGap(
+                                crate::semantic_query::FlowGap::GuardNarrowing,
+                            ));
+                        }
                         self.narrowings.truncate(narrow_len);
                         None
                     };
@@ -6045,18 +8307,42 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let return_base = self.return_edges.len();
                     let throw_base = self.throw_points.len();
                     let shadow_base = self.scope_shadows.len();
-                    let tests: Vec<crate::flow_slice_content::SliceGuardLiteral> =
-                        cases.iter().filter_map(|case| case.test.clone()).collect();
+                    // The remainder the DEFAULT edge subtracts is built
+                    // from the CARRIED relations only. An unrecognized
+                    // clause contributes nothing to it, which leaves the
+                    // remainder a SUPERSET of the true default set — the
+                    // sound direction — and never lets that clause's own
+                    // values disappear from another clause's edge.
+                    let tests: Vec<crate::flow_slice_content::SliceGuardLiteral> = cases
+                        .iter()
+                        .filter_map(|case| match &case.test {
+                            crate::flow_slice_content::SliceSwitchTest::Literal(literal) => {
+                                Some(literal.clone())
+                            }
+                            crate::flow_slice_content::SliceSwitchTest::Default
+                            | crate::flow_slice_content::SliceSwitchTest::Unmodeled => None,
+                        })
+                        .collect();
                     // Exhaustiveness is a resolver question: the lowering
                     // knows only `has_default`, so the no-matching-case
                     // path dies here, where the discriminant's arms and
                     // the tests can be related.
+                    // A DECLINED remainder probe (an unlowerable test, a
+                    // projection miss, an undecided relation) leaves the
+                    // no-matching-case path live over arms the checker may
+                    // prove covered — a superset, so it degrades: the
+                    // liveness verdict is then unproven, never clean.
                     let covered = !has_default
                         && discriminant.as_ref().is_some_and(|subject| {
-                            matches!(
-                                self.switch_discriminant_remainder(subject, &tests),
-                                Some((remainder, _)) if remainder.is_empty()
-                            )
+                            match self.switch_discriminant_remainder(subject, &tests) {
+                                Some((remainder, _)) => remainder.is_empty(),
+                                None => {
+                                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                                        crate::semantic_query::FlowGap::GuardNarrowing,
+                                    ));
+                                    false
+                                }
+                            }
                         });
                     let mut chain_end: Option<FlowLayerState> = None;
                     let mut last_end: Option<FlowLayerState> = None;
@@ -6068,24 +8354,35 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         if let Some(subject) = discriminant {
                             self.restore_layer_state(entry.clone());
                             match &case.test {
+                                // An unrecognized relation: the clause is
+                                // reachable for discriminant values this
+                                // half cannot enumerate, so its dispatch
+                                // edge carries NO narrow. It must never
+                                // take the DEFAULT edge — the remainder is
+                                // not this clause's reaching set, and
+                                // baking it in would publish a type the
+                                // clause was never proven to see.
+                                crate::flow_slice_content::SliceSwitchTest::Unmodeled => {}
                                 // The dispatch edge: the discriminant IS
                                 // this test.
-                                Some(test) => match self.narrow_eq_literal(subject, test, false) {
-                                    GuardNarrowing::Narrowed(fact_subject, node) => {
-                                        Self::bake_narrow_into_state(
-                                            &mut dispatch,
-                                            &fact_subject,
-                                            node,
-                                        );
+                                crate::flow_slice_content::SliceSwitchTest::Literal(test) => {
+                                    match self.narrow_eq_literal(subject, test, false) {
+                                        GuardNarrowing::Narrowed(fact_subject, node) => {
+                                            Self::bake_narrow_into_state(
+                                                &mut dispatch,
+                                                &fact_subject,
+                                                node,
+                                            );
+                                        }
+                                        GuardNarrowing::Impossible => {
+                                            dead_dispatch = true;
+                                        }
+                                        GuardNarrowing::Unchanged => {}
                                     }
-                                    GuardNarrowing::Impossible => {
-                                        dead_dispatch = true;
-                                    }
-                                    GuardNarrowing::Unchanged => {}
-                                },
+                                }
                                 // The default clause's dispatch edge: the
-                                // discriminant minus every test.
-                                None => {
+                                // discriminant minus every carried test.
+                                crate::flow_slice_content::SliceSwitchTest::Default => {
                                     if let Some((remainder, total)) =
                                         self.switch_discriminant_remainder(subject, &tests)
                                     {
@@ -6101,17 +8398,40 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                                 .intern_normalized_union_or_intersection(
                                                     &remainder, true,
                                                 );
-                                            let root_subject =
+                                            // The remainder's arms are the
+                                            // PARENT reference's, so the
+                                            // fact lands there — the root
+                                            // for a shallow discriminant,
+                                            // the enclosing reference for
+                                            // a nested one.
+                                            let parent_subject =
                                                 crate::flow_slice_content::SliceNarrowSubject {
                                                     root: subject.root.clone(),
-                                                    path: Arc::from(Vec::new().into_boxed_slice()),
+                                                    path: Arc::from(
+                                                        subject.path[..subject
+                                                            .path
+                                                            .len()
+                                                            .saturating_sub(1)]
+                                                            .to_vec()
+                                                            .into_boxed_slice(),
+                                                    ),
                                                 };
                                             Self::bake_narrow_into_state(
                                                 &mut dispatch,
-                                                &root_subject,
+                                                &parent_subject,
                                                 node,
                                             );
                                         }
+                                    } else {
+                                        // A DECLINED probe leaves this
+                                        // edge carrying the WHOLE
+                                        // discriminant where the checker
+                                        // subtracts the matched cases — a
+                                        // superset, so it degrades rather
+                                        // than publishing clean.
+                                        self.record_degradation(FlowReturnDegradation::FlowGap(
+                                            crate::semantic_query::FlowGap::GuardNarrowing,
+                                        ));
                                     }
                                 }
                             }
@@ -6736,19 +9056,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Assignment { target, value, .. } => {
+                crate::flow_slice_content::SliceStatement::Assignment {
+                    target,
+                    value,
+                    freshness,
+                    ..
+                } => {
                     // THE applied write: a whole-binding `=` at statement
                     // position retypes the binding IN SOURCE ORDER, so the
                     // reads after it see the written value and the typed
                     // unapplied-write degradation never seeds. An
                     // unmodelled right-hand side binds the typed marker
                     // with the failed-initializer membership, exactly like
-                    // an unmodelled declarator initializer.
+                    // an unmodelled declarator initializer. The declared
+                    // authority picks the evaluation: a declared UNION
+                    // needs the pre-widening assignment view (constituent
+                    // selection), a declared non-union discards the value
+                    // (the declared type wins), and an EVOLVING target
+                    // takes the freshness-directed widening.
                     let holds_before = self.holds.len();
-                    let outcome = if self.target_has_declared_union(target) {
-                        self.eval_assignment_expr(value)
-                    } else {
-                        self.eval_expr(value)
+                    let declared = self.target_declared_node(target);
+                    let outcome = match declared {
+                        Some(node) if self.dispatch.union_arms_of(node).is_some() => {
+                            self.eval_assignment_expr(value)
+                        }
+                        Some(_) => self.eval_expr(value),
+                        None => self.eval_evolving_rhs(value, freshness),
                     };
                     match outcome {
                         Positional::Value(node) => {
@@ -7155,6 +9488,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 throw_points: Vec::new(),
                 collect_throw_points: false,
                 scope_shadows: Vec::new(),
+                call_evidence: Vec::new(),
+                executed_walk: ExecutedSliceWalk::default(),
             };
             nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
@@ -7164,6 +9499,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             nested_bare_return_seen = nested_evaluator.bare_return_seen;
             nested_implicit_undefined_seen = nested_evaluator.implicit_undefined_seen;
             self.holds.append(&mut nested_evaluator.holds);
+            // A call the NESTED body evaluated is still an evaluated call
+            // of this evaluation run: the evidence rides the enclosing
+            // ledger exactly as the nested holds do — and so does the
+            // nested walk (a nested abort shortens THIS run's ledger).
+            self.call_evidence
+                .append(&mut nested_evaluator.call_evidence);
+            self.executed_walk.absorb(nested_evaluator.executed_walk);
             (outcome, nested_body_falls_through)
         };
         // A degraded nested body degrades the enclosing value that
@@ -7898,15 +10240,48 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     /// Evaluate one CALL to the value it contributes to this frame.
     ///
-    /// The ONE place a callee's return becomes a caller's value. Every
-    /// arm returns a [`CallValue`], whose constructors each decide what
-    /// happens to the CALLEE's own type-parameter clause — the rule
-    /// cannot be silently skipped at a new arm, only chosen.
+    /// The ONE place a callee's return becomes a caller's value — which
+    /// makes it the ONE place the evaluation's call evidence is recorded:
+    /// a call that evaluates to a value or a coinductive hold, without
+    /// minting a fresh degradation, deposits its span (plus whether every
+    /// relation outcome the resolution consumed was decided) onto the
+    /// evidence ledger the discharge-report producer claims call and
+    /// relation obligations from. An unmodelled or freshly-degraded call
+    /// deposits nothing — its obligations stay unclaimed.
+    fn eval_call(
+        &mut self,
+        call: &crate::flow_slice_content::SliceCall,
+        site: crate::flow_slice_content::SliceCallSite,
+    ) -> Positional<CallValue> {
+        let undecided_before = self.dispatch.dispatch_txn.borrow().call.undecided_relations;
+        let degradation_before = self.degradation;
+        let value = self.eval_call_value(call, site);
+        // A call whose evaluation minted the frame's FIRST degradation
+        // did not decide its occurrence (an already-degraded frame never
+        // seals, so evidence accuracy past the first degradation cannot
+        // affect admission).
+        let newly_degraded = degradation_before.is_none() && self.degradation.is_some();
+        if !matches!(value, Positional::Unmodeled) && !newly_degraded {
+            let relations_decided =
+                self.dispatch.dispatch_txn.borrow().call.undecided_relations == undecided_before;
+            self.call_evidence.push(FlowCallEvidence {
+                span: site.span(),
+                relations_decided,
+            });
+        }
+        value
+    }
+
+    /// The call sink's value computation ([`Self::eval_call`] records the
+    /// evidence around it). Every arm returns a [`CallValue`], whose
+    /// constructors each decide what happens to the CALLEE's own
+    /// type-parameter clause — the rule cannot be silently skipped at a
+    /// new arm, only chosen.
     ///
     /// [`Positional`], exactly as in [`Self::eval_expr`]: a call this
     /// substrate cannot resolve is an unmodelled POSITION, and the type
     /// leaves no way to say otherwise.
-    fn eval_call(
+    fn eval_call_value(
         &mut self,
         call: &crate::flow_slice_content::SliceCall,
         site: crate::flow_slice_content::SliceCallSite,
@@ -8096,9 +10471,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     && (site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments())
                 {
                     if let Some(callee) = self.direct_callee_value_node(target) {
-                        // An undecided executor falls through to this
-                        // rail's own clause read below — the answer it
-                        // gave before the executor existed, never worse.
                         if let Some(value) = self.eval_call_via_resolve_call(callee, site) {
                             return value;
                         }

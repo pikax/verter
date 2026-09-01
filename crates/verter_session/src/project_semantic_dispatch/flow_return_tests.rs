@@ -324,6 +324,7 @@ fn flow_result_for_file(
         context: dispatch.flow_return_context_for(canonical),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
     };
     flow_result(dispatch, host, key)
 }
@@ -346,6 +347,7 @@ fn flow_key(
         context: dispatch.flow_return_context_for(CANONICAL),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
 
@@ -1207,6 +1209,7 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
             context: dispatch.flow_return_context_for("/ws/mixed_c.ts"),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let roots = dispatch
             .graph()
@@ -2603,6 +2606,59 @@ fn flow_return_warm_read_consults_no_slice_state() {
     );
 }
 
+/// Plan-once: ONE cold FlowReturn demand runs the demand planner exactly
+/// once — the lowered-body node lowers the hash node's RETAINED plan (no
+/// re-plan, no demand-plan replan) — and a clean warm replay plans nothing
+/// at all.
+#[test]
+fn flow_return_cold_demand_plans_the_slice_once_and_warm_replay_never_plans() {
+    use verter_semantic::analysis::flow::peeker::return_path_peeker_plan_thread_invocations;
+
+    let host = make_host();
+    let plans_before = return_path_peeker_plan_thread_invocations();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key);
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the clean literal body completes"
+        );
+    });
+    let store = host.project_type_store();
+    assert_eq!(
+        return_path_peeker_plan_thread_invocations(),
+        plans_before + 1,
+        "one cold FlowReturn demand plans its slice exactly once: the hash \
+         node plans, the lowered node lowers the RETAINED plan"
+    );
+    assert_eq!(store.flow_slice().hash_node().entry_count(), 1);
+    assert_eq!(store.flow_slice().lowered_node().entry_count(), 1);
+
+    // A clean warm replay (a fresh dispatch over the same store) adds
+    // zero plans.
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let warm = flow_result_value(dispatch, key);
+        assert_eq!(warm.degradation(), None);
+    });
+    assert_eq!(
+        return_path_peeker_plan_thread_invocations(),
+        plans_before + 1,
+        "a clean warm replay adds zero plans"
+    );
+}
+
 /// §3.4 recorded-point identity: a published `FlowReturn` entry's
 /// `satisfied_projection` is the point set the compute ACTUALLY produced
 /// — the whole-return demand point — never an empty set and never a
@@ -2941,6 +2997,7 @@ fn flow_return_member_demand_never_lowers_elided_sibling_content() {
             context: dispatch.flow_return_context_for("/ws/member-sibling-content.ts"),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         key.demand = crate::semantic_query::ReturnProjectionDemand {
             point: crate::semantic_query::demand::Demand::navigate(
@@ -3352,7 +3409,62 @@ fn scc_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey 
         context: dispatch.flow_return_context_for(SCC_CANONICAL),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
+}
+
+/// Mint the proof a re-staged member carries: the fenced-publish
+/// machinery tests stage members by hand, and the publish boundary is
+/// proof-typed — the member's payload must be a `CompleteFlowResult`
+/// naming the member's OWN key (the batch vetoes a proof minted for
+/// another key). Test-only mint; production proofs come from the
+/// finalizer alone.
+fn staged_flow_proof(
+    key: &FlowReturnKey,
+    value: crate::semantic_query::FlowReturnResult,
+) -> super::flow_solve::CompleteFlowResult {
+    use super::dispatch_txn::flow_obligation_state::{
+        FlowConvergenceEvidence, FlowEvaluationProvenance,
+    };
+    use super::flow_solve::{CompleteFlowResult, FlowConvergencePolicy, FlowDemandBasis};
+    let file_language = crate::LanguageRegistry::global()
+        .classify_static(SCC_CANONICAL)
+        .static_resolution();
+    let parse_key = verter_language::default_parse_identity_for(SCC_FIXTURE, &file_language)
+        .expect("the SCC fixture derives a parse identity")
+        .1;
+    let basis = FlowDemandBasis {
+        graph_body: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+            canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
+            function: verter_semantic::analysis::function_program::FunctionProgramKey {
+                declaration: verter_semantic::analysis::function_program::FunctionDeclarationRef {
+                    owner: key.function.declaration_slot.owner,
+                    name: Arc::clone(&key.function.declaration_slot.merged_symbol_name),
+                    space: verter_semantic::facts::SymbolSpace::Value,
+                },
+                part: key.function.function_part.clone(),
+                overload_ordinal: key.function.overload_ordinal,
+            },
+            flow_body_stable_hash: [0; 16],
+            flow_body_exact_hash: [0; 16],
+            parse_env_hash: key.context.parse_env_hash,
+            parse_key,
+            file_language,
+            build_toolchain_fingerprint:
+                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+        },
+        query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+        input_basis: verter_identity::identity::InputBasisId::from_canonical(
+            &FlowEvaluationProvenance::new(1, 1, 1, 0),
+        ),
+        result_contract: key.result_contract.clone(),
+    };
+    CompleteFlowResult::for_tests(
+        basis,
+        value,
+        FlowConvergenceEvidence::for_tests(FlowConvergencePolicy { max_iterations: 16 }, 1, true),
+    )
+    .expect("a clean re-staged value mints a proof")
 }
 
 /// One PUBLIC-API demand: a fresh top-level dispatch per call, exactly as
@@ -3728,8 +3840,8 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
                 .cloned()
                 .map(|(_, key, _, result, materialized, flight)| {
                     crate::semantic_query_memo::PendingFlowReturnMember {
+                        result: staged_flow_proof(&key, result),
                         key,
-                        result,
                         materialized,
                         flight,
                     }
@@ -3801,7 +3913,7 @@ fn flow_expr_for_script(
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(canonical.to_string()),
         input_id: canonical.to_string(),
-        source: Arc::from(script),
+        source: Arc::from(crate::u6_flow_shape_corpus_tests::module_script(script)),
         file_language: crate::LanguageRegistry::global()
             .classify_static(canonical)
             .static_resolution(),
@@ -3820,6 +3932,7 @@ fn flow_expr_for_script(
             context: dispatch.flow_return_context_for(canonical),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let result = flow_result_value(dispatch, key);
         let expr = host
@@ -4140,7 +4253,7 @@ fn flow_source_probe(script: &str) -> FlowSourceProbe {
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(canonical.to_string()),
         input_id: canonical.to_string(),
-        source: Arc::from(script),
+        source: Arc::from(crate::u6_flow_shape_corpus_tests::module_script(script)),
         file_language: crate::LanguageRegistry::global()
             .classify_static(canonical)
             .static_resolution(),
@@ -4528,4 +4641,3341 @@ fn flow_return_nested_label_inherits_the_enclosing_suffix_return() {
         ),
         verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
     );
+}
+
+/// The `ReturnType<typeof f>["m"]` member rail is a PROBE with a
+/// structured fall-through: a spread-provisioned member is beyond the
+/// modeled member point, so the member-demand evaluation declines with a
+/// typed miss — and the DECLINE must leak nothing into the enclosing
+/// observation channels (the build-local taint frame, the
+/// per-cold-compute completeness scope, the request partial sticky),
+/// because the generic `Instantiate` unwrap fall-through re-derives the
+/// member cleanly from the whole return. A leaked decline collapsed the
+/// runtime constructor of a published prop derived through this shape to
+/// `Unknown` (`type: null`) even though its value resolved to `string`.
+///
+/// The rails stay FULLY visible to a direct member-demand consumer (the
+/// second half): the isolation lives at the rail's fall-through decision,
+/// never in the `FlowReturn` build's own output — stripping the build's
+/// rails instead would let a no-surface producer publish around.
+#[test]
+fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/spread-member.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(
+            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { ...base(), n: 1 } }\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let ctx = RequestContext::new(1, Arc::from(canonical), false, None);
+        let _guard = RequestContextGuard::install(ctx);
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let typeof_node =
+            dispatch
+                .graph()
+                .intern_node(crate::semantic_query::SemanticNodeData::new_typeof(
+                    crate::semantic_query::ValueRootKey {
+                        scope: crate::semantic_query::ScopeId {
+                            canonical_id: Arc::from(canonical),
+                            owner,
+                            local_scope: None,
+                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                owner,
+                            ),
+                        },
+                        name: Arc::from("makeProps"),
+                    },
+                    Arc::from([]),
+                    Arc::from([]),
+                ));
+
+        let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let observation = crate::project_semantic_dispatch::BuildLocalTaintGuard::push(
+            &dispatch.build_local_taint,
+        );
+        let projected = dispatch.flow_return_member_projection(
+            typeof_node,
+            &crate::semantic_query::PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("label"),
+            ),
+        );
+        let observed = observation.finish();
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        completeness_scope.discard();
+
+        assert!(
+            projected.is_none(),
+            "the spread-provisioned member demand declines to the generic unwrap route"
+        );
+        assert!(
+            !observed.result_is_partial && !observed.cache_suppress,
+            "the declined probe folds nothing into the enclosing build frame: {observed:?}"
+        );
+        assert!(
+            !completeness.is_partial(),
+            "the declined probe leaves the enclosing cold-compute scope Complete: \
+             {completeness:?}"
+        );
+        assert!(
+            !crate::request_context::current_request_result_is_partial(),
+            "the declined probe never marks the request partial sticky"
+        );
+
+        // A DIRECT member-demand consumer still sees the full typed rails.
+        let mut key = flow_key(
+            dispatch,
+            "makeProps",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        key.function = dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            owner,
+            Arc::from("makeProps"),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        key.context = dispatch.flow_return_context_for(canonical);
+        key.demand = crate::semantic_query::ReturnProjectionDemand {
+            point: crate::semantic_query::demand::Demand::navigate(
+                crate::semantic_query::demand::ProjectionPath::from_segments([
+                    crate::semantic_query::PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier("label"),
+                    ),
+                ]),
+            ),
+        };
+        let read = dispatch.execute_read(SemanticQueryKey::FlowReturn(Box::new(key)));
+        assert!(
+            matches!(
+                read.value,
+                crate::semantic_query::QueryResult::Error(crate::semantic_query::QueryError::Miss)
+            ),
+            "the member demand itself fails closed with the typed miss, got {:?}",
+            read.value
+        );
+        assert!(
+            read.result_is_partial && read.cache_suppress,
+            "a direct member-demand consumer keeps the no-surface rails"
+        );
+        assert!(
+            read.partial_reasons
+                .contains(crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE),
+            "the decline rides the no-surface class, got {:?}",
+            read.partial_reasons
+        );
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// The flow-proof admission boundary: root proof gate, missing-obligation
+// refusal, degraded-finalizer non-warming, and once-per-cold-demand
+// planning.
+// ────────────────────────────────────────────────────────────────────────
+
+/// The per-request cold-compute counter, read from the installed
+/// `RequestContext`.
+fn flow_cold_computes() -> u32 {
+    crate::request_context::current_request_context()
+        .expect("the test installs a RequestContext")
+        .flow_return_cold_computes
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Root warm admission of a `FlowReturn` result requires the finalizer's
+/// `CompleteFlowResult` proof token — the boolean rails alone are NOT the
+/// positive completeness authority. A clean raw value with both boolean
+/// flags clear but no proof yields ZERO candidates (the memo's flow-proof
+/// gate vetoes); the identical value with the finalizer token publishes,
+/// and the second request is a warm family hit. Deleting the proof check
+/// (`flow_proof_ok` at the memo admission) fails the negative leg.
+#[test]
+fn flow_root_publish_requires_complete_flow_proof() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+
+        // Negative leg: the SAME clean value, flags clear, proof stripped.
+        {
+            let _strip = inject::Guard::arm(&host.flow_fault_injection.strip_root_proof);
+            let result = flow_result_value(dispatch, key.clone());
+            assert_eq!(result.degradation(), None, "the value itself is clean");
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                        key.clone()
+                    ))),
+                0,
+                "a clean value WITHOUT the finalizer's proof token must not admit — \
+                 the boolean rails are not the positive completeness authority"
+            );
+        }
+
+        // Positive leg: the identical demand with the proof publishes.
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    key.clone()
+                ))),
+            1,
+            "the proof-bearing build admits exactly one candidate"
+        );
+        key
+    });
+    // The warm read runs against a FRESH view (the artifacts the cold
+    // build materialized are now visible to validation).
+    let warm_key = with_dispatch(&host, |dispatch| {
+        flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        )
+    });
+    with_dispatch(&host, |fresh| {
+        assert!(
+            fresh
+                .graph()
+                .get_flow_return_result(fresh.ctx, &warm_key)
+                .is_some(),
+            "the second request is a warm family hit"
+        );
+    });
+}
+
+/// A production plan whose discharge leaves ONE planned obligation
+/// pending finalizes Partial: the usable value still returns (twice), the
+/// cold-compute counter increments on BOTH demands (nothing warmed), and
+/// the family slot holds zero candidates. The injected fault only DROPS a
+/// discharge claim — it can refuse more, never mint — so a green negative
+/// leg here proves the seal discriminates a pending obligation rather
+/// than riding the report's say-so.
+#[test]
+fn production_missing_obligation_returns_only_and_recomputes() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use crate::request_context::{RequestContext, RequestContextGuard};
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
+        let _guard = RequestContextGuard::install(ctx);
+        let _drop_claim = inject::Guard::arm(&host.flow_fault_injection.drop_last_discharge_claim);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+
+        let first = flow_result_value(dispatch, key.clone());
+        assert_eq!(flow_cold_computes(), 1);
+        let second = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            flow_cold_computes(),
+            2,
+            "an unproven demand never warms, so the second request recomputes"
+        );
+        assert_eq!(
+            first.return_type(),
+            second.return_type(),
+            "both demands return the same usable value"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a pending planned obligation is ReturnOnly: zero candidates"
+        );
+    });
+}
+
+/// A NATURAL degraded success never warms — root and SCC legs. The root
+/// leg (a call on a non-callable binding) returns its usable payload
+/// twice with two cold computations and zero candidates; the SCC leg (a
+/// mutual component carrying an unapplied write effect) leaves ZERO
+/// candidates on BOTH member slots. The universal read funnel — not any
+/// consumer-side fold — carries the degradation class to the sealed
+/// consumer entry (the enclosing-component propagation is proven
+/// end-to-end by `flow_return_public_execute_releases_drained_members_
+/// both_orders`' degraded leg).
+#[test]
+fn degraded_flow_finalizer_never_warms_root_or_scc() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::semantic_query::PartialReasonSet;
+
+    // Root leg.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
+        let _guard = RequestContextGuard::install(ctx);
+        let key = flow_key(
+            dispatch,
+            "subNonCallableCall",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let first = flow_result_value(dispatch, key.clone());
+        assert!(first.degradation().is_some(), "a natural degraded success");
+        assert_eq!(flow_cold_computes(), 1);
+        let second = flow_result_value(dispatch, key.clone());
+        assert_eq!(flow_cold_computes(), 2, "degraded never warms: recompute");
+        assert_eq!(first.return_type(), second.return_type());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    key.clone()
+                ))),
+            0,
+            "zero root candidates"
+        );
+
+        // The universal rail: consuming the degraded value through the
+        // sealed consumer entry folds its class through the read funnel.
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let node = dispatch.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(
+                verter_type_expr::facts::FlowFunctionReturnIdentity {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::from(CANONICAL),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol: Arc::from("subNonCallableCall"),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::DeclarationBody,
+                    overload_ordinal: 0,
+                },
+            ),
+            CANONICAL,
+        );
+        let observed = crate::request_context::current_cold_compute_completeness();
+        scope.discard();
+        assert!(
+            matches!(node, super::flow_return::FunctionReturnNode::Flow(_)),
+            "the degraded value stays usable at the consumer, got {node:?}"
+        );
+        assert!(
+            observed
+                .reasons()
+                .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "the universal read funnel carries the degradation class to the \
+             consumer — no consumer-side fold exists to carry it; got {:?}",
+            observed.reasons()
+        );
+    });
+
+    // SCC leg: a degraded component publishes NEITHER member.
+    let scc_host = make_scc_host();
+    with_dispatch(&scc_host, |dispatch| {
+        let root = scc_key(dispatch, "scDegradedA");
+        let peer = scc_key(dispatch, "scDegradedB");
+        let result = flow_result_value(dispatch, root.clone());
+        assert!(
+            result.degradation().is_some(),
+            "the component's typed degradation reaches the root"
+        );
+        for (name, key) in [("scDegradedA", root), ("scDegradedB", peer)] {
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "{name}: a degraded component member never enters the SCC publish batch"
+            );
+        }
+    });
+}
+
+/// One cold flow demand plans EXACTLY once (one demand plan, one graph
+/// build); a warm replay of the same demand adds zero of either; an
+/// ordinary non-flow query and both pending typed-gap roots
+/// (`FlowNarrowingAt` / `ContextualTypeAt`) add zero graph builds, zero
+/// plans, and touch no flow-demand storage (the zero-capacity half is
+/// pinned by `unused_flow_runtime_reserves_no_demand_storage`).
+#[test]
+fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
+    let host = make_host();
+    // Cold demand: exactly one plan over exactly one built graph.
+    with_dispatch(&host, |dispatch| {
+        let flow_slice = host.project_type_store().flow_slice();
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key);
+        assert_eq!(
+            flow_slice.demand_plan_count(),
+            1,
+            "one cold demand plans once"
+        );
+        assert_eq!(
+            flow_slice.graphs().build_count(),
+            1,
+            "one graph build per content version"
+        );
+    });
+
+    // Warm replay (against a fresh view, where the published artifacts
+    // validate): zero additional plans, zero additional builds — then the
+    // non-flow and pending typed-gap dispatches on the same view.
+    with_dispatch(&host, |dispatch| {
+        let flow_slice = host.project_type_store().flow_slice();
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key);
+        assert_eq!(
+            flow_slice.demand_plan_count(),
+            1,
+            "warm replay never re-plans"
+        );
+        assert_eq!(flow_slice.graphs().build_count(), 1);
+
+        // An ordinary non-flow query.
+        let member =
+            dispatch
+                .graph()
+                .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+                    crate::semantic_query::PrimitiveKind::Number,
+                ));
+        let _ = dispatch.execute(SemanticQueryKey::NormalizeUnion {
+            members: Arc::from(vec![member].into_boxed_slice()),
+        });
+
+        // The pending typed-gap roots: a typed refusal, never a graph or
+        // a plan.
+        let analysis_context = crate::semantic_query::ProgramAnalysisContext {
+            parse_env_hash: [0; 16],
+            resolve_env_hash: [0; 16],
+            type_env_hash: [0; 16],
+            lib_env_hash: [0; 16],
+            project_identity: 0,
+            substitution: crate::semantic_query::SubstitutionCanonicalHash::empty(),
+        };
+        let pending_roots = [
+            SemanticQueryKey::FlowNarrowingAt {
+                point: crate::semantic_query::ProgramPointId {
+                    canonical_id: Arc::from(CANONICAL),
+                    offset: 0,
+                },
+                flow: crate::semantic_query::FlowNarrowingKey::empty(),
+                context: analysis_context,
+            },
+            SemanticQueryKey::ContextualTypeAt {
+                point: crate::semantic_query::ProgramPointId {
+                    canonical_id: Arc::from(CANONICAL),
+                    offset: 0,
+                },
+                contextual: crate::semantic_query::ContextualTypingKey::empty(),
+                context: analysis_context,
+            },
+        ];
+        for pending in pending_roots {
+            let result = dispatch.execute(pending);
+            assert!(
+                matches!(
+                    result,
+                    QueryResult::Error(crate::semantic_query::QueryError::Miss)
+                ),
+                "a pending typed-gap root is a typed miss, got {result:?}"
+            );
+        }
+
+        assert_eq!(
+            flow_slice.demand_plan_count(),
+            1,
+            "non-flow queries and pending typed-gap roots never plan"
+        );
+        assert_eq!(
+            flow_slice.graphs().build_count(),
+            1,
+            "non-flow queries and pending typed-gap roots never build a graph"
+        );
+    });
+}
+
+/// A pending flow root (`FlowNarrowingAt` / `ContextualTypeAt`) surfaces
+/// its OPERATION-SPECIFIC typed gap on the read's diagnostic rail — the
+/// typed reason the answer is absent is recorded, not just the generic
+/// no-surface class. The rails stay the typed refusal: `Error(Miss)` +
+/// partial + ReturnOnly.
+#[test]
+fn pending_flow_roots_surface_their_operation_specific_gap() {
+    use crate::project_semantic_dispatch::walk::ShallowDiagnostic;
+    use crate::semantic_query::{FlowGap, PartialReasonSet};
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let analysis_context = crate::semantic_query::ProgramAnalysisContext {
+            parse_env_hash: [0; 16],
+            resolve_env_hash: [0; 16],
+            type_env_hash: [0; 16],
+            lib_env_hash: [0; 16],
+            project_identity: 0,
+            substitution: crate::semantic_query::SubstitutionCanonicalHash::empty(),
+        };
+        let pending_roots = [
+            (
+                SemanticQueryKey::FlowNarrowingAt {
+                    point: crate::semantic_query::ProgramPointId {
+                        canonical_id: Arc::from(CANONICAL),
+                        offset: 0,
+                    },
+                    flow: crate::semantic_query::FlowNarrowingKey::empty(),
+                    context: analysis_context,
+                },
+                FlowGap::GuardNarrowing,
+            ),
+            (
+                SemanticQueryKey::ContextualTypeAt {
+                    point: crate::semantic_query::ProgramPointId {
+                        canonical_id: Arc::from(CANONICAL),
+                        offset: 0,
+                    },
+                    contextual: crate::semantic_query::ContextualTypingKey::empty(),
+                    context: analysis_context,
+                },
+                FlowGap::UnmodeledExpression,
+            ),
+        ];
+        for (key, gap) in pending_roots {
+            let read = dispatch.execute_via_cold_build_helper(key);
+            assert!(
+                matches!(read.value, QueryResult::Error(QueryError::Miss)),
+                "a pending typed-gap root is a typed miss, got {:?}",
+                read.value
+            );
+            assert!(
+                read.result_is_partial && read.cache_suppress,
+                "a pending typed-gap root is a typed partial, ReturnOnly"
+            );
+            assert!(
+                read.partial_reasons
+                    .contains(PartialReasonSet::FLOW_RETURN_NO_SURFACE),
+                "the no-surface partial class, got {:?}",
+                read.partial_reasons
+            );
+            assert!(
+                read.walker_diagnostics
+                    .contains(&ShallowDiagnostic::PendingFlowRoot { gap }),
+                "the operation-specific typed gap is surfaced on the read, got {:?}",
+                read.walker_diagnostics
+            );
+        }
+    });
+}
+
+/// The memo's flow-proof gate is a veto fence, not a silent refusal: a
+/// `FlowReturn` build whose proof token was stripped (clean value, clean
+/// boolean flags) is refused AND the returned read carries the
+/// partial/suppression rails, so an enclosing composition can never warm
+/// around the veto — the winner's read and every joiner's inherited state
+/// propagate the same taint. Mutation: veto the publication without
+/// forcing the rails; the rail assertions fail while zero candidates
+/// still hold.
+#[test]
+fn flow_root_proof_gate_veto_marks_the_read_partial() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use crate::semantic_query::PartialReasonSet;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _strip = inject::Guard::arm(&host.flow_fault_injection.strip_root_proof);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let read = dispatch
+            .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+        assert!(
+            matches!(read.value, QueryResult::Value(_)),
+            "the usable value still flows to the caller, got {:?}",
+            read.value
+        );
+        assert!(
+            read.result_is_partial && read.cache_suppress,
+            "the proof-gate veto marks the read partial + suppressed"
+        );
+        assert!(
+            read.partial_reasons
+                .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "the veto records the unverified class, got {:?}",
+            read.partial_reasons
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "the vetoed build never admits"
+        );
+    });
+}
+
+/// A production build can obtain discharge/convergence evidence only
+/// from the private, one-shot evaluation outcome `evaluate_flow_return`
+/// mints: production finalization triangulates the evidence's
+/// provenance against the installed carrier and the dispatch's CURRENT
+/// mint, so evidence that did not originate from THIS evaluation is a
+/// typed partial and never publishes. Raw per-obligation mutators and
+/// test helpers cannot reach production finalization: the runtime the
+/// dispatch finalizes against is transaction-internal (a foreign
+/// runtime's handle fails closed —
+/// `flow_demand_handle_fails_closed_on_a_foreign_runtime`), and the
+/// sealed-witness / proof constructors are compile-time private (the
+/// `complete_flow_result_constructor_is_private` and
+/// `flow_solve_sealed_witnesses_not_constructible` compile-fail
+/// fixtures).
+#[test]
+fn production_flow_proof_has_evaluator_origin() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    // Negative leg: evidence whose provenance is not this evaluation's
+    // one-shot mint refuses finalization — the usable value still flows,
+    // nothing publishes.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _foreign = inject::Guard::arm(&host.flow_fault_injection.foreign_evaluation_evidence);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "evidence not minted by this evaluation's outcome never publishes"
+        );
+    });
+
+    // Matched control: the evaluator-minted evidence publishes.
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the evaluator-minted proof is the one production admission source"
+        );
+    });
+}
+
+/// Finalization never fabricates convergence: a demand whose convergence
+/// evidence shows ZERO observed iterations (a claim the discharge driver
+/// never produced) is a typed partial — the usable value still flows,
+/// nothing warms. The unarmed control proves the production SOLO root is
+/// driven through the real fixed point (one observed stable pass) and
+/// warms. Mutation: restore the `iterations.max(1)` fabrication; the armed
+/// leg admits and fails.
+#[test]
+fn unobserved_convergence_never_seals() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _unobserved = inject::Guard::arm(&host.flow_fault_injection.unobserved_convergence);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "zero-iteration convergence evidence is refused, never fabricated up"
+        );
+    });
+
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the solo root's driver-observed convergence seals"
+        );
+    });
+}
+
+/// A DEFERRED (non-root) SCC member finalizes only AFTER its per-key
+/// substitution: the member's proof covers the INSTANTIATED value, not
+/// the raw component-fixed-point outcome its pop deposited. The
+/// caller-return clone substituted at the pop either way; the proof is
+/// the boundary this pins. Mutation: finalize the member over the raw
+/// deposited outcome; the proof's value still mentions the binder and
+/// the final assertion fails.
+#[test]
+fn deferred_scc_member_finalizes_after_per_key_substitution() {
+    const SUB_CANONICAL: &str = "/ws/flow-member-substitution.ts";
+    const SUB_FIXTURE: &str =
+        "export function rootFn() { return 1; }\nexport function memberFn<T>(x: T) { return x; }\n";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(SUB_CANONICAL.to_string()),
+        input_id: SUB_CANONICAL.to_string(),
+        source: Arc::from(SUB_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(SUB_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        use super::dispatch_txn::flow_obligation_state::{
+            FlowDischargeEntry, FlowDischargeReport, FlowSuboperationEvidence, ObligationState,
+        };
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        // The binder exactly as the member frame's own clause interns it.
+        let whole_hash = dispatch
+            .ctx
+            .shallow_file_state(SUB_CANONICAL)
+            .map(|state| state.whole_hash)
+            .unwrap_or_default();
+        let scope = crate::semantic_query::NodeScopeId::File {
+            canonical_id: Arc::from(SUB_CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash,
+            local_scope: None,
+        };
+        let binder = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("T")),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+        let key_of = |name: &str| FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(SUB_CANONICAL),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from(name),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(SUB_CANONICAL),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        let root_key = key_of("rootFn");
+        let mut member_key = key_of("memberFn");
+        member_key.context.type_substitution =
+            crate::semantic_query::CanonicalTypeSubstitution::new(vec![(binder, number)]);
+
+        // Open both frames and prepare BOTH demands for real.
+        let root_idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(root_key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&root_key, root_idx);
+        let member_idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(member_key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&member_key, member_idx);
+        // The SCC edge: the member assumed the in-flight root.
+        dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .obligations
+            .record_assumption(root_idx);
+
+        // The discharge claim set of one prepared frame: every obligation
+        // this fixture's evaluation completed (all of them).
+        let discharge_of = |key: &FlowReturnKey| {
+            let carrier = dispatch
+                .flow_demand_carrier_of(key)
+                .expect("the frame's demand is installed");
+            let txn = dispatch.dispatch_txn.borrow();
+            let records = txn
+                .obligations
+                .flow_obligations(carrier.handle)
+                .expect("the installed demand's records");
+            let entries = carrier
+                .plan
+                .obligation_specs()
+                .iter()
+                .filter(|spec| {
+                    records.iter().any(|record| {
+                        record.spec.id() == spec.id()
+                            && matches!(record.state, ObligationState::Pending)
+                    })
+                })
+                .map(|spec| FlowDischargeEntry {
+                    obligation: spec.id(),
+                    dependencies: Arc::from(spec.expected_dependencies()),
+                    suboperations: spec
+                        .expected_suboperations()
+                        .iter()
+                        .map(|operation| FlowSuboperationEvidence {
+                            operation: *operation,
+                            result_contract: carrier.plan.basis().result_contract.clone(),
+                        })
+                        .collect(),
+                })
+                .collect();
+            FlowDischargeReport::new(entries)
+        };
+
+        // The member pops PROVISIONAL: the caller-return clone substitutes
+        // at the pop; the deposited outcome stays raw.
+        let raw_member = crate::semantic_query::FlowReturnResult::new(graph, binder, false, None);
+        let step = dispatch.flow_frame_close_with_evidence_for_tests(
+            member_idx,
+            super::dispatch_txn::FlowReturnPendingOutcome::EvaluatedValue(raw_member),
+            Vec::new(),
+            Some(discharge_of(&member_key)),
+        );
+        assert!(
+            matches!(step, crate::semantic_query::FlowReturnStep::Complete(ref result) if result.return_type() == number),
+            "the caller-return clone substitutes at the pop"
+        );
+
+        // The root closes the component: the member finalizes there.
+        let _ = dispatch.flow_frame_close_with_evidence_for_tests(
+            root_idx,
+            super::dispatch_txn::FlowReturnPendingOutcome::EvaluatedValue(
+                crate::semantic_query::FlowReturnResult::new(graph, number, false, None),
+            ),
+            Vec::new(),
+            Some(discharge_of(&root_key)),
+        );
+
+        let txn = dispatch.dispatch_txn.borrow();
+        let member = txn
+            .flow
+            .completed_members
+            .iter()
+            .find(|member| member.key == member_key)
+            .expect("the deferred member proves and queues for the batch");
+        assert_eq!(
+            member.result.value().return_type(),
+            number,
+            "the member finalizes over its INSTANTIATED value, not the raw outcome"
+        );
+    });
+}
+
+/// Value, discharge report, convergence, and demand handle share ONE
+/// opaque evaluation provenance (semantic-store identity + request
+/// generation + the demand's OWN ledger ordinal — demand-unique). A
+/// demand carrier stamped with a provenance from another store or a
+/// stale generation makes the whole solve a typed partial/ReturnOnly:
+/// the usable value still flows, and NEITHER the root nor any SCC member
+/// produces a candidate; so does evaluation evidence from ANOTHER demand
+/// of the SAME store and generation (the demand-ordinal axis).
+#[test]
+fn foreign_flow_value_provenance_is_rejected() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    // Root leg.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _stale = inject::Guard::arm(&host.flow_fault_injection.stale_demand_carrier);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a foreign-provenance demand carrier never yields a root candidate"
+        );
+    });
+
+    // SCC leg: a clean mutual component under a foreign-provenance
+    // carrier publishes NEITHER member.
+    let scc_host = make_scc_host();
+    with_dispatch(&scc_host, |dispatch| {
+        let _stale = inject::Guard::arm(&scc_host.flow_fault_injection.stale_demand_carrier);
+        let root = scc_key(dispatch, "scCleanA");
+        let peer = scc_key(dispatch, "scCleanB");
+        let result = flow_result_value(dispatch, root.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the component value stays usable"
+        );
+        for (name, key) in [("scCleanA", root), ("scCleanB", peer)] {
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "{name}: foreign provenance produces zero SCC candidates"
+            );
+        }
+    });
+
+    // Same-generation foreign-demand leg: evidence carrying the carrier's
+    // OWN store/generation but ANOTHER demand's ordinal is refused —
+    // root and SCC members alike. The demand-unique axis is what
+    // distinguishes it; a store/generation-only token could not.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _foreign = inject::Guard::arm(&host.flow_fault_injection.foreign_demand_provenance);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a same-generation foreign demand's evidence never yields a root candidate"
+        );
+    });
+    let scc_host = make_scc_host();
+    with_dispatch(&scc_host, |dispatch| {
+        let _foreign = inject::Guard::arm(&scc_host.flow_fault_injection.foreign_demand_provenance);
+        let root = scc_key(dispatch, "scCleanA");
+        let peer = scc_key(dispatch, "scCleanB");
+        let result = flow_result_value(dispatch, root.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the component value stays usable"
+        );
+        for (name, key) in [("scCleanA", root), ("scCleanB", peer)] {
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "{name}: a same-generation foreign demand's evidence produces zero SCC candidates"
+            );
+        }
+    });
+}
+
+/// A call in an `if`/ternary TEST is a narrowing CONTROL: when the
+/// callee is a same-file OVERLOADED type predicate, signature selection
+/// decides which predicate target narrows, and this substrate performs
+/// no overload/applicability resolution for the guard channel. Taking
+/// the first declaration's target narrows WRONG (`pred`'s first overload
+/// says `x is string` where the checker selects `x is number`), and
+/// certifying that call as decided-above would launder the wrong narrow
+/// warm. Required: the overloaded predicate establishes NO narrow (both
+/// arms keep the unnarrowed parameter), and the demand finalizes
+/// unproven — zero candidates, never warm.
+#[test]
+fn overloaded_same_file_predicate_never_self_certifies_control_call() {
+    const PRED_CANONICAL: &str = "/ws/overloaded-predicate.ts";
+    const PRED_FIXTURE: &str = r#"
+function pred(x: string): x is string;
+function pred(x: string | number): x is number;
+function pred(x: string | number): boolean {
+  return typeof x === "number";
+}
+
+export function makeProps(x: string | number) {
+  if (pred(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(PRED_CANONICAL.to_string()),
+        input_id: PRED_CANONICAL.to_string(),
+        source: Arc::from(PRED_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(PRED_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, PRED_CANONICAL, "makeProps");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("the join is a union, got {expr:?}");
+        };
+        let has_primitive = |name: verter_type_expr::PrimitiveName| {
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(name))
+        };
+        assert!(
+            has_primitive(verter_type_expr::PrimitiveName::Number),
+            "the first overload's `x is string` target must not narrow the \
+             consequent — the number arm survives, got {expr:?}"
+        );
+        assert!(
+            has_primitive(verter_type_expr::PrimitiveName::String),
+            "no narrow is established at all for an overloaded predicate, \
+             got {expr:?}"
+        );
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(PRED_CANONICAL),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("makeProps"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(PRED_CANONICAL),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an overloaded predicate call in a control test carries no \
+             evaluator evidence and must never warm"
+        );
+    });
+}
+
+/// The positive control for the control-position call certification: a
+/// call in an `if` test whose callee is a MODULE-LOCAL, NON-EXPORTED,
+/// SINGLE-declaration function with an authored NON-predicate return
+/// annotation provably establishes no narrowing — the file is a module
+/// (top-level `export` syntax), so the callee is not a script global; the
+/// binding is not exported, so no module augmentation can merge a further
+/// signature into it; and its one signature's return is not a type
+/// predicate. Both arms join conservatively — which IS the checker's
+/// answer — and the call is decided above: the demand still proves and
+/// warms.
+#[test]
+fn annotated_non_predicate_control_call_stays_decided_above_and_warm() {
+    const CHECK_CANONICAL: &str = "/ws/boolean-check-control.ts";
+    const CHECK_FIXTURE: &str = r#"
+function check(x: string | number): boolean {
+  return typeof x === "number";
+}
+
+export function makeChecked(x: string | number) {
+  if (check(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(CHECK_CANONICAL.to_string()),
+        input_id: CHECK_CANONICAL.to_string(),
+        source: Arc::from(CHECK_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(CHECK_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, CHECK_CANONICAL, "makeChecked");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("the join is a union, got {expr:?}");
+        };
+        assert!(
+            arms.iter().any(|arm| *arm
+                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
+            "the unnarrowed parameter joins, got {expr:?}"
+        );
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(CHECK_CANONICAL),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("makeChecked"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(CHECK_CANONICAL),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "a provably non-narrowing control call stays decided above and warms"
+        );
+    });
+}
+
+/// Upsert one plain-TS file into `host`.
+fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+}
+
+/// The whole-return `FlowReturnKey` of a top-level function of `canonical`.
+fn whole_return_key(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical: &str,
+    name: &str,
+) -> FlowReturnKey {
+    FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(canonical),
+        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    }
+}
+
+/// Assert that a control-test callee whose declaration closure is NOT
+/// provable from the file establishes no narrowing and never warms: the
+/// join keeps BOTH arms of the unnarrowed `string | number` parameter,
+/// the demand carries the typed `GuardNarrowing` gap, and the family slot
+/// holds zero candidates.
+#[track_caller]
+fn assert_control_callee_gaps_unwarmed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("{name}: the join is a union, got {expr:?}");
+    };
+    for primitive in [
+        verter_type_expr::PrimitiveName::String,
+        verter_type_expr::PrimitiveName::Number,
+    ] {
+        assert!(
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+            "{name}: no narrow is established for a callee whose checker-visible \
+             signature set this file cannot enumerate — the {primitive:?} arm \
+             survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        )),
+        "{name}: the control test degrades to the typed guard-narrowing gap"
+    );
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name}: an unprovable control callee never warms"
+    );
+}
+
+/// Assert that a class-evaluation-time WRITE to a frame binding never
+/// seals the unnarrowed superset warm: the join keeps BOTH arms of the
+/// unnarrowed `string | number` parameter, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[track_caller]
+fn assert_class_evaluation_write_gaps_unwarmed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("{name}: the join is a union, got {expr:?}");
+    };
+    for primitive in [
+        verter_type_expr::PrimitiveName::String,
+        verter_type_expr::PrimitiveName::Number,
+    ] {
+        assert!(
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+            "{name}: the unapplied class-evaluation write is never modelled as a narrow — \
+             the {primitive:?} arm survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        )),
+        "{name}: the unmodelled write degrades to the typed guard-narrowing gap"
+    );
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name}: an unmodelled class-evaluation write never warms"
+    );
+}
+
+/// Control-call certification and predicate selection are proofs over
+/// the callee's CHECKER-VISIBLE declaration set, which is not the current
+/// file's text: a file with no top-level module syntax is a SCRIPT whose
+/// top-level functions are GLOBAL symbols, merging with every other
+/// script's and every `declare global` block's same-name declarations —
+/// a set no single parse snapshot can enumerate. Here a sibling
+/// declaration file contributes a PREDICATE overload to both callees:
+/// the checker narrows the consequent through the merged overload group,
+/// while the current file alone shows exactly one declaration —
+/// `check`'s a non-predicate `boolean`, `isNum`'s an `x is number`
+/// predicate whose target the merged group need not select. Neither
+/// route may self-certify from the local declaration: both demands keep
+/// the unnarrowed join, carry the typed gap, and hold zero candidates.
+#[test]
+fn script_file_control_callee_never_self_certifies_against_global_merge() {
+    const GLOBALS_CANONICAL: &str = "/ws/script-merge/globals.d.ts";
+    const GLOBALS_FIXTURE: &str = r#"
+declare function check(x: string | number): x is number;
+declare function isNum(x: string | number): x is string;
+"#;
+    const MAIN_CANONICAL: &str = "/ws/script-merge/main.ts";
+    const MAIN_FIXTURE: &str = r#"
+function check(x: string | number): boolean {
+  return true;
+}
+
+function isNum(x: string | number): x is number {
+  return typeof x === "number";
+}
+
+function make(x: string | number) {
+  if (check(x)) return x;
+  return false;
+}
+
+function pick(x: string | number) {
+  if (isNum(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, GLOBALS_CANONICAL, GLOBALS_FIXTURE);
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "make");
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "pick");
+    });
+}
+
+/// A MODULE file's EXPORTED function is augmentable: a `declare module
+/// "./main"` block in any file merges further call signatures into the
+/// export symbol, and the checker resolves even the SAME-FILE call of an
+/// `export`-modified declaration through that merged symbol. The
+/// augmenter here adds a predicate overload to both exported callees.
+/// The lowering context cannot enumerate augmenters, so an exported
+/// callee is never a certified control call and never a selected
+/// predicate: both demands keep the unnarrowed join, carry the typed
+/// gap, and hold zero candidates.
+#[test]
+fn exported_module_function_control_callee_never_self_certifies() {
+    const MAIN_CANONICAL: &str = "/ws/module-merge/main.ts";
+    const MAIN_FIXTURE: &str = r#"
+export function check(x: string | number): boolean {
+  return true;
+}
+
+export function isNum(x: string | number): x is number {
+  return typeof x === "number";
+}
+
+export function make(x: string | number) {
+  if (check(x)) return x;
+  return false;
+}
+
+export function pick(x: string | number) {
+  if (isNum(x)) return x;
+  return false;
+}
+"#;
+    const AUG_CANONICAL: &str = "/ws/module-merge/augment.ts";
+    const AUG_FIXTURE: &str = r#"
+import "./main";
+
+declare module "./main" {
+  export function check(x: string | number): x is number;
+  export function isNum(x: string | number): x is string;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "make");
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "pick");
+    });
+}
+
+/// A NAMESPACE-OWNED call site binds its bare callee through the
+/// enclosing block's scope first — the block-local `check` / `isNum`
+/// shadow the module-scope declarations of the same name, exactly as the
+/// function index binds `N.check` over the file-global `check` for a
+/// direct call. The checker narrows `N.make`'s consequent through the
+/// block-local PREDICATE while the module scope holds a non-predicate
+/// `boolean` `check`, and narrows `N.pick`'s to `number` while the
+/// module-scope `isNum` says `string`. Neither route may resolve the
+/// callee at the top level: both demands keep the unnarrowed join, carry
+/// the typed gap, and hold zero candidates. The top-level caller of the
+/// same file keeps its provable closure — its `check` is the single
+/// unexported module-local declaration — so that call is certified and
+/// the demand warms.
+#[test]
+fn namespace_owned_control_callee_never_resolves_at_top_level() {
+    const MAIN_CANONICAL: &str = "/ws/namespace-shadow/main.ts";
+    const MAIN_FIXTURE: &str = r#"
+export {};
+
+function check(x: string | number): boolean {
+  return true;
+}
+
+function isNum(x: string | number): x is string {
+  return typeof x === "string";
+}
+
+namespace N {
+  function check(x: string | number): x is number {
+    return typeof x === "number";
+  }
+
+  function isNum(x: string | number): x is number {
+    return typeof x === "number";
+  }
+
+  export function make(x: string | number) {
+    if (check(x)) return x;
+    return false;
+  }
+
+  export function pick(x: string | number) {
+    if (isNum(x)) return x;
+    return false;
+  }
+}
+
+function makeTop(x: string | number) {
+  if (check(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "N.make");
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "N.pick");
+
+        let key = whole_return_key(dispatch, MAIN_CANONICAL, "makeTop");
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the top-level call site's callee closure is provable: no gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the certified top-level control call warms"
+        );
+    });
+}
+
+/// A same-file predicate whose target names the CALLEE's own type
+/// parameter — `function isSame<T>(x: T): x is T` — is instantiated by
+/// the call: the checker binds `T` to the argument's `string | number`
+/// and the predicate is a tautology, so `f` returns `string | number |
+/// boolean`. Resolving `T` through the CALLER's environment binds the
+/// unrelated owner-scope alias `type T = number` and narrows `string`
+/// away. The demand keeps the unnarrowed join, carries the typed gap, and
+/// holds zero candidates.
+#[test]
+fn generic_predicate_target_never_resolves_in_the_caller_environment() {
+    const CANONICAL: &str = "/ws/generic-predicate/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+type T = number;
+
+function isSame<T>(x: T): x is T { return true }
+
+function f(x: string | number) {
+  if (isSame(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A nested namespace member is served from ITS OWN body: `N.M.make`
+/// returns `"x"`, `N.make` returns `111`. A locator that keeps only the
+/// inner block's statement ordinal resolves that ordinal in the OUTER
+/// block and certifies the outer body's `number` under the inner
+/// function's key — a wrong-complete result that would warm.
+#[test]
+fn nested_namespace_function_is_served_from_its_own_body() {
+    const CANONICAL: &str = "/ws/nested-namespace/main.ts";
+    const FIXTURE: &str = r#"
+namespace N {
+  function make() { return 111 }
+
+  namespace M {
+    function make() { return "x" }
+  }
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let inner_key = whole_return_key(dispatch, CANONICAL, "N.M.make");
+        let inner = flow_result_value(dispatch, inner_key.clone());
+        let inner_expr = host
+            .project_node_to_type_expr_for_test(inner.return_type())
+            .expect("return node must project to TypeExpr");
+        assert_eq!(
+            inner_expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            "the inner function's own body is served"
+        );
+        assert_eq!(inner.degradation(), None);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(inner_key))),
+            1,
+            "the correctly served inner body certifies and warms"
+        );
+
+        let (outer_expr, _) = flow_result_for_file(dispatch, &host, CANONICAL, "N.make");
+        assert_eq!(
+            outer_expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the outer function keeps its own body"
+        );
+    });
+}
+
+/// `x instanceof A` narrows by the VALUE `A` denotes at the test. A
+/// parameter `A: typeof B` shadows the owner-scope `class A`, and the
+/// checker narrows to `B` — `f` returns `B | boolean`. An owner-scope type
+/// reference for the constructor narrows to the class `A` instead, and
+/// with no call in the test nothing else stops that wrong narrowing from
+/// completing and warming. The frame-bound right-hand side is refused at
+/// lowering: the demand keeps both class arms unnarrowed, carries the
+/// typed gap, and holds zero candidates.
+#[test]
+fn instanceof_shadowed_by_a_parameter_never_narrows_through_the_owner_class() {
+    const CANONICAL: &str = "/ws/instanceof-shadow/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+class A { a = 1 }
+class B { b = 1 }
+
+function f(x: A | B, A: typeof B) {
+  if (x instanceof A) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("the join is a union, got {expr:?}");
+        };
+        for class in ["A", "B"] {
+            assert!(
+                arms.iter().any(|arm| matches!(
+                    arm,
+                    verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == class
+                )),
+                "no narrow is established through the shadowed constructor name — the \
+                 `{class}` arm survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "the shadowed constructor test degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an unprovable constructor binding never warms"
+        );
+    });
+}
+
+/// Assert that an `instanceof` test over `A | B` establishes no narrowing
+/// and never warms: the join keeps BOTH class arms, the demand carries
+/// the typed `GuardNarrowing` gap, and the family slot holds zero
+/// candidates.
+#[track_caller]
+fn assert_instanceof_class_arms_gap_unwarmed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("{name}: the join is a union, got {expr:?}");
+    };
+    for class in ["A", "B"] {
+        assert!(
+            arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == class
+            )),
+            "{name}: no narrow is established through the constructor — the `{class}` arm \
+             survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        )),
+        "{name}: the constructor test degrades to the typed guard-narrowing gap"
+    );
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name}: an unprovable constructor binding never warms"
+    );
+}
+
+/// A same-file predicate's target is authored in the CALLEE's declaration
+/// scope — `isNum(x): x is T` names the MODULE alias `type T = number` —
+/// but the fact is consumed inside the CALLER's frame, whose binder
+/// environment interns the caller's own `<T extends number>`. Lowering
+/// the target there rebinds it to the caller's `T`: no arm of `string |
+/// number` is assignable to a type parameter, the target itself is
+/// assignable to the subject, so the narrow becomes `T` and `f` publishes
+/// `T | boolean` where the checker says `number | boolean` — complete and
+/// warm. The channel refuses a target the caller frame rebinds: the
+/// demand keeps the unnarrowed join, carries the typed gap, and holds
+/// zero candidates.
+#[test]
+fn generic_caller_binder_never_captures_a_predicate_target() {
+    const CANONICAL: &str = "/ws/caller-binder-predicate/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+type T = number;
+
+function isNum(x: unknown): x is T { return true }
+
+function f<T extends number>(x: string | number, _t: T) {
+  if (isNum(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// `x instanceof A` narrows to the PREDICATE target of a static
+/// `[Symbol.hasInstance]` when the constructor's static side carries one
+/// — directly or through its heritage: with `static
+/// [Symbol.hasInstance](x: unknown): x is B` the checker narrows `A | B`
+/// to `B`, and `f` returns `B | boolean`. An owner-scope type reference
+/// for `A` narrows to the class instance type `A` instead — a
+/// wrong-complete `A | boolean` that would warm. Such a constructor is
+/// refused at lowering: both demands keep both class arms, carry the
+/// typed gap, and hold zero candidates.
+#[test]
+fn instanceof_with_symbol_has_instance_never_narrows_to_the_class_instance() {
+    const CANONICAL: &str = "/ws/instanceof-has-instance/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+class B { b = 1 }
+class A {
+  a = 1;
+  static [Symbol.hasInstance](x: unknown): x is B { return true }
+}
+class Base {
+  static [Symbol.hasInstance](x: unknown): x is B { return true }
+}
+class C extends Base { c = 1 }
+
+function direct(x: A | B) {
+  if (x instanceof A) return x;
+  return false;
+}
+
+function inherited(x: C | B) {
+  if (x instanceof C) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_instanceof_class_arms_gap_unwarmed(dispatch, &host, CANONICAL, "direct");
+        let key = whole_return_key(dispatch, CANONICAL, "inherited");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("inherited: the join is a union, got {expr:?}");
+        };
+        for class in ["C", "B"] {
+            assert!(
+                arms.iter().any(|arm| matches!(
+                    arm,
+                    verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == class
+                )),
+                "inherited: the `{class}` arm survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "inherited: the constructor test degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "inherited: an inherited `Symbol.hasInstance` never warms"
+        );
+    });
+}
+
+/// A DISCARDED sequence operand's assertion call narrows everything after
+/// it: `(assertString(x), x)` is `string` in the checker. Lowering only
+/// the last operand and blanket-certifying the discarded call
+/// decided-above published the unnarrowed `string | number` complete and
+/// warm. The discarded assertion is unprovable here: the demand keeps the
+/// unnarrowed join, carries the typed gap, and holds zero candidates.
+#[test]
+fn discarded_sequence_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/discarded-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  return (assertString(x), x);
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A type carrier folds its operand into ONE shallow-pass answer WITHOUT
+/// visiting it (`((assertString(x), 0) as number)` is `number`), so the
+/// direct-sequence protection never runs for the wrapped sequence and the
+/// discarded assertion's call would be blanket-certified decided-above —
+/// the checker narrows `x` to `string` while the unnarrowed superset
+/// publishes complete and warm. The wrapped discarded assertion takes the
+/// same discarded-operand discipline as the direct sequence: the binding
+/// keeps the carrier's asserted type, the later read of `x` keeps the
+/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap, and
+/// the family slot holds zero candidates.
+#[test]
+fn type_carrier_wrapped_sequence_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/wrapped-discarded-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = ((assertString(x), 0) as number);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert_eq!(
+            object_prop(&expr, "y"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "f: the binding keeps the carrier's asserted type: {expr:?}"
+        );
+        let verter_type_expr::TypeExpr::Union(arms) = object_prop(&expr, "x") else {
+            panic!("f: the later read of `x` keeps the unnarrowed join, got {expr:?}");
+        };
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Number,
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+                "f: the dropped narrowing never shrinks the read — the {primitive:?} arm \
+                 survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "f: the wrapped discarded assertion degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "f: an unprovable wrapped discarded assertion never warms"
+        );
+    });
+}
+
+/// A class's `super_class` heritage expression evaluates in the ENCLOSING
+/// frame, so a discarded operand of a sequence there still narrows what
+/// follows: after `((class extends (assertString(x), Base) {}) as typeof
+/// Base)` the checker reads `x` as `string`. Treating the whole class as a
+/// nested frame skipped the sequence split, blanket-certified the heritage
+/// assertion decided-above, and — with no call obligation for the class
+/// expression — the unnarrowed superset published complete and warm. The
+/// heritage assertion takes the discarded-operand discipline: the later
+/// read of `x` keeps the unnarrowed `string | number` join, the demand
+/// carries the typed `GuardNarrowing` gap, and the family slot holds zero
+/// candidates.
+#[test]
+fn class_heritage_sequence_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/heritage-discarded-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+class Base {}
+
+function f(x: string | number) {
+  const y = ((class extends (assertString(x), Base) {}) as typeof Base);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = object_prop(&expr, "x") else {
+            panic!("f: the later read of `x` keeps the unnarrowed join, got {expr:?}");
+        };
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Number,
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+                "f: the dropped narrowing never shrinks the read — the {primitive:?} arm \
+                 survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "f: the heritage discarded assertion degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "f: an unprovable heritage discarded assertion never warms"
+        );
+    });
+}
+
+/// A semantically complete `any` leaf answer (`as any`) is warm-admissible,
+/// but the leaf still RUNS: a class static block executes at class
+/// evaluation, so the assertion inside `(class { static { assertString(x);
+/// } } as any)` narrows `x` to `string` for every read that follows in the
+/// checker. Answering `SemanticAny` before the leaf call scanner ran
+/// skipped the same-frame discipline — no gap, no call obligation (the
+/// skeleton mints none for a class body) — and the `{ a: any, x }` return
+/// sealed complete and warm with `x` unnarrowed. The leaf takes the same
+/// per-callee certification: the assertion is unprovable, so the later
+/// read of `x` keeps the unnarrowed `string | number` join, the demand
+/// carries the typed `GuardNarrowing` gap, and the family slot holds zero
+/// candidates.
+#[test]
+fn semantic_any_leaf_static_block_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/semantic-any-static-block/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const a = (class { static { assertString(x); } } as any);
+  return { a, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// Assert that a dropped same-frame narrowing never publishes warm for a
+/// `{ y, x }` return: the later read of `x` keeps BOTH arms of the
+/// unnarrowed `string | number` parameter, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[track_caller]
+fn assert_object_read_gaps_unwarmed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = object_prop(&expr, "x") else {
+        panic!("{name}: the later read of `x` keeps the unnarrowed join, got {expr:?}");
+    };
+    for primitive in [
+        verter_type_expr::PrimitiveName::String,
+        verter_type_expr::PrimitiveName::Number,
+    ] {
+        assert!(
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+            "{name}: the dropped narrowing never shrinks the read — the {primitive:?} arm \
+             survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        )),
+        "{name}: the unprovable call degrades to the typed guard-narrowing gap"
+    );
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name}: an unprovable call never warms"
+    );
+}
+
+/// A class DECLARATION statement is not transparent: its static block
+/// runs at class evaluation — in THIS frame, at the statement — so the
+/// assertion in `class C { static { assertString(x); } }` narrows `x` to
+/// `string` for every read that follows in the checker. Treating the
+/// statement as a no-op minted neither a call obligation (the skeleton
+/// mints none for a class body) nor the typed gap: the unnarrowed
+/// `string | number` superset sealed complete and warm. The statement
+/// takes the same class discipline a class EXPRESSION leaf takes: the
+/// unprovable assertion keeps the return's read of `x` unnarrowed, the
+/// demand carries the typed `GuardNarrowing` gap, and the family slot
+/// holds zero candidates.
+#[test]
+fn class_declaration_static_block_assertion_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-static-block/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  class C { static { assertString(x); } }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A COMPUTED member key evaluates at class definition — the enclosing
+/// frame — so the assertion in `class C { [assertString(x)]() {} }`
+/// narrows `x` for every read that follows in the checker. Guarding the
+/// key with the class body blanket-certified the call decided-above and
+/// the unnarrowed superset sealed complete and warm. The key takes the
+/// same-frame discipline: the unprovable assertion keeps the return's
+/// read of `x` unnarrowed, the demand carries the typed `GuardNarrowing`
+/// gap, and the family slot holds zero candidates.
+#[test]
+fn class_declaration_computed_key_call_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-computed-key/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  class C { [assertString(x)]() {} }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A member DECORATOR evaluates at class definition — the enclosing
+/// frame — so the assertion in `class C { @assertString(x) m() {} }`
+/// narrows `x` for every read that follows in the checker. The same
+/// same-frame discipline applies: the unprovable assertion keeps the
+/// return's read of `x` unnarrowed, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn class_declaration_member_decorator_call_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-member-decorator/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  class C { @assertString(x) m() {} }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A STATIC auto-accessor initializer runs at class evaluation — the
+/// enclosing frame — exactly as a static property initializer does, so
+/// the assertion in `class C { static accessor p = assertString(x); }`
+/// narrows `x` for every read that follows in the checker. The same
+/// same-frame discipline applies: the unprovable assertion keeps the
+/// return's read of `x` unnarrowed, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn class_declaration_static_accessor_initializer_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-static-accessor/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  class C { static accessor p = assertString(x); }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A class-evaluation position can WRITE a frame binding, not only call:
+/// the static block of `class C { static { x = "s"; } }` runs at class
+/// evaluation and retypes `x` to `"s"` in the checker for every read that
+/// follows. The flow skeleton skips the whole class subtree, so the write
+/// never entered the slice's effect ledger and the unapplied-write gate
+/// never saw it — the candidate minted a COMPLETE warm result with `x` at
+/// its pre-class `string | number`. The class scan flags the enclosing
+/// statement's typed gap instead: the return's read of `x` keeps the
+/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap,
+/// and the family slot holds zero candidates.
+#[test]
+fn class_declaration_static_block_write_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-static-block-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function f(x: string | number) {
+  class C { static { x = "s"; } }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_class_evaluation_write_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// The class's `super_class` heritage expression evaluates in the
+/// ENCLOSING frame at the class declaration, so the sequence write in
+/// `class C extends (x = "s", B) {}` retypes `x` in the checker exactly
+/// as a static block write does — and is exactly as invisible to the
+/// slice's effect ledger. The same fail-closed discipline applies: the
+/// return's read of `x` keeps the unnarrowed join, the demand carries the
+/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn class_declaration_heritage_sequence_write_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-heritage-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function f(x: string | number) {
+  class B {}
+  class C extends (x = "s", B) {}
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_class_evaluation_write_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A parser-legal TS wrapper does not launder a write: `((x) as any) =
+/// "s"` and `(x as any)++` retype the frame binding exactly as the bare
+/// forms do. The wrapped target takes the same typed gap — the later
+/// read keeps the unnarrowed join and the family slot holds zero
+/// candidates.
+#[test]
+fn class_declaration_wrapped_write_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-wrapped-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function f(x: string | number) {
+  class C { static { ((x) as any) = "s"; } }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_class_evaluation_write_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// An UNSELECTED binding's initializer never lowers — but it still runs at
+/// the statement: the discarded assertion of `const unused =
+/// (assertString(x), 0)` narrows `x` to `string` in the checker for every
+/// read that follows. The demand plan pruned the position (the binding is
+/// never read), so no call obligation existed, and no scanner saw it —
+/// the return's read of `x` could seal complete and warm at the unnarrowed
+/// `string | number`. The elided position takes the same fail-closed
+/// discipline: the read keeps the unnarrowed join, the demand carries the
+/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn unselected_initializer_assertion_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/unselected-init-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const unused = (assertString(x), 0);
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A DESTRUCTURING declarator never lowers (it is not a simple local
+/// reaching definition) — but its initializer still runs at the statement,
+/// so the assertion in `const { a } = (assertString(x), { a: 0 })` narrows
+/// `x` for the checker while nothing here modeled or scanned it. The same
+/// typed `GuardNarrowing` gap applies: the read stays unnarrowed and the
+/// family slot holds zero candidates.
+#[test]
+fn destructuring_initializer_assertion_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/destructuring-init-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const { a } = (assertString(x), { a: 0 });
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// An enum declaration is not transparent: every member initializer
+/// evaluates in THIS frame at the statement, so the assertion in `enum E {
+/// A = (assertString(x), 1) }` narrows `x` for every read that follows in
+/// the checker. The declaration lowered as a no-op — no obligation, no
+/// scanner — so the unnarrowed superset could seal complete and warm. The
+/// same fail-closed discipline applies: the read of `x` keeps the
+/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap, and
+/// the family slot holds zero candidates.
+#[test]
+fn enum_member_initializer_assertion_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/enum-init-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  enum E { A = (assertString(x), 1) }
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// The discarded-operand scan must see WRITES, not only calls: the write
+/// in `(void (class { static { x = "s"; } }), x)` hides in a discarded
+/// operand's class static block, runs at the enclosing statement, and
+/// retypes `x` in the checker for the read the sequence's value carries.
+/// The skeleton skips the class subtree, so the write reached neither the
+/// effect ledger nor a scanner — the sequence's read of `x` could publish
+/// the unnarrowed superset complete and warm. The write takes the typed
+/// `GuardNarrowing` gap instead, and the family slot holds zero
+/// candidates.
+#[test]
+fn discarded_operand_class_write_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/discarded-operand-class-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function f(x: string | number) {
+  return { x: (void (class { static { x = "s"; } }), x) };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A `for … of` whose left side is an assignment target WRITES the binding
+/// once per iteration — inside a class static block the write runs at
+/// class evaluation and retypes `x` in the checker, while the default walk
+/// visited the target as a plain read and the skeleton never entered the
+/// class subtree. The loop-head target takes the same whole-binding write
+/// discipline: the return's read of `x` keeps the unnarrowed join, the
+/// demand carries the typed `GuardNarrowing` gap, and the family slot
+/// holds zero candidates.
+#[test]
+fn for_of_left_target_write_in_scanned_position_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/for-of-left-target-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+declare const xs: string[];
+
+function f(x: string | number) {
+  class C { static { for (x of xs) {} } }
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A `switch` case TEST is a control position: `switch (true) { case
+/// isString(x): … }` narrows `x` inside the clause in the checker exactly
+/// as the `if` twin does. The lowering modeled only literal case tests, so
+/// a predicate call there reached neither a guard, nor an obligation, nor
+/// a scanner — the clause's read of `x` could publish the unnarrowed
+/// superset complete and warm. The case test takes the control-test
+/// discipline: an unprovable control callee keeps every read of `x`
+/// unnarrowed, the demand carries the typed `GuardNarrowing` gap, and the
+/// family slot holds zero candidates.
+#[test]
+fn switch_case_test_predicate_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/switch-case-test-predicate/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function isString(x: unknown): x is string { return typeof x === "string" }
+
+function f(x: string | number) {
+  switch (true) {
+    case isString(x):
+      break;
+    default:
+      break;
+  }
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A `switch` clause whose dispatch relation this half cannot carry must
+/// never be dispatched as the DEFAULT clause.
+///
+/// The default clause's dispatch edge is "the discriminant minus every
+/// carried test". Routing an unrecognized relation onto that edge is not
+/// a superset — it is a WRONG value: the clause is published as if it
+/// were reached only by the discriminant values no other clause claimed,
+/// so an arm the clause genuinely can see (`"b"`, claimed by the
+/// preceding literal clause) disappears from its read. A degraded result
+/// is still USED by tolerant consumers, so a partial must approximate in
+/// the safe direction. The unrecognized clause therefore applies NO
+/// dispatch narrow, and the switch carries the typed gap.
+#[test]
+fn switch_unrecognized_case_relation_never_takes_the_default_edge() {
+    const CANONICAL: &str = "/ws/switch-unrecognized-case-relation/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+const k: "a" = "a";
+
+function f(x: "a" | "b" | "c") {
+  switch (x) {
+    case "b":
+      throw new Error();
+    case k:
+      return { x };
+  }
+  throw new Error();
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let read = object_prop(&expr, "x");
+        let verter_type_expr::TypeExpr::Union(arms) = read else {
+            panic!("the unrecognized clause keeps the whole discriminant union, got {expr:?}");
+        };
+        for literal in ["a", "b", "c"] {
+            assert!(
+                arms.iter().any(|arm| matches!(
+                    arm,
+                    verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                        value
+                    )) if value.as_str() == literal
+                )),
+                "the `{literal}` arm survives an uncarried dispatch relation, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "the uncarried dispatch relation degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an uncarried dispatch relation never warms"
+        );
+    });
+}
+
+/// An expression statement that is neither a modeled write nor a bare
+/// assertion call still EXECUTES: the discarded sequence operand of
+/// `(assertString(x), 0);` narrows `x` to `string` in the checker for the
+/// read that follows, while no content lowered for it and no obligation
+/// reached it — the return's read of `x` could seal complete and warm at
+/// the unnarrowed `string | number`. The statement takes the fail-closed
+/// scan: the read keeps the unnarrowed join, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn expression_statement_discarded_assertion_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/expression-statement-discarded-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  (assertString(x), 0);
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A call inside a discarded operand's NESTED frame never executes in
+/// this frame: the arrow body of `((() => { assertString(x); }), x)`
+/// runs only if the arrow is called, which nothing here does — so the
+/// checker narrows NOTHING and the read of `x` stays `string | number`.
+/// Walking the discarded operand without nested-frame boundaries
+/// collected the arrow body's call, could not certify the closed
+/// `asserts` callee, and flagged the typed gap for a call that never
+/// runs — a spurious degraded success. The nested-frame discipline
+/// collects nothing there: the demand stays CLEAN, keeps the unnarrowed
+/// join, and admits warm.
+#[test]
+fn discarded_operand_nested_frame_call_never_gaps_this_frame() {
+    const CANONICAL: &str = "/ws/discarded-nested-frame/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  return ((() => { assertString(x); }), x);
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "f: a never-executing call mints no gap — the demand stays clean"
+        );
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("f: the read of `x` keeps the unnarrowed join, got {expr:?}");
+        };
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Number,
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+                "f: the arrow body never runs — the {primitive:?} arm survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "f: a clean complete result admits warm"
+        );
+    });
+}
+
+/// A CONTROL position nested inside a leaf-lowered expression is still a
+/// control position: the checker binds the predicate call in the ternary
+/// test into the branch narrowing even though the WHOLE array folds into
+/// one shallow-pass leaf answer — `[isString(x) ? x : false]` is
+/// `(string | boolean)[]` in the checker. Blanket-certifying the nested
+/// test call decided-above dropped that narrowing and the unnarrowed
+/// superset sealed complete and warm. The nested control call takes the
+/// per-callee certification instead: a predicate callee is unprovable
+/// here, so the element keeps the unnarrowed join, the demand carries the
+/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn leaf_nested_conditional_predicate_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/leaf-nested-control/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function isString(x: unknown): x is string {
+  return typeof x === "string";
+}
+
+function f(x: string | number) {
+  return [isString(x) ? x : false];
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Array { element, .. } = &expr else {
+            panic!("f: the return is an array, got {expr:?}");
+        };
+        // The dropped branch narrowing never collapses the element to the
+        // narrowed branch read: the `false` arm survives and no arm is the
+        // narrowed `string`. (The consequent's bare `typeof x` root rides
+        // its own typed miss carrier — bare frame-rooted `typeof` roots
+        // are not path-projected, before and after this change.)
+        let verter_type_expr::TypeExpr::Union(arms) = element.as_ref() else {
+            panic!("f: the element keeps the unnarrowed join, got {expr:?}");
+        };
+        assert!(
+            arms.iter().any(|arm| *arm
+                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)),
+            "f: the `false` arm survives, got {expr:?}"
+        );
+        assert!(
+            !arms.iter().any(|arm| *arm
+                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
+            "f: the narrowed branch read never publishes, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "f: the nested control call degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "f: an unprovable nested control call never warms"
+        );
+    });
+}
+
+/// A type carrier folds a non-object operand into ONE shallow-pass answer
+/// without visiting it, so a direct assertion call under the carrier —
+/// `(assertString(x) as void)` — never reaches a structural arm and would
+/// be blanket-certified decided-above while the checker narrows every read
+/// that follows. The call takes the per-callee certification instead: an
+/// `asserts` callee is unprovable, so the later read of `x` keeps the
+/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap, and
+/// the family slot holds zero candidates.
+#[test]
+fn leaf_carrier_wrapped_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/carrier-wrapped-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = (assertString(x) as void);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// The RIGHTMOST operand of a sequence is the sequence's value, so the
+/// discarded-operand split never touches it — but a carrier folding the
+/// whole sequence discards the VALUE, not the evaluation: `((0,
+/// assertString(x)) as unknown)` still runs the assertion, and the checker
+/// narrows every read that follows. The folded rightmost assertion takes
+/// the same per-callee certification: unprovable, so the later read of `x`
+/// keeps the unnarrowed join, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn rightmost_sequence_assertion_under_carrier_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/rightmost-sequence-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = ((0, assertString(x)) as unknown);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A class STATIC BLOCK runs at class evaluation — enclosing-frame
+/// immediate, unlike the deferred bodies around it. Guarding the whole
+/// class body as a nested frame skipped the sequence split for the block,
+/// blanket-certifying the block's assertion decided-above while the
+/// checker narrows `x` for the read that follows the class. The static
+/// block takes the same-frame discipline: the assertion is unprovable, so
+/// the later read of `x` keeps the unnarrowed join, the demand carries the
+/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn class_static_block_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/static-block-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = (class { static { (assertString(x), 0); } } as object);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A STATIC property initializer also runs at class evaluation, so an
+/// assertion there narrows what follows exactly as a static block's
+/// would. The initializer takes the same enclosing-frame discipline: the
+/// later read of `x` keeps the unnarrowed `string | number` join, the
+/// demand carries the typed `GuardNarrowing` gap, and the family slot
+/// holds zero candidates.
+#[test]
+fn class_static_property_initializer_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/static-property-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = (class { static p = (assertString(x), 0); } as object);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A FLOW-rooted component's carrier — the self-root union the root and
+/// its batched members publish on — covers every file any drained member
+/// observed, the CALL members included. Here `seed`'s initializer in a
+/// THIRD file calls back into the pending root, so its call drains as a
+/// call member whose self-roots name that file (its program point and
+/// its argument node), while no flow or relation member of the component
+/// does: a carrier composed from the flow and relation members alone
+/// omits it. The component degrades (a program-expression hold has no
+/// value to resurrect the read with) and publishes nothing, so the
+/// composed carrier is read through the observation probe.
+///
+/// The explicit-type-argument spelling of the same omission
+/// (`bb<Arg>(n - 1)` with `Arg` imported from a third file) composes the
+/// same incomplete carrier, but its edit is already caught by the fact
+/// rail — the import's resolution facts — so it warms and invalidates
+/// correctly before and after the union; the third-file program point is
+/// the observation that only the union covers.
+#[test]
+fn flow_root_component_carrier_covers_call_member_roots() {
+    const A: &str = "/ws/scc-call-roots/a.ts";
+    const A_SRC: &str = r#"
+import { seed } from "/ws/scc-call-roots/c";
+
+export function a(n: number) {
+  if (n <= 0) return seed;
+  return 1;
+}
+"#;
+    const C: &str = "/ws/scc-call-roots/c.ts";
+    const C_SRC: &str = r#"
+import { a } from "/ws/scc-call-roots/a";
+
+export const seed = a(0);
+"#;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, A, A_SRC);
+    upsert_ts(&host, C, C_SRC);
+    *host
+        .flow_fault_injection
+        .flow_root_carrier_probe
+        .lock()
+        .expect("the flow-root carrier probe is never poisoned") = Some(Vec::new());
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, A, "a");
+        let _ = execute_flow(dispatch, key);
+    });
+    let roots = host
+        .flow_fault_injection
+        .flow_root_carrier_probe
+        .lock()
+        .expect("the flow-root carrier probe is never poisoned")
+        .take()
+        .expect("the probe stays armed");
+    assert!(
+        !roots.is_empty(),
+        "the flow-root close composed and recorded a carrier"
+    );
+    for file in [A, C] {
+        assert!(
+            roots.iter().any(|root| root.as_ref() == file),
+            "the component carrier covers {file}: {roots:?}"
+        );
+    }
+}
+
+/// A mixed component's UNPROVEN deferred flow members poison the
+/// MACHINERY ROOT that consumed their values. The joint fixed point
+/// feeds the evaluated flow-member overrides into the call/relation
+/// equations before the members finalize, so a close that refuses the
+/// member batch (the torn-component rule) but hands the root back as
+/// admissible would warm a verdict around an unproven flow-derived
+/// value. The discharge coordinator must mark the whole outcome
+/// non-admissible: the root's payload still flows (ReturnOnly), and the
+/// relation memo admits nothing. The proven control keeps the root
+/// admissible.
+#[test]
+fn unproven_flow_member_poisons_mixed_machinery_root() {
+    use super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence;
+    use super::dispatch_txn::{FlowReturnPendingOutcome, InferenceOccurrence, PendingVerdict};
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let member_key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        // A REAL prepared member demand: the carrier below is the one the
+        // finalizer triangulates against.
+        let idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(member_key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&member_key, idx);
+        let carrier = dispatch
+            .flow_demand_carrier_of(&member_key)
+            .expect("the member demand installs");
+        let provenance = carrier.provenance;
+        // The drained member: an EVALUATED value whose discharge report is
+        // MISSING — its planned obligations stay pending, so finalization
+        // refuses (unproven), exactly the torn-component shape.
+        let member = super::relation::DrainedFlowReturnMember {
+            key: member_key,
+            outcome: FlowReturnPendingOutcome::EvaluatedValue(
+                crate::semantic_query::FlowReturnResult::new(graph, number, false, None),
+            ),
+            inline_flight: None,
+            holds: Vec::new(),
+            self_roots: Vec::new(),
+            materialized: crate::semantic_query::demand::MaterializedSet::empty(),
+            fresh_seed: false,
+            flow_demand: Some(carrier),
+            discharge: None,
+            provenance,
+        };
+        let relate_key = dispatch.relate_key_for(number, number);
+        let outcome = dispatch
+            .relation_discharge_and_route(
+                true,
+                Some((
+                    relate_key,
+                    InferenceOccurrence::ARGUMENT_COVARIANT,
+                    PendingVerdict::Assignable {
+                        bindings: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    false,
+                    false,
+                    None,
+                    None,
+                )),
+                Vec::new(),
+                vec![member],
+                None,
+                Vec::new(),
+                false,
+                &ObservedFlowConvergence {
+                    iterations: 1,
+                    stable: true,
+                },
+            )
+            .expect("the mixed close routes");
+        assert!(
+            outcome.self_publish.is_some(),
+            "the machinery root's payload still flows to its ReturnOnly build"
+        );
+        assert!(
+            outcome.flow_batch_unproven,
+            "a refused flow-member batch must mark the machinery root's \
+             outcome non-admissible — the mixed equation consumed the \
+             members' evaluated values"
+        );
+    });
+
+    // Control: a PROVEN member batch keeps the root admissible.
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let relate_key = dispatch.relate_key_for(number, number);
+        let outcome = dispatch
+            .relation_discharge_and_route(
+                true,
+                Some((
+                    relate_key,
+                    InferenceOccurrence::ARGUMENT_COVARIANT,
+                    PendingVerdict::Assignable {
+                        bindings: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    false,
+                    false,
+                    None,
+                    None,
+                )),
+                Vec::new(),
+                Vec::new(),
+                None,
+                Vec::new(),
+                false,
+                &ObservedFlowConvergence {
+                    iterations: 1,
+                    stable: true,
+                },
+            )
+            .expect("the member-free close routes");
+        assert!(
+            outcome.self_publish.is_some() && !outcome.flow_batch_unproven,
+            "a component without a refused member batch keeps the root admissible"
+        );
+    });
+}
+
+/// Set the per-host one-shot slot that leaves `member` as an UNPROVEN
+/// provisional flow member beneath the next machinery root's close.
+fn arm_unproven_member(host: &VerterHost, member: &FlowReturnKey) {
+    *host
+        .flow_fault_injection
+        .unproven_flow_member
+        .lock()
+        .expect("the unproven-member fault slot is never poisoned") = Some(member.clone());
+}
+
+/// Whether the one-shot slot was consumed — i.e. a machinery-root build
+/// actually ran and drained the injected member.
+fn unproven_member_slot_consumed(host: &VerterHost) -> bool {
+    host.flow_fault_injection
+        .unproven_flow_member
+        .lock()
+        .expect("the unproven-member fault slot is never poisoned")
+        .is_none()
+}
+
+/// The ReturnOnly rails a build folds around an unproven flow value:
+/// partial, cache-suppressed, under the flow-unverified reason class.
+#[track_caller]
+fn assert_flow_unverified_rails(
+    result_is_partial: bool,
+    cache_suppress: bool,
+    reasons: crate::semantic_query::PartialReasonSet,
+    what: &str,
+) {
+    assert!(
+        result_is_partial && cache_suppress,
+        "{what}: the build folds the ReturnOnly rails (partial: {result_is_partial}, \
+         suppressed: {cache_suppress})"
+    );
+    assert!(
+        reasons.contains(crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+        "{what}: the refusal rides the flow-unverified class, got {reasons:?}"
+    );
+}
+
+/// SEAM — the RELATION machinery root. An unproven flow member drained
+/// at the root's close turns the decided verdict into
+/// `DecidedReturnOnly`: the payload still reaches the caller, the build
+/// folds the flow-unverified ReturnOnly rails, the relation family slot
+/// admits NOTHING, and the next request runs the build again (the slot
+/// is consumed a second time). The unarmed control admits once. The
+/// member enters through the real provisional pop path beneath the open
+/// root frame, so the close drains it exactly as an organic torn
+/// component would.
+#[test]
+fn unproven_flow_member_makes_relation_root_decided_return_only() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let query_key = dispatch.relate_key_for(number, number).to_query_key();
+        let member = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        for request in 1..=2 {
+            arm_unproven_member(&host, &member);
+            let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+            assert!(
+                unproven_member_slot_consumed(&host),
+                "request {request}: the relation root build ran and drained the injected member"
+            );
+            assert!(
+                matches!(
+                    read.value,
+                    QueryResult::Value(SemanticQueryValue::Relation(_))
+                ),
+                "request {request}: the decided verdict still flows to the caller, got {:?}",
+                read.value
+            );
+            assert_flow_unverified_rails(
+                read.result_is_partial,
+                read.cache_suppress,
+                read.partial_reasons,
+                &format!("request {request}: relation root"),
+            );
+            assert_eq!(
+                graph.slot_candidate_count_for_tests(&query_key),
+                0,
+                "request {request}: the relation memo admits nothing composed around an \
+                 unproven flow value — the second request recomputes"
+            );
+        }
+
+        let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Value(SemanticQueryValue::Relation(_))
+            ),
+            "control: the decided verdict flows, got {:?}",
+            read.value
+        );
+        assert!(
+            !read.result_is_partial && !read.cache_suppress,
+            "control: an unpoisoned root keeps the clean rails"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&query_key),
+            1,
+            "control: an unpoisoned relation root admits once"
+        );
+    });
+}
+
+/// SEAM — the CALL machinery root. An unproven flow member drained at
+/// the root's close turns the complete result into `CompleteReturnOnly`:
+/// the resolved call still reaches the caller, the build is
+/// cache-suppressed under the flow-unverified class, the call family
+/// slot admits nothing, and NOTHING is queued to the completed-member
+/// batches of either domain. The unarmed control admits once.
+#[test]
+fn unproven_flow_member_makes_call_root_complete_return_only() {
+    use crate::semantic_query::{CallKind, FunctionParam, SignatureKind};
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let declared = super::call_resolve_tests::signature(
+            dispatch,
+            "poisonedCallRoot",
+            0,
+            SignatureKind::Call,
+            vec![FunctionParam::synthetic(None, number, false, false)],
+            Vec::new(),
+            number,
+        );
+        let callee = super::call_resolve_tests::callable(dispatch, vec![declared], Vec::new());
+        let query_key =
+            SemanticQueryKey::ResolveCall(Box::new(super::call_resolve_tests::call_key(
+                dispatch,
+                callee,
+                CallKind::Call,
+                None,
+                vec![super::call_resolve_tests::eager(number)],
+            )));
+        let member = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+
+        arm_unproven_member(&host, &member);
+        let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+        assert!(
+            unproven_member_slot_consumed(&host),
+            "the call root build ran and drained the injected member"
+        );
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Value(SemanticQueryValue::ResolveCall(_))
+            ),
+            "the resolved call still flows to the caller, got {:?}",
+            read.value
+        );
+        assert_flow_unverified_rails(
+            read.result_is_partial,
+            read.cache_suppress,
+            read.partial_reasons,
+            "call root",
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&query_key),
+            0,
+            "the call memo admits nothing composed around an unproven flow value"
+        );
+        {
+            let txn = dispatch.dispatch_txn.borrow();
+            assert!(
+                txn.call.completed_members.is_empty(),
+                "the poisoned root is never queued as a completed call member"
+            );
+            assert!(
+                txn.flow.completed_members.is_empty(),
+                "the refused member batch queues no completed flow member"
+            );
+        }
+
+        let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Value(SemanticQueryValue::ResolveCall(_))
+            ),
+            "control: the resolved call flows, got {:?}",
+            read.value
+        );
+        assert!(
+            !read.result_is_partial && !read.cache_suppress,
+            "control: an unpoisoned root keeps the clean rails"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&query_key),
+            1,
+            "control: an unpoisoned call root admits once"
+        );
+    });
+}
+
+/// SEAM — the FLOW machinery root. An unproven flow member drained at
+/// the root's close withholds the root's OWN verdict: no proof token
+/// mints, the usable value still flows, the build folds the
+/// flow-unverified ReturnOnly rails, and neither the root's nor the
+/// member's family slot admits a candidate. The unarmed control proves
+/// and admits once.
+#[test]
+fn unproven_flow_member_withholds_flow_root_verdict() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let root = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let member = flow_key(
+            dispatch,
+            "subParam",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let root_query = SemanticQueryKey::FlowReturn(Box::new(root));
+        let member_query = SemanticQueryKey::FlowReturn(Box::new(member.clone()));
+
+        arm_unproven_member(&host, &member);
+        let read = dispatch.execute_via_cold_build_helper(root_query.clone());
+        assert!(
+            unproven_member_slot_consumed(&host),
+            "the flow root build ran and drained the injected member"
+        );
+        let QueryResult::Value(SemanticQueryValue::FlowReturn(result)) = &read.value else {
+            panic!(
+                "the root's evaluated value still flows, got {:?}",
+                read.value
+            );
+        };
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the root's own value is usable — only its proof is withheld"
+        );
+        assert_flow_unverified_rails(
+            read.result_is_partial,
+            read.cache_suppress,
+            read.partial_reasons,
+            "flow root",
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&root_query),
+            0,
+            "no proof token: the root never warms"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&member_query),
+            0,
+            "the refused member never warms"
+        );
+
+        let read = dispatch.execute_via_cold_build_helper(root_query.clone());
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Value(SemanticQueryValue::FlowReturn(_))
+            ),
+            "control: the root's value flows, got {:?}",
+            read.value
+        );
+        assert!(
+            !read.result_is_partial && !read.cache_suppress,
+            "control: an unpoisoned root keeps the clean rails"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&root_query),
+            1,
+            "control: an unpoisoned flow root proves and admits once"
+        );
+    });
+}
+
+/// Structural discharge claims are WALK-LEDGER-GATED: the execution
+/// witness yields an executed selection only from the evaluator's own
+/// recorded walk ledger (regions entered/completed at the walk sites),
+/// never by copying the plan's selection. An evaluation whose walk
+/// ledger is short/aborted (modelling an early-exit run that did not
+/// complete the structural walk) claims NO structural obligation: the
+/// usable value still flows, zero candidates, and the second demand
+/// recomputes. The unarmed control warms. Mutation: assign the witness's
+/// executed selection from the plan unconditionally; the armed leg
+/// admits and fails.
+#[test]
+fn short_walk_ledger_never_discharges_structural_claims() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _short = inject::Guard::arm(&host.flow_fault_injection.short_execution_ledger);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a short walk ledger claims no structural obligation and never warms"
+        );
+    });
+
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the completed walk's ledger yields the executed selection and warms"
+        );
+    });
+}
+
+/// The evaluation-provenance token is RUNTIME-unique, not merely
+/// (store, generation, ordinal)-unique: every fresh dispatch creates a
+/// fresh obligation runtime with an EMPTY demand ledger, so the first
+/// demand of two genuine runtimes against the same host bears the same
+/// ledger ordinal (zero). A token without the runtime axis aliases
+/// across them, and the finalizer's carrier comparison could not tell
+/// one runtime's first-demand evidence from the other's. Both first
+/// tokens must differ, and finalizing one runtime's demand with the
+/// OTHER runtime's first-demand token must be the typed
+/// `ForeignProvenance` partial — never a proof.
+#[test]
+fn provenance_distinguishes_first_demands_of_two_runtimes() {
+    use super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence;
+    use super::flow_solve::{FlowPartialReason, FlowSolveOutcome};
+
+    let host = make_host();
+    let key_of = |dispatch: &ProjectSemanticDispatch| {
+        flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        )
+    };
+    // Runtime A: its FIRST demand's carrier token.
+    let provenance_a = with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch);
+        let idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&key, idx);
+        dispatch
+            .flow_demand_carrier_of(&key)
+            .expect("the first demand installs on runtime A")
+            .provenance
+    });
+    // Runtime B: a genuine fresh dispatch runtime against the SAME host
+    // and unchanged generation — its first demand also bears ordinal 0.
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch);
+        let idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&key, idx);
+        let carrier = dispatch
+            .flow_demand_carrier_of(&key)
+            .expect("the first demand installs on runtime B");
+        assert_ne!(
+            carrier.provenance, provenance_a,
+            "two runtimes' first demands must not mint identical provenance"
+        );
+        // The functional leg: runtime A's first-demand token presented as
+        // runtime B's evaluation evidence is foreign, never a proof.
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let result = crate::semantic_query::FlowReturnResult::new(graph, number, false, None);
+        let verdict = dispatch.finalize_flow_demand(
+            Some(&carrier),
+            None,
+            &ObservedFlowConvergence {
+                iterations: 1,
+                stable: true,
+            },
+            provenance_a,
+            &result,
+        );
+        assert!(
+            matches!(
+                verdict,
+                Some(FlowSolveOutcome::Partial(ref partial))
+                    if matches!(partial.reason, FlowPartialReason::ForeignProvenance)
+            ),
+            "the other runtime's first-demand token must finalize as the \
+             typed ForeignProvenance partial, got {verdict:?}"
+        );
+    });
+}
+
+/// Discharge claims are EVALUATOR-ORIGIN: a call obligation is claimed
+/// only from the call-sink evidence the evaluation actually recorded, and
+/// a relation obligation additionally requires every relation outcome the
+/// occurrence's resolution consumed to be decided. An evaluation whose
+/// recorded call evidence is dropped (modelling work it never performed)
+/// finalizes unproven — the usable value still flows, zero candidates —
+/// and so does one whose calls consumed undecided relation outcomes. The
+/// unarmed control warms. Mutation: claim call/relation obligations from
+/// the plan's own specs instead of the recorded evidence; both armed legs
+/// admit and fail.
+#[test]
+fn discharge_claims_require_evaluator_call_evidence() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    // Armed: the evaluation's recorded call evidence is dropped — the
+    // planned CallSite / SemanticRelation obligations have no evidence to
+    // claim, so the demand never seals.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _suppress = inject::Guard::arm(&host.flow_fault_injection.suppress_call_evidence);
+        let key = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a call obligation without evaluator-recorded evidence never discharges"
+        );
+    });
+
+    // Armed: every recorded call is marked relation-undecided — the
+    // SemanticRelation obligation has no decided outcome to claim.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _undecided = inject::Guard::arm(&host.flow_fault_injection.undecided_relation_evidence);
+        let key = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a relation obligation without a decided relation outcome never discharges"
+        );
+    });
+
+    // Control: the unarmed evaluation records its call evidence and warms.
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "evaluator-recorded call evidence discharges and the demand seals"
+        );
+    });
 }

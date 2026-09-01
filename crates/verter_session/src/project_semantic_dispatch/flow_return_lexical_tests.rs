@@ -1846,6 +1846,7 @@ fn r5_key_part(
         context: dispatch.flow_return_context_for(R5_CANONICAL),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
 
@@ -5715,7 +5716,14 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// tnGenericMember    string            fails closed ← composes a call
 /// tnAmbSequence      "TA"              fails closed ← call position
 /// tnAmbNonNull       "TA"              fails closed ← call position
-/// tnAmbAs            "TA"              "TA"         ← exact
+/// tnAmbAs            "TA"              "TA"         ← exact value, but
+///                                                     DEGRADED and never
+///                                                     warm: the folded
+///                                                     call's callee is an
+///                                                     exported overload
+///                                                     pair, unprovable
+///                                                     under the per-callee
+///                                                     certification
 /// tnStrTernary       "a" | "b"         "a" | "b"    ← exact
 /// tnGenericBare      string            string       ← exact: the explicit
 ///                                                     type argument
@@ -5728,8 +5736,8 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// None`; dropping `SequenceExpression` / the type-carrier recursion
 /// from `value_is_unmodeled_call` flips the two call-position rows the
 /// same way; making the gate unconditional on the form (dropping the
-/// `embeds_any` conjunct) flips `tnAmbAs` / `tnStrTernary` to fail
-/// closed, which is the over-refusal direction.
+/// `embeds_any` conjunct) flips `tnAmbAs` / `tnStrTernary` to full
+/// fail-closed marker values, which is the over-refusal direction.
 #[test]
 fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     let host = make_r5_host();
@@ -5753,7 +5761,25 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     // The two rows that ARE exact, and the explicit-type-argument row the
     // executor now resolves exactly: they discriminate the `any` rows
     // above from "everything answers `any`".
-    assert_clean_warm(&host, "tnAmbAs", string_lit("TA"));
+    //
+    // `tnAmbAs`: the carrier pins the value — `"TA"` is the carrier's own
+    // exact answer, and the call's result is genuinely discarded — but the
+    // call under the carrier is certified decided-above ONLY when the
+    // callee provably establishes no narrowing, and `tnAmb` is an
+    // EXPORTED, OVERLOADED ambient pair: its checker-visible signature set
+    // is not enumerable from this file (a merged `declare module` overload
+    // could carry an `asserts` predicate). The value still publishes
+    // exact, DEGRADED through the typed guard-narrowing gap, never warm.
+    let tn_amb_as = r5_eval(&host, "tnAmbAs").expect("tnAmbAs must produce a value");
+    assert_eq!(tn_amb_as.ty, string_lit("TA"), "tnAmbAs return type");
+    assert_eq!(
+        tn_amb_as.degradation,
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        )),
+        "tnAmbAs: the unprovable carrier-folded call degrades to the typed gap"
+    );
+    assert_eq!(tn_amb_as.candidates, 0, "tnAmbAs never warms");
     assert_clean_warm(
         &host,
         "tnStrTernary",
@@ -6053,6 +6079,14 @@ const R1_CANONICAL: &str = "/ws/flow-r1fix.ts";
 const R1_FIXTURE: &str = r#"
 export declare function mayThrow(): void;
 
+// The MODULE-LOCAL twin. An exported binding is augmentable, so its
+// checker-visible signature set is not enumerable from this file and a
+// statement-position call to it is unproven — it could assert about a
+// frame binding, and it could diverge. The unexported ambient
+// declaration IS enumerable: one declaration, an authored `void` return,
+// no export spelling to augment through.
+declare function mayThrowClosed(): void;
+
 // The predicate helpers stay UNEXPORTED: the same-file predicate scan
 // reads direct function declarations, and an `export` wrapper is a
 // different statement shape (the corpus's scripts, spliced into a
@@ -6130,11 +6164,23 @@ export function r1SwitchCaseNarrows(u: A | B) {
 
 export function r1ThrowPointJoin(s: string) {
   let x: string | number = 0;
+  try { x = s; mayThrowClosed(); x = 0 } catch { return x }
+  return x
+}
+
+export function r1ThrowPointJoinOpenCallee(s: string) {
+  let x: string | number = 0;
   try { x = s; mayThrow(); x = 0 } catch { return x }
   return x
 }
 
 export function r1FinallyWrite() {
+  let x: string | number | boolean = true;
+  try { mayThrowClosed() } finally { x = 1 }
+  return x
+}
+
+export function r1FinallyWriteOpenCallee() {
   let x: string | number | boolean = true;
   try { mayThrow() } finally { x = 1 }
   return x
@@ -6184,6 +6230,7 @@ fn r1_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
             context: dispatch.flow_return_context_for(R1_CANONICAL),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::FlowReturn(result),
@@ -6432,7 +6479,10 @@ fn flow_return_destructured_default_strips_aliased_undefined() {
 const R2_CANONICAL: &str = "/ws/flow-r2fix.ts";
 const R2_FIXTURE: &str = r#"
 export declare function mayThrow(): void;
-export declare function maybeOk(): boolean;
+// The control-test callee stays UNEXPORTED: an exported binding is
+// augmentable, so only a module-local single declaration is a provably
+// closed (certifiable) callee of an `if` test.
+declare function maybeOk(): boolean;
 
 export function r2SwitchFallthroughChain(x: "a" | "b" | "c") {
   switch (x) { case "a": case "b": return x; default: return "z" }
@@ -6513,6 +6563,7 @@ fn r2_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
             context: dispatch.flow_return_context_for(R2_CANONICAL),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::FlowReturn(result),

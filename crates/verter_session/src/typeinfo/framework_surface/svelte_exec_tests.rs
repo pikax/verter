@@ -1042,15 +1042,15 @@ fn snippet_union_arms_combine_by_index_into_intersection_binding() {
         Some("a"),
         "the FIRST arm's label names the position"
     );
+    // The combined position intersects both arms; `string & number` is
+    // PROVABLY disjoint at tag level, so the canonical intersection reduces
+    // it to `never` (checker-confirmed: `IsNever<string & number>` is
+    // `true`) — never a first-arm override.
     match node_data_for(dispatch.ctx, params[0].ty).as_deref() {
-        Some(crate::semantic_query::SemanticNodeData::Intersection(arms)) => {
-            assert_eq!(
-                arms.as_ref(),
-                &[a_ty, b_ty][..],
-                "the combined position type intersects both arms' exact nodes, in arm order"
-            );
-        }
-        other => panic!("the combined position type is an `Intersection` node, got {other:?}"),
+        Some(crate::semantic_query::SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Never,
+        )) => {}
+        other => panic!("the disjoint combined position reduces to `never`, got {other:?}"),
     }
 
     let bindings = materialize_snippet_slot_bindings(
@@ -1062,7 +1062,7 @@ fn snippet_union_arms_combine_by_index_into_intersection_binding() {
     assert_eq!(bindings[0].name, "a");
     assert_eq!(
         bindings[0].type_annotation.as_deref(),
-        Some("string & number"),
+        Some("never"),
         "the published binding type is the intersection of both arms, got {:?}",
         bindings[0].type_annotation
     );

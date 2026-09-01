@@ -448,10 +448,16 @@ pub(crate) fn read_positive_surface_members(
                 crate::semantic_query::QueryResult::Value(formula) => formula,
                 _ => return Vec::new(),
             };
-            crate::project_semantic_dispatch::walk::spread_formula_positive_members_for_macro(
-                ctx.project_type_store().semantic_graph(),
-                &formula,
-            )
+            let mut canonical_evidence =
+                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+            let members =
+                crate::project_semantic_dispatch::walk::spread_formula_positive_members_for_macro(
+                    ctx.project_type_store().semantic_graph(),
+                    &formula,
+                    &mut canonical_evidence,
+                );
+            dispatch.deposit_canonical_evidence(canonical_evidence);
+            members
         }
         Some(SemanticNodeData::Union(arms)) => {
             let arms = Arc::clone(arms);
@@ -459,10 +465,16 @@ pub(crate) fn read_positive_surface_members(
                 .iter()
                 .map(|arm| read_positive_surface_members(ctx, *arm))
                 .collect();
-            crate::project_semantic_dispatch::walk::presence_union_members(
+            let mut canonical_evidence =
+                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+            let members = crate::project_semantic_dispatch::walk::presence_union_members(
                 ctx.project_type_store().semantic_graph(),
                 &per_arm,
-            )
+                &mut canonical_evidence,
+            );
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
+                .deposit_canonical_evidence(canonical_evidence);
+            members
         }
         // Intersection carriers merge under INTERSECTION rules (required
         // in any declaring arm stays required, same-key collisions
@@ -475,10 +487,16 @@ pub(crate) fn read_positive_surface_members(
                 .iter()
                 .map(|arm| read_positive_surface_members(ctx, *arm))
                 .collect();
-            crate::project_semantic_dispatch::walk::presence_intersection_members(
+            let mut canonical_evidence =
+                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+            let members = crate::project_semantic_dispatch::walk::presence_intersection_members(
                 ctx.project_type_store().semantic_graph(),
                 &per_arm,
-            )
+                &mut canonical_evidence,
+            );
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
+                .deposit_canonical_evidence(canonical_evidence);
+            members
         }
         Some(SemanticNodeData::Conditional {
             true_branch_ref,
@@ -486,13 +504,19 @@ pub(crate) fn read_positive_surface_members(
             ..
         }) => {
             let (true_branch, false_branch) = (*true_branch_ref, *false_branch_ref);
-            crate::project_semantic_dispatch::walk::presence_union_members(
+            let mut canonical_evidence =
+                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+            let members = crate::project_semantic_dispatch::walk::presence_union_members(
                 ctx.project_type_store().semantic_graph(),
                 &[
                     read_positive_surface_members(ctx, true_branch),
                     read_positive_surface_members(ctx, false_branch),
                 ],
-            )
+                &mut canonical_evidence,
+            );
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
+                .deposit_canonical_evidence(canonical_evidence);
+            members
         }
         _ => Vec::new(),
     }

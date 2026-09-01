@@ -754,3 +754,158 @@ pub mod projection_bench_support {
         ProjectionBenchCase, ProjectionBenchHarness,
     };
 }
+
+// ── Private flow-solve completeness-proof surface (hermetic) ────────────
+// The fixtures' content keys stay `pub(crate)`; construction/planning go
+// through the wrapper below.
+/// The store-retained structural plan carrier the demand planner consumes:
+/// the slice identity minted over the bound graph plus the selection it
+/// covers. Tests pass it around as an opaque provenance token.
+pub use crate::cache_runtime::flow_slice_node::PlannedFlowSlice;
+pub use crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::*;
+pub use crate::project_semantic_dispatch::dispatch_txn::ObligationRuntime;
+pub use crate::project_semantic_dispatch::flow_solve::*;
+
+/// One hermetic flow-solve fixture: `source`'s first function declaration,
+/// parsed and indexed ONCE — the store-minted bound graph (skeleton +
+/// graph sealed to the content key by `FunctionFlowGraphStore`) plus the
+/// frame's real binding inventory from the `FunctionProgramIndex`.
+pub struct FlowGraphFixtureForTests {
+    bound: crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+    inventory: FlowBindingInventory,
+}
+
+#[rustfmt::skip]
+impl FlowGraphFixtureForTests {
+    /// The ONE structural plan the production hash node would retain for
+    /// this demand over this fixture's bound graph: planned once by graph
+    /// reachability and sealed with the slice identity minted over the
+    /// SAME graph — the exact `PlannedFlowSlice` shape the production
+    /// hash node's compute retains on its published outcome.
+    pub fn retained_plan(&self, request: &FlowDemandRequest) -> Result<PlannedFlowSlice, FlowDemandPlanError> {
+        use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash;
+        use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
+        let subject = crate::project_semantic_dispatch::flow_solve::derive_demand_subject(&request.query)?;
+        let bundle = self.bound.bundle();
+        let demand = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
+        let selection = ReturnPathPeeker::new(&bundle.graph)
+            .plan(&demand, &request.resources.slice_budget)
+            .map_err(FlowDemandPlanError::SliceBudget)?;
+        let hash = compute_flow_slice_hash(&selection, &bundle.graph, &bundle.skeleton);
+        Ok(PlannedFlowSlice::new(hash, selection))
+    }
+
+    /// Plan `request` over this fixture's store-bound graph and binding
+    /// inventory. The request carries no graph axis and no subject axis:
+    /// the basis takes the body identity from the bound graph's key and
+    /// the subject from the query's own demand payload. The fixture runs
+    /// the ONE structural plan the production hash node would retain for
+    /// this demand and hands it to the demand planner, which assembles
+    /// obligations without re-planning.
+    pub fn build_plan(&self, request: FlowDemandRequest) -> Result<FlowDemandPlan, FlowDemandPlanError> {
+        let retained = self.retained_plan(&request)?;
+        self.build_plan_with_retained(request, &retained)
+    }
+
+    /// Plan `request` over this fixture's bound graph against an EXPLICIT
+    /// retained selection — the adversarial seam: a selection retained
+    /// for another graph or another demand must be a typed planning
+    /// error, never a proof plan.
+    pub fn build_plan_with_retained(&self, request: FlowDemandRequest, retained: &PlannedFlowSlice) -> Result<FlowDemandPlan, FlowDemandPlanError> {
+        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, retained, &self.inventory)
+    }
+}
+
+/// Parse `source`, build the skeleton + graph of its first function
+/// declaration through the store's minting path (sealed to the pinned
+/// content key, body hashes tagged `body_hash_tag`), derive the source's
+/// REAL parse identity (exact parse key + language row), and resolve the
+/// frame's binding inventory through the real `FunctionProgramIndex`.
+#[rustfmt::skip]
+pub fn flow_graph_fixture_for_tests(source: &str, body_hash_tag: u8) -> FlowGraphFixtureForTests {
+    flow_graph_fixture(source, body_hash_tag, verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts))
+}
+
+/// The same fixture under a different runtime-authoritative language row:
+/// the parse identity is derived for REAL from the same source under that
+/// language (never a tagged stand-in), so the two fixtures' keys differ in
+/// exactly the source-identity axes.
+#[rustfmt::skip]
+pub fn flow_graph_fixture_for_tests_with_language(source: &str, body_hash_tag: u8, file_language: verter_language::FileLanguage) -> FlowGraphFixtureForTests {
+    flow_graph_fixture(source, body_hash_tag, file_language)
+}
+
+#[rustfmt::skip]
+fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_language::FileLanguage) -> FlowGraphFixtureForTests {
+    use verter_semantic::analysis::flow::{FunctionBodySource, build_function_body_skeleton};
+    use verter_semantic::analysis::function_program::{build_function_program_index, FunctionDeclarationRef, FunctionProgramKey};
+    use verter_semantic::analysis::top_level_owners::TopLevelOwnerTable;
+    let oxc_source_type = match &file_language {
+        verter_language::FileLanguage::Script { source_type, .. } => match source_type {
+            verter_language::ScriptSourceType::Ts => oxc_span::SourceType::ts(),
+            verter_language::ScriptSourceType::Tsx => oxc_span::SourceType::tsx(),
+            other => panic!("the hermetic flow fixture serves script languages ts/tsx, got {other:?}"),
+        },
+        other => panic!("the hermetic flow fixture serves script languages, got {other:?}"),
+    };
+    // The parse identity is DERIVED from the real source under the real
+    // language row — the same derivation the production
+    // `FileArtifactKey::for_source_identity` performs — never a constant.
+    let (_, parse_key) = verter_language::default_parse_identity_for(source, &file_language)
+        .expect("the hermetic fixture's script language derives a parse identity");
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_source_type).parse();
+    assert!(parsed.errors.is_empty(), "fixture must parse");
+    let function = parsed.program.body.iter().find_map(|s| match s { oxc_ast::ast::Statement::FunctionDeclaration(f) => Some(f), _ => None }).expect("fixture must contain a function declaration");
+    let name = function.id.as_ref().expect("named function").name.as_str();
+    let canonical_id: std::sync::Arc<str> = std::sync::Arc::from("/flow_solve_fixture.ts");
+    let skeleton = build_function_body_skeleton(&FunctionBodySource::from_function(function).expect("bodied function"));
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let index = build_function_program_index(&parsed.program, source, &owners, canonical_id.clone());
+    let declaration = FunctionDeclarationRef { owner: verter_type_expr::TopLevelOwnerId::ordinary_file(), name: std::sync::Arc::from(name), space: verter_semantic::facts::SymbolSpace::Value };
+    let function = FunctionProgramKey { declaration, part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody, overload_ordinal: 0 };
+    let inventory = FlowBindingInventory {
+        bindings: std::sync::Arc::clone(&index.get(&function).expect("the fixture function is indexed").entry().bindings),
+    };
+    let key = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+        canonical_id, function, parse_env_hash: [0u8; 16],
+        flow_body_stable_hash: [body_hash_tag; 16], flow_body_exact_hash: [body_hash_tag; 16],
+        parse_key, file_language,
+        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+    };
+    let store = crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new();
+    let bound = store.mint_bound_flow_graph(key, skeleton);
+    FlowGraphFixtureForTests { bound, inventory }
+}
+
+/// Mint the hermetic value payload: a clean flow-return result over `return_type`.
+#[rustfmt::skip]
+pub fn flow_return_result_for_tests(graph: &SemanticGraphStore, return_type: crate::semantic_query::SemanticNodeId) -> crate::semantic_query::FlowReturnResult {
+    crate::semantic_query::FlowReturnResult::new(graph, return_type, false, None)
+}
+
+/// Mint a DEGRADED hermetic value payload over `return_type` — the
+/// completion seal must refuse it.
+#[rustfmt::skip]
+pub fn degraded_flow_return_result_for_tests(graph: &SemanticGraphStore, return_type: crate::semantic_query::SemanticNodeId) -> crate::semantic_query::FlowReturnResult {
+    crate::semantic_query::FlowReturnResult::new(graph, return_type, false, Some(crate::semantic_query::FlowReturnDegradation::NonCallableBinding))
+}
+
+/// Probe the no-flow allocation contract through the REAL production
+/// dispatch: execute `key` through the one canonical
+/// `ProjectSemanticDispatch` (the same choke point
+/// [`dispatch_execute_type_node_for_tests`] forwards to) and report the
+/// dispatch's flow-demand ledger footprint afterwards — `(installed
+/// demand count, reserved demand storage capacity)`. An ordinary query
+/// and every pending typed-gap root install zero demands and reserve
+/// zero capacity.
+#[rustfmt::skip]
+pub fn dispatch_flow_demand_footprint_for_tests(
+    host: &crate::VerterHost,
+    key: crate::semantic_query::SemanticQueryKey,
+) -> (usize, usize) {
+    use crate::semantic_query::SemanticQueryApi;
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let _ = dispatch.execute(key);
+    dispatch.flow_demand_footprint_for_tests()
+}

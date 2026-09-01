@@ -298,7 +298,16 @@ impl VerterHost {
                     QueryResult::Value(formula) => formula,
                     QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
                 };
-                TypeInfoSurface::from_spread_projection(graph, &formula)
+                let mut canonical_evidence =
+                    crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default(
+                    );
+                let surface = TypeInfoSurface::from_spread_projection(
+                    graph,
+                    &formula,
+                    &mut canonical_evidence,
+                );
+                dispatch.deposit_canonical_evidence(canonical_evidence);
+                surface
             }
             _ => None,
         }
