@@ -87,4 +87,4 @@ Test homes: `crates/verter_compiler/tests` and compile-fail fixtures owned by `v
 2. Run `cargo nextest run -p verter_compiler`.
 3. Run every final command in `targeted-domain` on the review candidate.
 
-Apply `architecture-3`. Before squash/review, add only CCA1A's `[[implemented]]` row to `authority/state/implemented.toml`; no sibling row is implied.
+Apply `architecture-3`. Before squashing or review, the implementation patch transitions this node's predeclared row in `authority/state/implemented.toml` from `status = "pending"` to `status = "implemented"` with the planned squash commit message, approximate date with timezone, and optional pull-request number. The transitioned row is the implementation fact. No sibling row is implied.

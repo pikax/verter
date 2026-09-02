@@ -284,6 +284,11 @@ jobs:
         run: |
           node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict
           node --test roadmap/0.1.0-tama/tools/implementation-ledger.test.mjs
+          node --test roadmap/0.1.0-tama/tools/ledger.test.mjs
+      - name: CI aggregate completeness
+        run: |
+          node scripts/check-ci-aggregate.mjs
+          node --test scripts/check-ci-aggregate.test.mjs
 
   # ---------------------------------------------------------------------------
   # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in
@@ -1805,7 +1810,10 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # Aggregate gate. Branch protection should require THIS job and nothing else.
+  # Aggregate gate. The ruleset must require the check named "CI Required"
+  # (this job's `name:`) and nothing else. `scripts/check-ci-aggregate.mjs`
+  # statically enforces that every job in this workflow is listed in its
+  # `needs`.
   #
   # Almost every job above is gated on a  path filter, so on any
   # given PR most of them legitimately SKIP. A skipped job cannot be used as a
@@ -1815,7 +1823,7 @@ jobs:
   # skipped is accepted, failure is not.
   # ---------------------------------------------------------------------------
   ci-success:
-    name: CI Success
+    name: CI Required
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1853,8 +1861,11 @@ jobs:
       - editor-neovim
     steps:
       - name: Verify no dependency failed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           echo "results: ${{ join(needs.*.result, ', ') }}"
+          printf '%s\n' "$NEEDS_JSON"
           if ${{ contains(needs.*.result, 'failure') }}; then
             echo "::error::at least one CI job failed"; exit 1
           fi

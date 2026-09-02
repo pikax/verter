@@ -2,6 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parseToml, readToml } from "./toml.mjs";
+import { implementedRows, ledgerErrors, COMMIT_DATE_PATTERN, NODE_ID_PATTERN } from "./ledger.mjs";
+
+export { parseToml, readToml };
+
 export const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 export const NODE_FIELDS = [
@@ -54,6 +59,7 @@ const INT_FIELDS = new Set([
   "rescope_unrelated_packages",
 ]);
 const FORBIDDEN_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
 export function normalizeProductionSurface(surface, nodeId = "unknown node") {
   const parts = typeof surface === "string" ? surface.split("/") : [];
   if (
@@ -63,11 +69,6 @@ export function normalizeProductionSurface(surface, nodeId = "unknown node") {
   )
     throw new Error(`${nodeId}: production surface is not a repository path: ${surface}`);
   return surface.replace(/\/+$/, "");
-}
-
-function assertSafeKey(key, lineNumber) {
-  if (FORBIDDEN_KEYS.has(key))
-    throw new Error(`TOML line ${lineNumber}: unsafe prototype-bearing key ${key}`);
 }
 
 function safeRelative(relative, label) {
@@ -111,115 +112,6 @@ export function confinedFile(root, relative, label = "authority input") {
   return real;
 }
 
-function stripComment(line) {
-  let quoted = false;
-  let escaped = false;
-  for (let index = 0; index < line.length; index += 1) {
-    const char = line[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (char === "\\" && quoted) {
-      escaped = true;
-      continue;
-    }
-    if (char === '"') quoted = !quoted;
-    if (char === "#" && !quoted) return line.slice(0, index);
-  }
-  return line;
-}
-
-function parseValue(raw, lineNumber) {
-  const value = raw.trim();
-  if (value.startsWith('"')) {
-    try {
-      return JSON.parse(value);
-    } catch (error) {
-      throw new Error(`TOML line ${lineNumber}: invalid string: ${error.message}`);
-    }
-  }
-  if (value.startsWith("[")) {
-    try {
-      const parsed = JSON.parse(value);
-      if (!Array.isArray(parsed)) throw new Error("not an array");
-      return parsed;
-    } catch (error) {
-      throw new Error(`TOML line ${lineNumber}: invalid array: ${error.message}`);
-    }
-  }
-  if (value === "true") return true;
-  if (value === "false") return false;
-  if (/^-?\d+$/u.test(value)) {
-    const parsed = Number(value);
-    if (!Number.isSafeInteger(parsed))
-      throw new Error(`TOML line ${lineNumber}: integer is not safe: ${value}`);
-    return parsed;
-  }
-  throw new Error(`TOML line ${lineNumber}: unsupported value ${value}`);
-}
-
-export function parseToml(text) {
-  if (typeof text !== "string") throw new Error("TOML input must be a string");
-  const root = {};
-  let target = root;
-  const declaredTables = new Set();
-  for (const [index, original] of text.replaceAll("\r\n", "\n").split("\n").entries()) {
-    const lineNumber = index + 1;
-    const line = stripComment(original).trim();
-    if (!line) continue;
-    const arrayTable = line.match(/^\[\[([A-Za-z0-9_.-]+)\]\]$/u);
-    if (arrayTable) {
-      const key = arrayTable[1];
-      if (key.includes("."))
-        throw new Error(`TOML line ${lineNumber}: nested array tables are unsupported`);
-      assertSafeKey(key, lineNumber);
-      if (root[key] !== undefined && !Array.isArray(root[key]))
-        throw new Error(`TOML line ${lineNumber}: table type conflict ${key}`);
-      root[key] ||= [];
-      target = {};
-      root[key].push(target);
-      continue;
-    }
-    const table = line.match(/^\[([A-Za-z0-9_.-]+)\]$/u);
-    if (table) {
-      const parts = table[1].split(".");
-      for (const part of parts) assertSafeKey(part, lineNumber);
-      const tableName = parts.join(".");
-      if (declaredTables.has(tableName))
-        throw new Error(`TOML line ${lineNumber}: duplicate table ${tableName}`);
-      declaredTables.add(tableName);
-      target = root;
-      for (const part of parts) {
-        if (
-          target[part] !== undefined &&
-          (typeof target[part] !== "object" || Array.isArray(target[part]))
-        )
-          throw new Error(`TOML line ${lineNumber}: table type conflict ${part}`);
-        target[part] ||= {};
-        target = target[part];
-      }
-      continue;
-    }
-    const assignment = line.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/u);
-    if (!assignment) throw new Error(`TOML line ${lineNumber}: malformed statement`);
-    const [, key, raw] = assignment;
-    assertSafeKey(key, lineNumber);
-    if (Object.hasOwn(target, key))
-      throw new Error(`TOML line ${lineNumber}: duplicate key ${key}`);
-    target[key] = parseValue(raw, lineNumber);
-  }
-  return root;
-}
-
-export function readToml(file) {
-  try {
-    return parseToml(fs.readFileSync(file, "utf8"));
-  } catch (error) {
-    throw new Error(`${file}: ${error.message}`);
-  }
-}
-
 function schemaTypeMatches(value, type) {
   if (type === "object")
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -245,12 +137,23 @@ function schemaErrors(value, schema, location) {
     for (const key of schema.required || [])
       if (!Object.hasOwn(value, key)) errors.push(`${location}: missing required property ${key}`);
     const properties = schema.properties || {};
+    const patternProperties = Object.entries(schema.patternProperties || {}).map(
+      ([pattern, child]) => [new RegExp(pattern, "u"), child],
+    );
     if (schema.additionalProperties === false)
       for (const key of Object.keys(value))
-        if (!Object.hasOwn(properties, key)) errors.push(`${location}: additional property ${key}`);
+        if (
+          !Object.hasOwn(properties, key) &&
+          !patternProperties.some(([pattern]) => pattern.test(key))
+        )
+          errors.push(`${location}: additional property ${key}`);
     for (const [key, child] of Object.entries(properties))
       if (Object.hasOwn(value, key))
         errors.push(...schemaErrors(value[key], child, `${location}.${key}`));
+    for (const [pattern, child] of patternProperties)
+      for (const key of Object.keys(value))
+        if (!Object.hasOwn(properties, key) && pattern.test(key))
+          errors.push(...schemaErrors(value[key], child, `${location}.${key}`));
   } else if (schema.type === "array") {
     if (schema.minItems !== undefined && value.length < schema.minItems)
       errors.push(`${location}: requires at least ${schema.minItems} items`);
@@ -359,9 +262,27 @@ export function loadAuthority(packageRoot = PACKAGE_ROOT) {
     metadata.implemented_ledger,
     "implemented-node ledger",
   );
-  const ledger = readToml(ledgerFile);
-  if (!Array.isArray(ledger.implemented))
-    throw new Error(`${ledgerFile}: missing [[implemented]] rows`);
+  const raw = readToml(ledgerFile);
+  if (raw.schema !== 2) {
+    if (Array.isArray(raw.implemented))
+      throw new Error(
+        `${ledgerFile}: legacy schema-1 ledger; migrate to the predeclared schema-2 [implementation] table`,
+      );
+    throw new Error(`${ledgerFile}: implementation ledger must declare schema = 2`);
+  }
+  if (
+    raw.implementation === null ||
+    typeof raw.implementation !== "object" ||
+    Array.isArray(raw.implementation)
+  )
+    throw new Error(`${ledgerFile}: missing [implementation] table`);
+  const ledger = {
+    schema: 2,
+    implementation: raw.implementation,
+    implemented: implementedRows(raw),
+    github_issue: raw.github_issue || [],
+    github_train_issue: raw.github_train_issue || [],
+  };
   return { packageRoot, rootFile, metadata, nodes, moduleModels, ledgerFile, ledger };
 }
 
@@ -765,17 +686,34 @@ export function validateAuthority(authority, options = {}) {
     errors.push(
       `authority root: successor promotion gate ${successorPromotionGate} must directly depend on final Rev11 gate ${finalRev11Gate}`,
     );
-  try {
-    errors.push(
-      ...validateSchemaObject(
-        authority.ledger,
-        loadSchema(authority.packageRoot, "implementation-ledger.schema.json"),
-        "authority.implementation-ledger",
-      ),
-    );
-  } catch (error) {
-    errors.push(error.message);
+  // Predeclaration completeness and record shape come from the schema-2
+  // [implementation] table when present (loadAuthority always provides it).
+  if (authority.ledger.implementation) {
+    const projection = {
+      schema: authority.ledger.schema,
+      implementation: authority.ledger.implementation,
+      ...(authority.ledger.github_issue?.length
+        ? { github_issue: authority.ledger.github_issue }
+        : {}),
+      ...(authority.ledger.github_train_issue?.length
+        ? { github_train_issue: authority.ledger.github_train_issue }
+        : {}),
+    };
+    errors.push(...ledgerErrors(projection, { knownNodeIds: knownNodes }));
+    try {
+      errors.push(
+        ...validateSchemaObject(
+          projection,
+          loadSchema(authority.packageRoot, "implementation-ledger.schema.json"),
+          "authority.implementation-ledger",
+        ),
+      );
+    } catch (error) {
+      errors.push(error.message);
+    }
   }
+  // Row-level checks run against the in-memory implemented view so that
+  // programmatic mutations (tests, tooling) are validated too.
   const implemented = new Set();
   for (const row of authority.ledger.implemented) {
     if (!knownNodes.has(row.node_id))
@@ -783,6 +721,21 @@ export function validateAuthority(authority, options = {}) {
     if (implemented.has(row.node_id))
       errors.push(`implementation ledger: duplicate node ${row.node_id}`);
     implemented.add(row.node_id);
+    if (typeof row.commit_message !== "string" || row.commit_message.length === 0)
+      errors.push(
+        `implementation ledger: ${row.node_id} commit_message must be a non-empty string`,
+      );
+    if (typeof row.commit_date !== "string" || !COMMIT_DATE_PATTERN.test(row.commit_date))
+      errors.push(
+        `implementation ledger: ${row.node_id} commit_date must be a timezone-bearing timestamp`,
+      );
+    if (
+      row.pull_request !== undefined &&
+      (!Number.isSafeInteger(row.pull_request) || row.pull_request < 1)
+    )
+      errors.push(`implementation ledger: ${row.node_id} pull_request must be a positive integer`);
+    if (!NODE_ID_PATTERN.test(row.node_id))
+      errors.push(`implementation ledger: invalid node id ${row.node_id}`);
   }
   const mappedNodes = new Set();
   const mappedIssues = new Set();
@@ -908,11 +861,17 @@ export function packetFor(authority, state, id) {
   const node = authority.nodes.find((candidate) => candidate.id === id);
   if (!node) throw new Error(`unknown node ${id}`);
   const row = state.states.get(id);
+  if (row.status === "BLOCKED") {
+    const reason = row.missing_ancestors.length
+      ? `missing ancestors: ${row.missing_ancestors.join(", ")}`
+      : "node is not dispatchable";
+    throw new Error(`cannot create work packet for BLOCKED node ${id}; ${reason}`);
+  }
   const charter = fs.readFileSync(
     confinedFile(authority.packageRoot, node.charter, `${id} charter`),
     "utf8",
   );
-  return `# Tama work packet: ${id}\n\nStatus: ${row.status}\nName: ${node.name}\nTrain: ${node.train}\nPredecessors: ${node.predecessors.join(", ") || "none"}\nMissing ancestors: ${row.missing_ancestors.join(", ") || "none"}\nExternal requirements (agent-checked): ${node.external_requirements.join(", ") || "none"}\n\n## Completion ledger\n\nBefore squashing or starting review, add this trusted row to \`authority/${authority.metadata.implemented_ledger}\` as part of the implementation patch:\n\n    [[implemented]]\n    node_id = "${id}"\n    commit_message = "<planned squash commit message or useful search phrase>"\n    commit_date = "<approximate squash date with timezone>"\n    # pull_request = 1234 # optional; uncomment when known\n\nThen squash once using the planned message and review that candidate. No after-commit ledger update or amend is required. The row is authoritative by presence. The three commit fields are loose locator hints only. Tooling does not resolve or validate them, require an exact message/date match, compare content, inspect ancestry, or contact GitHub. If a message search returns several commits, use the date to choose the closest result; use the PR number when available.\n\n## Charter\n\n${charter}`;
+  return `# Tama work packet: ${id}\n\nStatus: ${row.status}\nName: ${node.name}\nTrain: ${node.train}\nPredecessors: ${node.predecessors.join(", ") || "none"}\nMissing ancestors: ${row.missing_ancestors.join(", ") || "none"}\nExternal requirements (agent-checked): ${node.external_requirements.join(", ") || "none"}\n\n## Completion ledger\n\nBefore squashing or starting review, transition this node's predeclared line in \`authority/${authority.metadata.implemented_ledger}\` as part of the implementation patch. The node already has exactly one line under \`[implementation]\`; change only that line:\n\n    "${id}" = { status = "implemented", commit_message = "<planned squash commit message or useful search phrase>", commit_date = "<approximate squash date with timezone>" }\n\nAdd \`, pull_request = 1234\` inside the braces when the PR number is already known. Never append a second entry, never touch another node's line, and never edit \`[[github_issue]]\` rows for completion.\n\nThen squash once using the planned message and review that candidate. No after-commit ledger update or amend is required. The transitioned status is authoritative by presence. The commit fields are loose locator hints only. Tooling does not resolve or validate them, require an exact message/date match, compare content, inspect ancestry, or contact GitHub. If a message search returns several commits, use the date to choose the closest result; use the PR number when available.\n\n## Active sizing and train review policy\n\nProduction LOC and file budgets are planning references, not hard acceptance lines. Investigate material drift in either direction; if one expected production file becomes ten, require a scope-coherence explanation rather than mechanically rejecting or splitting the candidate.\n\nAfter every 3 to 6 implemented blocks in this train, the train manager spawns a fresh Codex Architect conformance review over the cumulative implementation before a seventh unchecked block proceeds. On the train's final intended block, also spawn a fresh train review covering every implemented block, the final candidate, and all current amendments. These train reviews are additional to the node's own review profile and create no new ledger or readiness state.\n\n## Charter\n\n${charter}`;
 }
 
 export function exactRegularFileInventory(root, label = "inventory") {

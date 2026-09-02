@@ -146,11 +146,13 @@ impl ProjectSemanticDispatch<'_> {
         .with_observed_self_roots(observed)
     }
 
-    // The union / intersection §22 absorption arms live INSIDE the
-    // canonical algebra (`canonical_algebra::canonical_union` /
-    // `canonical_intersection`), which every construction funnel routes
-    // through — the former per-reducer `absorb_union` / `absorb_intersection`
-    // entry hooks are deleted with them.
+    // Canonical semantic union / intersection construction owns the §22
+    // absorption arms inside `canonical_algebra::canonical_union` /
+    // `canonical_intersection`; the former per-reducer `absorb_union` /
+    // `absorb_intersection` entry hooks are deleted. Raw structural carriers
+    // remain intentional: the `NormalizeUnion` / `NormalizeIntersection`
+    // query-key nodes, the arity-1 key-domain carrier in `mod.rs`, and the
+    // structural rebuilds in `walk.rs` intern their ordered payloads directly.
 
     // ── Intersection ──────────────────────────────────────────────────────
     // ── keyof ───────────────────────────────────────────────────────────

@@ -21,7 +21,7 @@
 // `resolveActualOptimizerFile` → `hashFile` → `computeCacheDigest` end to
 // end against a real shim SHAPE, not a synthetic hash.
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -623,8 +623,18 @@ describe("extractPosixShimTargetPath — pnpm/npm POSIX shell shim parsing", () 
 
 describe("isPosixShellShim — structural detection, not name/extension-based", () => {
   let tmpDir;
+  let originalPlatform;
+
+  beforeEach(() => {
+    originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+  });
 
   afterEach(() => {
+    Object.defineProperty(process, "platform", {
+      value: originalPlatform,
+      configurable: true,
+    });
     if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
     tmpDir = undefined;
   });
@@ -659,8 +669,18 @@ describe("isPosixShellShim — structural detection, not name/extension-based", 
 // not digest computation.
 describe("resolveActualOptimizerFile → hashFile → computeCacheDigest (POSIX shim, end to end)", () => {
   let tmpDir;
+  let originalPlatform;
+
+  beforeEach(() => {
+    originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+  });
 
   afterEach(() => {
+    Object.defineProperty(process, "platform", {
+      value: originalPlatform,
+      configurable: true,
+    });
     if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
     tmpDir = undefined;
   });
@@ -963,109 +983,116 @@ describe("spawnOptimizerToTempOutput — atomic temp-file pattern (Finding 2)", 
 // renamed into place — an implementation that wrote directly to `outputPath`
 // (skipping the temp file + atomic rename) would call `renameSync` zero
 // times here and fail the assertions below.
-describe("runUncachedFallback — main()'s uncached-fallback branch, exercised end-to-end (Finding 3, round 6)", () => {
-  let tmpDir;
-  let fakeBinDir;
-  let originalPath;
+// The fallback deliberately spawns a bare extensionless executable without a
+// shell. Windows optimizer installs are `.exe` or shims and are resolved by
+// the ordinary identity path before this branch; its POSIX executable fixture
+// is therefore not runnable on Windows.
+describe.skipIf(process.platform === "win32")(
+  "runUncachedFallback — main()'s uncached-fallback branch, exercised end-to-end (Finding 3, round 6)",
+  () => {
+    let tmpDir;
+    let fakeBinDir;
+    let originalPath;
 
-  afterEach(() => {
-    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
-    tmpDir = undefined;
-    if (fakeBinDir) rmSync(fakeBinDir, { recursive: true, force: true });
-    fakeBinDir = undefined;
-    if (originalPath !== undefined) {
-      process.env.PATH = originalPath;
-      originalPath = undefined;
-    }
-    renameSyncCalls.length = 0;
-  });
-
-  // Installs a real, executable fake `wasm-opt` on `PATH` that writes
-  // `content` to whatever path follows its `-o` argument — standing in for
-  // the real optimizer without needing binaryen installed.
-  function installFakeWasmOpt({ content = "uncached-optimized-bytes", exitCode = 0 } = {}) {
-    fakeBinDir = mkdtempSync(path.join(os.tmpdir(), "wasm-opt-cache-fakebin-"));
-    const fakeWasmOpt = path.join(fakeBinDir, "wasm-opt");
-    writeFileSync(
-      fakeWasmOpt,
-      [
-        "#!/usr/bin/env node",
-        "const fs = require('node:fs');",
-        "const argv = process.argv.slice(2);",
-        "const outIdx = argv.indexOf('-o');",
-        exitCode === 0
-          ? "fs.writeFileSync(argv[outIdx + 1], " + JSON.stringify(content) + ");"
-          : "",
-        `process.exit(${exitCode});`,
-      ].join("\n"),
-      { mode: 0o755 },
-    );
-    originalPath = process.env.PATH;
-    process.env.PATH = `${fakeBinDir}${path.delimiter}${originalPath}`;
-  }
-
-  it("writes through a distinct temp file and atomically renames it into outputPath — never a direct write", () => {
-    installFakeWasmOpt({ content: "uncached-optimized-bytes" });
-    tmpDir = mkdtempSync(path.join(os.tmpdir(), "wasm-opt-cache-test-"));
-    const inputPath = path.join(tmpDir, "in.wasm");
-    const outputPath = path.join(tmpDir, "out.wasm");
-    writeFileSync(inputPath, "input-bytes");
-
-    renameSyncCalls.length = 0;
-    runUncachedFallback({ wasmOptArgs: ["-Os"], inputPath, outputPath });
-
-    // The actual output is correct...
-    expect(existsSync(outputPath)).toBe(true);
-    expect(readFileSync(outputPath, "utf8")).toBe("uncached-optimized-bytes");
-
-    // ...and it got there via EXACTLY one rename from a temp path distinct
-    // from `outputPath` — proving the temp-file+rename invariant was
-    // actually exercised, not bypassed by a direct write.
-    expect(renameSyncCalls).toHaveLength(1);
-    const [oldPath, newPath] = renameSyncCalls[0];
-    expect(newPath).toBe(outputPath);
-    expect(oldPath).not.toBe(outputPath);
-    expect(path.basename(oldPath)).toMatch(/^\.wasm-opt-cache\.\d+\.tmp$/);
-    // The temp file itself must not survive past the rename.
-    expect(existsSync(oldPath)).toBe(false);
-  });
-
-  it("never touches .cache/wasm-opt — this branch has no resolved identity to key a cache entry on", () => {
-    installFakeWasmOpt({ content: "uncached-optimized-bytes" });
-    tmpDir = mkdtempSync(path.join(os.tmpdir(), "wasm-opt-cache-test-"));
-    const inputPath = path.join(tmpDir, "in.wasm");
-    const outputPath = path.join(tmpDir, "out.wasm");
-    writeFileSync(inputPath, "input-bytes");
-
-    runUncachedFallback({ wasmOptArgs: ["-Os"], inputPath, outputPath });
-
-    expect(existsSync(path.join(tmpDir, ".cache", "wasm-opt"))).toBe(false);
-  });
-
-  it("propagates failure and calls process.exit with the fallback's exit status when the run fails — no output written", () => {
-    installFakeWasmOpt({ exitCode: 1 });
-    tmpDir = mkdtempSync(path.join(os.tmpdir(), "wasm-opt-cache-test-"));
-    const inputPath = path.join(tmpDir, "in.wasm");
-    const outputPath = path.join(tmpDir, "out.wasm");
-    writeFileSync(inputPath, "input-bytes");
-
-    const exitError = new Error("process.exit called");
-    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw exitError;
+    afterEach(() => {
+      if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+      tmpDir = undefined;
+      if (fakeBinDir) rmSync(fakeBinDir, { recursive: true, force: true });
+      fakeBinDir = undefined;
+      if (originalPath !== undefined) {
+        process.env.PATH = originalPath;
+        originalPath = undefined;
+      }
+      renameSyncCalls.length = 0;
     });
-    renameSyncCalls.length = 0;
-    try {
-      expect(() => runUncachedFallback({ wasmOptArgs: ["-Os"], inputPath, outputPath })).toThrow(
-        exitError,
+
+    // Installs a real, executable fake `wasm-opt` on `PATH` that writes
+    // `content` to whatever path follows its `-o` argument — standing in for
+    // the real optimizer without needing binaryen installed.
+    function installFakeWasmOpt({ content = "uncached-optimized-bytes", exitCode = 0 } = {}) {
+      fakeBinDir = mkdtempSync(path.join(os.tmpdir(), "wasm-opt-cache-fakebin-"));
+      const fakeWasmOpt = path.join(fakeBinDir, "wasm-opt");
+      writeFileSync(
+        fakeWasmOpt,
+        [
+          "#!/usr/bin/env node",
+          "const fs = require('node:fs');",
+          "const argv = process.argv.slice(2);",
+          "const outIdx = argv.indexOf('-o');",
+          exitCode === 0
+            ? "fs.writeFileSync(argv[outIdx + 1], " + JSON.stringify(content) + ");"
+            : "",
+          `process.exit(${exitCode});`,
+        ].join("\n"),
+        { mode: 0o755 },
       );
-      expect(exitSpy).toHaveBeenCalledWith(1);
-    } finally {
-      exitSpy.mockRestore();
+      originalPath = process.env.PATH;
+      process.env.PATH = `${fakeBinDir}${path.delimiter}${originalPath}`;
     }
-    expect(existsSync(outputPath)).toBe(false);
-    expect(renameSyncCalls).toHaveLength(0);
-  });
-});
+
+    it("writes through a distinct temp file and atomically renames it into outputPath — never a direct write", () => {
+      installFakeWasmOpt({ content: "uncached-optimized-bytes" });
+      tmpDir = mkdtempSync(path.join(os.tmpdir(), "wasm-opt-cache-test-"));
+      const inputPath = path.join(tmpDir, "in.wasm");
+      const outputPath = path.join(tmpDir, "out.wasm");
+      writeFileSync(inputPath, "input-bytes");
+
+      renameSyncCalls.length = 0;
+      runUncachedFallback({ wasmOptArgs: ["-Os"], inputPath, outputPath });
+
+      // The actual output is correct...
+      expect(existsSync(outputPath)).toBe(true);
+      expect(readFileSync(outputPath, "utf8")).toBe("uncached-optimized-bytes");
+
+      // ...and it got there via EXACTLY one rename from a temp path distinct
+      // from `outputPath` — proving the temp-file+rename invariant was
+      // actually exercised, not bypassed by a direct write.
+      expect(renameSyncCalls).toHaveLength(1);
+      const [oldPath, newPath] = renameSyncCalls[0];
+      expect(newPath).toBe(outputPath);
+      expect(oldPath).not.toBe(outputPath);
+      expect(path.basename(oldPath)).toMatch(/^\.wasm-opt-cache\.\d+\.tmp$/);
+      // The temp file itself must not survive past the rename.
+      expect(existsSync(oldPath)).toBe(false);
+    });
+
+    it("never touches .cache/wasm-opt — this branch has no resolved identity to key a cache entry on", () => {
+      installFakeWasmOpt({ content: "uncached-optimized-bytes" });
+      tmpDir = mkdtempSync(path.join(os.tmpdir(), "wasm-opt-cache-test-"));
+      const inputPath = path.join(tmpDir, "in.wasm");
+      const outputPath = path.join(tmpDir, "out.wasm");
+      writeFileSync(inputPath, "input-bytes");
+
+      runUncachedFallback({ wasmOptArgs: ["-Os"], inputPath, outputPath });
+
+      expect(existsSync(path.join(tmpDir, ".cache", "wasm-opt"))).toBe(false);
+    });
+
+    it("propagates failure and calls process.exit with the fallback's exit status when the run fails — no output written", () => {
+      installFakeWasmOpt({ exitCode: 1 });
+      tmpDir = mkdtempSync(path.join(os.tmpdir(), "wasm-opt-cache-test-"));
+      const inputPath = path.join(tmpDir, "in.wasm");
+      const outputPath = path.join(tmpDir, "out.wasm");
+      writeFileSync(inputPath, "input-bytes");
+
+      const exitError = new Error("process.exit called");
+      const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+        throw exitError;
+      });
+      renameSyncCalls.length = 0;
+      try {
+        expect(() => runUncachedFallback({ wasmOptArgs: ["-Os"], inputPath, outputPath })).toThrow(
+          exitError,
+        );
+        expect(exitSpy).toHaveBeenCalledWith(1);
+      } finally {
+        exitSpy.mockRestore();
+      }
+      expect(existsSync(outputPath)).toBe(false);
+      expect(renameSyncCalls).toHaveLength(0);
+    });
+  },
+);
 
 // --- finalizeCacheMissOutput — cache-write-time consistency check ---------
 // (Finding 1, round 6)
@@ -1079,8 +1106,18 @@ describe("runUncachedFallback — main()'s uncached-fallback branch, exercised e
 // cache-write-time consistency re-hash rather than full locking.
 describe("finalizeCacheMissOutput — cache-write-time consistency check (Finding 1, round 6)", () => {
   let tmpDir;
+  let originalPlatform;
+
+  beforeEach(() => {
+    originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+  });
 
   afterEach(() => {
+    Object.defineProperty(process, "platform", {
+      value: originalPlatform,
+      configurable: true,
+    });
     if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
     tmpDir = undefined;
     copyFileSyncFailFor.clear();

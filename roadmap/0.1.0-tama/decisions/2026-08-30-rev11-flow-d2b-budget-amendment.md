@@ -19,7 +19,7 @@ Amend D2B's budget to the landed reality: the 800/8 target and the 1,500/12 resc
 
 - D2B's ledger row stands without a rescope split.
 - Successor nodes (D3R/D3I/D3P/D3C per `decisions/2026-08-30-rev11-flow-d3-split.md`, then D4–D8) keep their standard budgets; the D3 split is the evidence that over-budget work continues to be split rather than amortized.
-- This amendment changes no other charter, budget, or DAG field.
+- This amendment changes no other node's charter or budget. D2B's charter and DAG machine fields record the accepted 3,262-LOC/20-file/one-crate comparison footprint without creating a numeric rescope trigger.
 
 ## Correction (architect review, 2026-09-01)
 
@@ -49,6 +49,7 @@ retraction convention.
   one.
 - The budget conclusion itself — that the 800/8 target and the 1,500/12 rescope
   trigger do not apply to D2B — is UNCHANGED by this correction; see
-  `charters/rev11-flow/D2B.md` → "Budgets and mandatory rescope" and
-  `authority/dag/rev11-flow.toml`, both of which now mark those two limits
-  explicitly historical/non-binding for D2B.
+  `charters/rev11-flow/D2B.md` → "Budgets and rescope" and
+  `authority/dag/rev11-flow.toml`, which record the amendment's accepted
+  3,262-LOC/20-file/one-crate comparison footprint without making it a numeric
+  rescope trigger.

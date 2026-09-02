@@ -61,7 +61,7 @@ Product/worklist cutover (codex D3 scope ruling, `decisions/2026-08-30-rev11-flo
 - Named work (ruling §3): replace `locals`, `var_locals`, declared-type maps, parameter-write maps, conditional-definition sets, and the narrowing overlay with `FlowProductStore`; replace `join_layer_states` with domain joins; execute selected transfers in `FlowDemandPlan` order until stable; use `max_iterations` and the selected obligation frontier as the connected budget; emit product-domain discharge evidence through D2B's report; delete all runtime semantic state keyed by `String`.
 - D3C must not repair proof provenance, recreate admission predicates, or construct `CompleteFlowResult` directly — D2B's proof/admission contract is assumed intact.
 - Discriminating tests (all required): `flow_discharge_requires_product_evidence` (omitting one required binding-domain product from an otherwise clean evaluation cannot mint `CompleteFlowResult`, at either root or SCC publication); `flow_product_worklist_is_permutation_deterministic` (end-to-end legs: identical visitation order, products, discharge evidence, result bytes, and warm candidate under randomized equivalent order); `flow_product_budget_boundary_is_exact_and_never_warm` (end-to-end legs: typed budget exhaustion retains no candidate and recomputes cold); and the successor-boundary controls — existing `GuardNarrowing`, `ClosureCapture`, and `AbruptCompletion` fixtures unrelated to nominal comparability must remain typed partial/cold; D3 must not make D4/D5/D6 tests pass by widening its scope.
-- Landing: D3R, D3I, D3P, and D3C land as ONE atomic multi-node candidate; none of the four merges independently (codex D3 scope ruling, `decisions/2026-08-30-rev11-flow-d3-split.md`, extending the D1+D2A+D2B atomic-landing pattern of `decisions/2026-08-29-rev11-flow-d2-split.md`). Per `contracts/github-control-plane.md`, each node in the shared candidate keeps its own issue mapping, ledger row, and closing link; this node carries the rekeyed gh_issue 175 mapping.
+- Landing: D3R, D3I, D3P, and D3C land as ONE atomic multi-node candidate; none of the four merges independently (codex D3 scope ruling, `decisions/2026-08-30-rev11-flow-d3-split.md`, extending the D1+D2A+D2B atomic-landing pattern of `decisions/2026-08-29-rev11-flow-d2-split.md`). The normal `contracts/github-control-plane.md` rule gives each mapped node its own issue and closing link. This maintainer-approved atomic candidate is the explicit exception: D3R, D3I, and D3P are intentionally unmapped substrate nodes, while D3C alone carries the rekeyed pre-existing D3 mapping (gh_issue 175). All four retain distinct implementation-ledger rows; only mapped D3C receives a closing link.
 
 ## Acceptance IDs and discriminating proof
 
@@ -82,10 +82,11 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Never add a dual-running authority, compatibility fallback, string/regex semantic recovery, test-only production bypass, resource-capacity predecessor, sleep/poll readiness, or unqualified cache/public identity. Never add a public product query: `FlowReturn` remains the only proof-enabled root; `FlowNarrowingAt` / `ContextualTypeAt` remain pending; `ResolveCallKey.flow` remains sealed-empty.
 - Do not add capture, effect, loop, completion, contextual-typing, or new narrowing behavior merely because those variants already appear in the D1 registry — those are D4–D7's named scopes. Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
 
-## Budgets and mandatory rescope
+## Budgets and rescope
 
-- Target ceiling: 800 production LOC, 8 production files, 2 related crates/packages (ruling target: 600–800 production LOC, at most 6 files, `verter_session` only).
-- Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
+- Planning reference: 800 production LOC, 8 production files, 2 related crates/packages (ruling estimate: 600–800 production LOC, at most 6 files, `verter_session` only).
+- Numeric rescope signal: 1,500 production LOC or 12 files. Crossing it requires a scope-coherence investigation under `contracts/sizing.md`, not automatic rescope.
+- Architect rescope remains mandatory when the candidate spans 3 unrelated crates/packages, or combines public/wire, unsafe, concurrency, or lifetime work with another major concern.
 - Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
 - Performance budget: when preflight identifies touched authority or a hot path, equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance remains 0.0% unless an owning-authority amendment supplies exact replacement thresholds. Otherwise performance evidence is not applicable; do not create counters or a 100-request retention soak solely to satisfy this charter.
 
@@ -106,4 +107,10 @@ Apply `public-3`: 3 fresh distinct harness tasks covering exactly `adversarial`,
 
 ## Trusted implementation ledger
 
-Before squashing or review, the implementation patch adds one `[[implemented]]` row to `authority/state/implemented.toml` with the node ID, planned squash commit message, approximate date with timezone, and optional pull-request number. Row presence is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
+Before squashing or review, the implementation patch transitions this node's
+predeclared row in `authority/state/implemented.toml` from `status = "pending"`
+to `status = "implemented"` with the planned squash commit message, approximate
+date with timezone, and optional pull-request number. The transitioned row is the
+implementation fact. Commit metadata is a loose locator only and is never resolved or
+validated against Git or GitHub. Reviewers inspect the squashed candidate patch without
+SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.

@@ -20,6 +20,7 @@ import {
   UnstructuredGitHubOutputError,
   inspectIssue,
 } from "../index.mjs";
+import { writeLedgerFixture } from "./ledger-fixture.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(HERE, "../githubctl.mjs");
@@ -53,31 +54,11 @@ function clearanceFor(adapter, require = ["issues"]) {
   return report.clearance;
 }
 
-function implementedBlock(id) {
-  return `[[implemented]]
-node_id = "${id}"
-commit_message = "test locator ${id}"
-commit_date = "2026-08-28T00:00:00+00:00"
-`;
-}
-
-function mappingBlock(nodeId, issue, syncToGithub) {
-  return `[[github_issue]]
-node_id = "${nodeId}"
-gh_issue = ${issue}
-sync_to_github = ${syncToGithub}
-`;
-}
-
 function writeLedger(options = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-inspect-"));
-  const file = path.join(dir, "implemented.toml");
-  const implemented = options.implemented ?? ["ORC0", "GH0", "GH1", "FB0"];
-  const issues = options.issues ?? [];
-  const parts = ["schema = 1", "", ...implemented.map(implementedBlock)];
-  for (const row of issues) parts.push(mappingBlock(row.node_id, row.gh_issue, row.sync_to_github));
-  fs.writeFileSync(file, parts.join("\n"));
-  return file;
+  return writeLedgerFixture("githubctl-inspect-", {
+    implemented: options.implemented ?? ["ORC0", "GH0", "GH1", "FB0"],
+    issues: options.issues ?? [],
+  });
 }
 
 function reportDir() {

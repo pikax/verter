@@ -1,6 +1,13 @@
 import fs from "node:fs";
 
-import { parseToml } from "../../roadmap/0.1.0-tama/tools/lib.mjs";
+import {
+  COMMIT_DATE_PATTERN as LEDGER_COMMIT_DATE_PATTERN,
+  implementedRows,
+  parseLedgerText,
+  serializeLedger,
+  setEvidence,
+  transitionToImplemented,
+} from "../../roadmap/0.1.0-tama/tools/ledger.mjs";
 import { assertIssueNumber } from "./adapter.mjs";
 import {
   DuplicateError,
@@ -9,7 +16,7 @@ import {
   MissingAncestorError,
 } from "./errors.mjs";
 
-export const COMMIT_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$/u;
+export const COMMIT_DATE_PATTERN = LEDGER_COMMIT_DATE_PATTERN;
 
 export function assertCommitDate(value, label = "commit_date") {
   if (typeof value !== "string" || !COMMIT_DATE_PATTERN.test(value)) {
@@ -61,9 +68,11 @@ export function assertUniqueTrainMappings(rows, issueMappings = []) {
 
 export function loadLedgerFile(file) {
   const text = fs.readFileSync(file, "utf8");
-  const parsed = parseToml(text);
-  if (!Array.isArray(parsed.implemented)) {
-    throw new MissingAncestorError(`${file}: missing [[implemented]] rows`);
+  let parsed;
+  try {
+    parsed = parseLedgerText(text);
+  } catch (error) {
+    throw new MissingAncestorError(`${file}: ${error.message}`);
   }
   const githubIssue = parsed.github_issue ?? [];
   assertUniqueMappings(githubIssue);
@@ -73,7 +82,7 @@ export function loadLedgerFile(file) {
     file,
     text,
     parsed,
-    implemented: parsed.implemented,
+    implemented: implementedRows(parsed),
     github_issue: githubIssue,
     github_train_issue: githubTrain,
   };
@@ -86,53 +95,30 @@ export function assertSyncAncestors(ledger, ancestorIds) {
   }
 }
 
-function insertPullRequestLine(text, nodeId, number) {
-  const endedWithNewline = text.endsWith("\n");
-  const lines = text.replaceAll("\r\n", "\n").replace(/\n$/u, "").split("\n");
-  let targetLastField = -1;
-  let found = false;
-  let index = 0;
-  while (index < lines.length) {
-    if (lines[index].trim() !== "[[implemented]]") {
-      index += 1;
-      continue;
-    }
-    let isTarget = false;
-    let lastField = index;
-    index += 1;
-    while (index < lines.length && !lines[index].trim().startsWith("[")) {
-      const trimmed = lines[index].trim();
-      const node = trimmed.match(/^node_id\s*=\s*"([^"]*)"\s*$/u);
-      if (node?.[1] === nodeId) isTarget = true;
-      if (trimmed && !trimmed.startsWith("#")) lastField = index;
-      index += 1;
-    }
-    if (isTarget) {
-      if (found) throw new DuplicateError(`duplicate implemented row ${nodeId}`);
-      found = true;
-      targetLastField = lastField;
-    }
-  }
-  if (!found) {
-    throw new MappingMismatchError(`implemented row ${nodeId} is missing from ledger text`);
-  }
-  lines.splice(targetLastField + 1, 0, `pull_request = ${number}`);
-  const joined = lines.join("\n");
-  return endedWithNewline || text.length === 0 ? `${joined}\n` : joined;
+function statusOf(loaded, nodeId) {
+  const record = loaded.parsed.implementation[nodeId];
+  return record ? record.status : null;
 }
 
+/**
+ * Record the PR number on an implemented node's locator evidence. Returns
+ * `{written:false}` when the node is still pending (there is no implemented
+ * evidence to update yet); the implementation patch itself will carry the
+ * transitioned line.
+ */
 export function setImplementedPullRequest(file, nodeId, pullRequest) {
   const number = assertIssueNumber(pullRequest, "pull_request");
   if (typeof nodeId !== "string" || nodeId.length === 0) {
     throw new MappingMismatchError("node_id is required");
   }
   const loaded = loadLedgerFile(file);
-  const matches = loaded.implemented.filter((row) => row.node_id === nodeId);
-  if (matches.length > 1) throw new DuplicateError(`duplicate implemented row ${nodeId}`);
-  if (matches.length === 0) {
+  const status = statusOf(loaded, nodeId);
+  if (status !== "implemented") {
+    // Absent or still pending: there is no implemented evidence to update;
+    // the implementation patch itself carries the transitioned line.
     return { written: false, node_id: nodeId, pull_request: number };
   }
-  const existing = matches[0].pull_request;
+  const existing = loaded.parsed.implementation[nodeId].pull_request;
   if (existing != null) {
     const current = assertIssueNumber(existing, "pull_request");
     if (current !== number) {
@@ -140,67 +126,12 @@ export function setImplementedPullRequest(file, nodeId, pullRequest) {
     }
     return { written: true, node_id: nodeId, pull_request: number };
   }
-  fs.writeFileSync(file, insertPullRequestLine(loaded.text, nodeId, number));
+  const next = setEvidence(loaded.parsed, nodeId, { pullRequest: number });
+  fs.writeFileSync(file, serializeLedger(next));
   return { written: true, node_id: nodeId, pull_request: number };
 }
 
-function replaceImplementedFields(text, nodeId, fields) {
-  const endedWithNewline = text.endsWith("\n");
-  const lines = text.replaceAll("\r\n", "\n").replace(/\n$/u, "").split("\n");
-  let found = false;
-  const out = [];
-  let index = 0;
-  while (index < lines.length) {
-    if (lines[index].trim() !== "[[implemented]]") {
-      out.push(lines[index]);
-      index += 1;
-      continue;
-    }
-    const block = [lines[index]];
-    index += 1;
-    while (index < lines.length && !lines[index].trim().startsWith("[")) {
-      block.push(lines[index]);
-      index += 1;
-    }
-    const isTarget = block.some((line) => {
-      const node = line.trim().match(/^node_id\s*=\s*"([^"]*)"\s*$/u);
-      return node?.[1] === nodeId;
-    });
-    if (!isTarget) {
-      out.push(...block);
-      continue;
-    }
-    if (found) throw new DuplicateError(`duplicate implemented row ${nodeId}`);
-    found = true;
-    let wroteMessage = false;
-    let wroteDate = false;
-    let wrotePr = false;
-    for (const line of block) {
-      const trimmed = line.trim();
-      if (/^commit_message\s*=/u.test(trimmed)) {
-        out.push(`commit_message = ${JSON.stringify(fields.message)}`);
-        wroteMessage = true;
-      } else if (/^commit_date\s*=/u.test(trimmed)) {
-        out.push(`commit_date = ${JSON.stringify(fields.date)}`);
-        wroteDate = true;
-      } else if (/^pull_request\s*=/u.test(trimmed)) {
-        out.push(`pull_request = ${fields.pullRequest}`);
-        wrotePr = true;
-      } else {
-        out.push(line);
-      }
-    }
-    if (!wroteMessage) out.push(`commit_message = ${JSON.stringify(fields.message)}`);
-    if (!wroteDate) out.push(`commit_date = ${JSON.stringify(fields.date)}`);
-    if (!wrotePr) out.push(`pull_request = ${fields.pullRequest}`);
-  }
-  if (!found) {
-    throw new MappingMismatchError(`implemented row ${nodeId} is missing from ledger text`);
-  }
-  const joined = out.join("\n");
-  return endedWithNewline || text.length === 0 ? `${joined}\n` : joined;
-}
-
+/** Update an implemented node's full locator evidence (post-landing finalize). */
 export function finalizeImplementedRow(file, { nodeId, message, date, pullRequest }) {
   if (typeof nodeId !== "string" || nodeId.length === 0) {
     throw new MappingMismatchError("node_id is required");
@@ -211,20 +142,46 @@ export function finalizeImplementedRow(file, { nodeId, message, date, pullReques
   const stamped = assertCommitDate(date);
   const number = assertIssueNumber(pullRequest, "pull_request");
   const loaded = loadLedgerFile(file);
-  const matches = loaded.implemented.filter((row) => row.node_id === nodeId);
-  if (matches.length > 1) throw new DuplicateError(`duplicate implemented row ${nodeId}`);
-  if (matches.length === 0) {
+  const status = statusOf(loaded, nodeId);
+  if (status !== "implemented") {
     throw new MappingMismatchError(`implemented row ${nodeId} is missing from ledger text`);
   }
-  fs.writeFileSync(
-    file,
-    replaceImplementedFields(loaded.text, nodeId, {
-      message,
-      date: stamped,
-      pullRequest: number,
-    }),
-  );
+  const next = setEvidence(loaded.parsed, nodeId, {
+    commitMessage: message,
+    commitDate: stamped,
+    pullRequest: number,
+  });
+  fs.writeFileSync(file, serializeLedger(next));
   return { written: true, node_id: nodeId, pull_request: number };
+}
+
+/**
+ * Transition a predeclared pending node to implemented. This is the ledger
+ * mutation the implementation patch carries; exposed for deterministic
+ * tooling (never invoked implicitly by CI evidence).
+ */
+export function markImplemented(file, { nodeId, message, date, pullRequest }) {
+  if (typeof nodeId !== "string" || nodeId.length === 0) {
+    throw new MappingMismatchError("node_id is required");
+  }
+  if (typeof message !== "string" || message.length === 0) {
+    throw new MappingMismatchError("commit_message is required");
+  }
+  const stamped = assertCommitDate(date);
+  const number = pullRequest === undefined ? undefined : assertIssueNumber(pullRequest, "pull_request");
+  const loaded = loadLedgerFile(file);
+  let next;
+  try {
+    next = transitionToImplemented(loaded.parsed, nodeId, {
+      commitMessage: message,
+      commitDate: stamped,
+      ...(number === undefined ? {} : { pullRequest: number }),
+    });
+  } catch (error) {
+    throw new MappingMismatchError(error.message);
+  }
+  fs.writeFileSync(file, serializeLedger(next));
+  return { written: true, node_id: nodeId, ...(number === undefined ? {} : { pull_request: number }) };
 }
 
 export function appendGitHubIssueMapping(file, mapping) {
@@ -232,31 +189,24 @@ export function appendGitHubIssueMapping(file, mapping) {
     throw new MappingMismatchError("created mappings must set sync_to_github = true");
   }
   const loaded = loadLedgerFile(file);
-  assertUniqueMappings([
-    ...loaded.github_issue,
-    { node_id: mapping.node_id, gh_issue: mapping.gh_issue, sync_to_github: true },
-  ]);
-  const block =
-    `[[github_issue]]\n` +
-    `node_id = "${mapping.node_id}"\n` +
-    `gh_issue = ${mapping.gh_issue}\n` +
-    `sync_to_github = true\n`;
-  const prefix = loaded.text.length === 0 || loaded.text.endsWith("\n") ? "" : "\n";
-  fs.writeFileSync(file, `${loaded.text}${prefix}${block}`);
-  return { node_id: mapping.node_id, gh_issue: mapping.gh_issue, sync_to_github: true };
+  const row = { node_id: mapping.node_id, gh_issue: mapping.gh_issue, sync_to_github: true };
+  assertUniqueMappings([...loaded.github_issue, row]);
+  const next = {
+    ...loaded.parsed,
+    github_issue: [...loaded.github_issue, row],
+  };
+  fs.writeFileSync(file, serializeLedger(next));
+  return row;
 }
 
 export function appendGitHubTrainMapping(file, mapping) {
   const loaded = loadLedgerFile(file);
-  assertUniqueTrainMappings(
-    [...loaded.github_train_issue, { train: mapping.train, gh_issue: mapping.gh_issue }],
-    loaded.github_issue,
-  );
-  const block =
-    `[[github_train_issue]]\n` +
-    `train = "${mapping.train}"\n` +
-    `gh_issue = ${mapping.gh_issue}\n`;
-  const prefix = loaded.text.length === 0 || loaded.text.endsWith("\n") ? "" : "\n";
-  fs.writeFileSync(file, `${loaded.text}${prefix}${block}`);
-  return { train: mapping.train, gh_issue: mapping.gh_issue };
+  const row = { train: mapping.train, gh_issue: mapping.gh_issue };
+  assertUniqueTrainMappings([...loaded.github_train_issue, row], loaded.github_issue);
+  const next = {
+    ...loaded.parsed,
+    github_train_issue: [...loaded.github_train_issue, row],
+  };
+  fs.writeFileSync(file, serializeLedger(next));
+  return row;
 }

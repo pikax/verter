@@ -104,11 +104,11 @@ verification_effort_default = "high"
 confirmation_effort_min = "high"
 confirmation_effort_default = "high"
 size = "M"
-max_production_loc = 800 # HISTORICAL — non-binding for D2B; decisions/2026-08-30-rev11-flow-d2b-budget-amendment.md. Charter header field stays byte-equal.
-max_production_files = 8 # HISTORICAL — non-binding for D2B; same amendment. Charter header field stays byte-equal.
-max_related_packages = 2
-rescope_loc = 1500 # HISTORICAL — non-binding for D2B; same amendment. Charter header field stays byte-equal.
-rescope_files = 12 # HISTORICAL — non-binding for D2B; same amendment. Charter header field stays byte-equal.
+max_production_loc = 3262
+max_production_files = 20
+max_related_packages = 1
+rescope_loc = 3262
+rescope_files = 20
 rescope_unrelated_packages = 3
 
 [[node]]
@@ -479,7 +479,7 @@ rescope_unrelated_packages = 3
 [[node]]
 id = "D8"
 name = "U6 convergence and complete-result admission proof"
-predecessors = ["D4","D5","D6","D7"]
+predecessors = ["D4","D5","D6","D7","TE5"]
 phase = "rev11"
 train = "rev11.flow"
 product = "rev11"

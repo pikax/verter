@@ -108,7 +108,7 @@ trains = ["compiler.compiler-bridge", "compiler.compiler-core", "compiler.compil
 
 [[area_rule]]
 label = "area:identity"
-trains = ["rev11.core", "rev11.flow", "rev11.inputs", "rev11.public-typeinfo", "rev11.source-identity"]
+trains = ["rev11.core", "rev11.flow", "rev11.inputs", "rev11.public-typeinfo", "rev11.source-identity", "rev11.type-algebra", "rev11.type-evaluation"]
 
 [[area_rule]]
 label = "area:session"
@@ -176,4 +176,4 @@ trains = ["compiler.compiler-bridge", "compiler.svelte-compiler", "compiler.svel
 
 [[framework_rule]]
 label = "framework:shared"
-trains = ["compiler.compiler-bridge", "compiler.compiler-core", "compiler.compiler-optimization", "compiler.compiler-perf", "expansion.custom-elements", "expansion.formatter", "expansion.html-wc", "expansion.kernel", "expansion.language-service", "expansion.lint", "expansion.native-checker", "rev11.cache-runtime", "rev11.compiler-foundation", "rev11.core", "rev11.finalization", "rev11.flow", "rev11.host-runtime", "rev11.host-session", "rev11.inputs", "rev11.lock", "rev11.provider-runtime", "rev11.public-typeinfo", "rev11.publication", "rev11.query-runtime", "rev11.scheduler-runtime", "rev11.semantic-compile", "rev11.source-identity", "rev11.style", "rev11.typescript-mapper"]
+trains = ["compiler.compiler-bridge", "compiler.compiler-core", "compiler.compiler-optimization", "compiler.compiler-perf", "expansion.custom-elements", "expansion.formatter", "expansion.html-wc", "expansion.kernel", "expansion.language-service", "expansion.lint", "expansion.native-checker", "rev11.cache-runtime", "rev11.compiler-foundation", "rev11.core", "rev11.finalization", "rev11.flow", "rev11.host-runtime", "rev11.host-session", "rev11.inputs", "rev11.lock", "rev11.provider-runtime", "rev11.public-typeinfo", "rev11.publication", "rev11.query-runtime", "rev11.scheduler-runtime", "rev11.semantic-compile", "rev11.source-identity", "rev11.style", "rev11.type-algebra", "rev11.type-evaluation", "rev11.typescript-mapper"]

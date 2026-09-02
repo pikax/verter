@@ -13,6 +13,7 @@ import {
   ProtectedMappingError,
   projectStatus,
 } from "../index.mjs";
+import { ledgerText } from "./ledger-fixture.mjs";
 
 function fake(options = {}) {
   return new FakeGitHubAdapter({ owner: "pikax", repo: "verter", ...options });
@@ -29,33 +30,16 @@ function fixture(options = {}) {
   const ledgerPath = path.join(dir, "implemented.toml");
   fs.writeFileSync(
     ledgerPath,
-    `schema = 1
-
-[[implemented]]
-node_id = "BASE"
-commit_message = "test locator"
-commit_date = "2026-08-29T00:00:00+00:00"
-
-[[github_issue]]
-node_id = "WORK"
-gh_issue = 10
-sync_to_github = ${options.protected === true ? "false" : "true"}
-
-[[github_issue]]
-node_id = "SIBLING"
-gh_issue = 11
-sync_to_github = ${options.siblingProtected === true ? "false" : "true"}
-${
-  options.parentProtected === true
-    ? `
-[[github_issue]]
-node_id = "PARENT"
-gh_issue = 20
-sync_to_github = false
-`
-    : ""
-}
-`,
+    ledgerText({
+      implemented: ["BASE"],
+      issues: [
+        { node_id: "WORK", gh_issue: 10, sync_to_github: options.protected !== true },
+        { node_id: "SIBLING", gh_issue: 11, sync_to_github: options.siblingProtected !== true },
+        ...(options.parentProtected === true
+          ? [{ node_id: "PARENT", gh_issue: 20, sync_to_github: false }]
+          : []),
+      ],
+    }),
   );
   const authority = {
     nodes: [

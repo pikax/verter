@@ -142,7 +142,7 @@ fn walk_production(dir: &std::path::Path, hits: &mut Vec<String>) {
         let rel = path
             .strip_prefix(env!("CARGO_MANIFEST_DIR"))
             .unwrap_or(&path);
-        let rel_str = rel.to_string_lossy();
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
         if rel_str.ends_with("framework_common/vue_carrier_frontend.rs")
             || rel_str.ends_with("framework_common/mod.rs")
             || rel_str.ends_with("framework_common/vue_semantic_authority.rs")
@@ -159,7 +159,7 @@ fn walk_production(dir: &std::path::Path, hits: &mut Vec<String>) {
         let text = std::fs::read_to_string(&path).expect("read rust");
         if text.contains("VueCarrierFrontend") || text.contains("vue_carrier_frontend_registration")
         {
-            hits.push(rel_str.into_owned());
+            hits.push(rel_str);
         }
     }
 }

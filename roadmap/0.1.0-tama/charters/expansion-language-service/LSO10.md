@@ -60,6 +60,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 - `LanguageServiceCapabilitySnapshot` and exact certified row/implementation digests
 - `LegacyRouteDeletionManifest` and no-bypass architecture guard
 - `LanguageServiceResidualLedger` for unsupported/external operation families
+- `CurrentProductClosureReceipt` proving every `RequiredCurrent` row is certified or was explicitly removed before this terminal
 
 ## Exact predecessor contracts
 
@@ -77,6 +78,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 - Terminal work proves, deletes, and promotes; it does not add targets, occurrence roles, rename policy, candidate logic, presentation semantics, or edit algorithms.
 - Every legacy/bypass route has one exact deletion owner and a structural negative guard.
 - Residual external/unsupported ownership is explicit and capability-visible.
+- No `RequiredCurrent` operation may enter the residual ledger. It must have a current canonical certification, or a named predecessor must already have deleted/unadvertised the operation and supplied its removal receipt; LSO10 may not make that product decision itself.
 - Deleting TypeScript provider feature routes is per certified operation family; providers remain for residual owners.
 - Product receipt binds exact DAG/charter/manifest/implementation/evidence/capability/deletion digests.
 - Public/editor documentation is relocated outside `docs/arch`; Git history is the archive.
@@ -85,12 +87,13 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 #### LSO10-SB1 - Terminal certification and residual closure
 
-**Independently testable outcome:** All required rows have accepted receipts and every non-required row has exact residual owner/maturity.
+**Independently testable outcome:** All required rows have accepted receipts, every `RequiredCurrent` row is certified or has a predecessor removal receipt, and every genuinely non-current row has exact residual owner/maturity.
 
 **Architecture:**
 
 - Validate LSO9 manifest/receipts against current implementation tree.
 - Reject stale/partial/sampled certification.
+- Reject any `RequiredCurrent` row classified as `ExternalOwner`, `Unsupported`, absent, or residual.
 - Generate residual ledger and public capability snapshot.
 
 **Expected changes:**
@@ -101,6 +104,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 **Discriminating proof:**
 
 - Every required row maps to exact implementation/evidence receipts.
+- Every current-product capability/handler/custom method maps to a certified row or an earlier explicit removal receipt.
 - Capability claims contain no unproven operation/profile topology.
 
 #### LSO10-SB2 - Feature route and authority deletion
@@ -244,6 +248,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - **LSO10-AC-SURFACES:** opened consumers/coexistence modes pass exact terminal matrix.
 - **LSO10-AC-PERF:** equivalent-work/latency/allocation/RSS/cancel/churn terminal passes.
 - **LSO10-AC-HONEST:** residual provider/unsupported ownership and public capability claims are exact.
+- **LSO10-AC-CURRENT:** the residual ledger contains no `RequiredCurrent` row and the current-product inventory is closed by certification or predecessor removal receipts.
 - **LSO10-AC-SOLE:** a planted displaced authority or duplicate route is rejected by a static or runtime guard.
 - **LSO10-AC-CONTRACT:** the named APIs, identities, outcomes, and provenance fields are exact, deterministic, and complete for this block.
 - **LSO10-AC-INCREMENTAL:** incremental execution equals fresh execution on the same basis; cancelled, stale, partial, or NeedInputs outcomes are never warm-admitted as complete.
@@ -308,4 +313,4 @@ Apply `architecture-3`: 3 fresh distinct harness tasks covering exactly `adversa
 
 ## Trusted implementation ledger
 
-Before squashing or review, the implementation patch adds one `[[implemented]]` row to `authority/state/implemented.toml` with the node ID, planned squash commit message, approximate date with timezone, and optional pull-request number. Row presence is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
+Before squashing or review, the implementation patch transitions this node's predeclared row in `authority/state/implemented.toml` from `status = "pending"` to `status = "implemented"` with the planned squash commit message, approximate date with timezone, and optional pull-request number. The transitioned row is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.

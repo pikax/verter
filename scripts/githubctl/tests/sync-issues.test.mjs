@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -31,8 +30,9 @@ import {
   githubIssueByNumber,
   listGitHubIssues,
   loadAuthority,
-  parseToml,
 } from "../../../roadmap/0.1.0-tama/tools/lib.mjs";
+import { implementedRows, parseLedgerText } from "../../../roadmap/0.1.0-tama/tools/ledger.mjs";
+import { writeLedgerFixture } from "./ledger-fixture.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
@@ -114,35 +114,16 @@ function clearanceFor(adapter) {
   return report.clearance;
 }
 
-function implementedBlock(id) {
-  return `[[implemented]]
-node_id = "${id}"
-commit_message = "test locator ${id}"
-commit_date = "2026-08-28T00:00:00+00:00"
-`;
-}
-
-function mappingBlock(nodeId, issue, syncToGithub) {
-  return `[[github_issue]]
-node_id = "${nodeId}"
-gh_issue = ${issue}
-sync_to_github = ${syncToGithub}
-`;
-}
-
 function writeLedger(options = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-sync-"));
-  const file = path.join(dir, "implemented.toml");
-  const implemented = options.implemented ?? ["sync-capability"];
-  const issues = options.issues ?? [];
-  const parts = ["schema = 1", "", ...implemented.map(implementedBlock)];
-  for (const row of issues) parts.push(mappingBlock(row.node_id, row.gh_issue, row.sync_to_github));
-  fs.writeFileSync(file, parts.join("\n"));
-  return file;
+  return writeLedgerFixture("githubctl-sync-", {
+    implemented: options.implemented ?? ["SYNC-CAPABILITY"],
+    issues: options.issues ?? [],
+  });
 }
 
 function readLedger(file) {
-  return parseToml(fs.readFileSync(file, "utf8"));
+  const parsed = parseLedgerText(fs.readFileSync(file, "utf8"));
+  return { ...parsed, implemented: implementedRows(parsed) };
 }
 
 function rendered(nodeId = "GH0") {
@@ -155,7 +136,7 @@ function syncIssues(options) {
     ignoreBlockers: true,
     projectIssues: false,
     syncTrainParents: false,
-    syncPrerequisites: ["sync-capability"],
+    syncPrerequisites: ["SYNC-CAPABILITY"],
     ...options,
   });
 }
@@ -298,7 +279,7 @@ test("GH2-AC1 apply never writes an implemented row", () => {
     false,
   );
   assert.equal(
-    fs.readFileSync(ledgerPath, "utf8").match(/\[\[implemented\]\]/g)?.length,
+    fs.readFileSync(ledgerPath, "utf8").match(/^"[^"\n]+" = \{ status = "implemented"/gmu)?.length,
     before.implemented.length,
   );
 });
@@ -1059,7 +1040,7 @@ test("missing required sync capability aborts without writing", () => {
         model: MODEL,
         ledgerPath,
         clearance: clearanceFor(adapter),
-        syncPrerequisites: ["required-capability"],
+        syncPrerequisites: ["REQUIRED-CAPABILITY"],
       }),
     MissingAncestorError,
   );

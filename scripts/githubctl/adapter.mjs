@@ -92,6 +92,7 @@ export function capabilityRecord({
   pullRequests,
   projects,
   actions,
+  admin,
 }) {
   const record = {
     authenticated: authenticated === true,
@@ -100,6 +101,7 @@ export function capabilityRecord({
     pullRequests: pullRequests === true,
     projects: projects === true,
     actions: actions === true,
+    admin: admin === true,
   };
   if (typeof login === "string" && login.length > 0) record.login = login;
   return record;
@@ -1530,6 +1532,116 @@ export function createGhApiTransport({ spawn = spawnSync } = {}) {
   };
 }
 
+const REPOSITORY_SETTING_KEYS = Object.freeze([
+  "allow_squash_merge",
+  "allow_merge_commit",
+  "allow_rebase_merge",
+  "allow_auto_merge",
+  "delete_branch_on_merge",
+]);
+
+function assertRulesetId(value) {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new GitHubAdapterError("ruleset id must be a positive safe integer");
+  }
+  return value;
+}
+
+export function parseRulesetPayload(payload) {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new UnstructuredGitHubOutputError("GitHub ruleset is not a JSON object");
+  }
+  assertRulesetId(payload.id);
+  if (typeof payload.name !== "string" || payload.name.length === 0) {
+    throw new UnstructuredGitHubOutputError("GitHub ruleset name is not a string");
+  }
+  return payload;
+}
+
+export function parseRulesetListPayload(payload) {
+  if (!Array.isArray(payload)) {
+    throw new UnstructuredGitHubOutputError("GitHub ruleset list is not a JSON array");
+  }
+  return payload.map((row, index) => {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      throw new UnstructuredGitHubOutputError(`GitHub ruleset ${index} is not a JSON object`);
+    }
+    if (!Number.isSafeInteger(row.id) || row.id < 1) {
+      throw new UnstructuredGitHubOutputError("GitHub ruleset id is not a positive integer");
+    }
+    if (typeof row.name !== "string" || row.name.length === 0) {
+      throw new UnstructuredGitHubOutputError("GitHub ruleset name is not a string");
+    }
+    return row;
+  });
+}
+
+export function parseRepositorySettingsPayload(payload) {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new UnstructuredGitHubOutputError("GitHub repository settings are not a JSON object");
+  }
+  return payload;
+}
+
+function assertRulesetWritePayload(payload) {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new GitHubAdapterError("ruleset payload is required");
+  }
+  assertRequiredText(payload.name, "ruleset name");
+  if (payload.target !== "branch") {
+    throw new GitHubAdapterError("ruleset target must be branch");
+  }
+  if (typeof payload.enforcement !== "string" || payload.enforcement.length === 0) {
+    throw new GitHubAdapterError("ruleset enforcement is required");
+  }
+  if (!Array.isArray(payload.rules) || payload.rules.length === 0) {
+    throw new GitHubAdapterError("ruleset rules must be a non-empty array");
+  }
+  return payload;
+}
+
+export function planCreateRuleset(payload) {
+  return { kind: "create-ruleset", name: payload.name, applied: false };
+}
+
+export function prepareCreateRuleset(payload) {
+  return assertRulesetWritePayload(payload);
+}
+
+export function prepareGetRuleset(id) {
+  return { id: assertRulesetId(id) };
+}
+
+export function planUpdateRuleset(id, payload) {
+  return { kind: "update-ruleset", id, name: payload.name, applied: false };
+}
+
+export function prepareUpdateRuleset(id, payload) {
+  return { id: assertRulesetId(id), payload: assertRulesetWritePayload(payload) };
+}
+
+export function planUpdateRepositorySettings(patch) {
+  return { kind: "update-repository-settings", patch, applied: false };
+}
+
+export function prepareUpdateRepositorySettings(patch) {
+  if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
+    throw new GitHubAdapterError("repository settings patch is required");
+  }
+  const body = {};
+  for (const key of REPOSITORY_SETTING_KEYS) {
+    if (!Object.hasOwn(patch, key)) continue;
+    if (typeof patch[key] !== "boolean") {
+      throw new GitHubAdapterError(`repository setting ${key} must be a boolean`);
+    }
+    body[key] = patch[key];
+  }
+  if (Object.keys(body).length === 0) {
+    throw new GitHubAdapterError("repository settings patch is empty");
+  }
+  return body;
+}
+
 export class GitHubAdapter {
   #transport;
   #project;
@@ -1651,6 +1763,7 @@ export class GitHubAdapter {
       // GitHub's repository permission object has no distinct Actions bit.
       // workflow_dispatch requires the same write as pull-request mutation.
       actions: pullWrite,
+      admin: permissions.admin === true,
     });
   }
 
@@ -2295,5 +2408,75 @@ export class GitHubAdapter {
       workflow: "release-check.yml",
       applied: true,
     };
+  }
+
+  listRulesets() {
+    return this.#getCompleteList(
+      `/repos/${this.owner}/${this.repo}/rulesets`,
+      parseRulesetListPayload,
+      "GitHub ruleset list is incomplete",
+    );
+  }
+
+  getRuleset(id) {
+    const { id: rulesetId } = prepareGetRuleset(id);
+    const payload = this.#transport.request({
+      method: "GET",
+      path: `/repos/${this.owner}/${this.repo}/rulesets/${rulesetId}`,
+    });
+    return parseRulesetPayload(payload);
+  }
+
+  createRuleset(payload) {
+    const body = prepareCreateRuleset(payload);
+    const created = parseRulesetPayload(
+      this.#transport.request({
+        method: "POST",
+        path: `/repos/${this.owner}/${this.repo}/rulesets`,
+        body,
+      }),
+    );
+    return {
+      kind: "create-ruleset",
+      id: created.id,
+      name: created.name,
+      applied: true,
+    };
+  }
+
+  updateRuleset(id, payload) {
+    const prepared = prepareUpdateRuleset(id, payload);
+    const updated = parseRulesetPayload(
+      this.#transport.request({
+        method: "PUT",
+        path: `/repos/${this.owner}/${this.repo}/rulesets/${prepared.id}`,
+        body: prepared.payload,
+      }),
+    );
+    return {
+      kind: "update-ruleset",
+      id: updated.id,
+      name: updated.name,
+      applied: true,
+    };
+  }
+
+  getRepositorySettings() {
+    const payload = this.#transport.request({
+      method: "GET",
+      path: `/repos/${this.owner}/${this.repo}`,
+    });
+    return parseRepositorySettingsPayload(payload);
+  }
+
+  updateRepositorySettings(patch) {
+    const body = prepareUpdateRepositorySettings(patch);
+    const payload = this.#transport.request({
+      method: "PATCH",
+      path: `/repos/${this.owner}/${this.repo}`,
+      body,
+    });
+    parseRepositorySettingsPayload(payload);
+    return { kind: "update-repository-settings", patch: body, applied: true };
   }
 }

@@ -12,7 +12,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
-import { pathToFileURL } from "node:url";
 
 const ISOLATION = new URL(
   "../packages/unplugin/scripts/probe-bundler-route-isolation.mjs",
@@ -25,7 +24,7 @@ after(() => {
 });
 
 test("concurrent fixture allocations never share a path", async () => {
-  const { allocateRecompileFixture } = await import(pathToFileURL(ISOLATION.pathname).href);
+  const { allocateRecompileFixture } = await import(ISOLATION.href);
   const parent = join(scratch, "fixtures");
   const roots = await Promise.all(
     Array.from({ length: 6 }, () => allocateRecompileFixture(parent)),
@@ -46,9 +45,7 @@ test("concurrent fixture allocations never share a path", async () => {
 });
 
 test("an errored exportCase fails the run — scanning only cases is a false green", async () => {
-  const { collectErroredCaseLabels, probeExitCode } = await import(
-    pathToFileURL(ISOLATION.pathname).href
-  );
+  const { collectErroredCaseLabels, probeExitCode } = await import(ISOLATION.href);
   const labels = collectErroredCaseLabels(
     { vueRecompileLane: { outcome: "buildStarted" } },
     { VerterVue: { outcome: "error", message: "ENOENT" } },
@@ -58,9 +55,7 @@ test("an errored exportCase fails the run — scanning only cases is a false gre
 });
 
 test("an errored required case fails the run even when fresh is true", async () => {
-  const { collectErroredCaseLabels, probeExitCode } = await import(
-    pathToFileURL(ISOLATION.pathname).href
-  );
+  const { collectErroredCaseLabels, probeExitCode } = await import(ISOLATION.href);
   const labels = collectErroredCaseLabels(
     { vueRecompileLane: { outcome: "error", message: "ENOENT: Parent.vue" } },
     { VerterVue: { outcome: "transformed" } },
@@ -70,9 +65,7 @@ test("an errored required case fails the run even when fresh is true", async () 
 });
 
 test("a clean record exits 0", async () => {
-  const { collectErroredCaseLabels, probeExitCode } = await import(
-    pathToFileURL(ISOLATION.pathname).href
-  );
+  const { collectErroredCaseLabels, probeExitCode } = await import(ISOLATION.href);
   const labels = collectErroredCaseLabels(
     { vueRecompileLane: { outcome: "buildStarted" } },
     { VerterVue: { outcome: "transformed" } },

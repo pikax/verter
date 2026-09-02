@@ -105,7 +105,7 @@ Apply `architecture-3`: 3 fresh distinct harness tasks covering exactly `adversa
 
 ## Trusted implementation ledger
 
-Before squashing or review, the implementation patch adds one `[[implemented]]` row to `authority/state/implemented.toml` with the node ID, planned squash commit message, approximate date with timezone, and optional pull-request number. Row presence is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
+Before squashing or review, the implementation patch transitions this node's predeclared row in `authority/state/implemented.toml` from `status = "pending"` to `status = "implemented"` with the planned squash commit message, approximate date with timezone, and optional pull-request number. The transitioned row is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
 
 ## Reconciled source-plan contract
 
@@ -201,13 +201,13 @@ Arbitrary remark/rehype plugin execution remains outside Rust/WASM. Static captu
 
 Project profiles are semantic overlays over already-resolved carrier/framework facts and captured project structure. They never become TypeScript project owners.
 
-Only Next is selected as an implementation candidate. Every other row below is explicitly deferred and unordered; row position carries no priority. Scored profiles show the dated §6 hypothesis, while `unscored` means a feasibility lock must produce evidence before the profile may enter any investment order.
+Nuxt and SvelteKit are co-selected as the first production project profiles in `expansion.project-profiles`. Their lanes are independently acceptable and may progress in parallel through distinct framework-specific conflict domains; shared LSP, bundler, and performance mutations still serialize under their existing leases. `PPR1` promotes the generic project-profile architecture only after both terminals pass. Every other row is deferred and unordered; row position carries no priority. Scored rows preserve the dated §6 hypothesis rather than current selection authority.
 
 | Decision | Profile | Score | Required semantic focus | Prerequisites / reason deferred |
 |---|---|---:|---|---|
-| First candidate | Next.js | 4.2 | App Router file roles, layouts/pages/loading/error/metadata, RSC, client/server directives, Server Functions, route/cache/rendering semantics | React + MDX full prerequisites; generic project identity/index |
-| Deferred; counterfixture first | Nuxt 4 | 3.3 | pages/layouts/plugins/middleware/server routes, auto-imports, client/server boundaries, Vue/Nitro associations | Vue accepted; challenge generic project vocabulary before any implementation rank |
-| Deferred; counterfixture first | SvelteKit | 3.1 | routes/layouts/load/actions/hooks, universal/server files, Svelte associations | Svelte accepted; challenge generic project vocabulary before any implementation rank |
+| Deferred; prerequisites incomplete | Next.js | 4.2 | App Router file roles, layouts/pages/loading/error/metadata, RSC, client/server directives, Server Functions, route/cache/rendering semantics | Full React + MDX prerequisites and a separately ratified production train |
+| Active first-class lane | Nuxt 4 | 3.3 | pages/layouts/plugins/middleware/server routes, auto-imports, client/server boundaries, Vue/Nitro associations | `PPR0 → NUX0…NUX3 → PPR1` |
+| Active first-class lane | SvelteKit | 3.1 | routes/layouts/load/actions/hooks, universal/server files, Svelte associations | `PPR0 → SKT0…SKT3 → PPR1` |
 | Deferred; unranked | Astro project | unscored | file-based routes/endpoints, layouts, content collections, integrations, assets, islands and source-observable build-mode facts | full Astro tooling vertical plus independent feasibility/score lock |
 | Deferred; unranked | Angular workspace | unscored | projects/configurations, routes/lazy boundaries, templates/styles/assets, build targets and library/app relationships that are source/config-observable | full Angular semantic vertical plus exact project/config epoch and feasibility/score lock |
 | Deferred; unranked | React Router | unscored | route modules, loaders/actions, server/client boundaries, framework-mode conventions | exact release and React prerequisite plus independent feasibility/score lock |
@@ -218,18 +218,19 @@ Only Next is selected as an implementation candidate. Every other row below is e
 | Deferred; unranked | Docusaurus | unscored | docs routes, MDX component environment, sidebars, links/assets and plugin-config facts | MDX vertical plus independently bounded static-config contract and feasibility/score lock |
 | Deferred; unranked | VitePress | unscored | Markdown/Vue content, routes, theme/components, links/assets and static config facts | Vue + Markdown/MDX substrate plus independent feasibility/score lock |
 
-Next is the intended first implementation because it combines reach and high-value semantics TypeScript does not know, not because it defines the generic schema. Before any project-profile contract becomes Stable, Nuxt and SvelteKit adversarial fixtures must demonstrate that route/module/client-server vocabulary is not merely Next renamed. Promotion of Next does not automatically rank any deferred row.
+The dated numerical score does not override product strategy or prerequisite readiness. Nuxt and SvelteKit are the first implementation pair because Vue and Svelte are Verter's co-equal first-class frameworks and both compiler lanes exist in the active DAG. The generic schema is accepted only through their mutual counterexamples; neither profile is implemented as the other's renamed vocabulary. Next remains deferred until its React/MDX prerequisites and a separate production charter are accepted.
 
-### 15.6 Non-active horizontal semantics ledger
+### 15.6 Horizontal semantics disposition
 
-After the architecture and one full new vertical are proven, prioritization should compare new framework work against horizontal semantics that benefit several verticals at once:
+Horizontal semantics that benefit several verticals are split between active successor trains and the remaining portfolio:
 
-- CSS Modules, Sass/SCSS/Less semantic references, custom properties, and later evidence-gated utility-framework semantics;
-- Vite/source-module facts such as aliases, assets, query imports, `import.meta.glob`, and environment typing, without bundler/HMR ownership;
-- JSON/JSONC/YAML and statically captured configuration projections, without executable configuration in Rust/WASM;
-- package exports/imports/workspaces and monorepo cross-package component relationships.
+- **Portfolio:** CSS Modules, Sass/SCSS/Less semantic references, custom properties, and later evidence-gated utility-framework semantics.
+- **Active `expansion.source-modules`:** Vite aliases, assets, query imports, `import.meta.glob`, URL/worker forms, environment typing, provenance, and read sets.
+- **Active `expansion.bundler-host`:** JavaScript `packages/unplugin` lifecycle, resolve/load/transform, processed-content handoff, client/SSR graphs, HMR policy, and seven-bundler Vue/Svelte conformance.
+- **Portfolio:** JSON/JSONC/YAML projections beyond the captured configuration already owned by CFG0/SM/NUX/SKT.
+- **Active `expansion.project-model`:** package exports/imports/workspaces, project references, compiler environments, and monorepo project/module ownership. Cross-package component discovery remains an IDX/TypeInfo consumer over those facts.
 
-These are portfolio records, not active DAG nodes or hidden vertical prerequisites. Each needs its own authority/reuse dossier and may be selected ahead of a lower-value framework when measured cross-vertical unlock exceeds the next vertical score.
+Active rows are explicit DAG nodes and predecessors of the new product surfaces; portfolio rows remain non-active and may not be treated as hidden prerequisites.
 
 ## 16. Superseded-proposal disposition
 
@@ -253,4 +254,3 @@ Useful architecture from revision 3 is migrated rather than lost:
 | Formatter/lint/CLI mega-terminal chain | Replaced by independent `FMT4`, `LNT3` plus rule packs, base `CLI5`, and optional aggregate `CLI3` promotions |
 
 No revision-3 charter i
-

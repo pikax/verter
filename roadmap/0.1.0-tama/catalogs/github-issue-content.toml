@@ -97,18 +97,6 @@ problem = "Flow analysis is split across legacy resolver paths that can disagree
 expected_outcome = "A private shared solver owns `FlowSlice` production and returns explicit result contracts for every semantic query."
 acceptance = ["One private solver produces `FlowSlice` values for the affected semantic and session paths.", "`SemanticQueryKey` identifies every input that can change a flow result.", "`ResultContract` distinguishes complete, incomplete, and cancelled computation.", "Equivalent inputs produce deterministic flow facts.", "Parallel legacy resolution and wrong-complete fallback paths are unavailable."]
 [[issue]]
-node_id = "D2B"
-title = "Cut public flow consumers over to the shared solver"
-problem = "Public semantic consumers can still reach legacy flow resolvers after the shared solver exists. Dual routes risk divergent diagnostics, inconsistent narrowing, and duplicate computation depending on which entry point a caller uses."
-expected_outcome = "Every public flow consumer uses the shared `FlowSlice` authority, and the displaced resolver APIs and implementations are removed atomically."
-acceptance = ["All public flow entry points delegate to the shared solver.", "Public results preserve complete identities, provenance, and deterministic ordering.", "Existing diagnostics and semantic answers remain equivalent through the cutover.", "Legacy resolver APIs, implementations, and fallback calls are removed together.", "No caller can construct or publish a wrong-complete flow result."]
-[[issue]]
-node_id = "D3R"
-title = "Extend shared flow facts to relations and bindings"
-problem = "The shared solver does not yet own all relation and binding-product facts needed by semantic consumers. Leaving those domains on legacy paths causes duplicate interpretation and can produce inconsistent identities or incomplete downstream results."
-expected_outcome = "`FlowSlice` carries authoritative relation and binding-product facts with stable identity and deterministic semantics across all affected consumers."
-acceptance = ["Relation facts are represented and produced by the shared solver.", "Binding-product facts retain stable source and declaration identity.", "Consumers obtain these facts through the existing semantic query contract rather than local recomputation.", "Incremental and fresh evaluation produce equivalent relation and binding results.", "No parallel relation or binding resolver remains in production use."]
-[[issue]]
 node_id = "D4"
 title = "Model narrowing and structural returns in shared flow facts"
 problem = "Narrowing and structural return behavior can be inferred outside the shared solver, causing branches and return paths to disagree about reachable types. This risks incorrect diagnostics and incomplete semantic results."

@@ -27,7 +27,12 @@ import {
   syncIssues,
   workflowInventory,
 } from "../index.mjs";
-import { parseToml } from "../../../roadmap/0.1.0-tama/tools/lib.mjs";
+import {
+  implementedRows,
+  parseLedgerText,
+  serializeLedger,
+} from "../../../roadmap/0.1.0-tama/tools/ledger.mjs";
+import { ledgerText } from "./ledger-fixture.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
@@ -72,37 +77,31 @@ function clearanceFor(adapter, require = ["issues", "pullRequests", "projects", 
   return report.clearance;
 }
 
-function implementedBlock(id) {
-  return `[[implemented]]
-node_id = "${id}"
-commit_message = "test locator ${id}"
-commit_date = "2026-08-28T00:00:00+00:00"
-`;
-}
-
-function mappingBlock(nodeId, issue, syncToGithub) {
-  return `[[github_issue]]
-node_id = "${nodeId}"
-gh_issue = ${issue}
-sync_to_github = ${syncToGithub}
-`;
-}
-
 function writeLedger(options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-workflow-"));
   const file = path.join(dir, "implemented.toml");
   const implemented =
-    options.implemented ??
-    parseToml(fs.readFileSync(LIVE_LEDGER, "utf8")).implemented.map((row) => row.node_id);
+    options.implemented ?? readLedger(LIVE_LEDGER).implemented.map((row) => row.node_id);
   const issues = options.issues ?? [];
-  const parts = ["schema = 1", "", ...implemented.map(implementedBlock)];
-  for (const row of issues) parts.push(mappingBlock(row.node_id, row.gh_issue, row.sync_to_github));
-  fs.writeFileSync(file, parts.join("\n"));
+  fs.writeFileSync(file, ledgerText({ implemented, issues }));
   return file;
 }
 
 function readLedger(file) {
-  return parseToml(fs.readFileSync(file, "utf8"));
+  const parsed = parseLedgerText(fs.readFileSync(file, "utf8"));
+  return { ...parsed, implemented: implementedRows(parsed) };
+}
+
+function addImplemented(file, nodeIds) {
+  const parsed = parseLedgerText(fs.readFileSync(file, "utf8"));
+  for (const id of nodeIds) {
+    parsed.implementation[id] = {
+      status: "implemented",
+      commit_message: `test locator ${id}`,
+      commit_date: "2026-08-28T00:00:00+00:00",
+    };
+  }
+  fs.writeFileSync(file, serializeLedger(parsed));
 }
 
 test("check prints the frozen composed-workflow inventory and keeps issue-sync available", () => {
@@ -130,7 +129,7 @@ test("check prints the frozen composed-workflow inventory and keeps issue-sync a
 test("one fake adapter walks issue mapping through squash landing, feedback, and release rehearsal", () => {
   const adapter = fake();
   const clearance = clearanceFor(adapter);
-  const ledgerPath = writeLedger({ implemented: ["sync-capability"] });
+  const ledgerPath = writeLedger({ implemented: ["SYNC-CAPABILITY"] });
   const reportDir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-workflow-reports-"));
 
   const missing = syncIssues({
@@ -202,13 +201,14 @@ test("one fake adapter walks issue mapping through squash landing, feedback, and
 
   const implementationNode = synced.created.find((row) => row.gh_issue === gh0Issue).node_id;
   const readyNode = synced.created.find((row) => row.gh_issue === readyIssue).node_id;
-  fs.appendFileSync(ledgerPath, `\n${implementedBlock(implementationNode)}`);
+  addImplemented(ledgerPath, [implementationNode]);
   const present = new Set(readLedger(ledgerPath).implemented.map((row) => row.node_id));
-  for (const row of parseToml(fs.readFileSync(LIVE_LEDGER, "utf8")).implemented) {
-    if (row.node_id === readyNode || present.has(row.node_id)) continue;
-    fs.appendFileSync(ledgerPath, `\n${implementedBlock(row.node_id)}`);
-    present.add(row.node_id);
-  }
+  addImplemented(
+    ledgerPath,
+    readLedger(LIVE_LEDGER)
+      .implemented.map((row) => row.node_id)
+      .filter((id) => id !== readyNode && !present.has(id)),
+  );
   const implementedBefore = readLedger(ledgerPath).implemented.length;
 
   const opened = createPr({
@@ -417,7 +417,7 @@ test("a protected mapping stays skipped and byte-for-byte untouched during issue
   });
   const clearance = clearanceFor(adapter, ["issues"]);
   const ledgerPath = writeLedger({
-    implemented: ["sync-capability"],
+    implemented: ["SYNC-CAPABILITY"],
     issues: [{ node_id: "GH0", gh_issue: 7, sync_to_github: false }],
   });
   const report = syncIssues({

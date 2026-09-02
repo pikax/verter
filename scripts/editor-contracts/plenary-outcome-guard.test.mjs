@@ -139,6 +139,13 @@ const REJECTED_SUMMARY_ONLY = "plenary-failure-without-runner-token.ansi.txt";
 const FAILURE_VERDICT = "Neovim plenary suite reported failures";
 const NO_PROOF_VERDICT = "did not prove that any assertion-bearing test ran";
 
+let bashTestOptions = {};
+try {
+  execFileSync("bash", ["--version"], { stdio: "ignore" });
+} catch {
+  bashTestOptions = { skip: "requires a working bash executable" };
+}
+
 test("the committed transcripts really are ANSI-coloured and really differ", () => {
   // Guards the rest of the file against passing vacuously. If the fixtures ever
   // lose their escape sequences, every assertion below would still hold while
@@ -171,7 +178,7 @@ test("the committed transcripts really are ANSI-coloured and really differ", () 
 for (const workflow of WORKFLOWS) {
   const label = path.basename(workflow);
 
-  test(`${label}: an all-pass suite is accepted`, () => {
+  test(`${label}: an all-pass suite is accepted`, bashTestOptions, () => {
     const { status, output } = runVerdict(workflow, ACCEPTED);
     assert.equal(
       status,
@@ -181,26 +188,30 @@ for (const workflow of WORKFLOWS) {
     assert.doesNotMatch(output, new RegExp(FAILURE_VERDICT));
   });
 
-  test(`${label}: a failing suite is rejected via the runner token`, () => {
+  test(`${label}: a failing suite is rejected via the runner token`, bashTestOptions, () => {
     const { status, output } = runVerdict(workflow, REJECTED_WITH_TOKEN);
     assert.equal(status, 1);
     assert.match(output, new RegExp(FAILURE_VERDICT));
   });
 
-  test(`${label}: a failing suite is rejected on the coloured counter alone`, () => {
-    const { status, output } = runVerdict(workflow, REJECTED_SUMMARY_ONLY);
-    assert.equal(status, 1);
-    assert.match(
-      output,
-      new RegExp(FAILURE_VERDICT),
-      `the failure was not detected from the coloured \`Failed : 1\` counter. ` +
-        `Rejecting for any other reason is not detection:\n${output}`,
-    );
-    assert.doesNotMatch(
-      output,
-      new RegExp(NO_PROOF_VERDICT),
-      `the job rejected the run for the wrong reason — it could not find the success ` +
-        `proof, which it also cannot find on a GREEN run:\n${output}`,
-    );
-  });
+  test(
+    `${label}: a failing suite is rejected on the coloured counter alone`,
+    bashTestOptions,
+    () => {
+      const { status, output } = runVerdict(workflow, REJECTED_SUMMARY_ONLY);
+      assert.equal(status, 1);
+      assert.match(
+        output,
+        new RegExp(FAILURE_VERDICT),
+        `the failure was not detected from the coloured \`Failed : 1\` counter. ` +
+          `Rejecting for any other reason is not detection:\n${output}`,
+      );
+      assert.doesNotMatch(
+        output,
+        new RegExp(NO_PROOF_VERDICT),
+        `the job rejected the run for the wrong reason — it could not find the success ` +
+          `proof, which it also cannot find on a GREEN run:\n${output}`,
+      );
+    },
+  );
 }

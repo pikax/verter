@@ -126,8 +126,8 @@ fn main() {
                 // infer that feature from a test binary's fingerprint and the
                 // import fails to resolve — the pinned privacy diagnostics
                 // become `E0432 unresolved import` and every one mismatches.
-                // They still run, and still hold their seals, under the
-                // canonical gate where the feature is on.
+                // They still run, and still hold their seals, in the
+                // dedicated session-feature-variants compile-contract lane.
                 Some("instantiate_key_context_not_extractable.rs")
                     | Some("scanners_replacement_raw_parser_public.rs")
                     | Some("complete_flow_result_constructor_is_private.rs")

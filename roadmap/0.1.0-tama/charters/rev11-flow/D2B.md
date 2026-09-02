@@ -27,11 +27,11 @@ optional=false
 release_gating=none
 external_requirements=
 charter=charters/rev11-flow/D2B.md
-max_production_loc=800
-max_production_files=8
-max_related_packages=2
-rescope_loc=1500
-rescope_files=12
+max_production_loc=3262
+max_production_files=20
+max_related_packages=1
+rescope_loc=3262
+rescope_files=20
 rescope_unrelated_packages=3
 -->
 
@@ -52,6 +52,7 @@ Atomic public flow-proof cutover — one indivisible accepted cutover per the fl
 ## Exact predecessor contracts
 
 - **D2A:** implemented ledger row for “Canonical flow demand and proof substrate”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **D2D:** implemented ledger row for “Typed resolution outcome for every surface producer”; ledger presence alone satisfies the predecessor. D2D gates D2B re-certification because its typed outcome removes the raw empty-success warming chokepoint that violates D2B-AC2/AC3. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **TA1B and TA2:** implemented ledger rows for “Canonical composite payload and construction-site closure” and “Demand-scoped truthiness domain authority”; ledger presence alone satisfies each predecessor. Their commit messages, approximate timezone-bearing dates, and optional PRs are locator hints only. Both were added as explicit D2B predecessors by the canonical-type-algebra ruling (`decisions/2026-08-31-canonical-type-algebra-predecessor.md`), which holds that D2B does not land until both land, because `FlowReturnResult` promises a canonical whole-return node and D2B-AC2 pins exact identity. TA1B's predecessor TA1A ("Canonical algebra comparator builder and mint substrate") is reached transitively and is not listed directly.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
@@ -60,7 +61,7 @@ Atomic public flow-proof cutover — one indivisible accepted cutover per the fl
 - Deliver exactly “Atomic public flow-proof cutover and distributed-admission retirement” as the independently acceptable boundary; no neighboring authority is included.
 - Deletion discipline: each deleted responsibility cites the source-verified displaced route it replaces; a route without that proof is preserved. The three distributed admission channels and their displaced routes are: (a) the root build's degradation decision and direct `cache_suppress` write in `build_flow_return` (`flow_return.rs`) — displaced by the finalizer outcome adapter translating a partial outcome once into `QueryBuildOutput.result_is_partial` / `partial_reasons` / `cache_suppress`, with the universal read funnel propagating those rails into enclosing builds; (b) the SCC batch's raw `result.degradation().is_some()` admission test (`semantic_query_memo/scc_publish.rs`) — displaced by proof typing that makes a degraded member unrepresentable at the publish boundary; (c) `ConsumerFold`, `FunctionReturnNode::consumer_fold`, the special call in `execute_function_return_source` (`flow_return.rs`), and `fold_flow_return_consumer_rails` (`project_semantic_dispatch/mod.rs`) — displaced by the universal consumer-rail fold. Also retired with their displaced routes: the pre-proof value-arm names `FlowReturnPendingOutcome::Complete` / `FlowRootClose::Complete` (renamed `EvaluatedValue` — completeness is claimed only by the proof), the `component_degraded` boolean as a completeness authority (its failure detection is preserved by recording gaps/failures on the ledger and branching on the finalized outcome), and the “three channels” module documentation in `semantic_query/flow_return_result.rs`. There is no legacy parallel flow resolver to delete — the A5 owner rows and the A6 lock record establish that none exists.
 - Preserve: `evaluate_flow_return` / `FlowEvaluator` (return equation, coinductive holds, fixed-point join, literal widening, typed failure production — they compute values); `FlowReturnResult` as the value payload, whose degradation verdict the finalizer reads exactly once; `FlowReturnFailure`, `FlowReturnDegradation`, and `last_root_failure` as a typed caller-transport channel, never an admission decision; the generic `cache_suppress` / `result_is_partial` system for non-flow queries, fact instability, cancellation, and enclosing partial propagation; and `FlowSliceStores`, the graph bundle, lowered-IR cache, warm carrier validation, SCC root witness, retention capacity, atomic writes, reverse indexes, and inline-flight lifecycle, including the strict warm reader (`semantic_query_memo/flow_return_memo.rs`).
-- Landing: D1, D2A, and D2B land as ONE atomic multi-node candidate; none of the three merges independently (codex D2 scope ruling, `decisions/2026-08-29-rev11-flow-d2-split.md`, extending the D1+D2 atomic-landing ruling of 2026-08-29). Per `contracts/github-control-plane.md`, each node in the shared candidate keeps its own issue mapping, ledger row, and closing link; this node carries the rekeyed gh_issue 174 mapping.
+- Landing: D1, D2A, and D2B land as ONE atomic multi-node candidate; none of the three merges independently (codex D2 scope ruling, `decisions/2026-08-29-rev11-flow-d2-split.md`, extending the D1+D2 atomic-landing ruling of 2026-08-29). Per `contracts/github-control-plane.md`, D2A is the intentional unmapped exception; all three nodes keep distinct ledger rows, D1 and D2B retain their own issue mappings, and only those mapped nodes carry closing links. This node carries the rekeyed gh_issue 174 mapping.
 - Discriminating cutover tests (all six required): `flow_root_publish_requires_complete_flow_proof` (a clean raw `FlowReturn` value with both boolean flags clear but no `CompleteFlowResult` yields zero candidates; the identical value with the finalizer token publishes and the second request is warm; deleting the proof check fails the negative leg); `production_missing_obligation_returns_only_and_recomputes` (a real production plan with one pending obligation returns its usable value twice, increments the cold-compute counter twice, and holds zero candidates); `flow_scc_publish_accepts_proof_tokens_only` (`PendingFlowReturnMember` constructible only with `CompleteFlowResult`; a structural/type guard proves `CompleteFlowResult` construction occurs only in `flow_solve.rs`; a trybuild fixture proves external construction fails); `degraded_flow_finalizer_never_warms_root_or_scc` (a natural degraded success returns its payload twice with two cold computations and zero candidates, root and SCC legs; the enclosing component test proves the universal rail replaces the deleted sealed-consumer fold); `flow_plan_runs_once_per_cold_demand_and_never_for_nonflow` (one cold demand plans exactly once; warm replay, ordinary non-flow queries, and pending typed-gap roots add zero graph builds, zero plans, zero obligation capacity); and `flow_result_contract_is_exact_identity` (changing any registry contract column changes `ResultContractId`; same key with different contract IDs compares unequal; a proof under one contract cannot finalize or publish under another). Two further named requirements (D1 adjudication ruling, 2026-08-29) own the production-provenance findings that D1's hermetic layer structurally cannot close: `production_flow_proof_has_evaluator_origin` (a non-test build can obtain discharge/convergence evidence only from the private, one-shot `FlowEvaluationOutcome` produced by `evaluate_flow_return`; raw per-obligation mutators and test helpers cannot reach production finalization) and `foreign_flow_value_provenance_is_rejected` (value, discharge report, convergence, and `FlowDemandHandle` carry the same opaque evaluation provenance, including semantic-store identity and arena epoch/request generation; a value from another demand, store, or stale generation is typed partial/ReturnOnly and produces zero root or SCC candidates). Retain the existing Supported/Stable flow-return corpus, plan-order tests, stale-basis tests, SCC order-independence tests, and component-meta flow guards; replace the old SCC unit test that directly exercises the deleted `result.degradation().is_some()` predicate.
 
 ## Acceptance IDs and discriminating proof
@@ -161,11 +162,11 @@ carries the `instanceof` retention/gap rows.
 - Never add a dual-running authority, compatibility fallback, string/regex semantic recovery, test-only production bypass, resource-capacity predecessor, sleep/poll readiness, or unqualified cache/public identity. No shadow result comparison: the cutover swaps admission authority atomically, never by running old and new side by side.
 - Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
 
-## Budgets and mandatory rescope
+## Budgets and rescope
 
-- Target ceiling: 800 production LOC / 8 production files — **HISTORICAL, NON-BINDING for D2B.** `decisions/2026-08-30-rev11-flow-d2b-budget-amendment.md` holds that this LOC/file target does not apply to D2B's landed candidate; the figures are retained here only as the schema-required historical value, not as a live constraint. The "2 related crates/packages" ceiling is unaffected by that amendment, remains binding, and was not breached.
-- Mandatory rescope above 1,500 production LOC / 12 files — **HISTORICAL, NON-BINDING for D2B**, same amendment. The "3 unrelated crates/packages" trigger, and the "public/wire, unsafe, concurrency, or lifetime work combined with another major concern" trigger, are unaffected, remain binding, and were not breached.
-- Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing. This constraint is unaffected by the budget amendment and remains fully binding.
+- Recorded landed footprint: 3,262 added production LOC across 20 production files in one crate. These machine fields preserve the accepted candidate's comparison baseline; D2B has no numeric target ceiling or numeric rescope trigger.
+- Architect rescope remains mandatory under `contracts/sizing.md` when a candidate spans 3 unrelated crates/packages, or combines public/wire, unsafe, concurrency, or lifetime work with another major concern.
+- Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
 - Performance budget: when preflight identifies touched authority or a hot path, equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance remains 0.0% unless an owning-authority amendment supplies exact replacement thresholds. Otherwise performance evidence is not applicable; do not create counters or a 100-request retention soak solely to satisfy this charter.
 
 ## Abort conditions
@@ -185,4 +186,10 @@ Apply `public-3`: 3 fresh distinct harness tasks covering exactly `adversarial`,
 
 ## Trusted implementation ledger
 
-Before squashing or review, the implementation patch adds one `[[implemented]]` row to `authority/state/implemented.toml` with the node ID, planned squash commit message, approximate date with timezone, and optional pull-request number. Row presence is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
+Before squashing or review, the implementation patch transitions this node's
+predeclared row in `authority/state/implemented.toml` from `status = "pending"`
+to `status = "implemented"` with the planned squash commit message, approximate
+date with timezone, and optional pull-request number. The transitioned row is the
+implementation fact. Commit metadata is a loose locator only and is never resolved or
+validated against Git or GitHub. Reviewers inspect the squashed candidate patch without
+SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.

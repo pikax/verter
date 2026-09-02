@@ -7,6 +7,7 @@ import {
   GitHubDoctor,
   INSPECT_CAPABILITIES,
   PROJECT_STATUS_CAPABILITIES,
+  PROTECTION_CAPABILITIES,
   RELEASE_CUT_CAPABILITIES,
   RELEASE_PLAN_DISPATCH_CAPABILITIES,
   REVIEW_SUMMARY_CAPABILITIES,
@@ -23,6 +24,7 @@ import { releasePlan } from "./release-plan.mjs";
 import { schedule, schedulePreflight } from "./schedule.mjs";
 import { syncIssues } from "./sync-issues.mjs";
 import { workflowInventory } from "./workflow.mjs";
+import { protectionApply, protectionCheck } from "./protection.mjs";
 
 function printHelp() {
   console.log(`Usage: githubctl <command>
@@ -62,6 +64,7 @@ Commands:
     [--head <branch>] [--base main] [--body <pr prose>] [--findings <json>]
     [--land] [--pr <n>] [--close-milestone] [--fake]
     [--owner <owner> --repo <repo>]
+  protection --check|--apply [--fake] --owner <owner> --repo <repo>
 
 check prints the frozen composed-workflow inventory as JSON. It is
 local and never contacts GitHub. Issue-sync stays available as an
@@ -80,6 +83,7 @@ release-plan --apply does not write GitHub. --dispatch is the only
 workflow_dispatch path, is never the default, and is doctor-gated for
 actions. HTTP 204 means the dispatch was accepted; rehearsal.dispatched
 does not imply the rehearsal passed. Live job poll is not default.
+protection --apply is doctor-gated for admin.
 
 Issue create/update and pull-request mutation remain library APIs. Each
 requires mode 'check' or 'apply'; apply is doctor-gated.
@@ -143,6 +147,12 @@ dispatch. --land squash-merges after a successful CiResult with
 commit_title preserved.
 Do not auto-close the milestone; --close-milestone is the only close path.
 P0/P1 findings block; GitHub issue state cannot erase them.
+
+protection inspects the expected GitHub ruleset and repository merge
+settings. Check reports drift without writing. Apply creates or updates
+the named ruleset and patches repository merge settings; it never deletes
+other rulesets. Extra unexpected blocking rules are reported and left
+alone. Apply is doctor-gated for admin.
 `);
 }
 
@@ -629,6 +639,35 @@ function runReleaseCut(flags, options) {
   return report.ok ? 0 : 1;
 }
 
+function runProtection(flags, options) {
+  const check = flags.has("check");
+  const apply = flags.has("apply");
+  if (check === apply) throw new Error("protection requires exactly one of --check or --apply");
+  const adapter = boundAdapter(flags, options, "protection");
+  if (check) {
+    const report = protectionCheck({
+      adapter,
+      owner: options.owner,
+      repo: options.repo,
+    });
+    console.log(JSON.stringify(report, null, 2));
+    return report.ok ? 0 : 1;
+  }
+  const doctor = new GitHubDoctor(adapter).check({ require: PROTECTION_CAPABILITIES });
+  if (!doctor.ok) {
+    console.log(JSON.stringify(doctor, null, 2));
+    return 1;
+  }
+  const report = protectionApply({
+    adapter,
+    owner: options.owner,
+    repo: options.repo,
+    clearance: doctor.clearance,
+  });
+  console.log(JSON.stringify(report, null, 2));
+  return report.ok ? 0 : 1;
+}
+
 function main(argv) {
   const { flags, options, positionals } = parseArgs(argv);
   if (flags.has("help") && positionals.length === 0) {
@@ -662,8 +701,9 @@ function main(argv) {
   if (command === "schedule") return runSchedule(flags, options);
   if (command === "release-plan") return runReleasePlan(flags, options);
   if (command === "release-cut") return runReleaseCut(flags, options);
+  if (command === "protection") return runProtection(flags, options);
   throw new Error(
-    `unknown command ${command}; supported commands: doctor, check, inspect, sync-issues, project-status, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan, release-cut`,
+    `unknown command ${command}; supported commands: doctor, check, inspect, sync-issues, project-status, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan, release-cut, protection`,
   );
 }
 

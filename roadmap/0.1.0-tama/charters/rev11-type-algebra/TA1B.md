@@ -359,13 +359,13 @@ FIX_REQUIRED disposition.
 
 ## Trusted implementation ledger
 
-Before squashing or review, the implementation patch adds one `[[implemented]]` row
-to `authority/state/implemented.toml` with the node ID, planned squash commit
-message, approximate date with timezone, and optional pull-request number. Row
-presence is the implementation fact. Commit metadata is a loose locator only and is
-never resolved or validated against Git or GitHub. Reviewers inspect the squashed
-candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound
-orchestration manifests.
+Before squashing or review, the implementation patch transitions this node's
+predeclared row in `authority/state/implemented.toml` from `status = "pending"`
+to `status = "implemented"` with the planned squash commit message, approximate
+date with timezone, and optional pull-request number. The transitioned row is the
+implementation fact. Commit metadata is a loose locator only and is never resolved or
+validated against Git or GitHub. Reviewers inspect the squashed candidate patch without
+SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
 
 ## Boundary correction inherited from the predecessor's review
 
@@ -401,12 +401,10 @@ a `String` augmentation. Moving them too would have broadly disabled the canonic
 route for member-value intersections, which is a scope decision this node is the right
 place to make rather than a closing round on its predecessor.
 
-Decide it explicitly here. Either those carriers join the fail-closed arm — accepting
-that member-value intersections over string-shaped carriers keep their raw ordered form
-and lose canonicalization — or the classification gains a real apparent-type callability
-question rather than a shape guess. What is not acceptable is leaving a documented
-claim that those carriers never yield call signatures, because the compiler says
-otherwise and the consequence is a silently reversed overload set.
+The implementation therefore had to choose between admitting those carriers to the
+fail-closed arm or adding a real apparent-type callability question. It could not retain
+the disproven claim that those carriers never yield call signatures, because that would
+silently reverse an overload set.
 
 RESOLVED in the landed implementation
 (`walk.rs::value_may_contribute_call_signatures`): the augmentable
@@ -420,4 +418,3 @@ collapse to `never` before any ordering exists, and same-domain scalar arms
 share one backing interface's signature list, so commutative reordering is
 unobservable to overload resolution. No documented never-callable claim
 remains for the augmentable carriers.
-

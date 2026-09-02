@@ -59,7 +59,7 @@ Canonical flow demand and proof substrate that compiles into production but rema
 - Deliver exactly “Canonical flow demand and proof substrate” as the independently acceptable boundary; no neighboring authority is included.
 - The substrate is production-compiled but publicly unreachable: it publishes no new public/wire surface, opens no admission route, and runs no shadow comparison against the live evaluator's results. Public cutover is D2B's boundary, not this node's.
 - Planning runs exactly once per cold FlowReturn demand: delete the lowered-node `ReturnPathPeeker` replan and D1's independent proof-plan replan, each citing the retained `Arc<PlannedFlowSlice>` plan as the source-verified displaced route.
-- Landing: D2A never merges independently. It lands only as part of the atomic D1+D2A+D2B multi-node candidate, with internal D1 and D2A checkpoints inside that candidate (codex D2 scope ruling, `decisions/2026-08-29-rev11-flow-d2-split.md`). Per `contracts/github-control-plane.md`, the shared atomic landing keeps each node's own issue mapping, ledger row, and closing link; D2A intentionally carries no GitHub issue mapping (maintainer freeze on issue churn — the pre-existing D2 issue mapping was rekeyed to D2B).
+- Landing: D2A never merges independently. It lands only as part of the atomic D1+D2A+D2B multi-node candidate, with internal D1 and D2A checkpoints inside that candidate (codex D2 scope ruling, `decisions/2026-08-29-rev11-flow-d2-split.md`). Per `contracts/github-control-plane.md`, D2A is the intentional unmapped exception; all three nodes keep distinct ledger rows, D1 and D2B retain their own issue mappings, and only those mapped nodes carry closing links.
 
 ## Acceptance IDs and discriminating proof
 
@@ -105,4 +105,10 @@ Apply `semantic-3`: 2 fresh distinct harness tasks covering exactly `adversarial
 
 ## Trusted implementation ledger
 
-Before squashing or review, the implementation patch adds one `[[implemented]]` row to `authority/state/implemented.toml` with the node ID, planned squash commit message, approximate date with timezone, and optional pull-request number. Row presence is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
+Before squashing or review, the implementation patch transitions this node's
+predeclared row in `authority/state/implemented.toml` from `status = "pending"`
+to `status = "implemented"` with the planned squash commit message, approximate
+date with timezone, and optional pull-request number. The transitioned row is the
+implementation fact. Commit metadata is a loose locator only and is never resolved or
+validated against Git or GitHub. Reviewers inspect the squashed candidate patch without
+SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.

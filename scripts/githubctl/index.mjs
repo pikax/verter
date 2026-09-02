@@ -61,6 +61,12 @@ export {
 } from "./ci-land.mjs";
 export { MINIMAL_GITHUB_WORKFLOW, workflowInventory } from "./workflow.mjs";
 export {
+  diffProtection,
+  loadExpectedProtection,
+  protectionApply,
+  protectionCheck,
+} from "./protection.mjs";
+export {
   BlockingFindingError,
   CiFailedError,
   ClosingLinkError,

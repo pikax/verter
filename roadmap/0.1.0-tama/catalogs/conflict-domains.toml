@@ -65,6 +65,11 @@ path_roots = ["crates/verter_audit/src","crates/verter_bench/benches","crates/ve
 symbols = ["CompileWorkLedger","CompileRequest"]
 description = "Exclusive mutation lease for the concrete compiler execution authority surface."
 [[domain]]
+id = "bundler_host"
+path_roots = ["packages/unplugin","roadmap/0.1.0-tama"]
+symbols = ["BundlerHostSession","BundlerModuleCatalog","BundlerGraphKind","HotUpdatePlan"]
+description = "Exclusive mutation scope for JavaScript bundler adapters, virtual-module lifecycle, processed-content handoff, and HMR graph policy."
+[[domain]]
 id = "customelementdeclaration"
 path_roots = ["crates/verter_language","crates/verter_protocol","crates/verter_session"]
 symbols = ["CustomElementDeclaration","CustomElementRegistration","CemModule"]
@@ -160,6 +165,26 @@ path_roots = ["crates/verter_audit/src","crates/verter_bench","crates/verter_com
 symbols = ["PerformanceGate","MeasurementReceipt"]
 description = "Exclusive mutation lease for the concrete performance evidence authority surface."
 [[domain]]
+id = "project_model"
+path_roots = ["crates/verter_lsp","crates/verter_protocol","crates/verter_session","crates/verter_workspace","packages/typescript-plugin","roadmap/0.1.0-tama"]
+symbols = ["ProjectEnvironmentId","ProjectMembershipSet","ProjectSnapshot","ModuleResolutionProof"]
+description = "Exclusive mutation scope for deriving membership over kernel-owned project identities, compiler environments, package/module resolution, snapshot publication, and consumer cutover."
+[[domain]]
+id = "project_profiles"
+path_roots = ["crates/verter_lsp","crates/verter_protocol","crates/verter_session","roadmap/0.1.0-tama"]
+symbols = ["ProjectProfileSnapshot","ProjectProfileResolutionContribution","ProjectFileRole","ExecutionRealm"]
+description = "Exclusive mutation scope for facts and roles keyed by kernel-owned project-profile identities and for the paired Nuxt and SvelteKit first-class products."
+[[domain]]
+id = "nuxt_project_profile"
+path_roots = ["crates/verter_lsp/src/project_profiles/nuxt","crates/verter_protocol/src/project_profiles/nuxt","crates/verter_session/src/project_profiles/nuxt","packages/nuxt","roadmap/0.1.0-tama/charters/expansion-project-profiles/NUX0.md","roadmap/0.1.0-tama/charters/expansion-project-profiles/NUX1.md","roadmap/0.1.0-tama/charters/expansion-project-profiles/NUX2.md","roadmap/0.1.0-tama/charters/expansion-project-profiles/NUX3.md"]
+symbols = ["NuxtProjectProfileSnapshot","NuxtFileRole","NuxtRouteId","NuxtAliasContribution"]
+description = "Exclusive mutation scope for Nuxt-specific capture, roles, contributions, integration, and product proof; shared project-profile vocabulary is excluded."
+[[domain]]
+id = "sveltekit_project_profile"
+path_roots = ["crates/verter_lsp/src/project_profiles/sveltekit","crates/verter_protocol/src/project_profiles/sveltekit","crates/verter_session/src/project_profiles/sveltekit","packages/sveltekit","roadmap/0.1.0-tama/charters/expansion-project-profiles/SKT0.md","roadmap/0.1.0-tama/charters/expansion-project-profiles/SKT1.md","roadmap/0.1.0-tama/charters/expansion-project-profiles/SKT2.md","roadmap/0.1.0-tama/charters/expansion-project-profiles/SKT3.md"]
+symbols = ["SvelteKitProjectProfileSnapshot","SvelteKitFileRole","SvelteKitRouteId","SvelteKitAliasContribution"]
+description = "Exclusive mutation scope for SvelteKit-specific capture, roles, contributions, integration, and product proof; shared project-profile vocabulary is excluded."
+[[domain]]
 id = "program_authority"
 path_roots = [".claude/skills","AGENTS.md","crates/verter_identity","crates/verter_identity/src","crates/verter_language/src","crates/verter_protocol/src","crates/verter_session/src","roadmap/0.1.0-tama"]
 symbols = ["ProgramAuthority","StaticDag","ImplementationLedger"]
@@ -209,6 +234,11 @@ id = "source_lineage"
 path_roots = ["crates/verter_compiler/src","crates/verter_css_syntax/src","crates/verter_identity","crates/verter_identity/src","crates/verter_language/src","crates/verter_lsp","crates/verter_lsp/src","crates/verter_protocol","crates/verter_semantic/src","crates/verter_session","crates/verter_span","crates/verter_type_runtime/src","packages/typescript-plugin/src","packages/vue-vscode/src/css"]
 symbols = ["SourceUnitId","CanonicalPath","ContentHash"]
 description = "Exclusive mutation lease for the concrete source lineage authority surface."
+[[domain]]
+id = "source_module_facts"
+path_roots = ["crates/verter_protocol","crates/verter_session","crates/verter_workspace","packages/typescript-plugin","packages/unplugin","roadmap/0.1.0-tama"]
+symbols = ["SourceModuleFactSet","SourceModuleResolutionContribution","GlobMembership","ModuleQueryKind"]
+description = "Exclusive mutation scope for statically captured aliases, asset/query modules, import.meta facts, provenance, read sets, and consumer integration."
 [[domain]]
 id = "style_semantics"
 path_roots = ["crates/verter_compiler","crates/verter_css","crates/verter_css_syntax/src","crates/verter_language/src","crates/verter_lsp/src","crates/verter_semantic/src","crates/verter_session","packages/language-shared/src","packages/vue-vscode/src/css"]

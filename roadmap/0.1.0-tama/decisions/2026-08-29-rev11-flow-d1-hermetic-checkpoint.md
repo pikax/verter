@@ -35,11 +35,11 @@ Maintainer-directed correction round 2, applied as authority text only:
 
 The maintainer explicitly refused GitHub issue prose updates: issues #173/#174 remain as-is, and no `catalogs/github-issue-content.toml` entries are authored. This record and the charters carry the correction instead.
 
-Resolved by maintainer direction (2026-08-29): no pull requests. D1+D2 land directly on the shared `train/rev11-flow` branch and are pushed to origin; each node keeps its own issue mapping, ledger row, and one `Closes #<gh_issue>` line in the landing commit body per the non-PR closing flow in `contracts/github-control-plane.md`. Issues close when the train branch reaches the origin default branch; Project 3 `done` is marked only after that point. No `githubctl create-pr`/`squash-land` extension is built.
+Resolved by maintainer direction (2026-08-29): no pull requests. D1+D2 land directly on the shared `train/rev11-flow` branch and are pushed to origin; D1, D2A, and D2B keep distinct ledger rows, D2A is intentionally unmapped, and D1 and D2B each carry one `Closes #<gh_issue>` line in the landing commit body per the non-PR closing flow in `contracts/github-control-plane.md`. Issues close when the train branch reaches the origin default branch; Project 3 `done` is marked only after that point. No `githubctl create-pr`/`squash-land` extension is built.
 
 ## Consequences
 
 - D1 can dispatch as a private hermetic checkpoint with source-verified type boundaries; its abort condition no longer fires on retracted concept mappings.
-- D2's cutover gate is now enforceable as a two-step external requirement (rows/mapping, then ratification), and its deletion discipline names the legacy admission path.
+- D2's capability-matrix gate is waived and non-blocking; its deletion discipline still names the legacy admission path.
 - RESIDUAL-NON-CALL-ANY-FABRICATION ownership is consistent across D1–D8 and matches the debt record; no charter assigns it to D6 or D8.
-- `dispatchable`, budgets, review profiles, and the DAG topology are unchanged; the correction is authority text plus the renamed D2 external-requirement field.
+- At the time of this correction, `dispatchable`, budgets, review profiles, and the DAG topology are unchanged; the correction is authority text plus the explicit waiver.

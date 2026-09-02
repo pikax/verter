@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -22,7 +21,8 @@ import {
   createPr,
   mappedClosingLink,
 } from "../index.mjs";
-import { parseToml } from "../../../roadmap/0.1.0-tama/tools/lib.mjs";
+import { implementedRows, parseLedgerText } from "../../../roadmap/0.1.0-tama/tools/ledger.mjs";
+import { writeLedgerFixture } from "./ledger-fixture.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
@@ -46,33 +46,12 @@ function clearanceFor(adapter, require = ["issues", "pullRequests"]) {
   return report.clearance;
 }
 
-function implementedBlock(id, pullRequest) {
-  const locator = pullRequest == null ? "" : `pull_request = ${pullRequest}\n`;
-  return `[[implemented]]
-node_id = "${id}"
-commit_message = "test locator ${id}"
-commit_date = "2026-08-28T00:00:00+00:00"
-${locator}`;
-}
-
-function mappingBlock(nodeId, issue, syncToGithub) {
-  return `[[github_issue]]
-node_id = "${nodeId}"
-gh_issue = ${issue}
-sync_to_github = ${syncToGithub}
-`;
-}
-
 function writeLedger(options = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-create-pr-"));
-  const file = path.join(dir, "implemented.toml");
-  const implemented = options.implemented ?? ["ORC0", "GH0", "GH1", "GH2"];
-  const locators = options.locators ?? {};
-  const issues = options.issues ?? [];
-  const parts = ["schema = 1", "", ...implemented.map((id) => implementedBlock(id, locators[id]))];
-  for (const row of issues) parts.push(mappingBlock(row.node_id, row.gh_issue, row.sync_to_github));
-  fs.writeFileSync(file, parts.join("\n"));
-  return file;
+  return writeLedgerFixture("githubctl-create-pr-", {
+    implemented: options.implemented ?? ["ORC0", "GH0", "GH1", "GH2"],
+    locators: options.locators ?? {},
+    issues: options.issues ?? [],
+  });
 }
 
 function pullsForHeadPath(owner, repo, head) {
@@ -80,7 +59,8 @@ function pullsForHeadPath(owner, repo, head) {
 }
 
 function readLedger(file) {
-  return parseToml(fs.readFileSync(file, "utf8"));
+  const parsed = parseLedgerText(fs.readFileSync(file, "utf8"));
+  return { ...parsed, implemented: implementedRows(parsed) };
 }
 
 const WRITABLE_REPO = {

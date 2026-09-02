@@ -1,20 +1,20 @@
 error[E0624]: associated function `new` is private
-  --> tests/cases/compile-fail/complete_flow_result_constructor_is_private.rs:11:33
-   |
-11 |     let _ = CompleteFlowResult::new(todo!());
-   |                                 ^^^ private associated function
-   |
-  ::: src/project_semantic_dispatch/flow_solve.rs
-   |
-   |     fn new(parts: CompleteFlowResultParts) -> Self {
-   |     ---------------------------------------------- private associated function defined here
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/complete_flow_result_constructor_is_private.rs
+  |
+  |     let _ = CompleteFlowResult::new(todo!());
+  |                                 ^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/verter_session/src/project_semantic_dispatch/flow_solve.rs
+  |
+  |     fn new(parts: CompleteFlowResultParts) -> Self {
+  |     ---------------------------------------------- private associated function defined here
 
 warning: unreachable call
-  --> tests/cases/compile-fail/complete_flow_result_constructor_is_private.rs:11:13
-   |
-11 |     let _ = CompleteFlowResult::new(todo!());
-   |             ^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
-   |             |
-   |             unreachable call
-   |
-   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/complete_flow_result_constructor_is_private.rs
+  |
+  |     let _ = CompleteFlowResult::new(todo!());
+  |             ^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
+  |             |
+  |             unreachable call
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default

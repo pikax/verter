@@ -176,7 +176,10 @@ test("a healthy toolchain satisfies the prerequisite and pins the runner from th
   assert.equal(result.discoveredCases, 4);
   assert.deepEqual(
     result.packages[0].sourceRoots,
-    ["/repo/crates/fixture_wasm/src", "/repo/crates/fixture_wasm/tests"],
+    [
+      join("/repo", "crates", "fixture_wasm", "src"),
+      join("/repo", "crates", "fixture_wasm", "tests"),
+    ],
     "scan roots come from cargo's own `test = true` targets — the bench directory is not one",
   );
 });

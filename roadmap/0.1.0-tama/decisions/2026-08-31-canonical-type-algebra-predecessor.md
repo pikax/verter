@@ -463,4 +463,3 @@ is retained rather than deleted, because the measurement that produced it is wha
 forced the cheap path to exist. For the common case the closure is now O(1); the
 pipeline still runs, with its evidence deposit and epoch advance, for a top that is not
 canonically tagged.
-

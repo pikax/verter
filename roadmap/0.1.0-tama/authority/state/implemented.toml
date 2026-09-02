@@ -1,459 +1,435 @@
-schema = 1
-
-[[implemented]]
-node_id = "A0"
-commit_message = "chore(*): add the architecture-lock program documents, state validator, and gate wiring"
-commit_date = "2026-08-10T01:40:28+01:00"
-
-[[implemented]]
-node_id = "A1"
-commit_message = "docs(*): reference command-truth evidence in the capability matrix"
-commit_date = "2026-08-10T08:17:25+01:00"
-
-[[implemented]]
-node_id = "A2"
-commit_message = "test(session): strengthen the U6 flow-return corpus with recursive expectations, a fully modelled two-call boundary, checker-syntax semantic cross-validation, and per-clause comparator controls"
-commit_date = "2026-08-10T17:18:39+01:00"
-
-[[implemented]]
-node_id = "A3"
-commit_message = "fix(session): retract unsupported flow-return results from warm admission"
-commit_date = "2026-08-11T15:42:17+01:00"
-
-[[implemented]]
-node_id = "A4"
-commit_message = "feat(audit): install measurement-only work-attribution substrate and capture baseline"
-commit_date = "2026-08-12T00:12:56+01:00"
-
-[[implemented]]
-node_id = "A5"
-commit_message = "docs(arch): accept the current-owner inventories and the implementation lock record into the program ledger"
-commit_date = "2026-08-12T08:32:50+01:00"
-
-[[implemented]]
-node_id = "A6"
-commit_message = "docs(arch): accept the current-owner inventories and the implementation lock record into the program ledger"
-commit_date = "2026-08-12T08:32:50+01:00"
-
-[[implemented]]
-node_id = "B1"
-commit_message = "fix(*): give each parse owner domain its own identity"
-commit_date = "2026-08-25T12:08:32+01:00"
-
-[[implemented]]
-node_id = "B2"
-commit_message = "docs(core): record framework parse-facet conformance re-review evidence"
-commit_date = "2026-08-19T06:39:27+01:00"
-
-[[implemented]]
-node_id = "B3"
-commit_message = "docs(core): record landing evidence for the canonical compile request"
-commit_date = "2026-08-19T17:14:04+01:00"
-
-[[implemented]]
-node_id = "B4"
-commit_message = "docs(arch): record landing evidence for the fragment-assembly block"
-commit_date = "2026-08-20T01:58:38+01:00"
-
-[[implemented]]
-node_id = "B5"
-commit_message = "feat(core): expose the accepted framework algorithms through one direct core"
-commit_date = "2026-08-22T16:48:49+01:00"
-
-[[implemented]]
-node_id = "B6"
-commit_message = "perf(core): group batch items by map probe instead of a linear scan"
-commit_date = "2026-08-24T18:43:38+01:00"
-
-[[implemented]]
-node_id = "BA0"
-commit_message = "fix(core): make a compile request atomic over the products it asks for"
-commit_date = "2026-08-17T23:47:24+01:00"
-
-[[implemented]]
-node_id = "BF1"
-commit_message = "chore(arch): freeze the oracle-manifest enumeration performance cells"
-commit_date = "2026-08-12T17:05:21+01:00"
-
-[[implemented]]
-node_id = "BF2"
-commit_message = "fix(meta): correct three official-invocation option-propagation defects and rebuild the mapping axis on authored-source truthfulness"
-commit_date = "2026-08-14T19:02:10+01:00"
-
-[[implemented]]
-node_id = "BF3"
-commit_message = "docs(arch): record the maintainer act closing the two held-open review items"
-commit_date = "2026-08-17T12:53:47+01:00"
-
-[[implemented]]
-node_id = "BRT0"
-commit_message = "docs(arch): record the batch carrier-selection landing evidence"
-commit_date = "2026-08-18T02:34:03+01:00"
-
-[[implemented]]
-node_id = "BS0"
-commit_message = "docs(arch): record the Svelte correction block's dispatch packet and evidence"
-commit_date = "2026-08-18T00:07:04+01:00"
-
-[[implemented]]
-node_id = "BS1"
-commit_message = "test(core): pin the real authored span for multi-name each-item pattern refusal"
-commit_date = "2026-08-21T03:26:17+01:00"
-
-[[implemented]]
-node_id = "BV0"
-commit_message = "fix(core): correct Vue script, VDOM, Vapor, SSR, and source-map defects against the rc.3 oracle"
-commit_date = "2026-08-16T05:13:32+01:00"
-
-[[implemented]]
-node_id = "BV0A"
-commit_message = "feat(core): pair assembled Vue module code with its composed source map"
-commit_date = "2026-08-15T10:11:23+01:00"
-
-[[implemented]]
-node_id = "BV1"
-commit_message = "docs(arch): record landing evidence for the Vue conformance train"
-commit_date = "2026-08-20T10:07:31+01:00"
-
-[[implemented]]
-node_id = "BV2"
-commit_message = "fix(core): contain a degraded class-method inference to its own prop row"
-commit_date = "2026-08-22T15:00:26+01:00"
-
-[[implemented]]
-node_id = "C1"
-commit_message = "refactor(core): establish the semantic module resolver boundary"
-commit_date = "2026-08-27T14:57:34+01:00"
-
-[[implemented]]
-node_id = "CM1"
-commit_message = "fix(*): give exposed bindings and runtime prop constructors real types"
-commit_date = "2026-08-25T07:18:51+01:00"
-
-[[implemented]]
-node_id = "FB0"
-commit_message = "docs(ci): define non-DAG feedback labels and finding follow-up"
-commit_date = "2026-08-29T03:45:51+01:00"
-
-[[implemented]]
-node_id = "FB1"
-commit_message = "feat(ci): inspect GitHub issues and write local feedback reports"
-commit_date = "2026-08-29T04:14:40+01:00"
-
-[[implemented]]
-node_id = "FB2"
-commit_message = "docs(ci): require manual patches to map existing issues into the DAG"
-commit_date = "2026-08-29T04:55:09+01:00"
-
-[[implemented]]
-node_id = "GH0"
-commit_message = "docs(ci): ratify local GitHub issue mapping"
-commit_date = "2026-08-28T21:45:48+01:00"
-
-[[implemented]]
-node_id = "GH1"
-commit_message = "feat(ci): add a structured GitHub adapter and deterministic fake"
-commit_date = "2026-08-28T23:08:16+01:00"
-
-[[implemented]]
-node_id = "GH2"
-commit_message = "feat(ci): add one-way GitHub issue sync from the local ledger"
-commit_date = "2026-08-29T00:05:33+01:00"
-
-[[implemented]]
-node_id = "GH3"
-commit_message = "feat(ci): create final-title pull requests that close mapped issues"
-commit_date = "2026-08-29T02:28:30+01:00"
-
-[[implemented]]
-node_id = "GH4"
-commit_message = "feat(ci): record review history in ordinary pull-request prose"
-commit_date = "2026-08-29T02:41:41+01:00"
-
-[[implemented]]
-node_id = "GH5"
-commit_message = "feat(ci): report pull-request checks and squash-land through GitHub"
-commit_date = "2026-08-29T03:25:00+01:00"
-
-[[implemented]]
-node_id = "J1"
-commit_message = "refactor(core): cut CSS public routes over to StyleSyntaxIr"
-commit_date = "2026-08-28T16:41:34+01:00"
-
-[[implemented]]
-node_id = "ORC0"
-commit_message = "fix(orchestration): project trusted successor landings"
-commit_date = "2026-08-28T13:06:16+01:00"
-
-[[implemented]]
-node_id = "REL0"
-commit_message = "feat(ci): overlay READY work onto GitHub Project 3"
-commit_date = "2026-08-29T01:22:51+01:00"
-
-[[implemented]]
-node_id = "REL1"
-commit_message = "feat(ci): plan milestone release readiness from the local ledger"
-commit_date = "2026-08-29T05:20:00+01:00"
-
-[[implemented]]
-node_id = "REL2"
-commit_message = "feat(ci): cut release pull requests with a versioned squash subject"
-commit_date = "2026-08-29T18:00:00+01:00"
-
-[[implemented]]
-node_id = "GH6"
-commit_message = "feat(ci): inventory the composed GitHub workflow and prove it on the fake"
-commit_date = "2026-08-29T21:30:00+01:00"
-
-[[implemented]]
-node_id = "B4R0"
-commit_message = "fix(core): keep source-unit identity stable across edits"
-commit_date = "2026-08-29T07:58:40+01:00"
-
-[[implemented]]
-node_id = "PGF0"
-commit_message = "fix(session): separate project-shape and route-publication fences"
-commit_date = "2026-08-30T14:48:45+01:00"
-
-[[implemented]]
-node_id = "CCA0"
-commit_message = "docs(core): lock compiler authority, policy, demand, and admission"
-commit_date = "2026-08-29T16:01:15+01:00"
-
-[[implemented]]
-node_id = "CCA1A"
-commit_message = "feat(core): add typed compiler capability catalog"
-commit_date = "2026-08-29T22:40:00+01:00"
-
-[[implemented]]
-node_id = "CCA1B"
-commit_message = "feat(core): register Vue carrier frontend parse backend"
-commit_date = "2026-08-29T23:30:00+01:00"
-
-[[implemented]]
-node_id = "CCA1C"
-commit_message = "feat(core): register Svelte carrier frontend parse backend"
-commit_date = "2026-08-29T23:59:00+01:00"
-
-[[implemented]]
-node_id = "CCA1D1"
-commit_message = "feat(core): route registered Vue/Svelte parse through catalog frontends"
-commit_date = "2026-08-29T21:30:00+01:00"
-
-[[implemented]]
-node_id = "CCA1D2"
-commit_message = "feat(core): publish registered carrier artifacts through catalog frontends"
-commit_date = "2026-08-29T12:00:00+01:00"
-
-[[implemented]]
-node_id = "CCA1D"
-commit_message = "docs(core): record registered frontend parse and publication convergence"
-commit_date = "2026-08-29T18:20:42+01:00"
-
-[[implemented]]
-node_id = "CCA1E"
-commit_message = "feat(core): register Vue semantic authority backend"
-commit_date = "2026-08-29T18:28:19+01:00"
-
-[[implemented]]
-node_id = "CCA1F"
-commit_message = "feat(core): register Svelte semantic authority backend"
-commit_date = "2026-08-29T18:48:10+01:00"
-
-[[implemented]]
-node_id = "CCA1GE"
-commit_message = "feat(core): route eval-source through catalog semantic authorities"
-commit_date = "2026-08-29T20:53:53+01:00"
-
-[[implemented]]
-node_id = "CCA1GT"
-commit_message = "feat(core): route template facts through catalog semantic authorities"
-commit_date = "2026-08-30T01:06:43+01:00"
-
-[[implemented]]
-node_id = "CCA1G"
-commit_message = "docs(core): record eval-source and template-fact catalog convergence"
-commit_date = "2026-08-30T02:29:21+01:00"
-
-[[implemented]]
-node_id = "CCA1H"
-commit_message = "feat(core): register Vue IDE projection backend"
-commit_date = "2026-08-30T03:02:21+01:00"
-
-[[implemented]]
-node_id = "CCA1I"
-commit_message = "feat(core): register Svelte IDE projection backend"
-commit_date = "2026-08-30T04:18:58+01:00"
-
-[[implemented]]
-node_id = "CCA1J"
-commit_message = "feat(core): route IDE projection through catalog backends"
-commit_date = "2026-08-30T05:24:37+01:00"
-
-[[implemented]]
-node_id = "CCA1K"
-commit_message = "feat(core): register Vue runtime compiler backend"
-commit_date = "2026-08-30T06:42:48+01:00"
-
-[[implemented]]
-node_id = "CCA1L"
-commit_message = "feat(core): register Svelte runtime compiler backend"
-commit_date = "2026-08-30T09:24:12+01:00"
-
-[[implemented]]
-node_id = "CCA1M1"
-commit_message = "refactor(core): delegate direct and batch compilation to runtime backends"
-commit_date = "2026-08-30T12:00:49+01:00"
-
-[[implemented]]
-node_id = "CCA1M2"
-commit_message = "refactor(core): delegate compatibility bundle runtime construction to typed backends"
-commit_date = "2026-08-30T15:24:49+01:00"
-
-[[implemented]]
-node_id = "CCA1N2G"
-commit_message = "refactor(core): select carrier grammar from registered catalog identity"
-commit_date = "2026-08-30T15:09:58+01:00"
-
-[[implemented]]
-node_id = "CCA1M3"
-commit_message = "test(core): characterize the fixed-vue runtime-render route"
-commit_date = "2026-08-30T16:15:28+01:00"
-
-[[implemented]]
-node_id = "CCA1M"
-commit_message = "docs(roadmap): confirm runtime compile route convergence"
-commit_date = "2026-08-30T17:23:00+01:00"
-
-[[implemented]]
-node_id = "CCA1N1"
-commit_message = "feat(core): add the vue host-integration backend with demand-scoped admission"
-commit_date = "2026-08-30T20:00:02+01:00"
-
-[[implemented]]
-node_id = "CCA1N2"
-commit_message = "feat(core): add the svelte host-integration backend with demand-scoped admission"
-commit_date = "2026-08-30T21:45:00+01:00"
-
-[[implemented]]
-node_id = "CCA1N2A"
-commit_message = "feat(core): add the request-scoped native host binding substrate"
-commit_date = "2026-08-30T22:28:21+01:00"
-
-[[implemented]]
-node_id = "CCA1N2B"
-commit_message = "refactor(session): bind framework identity once per host compile attempt"
-commit_date = "2026-08-31T00:05:43+01:00"
-
-[[implemented]]
-node_id = "CCA1N4"
-commit_message = "feat(session): route runtime render through bound framework host backends"
-commit_date = "2026-08-31T10:47:35+01:00"
-
-[[implemented]]
-node_id = "CCA1N3"
-commit_message = "feat(session): route host-backed compile through bound framework host backends"
-commit_date = "2026-08-31T14:30:00+01:00"
-
-[[implemented]]
-node_id = "CCA1N4A"
-commit_message = "fix(session): state the runtime-render route record's real verification"
-commit_date = "2026-08-31T18:05:00+01:00"
-
-[[implemented]]
-node_id = "CCA1N3A"
-commit_message = "fix(session): prepare framework execution inputs inside the bound arm"
-commit_date = "2026-08-31T19:00:00+01:00"
-
-[[implemented]]
-node_id = "CCA1N"
-commit_message = "docs(*): record native host-integration route convergence"
-commit_date = "2026-08-31T20:30:00+01:00"
-
-[[implemented]]
-node_id = "CCA1O1"
-commit_message = "feat(*): add a framework-discriminated FFI host compile-request schema"
-commit_date = "2026-08-31T22:15:00+01:00"
-
-[[implemented]]
-node_id = "CCA1O2"
-commit_message = "feat(napi): add a tagged native host compile-request adapter"
-commit_date = "2026-08-31T21:14:14+01:00"
-
-[[implemented]]
-node_id = "CCA1O3"
-commit_message = "feat(wasm): add a typed host compile-request adapter and local request DTOs"
-commit_date = "2026-08-31T22:30:00+01:00"
-
-[[implemented]]
-node_id = "CCA1O2H"
-commit_message = "fix(napi): refuse a request key stated as undefined"
-commit_date = "2026-09-01T00:56:27+01:00"
-
-[[implemented]]
-node_id = "CPER0M"
-commit_message = "fix(napi): publish a coherent memory-audit peak and live-bytes pair"
-commit_date = "2026-09-01T01:30:00+01:00"
-
-[[implemented]]
-node_id = "CCA1O1A"
-commit_message = "refactor(*): decide the Svelte custom-element prop-type vocabulary once"
-commit_date = "2026-09-01T12:00:00+01:00"
-
-[[implemented]]
-node_id = "CCA1O3C"
-commit_message = "feat(ci): execute the wasm JavaScript-boundary tests in the canonical gate"
-commit_date = "2026-09-01T02:10:00+01:00"
-
-[[implemented]]
-node_id = "CCA1O2I"
-commit_message = "refactor(napi): generate the published host compile-request declaration"
-commit_date = "2026-09-01T14:00:00+01:00"
-
-[[implemented]]
-node_id = "CCA1O3E"
-commit_message = "test(*): check the committed carrier fixtures against the built wasm host"
-commit_date = "2026-09-01T09:00:00+01:00"
-
-[[implemented]]
-node_id = "CCA1O1B"
-commit_message = "feat(*): execute a caller-supplied canonical compile request"
-commit_date = "2026-09-01T18:00:00+01:00"
-
-[[implemented]]
-node_id = "D1"
-commit_message = "feat(session): add private hermetic flow completeness foundation"
-commit_date = "2026-08-29T20:05:00+01:00"
-
-[[implemented]]
-node_id = "D2A"
-commit_message = "feat(session): canonical flow demand and proof substrate"
-commit_date = "2026-08-30T09:46:00+01:00"
-
-[[implemented]]
-node_id = "D2B"
-commit_message = "feat(session): route flow-return admission through the sole completeness proof"
-commit_date = "2026-08-30T17:32:00+01:00"
-
-[[implemented]]
-node_id = "TA1A"
-commit_message = "feat(session): canonical union and intersection algebra with structural constituent identity"
-commit_date = "2026-08-31T18:30:00+01:00"
-
-[[implemented]]
-node_id = "TA1B"
-commit_message = "feat(session): flip the composite payload opaque and close every construction site"
-commit_date = "2026-08-31T23:30:00+01:00"
-
-[[implemented]]
-node_id = "TA2"
-commit_message = "feat(session): demand-scoped truthiness domain authority consumed by flow"
-commit_date = "2026-09-01T04:00:00+01:00"
-
-[[implemented]]
-node_id = "D2D"
-commit_message = "feat(session): make every surface producer return a typed resolution outcome"
-commit_date = "2026-09-01T19:15:00+01:00"
+schema = 2
+
+# Trusted implementation ledger (schema 2). Every DAG node is predeclared
+# exactly once under [implementation]. status = "pending" carries no evidence;
+# transitioning the node's single line to status = "implemented" (with
+# commit_message, commit_date, and optionally pull_request) is the complete
+# implementation fact. Evidence fields are loose human locators; tooling never
+# resolves or validates them against Git, content, ancestry, or GitHub.
+# Serialization is canonical: nodes sorted by id, one line per node, so
+# independent transitions merge mechanically. [[github_issue]] rows map
+# node_id to gh_issue; sync_to_github is one-way-refresh policy only and never
+# affects readiness. [[github_train_issue]] rows map train parents.
+
+[implementation]
+
+"A0" = { status = "implemented", commit_message = "chore(*): add the architecture-lock program documents, state validator, and gate wiring", commit_date = "2026-08-10T01:40:28+01:00" }
+"A1" = { status = "implemented", commit_message = "docs(*): reference command-truth evidence in the capability matrix", commit_date = "2026-08-10T08:17:25+01:00" }
+"A2" = { status = "implemented", commit_message = "test(session): strengthen the U6 flow-return corpus with recursive expectations, a fully modelled two-call boundary, checker-syntax semantic cross-validation, and per-clause comparator controls", commit_date = "2026-08-10T17:18:39+01:00" }
+"A2C" = { status = "pending" }
+"A3" = { status = "implemented", commit_message = "fix(session): retract unsupported flow-return results from warm admission", commit_date = "2026-08-11T15:42:17+01:00" }
+"A4" = { status = "implemented", commit_message = "feat(audit): install measurement-only work-attribution substrate and capture baseline", commit_date = "2026-08-12T00:12:56+01:00" }
+"A5" = { status = "implemented", commit_message = "docs(arch): accept the current-owner inventories and the implementation lock record into the program ledger", commit_date = "2026-08-12T08:32:50+01:00" }
+"A6" = { status = "implemented", commit_message = "docs(arch): accept the current-owner inventories and the implementation lock record into the program ledger", commit_date = "2026-08-12T08:32:50+01:00" }
+"ALPP" = { status = "pending" }
+"ANGP" = { status = "pending" }
+"ASTP" = { status = "pending" }
+"B1" = { status = "implemented", commit_message = "fix(*): give each parse owner domain its own identity", commit_date = "2026-08-25T12:08:32+01:00" }
+"B2" = { status = "implemented", commit_message = "docs(core): record framework parse-facet conformance re-review evidence", commit_date = "2026-08-19T06:39:27+01:00" }
+"B3" = { status = "implemented", commit_message = "docs(core): record landing evidence for the canonical compile request", commit_date = "2026-08-19T17:14:04+01:00" }
+"B4" = { status = "implemented", commit_message = "docs(arch): record landing evidence for the fragment-assembly block", commit_date = "2026-08-20T01:58:38+01:00" }
+"B4R0" = { status = "implemented", commit_message = "fix(core): keep source-unit identity stable across edits", commit_date = "2026-08-29T07:58:40+01:00" }
+"B5" = { status = "implemented", commit_message = "feat(core): expose the accepted framework algorithms through one direct core", commit_date = "2026-08-22T16:48:49+01:00" }
+"B6" = { status = "implemented", commit_message = "perf(core): group batch items by map probe instead of a linear scan", commit_date = "2026-08-24T18:43:38+01:00" }
+"BA0" = { status = "implemented", commit_message = "fix(core): make a compile request atomic over the products it asks for", commit_date = "2026-08-17T23:47:24+01:00" }
+"BCSS0" = { status = "pending" }
+"BF1" = { status = "implemented", commit_message = "chore(arch): freeze the oracle-manifest enumeration performance cells", commit_date = "2026-08-12T17:05:21+01:00" }
+"BF2" = { status = "implemented", commit_message = "fix(meta): correct three official-invocation option-propagation defects and rebuild the mapping axis on authored-source truthfulness", commit_date = "2026-08-14T19:02:10+01:00" }
+"BF3" = { status = "implemented", commit_message = "docs(arch): record the maintainer act closing the two held-open review items", commit_date = "2026-08-17T12:53:47+01:00" }
+"BND0" = { status = "pending" }
+"BND1" = { status = "pending" }
+"BND2" = { status = "pending" }
+"BND3" = { status = "pending" }
+"BND4" = { status = "pending" }
+"BND5" = { status = "pending" }
+"BR0" = { status = "pending" }
+"BRT0" = { status = "implemented", commit_message = "docs(arch): record the batch carrier-selection landing evidence", commit_date = "2026-08-18T02:34:03+01:00" }
+"BS0" = { status = "implemented", commit_message = "docs(arch): record the Svelte correction block's dispatch packet and evidence", commit_date = "2026-08-18T00:07:04+01:00" }
+"BS1" = { status = "implemented", commit_message = "test(core): pin the real authored span for multi-name each-item pattern refusal", commit_date = "2026-08-21T03:26:17+01:00" }
+"BV0" = { status = "implemented", commit_message = "fix(core): correct Vue script, VDOM, Vapor, SSR, and source-map defects against the rc.3 oracle", commit_date = "2026-08-16T05:13:32+01:00" }
+"BV0A" = { status = "implemented", commit_message = "feat(core): pair assembled Vue module code with its composed source map", commit_date = "2026-08-15T10:11:23+01:00" }
+"BV1" = { status = "implemented", commit_message = "docs(arch): record landing evidence for the Vue conformance train", commit_date = "2026-08-20T10:07:31+01:00" }
+"BV2" = { status = "implemented", commit_message = "fix(core): contain a degraded class-method inference to its own prop row", commit_date = "2026-08-22T15:00:26+01:00" }
+"C1" = { status = "implemented", commit_message = "refactor(core): establish the semantic module resolver boundary", commit_date = "2026-08-27T14:57:34+01:00" }
+"C2" = { status = "pending" }
+"C3" = { status = "pending" }
+"C4" = { status = "pending" }
+"CAT0" = { status = "pending" }
+"CCA0" = { status = "implemented", commit_message = "docs(core): lock compiler authority, policy, demand, and admission", commit_date = "2026-08-29T16:01:15+01:00" }
+"CCA1" = { status = "pending" }
+"CCA1A" = { status = "implemented", commit_message = "feat(core): add typed compiler capability catalog", commit_date = "2026-08-29T22:40:00+01:00" }
+"CCA1B" = { status = "implemented", commit_message = "feat(core): register Vue carrier frontend parse backend", commit_date = "2026-08-29T23:30:00+01:00" }
+"CCA1C" = { status = "implemented", commit_message = "feat(core): register Svelte carrier frontend parse backend", commit_date = "2026-08-29T23:59:00+01:00" }
+"CCA1D" = { status = "implemented", commit_message = "docs(core): record registered frontend parse and publication convergence", commit_date = "2026-08-29T18:20:42+01:00" }
+"CCA1D1" = { status = "implemented", commit_message = "feat(core): route registered Vue/Svelte parse through catalog frontends", commit_date = "2026-08-29T21:30:00+01:00" }
+"CCA1D2" = { status = "implemented", commit_message = "feat(core): publish registered carrier artifacts through catalog frontends", commit_date = "2026-08-29T12:00:00+01:00" }
+"CCA1E" = { status = "implemented", commit_message = "feat(core): register Vue semantic authority backend", commit_date = "2026-08-29T18:28:19+01:00" }
+"CCA1F" = { status = "implemented", commit_message = "feat(core): register Svelte semantic authority backend", commit_date = "2026-08-29T18:48:10+01:00" }
+"CCA1G" = { status = "implemented", commit_message = "docs(core): record eval-source and template-fact catalog convergence", commit_date = "2026-08-30T02:29:21+01:00" }
+"CCA1GE" = { status = "implemented", commit_message = "feat(core): route eval-source through catalog semantic authorities", commit_date = "2026-08-29T20:53:53+01:00" }
+"CCA1GT" = { status = "implemented", commit_message = "feat(core): route template facts through catalog semantic authorities", commit_date = "2026-08-30T01:06:43+01:00" }
+"CCA1H" = { status = "implemented", commit_message = "feat(core): register Vue IDE projection backend", commit_date = "2026-08-30T03:02:21+01:00" }
+"CCA1I" = { status = "implemented", commit_message = "feat(core): register Svelte IDE projection backend", commit_date = "2026-08-30T04:18:58+01:00" }
+"CCA1J" = { status = "implemented", commit_message = "feat(core): route IDE projection through catalog backends", commit_date = "2026-08-30T05:24:37+01:00" }
+"CCA1K" = { status = "implemented", commit_message = "feat(core): register Vue runtime compiler backend", commit_date = "2026-08-30T06:42:48+01:00" }
+"CCA1L" = { status = "implemented", commit_message = "feat(core): register Svelte runtime compiler backend", commit_date = "2026-08-30T09:24:12+01:00" }
+"CCA1M" = { status = "implemented", commit_message = "docs(roadmap): confirm runtime compile route convergence", commit_date = "2026-08-30T17:23:00+01:00" }
+"CCA1M1" = { status = "implemented", commit_message = "refactor(core): delegate direct and batch compilation to runtime backends", commit_date = "2026-08-30T12:00:49+01:00" }
+"CCA1M2" = { status = "implemented", commit_message = "refactor(core): delegate compatibility bundle runtime construction to typed backends", commit_date = "2026-08-30T15:24:49+01:00" }
+"CCA1M3" = { status = "implemented", commit_message = "test(core): characterize the fixed-vue runtime-render route", commit_date = "2026-08-30T16:15:28+01:00" }
+"CCA1N" = { status = "implemented", commit_message = "docs(*): record native host-integration route convergence", commit_date = "2026-08-31T20:30:00+01:00" }
+"CCA1N1" = { status = "implemented", commit_message = "feat(core): add the vue host-integration backend with demand-scoped admission", commit_date = "2026-08-30T20:00:02+01:00" }
+"CCA1N2" = { status = "implemented", commit_message = "feat(core): add the svelte host-integration backend with demand-scoped admission", commit_date = "2026-08-30T21:45:00+01:00" }
+"CCA1N2A" = { status = "implemented", commit_message = "feat(core): add the request-scoped native host binding substrate", commit_date = "2026-08-30T22:28:21+01:00" }
+"CCA1N2B" = { status = "implemented", commit_message = "refactor(session): bind framework identity once per host compile attempt", commit_date = "2026-08-31T00:05:43+01:00" }
+"CCA1N2G" = { status = "implemented", commit_message = "refactor(core): select carrier grammar from registered catalog identity", commit_date = "2026-08-30T15:09:58+01:00" }
+"CCA1N3" = { status = "implemented", commit_message = "feat(session): route host-backed compile through bound framework host backends", commit_date = "2026-08-31T14:30:00+01:00" }
+"CCA1N3A" = { status = "implemented", commit_message = "fix(session): prepare framework execution inputs inside the bound arm", commit_date = "2026-08-31T19:00:00+01:00" }
+"CCA1N4" = { status = "implemented", commit_message = "feat(session): route runtime render through bound framework host backends", commit_date = "2026-08-31T10:47:35+01:00" }
+"CCA1N4A" = { status = "implemented", commit_message = "fix(session): state the runtime-render route record's real verification", commit_date = "2026-08-31T18:05:00+01:00" }
+"CCA1O" = { status = "pending" }
+"CCA1O1" = { status = "implemented", commit_message = "feat(*): add a framework-discriminated FFI host compile-request schema", commit_date = "2026-08-31T22:15:00+01:00" }
+"CCA1O1A" = { status = "implemented", commit_message = "refactor(*): decide the Svelte custom-element prop-type vocabulary once", commit_date = "2026-09-01T12:00:00+01:00" }
+"CCA1O1B" = { status = "implemented", commit_message = "feat(*): execute a caller-supplied canonical compile request", commit_date = "2026-09-01T18:00:00+01:00" }
+"CCA1O2" = { status = "implemented", commit_message = "feat(napi): add a tagged native host compile-request adapter", commit_date = "2026-08-31T21:14:14+01:00" }
+"CCA1O2A" = { status = "pending" }
+"CCA1O2B" = { status = "pending" }
+"CCA1O2C" = { status = "pending" }
+"CCA1O2D" = { status = "pending" }
+"CCA1O2E" = { status = "pending" }
+"CCA1O2F" = { status = "pending" }
+"CCA1O2G" = { status = "pending" }
+"CCA1O2H" = { status = "implemented", commit_message = "fix(napi): refuse a request key stated as undefined", commit_date = "2026-09-01T00:56:27+01:00" }
+"CCA1O2I" = { status = "implemented", commit_message = "refactor(napi): generate the published host compile-request declaration", commit_date = "2026-09-01T14:00:00+01:00" }
+"CCA1O2J" = { status = "pending" }
+"CCA1O3" = { status = "implemented", commit_message = "feat(wasm): add a typed host compile-request adapter and local request DTOs", commit_date = "2026-08-31T22:30:00+01:00" }
+"CCA1O3A" = { status = "pending" }
+"CCA1O3B" = { status = "pending" }
+"CCA1O3C" = { status = "implemented", commit_message = "feat(ci): execute the wasm JavaScript-boundary tests in the canonical gate", commit_date = "2026-09-01T02:10:00+01:00" }
+"CCA1O3D" = { status = "pending" }
+"CCA1O3E" = { status = "implemented", commit_message = "test(*): check the committed carrier fixtures against the built wasm host", commit_date = "2026-09-01T09:00:00+01:00" }
+"CCA1O4" = { status = "pending" }
+"CCA1O4D" = { status = "pending" }
+"CCA1O5" = { status = "pending" }
+"CCA1O5D" = { status = "pending" }
+"CCA1T1" = { status = "pending" }
+"CCA1T2" = { status = "pending" }
+"CCA1T2S" = { status = "pending" }
+"CCA1T2V" = { status = "pending" }
+"CCA1T3" = { status = "pending" }
+"CCA1T4" = { status = "pending" }
+"CCA2" = { status = "pending" }
+"CCA2A" = { status = "pending" }
+"CCA2B" = { status = "pending" }
+"CCA2BS" = { status = "pending" }
+"CCA2BV" = { status = "pending" }
+"CCA2C" = { status = "pending" }
+"CCA2D" = { status = "pending" }
+"CCA2D0" = { status = "pending" }
+"CCA2DS" = { status = "pending" }
+"CCA2DV" = { status = "pending" }
+"CCA2E" = { status = "pending" }
+"CCA2E0" = { status = "pending" }
+"CCA2EH" = { status = "pending" }
+"CCA2EV" = { status = "pending" }
+"CCA2F" = { status = "pending" }
+"CEC0" = { status = "pending" }
+"CEF0" = { status = "pending" }
+"CEJ0" = { status = "pending" }
+"CFG0" = { status = "pending" }
+"CLI0" = { status = "pending" }
+"CLI1" = { status = "pending" }
+"CLI2" = { status = "pending" }
+"CLI3" = { status = "pending" }
+"CLI4" = { status = "pending" }
+"CLI5" = { status = "pending" }
+"CLIC0" = { status = "pending" }
+"CLIF0" = { status = "pending" }
+"CLIL0" = { status = "pending" }
+"CLITS0" = { status = "pending" }
+"CM1" = { status = "implemented", commit_message = "fix(*): give exposed bindings and runtime prop constructors real types", commit_date = "2026-08-25T07:18:51+01:00" }
+"CMP0" = { status = "pending" }
+"CMP1" = { status = "pending" }
+"CMP2" = { status = "pending" }
+"CMP3" = { status = "pending" }
+"CMP4" = { status = "pending" }
+"CMP5" = { status = "pending" }
+"CMP6" = { status = "pending" }
+"COX0" = { status = "pending" }
+"CPER0" = { status = "pending" }
+"CPER0M" = { status = "implemented", commit_message = "fix(napi): publish a coherent memory-audit peak and live-bytes pair", commit_date = "2026-09-01T01:30:00+01:00" }
+"CPER1" = { status = "pending" }
+"CPER2" = { status = "pending" }
+"CPER3" = { status = "pending" }
+"CPF0" = { status = "pending" }
+"CPF1" = { status = "pending" }
+"D1" = { status = "implemented", commit_message = "feat(session): add private hermetic flow completeness foundation", commit_date = "2026-08-29T20:05:00+01:00" }
+"D2A" = { status = "implemented", commit_message = "feat(session): canonical flow demand and proof substrate", commit_date = "2026-08-30T09:46:00+01:00" }
+"D2B" = { status = "implemented", commit_message = "feat(session): route flow-return admission through the sole completeness proof", commit_date = "2026-08-30T17:32:00+01:00" }
+"D2C" = { status = "pending" }
+"D2D" = { status = "implemented", commit_message = "feat(session): make every surface producer return a typed resolution outcome", commit_date = "2026-09-01T19:15:00+01:00" }
+"D3C" = { status = "pending" }
+"D3I" = { status = "pending" }
+"D3P" = { status = "pending" }
+"D3R" = { status = "pending" }
+"D4" = { status = "pending" }
+"D5" = { status = "pending" }
+"D6" = { status = "pending" }
+"D7" = { status = "pending" }
+"D8" = { status = "pending" }
+"DEM0" = { status = "pending" }
+"E1" = { status = "pending" }
+"E2" = { status = "pending" }
+"E3" = { status = "pending" }
+"E4" = { status = "pending" }
+"EAK0" = { status = "pending" }
+"EAK1" = { status = "pending" }
+"EMB0" = { status = "pending" }
+"ENC0" = { status = "pending" }
+"ENC1" = { status = "pending" }
+"ENCF0" = { status = "pending" }
+"ENCL0" = { status = "pending" }
+"ENCT0" = { status = "pending" }
+"EPR0" = { status = "pending" }
+"EPR1" = { status = "pending" }
+"EPR2" = { status = "pending" }
+"EPR3" = { status = "pending" }
+"EPR4" = { status = "pending" }
+"EPR5" = { status = "pending" }
+"EPR6" = { status = "pending" }
+"F1" = { status = "pending" }
+"F2" = { status = "pending" }
+"FB0" = { status = "implemented", commit_message = "docs(ci): define non-DAG feedback labels and finding follow-up", commit_date = "2026-08-29T03:45:51+01:00" }
+"FB1" = { status = "implemented", commit_message = "feat(ci): inspect GitHub issues and write local feedback reports", commit_date = "2026-08-29T04:14:40+01:00" }
+"FB2" = { status = "implemented", commit_message = "docs(ci): require manual patches to map existing issues into the DAG", commit_date = "2026-08-29T04:55:09+01:00" }
+"FCFG0" = { status = "pending" }
+"FMK0" = { status = "pending" }
+"FMT0" = { status = "pending" }
+"FMT1" = { status = "pending" }
+"FMT1A" = { status = "pending" }
+"FMT1B" = { status = "pending" }
+"FMT1C" = { status = "pending" }
+"FMT1D" = { status = "pending" }
+"FMT1E" = { status = "pending" }
+"FMT1P" = { status = "pending" }
+"FMT2" = { status = "pending" }
+"FMT2T" = { status = "pending" }
+"FMT2TX" = { status = "pending" }
+"FMT2X" = { status = "pending" }
+"FMT3" = { status = "pending" }
+"FMT3C" = { status = "pending" }
+"FMT4" = { status = "pending" }
+"FMT4F" = { status = "pending" }
+"FMT4L" = { status = "pending" }
+"FMT4M" = { status = "pending" }
+"FMT4N" = { status = "pending" }
+"FMT4P" = { status = "pending" }
+"FMT4W" = { status = "pending" }
+"FMTC0" = { status = "pending" }
+"FMTCL0" = { status = "pending" }
+"FMTCS0" = { status = "pending" }
+"FMTH0" = { status = "pending" }
+"FMTS0" = { status = "pending" }
+"FMTV0" = { status = "pending" }
+"G1" = { status = "pending" }
+"G2" = { status = "pending" }
+"G3" = { status = "pending" }
+"G4" = { status = "pending" }
+"G5" = { status = "pending" }
+"GH0" = { status = "implemented", commit_message = "docs(ci): ratify local GitHub issue mapping", commit_date = "2026-08-28T21:45:48+01:00" }
+"GH1" = { status = "implemented", commit_message = "feat(ci): add a structured GitHub adapter and deterministic fake", commit_date = "2026-08-28T23:08:16+01:00" }
+"GH2" = { status = "implemented", commit_message = "feat(ci): add one-way GitHub issue sync from the local ledger", commit_date = "2026-08-29T00:05:33+01:00" }
+"GH3" = { status = "implemented", commit_message = "feat(ci): create final-title pull requests that close mapped issues", commit_date = "2026-08-29T02:28:30+01:00" }
+"GH4" = { status = "implemented", commit_message = "feat(ci): record review history in ordinary pull-request prose", commit_date = "2026-08-29T02:41:41+01:00" }
+"GH5" = { status = "implemented", commit_message = "feat(ci): report pull-request checks and squash-land through GitHub", commit_date = "2026-08-29T03:25:00+01:00" }
+"GH6" = { status = "implemented", commit_message = "feat(ci): inventory the composed GitHub workflow and prove it on the fake", commit_date = "2026-08-29T21:30:00+01:00" }
+"H1" = { status = "pending" }
+"H2" = { status = "pending" }
+"H3" = { status = "pending" }
+"HWC0" = { status = "pending" }
+"HWC1" = { status = "pending" }
+"HWC2" = { status = "pending" }
+"HWC3" = { status = "pending" }
+"HWC4" = { status = "pending" }
+"HWC5" = { status = "pending" }
+"HWCI0" = { status = "pending" }
+"HWCL0" = { status = "pending" }
+"HWCP0" = { status = "pending" }
+"IDX0" = { status = "pending" }
+"J1" = { status = "implemented", commit_message = "refactor(core): cut CSS public routes over to StyleSyntaxIr", commit_date = "2026-08-28T16:41:34+01:00" }
+"J2" = { status = "pending" }
+"J3" = { status = "pending" }
+"J4" = { status = "pending" }
+"K1" = { status = "pending" }
+"K2" = { status = "pending" }
+"K3" = { status = "pending" }
+"L1" = { status = "pending" }
+"L2" = { status = "pending" }
+"L3" = { status = "pending" }
+"L4" = { status = "pending" }
+"LITP" = { status = "pending" }
+"LNT0" = { status = "pending" }
+"LNT1" = { status = "pending" }
+"LNT2" = { status = "pending" }
+"LNT3" = { status = "pending" }
+"LNTCFG0" = { status = "pending" }
+"LNTCSS0" = { status = "pending" }
+"LNTS0" = { status = "pending" }
+"LNTV0" = { status = "pending" }
+"LRA0" = { status = "pending" }
+"LSO0" = { status = "pending" }
+"LSO1" = { status = "pending" }
+"LSO10" = { status = "pending" }
+"LSO2" = { status = "pending" }
+"LSO3" = { status = "pending" }
+"LSO4" = { status = "pending" }
+"LSO5" = { status = "pending" }
+"LSO6" = { status = "pending" }
+"LSO7" = { status = "pending" }
+"LSO8" = { status = "pending" }
+"LSO9" = { status = "pending" }
+"MDXP" = { status = "pending" }
+"MDXR0" = { status = "pending" }
+"NCF-AT-CYCLE" = { status = "pending" }
+"NCF-AT-QUERY" = { status = "pending" }
+"NCF-AT-REDUCE" = { status = "pending" }
+"NCF-BD-DUP" = { status = "pending" }
+"NCF-BD-INIT" = { status = "pending" }
+"NCF-BD-SCOPE" = { status = "pending" }
+"NCF-CF-CONTEXT" = { status = "pending" }
+"NCF-CF-THIS" = { status = "pending" }
+"NCF-CF-VAR" = { status = "pending" }
+"NCF-CO-CALL" = { status = "pending" }
+"NCF-CO-INFER" = { status = "pending" }
+"NCF-CO-OVER" = { status = "pending" }
+"NCF-FD-CFLOW" = { status = "pending" }
+"NCF-FD-DEF" = { status = "pending" }
+"NCF-FD-NARROW" = { status = "pending" }
+"NCF-JD-DEC" = { status = "pending" }
+"NCF-JD-JS" = { status = "pending" }
+"NCF-JD-JSDOC" = { status = "pending" }
+"NCF-JF-JSX" = { status = "pending" }
+"NCF-JF-SVELTE" = { status = "pending" }
+"NCF-JF-VUE" = { status = "pending" }
+"NCF-MP-AUG" = { status = "pending" }
+"NCF-MP-MODULE" = { status = "pending" }
+"NCF-MP-PROJECT" = { status = "pending" }
+"NCF-OC-HERIT" = { status = "pending" }
+"NCF-OC-MEM" = { status = "pending" }
+"NCF-OC-MERGE" = { status = "pending" }
+"NCF-RO-ASSIGN" = { status = "pending" }
+"NCF-RO-EXCESS" = { status = "pending" }
+"NCF-RO-OPER" = { status = "pending" }
+"NCK0" = { status = "pending" }
+"NCK1" = { status = "pending" }
+"NCK2" = { status = "pending" }
+"NCK3" = { status = "pending" }
+"NCK4" = { status = "pending" }
+"NCK5" = { status = "pending" }
+"NCK6" = { status = "pending" }
+"NCK7" = { status = "pending" }
+"NCK8" = { status = "pending" }
+"NCKF0" = { status = "pending" }
+"NUX0" = { status = "pending" }
+"NUX1" = { status = "pending" }
+"NUX2" = { status = "pending" }
+"NUX3" = { status = "pending" }
+"OPT0" = { status = "pending" }
+"ORC0" = { status = "implemented", commit_message = "fix(orchestration): project trusted successor landings", commit_date = "2026-08-28T13:06:16+01:00" }
+"PAR0" = { status = "pending" }
+"PER0" = { status = "pending" }
+"PGF0" = { status = "implemented", commit_message = "fix(session): separate project-shape and route-publication fences", commit_date = "2026-08-30T14:48:45+01:00" }
+"PM0" = { status = "pending" }
+"PM1" = { status = "pending" }
+"PM2" = { status = "pending" }
+"PM3" = { status = "pending" }
+"PM4" = { status = "pending" }
+"PPR0" = { status = "pending" }
+"PPR1" = { status = "pending" }
+"PRF0" = { status = "pending" }
+"PUB0" = { status = "pending" }
+"RCTP" = { status = "pending" }
+"REL0" = { status = "implemented", commit_message = "feat(ci): overlay READY work onto GitHub Project 3", commit_date = "2026-08-29T01:22:51+01:00" }
+"REL1" = { status = "implemented", commit_message = "feat(ci): plan milestone release readiness from the local ledger", commit_date = "2026-08-29T05:20:00+01:00" }
+"REL2" = { status = "implemented", commit_message = "feat(ci): cut release pull requests with a versioned squash subject", commit_date = "2026-08-29T18:00:00+01:00" }
+"SCE0" = { status = "pending" }
+"SCP0" = { status = "pending" }
+"SCP1" = { status = "pending" }
+"SCP2" = { status = "pending" }
+"SCP3" = { status = "pending" }
+"SCP4" = { status = "pending" }
+"SCP5" = { status = "pending" }
+"SCP6" = { status = "pending" }
+"SCP7" = { status = "pending" }
+"SKL0" = { status = "pending" }
+"SKL1" = { status = "pending" }
+"SKL2" = { status = "pending" }
+"SKL3" = { status = "pending" }
+"SKT0" = { status = "pending" }
+"SKT1" = { status = "pending" }
+"SKT2" = { status = "pending" }
+"SKT3" = { status = "pending" }
+"SLDP" = { status = "pending" }
+"SM0" = { status = "pending" }
+"SM1" = { status = "pending" }
+"SM2" = { status = "pending" }
+"SM3" = { status = "pending" }
+"SST0" = { status = "pending" }
+"SST1" = { status = "pending" }
+"SST2" = { status = "pending" }
+"TA1A" = { status = "implemented", commit_message = "feat(session): canonical union and intersection algebra with structural constituent identity", commit_date = "2026-08-31T18:30:00+01:00" }
+"TA1B" = { status = "implemented", commit_message = "feat(session): flip the composite payload opaque and close every construction site", commit_date = "2026-08-31T23:30:00+01:00" }
+"TA2" = { status = "implemented", commit_message = "feat(session): demand-scoped truthiness domain authority consumed by flow", commit_date = "2026-09-01T04:00:00+01:00" }
+"TCM0" = { status = "pending" }
+"TCM0R" = { status = "pending" }
+"TCM1" = { status = "pending" }
+"TCM2" = { status = "pending" }
+"TCM3" = { status = "pending" }
+"TCM4" = { status = "pending" }
+"TE1" = { status = "pending" }
+"TE2" = { status = "pending" }
+"TE3" = { status = "pending" }
+"TE4" = { status = "pending" }
+"TE5" = { status = "pending" }
+"TIF0" = { status = "pending" }
+"TIF1" = { status = "pending" }
+"UAI0" = { status = "pending" }
+"UAK0" = { status = "pending" }
+"UAK1" = { status = "pending" }
+"UAK2" = { status = "pending" }
+"UAM0" = { status = "pending" }
+"UAO0" = { status = "pending" }
+"UAP0" = { status = "pending" }
+"UKS0" = { status = "pending" }
+"VCE0" = { status = "pending" }
+"VCP0" = { status = "pending" }
+"VCP1" = { status = "pending" }
+"VCP2" = { status = "pending" }
+"VCP3" = { status = "pending" }
+"VCP4" = { status = "pending" }
+"VCP5" = { status = "pending" }
+"VCP6" = { status = "pending" }
+"VCP7" = { status = "pending" }
+"VID0" = { status = "pending" }
+"VIM0" = { status = "pending" }
+"VIM1" = { status = "pending" }
+"VST0" = { status = "pending" }
+"VST1" = { status = "pending" }
+
+[[github_issue]]
+node_id = "ALPP"
+gh_issue = 394
+sync_to_github = true
+
+[[github_issue]]
+node_id = "ANGP"
+gh_issue = 395
+sync_to_github = true
+
+[[github_issue]]
+node_id = "ASTP"
+gh_issue = 396
+sync_to_github = true
 
 [[github_issue]]
 node_id = "B4R0"
@@ -461,8 +437,38 @@ gh_issue = 102
 sync_to_github = true
 
 [[github_issue]]
+node_id = "BR0"
+gh_issue = 210
+sync_to_github = true
+
+[[github_issue]]
+node_id = "C2"
+gh_issue = 182
+sync_to_github = true
+
+[[github_issue]]
+node_id = "C3"
+gh_issue = 183
+sync_to_github = true
+
+[[github_issue]]
+node_id = "C4"
+gh_issue = 184
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CAT0"
+gh_issue = 219
+sync_to_github = true
+
+[[github_issue]]
 node_id = "CCA0"
 gh_issue = 105
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1"
+gh_issue = 154
 sync_to_github = true
 
 [[github_issue]]
@@ -481,6 +487,11 @@ gh_issue = 108
 sync_to_github = true
 
 [[github_issue]]
+node_id = "CCA1D"
+gh_issue = 111
+sync_to_github = true
+
+[[github_issue]]
 node_id = "CCA1D1"
 gh_issue = 109
 sync_to_github = true
@@ -488,11 +499,6 @@ sync_to_github = true
 [[github_issue]]
 node_id = "CCA1D2"
 gh_issue = 110
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1D"
-gh_issue = 111
 sync_to_github = true
 
 [[github_issue]]
@@ -506,6 +512,11 @@ gh_issue = 113
 sync_to_github = true
 
 [[github_issue]]
+node_id = "CCA1G"
+gh_issue = 116
+sync_to_github = true
+
+[[github_issue]]
 node_id = "CCA1GE"
 gh_issue = 114
 sync_to_github = true
@@ -513,11 +524,6 @@ sync_to_github = true
 [[github_issue]]
 node_id = "CCA1GT"
 gh_issue = 115
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1G"
-gh_issue = 116
 sync_to_github = true
 
 [[github_issue]]
@@ -546,6 +552,11 @@ gh_issue = 121
 sync_to_github = true
 
 [[github_issue]]
+node_id = "CCA1M"
+gh_issue = 125
+sync_to_github = true
+
+[[github_issue]]
 node_id = "CCA1M1"
 gh_issue = 122
 sync_to_github = true
@@ -561,8 +572,8 @@ gh_issue = 124
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CCA1M"
-gh_issue = 125
+node_id = "CCA1N"
+gh_issue = 130
 sync_to_github = true
 
 [[github_issue]]
@@ -576,8 +587,28 @@ gh_issue = 127
 sync_to_github = true
 
 [[github_issue]]
+node_id = "CCA1N2A"
+gh_issue = 445
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1N2B"
+gh_issue = 446
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1N2G"
+gh_issue = 447
+sync_to_github = true
+
+[[github_issue]]
 node_id = "CCA1N3"
 gh_issue = 128
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1N3A"
+gh_issue = 450
 sync_to_github = true
 
 [[github_issue]]
@@ -586,13 +617,28 @@ gh_issue = 129
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CCA1N"
-gh_issue = 130
+node_id = "CCA1N4A"
+gh_issue = 449
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O"
+gh_issue = 147
 sync_to_github = true
 
 [[github_issue]]
 node_id = "CCA1O1"
 gh_issue = 131
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O1A"
+gh_issue = 451
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O1B"
+gh_issue = 456
 sync_to_github = true
 
 [[github_issue]]
@@ -636,6 +682,21 @@ gh_issue = 139
 sync_to_github = true
 
 [[github_issue]]
+node_id = "CCA1O2H"
+gh_issue = 452
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O2I"
+gh_issue = 453
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O2J"
+gh_issue = 457
+sync_to_github = true
+
+[[github_issue]]
 node_id = "CCA1O3"
 gh_issue = 140
 sync_to_github = true
@@ -648,6 +709,21 @@ sync_to_github = true
 [[github_issue]]
 node_id = "CCA1O3B"
 gh_issue = 142
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O3C"
+gh_issue = 454
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O3D"
+gh_issue = 458
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA1O3E"
+gh_issue = 459
 sync_to_github = true
 
 [[github_issue]]
@@ -671,13 +747,13 @@ gh_issue = 146
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CCA1O"
-gh_issue = 147
+node_id = "CCA1T1"
+gh_issue = 148
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CCA1T1"
-gh_issue = 148
+node_id = "CCA1T2"
+gh_issue = 151
 sync_to_github = true
 
 [[github_issue]]
@@ -691,11 +767,6 @@ gh_issue = 150
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CCA1T2"
-gh_issue = 151
-sync_to_github = true
-
-[[github_issue]]
 node_id = "CCA1T3"
 gh_issue = 152
 sync_to_github = true
@@ -706,13 +777,18 @@ gh_issue = 153
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CCA1"
-gh_issue = 154
+node_id = "CCA2"
+gh_issue = 169
 sync_to_github = true
 
 [[github_issue]]
 node_id = "CCA2A"
 gh_issue = 155
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CCA2B"
+gh_issue = 158
 sync_to_github = true
 
 [[github_issue]]
@@ -726,13 +802,13 @@ gh_issue = 157
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CCA2B"
-gh_issue = 158
+node_id = "CCA2C"
+gh_issue = 159
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CCA2C"
-gh_issue = 159
+node_id = "CCA2D"
+gh_issue = 163
 sync_to_github = true
 
 [[github_issue]]
@@ -751,8 +827,8 @@ gh_issue = 162
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CCA2D"
-gh_issue = 163
+node_id = "CCA2E"
+gh_issue = 167
 sync_to_github = true
 
 [[github_issue]]
@@ -761,18 +837,13 @@ gh_issue = 164
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CCA2EV"
-gh_issue = 165
-sync_to_github = true
-
-[[github_issue]]
 node_id = "CCA2EH"
 gh_issue = 166
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CCA2E"
-gh_issue = 167
+node_id = "CCA2EV"
+gh_issue = 165
 sync_to_github = true
 
 [[github_issue]]
@@ -781,23 +852,148 @@ gh_issue = 168
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CCA2"
-gh_issue = 169
+node_id = "CEC0"
+gh_issue = 386
 sync_to_github = true
 
 [[github_issue]]
-node_id = "J2"
-gh_issue = 170
+node_id = "CEF0"
+gh_issue = 251
 sync_to_github = true
 
 [[github_issue]]
-node_id = "J3"
-gh_issue = 171
+node_id = "CEJ0"
+gh_issue = 387
 sync_to_github = true
 
 [[github_issue]]
-node_id = "J4"
-gh_issue = 172
+node_id = "CFG0"
+gh_issue = 220
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CLI0"
+gh_issue = 271
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CLI1"
+gh_issue = 272
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CLI2"
+gh_issue = 273
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CLI3"
+gh_issue = 376
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CLI4"
+gh_issue = 274
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CLI5"
+gh_issue = 277
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CLIC0"
+gh_issue = 275
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CLIF0"
+gh_issue = 375
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CLIL0"
+gh_issue = 285
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CLITS0"
+gh_issue = 276
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CMP0"
+gh_issue = 225
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CMP1"
+gh_issue = 264
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CMP2"
+gh_issue = 265
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CMP3"
+gh_issue = 266
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CMP4"
+gh_issue = 267
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CMP5"
+gh_issue = 269
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CMP6"
+gh_issue = 404
+sync_to_github = true
+
+[[github_issue]]
+node_id = "COX0"
+gh_issue = 252
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CPER0"
+gh_issue = 262
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CPER0M"
+gh_issue = 455
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CPER1"
+gh_issue = 263
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CPER2"
+gh_issue = 268
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CPER3"
+gh_issue = 405
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CPF0"
+gh_issue = 221
+sync_to_github = true
+
+[[github_issue]]
+node_id = "CPF1"
+gh_issue = 222
 sync_to_github = true
 
 [[github_issue]]
@@ -841,23 +1037,13 @@ gh_issue = 180
 sync_to_github = true
 
 [[github_issue]]
+node_id = "DEM0"
+gh_issue = 223
+sync_to_github = true
+
+[[github_issue]]
 node_id = "E1"
 gh_issue = 181
-sync_to_github = true
-
-[[github_issue]]
-node_id = "C2"
-gh_issue = 182
-sync_to_github = true
-
-[[github_issue]]
-node_id = "C3"
-gh_issue = 183
-sync_to_github = true
-
-[[github_issue]]
-node_id = "C4"
-gh_issue = 184
 sync_to_github = true
 
 [[github_issue]]
@@ -876,6 +1062,81 @@ gh_issue = 187
 sync_to_github = true
 
 [[github_issue]]
+node_id = "EAK0"
+gh_issue = 226
+sync_to_github = true
+
+[[github_issue]]
+node_id = "EAK1"
+gh_issue = 248
+sync_to_github = true
+
+[[github_issue]]
+node_id = "EMB0"
+gh_issue = 227
+sync_to_github = true
+
+[[github_issue]]
+node_id = "ENC0"
+gh_issue = 213
+sync_to_github = true
+
+[[github_issue]]
+node_id = "ENC1"
+gh_issue = 217
+sync_to_github = true
+
+[[github_issue]]
+node_id = "ENCF0"
+gh_issue = 214
+sync_to_github = true
+
+[[github_issue]]
+node_id = "ENCL0"
+gh_issue = 215
+sync_to_github = true
+
+[[github_issue]]
+node_id = "ENCT0"
+gh_issue = 216
+sync_to_github = true
+
+[[github_issue]]
+node_id = "EPR0"
+gh_issue = 278
+sync_to_github = true
+
+[[github_issue]]
+node_id = "EPR1"
+gh_issue = 279
+sync_to_github = true
+
+[[github_issue]]
+node_id = "EPR2"
+gh_issue = 280
+sync_to_github = true
+
+[[github_issue]]
+node_id = "EPR3"
+gh_issue = 281
+sync_to_github = true
+
+[[github_issue]]
+node_id = "EPR4"
+gh_issue = 282
+sync_to_github = true
+
+[[github_issue]]
+node_id = "EPR5"
+gh_issue = 283
+sync_to_github = true
+
+[[github_issue]]
+node_id = "EPR6"
+gh_issue = 318
+sync_to_github = true
+
+[[github_issue]]
 node_id = "F1"
 gh_issue = 188
 sync_to_github = true
@@ -883,6 +1144,151 @@ sync_to_github = true
 [[github_issue]]
 node_id = "F2"
 gh_issue = 189
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FCFG0"
+gh_issue = 230
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMK0"
+gh_issue = 228
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT0"
+gh_issue = 229
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT1"
+gh_issue = 232
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT1A"
+gh_issue = 233
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT1B"
+gh_issue = 234
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT1C"
+gh_issue = 235
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT1D"
+gh_issue = 236
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT1E"
+gh_issue = 237
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT1P"
+gh_issue = 231
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT2"
+gh_issue = 238
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT2T"
+gh_issue = 239
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT2TX"
+gh_issue = 241
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT2X"
+gh_issue = 240
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT3"
+gh_issue = 370
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT3C"
+gh_issue = 366
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT4"
+gh_issue = 374
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT4F"
+gh_issue = 368
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT4L"
+gh_issue = 369
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT4M"
+gh_issue = 371
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT4N"
+gh_issue = 372
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT4P"
+gh_issue = 367
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMT4W"
+gh_issue = 373
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMTC0"
+gh_issue = 242
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMTCL0"
+gh_issue = 243
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMTCS0"
+gh_issue = 244
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMTH0"
+gh_issue = 365
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMTS0"
+gh_issue = 245
+sync_to_github = true
+
+[[github_issue]]
+node_id = "FMTV0"
+gh_issue = 246
 sync_to_github = true
 
 [[github_issue]]
@@ -926,6 +1332,71 @@ gh_issue = 197
 sync_to_github = true
 
 [[github_issue]]
+node_id = "HWC0"
+gh_issue = 362
+sync_to_github = true
+
+[[github_issue]]
+node_id = "HWC1"
+gh_issue = 363
+sync_to_github = true
+
+[[github_issue]]
+node_id = "HWC2"
+gh_issue = 364
+sync_to_github = true
+
+[[github_issue]]
+node_id = "HWC3"
+gh_issue = 377
+sync_to_github = true
+
+[[github_issue]]
+node_id = "HWC4"
+gh_issue = 381
+sync_to_github = true
+
+[[github_issue]]
+node_id = "HWC5"
+gh_issue = 382
+sync_to_github = true
+
+[[github_issue]]
+node_id = "HWCI0"
+gh_issue = 378
+sync_to_github = true
+
+[[github_issue]]
+node_id = "HWCL0"
+gh_issue = 379
+sync_to_github = true
+
+[[github_issue]]
+node_id = "HWCP0"
+gh_issue = 380
+sync_to_github = true
+
+[[github_issue]]
+node_id = "IDX0"
+gh_issue = 250
+sync_to_github = true
+
+[[github_issue]]
+node_id = "J2"
+gh_issue = 170
+sync_to_github = true
+
+[[github_issue]]
+node_id = "J3"
+gh_issue = 171
+sync_to_github = true
+
+[[github_issue]]
+node_id = "J4"
+gh_issue = 172
+sync_to_github = true
+
+[[github_issue]]
 node_id = "K1"
 gh_issue = 198
 sync_to_github = true
@@ -933,31 +1404,6 @@ sync_to_github = true
 [[github_issue]]
 node_id = "K2"
 gh_issue = 199
-sync_to_github = true
-
-[[github_issue]]
-node_id = "TCM0R"
-gh_issue = 200
-sync_to_github = true
-
-[[github_issue]]
-node_id = "TCM1"
-gh_issue = 201
-sync_to_github = true
-
-[[github_issue]]
-node_id = "TCM2"
-gh_issue = 202
-sync_to_github = true
-
-[[github_issue]]
-node_id = "TCM3"
-gh_issue = 203
-sync_to_github = true
-
-[[github_issue]]
-node_id = "TCM4"
-gh_issue = 204
 sync_to_github = true
 
 [[github_issue]]
@@ -986,223 +1432,8 @@ gh_issue = 209
 sync_to_github = true
 
 [[github_issue]]
-node_id = "BR0"
-gh_issue = 210
-sync_to_github = true
-
-[[github_issue]]
-node_id = "UAK0"
-gh_issue = 211
-sync_to_github = true
-
-[[github_issue]]
-node_id = "UAK1"
-gh_issue = 212
-sync_to_github = true
-
-[[github_issue]]
-node_id = "ENC0"
-gh_issue = 213
-sync_to_github = true
-
-[[github_issue]]
-node_id = "ENCF0"
-gh_issue = 214
-sync_to_github = true
-
-[[github_issue]]
-node_id = "ENCL0"
-gh_issue = 215
-sync_to_github = true
-
-[[github_issue]]
-node_id = "ENCT0"
-gh_issue = 216
-sync_to_github = true
-
-[[github_issue]]
-node_id = "ENC1"
-gh_issue = 217
-sync_to_github = true
-
-[[github_issue]]
-node_id = "VID0"
-gh_issue = 218
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CAT0"
-gh_issue = 219
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CFG0"
-gh_issue = 220
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CPF0"
-gh_issue = 221
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CPF1"
-gh_issue = 222
-sync_to_github = true
-
-[[github_issue]]
-node_id = "DEM0"
-gh_issue = 223
-sync_to_github = true
-
-[[github_issue]]
-node_id = "PAR0"
-gh_issue = 224
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CMP0"
-gh_issue = 225
-sync_to_github = true
-
-[[github_issue]]
-node_id = "EAK0"
-gh_issue = 226
-sync_to_github = true
-
-[[github_issue]]
-node_id = "EMB0"
-gh_issue = 227
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMK0"
-gh_issue = 228
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMT0"
-gh_issue = 229
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FCFG0"
-gh_issue = 230
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMT1P"
-gh_issue = 231
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMT1"
-gh_issue = 232
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMT1A"
-gh_issue = 233
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMT1B"
-gh_issue = 234
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMT1C"
-gh_issue = 235
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMT1D"
-gh_issue = 236
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMT1E"
-gh_issue = 237
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMT2"
-gh_issue = 238
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMT2T"
-gh_issue = 239
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMT2X"
-gh_issue = 240
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMT2TX"
-gh_issue = 241
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMTC0"
-gh_issue = 242
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMTCL0"
-gh_issue = 243
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMTCS0"
-gh_issue = 244
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMTS0"
-gh_issue = 245
-sync_to_github = true
-
-[[github_issue]]
-node_id = "FMTV0"
-gh_issue = 246
-sync_to_github = true
-
-[[github_issue]]
-node_id = "TIF0"
-gh_issue = 247
-sync_to_github = true
-
-[[github_issue]]
-node_id = "EAK1"
-gh_issue = 248
-sync_to_github = true
-
-[[github_issue]]
-node_id = "TIF1"
-gh_issue = 249
-sync_to_github = true
-
-[[github_issue]]
-node_id = "IDX0"
-gh_issue = 250
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CEF0"
-gh_issue = 251
-sync_to_github = true
-
-[[github_issue]]
-node_id = "COX0"
-gh_issue = 252
-sync_to_github = true
-
-[[github_issue]]
-node_id = "LRA0"
-gh_issue = 253
+node_id = "LITP"
+gh_issue = 390
 sync_to_github = true
 
 [[github_issue]]
@@ -1211,8 +1442,8 @@ gh_issue = 254
 sync_to_github = true
 
 [[github_issue]]
-node_id = "LNTCFG0"
-gh_issue = 255
+node_id = "LNT1"
+gh_issue = 257
 sync_to_github = true
 
 [[github_issue]]
@@ -1221,8 +1452,13 @@ gh_issue = 256
 sync_to_github = true
 
 [[github_issue]]
-node_id = "LNT1"
-gh_issue = 257
+node_id = "LNT3"
+gh_issue = 284
+sync_to_github = true
+
+[[github_issue]]
+node_id = "LNTCFG0"
+gh_issue = 255
 sync_to_github = true
 
 [[github_issue]]
@@ -1241,218 +1477,8 @@ gh_issue = 260
 sync_to_github = true
 
 [[github_issue]]
-node_id = "PER0"
-gh_issue = 261
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CPER0"
-gh_issue = 262
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CPER1"
-gh_issue = 263
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CMP1"
-gh_issue = 264
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CMP2"
-gh_issue = 265
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CMP3"
-gh_issue = 266
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CMP4"
-gh_issue = 267
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CPER2"
-gh_issue = 268
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CMP5"
-gh_issue = 269
-sync_to_github = true
-
-[[github_issue]]
-node_id = "PUB0"
-gh_issue = 270
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CLI0"
-gh_issue = 271
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CLI1"
-gh_issue = 272
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CLI2"
-gh_issue = 273
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CLI4"
-gh_issue = 274
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CLIC0"
-gh_issue = 275
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CLITS0"
-gh_issue = 276
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CLI5"
-gh_issue = 277
-sync_to_github = true
-
-[[github_issue]]
-node_id = "EPR0"
-gh_issue = 278
-sync_to_github = true
-
-[[github_issue]]
-node_id = "EPR1"
-gh_issue = 279
-sync_to_github = true
-
-[[github_issue]]
-node_id = "EPR2"
-gh_issue = 280
-sync_to_github = true
-
-[[github_issue]]
-node_id = "EPR3"
-gh_issue = 281
-sync_to_github = true
-
-[[github_issue]]
-node_id = "EPR4"
-gh_issue = 282
-sync_to_github = true
-
-[[github_issue]]
-node_id = "EPR5"
-gh_issue = 283
-sync_to_github = true
-
-[[github_issue]]
-node_id = "LNT3"
-gh_issue = 284
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CLIL0"
-gh_issue = 285
-sync_to_github = true
-
-[[github_issue]]
-node_id = "NCK0"
-gh_issue = 286
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SCP0"
-gh_issue = 287
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SCP1"
-gh_issue = 288
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SCP2"
-gh_issue = 289
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SCP5"
-gh_issue = 290
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SST0"
-gh_issue = 291
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SST1"
-gh_issue = 292
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SST2"
-gh_issue = 293
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SCP3"
-gh_issue = 294
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SCP4"
-gh_issue = 295
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SCP6"
-gh_issue = 296
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SCP7"
-gh_issue = 297
-sync_to_github = true
-
-[[github_issue]]
-node_id = "UAI0"
-gh_issue = 298
-sync_to_github = true
-
-[[github_issue]]
-node_id = "NCK1"
-gh_issue = 299
-sync_to_github = true
-
-[[github_issue]]
-node_id = "NCK2"
-gh_issue = 300
-sync_to_github = true
-
-[[github_issue]]
-node_id = "NCK3"
-gh_issue = 301
-sync_to_github = true
-
-[[github_issue]]
-node_id = "UAO0"
-gh_issue = 302
-sync_to_github = true
-
-[[github_issue]]
-node_id = "UAP0"
-gh_issue = 303
+node_id = "LRA0"
+gh_issue = 253
 sync_to_github = true
 
 [[github_issue]]
@@ -1463,6 +1489,11 @@ sync_to_github = true
 [[github_issue]]
 node_id = "LSO1"
 gh_issue = 305
+sync_to_github = true
+
+[[github_issue]]
+node_id = "LSO10"
+gh_issue = 320
 sync_to_github = true
 
 [[github_issue]]
@@ -1501,58 +1532,18 @@ gh_issue = 312
 sync_to_github = true
 
 [[github_issue]]
-node_id = "VCP0"
-gh_issue = 313
-sync_to_github = true
-
-[[github_issue]]
-node_id = "VCP1"
-gh_issue = 314
-sync_to_github = true
-
-[[github_issue]]
-node_id = "VCP2"
-gh_issue = 315
-sync_to_github = true
-
-[[github_issue]]
-node_id = "VIM0"
-gh_issue = 316
-sync_to_github = true
-
-[[github_issue]]
-node_id = "VIM1"
-gh_issue = 317
-sync_to_github = true
-
-[[github_issue]]
-node_id = "EPR6"
-gh_issue = 318
-sync_to_github = true
-
-[[github_issue]]
 node_id = "LSO9"
 gh_issue = 319
 sync_to_github = true
 
 [[github_issue]]
-node_id = "LSO10"
-gh_issue = 320
+node_id = "MDXP"
+gh_issue = 389
 sync_to_github = true
 
 [[github_issue]]
-node_id = "NCK4"
-gh_issue = 321
-sync_to_github = true
-
-[[github_issue]]
-node_id = "NCK5"
-gh_issue = 322
-sync_to_github = true
-
-[[github_issue]]
-node_id = "NCK6"
-gh_issue = 323
+node_id = "MDXR0"
+gh_issue = 392
 sync_to_github = true
 
 [[github_issue]]
@@ -1706,13 +1697,43 @@ gh_issue = 353
 sync_to_github = true
 
 [[github_issue]]
-node_id = "NCK7"
-gh_issue = 354
+node_id = "NCK0"
+gh_issue = 286
 sync_to_github = true
 
 [[github_issue]]
-node_id = "NCKF0"
-gh_issue = 355
+node_id = "NCK1"
+gh_issue = 299
+sync_to_github = true
+
+[[github_issue]]
+node_id = "NCK2"
+gh_issue = 300
+sync_to_github = true
+
+[[github_issue]]
+node_id = "NCK3"
+gh_issue = 301
+sync_to_github = true
+
+[[github_issue]]
+node_id = "NCK4"
+gh_issue = 321
+sync_to_github = true
+
+[[github_issue]]
+node_id = "NCK5"
+gh_issue = 322
+sync_to_github = true
+
+[[github_issue]]
+node_id = "NCK6"
+gh_issue = 323
+sync_to_github = true
+
+[[github_issue]]
+node_id = "NCK7"
+gh_issue = 354
 sync_to_github = true
 
 [[github_issue]]
@@ -1721,8 +1742,83 @@ gh_issue = 356
 sync_to_github = true
 
 [[github_issue]]
-node_id = "UAM0"
-gh_issue = 357
+node_id = "NCKF0"
+gh_issue = 355
+sync_to_github = true
+
+[[github_issue]]
+node_id = "OPT0"
+gh_issue = 406
+sync_to_github = true
+
+[[github_issue]]
+node_id = "PAR0"
+gh_issue = 224
+sync_to_github = true
+
+[[github_issue]]
+node_id = "PER0"
+gh_issue = 261
+sync_to_github = true
+
+[[github_issue]]
+node_id = "PRF0"
+gh_issue = 388
+sync_to_github = true
+
+[[github_issue]]
+node_id = "PUB0"
+gh_issue = 270
+sync_to_github = true
+
+[[github_issue]]
+node_id = "RCTP"
+gh_issue = 391
+sync_to_github = true
+
+[[github_issue]]
+node_id = "SCE0"
+gh_issue = 383
+sync_to_github = true
+
+[[github_issue]]
+node_id = "SCP0"
+gh_issue = 287
+sync_to_github = true
+
+[[github_issue]]
+node_id = "SCP1"
+gh_issue = 288
+sync_to_github = true
+
+[[github_issue]]
+node_id = "SCP2"
+gh_issue = 289
+sync_to_github = true
+
+[[github_issue]]
+node_id = "SCP3"
+gh_issue = 294
+sync_to_github = true
+
+[[github_issue]]
+node_id = "SCP4"
+gh_issue = 295
+sync_to_github = true
+
+[[github_issue]]
+node_id = "SCP5"
+gh_issue = 290
+sync_to_github = true
+
+[[github_issue]]
+node_id = "SCP6"
+gh_issue = 296
+sync_to_github = true
+
+[[github_issue]]
+node_id = "SCP7"
+gh_issue = 297
 sync_to_github = true
 
 [[github_issue]]
@@ -1746,113 +1842,73 @@ gh_issue = 361
 sync_to_github = true
 
 [[github_issue]]
-node_id = "HWC0"
-gh_issue = 362
+node_id = "SLDP"
+gh_issue = 393
 sync_to_github = true
 
 [[github_issue]]
-node_id = "HWC1"
-gh_issue = 363
+node_id = "SST0"
+gh_issue = 291
 sync_to_github = true
 
 [[github_issue]]
-node_id = "HWC2"
-gh_issue = 364
+node_id = "SST1"
+gh_issue = 292
 sync_to_github = true
 
 [[github_issue]]
-node_id = "FMTH0"
-gh_issue = 365
+node_id = "SST2"
+gh_issue = 293
 sync_to_github = true
 
 [[github_issue]]
-node_id = "FMT3C"
-gh_issue = 366
+node_id = "TCM0R"
+gh_issue = 200
 sync_to_github = true
 
 [[github_issue]]
-node_id = "FMT4P"
-gh_issue = 367
+node_id = "TCM1"
+gh_issue = 201
 sync_to_github = true
 
 [[github_issue]]
-node_id = "FMT4F"
-gh_issue = 368
+node_id = "TCM2"
+gh_issue = 202
 sync_to_github = true
 
 [[github_issue]]
-node_id = "FMT4L"
-gh_issue = 369
+node_id = "TCM3"
+gh_issue = 203
 sync_to_github = true
 
 [[github_issue]]
-node_id = "FMT3"
-gh_issue = 370
+node_id = "TCM4"
+gh_issue = 204
 sync_to_github = true
 
 [[github_issue]]
-node_id = "FMT4M"
-gh_issue = 371
+node_id = "TIF0"
+gh_issue = 247
 sync_to_github = true
 
 [[github_issue]]
-node_id = "FMT4N"
-gh_issue = 372
+node_id = "TIF1"
+gh_issue = 249
 sync_to_github = true
 
 [[github_issue]]
-node_id = "FMT4W"
-gh_issue = 373
+node_id = "UAI0"
+gh_issue = 298
 sync_to_github = true
 
 [[github_issue]]
-node_id = "FMT4"
-gh_issue = 374
+node_id = "UAK0"
+gh_issue = 211
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CLIF0"
-gh_issue = 375
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CLI3"
-gh_issue = 376
-sync_to_github = true
-
-[[github_issue]]
-node_id = "HWC3"
-gh_issue = 377
-sync_to_github = true
-
-[[github_issue]]
-node_id = "HWCI0"
-gh_issue = 378
-sync_to_github = true
-
-[[github_issue]]
-node_id = "HWCL0"
-gh_issue = 379
-sync_to_github = true
-
-[[github_issue]]
-node_id = "HWCP0"
-gh_issue = 380
-sync_to_github = true
-
-[[github_issue]]
-node_id = "HWC4"
-gh_issue = 381
-sync_to_github = true
-
-[[github_issue]]
-node_id = "HWC5"
-gh_issue = 382
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SCE0"
-gh_issue = 383
+node_id = "UAK1"
+gh_issue = 212
 sync_to_github = true
 
 [[github_issue]]
@@ -1861,63 +1917,18 @@ gh_issue = 384
 sync_to_github = true
 
 [[github_issue]]
-node_id = "VCE0"
-gh_issue = 385
+node_id = "UAM0"
+gh_issue = 357
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CEC0"
-gh_issue = 386
+node_id = "UAO0"
+gh_issue = 302
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CEJ0"
-gh_issue = 387
-sync_to_github = true
-
-[[github_issue]]
-node_id = "PRF0"
-gh_issue = 388
-sync_to_github = true
-
-[[github_issue]]
-node_id = "MDXP"
-gh_issue = 389
-sync_to_github = true
-
-[[github_issue]]
-node_id = "LITP"
-gh_issue = 390
-sync_to_github = true
-
-[[github_issue]]
-node_id = "RCTP"
-gh_issue = 391
-sync_to_github = true
-
-[[github_issue]]
-node_id = "MDXR0"
-gh_issue = 392
-sync_to_github = true
-
-[[github_issue]]
-node_id = "SLDP"
-gh_issue = 393
-sync_to_github = true
-
-[[github_issue]]
-node_id = "ALPP"
-gh_issue = 394
-sync_to_github = true
-
-[[github_issue]]
-node_id = "ANGP"
-gh_issue = 395
-sync_to_github = true
-
-[[github_issue]]
-node_id = "ASTP"
-gh_issue = 396
+node_id = "UAP0"
+gh_issue = 303
 sync_to_github = true
 
 [[github_issue]]
@@ -1926,8 +1937,23 @@ gh_issue = 397
 sync_to_github = true
 
 [[github_issue]]
-node_id = "VST0"
-gh_issue = 398
+node_id = "VCE0"
+gh_issue = 385
+sync_to_github = true
+
+[[github_issue]]
+node_id = "VCP0"
+gh_issue = 313
+sync_to_github = true
+
+[[github_issue]]
+node_id = "VCP1"
+gh_issue = 314
+sync_to_github = true
+
+[[github_issue]]
+node_id = "VCP2"
+gh_issue = 315
 sync_to_github = true
 
 [[github_issue]]
@@ -1956,18 +1982,23 @@ gh_issue = 403
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CMP6"
-gh_issue = 404
+node_id = "VID0"
+gh_issue = 218
 sync_to_github = true
 
 [[github_issue]]
-node_id = "CPER3"
-gh_issue = 405
+node_id = "VIM0"
+gh_issue = 316
 sync_to_github = true
 
 [[github_issue]]
-node_id = "OPT0"
-gh_issue = 406
+node_id = "VIM1"
+gh_issue = 317
+sync_to_github = true
+
+[[github_issue]]
+node_id = "VST0"
+gh_issue = 398
 sync_to_github = true
 
 [[github_issue]]
@@ -1975,175 +2006,21 @@ node_id = "VST1"
 gh_issue = 407
 sync_to_github = true
 
-[[github_issue]]
-node_id = "CCA1N2A"
-gh_issue = 445
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1N2B"
-gh_issue = 446
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1N2G"
-gh_issue = 447
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1N4A"
-gh_issue = 449
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1N3A"
-gh_issue = 450
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1O1A"
-gh_issue = 451
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1O2H"
-gh_issue = 452
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1O2I"
-gh_issue = 453
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1O3C"
-gh_issue = 454
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CPER0M"
-gh_issue = 455
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1O1B"
-gh_issue = 456
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1O2J"
-gh_issue = 457
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1O3D"
-gh_issue = 458
-sync_to_github = true
-
-[[github_issue]]
-node_id = "CCA1O3E"
-gh_issue = 459
-sync_to_github = true
-
 [[github_train_issue]]
 train = "compiler.compiler-bridge"
 gh_issue = 104
-
-[[github_train_issue]]
-train = "rev11.flow"
-gh_issue = 408
-
-[[github_train_issue]]
-train = "rev11.public-typeinfo"
-gh_issue = 409
-
-[[github_train_issue]]
-train = "rev11.style"
-gh_issue = 410
-
-[[github_train_issue]]
-train = "rev11.semantic-compile"
-gh_issue = 411
-
-[[github_train_issue]]
-train = "rev11.inputs"
-gh_issue = 412
-
-[[github_train_issue]]
-train = "rev11.core"
-gh_issue = 413
-
-[[github_train_issue]]
-train = "rev11.query-runtime"
-gh_issue = 414
-
-[[github_train_issue]]
-train = "rev11.scheduler-runtime"
-gh_issue = 415
-
-[[github_train_issue]]
-train = "rev11.cache-runtime"
-gh_issue = 416
-
-[[github_train_issue]]
-train = "rev11.host-runtime"
-gh_issue = 417
-
-[[github_train_issue]]
-train = "rev11.provider-runtime"
-gh_issue = 418
-
-[[github_train_issue]]
-train = "rev11.publication"
-gh_issue = 419
-
-[[github_train_issue]]
-train = "rev11.host-session"
-gh_issue = 420
-
-[[github_train_issue]]
-train = "rev11.typescript-mapper"
-gh_issue = 421
-
-[[github_train_issue]]
-train = "rev11.finalization"
-gh_issue = 422
-
-[[github_train_issue]]
-train = "governance.governance"
-gh_issue = 423
-
-[[github_train_issue]]
-train = "expansion.kernel"
-gh_issue = 424
 
 [[github_train_issue]]
 train = "compiler.compiler-core"
 gh_issue = 425
 
 [[github_train_issue]]
-train = "expansion.formatter"
-gh_issue = 426
-
-[[github_train_issue]]
-train = "expansion.lint"
-gh_issue = 427
+train = "compiler.compiler-optimization"
+gh_issue = 443
 
 [[github_train_issue]]
 train = "compiler.compiler-perf"
 gh_issue = 428
-
-[[github_train_issue]]
-train = "expansion.cli"
-gh_issue = 429
-
-[[github_train_issue]]
-train = "expansion.engine-provisioning"
-gh_issue = 430
-
-[[github_train_issue]]
-train = "expansion.native-checker"
-gh_issue = 431
 
 [[github_train_issue]]
 train = "compiler.svelte-compiler"
@@ -2154,20 +2031,60 @@ train = "compiler.svelte-style"
 gh_issue = 433
 
 [[github_train_issue]]
-train = "expansion.language-service"
-gh_issue = 434
-
-[[github_train_issue]]
 train = "compiler.vue-compiler"
 gh_issue = 435
 
 [[github_train_issue]]
-train = "expansion.skills"
-gh_issue = 436
+train = "compiler.vue-style"
+gh_issue = 442
+
+[[github_train_issue]]
+train = "compiler.vue-style-query"
+gh_issue = 444
+
+[[github_train_issue]]
+train = "expansion.architecture-proof"
+gh_issue = 441
+
+[[github_train_issue]]
+train = "expansion.cli"
+gh_issue = 429
+
+[[github_train_issue]]
+train = "expansion.custom-elements"
+gh_issue = 440
+
+[[github_train_issue]]
+train = "expansion.engine-provisioning"
+gh_issue = 430
+
+[[github_train_issue]]
+train = "expansion.formatter"
+gh_issue = 426
 
 [[github_train_issue]]
 train = "expansion.html-wc"
 gh_issue = 437
+
+[[github_train_issue]]
+train = "expansion.kernel"
+gh_issue = 424
+
+[[github_train_issue]]
+train = "expansion.language-service"
+gh_issue = 434
+
+[[github_train_issue]]
+train = "expansion.lint"
+gh_issue = 427
+
+[[github_train_issue]]
+train = "expansion.native-checker"
+gh_issue = 431
+
+[[github_train_issue]]
+train = "expansion.skills"
+gh_issue = 436
 
 [[github_train_issue]]
 train = "expansion.svelte-ce"
@@ -2178,21 +2095,65 @@ train = "expansion.vue-ce"
 gh_issue = 439
 
 [[github_train_issue]]
-train = "expansion.custom-elements"
-gh_issue = 440
+train = "governance.governance"
+gh_issue = 423
 
 [[github_train_issue]]
-train = "expansion.architecture-proof"
-gh_issue = 441
+train = "rev11.cache-runtime"
+gh_issue = 416
 
 [[github_train_issue]]
-train = "compiler.vue-style"
-gh_issue = 442
+train = "rev11.core"
+gh_issue = 413
 
 [[github_train_issue]]
-train = "compiler.compiler-optimization"
-gh_issue = 443
+train = "rev11.finalization"
+gh_issue = 422
 
 [[github_train_issue]]
-train = "compiler.vue-style-query"
-gh_issue = 444
+train = "rev11.flow"
+gh_issue = 408
+
+[[github_train_issue]]
+train = "rev11.host-runtime"
+gh_issue = 417
+
+[[github_train_issue]]
+train = "rev11.host-session"
+gh_issue = 420
+
+[[github_train_issue]]
+train = "rev11.inputs"
+gh_issue = 412
+
+[[github_train_issue]]
+train = "rev11.provider-runtime"
+gh_issue = 418
+
+[[github_train_issue]]
+train = "rev11.public-typeinfo"
+gh_issue = 409
+
+[[github_train_issue]]
+train = "rev11.publication"
+gh_issue = 419
+
+[[github_train_issue]]
+train = "rev11.query-runtime"
+gh_issue = 414
+
+[[github_train_issue]]
+train = "rev11.scheduler-runtime"
+gh_issue = 415
+
+[[github_train_issue]]
+train = "rev11.semantic-compile"
+gh_issue = 411
+
+[[github_train_issue]]
+train = "rev11.style"
+gh_issue = 410
+
+[[github_train_issue]]
+train = "rev11.typescript-mapper"
+gh_issue = 421

@@ -12,6 +12,7 @@ import {
   syncIssues,
   validateIssueContentCatalog,
 } from "../index.mjs";
+import { ledgerText } from "./ledger-fixture.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(HERE, "../../../roadmap/0.1.0-tama");
@@ -85,22 +86,13 @@ function fixture(options = {}) {
   ];
   fs.writeFileSync(
     ledgerPath,
-    [
-      "schema = 1",
-      "",
-      ...(options.implemented ?? ["SYNC_READY"]).map(
-        (nodeId) =>
-          `[[implemented]]\nnode_id = "${nodeId}"\ncommit_message = "test locator"\ncommit_date = "2026-08-29T00:00:00+00:00"`,
-      ),
-      ...mappings.map(
-        (row) =>
-          `[[github_issue]]\nnode_id = "${row.node_id}"\ngh_issue = ${row.gh_issue}\nsync_to_github = ${row.sync_to_github}`,
-      ),
-      "",
-    ].join("\n\n"),
+    ledgerText({
+      implemented: options.implemented ?? ["SYNC-READY"],
+      issues: mappings,
+    }),
   );
   const nodes = [
-    { id: "SYNC_READY", train: "fixture", kind: "implementation", predecessors: [] },
+    { id: "SYNC-READY", train: "fixture", kind: "implementation", predecessors: [] },
     { id: "ROOT", train: "fixture", kind: "implementation", predecessors: [] },
     {
       id: "WORK",
@@ -335,7 +327,7 @@ test("explicit blocker ignore permits a bounded update and preserves external re
 
 test("completed requirements do not cross the selection boundary or create issues", () => {
   const fx = fixture({
-    implemented: ["SYNC_READY", "ROOT"],
+    implemented: ["SYNC-READY", "ROOT"],
     mappings: [{ node_id: "WORK", gh_issue: 10, sync_to_github: true }],
     issues: [
       {
