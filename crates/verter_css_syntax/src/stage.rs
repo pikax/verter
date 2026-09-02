@@ -155,6 +155,17 @@ impl ExternalStyleProducer {
     }
 }
 
+/// Identity carried specifically by bytes an external preprocessor produced.
+///
+/// Unlike [`StyleProducer`], this type cannot name Verter. `Anonymous` is an
+/// explicit external producer whose identity was unavailable, not an absent
+/// provenance claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreprocessorIdentity {
+    Named(ExternalStyleProducer),
+    Anonymous,
+}
+
 /// What produced a stage's bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StyleProducer {
@@ -187,6 +198,15 @@ impl StyleProducer {
         match self {
             Self::External(_) | Self::ExternalAnonymous => true,
             Self::Verter => false,
+        }
+    }
+}
+
+impl From<PreprocessorIdentity> for StyleProducer {
+    fn from(producer: PreprocessorIdentity) -> Self {
+        match producer {
+            PreprocessorIdentity::Named(producer) => Self::External(producer),
+            PreprocessorIdentity::Anonymous => Self::ExternalAnonymous,
         }
     }
 }
@@ -430,22 +450,24 @@ impl QualifiedStyleResult {
     ///
     /// The dialect is fixed to [`CssDialect::Css`] — a preprocessor that has
     /// not left its dialect behind has not finished. The producer slot is
-    /// mandatory, but [`StyleProducer::ExternalAnonymous`] is a legitimate
-    /// value for it: a tool that named no identity is recorded as unnamed, not
-    /// refused and not given a fabricated name. What keeps these bytes from
+    /// mandatory, but [`PreprocessorIdentity::Anonymous`] is a legitimate
+    /// value: a tool that named no identity is recorded as unnamed, not
+    /// refused and not given a fabricated name. The input type cannot name
+    /// Verter, so a preprocessed-stage result is externally produced by
+    /// construction. What keeps these bytes from
     /// travelling on as an unqualified string is [`PreprocessedStyle`], the
     /// only shape a plain-CSS-only consumer accepts them in.
     ///
     #[must_use]
     pub fn preprocessed(
-        producer: StyleProducer,
+        producer: PreprocessorIdentity,
         code: impl Into<String>,
         diagnostics: Vec<StyleDiagnostic>,
     ) -> Self {
         Self {
             stage: StyleStage::Preprocessed,
             dialect: CssDialect::Css,
-            producer,
+            producer: producer.into(),
             code: code.into(),
             diagnostics,
             refused: false,
@@ -569,11 +591,18 @@ impl QualifiedStyleResult {
     ///   as a valid empty stylesheet.
     #[must_use]
     pub fn as_preprocessed(&self) -> Option<PreprocessedStyle<'_>> {
-        (!self.refused && self.stage == StyleStage::Preprocessed && self.producer.is_external())
-            .then(|| PreprocessedStyle {
-                code: &self.code,
-                producer: self.producer.clone(),
-            })
+        if self.refused || self.stage != StyleStage::Preprocessed {
+            return None;
+        }
+        let producer = match &self.producer {
+            StyleProducer::External(producer) => PreprocessorIdentity::Named(producer.clone()),
+            StyleProducer::ExternalAnonymous => PreprocessorIdentity::Anonymous,
+            StyleProducer::Verter => return None,
+        };
+        Some(PreprocessedStyle {
+            code: &self.code,
+            producer,
+        })
     }
 }
 
@@ -603,7 +632,7 @@ impl QualifiedStyleResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreprocessedStyle<'a> {
     code: &'a str,
-    producer: StyleProducer,
+    producer: PreprocessorIdentity,
 }
 
 impl<'a> PreprocessedStyle<'a> {
@@ -618,8 +647,8 @@ impl<'a> PreprocessedStyle<'a> {
     /// plain-CSS-only signature structurally rejects is `&str` — bytes handed
     /// over with NO stated stage and NO stated producer. It does not reject a
     /// caller willing to assert one: this constructor is public, and so is
-    /// [`StyleProducer::ExternalAnonymous`], so `admitted(bytes,
-    /// ExternalAnonymous)` is a spelling any crate can write. That is the
+    /// [`PreprocessorIdentity::Anonymous`], so `admitted(bytes, Anonymous)` is
+    /// a spelling any crate can write. That is the
     /// point — the boundary that accepted the tool's output before it entered
     /// the process has no [`QualifiedStyleResult`] to mint the witness from —
     /// and the cost is that the assertion, not the bytes, is what carries the
@@ -629,7 +658,7 @@ impl<'a> PreprocessedStyle<'a> {
     /// diagnostics and dependency list — stays on that boundary's own record,
     /// where its consumers read it.
     #[must_use]
-    pub const fn admitted(code: &'a str, producer: StyleProducer) -> Self {
+    pub const fn admitted(code: &'a str, producer: PreprocessorIdentity) -> Self {
         Self { code, producer }
     }
 
@@ -641,7 +670,7 @@ impl<'a> PreprocessedStyle<'a> {
 
     /// The tool the admitter names for these bytes.
     #[must_use]
-    pub const fn producer(&self) -> &StyleProducer {
+    pub const fn producer(&self) -> &PreprocessorIdentity {
         &self.producer
     }
 }
@@ -652,7 +681,7 @@ mod tests {
 
     #[test]
     fn preprocessed_result_is_always_plain_css_and_externally_produced() {
-        let producer = StyleProducer::External(
+        let producer = PreprocessorIdentity::Named(
             ExternalStyleProducer::new("sass", Some("1.77.0"), None).expect("named producer"),
         );
         let result = QualifiedStyleResult::preprocessed(producer, ".a{color:red}", Vec::new());
@@ -674,11 +703,8 @@ mod tests {
         assert!(ExternalStyleProducer::new("   ", Some("1.0"), None).is_none());
         assert!(ExternalStyleProducer::new("", None, None).is_none());
 
-        let anonymous = QualifiedStyleResult::preprocessed(
-            StyleProducer::ExternalAnonymous,
-            ".a{}",
-            Vec::new(),
-        );
+        let anonymous =
+            QualifiedStyleResult::preprocessed(PreprocessorIdentity::Anonymous, ".a{}", Vec::new());
         assert!(anonymous.producer().is_external());
         assert!(anonymous.producer().external().is_none());
     }

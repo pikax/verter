@@ -19,7 +19,7 @@ use verter_compiler::style_planner::{
 };
 use verter_css_syntax::{
     parse_style_ir, CssDialect, CssParseMode, CssSource, ExternalStyleProducer,
-    QualifiedStyleResult, StyleProducer, StyleStage,
+    PreprocessorIdentity, QualifiedStyleResult, StyleProducer, StyleStage,
 };
 
 fn plain(code: &str) -> PlainCssInput<'_> {
@@ -33,8 +33,8 @@ fn plain(code: &str) -> PlainCssInput<'_> {
     .expect("plain css")
 }
 
-fn sass_producer() -> StyleProducer {
-    StyleProducer::External(
+fn sass_producer() -> PreprocessorIdentity {
+    PreprocessorIdentity::Named(
         ExternalStyleProducer::new("sass", Some("1.77.0"), None).expect("named producer"),
     )
 }
@@ -173,7 +173,7 @@ fn only_the_preprocessed_stage_mints_the_supplied_style_witness() {
     let css = ".card { color: red; }";
 
     let named = QualifiedStyleResult::preprocessed(
-        StyleProducer::External(
+        PreprocessorIdentity::Named(
             verter_css_syntax::ExternalStyleProducer::new("sass", Some("1.77.0"), None)
                 .expect("named producer"),
         ),
@@ -282,20 +282,20 @@ fn the_dialect_owner_accepts_exactly_what_the_carrier_parser_classifies() {
         );
     }
 
-    // Spellings a carrier can plausibly author that neither side may accept:
-    // a preprocessor table keyed by exact bytes has no entry for them, so a
-    // block spelled this way has nothing that can compile it. `css` is absent
+    // Spellings that name no exact dialect in either classifier. A framework
+    // may apply a later fallback (Vue treats processor-table misses as CSS),
+    // but that policy must not change their authored identity. `css` is absent
     // from this list for the reason above, and `CSS ` (trailing space) is not
     // a casing variant — it is a different string in every table.
     for spelling in ["SCSS", "Less", " stylus ", "sass ", "CSS ", "nocss", ""] {
         assert!(
             CssDialect::from_lang(spelling).is_none(),
-            "{spelling:?} must fail closed in the dialect owner"
+            "{spelling:?} must remain unknown in the dialect owner"
         );
         assert_eq!(
             StyleLang::from_bytes(spelling.as_bytes()),
             StyleLang::Unknown,
-            "{spelling:?} must fail closed in the carrier parser too"
+            "{spelling:?} must remain unknown in the carrier parser too"
         );
     }
 
@@ -597,7 +597,10 @@ fn preprocessed_input_keeps_its_producer_through_the_cascade() {
         false,
     );
     assert_eq!(untouched.result.stage(), StyleStage::Preprocessed);
-    assert_eq!(untouched.result.producer(), &sass_producer());
+    assert_eq!(
+        untouched.result.producer(),
+        &StyleProducer::from(sass_producer())
+    );
 
     // The authored v-bind() stage still runs on preprocessed bytes: a
     // preprocessor leaves v-bind() in its output for exactly this stage.

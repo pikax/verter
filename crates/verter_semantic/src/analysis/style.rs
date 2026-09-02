@@ -726,12 +726,11 @@ impl StyleAnalysisLang {
     /// Classify an authored `<style lang="…">` spelling.
     ///
     /// Delegates to the one spelling owner rather than keeping a table here.
-    /// That owner is byte-exact — every preprocessor table the ecosystem hands
-    /// these blocks to is keyed by exact bytes, so `lang="SCSS"` has nothing
-    /// that can compile it and must not analyse as SCSS either — and it is the
-    /// same authority the rewrite pipeline asks, so a spelling cannot resolve
-    /// for analysis while failing closed for compilation. An unrecognised
-    /// spelling is [`Self::Unknown`], never a default.
+    /// That owner is byte-exact, so `lang="SCSS"` does not become SCSS merely
+    /// through case folding. This classification does not decide what a
+    /// framework compiler does after its processor lookup misses; Vue's
+    /// reference compiler falls through to plain CSS in that case. An
+    /// unrecognised spelling is [`Self::Unknown`], never an implicit dialect.
     #[must_use]
     pub fn from_lang(lang: &str) -> Self {
         match verter_css_syntax::CssDialect::from_lang(lang) {
@@ -816,22 +815,15 @@ pub fn build_scanned_style_analysis(
     module_name: Option<&str>,
     content_offset: u32,
 ) -> StyleBlockAnalysis {
-    let dialect = match lang {
-        StyleAnalysisLang::Css => verter_css_syntax::CssDialect::Css,
-        StyleAnalysisLang::Scss => verter_css_syntax::CssDialect::Scss,
-        StyleAnalysisLang::Sass => verter_css_syntax::CssDialect::Sass,
-        StyleAnalysisLang::Less => verter_css_syntax::CssDialect::Less,
-        StyleAnalysisLang::Stylus => verter_css_syntax::CssDialect::Stylus,
-        StyleAnalysisLang::Unknown => {
-            return build_preprocessor_style_analysis(
-                lang,
-                vue_input,
-                scoped,
-                is_module,
-                module_name,
-                content_offset,
-            );
-        }
+    let Some(dialect) = lang.native_dialect() else {
+        return build_preprocessor_style_analysis(
+            lang,
+            vue_input,
+            scoped,
+            is_module,
+            module_name,
+            content_offset,
+        );
     };
 
     match super::style_syntax::parse_style_block(css_content, content_offset, dialect) {
@@ -862,14 +854,7 @@ pub fn parse_style_ir_for_analysis(
     content_offset: u32,
     lang: StyleAnalysisLang,
 ) -> Option<verter_css_syntax::StyleSyntaxIr> {
-    let dialect = match lang {
-        StyleAnalysisLang::Css => verter_css_syntax::CssDialect::Css,
-        StyleAnalysisLang::Scss => verter_css_syntax::CssDialect::Scss,
-        StyleAnalysisLang::Sass => verter_css_syntax::CssDialect::Sass,
-        StyleAnalysisLang::Less => verter_css_syntax::CssDialect::Less,
-        StyleAnalysisLang::Stylus => verter_css_syntax::CssDialect::Stylus,
-        StyleAnalysisLang::Unknown => return None,
-    };
+    let dialect = lang.native_dialect()?;
     super::style_syntax::parse_style_block(css_content, content_offset, dialect)
 }
 

@@ -917,8 +917,8 @@ mod tests {
 
     /// Stand in for the host's identity for the tool that produced the bytes
     /// these tests supply.
-    fn supplied_producer() -> verter_css_syntax::StyleProducer {
-        verter_css_syntax::StyleProducer::External(
+    fn supplied_producer() -> verter_css_syntax::PreprocessorIdentity {
+        verter_css_syntax::PreprocessorIdentity::Named(
             verter_css_syntax::ExternalStyleProducer::new("sass", Some("1.77.0"), None)
                 .expect("named producer"),
         )

@@ -1299,12 +1299,12 @@ fn registered_vue_style_dialect_names_postcss_and_only_unrecognises_the_unnameab
 ///
 /// The classification is read on two routes that must agree — the editor's CSS
 /// intelligence serves the block from it, and the rewrite pipeline's dialect
-/// owner decides from the same spelling whether anything can compile the block
-/// — so a per-carrier table drifts silently and in both directions. It did:
+/// owner reads the same authored spelling, so a per-carrier table drifts
+/// silently and in both directions. It did:
 /// `lang="styl"` was Stylus in one carrier and unrecognised in the other, and
-/// `lang="SCSS"` — which no preprocessor table, all keyed by exact bytes, has
-/// an entry for — resolved as SCSS in one of them while the pipeline that
-/// compiles it failed closed. Neither carrier reports the disagreement.
+/// `lang="SCSS"` resolved as SCSS in one even though it does not name the
+/// lowercase `scss` processor. Exact identity is independent of a framework's
+/// later fallback; Vue passes a processor-table miss through as plain CSS.
 #[test]
 fn every_carrier_classifies_a_style_lang_spelling_the_same_way() {
     use verter_language::{SectionRole, StyleDialect};
@@ -1344,8 +1344,7 @@ fn every_carrier_classifies_a_style_lang_spelling_the_same_way() {
         ),
         // The same postcss dialect under its other mainstream spelling.
         ("<style lang=\"pcss\">.x{}</style>", StyleDialect::PostCss),
-        // Case-folding here would accept a spelling nothing downstream can
-        // build, and publish a complete-looking surface for it.
+        // Case-folding here would assign the wrong exact dialect identity.
         ("<style lang=\"SCSS\">.x{}</style>", StyleDialect::Missing),
         ("<style lang=\"Stylus\">.x{}</style>", StyleDialect::Missing),
     ];

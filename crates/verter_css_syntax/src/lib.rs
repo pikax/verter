@@ -50,9 +50,9 @@ pub use selector::{
     SelectorTrust, SvelteNthArg,
 };
 pub use stage::{
-    ExternalStyleProducer, PreprocessedStyle, QualifiedStyleResult, StyleDependency,
-    StyleDependencyKind, StyleDiagnostic, StyleProducer, StyleSpecifier, StyleSpecifierForm,
-    StyleStage,
+    ExternalStyleProducer, PreprocessedStyle, PreprocessorIdentity, QualifiedStyleResult,
+    StyleDependency, StyleDependencyKind, StyleDiagnostic, StyleProducer, StyleSpecifier,
+    StyleSpecifierForm, StyleStage,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use style_ir::parse_style_ir_thread_invocations;

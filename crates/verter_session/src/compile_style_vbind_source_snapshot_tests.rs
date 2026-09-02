@@ -400,6 +400,25 @@ fn a_style_block_reaching_past_its_own_bytes_reports_an_incomplete_surface() {
     assert!(supplied_import.0.contains(&"tone".to_string()));
 }
 
+/// A block whose selected content is unavailable has not been surveyed and
+/// therefore cannot publish an exhaustive empty usage inventory.
+#[test]
+fn unavailable_style_content_reports_an_incomplete_surface() {
+    let captured = capture_inline(
+        "<script setup lang=\"ts\">\nconst tone = 'red'\n</script>\n\
+         <style lang=\"customcss\">.a { color: v-bind(tone); }</style>",
+    );
+
+    assert!(
+        captured.0.is_empty(),
+        "unavailable bytes cannot publish observed bindings: {captured:?}"
+    );
+    assert!(
+        !captured.1,
+        "unsurveyed bytes cannot publish an exhaustive empty inventory: {captured:?}"
+    );
+}
+
 /// Preprocessed style bytes publish the same free identifier ROOTS every other
 /// route publishes.
 ///

@@ -565,7 +565,7 @@ pub struct RuntimeBlockContentInput {
     /// the compiler records the tool that actually made them instead of
     /// claiming it made them itself. Only the host can answer this: the bytes
     /// look identical either way.
-    pub producer: Option<verter_css_syntax::StyleProducer>,
+    pub producer: Option<verter_css_syntax::PreprocessorIdentity>,
 }
 
 /// Parser-local projection of validated block content. Ordering exists only at

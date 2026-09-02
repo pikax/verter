@@ -195,9 +195,13 @@ export class CssService {
       const cssDoc = this.getCssDocument(block, entry, uri);
       const diags =
         service && cssDoc ? service.doValidation(cssDoc, service.parseStylesheet(cssDoc)) : [];
-      // Map diagnostic ranges back to SFC coordinates
-      for (const d of diags) {
-        d.range = this.toSfcRange(block, d.range);
+      if (this.usesGeneratedCss(block, entry)) {
+        // These ranges address generated CSS. Until the preprocessor map is
+        // available here, anchor them rather than applying authored offsets.
+        const blockStart = this.toSfcPosition(block, { line: 0, character: 0 });
+        for (const d of diags) d.range = { start: blockStart, end: blockStart };
+      } else {
+        for (const d of diags) d.range = this.toSfcRange(block, d.range);
       }
 
       const blockDiags = [...preprocessorDiags, ...diags];
@@ -251,6 +255,7 @@ export class CssService {
     const allColors: ColorInformation[] = [];
 
     for (const block of entry.blocks) {
+      if (this.usesGeneratedCss(block, entry)) continue;
       const service = this.getServiceForBlock(block, entry);
       const cssDoc = this.getCssDocument(block, entry, uri);
       if (!service || !cssDoc) continue;
@@ -337,6 +342,10 @@ export class CssService {
     const block = findStyleBlockAt(entry.blocks, source, line, character);
     if (!block) return null;
 
+    // Cursor positions and returned ranges are authored coordinates. Generated
+    // CSS cannot safely serve positional features without its source map.
+    if (this.usesGeneratedCss(block, entry)) return null;
+
     const service = this.getServiceForBlock(block, entry);
     const cssDoc = this.getCssDocument(block, entry, uri);
     if (!service || !cssDoc) return null;
@@ -353,6 +362,13 @@ export class CssService {
       return entry.transpiled.has(block.legacyPreprocessorIndex) ? cssService : null;
     }
     return getServiceForLang(block.lang);
+  }
+
+  private usesGeneratedCss(block: StyleBlockInfo, entry: DocumentCache): boolean {
+    return (
+      (block.lang === "sass" || block.lang === "stylus") &&
+      entry.transpiled.has(block.legacyPreprocessorIndex)
+    );
   }
 
   private getCssDocument(

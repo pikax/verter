@@ -20,7 +20,9 @@ use verter_css_syntax::{
 ///
 /// Re-exported so the admitting host names the compiler's own entry vocabulary
 /// instead of taking a direct dependency on the syntax crate for these types.
-pub use verter_css_syntax::{ExternalStyleProducer, PreprocessedStyle, StyleProducer};
+pub use verter_css_syntax::{
+    ExternalStyleProducer, PreprocessedStyle, PreprocessorIdentity, StyleProducer,
+};
 use verter_span::Span;
 
 use crate::code_transform::{advance_generated_position, CodeTransform, SourceMapOptions};
@@ -1920,7 +1922,7 @@ pub enum CascadeInput {
     Authored,
     /// Plain CSS an external preprocessor already produced, and the identity
     /// the caller has for that tool.
-    Preprocessed(StyleProducer),
+    Preprocessed(PreprocessorIdentity),
 }
 
 impl CascadeInput {
@@ -3137,7 +3139,7 @@ mod prepared_slot_join_tests {
     fn supplied(css: &str) -> PreparedStyleIr {
         prepare_supplied_style(PreprocessedStyle::admitted(
             css,
-            verter_css_syntax::StyleProducer::ExternalAnonymous,
+            verter_css_syntax::PreprocessorIdentity::Anonymous,
         ))
         .expect("css parses")
     }

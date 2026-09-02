@@ -1,5 +1,5 @@
-//! J1-A13: the Rust-LSP baseline analyzes authored CSS-family syntax
-//! natively, without any preprocessor provider, for every one of the five
+//! The Rust LSP analyzes authored CSS-family syntax natively, without any
+//! preprocessor provider, for every one of the five
 //! dialects `StyleSyntaxIr` owns (CSS/SCSS/Sass/Less/Stylus) — and fails
 //! CLOSED (typed `ProcessedContentRequired`/`External`, never a fabricated
 //! or silently-internally-preprocessed result) for a `lang` the shared
@@ -12,7 +12,7 @@ use verter_session::{
     UpsertRequest, VerterHost,
 };
 
-/// Positive half of A13: every native dialect gets real, non-trivial
+/// Every native dialect gets real, non-trivial
 /// structural facts (`CssAnalysis`) directly from `StyleSyntaxIr`, published
 /// through the host's ordinary analysis surface, with zero preprocessor
 /// *requirement* for the block. CSS issues no request at all. SCSS/Sass/Less/
@@ -163,12 +163,11 @@ fn preprocess_dependent_request_fails_closed_as_external() {
         style.css
     );
 
-    // A case variant of a native name is NOT that dialect. Every preprocessor
-    // table the ecosystem hands these blocks to is keyed by exact bytes, so
-    // `lang="SCSS"` has nothing that can compile it, and the pipeline that
-    // compiles the block fails closed on it. Case-folding on this route alone
-    // made the same block report a complete, natively-parsed surface here
-    // while nothing downstream could build it.
+    // A case variant of a native name is NOT that dialect: `SCSS` does not
+    // name the `scss` processor. This host currently routes an unrecognised
+    // exact identity through its external-content handoff. That policy is
+    // distinct from Vue's reference fallback, which passes a processor-table
+    // miss through as plain CSS.
     let folded = host
         .upsert(UpsertRequest {
             canonical_id: None,
@@ -186,7 +185,7 @@ fn preprocess_dependent_request_fails_closed_as_external() {
     assert_eq!(
         folded_style.content_availability,
         BlockContentAvailability::ProcessedContentRequired,
-        "a case variant of a native name has no preprocessor entry, so it must fail closed"
+        "an unrecognised exact identity follows the host's external-content policy"
     );
     assert!(
         folded_style.css.is_none(),
@@ -259,8 +258,10 @@ fn preprocess_dependent_request_fails_closed_as_external() {
 
 /// Byte-exact `lang` reporting belongs to the style axis alone.
 ///
-/// The style pipeline's tables are keyed by exact bytes, so `lang="SCSS"` has
-/// to fail closed. A script or template block's dialect classifier resolves an
+/// The style identity is byte-exact, so `lang="SCSS"` does not become SCSS by
+/// case folding. The host currently routes that unknown identity through the
+/// external-content handoff; this is separate from Vue's plain-CSS fallback.
+/// A script or template block's dialect classifier resolves an
 /// unrecognised spelling to a language rather than refusing it, so
 /// `<script lang="TS">` is compiled, type-checked and served as TypeScript by
 /// every other route. Applying the style rule to those roles makes THIS route
@@ -291,8 +292,8 @@ fn only_the_style_axis_reports_its_lang_byte_exactly() {
         update.preprocessor_requests
     );
 
-    // The same SFC with a case-variant STYLE lang still fails closed, so the
-    // containment above did not put the widening step back.
+    // The same SFC with a case-variant STYLE lang retains its exact spelling
+    // and follows the host's unknown-style policy.
     let styled = host
         .upsert(UpsertRequest {
             canonical_id: None,
@@ -317,7 +318,7 @@ fn only_the_style_axis_reports_its_lang_byte_exactly() {
             "SCSS".to_string(),
             BlockContentAvailability::ProcessedContentRequired
         )],
-        "exactly the style block fails closed, and it does so under the spelling \
+        "exactly the style block requests external content under the spelling \
          the author wrote"
     );
 }
@@ -333,8 +334,7 @@ fn only_the_style_axis_reports_its_lang_byte_exactly() {
 /// user-visible loss for no agreement gained.
 ///
 /// The `lang="SCSS"` control in `only_the_style_axis_reports_its_lang_byte_exactly`
-/// is what keeps this from reading as the widening step returning: exactly the
-/// spelling that names a preprocessor still fails closed.
+/// keeps this from reclassifying that spelling as the lowercase SCSS dialect.
 #[test]
 fn a_case_variant_css_style_lang_stays_native() {
     let host = VerterHost::new_standalone(HostConfig::default());

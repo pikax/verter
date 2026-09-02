@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use verter_compiler::style_planner::{ExternalStyleProducer, StyleProducer};
+use verter_compiler::style_planner::{ExternalStyleProducer, PreprocessorIdentity};
 use verter_language::parse_artifact::carrier_inventory::{
     AttributeValue, CarrierAttribute, CarrierBlock, SectionRole, SourceSlice, StyleDialect,
     TaggedSyntax,
@@ -93,13 +93,13 @@ pub(crate) fn style_producer_of(
     processor_identity: &str,
     processor_version: &str,
     config_fingerprint: Option<&str>,
-) -> StyleProducer {
+) -> PreprocessorIdentity {
     ExternalStyleProducer::new(
         processor_identity,
         Some(processor_version),
         config_fingerprint,
     )
-    .map_or(StyleProducer::ExternalAnonymous, StyleProducer::External)
+    .map_or(PreprocessorIdentity::Anonymous, PreprocessorIdentity::Named)
 }
 
 impl SuppliedContentArtifact {
@@ -593,14 +593,12 @@ pub(crate) fn role_class(role: &SectionRole) -> BlockContentClass {
 ///
 /// A style block's `lang` is reported VERBATIM, never case-folded. Every table
 /// a style `lang` is then looked up in — the dialect owner
-/// (`CssDialect::from_lang`), the native-language question below, the carrier
-/// parser's own `StyleLang`, and every preprocessor table the ecosystem keys
-/// by `lang` — is keyed by exact bytes. Normalizing put a widening step in
-/// front of all of them: `lang="SCSS"` failed closed for the pipeline that
-/// compiles the block while resolving for the one that publishes its
-/// `v-bind()` inventory, so a block nothing downstream can build was reported
-/// as having a complete surface. An unrecognised style spelling has to reach
-/// those owners as authored and fail closed there.
+/// (`CssDialect::from_lang`), the native-language question below, and the
+/// carrier parser's own `StyleLang` — receives the authored bytes. Normalizing
+/// put a widening step in front of all of them: `lang="SCSS"` was classified as
+/// SCSS here even though it does not name the `scss` processor. Preserving the
+/// spelling lets each caller apply its explicit fallback policy; Vue's
+/// reference compiler, for example, treats a processor-table miss as CSS.
 ///
 /// Every OTHER role keeps the ASCII-lowercased spelling, because that is the
 /// form ITS owners are keyed by, and folding the style rule onto them would
@@ -1413,6 +1411,10 @@ impl VerterHost {
                 } else {
                     usage_complete = false;
                 }
+            } else {
+                // No parse surveyed the selected bytes. An empty inventory is
+                // therefore only a lower bound, never an exhaustive surface.
+                usage_complete = false;
             }
             if snapshot.availability == BlockContentAvailability::NativeAvailable
                 && style.content_is_available()

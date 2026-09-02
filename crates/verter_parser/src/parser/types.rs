@@ -447,13 +447,12 @@ fn props_modifier_spill(props: &[NodeProp]) -> usize {
 impl StyleLang {
     /// Parse a style language from the raw `lang` attribute bytes.
     ///
-    /// Byte-exact for every dialect an external tool compiles: those tools
-    /// look the spelling up by exact bytes, so `lang="SCSS"` names nothing
-    /// that can build the block and must not resolve here either. `css` is
-    /// matched ASCII-case-insensitively instead, because plain CSS reaches no
-    /// such table — nothing downstream can fail on its casing, and refusing
-    /// `lang="CSS"` would cost an unambiguously-CSS block every CSS feature
-    /// the editor serves.
+    /// Byte-exact for every dialect an external tool compiles: `lang="SCSS"`
+    /// does not name the `scss` processor and therefore does not resolve as
+    /// SCSS here. This classifies the authored spelling; it does not decide a
+    /// compiler's fallback after a processor lookup misses. Vue, for example,
+    /// passes such input through as plain CSS. `css` is matched
+    /// ASCII-case-insensitively because it already names that fallback grammar.
     pub fn from_bytes(lang: &[u8]) -> Self {
         if lang.eq_ignore_ascii_case(b"css") {
             return StyleLang::Css;

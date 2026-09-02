@@ -42,13 +42,13 @@ impl CssDialect {
     /// one, and the drift is silent: the same `lang="…"` resolves in one route
     /// and fails closed in another.
     ///
-    /// Matching is byte-exact for every dialect that needs an external tool,
-    /// and deliberately so. Such a `lang="…"` value is looked up by exact
-    /// bytes in every preprocessor table the ecosystem hands these blocks to,
-    /// so `lang="SCSS"` has no preprocessor and must fail closed here too —
-    /// accepting it would publish a complete-looking SCSS surface for a block
-    /// nothing downstream can compile. `styl` is accepted because it is a real
-    /// key in those tables, not a casing variant.
+    /// Matching is byte-exact for every dialect that needs an external tool:
+    /// `lang="SCSS"` does not name the `scss` processor and therefore must not
+    /// be classified as SCSS. This function answers exact dialect identity,
+    /// not the caller's fallback policy. In particular, Vue's compiler treats
+    /// a missing processor-table entry as plain CSS; a caller implementing
+    /// that policy must do so after this exact lookup returns `None`. `styl`
+    /// is accepted because it is a real table key, not a casing variant.
     ///
     /// `css` is the one exception, and it is an exception because the reason
     /// above does not reach it: plain CSS is handed to no preprocessor table

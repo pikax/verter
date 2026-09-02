@@ -1202,7 +1202,7 @@ fn zero_edit_routes_construct_no_code_transform() {
             .expect("empty sheet parses");
         let outcome = transform_vue_style(
             VerifiedPlainCss::from_parsed_native_css(&parsed).expect("native-CSS provenance"),
-            CascadeInput::Preprocessed(verter_css_syntax::StyleProducer::ExternalAnonymous),
+            CascadeInput::Preprocessed(verter_css_syntax::PreprocessorIdentity::Anonymous),
             "probe.css",
             "space:probe",
             "artifact:probe",

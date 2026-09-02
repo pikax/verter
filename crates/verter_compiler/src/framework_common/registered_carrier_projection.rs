@@ -51,15 +51,17 @@ use verter_parser::parser::types::StyleLang;
 /// One owner, shared by every carrier arm below, because the classification is
 /// read on two routes that must agree: the editor's CSS intelligence serves the
 /// block from it, and the rewrite pipeline's dialect owner
-/// (`CssDialect::from_lang`) decides from the same spelling whether anything can
-/// compile the block. A per-carrier table beside this one drifts silently and in
-/// both directions — one carrier recognised `lang="styl"` while the other called
-/// it unrecognised, and one accepted `lang="SCSS"`, which no preprocessor table
-/// (all keyed by exact bytes) has an entry for.
+/// (`CssDialect::from_lang`) reads the same authored spelling. A per-carrier
+/// table beside this one drifts silently in both directions: one carrier
+/// recognised `lang="styl"` while the other called it unrecognised, and one
+/// classified `lang="SCSS"` as SCSS even though that spelling does not name the
+/// `scss` processor.
 ///
-/// [`StyleLang::from_bytes`] is that spelling authority, and it is byte-exact
-/// for the same reason those tables are. `None` — no `lang` at all — is CSS;
-/// an unrecognised spelling is [`StyleDialect::Missing`], never a default.
+/// [`StyleLang::from_bytes`] is that spelling authority. `None` — no `lang` at
+/// all — is CSS; an unrecognised spelling is [`StyleDialect::Missing`]. That
+/// value records missing exact identity, not an assertion that a framework
+/// cannot apply its own fallback; Vue passes processor-table misses through as
+/// plain CSS.
 fn carrier_style_dialect(lang: Option<StyleLang>) -> StyleDialect {
     match lang {
         Some(StyleLang::Css) | None => StyleDialect::Css,

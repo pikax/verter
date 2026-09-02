@@ -1172,7 +1172,7 @@ fn matching_prepared_styles_reuse_the_admitted_ir_and_match_an_empty_carrier() {
 fn supplied_style(css: &str) -> PreparedStyleIr {
     prepare_supplied_style(verter_css_syntax::PreprocessedStyle::admitted(
         css,
-        verter_css_syntax::StyleProducer::ExternalAnonymous,
+        verter_css_syntax::PreprocessorIdentity::Anonymous,
     ))
     .expect("supplied css parses")
 }
