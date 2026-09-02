@@ -10245,6 +10245,82 @@ async fn component_completion_cold_parent_import_converges_without_test_prewarm(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn edited_carrier_republishes_its_own_contract_after_an_isolated_edit() {
+    // A document with no import roots keeps its delivered import receipt
+    // across an edit that cannot change what it imports. The same background
+    // pass ALSO owns this carrier's own public component contract, and a
+    // content edit DOES invalidate that contract (its snapshot is bound to the
+    // source revision). The pass's early-return freshness gate must therefore
+    // cover the self-contract leg as well as the import legs: gating solely on
+    // the promoted import receipt leaves the contract permanently cold for the
+    // whole generation, because every later enqueue returns early and the only
+    // producer never runs. A parent typing `<DraftCard ` then never sees the
+    // child's props.
+    const CHILD_V1: &str =
+        "<script setup lang=\"ts\">\ninterface DraftProps { title: string }\ndefineProps<DraftProps>()\n</script>\n";
+    const CHILD_V2: &str = "<script setup lang=\"ts\">\ninterface DraftProps { title: string; unusedOnly?: boolean }\ndefineProps<DraftProps>()\n</script>\n";
+
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &[("src/DraftCard.vue", "vue", CHILD_V1)],
+            crate::TypeProviderKind::Tsserver,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                metrics_enabled: true,
+                ..HostConfig::default()
+            },
+            false,
+        )
+        .await;
+    let server = service.inner();
+    let child_uri = workspace_uri(&workspace_id, "src/DraftCard.vue");
+    let child_id = format!("{workspace_id}/src/DraftCard.vue");
+
+    server.publish_import_dependencies_settled(&child_uri).await;
+    assert!(
+        server.cached_child_public_contract(&child_id).is_some(),
+        "the first background pass must commit the carrier's own contract"
+    );
+    assert!(
+        server.dependency_readiness_capture(&child_uri).is_ready(),
+        "a rootless carrier must hold a delivered import receipt"
+    );
+
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: child_uri.clone(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: CHILD_V2.to_string(),
+            }],
+        },
+    )
+    .await;
+
+    assert!(
+        server.cached_child_public_contract(&child_id).is_none(),
+        "the edit must retire the contract published against the previous revision"
+    );
+
+    // The same production pass the background lane runs. It must not treat the
+    // preserved import receipt as proof that the self-contract leg is
+    // delivered.
+    server.publish_import_dependencies_settled(&child_uri).await;
+    assert!(
+        server.cached_child_public_contract(&child_id).is_some(),
+        "the publication pass must republish the edited carrier's own contract"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn svelte_progressive_component_completion_uses_committed_child_contract() {
     for (provider_label, provider_kind) in [
         ("none", crate::TypeProviderKind::None),
