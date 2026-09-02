@@ -3731,12 +3731,24 @@ fn changed_workspace_reload_does_not_fence_out_its_own_cold_artifact() {
     host.ensure_indexed_ready(canonical)
         .expect("initial workspace source materializes");
 
-    host.evict(canonical);
-    host.scheduler.close_file(canonical);
+    // The demand below must BE the loading flight: it installs the changed
+    // source itself, advancing the store view mid-flight, and must still
+    // publish its own artifact. So drop the scheduler source WITHOUT
+    // scheduling a competing reload. Closing the file would enqueue an
+    // asynchronous background reload, and whichever way that reload races
+    // the demand the test stops proving its invariant: winning with the
+    // pre-change bytes republishes them as the authoritative content (the
+    // demand then serves a superseded artifact), and winning with the new
+    // bytes installs the source outside the flight (the canonical stays
+    // marked evicted, so it has no authoritative artifact key at all).
+    // Publishing the new content first keeps the workspace unambiguous for
+    // any read that follows.
     workspace.inject_file(
         canonical.to_string(),
         Arc::from("export const value = 2;\n"),
     );
+    host.evict(canonical);
+    host.scheduler.invalidate(canonical);
     host.provenance().reset();
 
     let refreshed = host

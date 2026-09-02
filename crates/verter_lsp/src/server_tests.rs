@@ -10127,7 +10127,7 @@ async fn component_completion_cold_parent_import_converges_without_test_prewarm(
         server,
         DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier {
-                uri: child_uri,
+                uri: child_uri.clone(),
                 version: 2,
             },
             content_changes: vec![TextDocumentContentChangeEvent {
@@ -10138,8 +10138,18 @@ async fn component_completion_cold_parent_import_converges_without_test_prewarm(
         },
     )
     .await;
+    // Re-arm the background lane on every poll instead of resting on the one
+    // debounced pass the edit scheduled. Publication is enqueue-driven: a pass
+    // whose projection is not available yet returns a retryable outcome and
+    // ends the lane, and only a later trigger restarts it. In an editor that
+    // trigger is the next feature request that misses the contract; with no
+    // request in flight this loop is the only thing left to supply it. The
+    // enqueue is idle-guarded, so an already-active pass merely records a
+    // trailing one — the contract still has to come from the normal background
+    // publication, never a test-only prewarm.
     tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
         while server.cached_child_public_contract(&child_id).is_none() {
+            server.enqueue_import_dependency_publication_if_idle(&child_uri);
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
