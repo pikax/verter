@@ -184,3 +184,112 @@ fn typeinfo_graph_payload_carries_every_documented_exactness_status() {
         "ExactnessTag must enumerate every closed status — missing: {missing:?}",
     );
 }
+
+#[test]
+fn flow_return_payload_exposes_its_typed_partiality_reason() {
+    let ts = read_audit_generated_ts();
+    assert!(
+        ts.contains("partiality: FlowPartialityTag | null"),
+        "FlowReturnInferencePayload must expose the typed partiality reason \
+         alongside its occurrence counters",
+    );
+    assert!(
+        ts.contains(
+            "export type FlowPartialityTag = { \"Degraded\": FlowDegradationTag } \
+             | { \"NoValue\": FlowFailureTag }"
+        ),
+        "FlowPartialityTag must split the degraded-but-usable arm from the \
+         no-value arm, each carrying its own closed reason tag",
+    );
+}
+
+/// Every flow-model gap, degradation, and no-value reason keeps a
+/// distinct wire spelling — no collapsed catch-all bucket, and no
+/// `Debug`-formatted string.
+///
+/// The comparison is EXACT SET EQUALITY against the generated unions,
+/// not a containment check, so it discriminates drift in BOTH
+/// directions: folding two reasons onto one tag (or replacing a nested
+/// `Unsupported` / `CallResolution` / `Budget` arm with a single
+/// bucket) drops a member and fails; adding a reason to the Rust enum
+/// without recording its wire spelling here adds an unlisted member
+/// and fails.
+#[test]
+fn flow_partiality_tags_enumerate_every_closed_reason() {
+    let ts = read_audit_generated_ts();
+    // Every `FlowGap` variant, reduced into the degradation tag,
+    // followed by the remaining `FlowReturnDegradation` variants.
+    let expected_degradation = [
+        "GapGuardNarrowing",
+        "GapNominalRelation",
+        "GapClosureCapture",
+        "GapAbruptCompletion",
+        "GapUnmodeledExpression",
+        "NonCallableBinding",
+        "UnrepresentableCallee",
+        "FailedBindingInitializer",
+        "UnappliedWriteEffect",
+        "ConditionalVarDefinition",
+        "UnreducedDeclaredUnion",
+        "UnresolvedValue",
+        "UnmodeledPosition",
+    ];
+    // Every `FlowReturnFailure` variant with its nested `Unsupported` /
+    // `CallResolution` / `Budget` reasons expanded, plus the host's own
+    // unstable-view refusal (`UnstableState`), which is not a
+    // `FlowReturnFailure` variant but shares the no-value tag.
+    let expected_failure = [
+        "Missing",
+        "UnsupportedLoop",
+        "UnsupportedJump",
+        "UnsupportedInvokedClosureEffect",
+        "UnsupportedWith",
+        "UnsupportedModuleDeclaration",
+        "Unresolved",
+        "EmptyCycle",
+        "UnmodeledDemandPoint",
+        "CallNotCallable",
+        "CallNoApplicableOverload",
+        "CallUndecidable",
+        "CallBudget",
+        "BudgetDepthExceeded",
+        "BudgetWorkExceeded",
+        "UnstableState",
+    ];
+
+    for (union_name, expected) in [
+        ("FlowDegradationTag", expected_degradation.as_slice()),
+        ("FlowFailureTag", expected_failure.as_slice()),
+    ] {
+        let members = string_union_members(&ts, union_name);
+        let mut expected_sorted: Vec<String> =
+            expected.iter().map(|name| (*name).to_string()).collect();
+        expected_sorted.sort_unstable();
+        assert_eq!(
+            members, expected_sorted,
+            "{union_name} must spell out exactly the closed reason set: a \
+             missing member is a collapsed reason, an extra member is a new \
+             reason whose wire spelling was never recorded",
+        );
+    }
+}
+
+/// Extract the sorted member names of a generated string-literal union
+/// (`export type Name = "A" | "B";`).
+fn string_union_members(ts: &str, union_name: &str) -> Vec<String> {
+    let needle = format!("export type {union_name} = ");
+    let rest = ts
+        .split_once(&needle)
+        .unwrap_or_else(|| panic!("audit.generated.ts must export {union_name}"))
+        .1;
+    let decl = rest
+        .split_once(';')
+        .unwrap_or_else(|| panic!("{union_name} declaration must be terminated"))
+        .0;
+    let mut members: Vec<String> = decl
+        .split('|')
+        .map(|member| member.trim().trim_matches('"').to_string())
+        .collect();
+    members.sort_unstable();
+    members
+}

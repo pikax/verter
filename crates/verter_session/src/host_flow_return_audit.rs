@@ -22,12 +22,23 @@
 //! `from_cache = true` with `cold_computes == 0`; the cold-path
 //! emission helpers construct no event payload without an installed
 //! accumulator (see [`crate::flow_return_audit`]).
+//!
+//! Partiality projection: `observed_partiality` reduces the outcome's
+//! OWN typed reason — the [`FlowReturnResult::degradation`] the
+//! finalizer refused to seal, or the [`FlowReturnError`] on the `Err`
+//! arm — onto the payload's `partiality` field, so a caller reading the
+//! record sees WHY a request was partial, not only THAT it was. This is
+//! the SOLE projection of that vocabulary onto the wire surface, and it
+//! is read-only: the outcome is already bound when it runs, and nothing
+//! in admission, warm/cold classification, or cache identity reads it
+//! back.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use verter_audit::{
-    AuditedResult, FlowReturnInferencePayload, RequestAuditRecord, RequestKind, RequestKindPayload,
+    AuditedResult, FlowDegradationTag, FlowFailureTag, FlowPartialityTag,
+    FlowReturnInferencePayload, RequestAuditRecord, RequestKind, RequestKindPayload,
     RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit, WaitAudit,
 };
 
@@ -35,7 +46,10 @@ use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::instant::Instant;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::{FlowReturnFailure, FlowReturnResult, ReturnProjectionDemand};
+use crate::semantic_query::{
+    FlowGap, FlowReturnDegradation, FlowReturnFailure, FlowReturnResult, FlowReturnUnsupported,
+    ResolveCallFailure, ReturnProjectionDemand,
+};
 use crate::VerterHost;
 
 /// Typed `Err` arm of the flow-return [`AuditedResult`] carrier —
@@ -195,6 +209,7 @@ impl VerterHost {
             cold_computes,
             budget_exceeded_events: ctx.flow_return_budget_exceeded.load(Ordering::Relaxed),
             cycle_reentry_holds: ctx.flow_return_cycle_reentries.load(Ordering::Relaxed),
+            partiality: observed_partiality(&outcome),
         };
         // Cold-vs-warm contract, counter side: a request that produced
         // a value with ZERO cold evaluations was served warm.
@@ -253,6 +268,102 @@ impl VerterHost {
         let cloned = record.clone();
         registration.finalize(record);
         audited_from_outcome(outcome, cloned)
+    }
+}
+
+/// Project the outcome's OWN typed partiality reason onto the audit
+/// payload — the single observability projection of the flow
+/// vocabulary, and a pure read.
+///
+/// It reads the reason the evaluator and the finalizer already certified
+/// ([`FlowReturnResult::degradation`] on the usable arm, the typed
+/// [`FlowReturnError`] on the no-value arm); it never re-derives one,
+/// infers one from text, or guesses. Nothing here feeds admission: the
+/// outcome is already bound, `from_cache` is computed from the cold
+/// counter, and the returned tag is written into the audit record only.
+///
+/// `None` is the complete, warm-admissible outcome.
+fn observed_partiality(
+    outcome: &Result<Arc<FlowReturnResult>, FlowReturnError>,
+) -> Option<FlowPartialityTag> {
+    match outcome {
+        Ok(result) => result
+            .degradation()
+            .map(|reason| FlowPartialityTag::Degraded(degradation_tag(reason))),
+        Err(FlowReturnError::Failure(failure)) => {
+            Some(FlowPartialityTag::NoValue(failure_tag(*failure)))
+        }
+        Err(FlowReturnError::UnstableState { .. }) => {
+            Some(FlowPartialityTag::NoValue(FlowFailureTag::UnstableState))
+        }
+    }
+}
+
+/// Map one typed degradation reason onto its closed wire tag.
+///
+/// EXHAUSTIVE, with no wildcard arm and no `Debug` formatting: a new
+/// [`FlowReturnDegradation`] or [`FlowGap`] variant fails to compile
+/// here rather than silently collapsing into an existing bucket.
+fn degradation_tag(degradation: FlowReturnDegradation) -> FlowDegradationTag {
+    match degradation {
+        FlowReturnDegradation::FlowGap(gap) => match gap {
+            FlowGap::GuardNarrowing => FlowDegradationTag::GapGuardNarrowing,
+            FlowGap::NominalRelation => FlowDegradationTag::GapNominalRelation,
+            FlowGap::ClosureCapture => FlowDegradationTag::GapClosureCapture,
+            FlowGap::AbruptCompletion => FlowDegradationTag::GapAbruptCompletion,
+            FlowGap::UnmodeledExpression => FlowDegradationTag::GapUnmodeledExpression,
+        },
+        FlowReturnDegradation::NonCallableBinding => FlowDegradationTag::NonCallableBinding,
+        FlowReturnDegradation::UnrepresentableCallee => FlowDegradationTag::UnrepresentableCallee,
+        FlowReturnDegradation::FailedBindingInitializer => {
+            FlowDegradationTag::FailedBindingInitializer
+        }
+        FlowReturnDegradation::UnappliedWriteEffect => FlowDegradationTag::UnappliedWriteEffect,
+        FlowReturnDegradation::ConditionalVarDefinition => {
+            FlowDegradationTag::ConditionalVarDefinition
+        }
+        FlowReturnDegradation::UnreducedDeclaredUnion => FlowDegradationTag::UnreducedDeclaredUnion,
+        FlowReturnDegradation::UnresolvedValue => FlowDegradationTag::UnresolvedValue,
+        FlowReturnDegradation::UnmodeledPosition => FlowDegradationTag::UnmodeledPosition,
+    }
+}
+
+/// Map one typed no-value failure onto its closed wire tag.
+///
+/// EXHAUSTIVE through the nested closed enums too, so `Unsupported`,
+/// `CallResolution` and `Budget` each surface WHICH inner reason
+/// stopped the evaluation instead of one collapsed bucket.
+fn failure_tag(failure: FlowReturnFailure) -> FlowFailureTag {
+    match failure {
+        FlowReturnFailure::Missing => FlowFailureTag::Missing,
+        FlowReturnFailure::Unsupported(unsupported) => match unsupported {
+            FlowReturnUnsupported::Loop => FlowFailureTag::UnsupportedLoop,
+            FlowReturnUnsupported::Jump => FlowFailureTag::UnsupportedJump,
+            FlowReturnUnsupported::InvokedClosureEffect => {
+                FlowFailureTag::UnsupportedInvokedClosureEffect
+            }
+            FlowReturnUnsupported::With => FlowFailureTag::UnsupportedWith,
+            FlowReturnUnsupported::ModuleDeclaration => {
+                FlowFailureTag::UnsupportedModuleDeclaration
+            }
+        },
+        FlowReturnFailure::Unresolved => FlowFailureTag::Unresolved,
+        FlowReturnFailure::EmptyCycle => FlowFailureTag::EmptyCycle,
+        FlowReturnFailure::UnmodeledDemandPoint => FlowFailureTag::UnmodeledDemandPoint,
+        FlowReturnFailure::CallResolution(call) => match call {
+            ResolveCallFailure::NotCallable => FlowFailureTag::CallNotCallable,
+            ResolveCallFailure::NoApplicableOverload => FlowFailureTag::CallNoApplicableOverload,
+            ResolveCallFailure::Undecidable => FlowFailureTag::CallUndecidable,
+            ResolveCallFailure::Budget => FlowFailureTag::CallBudget,
+        },
+        FlowReturnFailure::Budget(reason) => match reason {
+            verter_type_expr::facts::InferenceUnavailableReason::DepthBudgetExceeded => {
+                FlowFailureTag::BudgetDepthExceeded
+            }
+            verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded => {
+                FlowFailureTag::BudgetWorkExceeded
+            }
+        },
     }
 }
 
