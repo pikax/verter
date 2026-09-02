@@ -15,6 +15,7 @@ mod projection_catalog;
 mod style_codetransform_map_coverage;
 mod style_declaration_list_routing;
 mod style_pipeline_ordering;
+mod style_stage_identity;
 mod svelte_carrier_frontend;
 mod svelte_carrier_parse_rejection;
 mod svelte_carrier_runtime_compile_options_channel;

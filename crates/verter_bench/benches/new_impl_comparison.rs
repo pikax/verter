@@ -68,7 +68,7 @@ fn compile_full(source: &str) -> String {
                 Some(StyleLang::Sass) => CssDialect::Sass,
                 Some(StyleLang::Less) => CssDialect::Less,
                 Some(StyleLang::Stylus) => CssDialect::Stylus,
-                Some(StyleLang::Unknown) => continue,
+                Some(StyleLang::PostCss | StyleLang::Unknown) => continue,
             };
             if let Ok(stage_one) = transform_vue_v_bind(
                 AuthoredStyleInput::new(css_source, dialect, "bench.vue", "bench", "bench")
@@ -79,7 +79,7 @@ fn compile_full(source: &str) -> String {
                     StyleRewriteOutcome::Unchanged { .. } => css_source.to_string(),
                     StyleRewriteOutcome::Rewritten { code, .. } => code,
                 };
-                if style_node.scoped && dialect == CssDialect::Css {
+                if style_node.scoped && !dialect.requires_external_preprocessing() {
                     let input = PlainCssInput::try_new(
                         &code,
                         CssDialect::Css,

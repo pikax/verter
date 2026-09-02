@@ -23,7 +23,7 @@ use verter_compiler::standalone::{
     DirectCompileError, DirectCompileOutput, DirectExecutionInputs, StandaloneCompiler,
     SvelteExecutionInputs,
 };
-use verter_compiler::style_planner::{prepare_supplied_plain_css, PreparedStyleIr};
+use verter_compiler::style_planner::{prepare_supplied_style, PreparedStyleIr};
 use verter_compiler::svelte::runtime::{ClientCompileError, UnsupportedSvelteRuntimeSurface};
 use verter_compiler::svelte::{
     svelte_runtime_backend_registration, SvelteCarrierCompiler, SvelteRuntimeBackend,
@@ -1167,15 +1167,25 @@ fn matching_prepared_styles_reuse_the_admitted_ir_and_match_an_empty_carrier() {
     );
 }
 
+/// Stand in for the host's admission of already-preprocessed bytes, which is
+/// the shape this test exercises.
+fn supplied_style(css: &str) -> PreparedStyleIr {
+    prepare_supplied_style(verter_css_syntax::PreprocessedStyle::admitted(
+        css,
+        verter_css_syntax::StyleProducer::ExternalAnonymous,
+    ))
+    .expect("supplied css parses")
+}
+
 #[test]
 fn mismatched_prepared_styles_still_compile_via_safe_reparse() {
-    let origin_zero = prepare_supplied_plain_css(".card{color:blue}").expect("origin-0 css parses");
+    let origin_zero = supplied_style(".card{color:blue}");
     assert_eq!(
         origin_zero.ir().source().origin(),
         0,
-        "prepare_supplied_plain_css must stay origin 0 so a style-body mismatch is real"
+        "supplied style parses stay origin 0 so a style-body mismatch is real"
     );
-    let wrong_bytes = prepare_supplied_plain_css(".other{color:red}").expect("decoy css parses");
+    let wrong_bytes = supplied_style(".other{color:red}");
     for prepared in [origin_zero, wrong_bytes] {
         let inputs = SvelteRuntimeInputs {
             execution: SvelteExecutionInputs {

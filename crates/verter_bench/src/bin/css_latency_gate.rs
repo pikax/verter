@@ -147,7 +147,7 @@ fn capture_record(args: &[String]) -> Result<(String, CssBaselineRecord), ExitCo
     let compiled = compiled_binary_identity();
     if compiled.dirty && !args.iter().any(|a| a == "--allow-dirty") {
         eprintln!(
-            "REFUSED: this binary was built from a dirty git tree ({}). Recapture from a              clean checkout, or pass --allow-dirty for a throwaway local run.",
+            "REFUSED: this binary was built from a dirty git tree ({}). Recapture from a clean checkout, or pass --allow-dirty for a throwaway local run.",
             compiled.commit_sha
         );
         return Err(ExitCode::from(3));

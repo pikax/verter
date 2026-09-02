@@ -59,7 +59,7 @@ fn a1_resolved_dependency_graph_carries_no_lightningcss_package() {
         .expect("`cargo metadata` packages array");
     assert!(
         !packages.is_empty(),
-        "`cargo metadata` returned an empty packages array — an empty graph would make the          lightningcss-absence check vacuously true"
+        "`cargo metadata` returned an empty packages array — an empty graph would make the lightningcss-absence check vacuously true"
     );
     let names: Vec<&str> = packages
         .iter()

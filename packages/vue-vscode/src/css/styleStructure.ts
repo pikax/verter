@@ -6,7 +6,11 @@ export interface StyleBlockInfo {
   blockToken: string;
   /** Legacy preprocessor DTO identity only; no feature joins use this ordinal. */
   legacyPreprocessorIndex: number;
-  lang: StyleLang;
+  /**
+   * The block's dialect, or `null` when the parser reported one this client
+   * cannot address. Consumers fail closed on `null` — see [`styleLang`].
+   */
+  lang: StyleLang | null;
   scoped: boolean;
   /**
    * Parser-owned `src` attribute: the block's content is an EXTERNAL file
@@ -51,8 +55,24 @@ function lineCol(source: string, offset: number): { line: number; col: number } 
   return { line, col: offset - start };
 }
 
-function styleLang(dialect: string): StyleLang {
+/**
+ * Map the parser's reported dialect onto the closed set this client can serve.
+ *
+ * Exhaustive rather than defaulting: an unrecognised dialect used to fall
+ * through to `"css"`, so a block whose `lang` names no dialect at all was
+ * parsed and validated by the plain-CSS service and reported CSS errors for
+ * syntax that was never CSS. An unknown dialect returns `null` and the block is
+ * served nothing — missing intelligence beats confidently wrong intelligence.
+ *
+ * `"missing"` is that case, not the absence of a `lang` attribute. The parser
+ * reports a block with NO `lang` as `"css"`; `"missing"` is what it reports for
+ * a `lang` it does not recognise, which is exactly the block this client has no
+ * service for.
+ */
+function styleLang(dialect: string): StyleLang | null {
   switch (dialect.toLowerCase()) {
+    case "css":
+      return "css";
     case "scss":
       return "scss";
     case "less":
@@ -64,7 +84,7 @@ function styleLang(dialect: string): StyleLang {
     case "postcss":
       return "postcss";
     default:
-      return "css";
+      return null;
   }
 }
 

@@ -43,6 +43,34 @@ use crate::svelte::{
     SvelteProjectionBackend, SvelteProjectionError, SvelteProjectionInputs,
     SvelteSemanticAuthority, SvelteSfc5,
 };
+use verter_parser::parser::types::StyleLang;
+
+/// The carrier-level `<style lang="…">` classification, for every registered
+/// carrier.
+///
+/// One owner, shared by every carrier arm below, because the classification is
+/// read on two routes that must agree: the editor's CSS intelligence serves the
+/// block from it, and the rewrite pipeline's dialect owner
+/// (`CssDialect::from_lang`) decides from the same spelling whether anything can
+/// compile the block. A per-carrier table beside this one drifts silently and in
+/// both directions — one carrier recognised `lang="styl"` while the other called
+/// it unrecognised, and one accepted `lang="SCSS"`, which no preprocessor table
+/// (all keyed by exact bytes) has an entry for.
+///
+/// [`StyleLang::from_bytes`] is that spelling authority, and it is byte-exact
+/// for the same reason those tables are. `None` — no `lang` at all — is CSS;
+/// an unrecognised spelling is [`StyleDialect::Missing`], never a default.
+fn carrier_style_dialect(lang: Option<StyleLang>) -> StyleDialect {
+    match lang {
+        Some(StyleLang::Css) | None => StyleDialect::Css,
+        Some(StyleLang::Scss) => StyleDialect::Scss,
+        Some(StyleLang::Sass) => StyleDialect::Sass,
+        Some(StyleLang::Less) => StyleDialect::Less,
+        Some(StyleLang::Stylus) => StyleDialect::Stylus,
+        Some(StyleLang::PostCss) => StyleDialect::PostCss,
+        Some(StyleLang::Unknown) => StyleDialect::Missing,
+    }
+}
 
 /// Opaque in-process carrier retained by the registered projector.
 ///
@@ -1581,15 +1609,7 @@ fn project_vue(
                 }
             }
             Root::Style(v) => {
-                let dialect = match v.lang {
-                    Some(verter_parser::parser::types::StyleLang::Css) => StyleDialect::Css,
-                    Some(verter_parser::parser::types::StyleLang::Scss) => StyleDialect::Scss,
-                    Some(verter_parser::parser::types::StyleLang::Sass) => StyleDialect::Sass,
-                    Some(verter_parser::parser::types::StyleLang::Less) => StyleDialect::Less,
-                    Some(verter_parser::parser::types::StyleLang::Stylus) => StyleDialect::Stylus,
-                    Some(verter_parser::parser::types::StyleLang::Unknown) => StyleDialect::Missing,
-                    None => StyleDialect::Css,
-                };
+                let dialect = carrier_style_dialect(v.lang);
                 let content = v.content.map(|span| builder.span(span));
                 let closing = v
                     .tag_close
@@ -2258,22 +2278,16 @@ fn project_svelte(
                     v.tag_close,
                     &v.attributes,
                 );
-                // Dialect derives from the parser-owned `lang` (mirrors the Vue
-                // path: recognised names map, an unrecognised name is Missing,
-                // no lang is CSS). Svelte has no authored `scoped` / `module`
-                // attributes, so those stay un-fabricated.
-                let dialect = match v.lang.as_deref() {
-                    None => StyleDialect::Css,
-                    Some(lang) => match lang.to_ascii_lowercase().as_str() {
-                        "css" => StyleDialect::Css,
-                        "scss" => StyleDialect::Scss,
-                        "sass" => StyleDialect::Sass,
-                        "less" => StyleDialect::Less,
-                        "stylus" => StyleDialect::Stylus,
-                        "postcss" => StyleDialect::PostCss,
-                        _ => StyleDialect::Missing,
-                    },
-                };
+                // Same dialect owner as the Vue arm above. Svelte's parser hands
+                // the `lang` value on as authored bytes rather than a
+                // classification, so the spelling is resolved here — through the
+                // same function, never a table beside it. Svelte has no authored
+                // `scoped` / `module` attributes, so those stay un-fabricated.
+                let dialect = carrier_style_dialect(
+                    v.lang
+                        .as_deref()
+                        .map(|lang| StyleLang::from_bytes(lang.as_bytes())),
+                );
                 blocks.push(CarrierBlock::Section {
                     id,
                     role: SectionRole::Style {

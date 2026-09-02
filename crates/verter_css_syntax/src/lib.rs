@@ -18,6 +18,7 @@ mod layout;
 pub mod lexer;
 pub mod parser;
 pub mod selector;
+pub mod stage;
 pub mod style_ir;
 pub mod svelte_compat;
 pub mod token;
@@ -47,6 +48,11 @@ pub use selector::{
     SelectorComponent, SelectorComponentKind, SelectorCompound, SelectorFacts,
     SelectorInterpolation, SelectorKind, SelectorList, SelectorPseudo, SelectorStructure,
     SelectorTrust, SvelteNthArg,
+};
+pub use stage::{
+    ExternalStyleProducer, PreprocessedStyle, QualifiedStyleResult, StyleDependency,
+    StyleDependencyKind, StyleDiagnostic, StyleProducer, StyleSpecifier, StyleSpecifierForm,
+    StyleStage,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use style_ir::parse_style_ir_thread_invocations;

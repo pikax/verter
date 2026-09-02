@@ -138,9 +138,14 @@ fn css_dialect(value: Option<&str>) -> Result<verter_css_syntax::CssDialect> {
     match value {
         None => Ok(verter_css_syntax::CssDialect::Css),
         Some(lang) => verter_css_syntax::CssDialect::from_lang(lang).ok_or_else(|| {
+            // Listed from the owner's own table so the message cannot drift
+            // from what the call actually accepts.
+            let expected = verter_css_syntax::CssDialect::LANG_SPELLINGS
+                .map(|(spelling, _)| spelling)
+                .join(", ");
             Error::new(
                 Status::InvalidArg,
-                format!("unknown CSS dialect {lang:?}; expected css, scss, sass, less, or stylus"),
+                format!("unknown CSS dialect {lang:?}; expected one of: {expected}"),
             )
         }),
     }
@@ -295,6 +300,11 @@ pub fn transform_vue_style(
         let want_source_map = options.sourcemap.unwrap_or(false);
         let outcome = verter_compiler::style_planner::transform_vue_style(
             verified,
+            // This entry takes bytes the caller labels plain CSS and says
+            // nothing about who made them. Naming an anonymous external
+            // producer would assert the tool identified itself nowhere; the
+            // caller's own bytes at their own stage is what it actually knows.
+            verter_compiler::style_planner::CascadeInput::Authored,
             filename,
             filename,
             filename,
@@ -331,7 +341,7 @@ pub fn transform_vue_style(
             .map(ToString::to_string)
             .collect();
         Ok(TransformVueStyleResult {
-            code: outcome.code,
+            code: outcome.result.into_code(),
             sourceMap: source_map,
             moduleClasses: outcome
                 .facts

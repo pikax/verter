@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 // TE-C-11: CSS diagnostics must FAIL CLOSED on a stale/unavailable structure —
 // a non-`available` structure response must never surface as a successful
@@ -62,19 +62,33 @@ const transpileGate: {
   block?: Promise<void>;
   started?: () => void;
   /** `null` simulates a MISSING preprocessor (transpile unavailable). */
-  result?: { css: string; sourceMap: undefined } | null;
+  result?: QualifiedStyleResult | null;
 } = {};
+function preprocessed(
+  code: string,
+  diagnostics: QualifiedStyleResult["diagnostics"] = [],
+): QualifiedStyleResult {
+  return {
+    stage: "preprocessed",
+    dialect: "css",
+    producer: { identity: "sass", version: "1.0.0" },
+    code,
+    sourceMap: null,
+    diagnostics,
+  };
+}
 vi.mock("./transpiler", () => ({
   transpile: async () => {
     transpileGate.started?.();
     if (transpileGate.block) await transpileGate.block;
     if (transpileGate.result !== undefined) return transpileGate.result;
-    return { css: ".compiled { color: blue }", sourceMap: undefined };
+    return preprocessed(".compiled { color: blue }");
   },
 }));
 
 import * as vscode from "vscode";
 import { CssService } from "./cssService";
+import type { QualifiedStyleResult } from "./transpiler";
 import { RequestType } from "@verter/language-shared";
 import type { DocumentStructureResponseV1 } from "@verter/language-shared";
 
@@ -393,5 +407,119 @@ describe("CssService doValidation availability fail-closed (TE-C-11)", () => {
     liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 2 });
     const second = await svc.doValidation(URI, dirty, 2);
     expect(second).toBeNull();
+  });
+});
+
+describe("preprocessor result qualification", () => {
+  afterEach(() => {
+    transpileGate.result = undefined;
+  });
+
+  it("surfaces a preprocessor compile error at the mapped SFC position", async () => {
+    // The compile failure used to be reported on a record nothing read, so a
+    // broken `<style lang="sass">` produced silence in the editor.
+    const inline = '<style lang="sass">.a\n  color:\n</style>';
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    transpileGate.result = preprocessed("", [
+      {
+        // The tool reported against the bytes it consumed — the authored
+        // slice — which is what makes the block's own arithmetic the right map.
+        stage: "authored",
+        origin: "processor",
+        severity: "error",
+        message: "expected expression.",
+        position: { line: 1, character: 8 },
+      },
+    ]);
+    const svc = service((params) => available(params, inline, { dialect: "sass" }));
+
+    const results = await svc.doValidation(URI, inline, 1);
+
+    expect(results).toEqual([
+      {
+        blockToken: "style-0",
+        diagnostics: [
+          {
+            // Line 1 of the authored slice is line 1 of the SFC here, and a
+            // non-first line keeps its own character offset.
+            range: {
+              start: { line: 1, character: 8 },
+              end: { line: 1, character: 8 },
+            },
+            message: "expected expression.",
+            severity: 1,
+            source: "sass",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("anchors a diagnostic whose space it cannot map on the block instead of guessing", async () => {
+    // The block's line arithmetic is exact ONLY for the authored slice. A
+    // position in the generated CSS run through it lands on whatever authored
+    // text happens to sit at that line — silently, and plausibly enough that
+    // nobody notices. The stage is what makes the two cases distinguishable,
+    // so the consumer reads it rather than assuming one.
+    const inline = '<style lang="sass">.a\n  color:\n</style>';
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    transpileGate.result = preprocessed(".a{}", [
+      {
+        stage: "preprocessed",
+        origin: "processor",
+        severity: "error",
+        message: "reported against generated css.",
+        position: { line: 1, character: 8 },
+      },
+    ]);
+    const svc = service((params) => available(params, inline, { dialect: "sass" }));
+
+    const results = await svc.doValidation(URI, inline, 1);
+    const blockStart = { line: 0, character: inline.indexOf(".a") };
+    expect(results?.[0]?.diagnostics[0]?.range).toEqual({ start: blockStart, end: blockStart });
+  });
+
+  it("serves nothing for a dialect the client cannot address", async () => {
+    // `"Missing"` is the exact value the host reports for a `lang` its parser
+    // does not recognise. Handing such a block to the plain-CSS service reports
+    // CSS errors for syntax that is not CSS, so it is served nothing at all.
+    // The spelling is deliberately not a real dialect: `pcss` and `postcss`
+    // both name postcss, which IS served (below).
+    const inline = `<style lang="nocss">.a{color:}</style>`;
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    const svc = service((params) => available(params, inline, { dialect: "Missing" }));
+
+    expect(await svc.doValidation(URI, inline, 1)).toEqual([]);
+    expect(await svc.doHover(URI, inline, 1, 0, 21)).toBeNull();
+    expect(await svc.findDocumentColors(URI, inline, 1)).toEqual([]);
+  });
+
+  it("serves postcss with the css service rather than failing closed on it", async () => {
+    // `lang="postcss"` is a mainstream Vue configuration, and the host names
+    // it as its own dialect rather than folding it into the unrecognised
+    // value. Failing closed on it would cost a large share of real projects
+    // every CSS feature at once, with no compensating path — the block is
+    // CSS-shaped and the CSS service reads it.
+    const inline = `<style lang="postcss">.a{color:}</style>`;
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    const svc = service((params) => available(params, inline, { dialect: "postcss" }));
+
+    const results = await svc.doValidation(URI, inline, 1);
+    expect(results).not.toBeNull();
+    expect(results?.[0]?.diagnostics.length).toBeGreaterThan(0);
+  });
+
+  it("still serves a block with no lang attribute, which the host reports as css", async () => {
+    // The companion to the case above, and the reason it cannot simply treat
+    // every unfamiliar spelling as CSS: a `<style>` with no `lang` is reported
+    // as `"Css"`, NOT as the unrecognised value, so failing closed on the
+    // latter costs the former nothing.
+    const inline = `<style>.a{color:}</style>`;
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    const svc = service((params) => available(params, inline, { dialect: "Css" }));
+
+    const results = await svc.doValidation(URI, inline, 1);
+    expect(results).not.toBeNull();
+    expect(results?.[0]?.diagnostics.length).toBeGreaterThan(0);
   });
 });

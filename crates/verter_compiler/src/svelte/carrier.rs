@@ -1610,6 +1610,7 @@ let count = $state(0);
             content_artifact_token: "content:html".to_string(),
             source_space_token: "space:html".to_string(),
             parsed: None,
+            producer: None,
         }
     }
 

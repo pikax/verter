@@ -10,10 +10,17 @@ use sha2::{Digest, Sha256};
 use verter_css_syntax::{
     css_identifier_eq_ignore_ascii_case, parse_style_ir, CombinatorKind, ComplexSelector,
     ComplexSelectorPart, ComponentValue, ComponentValueTree, CssDialect, CssParseMode, CssSource,
-    SelectorComponent, SelectorComponentKind, SelectorList, SelectorPseudo, StyleCompleteness,
-    StyleDeclaration, StyleDirective, StyleStatement, StyleSyntaxIr, TokenKind, UnknownStatement,
-    UnknownStatementKind,
+    QualifiedStyleResult, SelectorComponent, SelectorComponentKind, SelectorList, SelectorPseudo,
+    StyleCompleteness, StyleDeclaration, StyleDependency, StyleDiagnostic, StyleDirective,
+    StyleStage, StyleStatement, StyleSyntaxIr, TokenKind, UnknownStatement, UnknownStatementKind,
 };
+
+/// The witness a caller-preprocessed style block enters the compiler through,
+/// and the producer vocabulary the witness carries.
+///
+/// Re-exported so the admitting host names the compiler's own entry vocabulary
+/// instead of taking a direct dependency on the syntax crate for these types.
+pub use verter_css_syntax::{ExternalStyleProducer, PreprocessedStyle, StyleProducer};
 use verter_span::Span;
 
 use crate::code_transform::{advance_generated_position, CodeTransform, SourceMapOptions};
@@ -112,6 +119,25 @@ impl StyleRewriteFailure {
             dialect,
             span,
         }
+    }
+
+    /// Project the refusal into the shared style-diagnostic vocabulary.
+    ///
+    /// `space` is the stage whose bytes the refused stage was handed, which
+    /// only the cascade driving the stages knows: the authored-`v-bind()`
+    /// stage always sees the cascade's input bytes, while a later stage sees
+    /// whatever an earlier rewrite left behind. Carrying it is what lets a
+    /// consumer decide which map a reported span needs.
+    ///
+    /// Crate-private on purpose. A failure is recorded in TWO shapes — as
+    /// itself, on the facts and stage-failure lists, and as a diagnostic on
+    /// the result carrier — and only one of them is the publication route. A
+    /// consumer able to mint the second shape from the first could chain both
+    /// and report every refusal twice; outside this crate the carrier's
+    /// `diagnostics()` is the only way to obtain one.
+    #[must_use]
+    pub(crate) fn to_diagnostic(&self, space: StyleStage) -> StyleDiagnostic {
+        StyleDiagnostic::new(space, self.to_string(), self.span)
     }
 }
 
@@ -213,7 +239,7 @@ impl<'a> PlainCssInput<'a> {
         source_space_token: &'a str,
         content_artifact_token: &'a str,
     ) -> Result<Self, StyleRewriteFailure> {
-        if dialect != CssDialect::Css {
+        if dialect.requires_external_preprocessing() {
             return Err(StyleRewriteFailure::new(
                 StyleRewriteFailureClass::StageRequiresPlainCss,
                 StyleRewriteStage::PostPreprocessScoping,
@@ -343,6 +369,28 @@ pub struct VueStyleFacts {
     pub module_classes: Vec<(String, String)>,
     pub refusals: Vec<StyleRewriteFailure>,
     pub rewrites: VueStyleRewriteMask,
+    /// Stylesheets the parsed input pulls in, in source order, carried
+    /// forward from the parse that produced this stage's facts.
+    pub dependencies: Vec<StyleDependency>,
+    /// Whether this block pulls in stylesheet bytes nothing here parsed.
+    ///
+    /// `true` means this block's declared surface is incomplete: classes,
+    /// custom properties and `v-bind()` calls exist outside anything Verter
+    /// saw, so a consumer publishing a complete-looking inventory has to fail
+    /// open on it. It is deliberately not `!dependencies.is_empty()`, and
+    /// deliberately not a fold over `dependencies` either — the style-syntax
+    /// owner answers it for the whole parse, because a parse that recovered
+    /// records FEWER inclusions than the sheet has, not more.
+    pub pulls_in_unparsed_bytes: bool,
+    /// Whether a parse of the cascade's INPUT has already published the two
+    /// fields above.
+    ///
+    /// Private, and deliberately not derived from them: a sheet with no
+    /// inclusions and a cascade that has not parsed its input yet both leave
+    /// `dependencies` empty. Reading the empty list as "not recorded yet" lets
+    /// a later stage — which parses whatever an earlier rewrite left behind —
+    /// publish its own space's inventory as the input's.
+    recorded_input_inclusions: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -472,6 +520,30 @@ fn observe_style_ir(stage: StyleRewriteStage, ir: &ParsedStyleIr) {
 #[cfg(not(test))]
 fn observe_style_ir(_stage: StyleRewriteStage, _ir: &ParsedStyleIr) {}
 
+/// Record the inclusion inventory a parse of the cascade's INPUT observed.
+///
+/// Every entry point that parses those bytes calls this, so the published
+/// dependency list does not depend on which entry point the same source was
+/// routed through — the divergence a consumer would then inherit as a
+/// route-dependent answer about which sheets a block pulls in.
+///
+/// It records at most once per cascade, and only from a parse of the input
+/// bytes: a later stage parses whatever an earlier rewrite left behind, and
+/// the spans it mints address that space instead.
+fn record_input_dependencies(facts: &mut VueStyleFacts, ir: &ParsedStyleIr) {
+    if facts.recorded_input_inclusions {
+        return;
+    }
+    facts.recorded_input_inclusions = true;
+    facts.dependencies = ir.dependencies().to_vec();
+    // Asked of the parse as a whole, not folded over the list above. A
+    // recovered parse hands back a dependency list that is a lower bound —
+    // an inclusion inside the range it skipped never reached the at-rule
+    // frame — so a fold over what it did record answers "nothing foreign
+    // here" for exactly the sheets where it saw least.
+    facts.pulls_in_unparsed_bytes = ir.pulls_in_unparsed_bytes();
+}
+
 #[cfg(test)]
 pub(crate) fn reset_style_ir_stage_observations() {
     NEXT_STYLE_IR_IDENTITY.with(|identity| identity.set(1));
@@ -542,10 +614,23 @@ pub fn parse_plain_css_for_verification(
     parse_ir(code, CssDialect::Css, stage).map(|parsed| parsed.inner)
 }
 
-/// Parse supplied preprocessor CSS once at host admission.
+/// Parse supplied preprocessor output once at host admission.
+///
+/// Takes the [`PreprocessedStyle`] witness rather than bare bytes. A caller
+/// holding a `&str` cannot state which byte space it is in or who produced
+/// it, and this stage runs a plain-CSS grammar over its input, so admitting
+/// one here would re-open the route this boundary exists to close: authored
+/// SCSS entering the compiler as anonymous "CSS".
+///
+/// The signature is what closes it, and closes exactly it: an authored or
+/// framework-rewritten value cannot be spelled here, and neither can bytes
+/// whose producer nobody named. It is not a proof that the bytes really left
+/// SCSS behind — plain CSS is a subset of every dialect this compiler parses,
+/// so no grammar check could be. That assertion is the admitting boundary's,
+/// made once, with the tool's identity attached.
 #[must_use]
-pub fn prepare_supplied_plain_css(code: &str) -> Option<PreparedStyleIr> {
-    parse_plain_css_for_verification(code, StyleRewriteStage::PostPreprocessModules)
+pub fn prepare_supplied_style(style: PreprocessedStyle<'_>) -> Option<PreparedStyleIr> {
+    parse_plain_css_for_verification(style.code(), StyleRewriteStage::PostPreprocessModules)
         .ok()
         .map(PreparedStyleIr::new)
 }
@@ -819,7 +904,7 @@ pub fn transform_vue_v_bind(
         input.dialect,
     )?;
     let vars = relocate_v_bind_vars(vars, origin);
-    let facts = VueStyleFacts {
+    let mut facts = VueStyleFacts {
         rewrites: VueStyleRewriteMask {
             v_bind: !edits.is_empty(),
             ..VueStyleRewriteMask::default()
@@ -827,6 +912,7 @@ pub fn transform_vue_v_bind(
         v_bind_vars: vars,
         ..VueStyleFacts::default()
     };
+    record_input_dependencies(&mut facts, &ir);
     emit(
         input.code,
         input.source,
@@ -1301,7 +1387,7 @@ pub fn transform_vue_css_modules(
         StyleRewriteStage::PostPreprocessModules,
     )?;
     let (edits, classes) = module_classes_and_edits_from_ir(&ir, CssDialect::Css, scope_id)?;
-    let facts = VueStyleFacts {
+    let mut facts = VueStyleFacts {
         module_classes: classes.into_iter().collect(),
         rewrites: VueStyleRewriteMask {
             css_modules: !edits.is_empty(),
@@ -1309,6 +1395,7 @@ pub fn transform_vue_css_modules(
         },
         ..VueStyleFacts::default()
     };
+    record_input_dependencies(&mut facts, &ir);
     emit(
         input.code,
         input.source,
@@ -1503,7 +1590,8 @@ pub fn transform_vue_scoped_css(
         CssDialect::Css,
         StyleRewriteStage::PostPreprocessScoping,
     )?;
-    let (edits, facts) = scoped_edits_and_facts_from_ir(&ir, scope_id)?;
+    let (edits, mut facts) = scoped_edits_and_facts_from_ir(&ir, scope_id)?;
+    record_input_dependencies(&mut facts, &ir);
     emit(
         input.code,
         input.source,
@@ -1516,19 +1604,39 @@ pub fn transform_vue_scoped_css(
 }
 
 /// Result of running Vue's style cascade (`run_vue_style_cascade` /
-/// `run_vue_style_cascade_post_preprocess`) end to end. The cascade never
+/// `run_vue_style_cascade_verified`) end to end. The cascade never
 /// hard-fails: a stage that cannot safely run is recorded in
 /// `stage_failures` and the run continues on a best-effort basis instead of
 /// aborting, so callers get one code path for both the fully-successful and
 /// the degraded case.
 #[derive(Debug, Clone)]
 pub struct VueStyleCascadeOutcome {
-    /// Final code after every requested stage's edits. Byte-identical to the
-    /// authored input when no stage produced any edit.
-    pub code: String,
+    /// Final code after every requested stage's edits, qualified by the stage
+    /// it now belongs to, the dialect it is written in, what produced it, and
+    /// the inclusions and refusals observed along the way.
+    ///
+    /// The bytes are reachable only through this carrier: a caller that took a
+    /// bare `String` here would have to re-derive which byte space it is
+    /// holding, and every caller would answer that separately.
+    /// The SOLE publication route for this run's diagnostics: `facts.refusals`
+    /// and `stage_failures` below are each authority's own record of what it
+    /// reported, and the carrier is where those records are projected into the
+    /// shared diagnostic vocabulary exactly once. A consumer that reads both
+    /// and re-projects reports every refusal twice, which is why projecting a
+    /// failure into a diagnostic is not something a consumer can spell.
+    pub result: QualifiedStyleResult,
     /// Authored-source-to-final-code map composed across every rewrite. Empty
     /// when no rewrite occurred or composition could not be completed.
     pub source_map: String,
+    /// This run's accumulated style facts.
+    ///
+    /// The inclusion inventory it collected has MOVED onto
+    /// `result.dependencies()` by the time the outcome exists — that is the
+    /// published surface, and retaining a second copy here would keep the
+    /// whole list alive per style block for no reader. `dependencies` is
+    /// therefore the recorder's in-cascade accumulator only, and is empty on a
+    /// finished outcome; `pulls_in_unparsed_bytes` is not, because the
+    /// single-stage entry points return these facts directly.
     pub facts: VueStyleFacts,
     /// Stage-level failures (as opposed to `facts.refusals`' soft,
     /// individually-tolerated per-selector refusals): the authored-v-bind,
@@ -1537,6 +1645,15 @@ pub struct VueStyleCascadeOutcome {
     /// the CSS-Modules and scoped-selector stages clear the output to empty
     /// and skip any stage after them, since their output is unsafe to use.
     pub stage_failures: Vec<StyleRewriteFailure>,
+}
+
+impl VueStyleCascadeOutcome {
+    /// Final code after every requested stage's edits. Byte-identical to the
+    /// cascade input when no stage produced any edit.
+    #[must_use]
+    pub fn code(&self) -> &str {
+        self.result.code()
+    }
 }
 
 /// Whether a `StyleRewriteFailureClass` participates in the publish gate at
@@ -1574,7 +1691,10 @@ pub fn cascade_output_is_publishable(
     if !post_preprocess_failure {
         return true;
     }
-    !(outcome.code.is_empty() && !authored_code.is_empty())
+    // The recorded refusal, not `code().is_empty()`. Emptiness is a shape two
+    // different outcomes share — a wiped output and an authored
+    // `<style></style>` — and only the stage that wiped it knows which.
+    !(outcome.result.is_refused() && !authored_code.is_empty())
 }
 
 /// Returns an honest map for a requested cascade result: the accumulated map
@@ -1593,7 +1713,7 @@ pub fn cascade_requested_source_map(
     if !outcome.source_map.is_empty() {
         return Some(outcome.source_map.clone());
     }
-    if outcome.code != authored_code {
+    if outcome.code() != authored_code {
         return None;
     }
     Some(build_identity_source_map(authored_code, source_name))
@@ -1725,6 +1845,13 @@ fn run_vue_authored_v_bind_stage(
         match stage {
             Ok((ir, edits, vars)) => {
                 facts.v_bind_vars = vars;
+                // This stage parsed the cascade's input, so it publishes the
+                // inventory through the shared recorder rather than assigning
+                // the list alone: the derived "does this pull in bytes nothing
+                // here parsed" answer is what consumers branch on, and a bare
+                // assignment leaves it at its default while making every later
+                // stage's recorder call a no-op.
+                record_input_dependencies(&mut facts, &ir);
                 facts.rewrites.v_bind = !edits.is_empty();
                 match apply_cascade_stage(
                     input.code,
@@ -1752,24 +1879,180 @@ fn run_vue_authored_v_bind_stage(
     }
 }
 
+/// The stage the bytes a cascade run was handed belong to, with the provenance
+/// that stage carries.
+///
+/// The preprocessed arm names its producer because the cascade did not make
+/// those bytes and must not claim to know who did: recording an unrewritten
+/// pass-through as [`StyleProducer::ExternalAnonymous`] would say "the tool
+/// supplied no identity" about a tool that may well have supplied one further
+/// upstream. Only the entry point handed the bytes knows, so it says.
+#[derive(Debug, Clone)]
+pub enum CascadeInput {
+    /// The carrier's own `<style>` bytes, in the authored dialect.
+    Authored,
+    /// Plain CSS an external preprocessor already produced, and the identity
+    /// the caller has for that tool.
+    Preprocessed(StyleProducer),
+}
+
+impl CascadeInput {
+    const fn stage(&self) -> StyleStage {
+        match self {
+            Self::Authored => StyleStage::Authored,
+            Self::Preprocessed(_) => StyleStage::Preprocessed,
+        }
+    }
+}
+
+/// Which byte space each stage of one cascade run was handed.
+///
+/// A refusal's span addresses the bytes the refusing stage parsed, so the only
+/// party that can say which space that is, is the runner that handed those
+/// bytes over. It records the answer per stage here instead of letting the
+/// outcome assembler re-derive it from one earlier stage's rewrite flag: every
+/// stage in the cascade can rewrite bytes on its own, so "did `v-bind()`
+/// rewrite" answers for the CSS-Modules stage and is simply wrong for the
+/// scoped-selector stage below it, which parses whatever CSS Modules left
+/// behind.
+///
+/// `true` means the stage was handed the cascade's own input bytes. A stage
+/// that never ran cannot have produced a refusal, so its value is never read.
+#[derive(Debug, Clone, Copy)]
+struct CascadeStageSpaces {
+    modules_at_input: bool,
+    scoping_at_input: bool,
+}
+
+impl CascadeStageSpaces {
+    /// The state before any post-`v-bind()` stage runs: whatever runs next
+    /// still sees the cascade input.
+    const AT_INPUT: Self = Self {
+        modules_at_input: true,
+        scoping_at_input: true,
+    };
+
+    /// Resolve a refused stage to the stage its span's byte space belongs to.
+    /// The authored-`v-bind()` stage always runs against the cascade input.
+    const fn space_of(self, stage: StyleRewriteStage, input_stage: StyleStage) -> StyleStage {
+        let at_input = match stage {
+            StyleRewriteStage::AuthoredVBind => true,
+            StyleRewriteStage::PostPreprocessModules => self.modules_at_input,
+            StyleRewriteStage::PostPreprocessScoping => self.scoping_at_input,
+        };
+        if at_input {
+            input_stage
+        } else {
+            StyleStage::FrameworkRewritten
+        }
+    }
+}
+
+/// What a finished cascade run left as its output.
+///
+/// The three states are genuinely different answers to "who produced these
+/// bytes", and the pair `(Option<bytes>, cleared: bool)` they replace could
+/// spell a fourth that means nothing. `ClearedByRefusal` in particular is NOT
+/// "rewritten to empty": a stage that cannot run safely wipes the output so a
+/// half-applied rewrite is never exposed, and nothing produced what is left.
+/// Emptiness alone cannot tell the two apart, since an authored
+/// `<style></style>` is empty as well.
+enum CascadeOutput {
+    /// No stage produced bytes; the cascade's input still stands.
+    Passthrough,
+    /// A stage rewrote the input into these bytes, with the map composed
+    /// across every rewrite that ran.
+    Rewritten {
+        code: String,
+        composition: MapComposition,
+    },
+    /// A stage refused and wiped the output.
+    ClearedByRefusal,
+}
+
+impl CascadeOutput {
+    /// Read the stage runner's state as one of the three answers above. The
+    /// clearing flag wins: a refusal that wiped the output leaves owned bytes
+    /// behind (empty ones), and those are the bytes nothing produced.
+    fn from_stage_state(owned: Option<(String, MapComposition)>, cleared_by_refusal: bool) -> Self {
+        if cleared_by_refusal {
+            return Self::ClearedByRefusal;
+        }
+        match owned {
+            Some((code, composition)) => Self::Rewritten { code, composition },
+            None => Self::Passthrough,
+        }
+    }
+}
+
+/// Assemble the one cascade outcome shape from a finished run.
+///
+/// Every cascade entry point lands here, so the rule that decides which byte
+/// space the result belongs to — and therefore which space each refusal's span
+/// addresses — is written once rather than re-derived per entry point.
+///
+/// `input` is the stage the cascade was handed: authored bytes for a carrier's
+/// own `<style>` content, preprocessed bytes when an external tool produced
+/// them. A run that changed nothing stays at that stage; a run that produced
+/// output is a framework-rewritten result.
+///
+/// `spaces` is the per-stage record of which bytes each stage was handed. It
+/// is deliberately not derived from the output state: a plain-CSS-only stage
+/// that refuses also CLEARS the output, and that clearing happens after the
+/// refusal — it does not move the bytes the refusal was reported against.
 fn finish_vue_style_cascade(
-    authored_code: &str,
-    owned: Option<(String, MapComposition)>,
-    facts: VueStyleFacts,
+    input: CascadeInput,
+    dialect: CssDialect,
+    input_code: &str,
+    spaces: CascadeStageSpaces,
+    output: CascadeOutput,
+    mut facts: VueStyleFacts,
     stage_failures: Vec<StyleRewriteFailure>,
 ) -> VueStyleCascadeOutcome {
-    let (code, source_map) = match owned {
-        Some((code, composition)) => (
+    let input_stage = input.stage();
+    let cleared_by_refusal = matches!(output, CascadeOutput::ClearedByRefusal);
+    let rewritten = matches!(output, CascadeOutput::Rewritten { .. });
+    let (code, source_map) = match output {
+        CascadeOutput::Rewritten { code, composition } => (
             code,
             composition
                 .accumulated()
                 .map(SourceMap::to_json_string)
                 .unwrap_or_default(),
         ),
-        None => (authored_code.to_string(), String::new()),
+        CascadeOutput::ClearedByRefusal => (String::new(), String::new()),
+        CascadeOutput::Passthrough => (input_code.to_string(), String::new()),
+    };
+    let diagnostics: Vec<StyleDiagnostic> = facts
+        .refusals
+        .iter()
+        .chain(stage_failures.iter())
+        .map(|failure| failure.to_diagnostic(spaces.space_of(failure.stage, input_stage)))
+        .collect();
+    // Moved, not cloned: the qualified result below is where this inventory
+    // is read, and `facts` travels into the same outcome struct. Keeping a
+    // second copy alive on `facts` would retain the whole list twice per
+    // style block for no reader.
+    let dependencies = std::mem::take(&mut facts.dependencies);
+    let result = if cleared_by_refusal {
+        // Nothing produced these (absent) bytes, so nothing claims them. The
+        // stage still names the space the refusals' own coordinates belong
+        // to, which is what makes them placeable.
+        QualifiedStyleResult::refused(input_stage, dialect, dependencies, diagnostics)
+    } else if rewritten {
+        QualifiedStyleResult::framework_rewritten(dialect, code, dependencies, diagnostics)
+    } else {
+        match input {
+            CascadeInput::Authored => {
+                QualifiedStyleResult::authored(dialect, code, dependencies, diagnostics)
+            }
+            CascadeInput::Preprocessed(producer) => {
+                QualifiedStyleResult::preprocessed(producer, code, dependencies, diagnostics)
+            }
+        }
     };
     VueStyleCascadeOutcome {
-        code,
+        result,
         source_map,
         facts,
         stage_failures,
@@ -1790,7 +2073,18 @@ pub fn run_vue_style_authored_only(
 ) -> VueStyleCascadeOutcome {
     verter_audit::attribute_scope!(CssTransform);
     let state = run_vue_authored_v_bind_stage(input, scope_id, want_source_map);
-    finish_vue_style_cascade(input.code, state.owned, state.facts, state.stage_failures)
+    finish_vue_style_cascade(
+        CascadeInput::Authored,
+        input.dialect,
+        input.code,
+        // No post-`v-bind()` stage runs on this entry point.
+        CascadeStageSpaces::AT_INPUT,
+        // The authored-`v-bind()` stage keeps whatever preceded it on failure
+        // and never wipes the output.
+        CascadeOutput::from_stage_state(state.owned, false),
+        state.facts,
+        state.stage_failures,
+    )
 }
 
 /// Runs Vue's authored-v-bind → CSS-Modules → scoped-selector cascade,
@@ -1823,6 +2117,8 @@ pub fn run_vue_style_cascade(
         mut stage_failures,
         retained_ir,
     } = run_vue_authored_v_bind_stage(input, scope_id, want_source_map);
+    let mut spaces = CascadeStageSpaces::AT_INPUT;
+    let mut cleared_by_refusal = false;
 
     if module || scoped {
         let current_code = owned.as_ref().map_or(input.code, |(code, _)| code.as_str());
@@ -1831,8 +2127,9 @@ pub fn run_vue_style_cascade(
             .map_or(MapComposition::NotStarted, |(_, composition)| {
                 composition.clone()
             });
-        if let Some(rewritten) = run_post_v_bind_stages(
+        let post = run_post_v_bind_stages(
             current_code,
+            owned.is_none(),
             input.source,
             input.dialect,
             retained_ir,
@@ -1843,21 +2140,45 @@ pub fn run_vue_style_cascade(
             &mut stage_failures,
             composition,
             want_source_map,
-        ) {
+        );
+        spaces = post.spaces;
+        cleared_by_refusal = post.output_cleared_by_refusal;
+        if let Some(rewritten) = post.owned {
             owned = Some(rewritten);
         }
     }
 
-    finish_vue_style_cascade(input.code, owned, facts, stage_failures)
+    finish_vue_style_cascade(
+        CascadeInput::Authored,
+        input.dialect,
+        input.code,
+        spaces,
+        CascadeOutput::from_stage_state(owned, cleared_by_refusal),
+        facts,
+        stage_failures,
+    )
 }
 
 /// Runs the full Vue style cascade from native-CSS grammar provenance.
 ///
 /// The supplied parse is reused for the first stage. If that stage leaves the
 /// bytes unchanged, the same parsed structure continues into later stages.
+///
+/// `input_stage` names where these bytes came from. Plain CSS reaching this
+/// entry is either a carrier's own authored CSS or an external preprocessor's
+/// output, and only the caller knows which — the bytes look the same either
+/// way. It is a parameter rather than an inference because guessing writes the
+/// wrong provenance onto every result and, worse, the wrong coordinate space
+/// onto every refusal.
+///
+/// The authored-`v-bind()` stage runs on both: a preprocessor leaves
+/// `v-bind()` untouched in its output, so lowering it is still this cascade's
+/// job. It simply runs against preprocessed bytes, and the recorded stage says
+/// so.
 #[allow(clippy::too_many_arguments)]
 pub fn run_vue_style_cascade_verified(
     verified: VerifiedPlainCss<'_>,
+    input_stage: CascadeInput,
     source_name: &str,
     source_space_token: &str,
     content_artifact_token: &str,
@@ -1880,6 +2201,7 @@ pub fn run_vue_style_cascade_verified(
     let mut retained_ir = None;
 
     observe_style_ir(StyleRewriteStage::AuthoredVBind, &parsed);
+    record_input_dependencies(&mut facts, &parsed);
     let origin = parsed.source().origin();
     match v_bind_edits_from_ir(&parsed, CssDialect::Css, scope_id).and_then(|(edits, vars)| {
         let edits = relocate_edits(
@@ -1909,6 +2231,8 @@ pub fn run_vue_style_cascade_verified(
         }
         Err(failure) => stage_failures.push(failure),
     }
+    let mut spaces = CascadeStageSpaces::AT_INPUT;
+    let mut cleared_by_refusal = false;
 
     if module || scoped {
         let current_code = owned.as_ref().map_or(code, |(value, _)| value.as_str());
@@ -1917,8 +2241,9 @@ pub fn run_vue_style_cascade_verified(
             .map_or(MapComposition::NotStarted, |(_, composition)| {
                 composition.clone()
             });
-        if let Some(rewritten) = run_post_v_bind_stages(
+        let post = run_post_v_bind_stages(
             current_code,
+            owned.is_none(),
             source,
             CssDialect::Css,
             retained_ir,
@@ -1929,27 +2254,23 @@ pub fn run_vue_style_cascade_verified(
             &mut stage_failures,
             composition,
             want_source_map,
-        ) {
+        );
+        spaces = post.spaces;
+        cleared_by_refusal = post.output_cleared_by_refusal;
+        if let Some(rewritten) = post.owned {
             owned = Some(rewritten);
         }
     }
 
-    let (code, source_map) = match owned {
-        Some((code, composition)) => (
-            code,
-            composition
-                .accumulated()
-                .map(SourceMap::to_json_string)
-                .unwrap_or_default(),
-        ),
-        None => (code.to_string(), String::new()),
-    };
-    VueStyleCascadeOutcome {
+    finish_vue_style_cascade(
+        input_stage,
+        CssDialect::Css,
         code,
-        source_map,
+        spaces,
+        CascadeOutput::from_stage_state(owned, cleared_by_refusal),
         facts,
         stage_failures,
-    }
+    )
 }
 
 /// Type-state-gated entry point for Vue transforms over CSS-grammar-proven
@@ -1957,6 +2278,7 @@ pub fn run_vue_style_cascade_verified(
 #[allow(clippy::too_many_arguments)]
 pub fn transform_vue_style(
     verified: VerifiedPlainCss<'_>,
+    input_stage: CascadeInput,
     source_name: &str,
     source_space_token: &str,
     content_artifact_token: &str,
@@ -1967,6 +2289,7 @@ pub fn transform_vue_style(
 ) -> VueStyleCascadeOutcome {
     run_vue_style_cascade_verified(
         verified,
+        input_stage,
         source_name,
         source_space_token,
         content_artifact_token,
@@ -1977,69 +2300,38 @@ pub fn transform_vue_style(
     )
 }
 
-/// Runs the CSS-Modules → scoped-selector continuation of the cascade for
-/// already-preprocessed CSS, where the authored-v-bind stage does not apply
-/// (its content is upstream of the supplied bytes). Parses each content
-/// identity at most once (A10i), same as [`run_vue_style_cascade`]: an
-/// unchanged modules stage hands its retained IR straight into the
-/// scoped-selector stage instead of forcing a re-parse.
-pub fn run_vue_style_cascade_post_preprocess(
-    input: PlainCssInput<'_>,
-    scope_id: &str,
-    module: bool,
-    scoped: bool,
-    want_source_map: bool,
-) -> VueStyleCascadeOutcome {
-    verter_audit::attribute_scope!(CssTransform);
-    let mut facts = VueStyleFacts::default();
-    let mut stage_failures = Vec::new();
-    let post = run_post_v_bind_stages(
-        input.code,
-        input.source,
-        CssDialect::Css,
-        None,
-        scope_id,
-        module,
-        scoped,
-        &mut facts,
-        &mut stage_failures,
-        MapComposition::NotStarted,
-        want_source_map,
-    );
-    let (code, source_map) = match post {
-        Some((code, composition)) => (
-            code,
-            composition
-                .accumulated()
-                .map(SourceMap::to_json_string)
-                .unwrap_or_default(),
-        ),
-        None => (input.code.to_string(), String::new()),
-    };
-    VueStyleCascadeOutcome {
-        code,
-        source_map,
-        facts,
-        stage_failures,
-    }
+/// Outcome of the post-`v-bind()` half of the cascade: the bytes it produced,
+/// if any, and which byte space each of its stages was handed.
+struct PostVBindStages {
+    owned: Option<(String, MapComposition)>,
+    spaces: CascadeStageSpaces,
+    /// A stage refused and WIPED the output rather than producing it. Read
+    /// as a recorded fact, never re-derived from `owned`'s bytes being
+    /// empty: a rewrite can legitimately produce nothing, and only the stage
+    /// that cleared the output knows the difference.
+    output_cleared_by_refusal: bool,
 }
 
 /// Shared CSS-Modules → scoped-selector continuation of the style cascade
-/// (stages 2 and 3), used both by [`run_vue_style_cascade`] (after its
-/// authored-v-bind stage) and [`run_vue_style_cascade_post_preprocess`]
-/// (which skips v-bind entirely) so the module→scoped IR hand-off (A10i)
-/// applies identically to both callers. Returns `Some((code, source_map))`
-/// when a stage rewrote bytes or hard-failed (in which case `code` is
-/// empty); `None` when neither stage produced output.
+/// (stages 2 and 3), used by both cascade entry points so the module→scoped
+/// IR hand-off (A10i) applies identically to each. `owned` is
+/// `Some((code, source_map))` when a stage rewrote bytes or hard-failed (in
+/// which case `code` is empty); `None` when neither stage produced output.
 ///
 /// A CSS-Modules or scoped-selector stage that cannot safely run pushes its
 /// failure onto `stage_failures` and clears the output rather than leaving
 /// unsafe partial bytes in place; a CSS-Modules failure also skips the
 /// scoped-selector stage below it, since it would only ever see the
 /// cleared, empty output.
+///
+/// `code_is_cascade_input` says whether `current_code` is still the bytes the
+/// cascade was handed. Only the caller knows — an earlier stage may already
+/// have rewritten them — and it decides whether a parse here may contribute
+/// the input's inclusion inventory, whose spans must address the input space.
 #[allow(clippy::too_many_arguments)]
 fn run_post_v_bind_stages(
     current_code: &str,
+    code_is_cascade_input: bool,
     source: StyleSourceIdentity<'_>,
     dialect: CssDialect,
     mut retained_ir: Option<ParsedStyleIr>,
@@ -2050,8 +2342,12 @@ fn run_post_v_bind_stages(
     stage_failures: &mut Vec<StyleRewriteFailure>,
     composition_in: MapComposition,
     want_source_map: bool,
-) -> Option<(String, MapComposition)> {
+) -> PostVBindStages {
     let mut owned: Option<(String, MapComposition)> = None;
+    let mut spaces = CascadeStageSpaces {
+        modules_at_input: code_is_cascade_input,
+        scoping_at_input: code_is_cascade_input,
+    };
     let mut output_cleared_by_failure = false;
     let composition_for = |owned: &Option<(String, MapComposition)>| {
         owned.as_ref().map_or_else(
@@ -2060,8 +2356,13 @@ fn run_post_v_bind_stages(
         )
     };
 
-    // Stage 2: CSS Modules — plain-CSS only.
+    // Stage 2: CSS Modules — plain-CSS only. Nothing has rewritten yet, so
+    // this stage reads the cascade's input whenever the caller says the code
+    // it was handed is that input. The scoped stage below cannot say the same:
+    // this stage may have replaced the bytes underneath it.
     if module {
+        let at_input = code_is_cascade_input;
+        spaces.modules_at_input = at_input;
         let code_now = owned
             .as_ref()
             .map_or(current_code, |(code, _)| code.as_str());
@@ -2082,6 +2383,9 @@ fn run_post_v_bind_stages(
                 )?,
             };
             observe_style_ir(StyleRewriteStage::PostPreprocessModules, &ir);
+            if at_input {
+                record_input_dependencies(facts, &ir);
+            }
             let origin = ir.source().origin();
             let (edits, classes) =
                 module_classes_and_edits_from_ir(&ir, CssDialect::Css, scope_id)?;
@@ -2129,6 +2433,8 @@ fn run_post_v_bind_stages(
     // Stage 3: scoped selectors + keyframes — plain-CSS only. Skipped when
     // the modules stage above hard-failed and cleared the output.
     if scoped && !output_cleared_by_failure {
+        let at_input = code_is_cascade_input && owned.is_none();
+        spaces.scoping_at_input = at_input;
         let code_now = owned
             .as_ref()
             .map_or(current_code, |(code, _)| code.as_str());
@@ -2149,6 +2455,9 @@ fn run_post_v_bind_stages(
                 )?,
             };
             observe_style_ir(StyleRewriteStage::PostPreprocessScoping, &ir);
+            if at_input {
+                record_input_dependencies(facts, &ir);
+            }
             let origin = ir.source().origin();
             let (edits, stage_facts) = scoped_edits_and_facts_from_ir(&ir, scope_id)?;
             let edits = relocate_edits(
@@ -2182,17 +2491,23 @@ fn run_post_v_bind_stages(
                     Err(failure) => {
                         stage_failures.push(failure);
                         owned = Some((String::new(), MapComposition::Abandoned));
+                        output_cleared_by_failure = true;
                     }
                 }
             }
             Err(failure) => {
                 stage_failures.push(failure);
                 owned = Some((String::new(), MapComposition::Abandoned));
+                output_cleared_by_failure = true;
             }
         }
     }
 
-    owned
+    PostVBindStages {
+        owned,
+        spaces,
+        output_cleared_by_refusal: output_cleared_by_failure,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2789,12 +3104,21 @@ fn selector_is_trusted_for_scoping(selector: &ComplexSelector) -> bool {
 
 #[cfg(test)]
 mod prepared_slot_join_tests {
-    use super::{prepare_supplied_plain_css, prepared_style_for_sealed_slot};
+    use super::{prepare_supplied_style, prepared_style_for_sealed_slot, PreparedStyleIr};
+    use verter_css_syntax::PreprocessedStyle;
+
+    fn supplied(css: &str) -> PreparedStyleIr {
+        prepare_supplied_style(PreprocessedStyle::admitted(
+            css,
+            verter_css_syntax::StyleProducer::ExternalAnonymous,
+        ))
+        .expect("css parses")
+    }
 
     #[test]
     fn sealed_slot_join_does_not_alias_same_bytes_in_another_slot() {
         let css = ".card { color: red; }";
-        let prepared = prepare_supplied_plain_css(css).expect("css parses");
+        let prepared = supplied(css);
         let styles = vec![Some(prepared.clone()), None];
 
         assert!(

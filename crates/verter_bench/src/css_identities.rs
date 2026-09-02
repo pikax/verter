@@ -237,7 +237,7 @@ impl CssMeasuredOp {
                     scoped,
                     false,
                 );
-                black_box(&outcome.code);
+                black_box(outcome.code());
                 black_box(&outcome.facts.module_classes);
                 black_box(&outcome.facts.v_bind_vars);
             }

@@ -34,7 +34,7 @@ import {
   type StyleLang,
 } from "./styleStructure";
 import { directStyleDocumentText } from "./styleDocumentText";
-import { transpile, type TranspileResult } from "./transpiler";
+import { transpile, type QualifiedStyleResult } from "./transpiler";
 import { resolvePreprocessor, type PreprocessorCache } from "./preprocessorResolver";
 
 // ── Language service singletons ──────────────────────────────────
@@ -43,7 +43,7 @@ const cssService = getCSSLanguageService();
 const scssService = getSCSSLanguageService();
 const lessService = getLESSLanguageService();
 
-function getServiceForLang(lang: StyleLang): CSSLanguageService | null {
+function getServiceForLang(lang: StyleLang | null): CSSLanguageService | null {
   switch (lang) {
     case "css":
     case "postcss":
@@ -53,7 +53,8 @@ function getServiceForLang(lang: StyleLang): CSSLanguageService | null {
     case "less":
       return lessService;
     default:
-      // sass, stylus — handled via transpilation to CSS
+      // sass and stylus go through transpilation to CSS; `null` is a dialect
+      // this client cannot address and is served nothing.
       return null;
   }
 }
@@ -66,8 +67,8 @@ interface DocumentCache {
   availability: DocumentStructureResponseV1["kind"] | "transportUnavailable" | "staleInvocation";
   blocks: StyleBlockInfo[];
   source: string;
-  /** Keyed by style block index — transpiled CSS for preprocessors */
-  transpiled: Map<number, TranspileResult>;
+  /** Keyed by style block index — qualified preprocessed CSS. */
+  transpiled: Map<number, QualifiedStyleResult>;
 }
 
 // ── CssService class ─────────────────────────────────────────────
@@ -183,22 +184,59 @@ export class CssService {
     const results: Array<{ blockToken: string; diagnostics: CSSDiagnostic[] }> = [];
 
     for (const block of entry.blocks) {
+      // A preprocessor that reported an error produced no CSS to validate, but
+      // the error itself is the block's real diagnostic. Reporting it here is
+      // what the qualified result made possible: the previous bare transpile
+      // record carried the errors and nothing ever read them, so a Sass or
+      // Stylus compile failure showed up as silence.
+      const preprocessorDiags = this.preprocessorDiagnostics(block, entry);
+
       const service = this.getServiceForBlock(block, entry);
       const cssDoc = this.getCssDocument(block, entry, uri);
-      if (!service || !cssDoc) continue;
+      const diags =
+        service && cssDoc ? service.doValidation(cssDoc, service.parseStylesheet(cssDoc)) : [];
+      // Map diagnostic ranges back to SFC coordinates
+      for (const d of diags) {
+        d.range = this.toSfcRange(block, d.range);
+      }
 
-      const stylesheet = service.parseStylesheet(cssDoc);
-      const diags = service.doValidation(cssDoc, stylesheet);
-      if (diags.length > 0) {
-        // Map diagnostic ranges back to SFC coordinates
-        for (const d of diags) {
-          d.range = this.toSfcRange(block, d.range);
-        }
-        results.push({ blockToken: block.blockToken, diagnostics: diags });
+      const blockDiags = [...preprocessorDiags, ...diags];
+      if (blockDiags.length > 0) {
+        results.push({ blockToken: block.blockToken, diagnostics: blockDiags });
       }
     }
 
     return results;
+  }
+
+  /**
+   * The block's preprocessor-reported diagnostics, mapped into SFC
+   * coordinates.
+   *
+   * The mapping is chosen from the stage the diagnostic names, not assumed.
+   * `"authored"` positions are in the verbatim carrier slice this client fed
+   * the tool, so the block's own line arithmetic is exact. There is no
+   * preprocessed → SFC map here (the generated CSS is not what the user is
+   * looking at, and a failed compile produced none at all), so anything else
+   * anchors at the block's first position rather than being run through
+   * arithmetic that does not address it.
+   */
+  private preprocessorDiagnostics(block: StyleBlockInfo, entry: DocumentCache): CSSDiagnostic[] {
+    const transpiled = entry.transpiled.get(block.legacyPreprocessorIndex);
+    if (!transpiled) return [];
+    const blockStart = this.toSfcPosition(block, { line: 0, character: 0 });
+    return transpiled.diagnostics.map((diagnostic) => {
+      const sfc =
+        diagnostic.stage === "authored" && diagnostic.position
+          ? this.toSfcPosition(block, diagnostic.position)
+          : blockStart;
+      return {
+        range: { start: sfc, end: sfc },
+        message: diagnostic.message,
+        severity: diagnostic.severity === "error" ? 1 : diagnostic.severity === "warning" ? 2 : 3,
+        source: transpiled.producer?.identity ?? "preprocessor",
+      } satisfies CSSDiagnostic;
+    });
   }
 
   /**
@@ -327,6 +365,11 @@ export class CssService {
     // they were available content. Typed unavailable, fail closed.
     if (block.externalSrc) return null;
 
+    // A dialect this client cannot address gets no virtual document at all:
+    // there is no language id to open it under, and opening it as CSS anyway
+    // is what produced fabricated CSS errors for non-CSS syntax.
+    if (block.lang === null) return null;
+
     // For transpiled languages, use transpiled CSS
     if (block.lang === "sass" || block.lang === "stylus") {
       const transpiled = entry.transpiled.get(block.legacyPreprocessorIndex);
@@ -335,7 +378,7 @@ export class CssService {
         `${sfcUri}.style.${block.blockToken}.css`,
         "css",
         1,
-        transpiled.css,
+        transpiled.code,
       );
     }
 
@@ -419,7 +462,7 @@ export class CssService {
       this.getOpenEpoch(uri) === openEpoch;
     const blocks = admitted && response ? styleBlocksFromStructure(source, response) : [];
     const admittedAvailable = admitted && response !== null && response.kind === "available";
-    const transpiled = new Map<number, TranspileResult>();
+    const transpiled = new Map<number, QualifiedStyleResult>();
 
     // Transpile preprocessors if needed (resolved from workspace node_modules)
     // Collect missing-preprocessor diagnostics for this URI atomically.

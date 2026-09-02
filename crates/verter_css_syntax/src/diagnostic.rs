@@ -16,6 +16,32 @@ pub enum RecoveryKind {
     CloseAtEndOfInput,
 }
 
+impl RecoveryKind {
+    /// Whether recovering this way left source constructs unparsed.
+    ///
+    /// This is the parse's own record of whether it skipped or force-closed
+    /// input, and it is what makes any "this is everything the sheet
+    /// declares" inventory decidable. A parse that discarded input never
+    /// reached whatever was inside the discarded range, so its inventories
+    /// are lower bounds — an `@import` swallowed by an unterminated block is
+    /// absent from the dependency list while its bytes are still very much
+    /// part of the sheet.
+    ///
+    /// [`Self::None`] is not "no diagnostic": it is a diagnostic reported
+    /// without dropping anything, so the surrounding structure was still
+    /// parsed and still inventoried.
+    ///
+    /// Exhaustive — no wildcard arm — so a new recovery strategy has to state
+    /// which side of this it falls on before it compiles.
+    #[must_use]
+    pub const fn discarded_input(self) -> bool {
+        match self {
+            Self::None => false,
+            Self::AdvanceOneToken | Self::AdvanceToBoundary | Self::CloseAtEndOfInput => true,
+        }
+    }
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CssDiagnosticKind {

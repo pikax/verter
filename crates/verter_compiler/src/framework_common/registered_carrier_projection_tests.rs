@@ -1248,6 +1248,121 @@ fn registered_svelte_style_dialect_derives_from_authored_lang() {
     }
 }
 
+/// The Vue projection names every dialect it can, including the ones with no
+/// native grammar behind them.
+///
+/// The consumers on either side of this classification want different answers:
+/// the editor's CSS intelligence serves a `lang="postcss"` block, and the
+/// rewrite pipeline refuses it. Reporting it as unrecognised collapses both
+/// into "no answer", which cost a mainstream Vue configuration every CSS
+/// feature at once — diagnostics, hover, completion, colors — with nothing
+/// serving it instead. A spelling with no dialect at all stays unrecognised.
+#[test]
+fn registered_vue_style_dialect_names_postcss_and_only_unrecognises_the_unnameable() {
+    use verter_language::{SectionRole, StyleDialect};
+    let cases: [(&str, StyleDialect); 5] = [
+        ("<style>.x{}</style>", StyleDialect::Css),
+        ("<style lang=\"scss\">.x{}</style>", StyleDialect::Scss),
+        (
+            "<style lang=\"postcss\">.x{}</style>",
+            StyleDialect::PostCss,
+        ),
+        // The same dialect under its other mainstream spelling.
+        ("<style lang=\"pcss\">.x{}</style>", StyleDialect::PostCss),
+        ("<style lang=\"nocss\">.x{}</style>", StyleDialect::Missing),
+    ];
+    for (source, expected) in cases {
+        let (_, _, accepted) = accepted(
+            "file:///workspace/StyleLang.vue",
+            verter_language::FileLanguage::vue(),
+            source,
+        );
+        let projection = project(&accepted);
+        let inventory = projection.inventory();
+        inventory.validate().expect("style-lang inventory");
+        let dialect = inventory
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                CarrierBlock::Section {
+                    role: SectionRole::Style { dialect, .. },
+                    ..
+                } => Some(dialect.clone()),
+                _ => None,
+            })
+            .expect("style section");
+        assert_eq!(dialect, expected, "dialect for {source}");
+    }
+}
+
+/// Every carrier classifies the same `<style lang="…">` spelling the same way.
+///
+/// The classification is read on two routes that must agree — the editor's CSS
+/// intelligence serves the block from it, and the rewrite pipeline's dialect
+/// owner decides from the same spelling whether anything can compile the block
+/// — so a per-carrier table drifts silently and in both directions. It did:
+/// `lang="styl"` was Stylus in one carrier and unrecognised in the other, and
+/// `lang="SCSS"` — which no preprocessor table, all keyed by exact bytes, has
+/// an entry for — resolved as SCSS in one of them while the pipeline that
+/// compiles it failed closed. Neither carrier reports the disagreement.
+#[test]
+fn every_carrier_classifies_a_style_lang_spelling_the_same_way() {
+    use verter_language::{SectionRole, StyleDialect};
+
+    fn dialect(language: verter_language::FileLanguage, source: &str) -> StyleDialect {
+        let canonical = if language.is_vue() {
+            "file:///workspace/StyleLang.vue"
+        } else {
+            "file:///workspace/StyleLang.svelte"
+        };
+        let (_, _, accepted) = accepted(canonical, language, source);
+        let projection = project(&accepted);
+        let inventory = projection.inventory();
+        inventory.validate().expect("style-lang inventory");
+        inventory
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                CarrierBlock::Section {
+                    role: SectionRole::Style { dialect, .. },
+                    ..
+                } => Some(dialect.clone()),
+                _ => None,
+            })
+            .expect("style section")
+    }
+
+    let cases: [(&str, StyleDialect); 7] = [
+        ("<style>.x{}</style>", StyleDialect::Css),
+        ("<style lang=\"sass\">.x{}</style>", StyleDialect::Sass),
+        // A real key in every preprocessor table, so both carriers must name it.
+        ("<style lang=\"styl\">.x{}</style>", StyleDialect::Stylus),
+        // No native grammar, but a real dialect the editor still serves.
+        (
+            "<style lang=\"postcss\">.x{}</style>",
+            StyleDialect::PostCss,
+        ),
+        // The same postcss dialect under its other mainstream spelling.
+        ("<style lang=\"pcss\">.x{}</style>", StyleDialect::PostCss),
+        // Case-folding here would accept a spelling nothing downstream can
+        // build, and publish a complete-looking surface for it.
+        ("<style lang=\"SCSS\">.x{}</style>", StyleDialect::Missing),
+        ("<style lang=\"Stylus\">.x{}</style>", StyleDialect::Missing),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(
+            dialect(verter_language::FileLanguage::vue(), source),
+            expected,
+            "vue dialect for {source}"
+        );
+        assert_eq!(
+            dialect(verter_language::FileLanguage::svelte(), source),
+            expected,
+            "svelte dialect for {source}"
+        );
+    }
+}
+
 #[test]
 fn registered_svelte_style_dialect_mutation_discriminates_structure_hash() {
     let (_, _, scss) = accepted(

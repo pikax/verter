@@ -11,7 +11,9 @@ use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 use verter_css_syntax::CssDialect;
 
-use crate::style_planner::{transform_vue_v_bind, AuthoredStyleInput, StyleRewriteOutcome};
+use crate::style_planner::{
+    transform_vue_v_bind, AuthoredStyleInput, PreparedStyleIr, StyleRewriteOutcome,
+};
 use crate::utils::oxc::bindings::collect_expression_free_refs;
 
 #[derive(Debug, Default, Clone)]
@@ -33,27 +35,82 @@ pub fn extract_style_v_bind_usage<'a>(
 pub fn extract_style_v_bind_usage_for_dialects<'a>(
     style_contents: impl IntoIterator<Item = (&'a str, CssDialect)>,
 ) -> StyleVBindUsage {
-    let mut used = FxHashSet::default();
-    let mut complete = true;
-
+    let mut usage = StyleVBindUsage {
+        used: FxHashSet::default(),
+        complete: true,
+    };
     for (css, dialect) in style_contents {
         let input =
             AuthoredStyleInput::new(css, dialect, "style-usage", "style-usage", "style-usage")
                 .without_source_map();
-        match transform_vue_v_bind(input, "usage") {
-            Ok(StyleRewriteOutcome::Unchanged { facts })
-            | Ok(StyleRewriteOutcome::Rewritten { facts, .. }) => {
-                for binding in facts.v_bind_vars {
-                    if !collect_expr_identifier_roots(&binding.expression, &mut used) {
-                        complete = false;
-                    }
+        accumulate_block_usage(input, &mut usage);
+    }
+    usage
+}
+
+/// Usage read from a style IR the caller already parsed.
+///
+/// The same owner as [`extract_style_v_bind_usage_for_dialects`], reached
+/// without a second parse of bytes this process has already read. A caller
+/// holding a prepared IR must come through here rather than reading
+/// `v_bind_vars` off a rewrite outcome itself: that shortcut answers the
+/// completeness question by omission (it cannot see an inclusion or a recovery
+/// window) and publishes whole expressions where every other route publishes
+/// free identifier roots, so `v-bind(theme.primary)` marked `theme.primary`
+/// used and left `theme` looking unused.
+pub fn extract_style_v_bind_usage_from_prepared<'a>(
+    prepared: impl IntoIterator<Item = &'a PreparedStyleIr>,
+) -> StyleVBindUsage {
+    let mut usage = StyleVBindUsage {
+        used: FxHashSet::default(),
+        complete: true,
+    };
+    for prepared in prepared {
+        let ir = prepared.ir();
+        let input = AuthoredStyleInput::new(
+            ir.source().text(),
+            ir.dialect(),
+            "style-usage",
+            "style-usage",
+            "style-usage",
+        )
+        .with_prepared(ir)
+        .without_source_map();
+        accumulate_block_usage(input, &mut usage);
+    }
+    usage
+}
+
+/// Fold ONE style block's `v-bind()` facts into a running inventory.
+///
+/// The single place the completeness question is answered, so every entry
+/// point above reaches the same answer for the same bytes.
+fn accumulate_block_usage(input: AuthoredStyleInput<'_>, usage: &mut StyleVBindUsage) {
+    match transform_vue_v_bind(input, "usage") {
+        Ok(StyleRewriteOutcome::Unchanged { facts })
+        | Ok(StyleRewriteOutcome::Rewritten { facts, .. }) => {
+            // A block that pulls in another stylesheet may call `v-bind()`
+            // from bytes nothing here parsed, so its usage inventory is not
+            // an exhaustive one. Reporting it as complete would let a
+            // binding used only by an imported sheet be published as unused.
+            // Whether that is the case is the style-syntax owner's single
+            // answer, not "are there any inclusions": `@use "sass:math"`
+            // names a built-in function library that emits nothing, and
+            // treating it as foreign bytes switched this path off for most
+            // real SCSS — while a sheet the parse could only read by
+            // skipping past a syntax error hides its `@import` from the
+            // inclusion list entirely and has to fail open on that too.
+            if facts.pulls_in_unparsed_bytes {
+                usage.complete = false;
+            }
+            for binding in facts.v_bind_vars {
+                if !collect_expr_identifier_roots(&binding.expression, &mut usage.used) {
+                    usage.complete = false;
                 }
             }
-            Err(_) => complete = false,
         }
+        Err(_) => usage.complete = false,
     }
-
-    StyleVBindUsage { used, complete }
 }
 
 pub fn extract_style_v_bind_usage_for_languages<'a>(
@@ -63,16 +120,13 @@ pub fn extract_style_v_bind_usage_for_languages<'a>(
     let inputs = style_contents
         .into_iter()
         .filter_map(|(content, language)| {
-            let dialect = match language.to_ascii_lowercase().as_str() {
-                "css" => CssDialect::Css,
-                "scss" => CssDialect::Scss,
-                "sass" => CssDialect::Sass,
-                "less" => CssDialect::Less,
-                "stylus" | "styl" => CssDialect::Stylus,
-                _ => {
-                    unknown_language = true;
-                    return None;
-                }
+            // The spelling → dialect identity has one owner. A private table
+            // here drifted from it once already: it accepted `styl` the owner
+            // did not, so the same `lang="…"` resolved on this route and failed
+            // closed on every other one.
+            let Some(dialect) = CssDialect::from_lang(language) else {
+                unknown_language = true;
+                return None;
             };
             Some((content, dialect))
         });

@@ -142,24 +142,32 @@ fn walk_production(dir: &std::path::Path, hits: &mut Vec<String>) {
         let rel = path
             .strip_prefix(env!("CARGO_MANIFEST_DIR"))
             .unwrap_or(&path);
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if rel_str.ends_with("framework_common/vue_carrier_frontend.rs")
-            || rel_str.ends_with("framework_common/mod.rs")
-            || rel_str.ends_with("framework_common/vue_semantic_authority.rs")
-            || rel_str.ends_with("framework_common/registered_carrier_projection.rs")
+        // Compared as PATHS, not as strings: a string suffix match against a
+        // `/`-spelled literal never fires on a platform whose separator is
+        // `\`, so every owner below would silently stop being excluded and the
+        // check would report the whole sanctioned set as a violation.
+        let excluded = [
+            "framework_common/vue_carrier_frontend.rs",
+            "framework_common/mod.rs",
+            "framework_common/vue_semantic_authority.rs",
+            "framework_common/registered_carrier_projection.rs",
             // The host-integration backend is the sanctioned frontend
             // CONSUMER: it composes the frontend's parse admission into
             // `CompileAdmission` and is itself consumed by no production
             // route (proven behaviorally by
             // `generic_compile_route_never_consults_the_host_backend`).
-            || rel_str.ends_with("framework_common/vue_host_integration.rs")
-        {
+            "framework_common/vue_host_integration.rs",
+        ]
+        .into_iter()
+        .any(|owner| rel.ends_with(std::path::Path::new(owner)));
+        if excluded {
             continue;
         }
+        let rel_str = rel.to_string_lossy();
         let text = std::fs::read_to_string(&path).expect("read rust");
         if text.contains("VueCarrierFrontend") || text.contains("vue_carrier_frontend_registration")
         {
-            hits.push(rel_str);
+            hits.push(rel_str.into_owned());
         }
     }
 }

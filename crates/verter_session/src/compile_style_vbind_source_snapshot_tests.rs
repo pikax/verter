@@ -248,3 +248,175 @@ fn supplied_style_vbind_vars_are_hydrated_for_the_compile_profile() {
         "style usage must be scanned from the profile-selected supplied CSS"
     );
 }
+
+/// Hydrate the compile-input style capture for one SFC source, with no
+/// supplied bucket: the registered carrier source is the sole content
+/// authority, which is the ordinary inline-`<style>` case.
+fn capture_inline(source: &str) -> (Vec<String>, bool) {
+    let host = make_host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(CANONICAL.to_string()),
+            input_id: CANONICAL.to_string(),
+            source: Arc::from(source),
+            file_language: verter_language::LanguageRegistry::global()
+                .classify_static(CANONICAL)
+                .static_resolution(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert must succeed");
+    capture(
+        &host,
+        crate::block_content::SuppliedBlockScope::RegisteredSourceOnly,
+    )
+}
+
+/// Admit preprocessor output for the file's single style block and hydrate
+/// the compile-input capture from it.
+fn capture_supplied(script: &str, produced_css: &str) -> (Vec<String>, bool) {
+    let host = make_host();
+    let source = format!(
+        "<script setup lang=\"ts\">\n{script}\n</script>\n<template><div>x</div></template>\n<style lang=\"customcss\">authored preprocessing input</style>"
+    );
+    let update = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(CANONICAL.to_string()),
+            input_id: CANONICAL.to_string(),
+            source: Arc::from(source.as_str()),
+            file_language: verter_language::LanguageRegistry::global()
+                .classify_static(CANONICAL)
+                .static_resolution(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert must request external preprocessing");
+    let request = update
+        .preprocessor_requests
+        .iter()
+        .find(|request| request.lang == "customcss")
+        .expect("the style must have one captured preprocessing request");
+    let profile = ide_profile();
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: update.canonical_id,
+            compile_profile: profile.clone(),
+            overrides: vec![BlockOverrideEntry::supplied_for_test(request, produced_css)],
+        })
+        .expect("the supplied CSS must be admitted for the IDE profile");
+    capture(
+        &host,
+        crate::block_content::SuppliedBlockScope::Profile(&profile),
+    )
+}
+
+/// The compile-input style capture, reduced to what the liveness consumer
+/// reads: the published usage names and whether they are an exhaustive set.
+fn capture(
+    host: &VerterHost,
+    scope: crate::block_content::SuppliedBlockScope<'_>,
+) -> (Vec<String>, bool) {
+    let source_snapshot = host
+        .scheduler
+        .try_get_source(CANONICAL)
+        .expect("source snapshot must remain live");
+    let source_data = source_snapshot
+        .downcast_data::<crate::host_executor::HostSourceData>()
+        .expect("source snapshot must carry host data");
+    let captured =
+        host.capture_compiler_style_content(CANONICAL, &source_data.parse.style_analyses, scope);
+    (captured.v_bind_vars, captured.usage_complete)
+}
+
+/// A style block whose surface reaches past the bytes this parse read never
+/// reports a complete `v-bind()` inventory, on EITHER host route.
+///
+/// The consumer publishes "this binding is unused" — and the IDE demotes it to
+/// a TS6133 — from a name's ABSENCE from this inventory, so the inventory has
+/// to be exhaustive or say that it is not. The recorded `v-bind()` list cannot
+/// say it: an `@import` swallowed inside a recovery window mints no inclusion,
+/// no binding and no error, so a block that pulls in a whole other stylesheet
+/// is indistinguishable from a self-contained one. Both host routes answered
+/// from that list alone and published a complete surface for such a block.
+#[test]
+fn a_style_block_reaching_past_its_own_bytes_reports_an_incomplete_surface() {
+    let script = "const tone = 'red'";
+    // No inclusion in these bytes, and the `v-bind()` sits in a rule the
+    // parse read cleanly, so the published name proves the bindings resolved
+    // and the only thing left that can withhold completeness is the parse's
+    // own record that it discarded input. Both halves are load-bearing: a
+    // block whose bindings failed to resolve also reports incomplete, and
+    // would not discriminate the check under test.
+    let recovered = capture_inline(&format!(
+        "<script setup lang=\"ts\">
+{script}
+</script>
+<style>.a {{ color: v-bind(tone); }}
+.b {{ content: \"unterminated
+</style>"
+    ));
+    assert_eq!(
+        recovered.0,
+        ["tone"],
+        "the recovered parse still publishes the rule it read: {recovered:?}"
+    );
+    assert!(
+        !recovered.1,
+        "a parse that skipped input cannot claim an exhaustive surface: {recovered:?}"
+    );
+
+    // The other half of the same question, with the bindings equally clean:
+    // an inclusion names bytes this parse never saw.
+    let included = capture_inline(&format!(
+        "<script setup lang=\"ts\">
+{script}
+</script>
+<style>@import \"theme.css\";
+.a {{ color: v-bind(tone); }}</style>"
+    ));
+    assert_eq!(included.0, ["tone"], "{included:?}");
+    assert!(
+        !included.1,
+        "an inclusion names foreign bytes: {included:?}"
+    );
+
+    let self_contained = capture_inline(&format!(
+        "<script setup lang=\"ts\">\n{script}\n</script>\n<style>.a {{ color: v-bind(tone); }}</style>"
+    ));
+    assert!(
+        self_contained.1,
+        "a self-contained block still declares an exhaustive surface: {self_contained:?}"
+    );
+    assert_eq!(self_contained.0, ["tone"]);
+
+    // Preprocessor output travels the other host route and must answer the
+    // same question the same way.
+    let supplied_import = capture_supplied(
+        script,
+        "@import \"theme.css\";\ndiv { color: v-bind(tone); }",
+    );
+    assert!(
+        !supplied_import.1,
+        "an inclusion in preprocessor output still names foreign bytes: {supplied_import:?}"
+    );
+    assert!(supplied_import.0.contains(&"tone".to_string()));
+}
+
+/// Preprocessed style bytes publish the same free identifier ROOTS every other
+/// route publishes.
+///
+/// The liveness consumer matches a script binding's NAME against this list, so
+/// publishing the whole expression for `v-bind(theme.primary)` records a name
+/// no binding ever has and leaves `theme` looking unused — the same
+/// wrong-unused direction, reached through the other host route.
+#[test]
+fn supplied_style_vbind_member_expressions_publish_their_root_binding() {
+    let captured = capture_supplied(
+        "const theme = { primary: 'red' }",
+        "div { color: v-bind(theme.primary); }",
+    );
+    assert_eq!(
+        captured.0,
+        ["theme"],
+        "the published usage is the expression's free roots, not its text"
+    );
+    assert!(captured.1, "{captured:?}");
+}

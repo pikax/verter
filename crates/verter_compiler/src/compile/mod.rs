@@ -45,7 +45,7 @@ use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style_planner::{
     analyze_css_module_classes, complete_static_class_names, generate_var_name,
     prepared_style_for_sealed_slot, run_vue_style_authored_only, run_vue_style_cascade,
-    AuthoredStyleInput, StyleRewriteFailure, VBindVar,
+    AuthoredStyleInput, VBindVar,
 };
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
@@ -54,7 +54,7 @@ use crate::tokenizer::byte::{
     tokenize, tokenize_sfc, tokenize_sfc_with_delimiters, tokenize_with_delimiters,
 };
 use crate::tsc;
-use verter_css_syntax::CssDialect;
+use verter_css_syntax::{CssDialect, StyleDiagnostic, StyleStage};
 
 use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
 use macro_scope_check::collect_invalid_options_scope_diagnostics;
@@ -67,7 +67,10 @@ pub(crate) fn style_dialect(lang: Option<StyleLang>) -> Option<CssDialect> {
         Some(StyleLang::Sass) => Some(CssDialect::Sass),
         Some(StyleLang::Less) => Some(CssDialect::Less),
         Some(StyleLang::Stylus) => Some(CssDialect::Stylus),
-        Some(StyleLang::Unknown) => None,
+        // PostCSS has no native grammar in the dialect owner: the rewrite
+        // pipeline refuses content it cannot claim to understand, exactly as
+        // it does for a `lang` it cannot name at all.
+        Some(StyleLang::PostCss | StyleLang::Unknown) => None,
     }
 }
 
@@ -85,23 +88,40 @@ fn class_extraction_dialect(lang: Option<StyleLang>) -> CssDialect {
     style_dialect(lang).unwrap_or(CssDialect::Css)
 }
 
-fn push_style_rewrite_diagnostic(
+/// Surface one style diagnostic against the SFC.
+///
+/// The style vocabulary is the single shape a style diagnostic reaches this
+/// boundary in, so the severity mapping and the block-relative → SFC-absolute
+/// span shift are written once instead of per producer.
+///
+/// Only a span in the AUTHORED space is shifted. `content_span.start + offset`
+/// is the authored block's own arithmetic and nothing else: a stage that
+/// rewrote bytes moved every offset after its first edit, so running a
+/// later-space span through it lands somewhere the reported construct is not.
+/// Carrying the stage is what makes that decidable here; there is no
+/// later-space → SFC map at this boundary, so such a diagnostic anchors on the
+/// block it belongs to rather than on a fabricated position inside it.
+fn push_style_diagnostic(
     diagnostics: &mut Vec<Diagnostic>,
     content_span: crate::common::Span,
-    error: &StyleRewriteFailure,
+    diagnostic: &StyleDiagnostic,
 ) {
+    let span = match diagnostic.span() {
+        Some(span) if diagnostic.stage() == StyleStage::Authored => crate::common::Span::new(
+            content_span.start + span.start,
+            content_span.start + span.end,
+        ),
+        _ => content_span,
+    };
     diagnostics.push(Diagnostic {
+        // Every style diagnostic the compiler can produce is a rewrite
+        // refusing, and a refusal is an error.
         severity: DiagnosticSeverity::Error,
         code: CompilerErrorCode::XCssParseError,
         plugin: "style-planner",
-        message: error.to_string(),
+        message: diagnostic.message().to_string(),
         arguments: Vec::new(),
-        span: error.span.map_or(content_span, |span| {
-            crate::common::Span::new(
-                content_span.start + span.start,
-                content_span.start + span.end,
-            )
-        }),
+        span,
     });
 }
 
@@ -918,11 +938,19 @@ fn compile_inner(
                 match style_dialect(style.lang) {
                     None => {
                         // Rewrite must refuse an unrecognized lang rather
-                        // than parse the bytes as CSS.
+                        // than parse the bytes as CSS. The spellings it names
+                        // come from the owner's own table: a list written out
+                        // here drifts from what the call actually accepts, and
+                        // the user reads the drift as the answer.
+                        let expected = CssDialect::LANG_SPELLINGS
+                            .map(|(spelling, _)| spelling)
+                            .join(", ");
                         all_diagnostics.push(Diagnostic::error_with_message(
                             "style-planner",
                             CompilerErrorCode::XCssParseError,
-                            "style rewrite refused unknown dialect; expected css, scss, sass, less, or stylus",
+                            format!(
+                                "style rewrite refused unknown dialect; expected one of: {expected}"
+                            ),
                             *content,
                         ));
                         style_source.to_string()
@@ -954,7 +982,8 @@ fn compile_inner(
                                 run_vue_style_cascade(
                                     cascade_input,
                                     scope_id_str,
-                                    style.module && authored_dialect == CssDialect::Css,
+                                    style.module
+                                        && !authored_dialect.requires_external_preprocessing(),
                                     style.scoped,
                                     verter_options.source_map,
                                 )
@@ -967,15 +996,10 @@ fn compile_inner(
                                 )
                             }
                         };
-                        all_v_bind_vars.extend(outcome.facts.v_bind_vars);
-                        for refusal in outcome
-                            .facts
-                            .refusals
-                            .iter()
-                            .chain(outcome.stage_failures.iter())
-                        {
-                            push_style_rewrite_diagnostic(&mut all_diagnostics, *content, refusal);
+                        for diagnostic in outcome.result.diagnostics() {
+                            push_style_diagnostic(&mut all_diagnostics, *content, diagnostic);
                         }
+                        all_v_bind_vars.extend(outcome.facts.v_bind_vars);
                         style_module_classes = outcome.facts.module_classes;
 
                         // CSS-Modules class *analysis* is dialect-unconditional
@@ -989,21 +1013,21 @@ fn compile_inner(
                             && (matches!(
                                 verter_options.style_processing,
                                 crate::compile_request::RuntimeStyleProcessing::AuthoredOnly
-                            ) || authored_dialect != CssDialect::Css)
+                            ) || authored_dialect.requires_external_preprocessing())
                         {
                             match analyze_css_module_classes(cascade_input, scope_id_str) {
                                 Ok(classes) => style_module_classes = classes,
                                 Err(error) => {
-                                    push_style_rewrite_diagnostic(
+                                    push_style_diagnostic(
                                         &mut all_diagnostics,
                                         *content,
-                                        &error,
+                                        &error.to_diagnostic(StyleStage::Authored),
                                     );
                                 }
                             }
                         }
 
-                        outcome.code
+                        outcome.result.into_code()
                     }
                 }
             } else {
@@ -1018,6 +1042,7 @@ fn compile_inner(
                 StyleLang::Sass => "sass".to_string(),
                 StyleLang::Less => "less".to_string(),
                 StyleLang::Stylus => "stylus".to_string(),
+                StyleLang::PostCss => "postcss".to_string(),
                 StyleLang::Unknown => "unknown".to_string(),
             });
 

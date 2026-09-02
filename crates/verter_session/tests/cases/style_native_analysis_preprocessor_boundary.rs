@@ -124,17 +124,19 @@ fn preprocess_dependent_request_fails_closed_as_external() {
             input_id: "/workspace/App.vue".to_string(),
             source: Arc::from(
                 "<template><div class=\"unresolved-root\"/></template>\
-                 <style lang=\"styl\">.unresolved\n  color: red\n</style>",
+                 <style lang=\"postcss\">.unresolved\n  color: red\n</style>",
             ),
             file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
 
-    // `styl` is Vue's tag-classification alias of Stylus, but analysis_lang
-    // keys off the authored string, so this spelling stays preprocessing-
-    // dependent. `lang="stylus"` (below) is native — if analysis starts
-    // treating `styl` as Stylus, this External fixture turns Native and fails.
+    // `postcss` is a real dialect the carrier names, and it has no native
+    // grammar in the shared syntax authority — the block's facts genuinely
+    // depend on a tool nothing here runs. It is deliberately NOT an alias of a
+    // native dialect: `styl` reads that way and IS Stylus everywhere the
+    // spelling owner is asked, so using it here would pin a drift rather than
+    // this boundary.
     assert_eq!(
         update.preprocessor_requests.len(),
         1,
@@ -161,33 +163,73 @@ fn preprocess_dependent_request_fails_closed_as_external() {
         style.css
     );
 
-    let stylus = host
+    // A case variant of a native name is NOT that dialect. Every preprocessor
+    // table the ecosystem hands these blocks to is keyed by exact bytes, so
+    // `lang="SCSS"` has nothing that can compile it, and the pipeline that
+    // compiles the block fails closed on it. Case-folding on this route alone
+    // made the same block report a complete, natively-parsed surface here
+    // while nothing downstream could build it.
+    let folded = host
         .upsert(UpsertRequest {
             canonical_id: None,
-            input_id: "/workspace/Stylus.vue".to_string(),
+            input_id: "/workspace/Folded.vue".to_string(),
             source: Arc::from(
-                "<template><div class=\"stylus-root\"/></template>\
-                 <style lang=\"stylus\">\n.native-stylus\n  color red\n</style>",
+                "<template><div class=\"folded-root\"/></template>\
+                 <style lang=\"SCSS\">$c: red;\n.folded { color: $c; }</style>",
             ),
             file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
-    let stylus_analysis = host.get_analysis(&stylus.canonical_id).unwrap();
-    let stylus_style = stylus_analysis.styles.first().expect("stylus style");
+    let folded_analysis = host.get_analysis(&folded.canonical_id).unwrap();
+    let folded_style = folded_analysis.styles.first().expect("style analysis");
     assert_eq!(
-        stylus_style.content_availability,
-        BlockContentAvailability::NativeAvailable,
-        "lang=stylus must stay native so lang=styl can remain the External contrast"
+        folded_style.content_availability,
+        BlockContentAvailability::ProcessedContentRequired,
+        "a case variant of a native name has no preprocessor entry, so it must fail closed"
     );
     assert!(
-        stylus_style.css.is_some(),
-        "lang=stylus must publish native css facts"
+        folded_style.css.is_none(),
+        "and must publish no natively-parsed facts: {:?}",
+        folded_style.css
     );
+
+    // Both spellings of the same dialect are the same answer. `styl` is a real
+    // key in every preprocessor table and Stylus to the carrier parse and the
+    // rewrite pipeline alike; classifying it as needing an external tool on
+    // this route alone is the drift a private spelling list reintroduces.
+    for (name, lang) in [("Stylus", "stylus"), ("Styl", "styl")] {
+        let stylus = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: format!("/workspace/{name}.vue"),
+                source: Arc::from(
+                    format!(
+                        "<template><div class=\"stylus-root\"/></template>\
+                         <style lang=\"{lang}\">\n.native-stylus\n  color red\n</style>"
+                    )
+                    .as_str(),
+                ),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let stylus_analysis = host.get_analysis(&stylus.canonical_id).unwrap();
+        let stylus_style = stylus_analysis.styles.first().expect("stylus style");
+        assert_eq!(
+            stylus_style.content_availability,
+            BlockContentAvailability::NativeAvailable,
+            "lang={lang} names a dialect with a native grammar, so it must be natively available"
+        );
+        assert!(
+            stylus_style.css.is_some(),
+            "lang={lang} must publish native css facts"
+        );
+    }
 
     // The host-level block-content query (the LSP's real read path) must
     // independently agree on typed unavailability. The raw AUTHORED bytes
-    // stay readable as `InlineAuthored` (unprocessed Stylus source, useful
+    // stay readable as `InlineAuthored` (unprocessed authored source, useful
     // on its own) — it is specifically the PROCESSED result and any facts
     // derived from it that fail closed, never a silent internal preprocess
     // standing in for the real one.
@@ -212,5 +254,70 @@ fn preprocess_dependent_request_fails_closed_as_external() {
         Some(".unresolved\n  color: red\n"),
         "the raw authored bytes must be exactly what was authored, never \
          preprocessed output fabricated in its place"
+    );
+}
+
+/// Byte-exact `lang` reporting belongs to the style axis alone.
+///
+/// The style pipeline's tables are keyed by exact bytes, so `lang="SCSS"` has
+/// to fail closed. A script or template block's dialect classifier resolves an
+/// unrecognised spelling to a language rather than refusing it, so
+/// `<script lang="TS">` is compiled, type-checked and served as TypeScript by
+/// every other route. Applying the style rule to those roles makes THIS route
+/// the only one that calls the block non-native: it demands preprocessed
+/// content for a script no preprocessor claims, and the block's content — and
+/// every IDE surface derived from it — fails closed on a file that builds
+/// everywhere else.
+#[test]
+fn only_the_style_axis_reports_its_lang_byte_exactly() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let update = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/Cased.vue".to_string(),
+            source: Arc::from(
+                "<template lang=\"HTML\"><div class=\"cased-root\"/></template>\
+                 <script lang=\"TS\">const tone: string = 'red';\nexport default {};</script>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    assert!(
+        update.preprocessor_requests.is_empty(),
+        "a case variant of a native script/template lang is still that language \
+         everywhere downstream, so this route must not demand a preprocessor for \
+         it: {:?}",
+        update.preprocessor_requests
+    );
+
+    // The same SFC with a case-variant STYLE lang still fails closed, so the
+    // containment above did not put the widening step back.
+    let styled = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/CasedStyle.vue".to_string(),
+            source: Arc::from(
+                "<template lang=\"HTML\"><div class=\"cased-root\"/></template>\
+                 <script lang=\"TS\">const tone: string = 'red';\nexport default {};</script>\
+                 <style lang=\"SCSS\">$c: red;\n.cased { color: $c; }</style>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let requested: Vec<_> = styled
+        .preprocessor_requests
+        .iter()
+        .map(|request| (request.lang.clone(), request.availability))
+        .collect();
+    assert_eq!(
+        requested,
+        vec![(
+            "SCSS".to_string(),
+            BlockContentAvailability::ProcessedContentRequired
+        )],
+        "exactly the style block fails closed, and it does so under the spelling \
+         the author wrote"
     );
 }

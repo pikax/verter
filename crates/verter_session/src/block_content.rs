@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
+use verter_compiler::style_planner::{ExternalStyleProducer, StyleProducer};
 use verter_language::parse_artifact::carrier_inventory::{
     AttributeValue, CarrierAttribute, CarrierBlock, SectionRole, SourceSlice, StyleDialect,
     TaggedSyntax,
@@ -78,6 +79,27 @@ pub(crate) struct SuppliedContentArtifact {
     processor_version: String,
     config_fingerprint: Option<BlockContentHashToken>,
     parsed: Option<verter_compiler::style_planner::PreparedStyleIr>,
+}
+
+/// The style-provenance vocabulary's view of one external tool's identity.
+///
+/// The single conversion from this host's provenance fields to the shared
+/// style vocabulary, so the identity the admission witness carries and the
+/// identity the compiler is later handed can never disagree. A tool that
+/// supplied no name is recorded as anonymous rather than given a fabricated
+/// one: unnamed is a real, recordable state, and inventing a name would make
+/// provenance read as exact when it is not.
+pub(crate) fn style_producer_of(
+    processor_identity: &str,
+    processor_version: &str,
+    config_fingerprint: Option<&str>,
+) -> StyleProducer {
+    ExternalStyleProducer::new(
+        processor_identity,
+        Some(processor_version),
+        config_fingerprint,
+    )
+    .map_or(StyleProducer::ExternalAnonymous, StyleProducer::External)
 }
 
 impl SuppliedContentArtifact {
@@ -567,13 +589,41 @@ pub(crate) fn role_class(role: &SectionRole) -> BlockContentClass {
     }
 }
 
+/// The block's language, in the form its own role's spelling owner is keyed by.
+///
+/// A style block's `lang` is reported VERBATIM, never case-folded. Every table
+/// a style `lang` is then looked up in — the dialect owner
+/// (`CssDialect::from_lang`), the native-language question below, the carrier
+/// parser's own `StyleLang`, and every preprocessor table the ecosystem keys
+/// by `lang` — is keyed by exact bytes. Normalizing put a widening step in
+/// front of all of them: `lang="SCSS"` failed closed for the pipeline that
+/// compiles the block while resolving for the one that publishes its
+/// `v-bind()` inventory, so a block nothing downstream can build was reported
+/// as having a complete surface. An unrecognised style spelling has to reach
+/// those owners as authored and fail closed there.
+///
+/// Every OTHER role keeps the ASCII-lowercased spelling, because that is the
+/// form ITS owners are keyed by, and folding the style rule onto them would
+/// manufacture the same disagreement in the opposite direction. A script
+/// block's dialect classifier resolves an unrecognised spelling to TypeScript
+/// rather than refusing it, so `<script lang="TS">` is compiled, checked and
+/// served as TypeScript everywhere downstream; reporting it verbatim here
+/// would leave this one route calling the block non-native, demanding
+/// preprocessed content for it, and failing its content closed while every
+/// other route still typed it. The case-fold is not a widening step for these
+/// roles — it is how they agree with the owners that already answer.
 pub(crate) fn role_lang(
     inventory: &verter_language::CarrierBlockInventory,
     role: &SectionRole,
     syntax: &TaggedSyntax,
 ) -> String {
     if let Some(Some(lang)) = named_attr(inventory, syntax, "lang") {
-        return lang.to_ascii_lowercase();
+        return match role {
+            SectionRole::Style { .. } => lang.to_string(),
+            SectionRole::TemplateHost | SectionRole::Script { .. } | SectionRole::Custom { .. } => {
+                lang.to_ascii_lowercase()
+            }
+        };
     }
     match role {
         SectionRole::TemplateHost => "html".to_string(),
@@ -617,7 +667,14 @@ pub(crate) fn native_language(content_class: BlockContentClass, lang: &str) -> b
                 "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts"
             )
         }
-        BlockContentClass::Style => matches!(lang, "css" | "scss" | "sass" | "less" | "stylus"),
+        // Which style spellings have a native grammar is the dialect owner's
+        // answer, reached through the analysis language. A list here drifted
+        // from it: `lang="styl"` — a real key in every preprocessor table, and
+        // Stylus to the carrier parse and the rewrite pipeline alike — was
+        // classified as needing an external tool by this route alone.
+        BlockContentClass::Style => {
+            verter_semantic::analysis::StyleAnalysisLang::from_lang(lang).is_natively_parsed()
+        }
         BlockContentClass::Custom => false,
     }
 }
@@ -631,7 +688,8 @@ pub(crate) fn optional_native_style_preprocessor(
     lang: &str,
 ) -> bool {
     matches!(role, SectionRole::Style { .. })
-        && matches!(lang, "scss" | "sass" | "less" | "stylus")
+        && verter_semantic::analysis::StyleAnalysisLang::from_lang(lang)
+            .requires_external_preprocessing()
         && named_attr(inventory, syntax, "src").is_none()
 }
 
@@ -1168,6 +1226,20 @@ impl VerterHost {
                 snapshot.lang.clone()
             };
             let parsed = snapshot.parsed_style.clone();
+            let producer = match &snapshot.origin {
+                Some(BlockContentOrigin::SuppliedValidated {
+                    processor_identity,
+                    processor_version,
+                    config_fingerprint,
+                    ..
+                }) => Some(style_producer_of(
+                    processor_identity,
+                    processor_version,
+                    config_fingerprint.as_ref().map(|token| token.as_str()),
+                )),
+                Some(BlockContentOrigin::InlineAuthored | BlockContentOrigin::NativeVfs { .. })
+                | None => None,
+            };
             let input = RuntimeBlockContentInput {
                 code,
                 source_map: snapshot.source_map,
@@ -1175,6 +1247,7 @@ impl VerterHost {
                 content_artifact_token: snapshot.content_artifact_token.to_string(),
                 source_space_token: snapshot.source_space_token.to_string(),
                 parsed,
+                producer,
             };
             match role {
                 SectionRole::TemplateHost => projection.template = Some(input),
@@ -1295,6 +1368,14 @@ impl VerterHost {
                     .as_deref()
                     .is_none_or(|token| token == snapshot.source_space_token.as_str());
             if already_analyzed_inline {
+                // The recorded `v-bind()` list answers "which bindings did
+                // this parse see", never "were these bytes the whole
+                // surface". A sheet whose `@import` sat inside a recovery
+                // window, or that includes another sheet outright, records
+                // nothing here to distinguish it from a self-contained block,
+                // so the exhaustiveness question is asked of the parse — the
+                // same owner every other route below asks.
+                usage_complete &= !style.pulls_in_unparsed_bytes();
                 for binding in &style.v_binds {
                     v_bind_vars.extend(binding.expr_roots.iter().cloned());
                     usage_complete &= binding.roots_complete;
@@ -1307,31 +1388,15 @@ impl VerterHost {
                     | BlockContentAvailability::SuppliedAvailable
             ) {
                 if let Some(prepared) = snapshot.parsed_style.as_ref() {
-                    let input = verter_compiler::style_planner::AuthoredStyleInput::new(
-                        prepared.ir().source().text(),
-                        prepared.ir().dialect(),
-                        "style-usage",
-                        "style-usage",
-                        "style-usage",
-                    )
-                    .with_prepared(prepared.ir())
-                    .without_source_map();
-                    match verter_compiler::style_planner::transform_vue_v_bind(input, "usage") {
-                        Ok(
-                            verter_compiler::style_planner::StyleRewriteOutcome::Unchanged {
-                                facts,
-                            }
-                            | verter_compiler::style_planner::StyleRewriteOutcome::Rewritten {
-                                facts,
-                                ..
-                            },
-                        ) => {
-                            for binding in facts.v_bind_vars {
-                                v_bind_vars.push(binding.expression);
-                            }
-                        }
-                        Err(_) => usage_complete = false,
-                    }
+                    // Through the usage owner, not a private fold over the
+                    // rewrite's facts: reading `v_bind_vars` here answered the
+                    // completeness question by omission and published whole
+                    // expressions where every other route publishes free
+                    // identifier roots.
+                    let usage = verter_compiler::compile::style_usage::
+                        extract_style_v_bind_usage_from_prepared([prepared]);
+                    usage_complete &= usage.complete;
+                    v_bind_vars.extend(usage.used);
                 } else if let Some(content) = snapshot.content.as_deref() {
                     let usage_lang = if snapshot.availability
                         == BlockContentAvailability::SuppliedAvailable
@@ -1720,8 +1785,33 @@ impl VerterHost {
                 content_hash: entry.code_hash.clone(),
                 utf8_byte_len: entry.code.len() as u64,
             };
+            // Preprocessor output reaches the compiler as preprocessor output:
+            // this boundary is the one party that knows these bytes already
+            // left their authored dialect behind, so it says so in the type
+            // rather than handing over a bare string the compiler would have
+            // to assume about, and it names the tool alongside — an assertion
+            // about bytes nobody claims to have produced is not one this
+            // boundary can honestly make. The bytes are borrowed: the artifact
+            // below owns them and no copy is needed to qualify them. The
+            // tool's reported diagnostics and dependency list stay on that
+            // artifact, where this host's consumers read them.
+            let producer = style_producer_of(
+                &entry.processor_identity,
+                &entry.processor_version,
+                entry
+                    .config_fingerprint
+                    .as_ref()
+                    .map(|token| token.as_str()),
+            );
             let parsed = (current.content_class == BlockContentClass::Style)
-                .then(|| verter_compiler::style_planner::prepare_supplied_plain_css(&entry.code))
+                .then(|| {
+                    verter_compiler::style_planner::prepare_supplied_style(
+                        verter_compiler::style_planner::PreprocessedStyle::admitted(
+                            entry.code.as_ref(),
+                            producer.clone(),
+                        ),
+                    )
+                })
                 .flatten();
             #[cfg(test)]
             {

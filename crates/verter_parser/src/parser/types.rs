@@ -37,6 +37,14 @@ pub enum StyleLang {
     Sass,
     Less,
     Stylus,
+    /// `lang="postcss"` and its equally common spelling `lang="pcss"`. One
+    /// recognised dialect with no native grammar here:
+    /// PostCSS blocks are CSS-shaped and the IDE serves them with the CSS
+    /// service, while the rewrite pipeline still treats them as content an
+    /// external tool owns. Classifying it is what lets those two answers
+    /// differ; folding it into [`Self::Unknown`] made a mainstream Vue
+    /// configuration indistinguishable from a typo and served it nothing.
+    PostCss,
     Unknown,
 }
 
@@ -445,6 +453,12 @@ impl StyleLang {
             b"sass" => StyleLang::Sass,
             b"less" => StyleLang::Less,
             b"stylus" | b"styl" => StyleLang::Stylus,
+            // Both spellings name the same dialect everywhere the ecosystem
+            // keys on them — neither has a `@vue/compiler-sfc` processor entry,
+            // and the file-extension route here already reads `.pcss` as
+            // postcss. Naming only one left the other indistinguishable from a
+            // typo and served it nothing.
+            b"postcss" | b"pcss" => StyleLang::PostCss,
             _ => StyleLang::Unknown,
         }
     }
