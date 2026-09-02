@@ -126,8 +126,10 @@ console.log(main?.code);
 ```
 
 There is no standalone `compile()` / `compileSync()`. The WASM artifact
-exports `VerterHost` and nothing else compile-shaped, so those wrappers
-never worked; they were removed rather than left throwing. Use the host.
+exports `VerterHost` and nothing else compile-shaped, so those wrappers never
+worked; they were removed rather than left throwing. Compile through the host:
+`Host.compileRequest()` for a typed one-call compile, or the profile-bearing
+reads for a cached IDE surface.
 
 ### `isInitialized(): boolean`
 
@@ -143,10 +145,13 @@ if (!isInitialized()) {
 
 ### Types
 
-Host request and response types (`HostConfig`, `HostUpsertRequest`,
+Shared host request and response types (`HostConfig`, `HostUpsertRequest`,
 `HostVirtualQuery`, `HostVirtualFileResponse`, …) are re-exported from
-`@verter/native/host-types`, so the two packages type-check against one
-definition.
+`@verter/native/host-types`. `BrowserHostCompileRequest` and
+`HostCompileRequestResponse` are exported by this package: the browser wire
+form tags each arm by key (`{ vue: … }`) where the native one uses a
+`framework` field, so the prefix keeps the two from being mistaken for each
+other at an import site.
 
 ## Development / Build
 

@@ -106,7 +106,7 @@ schema = 2
 "CCA1O3A" = { status = "pending" }
 "CCA1O3B" = { status = "pending" }
 "CCA1O3C" = { status = "implemented", commit_message = "feat(ci): execute the wasm JavaScript-boundary tests in the canonical gate", commit_date = "2026-09-01T02:10:00+01:00" }
-"CCA1O3D" = { status = "pending" }
+"CCA1O3D" = { status = "implemented", commit_message = "feat(wasm): expose a callable typed compile request on the browser host", commit_date = "2026-09-02T12:00:00+01:00", pull_request = 469 }
 "CCA1O3E" = { status = "implemented", commit_message = "test(*): check the committed carrier fixtures against the built wasm host", commit_date = "2026-09-01T09:00:00+01:00" }
 "CCA1O4" = { status = "pending" }
 "CCA1O4D" = { status = "pending" }

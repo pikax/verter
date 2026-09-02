@@ -105,7 +105,8 @@ pub(crate) use virtual_file_pipeline::CompileEntryOutcome;
 
 // The caller-supplied canonical-request execution route: the session
 // entry, its lane, and the virtual-node publication both lanes share.
-#[cfg(not(target_arch = "wasm32"))]
+// Available on EVERY target, browser included: the route is synchronous
+// and single-threaded, and the browser binding is one of its callers.
 mod compile_request_execute;
 
 // The canonical-request compile seam's own tests, housed with the route

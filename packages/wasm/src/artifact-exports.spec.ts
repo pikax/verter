@@ -14,7 +14,7 @@
  * has not quietly come back through the wrapper without the artifact.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -23,9 +23,36 @@ import * as wasm from "../wasm/verter_wasm.js";
 import * as pkg from "./index.js";
 
 const WASM_BINARY_PATH = resolve(import.meta.dirname, "../wasm/verter_wasm_bg.wasm");
+const WASM_DECLARATIONS_PATH = resolve(import.meta.dirname, "../wasm/verter_wasm.d.ts");
 
 /** Every binding `initialize()` reads off the imported module. */
 const REQUIRED_ARTIFACT_EXPORTS = ["default", "initSync", "VerterHost"] as const;
+
+/**
+ * Every host method the wrapper forwards to. The wrapper reaches these off
+ * the constructed instance, so an absent one throws at call time on a fully
+ * initialized module — the exact defect `compile`/`compileSync` were.
+ */
+const REQUIRED_HOST_METHODS = [
+  "resolve",
+  "upsert",
+  "applyBlockOverrides",
+  "getIde",
+  "ensureIdeCompiled",
+  "compileRequest",
+  "getVirtualFile",
+  "listVirtualFiles",
+  "remove",
+  "getAnalysis",
+  "setImportDependencies",
+  "collectResolvableModuleReferenceSpecifiers",
+  "resolveKnownModuleReferenceDependencies",
+  "lint",
+  "getCodeActions",
+  "getLintRuleMetadata",
+  "getDocumentSymbols",
+  "matchCssSelectors",
+] as const;
 
 describe("@verter/wasm artifact export surface", () => {
   it("the built artifact carries every export the wrapper binds", () => {
@@ -61,5 +88,31 @@ describe("@verter/wasm artifact export surface", () => {
         `@verter/wasm exports \`${name}\` but the artifact does not — the wrapper would throw at call time`,
       ).toBe(false);
     }
+  });
+
+  it("the generated host object carries every method the wrapper forwards", () => {
+    // The generated JS object, not the Rust source: a Rust method with no
+    // binding annotation compiles, is reachable from Rust tests, and is
+    // absent here. Reading the prototype needs no WASM instance, so this
+    // asks the same question a browser caller does before it ever calls.
+    const prototype = (wasm.VerterHost as unknown as { prototype: Record<string, unknown> })
+      .prototype;
+    const missing = REQUIRED_HOST_METHODS.filter((name) => typeof prototype[name] !== "function");
+    expect(
+      missing,
+      "the wrapper forwards to these; an absent one throws at call time, not here",
+    ).toEqual([]);
+  });
+
+  it("the generated declarations declare the typed compile entry", () => {
+    // The wrapper's own declaration says a `compileRequest` exists on the
+    // binding. That claim is only true if the GENERATED declarations say so
+    // too — a hand-written binding interface can name a method the artifact
+    // never had, which is how the removed standalone compile survived.
+    const declarations = readFileSync(WASM_DECLARATIONS_PATH, "utf8");
+    expect(
+      /^\s*compileRequest\(/m.test(declarations),
+      `no \`compileRequest\` method declared in ${WASM_DECLARATIONS_PATH}`,
+    ).toBe(true);
   });
 });

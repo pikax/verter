@@ -955,3 +955,10 @@ mod js_boundary {
         );
     }
 }
+
+// The callable route on the generated host object, housed beside the decode
+// fixtures it depends on: same wire form, same refusals, reached the way a
+// browser reaches it rather than the way Rust does.
+#[cfg(target_arch = "wasm32")]
+#[path = "host_compile_request_route_tests.rs"]
+mod js_route;

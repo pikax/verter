@@ -79,7 +79,8 @@ const host = await createHost();
 
 #### Host Methods
 
-The `Host` class exposes the same methods as `@verter/native`'s `VerterHost`:
+The `Host` class exposes the shared host methods below plus the WASM-only
+`compileRequest()` route:
 
 | Method                                                                                      | Returns                    | Description                                                   |
 | ------------------------------------------------------------------------------------------- | -------------------------- | ------------------------------------------------------------- |
@@ -87,6 +88,7 @@ The `Host` class exposes the same methods as `@verter/native`'s `VerterHost`:
 | `upsert(request)`                                                                           | `HostUpdateResult`         | Register/update a file                                        |
 | `applyBlockOverrides(request)`                                                              | `HostUpdateResult`         | Apply preprocessed block overrides                            |
 | `getIde(canonicalId, profile?)`                                                             | `HostIdeResponse \| null`  | Get TSX or JSX for type checking                              |
+| `compileRequest(canonicalId, request)`                                                      | `HostCompileRequestResponse` | Execute one typed compile request (throws on refusal)       |
 | `getVirtualFile(query)`                                                                     | `HostVirtualFileResponse \| null` | Get compiled virtual file (`null` when the node does not exist) |
 | `listVirtualFiles(canonicalId)`                                                             | `HostVirtualNodeKind[]`    | List virtual nodes for a file                                 |
 | `remove(canonicalOrAlias)`                                                                  | `HostRemoveResult \| null` | Remove file from host                                         |
@@ -138,6 +140,107 @@ The host validates the current revision, artifact, basis, source space, code
 hash, and optional source-map hash after the asynchronous processor completes.
 It refuses stale or mismatched results without mutating its caches.
 
+#### `compileRequest(canonicalId, request)`
+
+Executes one typed compile request against an already-registered source. The
+whole transaction is one call: register the carrier once with `upsert()`,
+source only, then hand this the canonical id and the request. There is no
+ensure-then-read pair to order correctly and no boolean to interpret.
+
+The request is the demand document end to end — its **product set** is what
+gets compiled. No compile profile is built from it on any path, and the source
+is never copied into it.
+
+This route can produce `runtimeClient`, `runtimeServer`, `ideCompanion`, and
+`analysis`. The shared schema also exposes the bare tags `"publicApi"` and
+`"declarations"`; `compileRequest()` refuses both for Vue and Svelte.
+
+```ts
+const host = await createHost();
+
+host.upsert({ inputId: "/src/App.vue", source: sfcSource, fileKind: "vue" });
+
+const result = host.compileRequest("/src/App.vue", {
+  vue: {
+    identity: { isProduction: false, forceJs: false },
+    products: [
+      { runtimeClient: { runtimeSourceMap: true } },
+      {
+        ideCompanion: {
+          wantSourceMap: true,
+          embedAmbientTypes: false,
+          conditionalRootNarrowing: false,
+          strictSlots: false,
+          ideChunkBoundaries: false,
+        },
+      },
+    ],
+    options: { backend: "inferred", ssr: false, isCustomElement: [], babelParserPlugins: [] },
+  },
+});
+
+// One row per requested product kind, in request order, tagged with the
+// same `kind` spelling the request used.
+for (const product of result.products) {
+  if (product.kind === "runtimeClient") {
+    // The assembled main module, the script, the compiled template, each
+    // style block and each custom block — each with its own code and map.
+    for (const node of product.nodes) console.log(node.node.kind, node.code.length);
+  }
+}
+```
+
+The request is discriminated by framework at the outermost level
+(`{ vue: … }` / `{ svelte: … }`), and the arms are **mutually exclusive** — a
+payload populating both is a TypeScript error as well as a decoder refusal.
+Under TypeScript's default optional-property semantics, a known sibling tag
+explicitly set to `undefined` is treated as absent. Every object is otherwise
+closed: a key the schema does not declare — including the other framework's
+option key — is refused by name.
+
+The response carries `canonicalId` (after alias resolution), one deduplicated
+`diagnostics` set for the whole compile, and the `products` rows. The
+`analysis` row nests its payload under its own `analysis` key, so no field of
+that payload can collide with the row's `kind` discriminant:
+
+```ts
+for (const product of result.products) {
+  if (product.kind === "analysis") console.log(product.analysis.bindingOccurrences);
+}
+```
+
+That payload is the **template** analysis snapshot — the value `getAnalysis()`
+publishes under its `template` field — not the whole-file snapshot
+`getAnalysis()` returns.
+
+**Offset encodings and coordinate spaces differ by field.**
+`diagnostics[].spanStart` / `spanEnd` and
+`destructuredBlock.bindings[].sourceStart` / `sourceEnd` are **UTF-16 code
+units into the registered source**, indexable against that JavaScript string.
+`destructuredBlock.blockStart` / `blockEnd` are **UTF-16 code units into the
+IDE product row's own `code`**, the generated IDE surface. The `analysis`
+row's spans are **UTF-8 byte offsets into the registered source**, exactly as
+`getAnalysis()` reports them — indexing a JS string with one is wrong on any
+non-ASCII carrier.
+
+**No compile cache slot.** Every call is a complete compile: this route
+consults and publishes no cache slot, so two identical calls compile twice. The
+profile-bearing `ensureIdeCompiled()` / `getIde()` pair *is* cached, so a
+per-keystroke editor loop that only needs the IDE surface stays cheaper there;
+reach for `compileRequest()` when the demand is a fresh multi-product compile.
+
+**Complete-only.** Every requested product the host can produce is present.
+There is no partial response, no `null`, and no ensure boolean: a payload the
+schema refuses, a request the compiler refuses, a framework arm the registered
+carrier contradicts, an unproducible product kind, or an execution refusal all
+**throw**, and no sibling product is published beside a refusal. A refusal
+names the offending product the way the request spelled it (`publicApi`, not
+`PublicApi`) and is thrown as the refusal-message string, not an `Error`
+instance.
+
+The profile-bearing `getIde()` / `ensureIdeCompiled()` / `getVirtualFile()`
+methods are unchanged and keep serving every existing caller.
+
 #### Shared module reference flow
 
 `host.upsert()` now returns `moduleReferences`, which are classified as:
@@ -183,6 +286,36 @@ that equivalence:
 - `HostBlockOverrideRequest`
 - `HostVirtualQuery`
 
+### Typed compile request types
+
+`compileRequest()`'s request is the shared framework-discriminated schema, tagged
+differently for this binding: the arm name is the object's single key
+(`{ vue: … }`, `{ analysis: … }`) where `@verter/native`'s decoder reads an
+internal `framework` / `kind` field. Because the two wire forms are NOT
+interchangeable, the browser forms carry a `Browser` prefix — a payload that
+moved between the packages under a shared name would keep type-checking and be
+refused by the other decoder at run time. Only the tagged wrappers are declared
+here; every leaf option, identity and product shape is imported from
+`@verter/native`'s generated projection, and `src/index.test-d.ts` pins the arm
+sets, the arm payloads, and their mutual exclusivity to it:
+
+- `BrowserHostCompileRequest`, `BrowserHostVueCompileRequest`,
+  `BrowserHostSvelteCompileRequest`
+- `BrowserHostRequestedProduct`
+- `HostCompileIdentity`, `HostVueCompileOptions`, `HostSvelteCompileOptions`
+- `HostRuntimeProductOptions`, `HostIdeProductOptions`, `HostAnalysisProductOptions`
+
+The response has no `@verter/native` counterpart, so its types are unprefixed
+and this binding's own. They reuse the re-exported shared shapes wherever the
+route serialises one (`HostDiagnosticsSnapshot`, `HostVirtualNodeKind`,
+`HostVirtualMeta`, `HostIdeResponse`) rather than restating them:
+
+- `HostCompileRequestResponse`
+- `HostCompiledProduct`, `HostCompiledRuntimeProduct`, `HostCompiledIdeProduct`,
+  `HostCompiledAnalysisProduct`
+- `HostCompiledVirtualNode`, `HostDestructuredBlockMeta`,
+  `HostTemplateAnalysisSnapshot`
+
 The remaining types are re-exported from `@verter/native/host-types`:
 
 - `HostConfig`
@@ -210,4 +343,5 @@ re-exported types.
 | `analyzeStyle()`                | Available                        | Not available                    |
 | `VerterHost`                    | Synchronous constructor          | Async via `createHost()`         |
 | `getAnalysis()` return          | JSON `string`                    | Native JS `object`               |
+| `compileRequest()`              | Not available yet                | Available                        |
 | `source` accepts                | `string \| Buffer`               | `string`                         |

@@ -660,8 +660,9 @@ routes above, and the two differ in WHO owns the demand:
 - **No compile cache slot.** This route consults and publishes none, so
   distinct requests for one canonical are distinct compiles.
 
-Native-only (`#[cfg(not(target_arch = "wasm32"))]`), along with the bound
-framework host backends it executes through.
+`compile_request` is available on native and `wasm32`; the browser binding
+calls it synchronously after decoding one typed request. `compile_request_many`
+and its source-registering batch coordinator remain native-only.
 
 ### LSP Integration
 
