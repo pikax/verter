@@ -614,6 +614,11 @@ impl CallValue {
     pub(super) fn into_node(self) -> SemanticNodeId {
         self.0
     }
+
+    /// The evaluated node, without consuming the value.
+    pub(super) fn node(&self) -> SemanticNodeId {
+        self.0
+    }
 }
 
 /// THE typed unresolved MARKER a positionally-unmodelled sub-expression

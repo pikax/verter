@@ -1,0 +1,30 @@
+error: cannot construct `CompositeMembers` with struct literal syntax due to private fields
+  --> tests/cases/compile-fail/composite_struct_literal_forge.rs:14:5
+   |
+14 |     CompositeMembers { members }
+   |     ^^^^^^^^^^^^^^^^   ------- private field
+   |
+   = note: ...and other private field `category` that was not provided
+
+error: cannot construct `CompositeList<_>` with struct literal syntax due to private fields
+  --> tests/cases/compile-fail/composite_struct_literal_forge.rs:18:5
+   |
+18 |     CompositeList { core }
+   |     ^^^^^^^^^^^^^   ---- private field
+   |
+   = note: ...and other private field `_kind` that was not provided
+help: you might have meant to use an associated function to build this type
+   |
+18 -     CompositeList { core }
+18 +     CompositeList::minted(_, _)
+   |
+18 -     CompositeList { core }
+18 +     CompositeList::authored_shell(_)
+   |
+18 -     CompositeList { core }
+18 +     CompositeList::ordered_carrier(_)
+   |
+18 -     CompositeList { core }
+18 +     CompositeList::preserving_rebuild(_)
+   |
+   = and 1 other candidate

@@ -310,6 +310,13 @@ pub(crate) struct FlowReturnFrameState {
     /// the demand could not be planned — the evaluation still runs, but
     /// no proof can mint, so the close finalizes unproven.
     pub(crate) flow_demand: Option<flow_obligation_state::FlowDemandCarrier>,
+    /// WHY the preparation installed no demand, when it refused —
+    /// consumed by the frame close to classify the unproven outcome onto
+    /// its partial class (a budget edge and a torn view fault consumers
+    /// an unplannable demand's contained class does not). `None` whenever
+    /// `flow_demand` is `Some`, and also for the deliberate
+    /// refused-member-batch close (which keeps the contained class).
+    pub(crate) plan_refusal: Option<flow_obligation_state::FlowPlanRefusal>,
 }
 
 /// The call-resolution-domain payload of one in-flight frame.
@@ -643,6 +650,13 @@ impl FlowReturnPendingOutcome {
 pub(crate) struct FlowReturnPendingState {
     /// The member's decided outcome at pop.
     pub(crate) outcome: FlowReturnPendingOutcome,
+    /// The refusal recorded when the member's OWN demand could not be
+    /// planned. It rides the deferral because the component close is
+    /// where the cause is finally read: a member refused for a budget
+    /// edge or a torn view must fault the root's consumers, and a cause
+    /// dropped here silently downgrades the whole component to the
+    /// contained unverified class.
+    pub(crate) plan_refusal: Option<flow_obligation_state::FlowPlanRefusal>,
     /// Store-owned admission for this inline member.
     pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
     /// The coinductive hold targets the member's evaluation met (in-flight
@@ -699,11 +713,13 @@ pub(crate) enum ResolveCallSelection {
         selected: SignatureCandidateOrigin,
         selected_signature: SelectedSignature,
         substitution: CanonicalTypeSubstitution,
-        /// The FRESH primitive-literal return candidates this winner may
-        /// close on: a naked declared return of an unconstrained parameter
-        /// fixed to a bare-literal argument. Consulted at close — a final
-        /// return equal to one of these is a fresh literal the caller's
-        /// return position widens.
+        /// The FRESH primitive-literal deposits this winner's return keeps
+        /// at TOP LEVEL: an unconstrained parameter fixed to a bare-literal
+        /// argument, reached from the return structure through the binder
+        /// itself or through UNION constituents. Consulted at close — a
+        /// final return EQUAL to one of these is a whole-return fresh
+        /// literal the caller's return position widens, and every listed
+        /// deposit widens at the caller's value (member) positions.
         fresh_literal_returns: Vec<SemanticNodeId>,
     },
     /// A UNION callee's per-arm winners: one first-applicable signature in
@@ -760,7 +776,7 @@ impl ResolveCallSelection {
                 },
                 substitution: substitution.clone(),
                 return_type,
-                fresh_literal_return: fresh_literal_returns.contains(&return_type),
+                fresh_literal_returns: std::sync::Arc::from(fresh_literal_returns.as_slice()),
             },
             Self::UnionSelected { arms } => ResolvedCallResult::UnionSelected {
                 selections: Arc::from(
@@ -1341,6 +1357,39 @@ pub(crate) mod flow_obligation_state {
         }
     }
 
+    /// WHY one cold flow demand installed no proof layer — recorded by the
+    /// demand preparation when it refuses, and read by the frame close to
+    /// classify the unproven outcome onto the right partial class. The
+    /// three causes are one verdict (`ReturnOnly`, no proof, no warm
+    /// admission) but DIFFERENT statements, and the partial classes they
+    /// map onto part ways at the Vue macro projection lanes: a budget edge
+    /// is a statement about the REQUEST and must fault every lane, a torn
+    /// view is a transient-state statement and must fault them too, while
+    /// an unplannable demand is a statement about this declaration's
+    /// verifiability that value-tolerant consumers may contain.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum FlowPlanRefusal {
+        /// A typed budget refusal on the demand's planning inputs — the
+        /// obligation-set cap, or the structural slice budget surfacing
+        /// through the retained-plan read. Classified
+        /// `BUDGET_EXCEEDED`, the same class the adjacent slice-budget
+        /// axis records, so both budget edges fault the same consumers.
+        Budget,
+        /// The prepare-time store read did not hold the demand's retained
+        /// artifacts (no retained plan outcome, no bound graph, a
+        /// retained selection that does not match the bound graph) while
+        /// the evaluation still produced a value — a torn intermediate
+        /// view, non-deterministic by nature. Classified
+        /// `UNSTABLE_STATE`.
+        TornView,
+        /// The demand itself is not plannable: no derivable demand site,
+        /// an unregistered or non-enabled-root operation, an
+        /// unrepresentable demand subject. Deterministic; the evaluated
+        /// value stays usable and unverified — classified
+        /// `FLOW_RETURN_UNVERIFIED`.
+        Unplannable,
+    }
+
     /// The per-demand proof carrier: the installed demand's handle, its
     /// plan, and the evaluation provenance, bound atomically at
     /// preparation time. Carried by the in-flight frame state and — for a
@@ -1624,6 +1673,29 @@ pub(crate) mod flow_obligation_state {
             handle
         }
 
+        /// TEST-ONLY: install a demand whose obligation set is EMPTY — a
+        /// state no constructible [`FlowDemandPlan`] produces (the planner
+        /// always plans one family-coverage obligation per required fact
+        /// family plus one per contract domain from the closed registry, so
+        /// a successfully built plan carries a non-empty spec set). The
+        /// runtime's convergence/seal gates refuse an empty proof universe
+        /// rather than passing it by vacuous truth; this installer keeps
+        /// that refusal discriminable by a test.
+        #[cfg(test)]
+        pub fn install_flow_demand_without_obligations_for_tests(&mut self, plan: &FlowDemandPlan) -> FlowDemandHandle {
+            let handle = FlowDemandHandle {
+                index: u32::try_from(self.flow_demands.len()).unwrap_or(u32::MAX),
+                identity: self.instance_identity,
+            };
+            self.flow_demands.push(InstalledFlowDemand {
+                basis: plan.basis().clone(),
+                obligations: Vec::new(),
+                convergence: FlowConvergenceObservation { policy: plan.convergence(), iterations: 0, stable: false },
+                phase: FlowDemandPhase::Discharging,
+            });
+            handle
+        }
+
         /// Transition Pending → Running.
         pub fn start_flow_obligation(&mut self, handle: FlowDemandHandle, id: FlowObligationId) -> Result<(), FlowTransitionError> {
             self.transition(handle, id, |state| matches!(state, ObligationState::Pending).then_some(ObligationState::Running))
@@ -1748,7 +1820,14 @@ pub(crate) mod flow_obligation_state {
             match demand.phase {
                 FlowDemandPhase::Converged | FlowDemandPhase::Sealed => return Err(FlowTransitionError::IllegalTransition),
                 FlowDemandPhase::Discharging | FlowDemandPhase::ExpansionClosed => {
-                    if !demand.obligations.iter().all(|record| matches!(record.state, ObligationState::Discharged(_))) {
+                    // An EMPTY obligation universe is not a discharged one:
+                    // `all(Discharged)` is vacuously true over it, and a
+                    // demand that installed nothing has proved nothing (no
+                    // constructible plan is empty — family-coverage +
+                    // domain obligations come from the closed registry).
+                    if demand.obligations.is_empty()
+                        || !demand.obligations.iter().all(|record| matches!(record.state, ObligationState::Discharged(_)))
+                    {
                         return Err(FlowTransitionError::IllegalTransition);
                     }
                 }
@@ -1762,7 +1841,8 @@ pub(crate) mod flow_obligation_state {
         }
 
         /// Mint the ONE sealed completion artifact of this solve
-        /// (Converged → Sealed). Mints ONLY when every installed
+        /// (Converged → Sealed). Mints ONLY when at least one obligation is
+        /// installed and every installed
         /// obligation is `Discharged` (each with spec-validated evidence),
         /// the runtime observed convergence, and the value payload carries
         /// no degradation. The artifact binds the installed basis, the
@@ -1774,7 +1854,13 @@ pub(crate) mod flow_obligation_state {
         pub fn seal_flow_completion(&mut self, handle: FlowDemandHandle, value: FlowReturnResult) -> Result<SealedFlowCompletion, FlowSealError> {
             let Some(demand) = self.flow_demand_mut(handle) else { return Err(FlowSealError::NoDemandInstalled) };
             if demand.phase == FlowDemandPhase::Sealed { return Err(FlowSealError::AlreadySealed); }
-            if !demand.obligations.iter().all(|record| matches!(record.state, ObligationState::Discharged(_))) {
+            // An EMPTY obligation universe never seals: `all(Discharged)` is
+            // vacuously true over it, and an empty `proofs` slice would be
+            // an evidence-free completion from the sole warm-admission
+            // authority (defense in depth beside the convergence gate).
+            if demand.obligations.is_empty()
+                || !demand.obligations.iter().all(|record| matches!(record.state, ObligationState::Discharged(_)))
+            {
                 return Err(FlowSealError::UndischargedObligations);
             }
             let observation = demand.convergence;

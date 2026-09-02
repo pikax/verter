@@ -1000,11 +1000,17 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     (
         "Component-Meta Completeness Contract",
         &[
-            // The completeness-contract substrate (typed degraded
-            // states, no `Complete(None)` for missing inputs) is a
-            // future addition. The current guard pins the
-            // present invariant via the audit-validator's
-            // PublishedField gate + the no-silent-skip guard.
+            // RESULT-level completeness on the public payload: a
+            // degraded surface publishes a partial state on both wire
+            // lanes, never pairs with an exact public contract, and
+            // stays cold — while a genuinely props-less component
+            // stays complete, exact, empty and warm-capable.
+            "ffi_component_meta_distinguishes_partial_from_exact_empty",
+            // The remaining completeness-contract substrate (typed
+            // degraded states, no `Complete(None)` for missing inputs)
+            // is a future addition. These two pin the present
+            // invariant via the audit-validator's PublishedField gate
+            // + the no-silent-skip guard.
             "macro_impacting_constructs_fail_lowering_not_silent_skip",
             "audit_publishes_member_edge_with_published_field_provenance_at_macro_boundaries",
         ],

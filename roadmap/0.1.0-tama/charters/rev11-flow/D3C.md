@@ -61,7 +61,7 @@ Product/worklist cutover (codex D3 scope ruling, `decisions/2026-08-30-rev11-flo
 - Named work (ruling §3): replace `locals`, `var_locals`, declared-type maps, parameter-write maps, conditional-definition sets, and the narrowing overlay with `FlowProductStore`; replace `join_layer_states` with domain joins; execute selected transfers in `FlowDemandPlan` order until stable; use `max_iterations` and the selected obligation frontier as the connected budget; emit product-domain discharge evidence through D2B's report; delete all runtime semantic state keyed by `String`.
 - D3C must not repair proof provenance, recreate admission predicates, or construct `CompleteFlowResult` directly — D2B's proof/admission contract is assumed intact.
 - Discriminating tests (all required): `flow_discharge_requires_product_evidence` (omitting one required binding-domain product from an otherwise clean evaluation cannot mint `CompleteFlowResult`, at either root or SCC publication); `flow_product_worklist_is_permutation_deterministic` (end-to-end legs: identical visitation order, products, discharge evidence, result bytes, and warm candidate under randomized equivalent order); `flow_product_budget_boundary_is_exact_and_never_warm` (end-to-end legs: typed budget exhaustion retains no candidate and recomputes cold); and the successor-boundary controls — existing `GuardNarrowing`, `ClosureCapture`, and `AbruptCompletion` fixtures unrelated to nominal comparability must remain typed partial/cold; D3 must not make D4/D5/D6 tests pass by widening its scope.
-- Landing: D3R, D3I, D3P, and D3C land as ONE atomic multi-node candidate; none of the four merges independently (codex D3 scope ruling, `decisions/2026-08-30-rev11-flow-d3-split.md`, extending the D1+D2A+D2B atomic-landing pattern of `decisions/2026-08-29-rev11-flow-d2-split.md`). Per `contracts/github-control-plane.md`, D3R, D3I, and D3P are intentional unmapped exceptions; all four nodes keep distinct ledger rows, D3C retains gh_issue 175, and only D3C carries a closing link.
+- Landing: D3R, D3I, D3P, and D3C land as ONE atomic multi-node candidate; none of the four merges independently (codex D3 scope ruling, `decisions/2026-08-30-rev11-flow-d3-split.md`, extending the D1+D2A+D2B atomic-landing pattern of `decisions/2026-08-29-rev11-flow-d2-split.md`). The normal `contracts/github-control-plane.md` rule gives each mapped node its own issue and closing link. This maintainer-approved atomic candidate is the explicit exception: D3R, D3I, and D3P are intentionally unmapped substrate nodes, while D3C alone carries the rekeyed pre-existing D3 mapping (gh_issue 175). All four retain distinct implementation-ledger rows; only mapped D3C receives a closing link.
 
 ## Acceptance IDs and discriminating proof
 
@@ -107,4 +107,10 @@ Apply `public-3`: 3 fresh distinct harness tasks covering exactly `adversarial`,
 
 ## Trusted implementation ledger
 
-Before squashing or review, the implementation patch transitions this node's predeclared row in `authority/state/implemented.toml` from `status = "pending"` to `status = "implemented"` with the planned squash commit message, approximate date with timezone, and optional pull-request number. The transitioned row is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
+Before squashing or review, the implementation patch transitions this node's
+predeclared row in `authority/state/implemented.toml` from `status = "pending"`
+to `status = "implemented"` with the planned squash commit message, approximate
+date with timezone, and optional pull-request number. The transitioned row is the
+implementation fact. Commit metadata is a loose locator only and is never resolved or
+validated against Git or GitHub. Reviewers inspect the squashed candidate patch without
+SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.

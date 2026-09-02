@@ -379,10 +379,17 @@ const BLOCK_PREREQS = new Map([
       "U2ModuleAugmentation",
     ],
   ],
-  ["U6FlowReturnSubstrate", ["U2QueryValueDomain", "U2RelationInfer", "U2IndexedAccess"]],
+  // The flow-return substrate's truthiness frame consumes the canonical
+  // algebra's demand-scoped `ClassifyTruthinessDomain` fact per arm.
+  [
+    "U6FlowReturnSubstrate",
+    ["U2QueryValueDomain", "U2RelationInfer", "U2IndexedAccess", "U2CanonicalTypeAlgebra"],
+  ],
   ["U6NarrowTypeof", ["U6FlowReturnSubstrate"]],
   ["U6NarrowEquality", ["U6FlowReturnSubstrate"]],
-  ["U6NarrowTruthiness", ["U6FlowReturnSubstrate"]],
+  // The truthiness frame CONSUMES the canonical algebra's demand-scoped
+  // `ClassifyTruthinessDomain` fact (it holds no private truthiness rule).
+  ["U6NarrowTruthiness", ["U6FlowReturnSubstrate", "U2CanonicalTypeAlgebra"]],
   ["U6NarrowIn", ["U6FlowReturnSubstrate"]],
   ["U6NarrowInstanceof", ["U6FlowReturnSubstrate"]],
   ["U6NarrowDiscriminated", ["U6FlowReturnSubstrate"]],
@@ -2140,10 +2147,11 @@ const MECHANISM_TO_KEYS = new Map([
     "QueryValueDomainFoundation",
     ["ResolveDecl", "TypeOf", "NormalizeUnion", "NormalizeIntersection"],
   ],
-  // The algebra closure OWNS no key of its own: the normalization queries
-  // it closes construction over stay owned by the value-domain foundation
-  // it is a sub-block of: a successor may not own its predecessor's keys.
-  ["CanonicalTypeAlgebraClosure", []],
+  // The algebra closure owns ONE key of its own — the demand-scoped
+  // truthiness-domain classifier. The normalization queries it closes
+  // construction over stay owned by the value-domain foundation it is a
+  // sub-block of: a successor may not own its predecessor's keys.
+  ["CanonicalTypeAlgebraClosure", ["ClassifyTruthinessDomain"]],
   // The binder-identity substrate feeds the scope-carrying decl/value
   // lookup keys (its `binder_scope_id` rides their `ScopeId`).
   ["BinderIdentityFactsSubstrate", ["ResolveDecl", "TypeOf"]],
@@ -2166,7 +2174,7 @@ const MECHANISM_TO_KEYS = new Map([
   ["ReturnPathPeekerTwoFrontier", ["TypeOf", "ResolveDecl"]],
   ["FlowNarrowingFrameTypeof", ["ResolveDecl", "Relate"]],
   ["FlowNarrowingFrameEquality", ["ResolveDecl", "Relate"]],
-  ["FlowNarrowingFrameTruthiness", ["ResolveDecl", "Relate"]],
+  ["FlowNarrowingFrameTruthiness", ["ResolveDecl", "Relate", "ClassifyTruthinessDomain"]],
   ["FlowNarrowingFrameIn", ["ResolveDecl", "Relate"]],
   ["FlowNarrowingFrameInstanceof", ["ResolveDecl", "Relate"]],
   ["FlowNarrowingFrameDiscriminated", ["ResolveDecl", "Relate"]],
@@ -3414,8 +3422,15 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "ReturnPathPeekerTwoFrontier",
       proof: "ProofRequirement::Ts7Oracle(OracleId::ValueInference)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "FlowReturn", "LowerLocator"],
-      consumed_mechanisms: ["QueryValueDomainFoundation"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "FlowReturn",
+        "LowerLocator",
+        "ClassifyTruthinessDomain",
+      ],
+      consumed_mechanisms: ["QueryValueDomainFoundation", "CanonicalTypeAlgebraClosure"],
       unblocker:
         "lifted by U6.FLOW_RETURN_SUBSTRATE: `ReturnType<typeof bodyReturn>` solves the two-return-site body through the demand-sliced FlowReturn dispatch to the exact per-arm union (`as const` discriminants preserved, `value` widened to `number`), proven against the checked-in tsgo oracle snapshot via oracle::run_row",
     },
@@ -3564,6 +3579,9 @@ const KEY_OWNING_BLOCK = new Map([
   ["ResolveCall", "U6CallResolve"],
   ["ContextualTypeAt", "U6ContextualCallback"],
   ["ResolveMacroPayload", "U14MacroAdapter"],
+  // The demand-scoped truthiness-domain classifier is the canonical
+  // type algebra's own key (flow narrowing frames consume the fact).
+  ["ClassifyTruthinessDomain", "U2CanonicalTypeAlgebra"],
 ]);
 
 function reaches(fromBlock, target) {

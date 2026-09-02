@@ -1051,6 +1051,26 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
                 "resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
         },
+        // ClassifyTruthinessDomain { subject } — demand-scoped, modeless
+        // truthiness-domain classification owned by the canonical
+        // semantic-types layer: a structural walk over the interned subject
+        // (union/intersection arms, template quasis + placeholder types,
+        // surface emptiness, type-parameter constraint nodes) that never
+        // resolves references or inlines aliases, so `T L J` like the
+        // normalization queries. LIVE producer; value domain is
+        // `TruthinessDomain`, NOT `TypeNode`. Only a FULLY decided domain
+        // admits — an `Undecided` bucket or an incomplete walk is
+        // `ReturnOnly`. Carries no `mode` → no demand axes.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ClassifyTruthinessDomain,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "(subject)",
+            value_domain: SemanticQueryValueTag::TruthinessDomain,
+            env_dims: EnvDimSpec::Static(env_structural()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "",
+            admission: AdmissionSpec::Singleflight,
+        },
     ]
 }
 
@@ -1089,6 +1109,7 @@ fn render_value_domain(tag: SemanticQueryValueTag) -> &'static str {
         SemanticQueryValueTag::MaterializationCycleGate => "MaterializationCycleGate",
         SemanticQueryValueTag::FlowReturn => "FlowReturn",
         SemanticQueryValueTag::ResolveCall => "ResolveCall",
+        SemanticQueryValueTag::TruthinessDomain => "TruthinessDomain",
         SemanticQueryValueTag::DiagnosticAnalysis => "DiagnosticAnalysis",
     }
 }

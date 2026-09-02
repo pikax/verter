@@ -183,6 +183,26 @@ boundary; it contains no independently dispatchable subblocks.
   `SealedFlowCompletion` / `CompleteFlowResult` is minted — the cache gate requires
   the proof's value to equal the admitted value exactly; in display." TA1B owns
   landing the final idempotent pre-seal closure at exactly the sanctioned boundary.
+- **Correction to the heritage-carrier rationale quoted above (stale wording, do not
+  cite as-is).** The quoted rationale's claim that "commutative sorting or dedup
+  would break own-body-last precedence and overload order" is STALE for the
+  precedence half. `decisions/2026-08-31-canonical-type-algebra-predecessor.md` →
+  "Correction: why the heritage carrier is excluded" measured it directly: planting
+  a canonical sort of the heritage carrier's arms failed ZERO tests across the
+  merged-declaration, heritage and shadow suites, and an unambiguous reversal still
+  left every value-level "own body shadows inherited member" test green — every
+  reachable consumer resolves own-versus-heritage member conflicts through the role
+  stamp and topology classification re-derived at the consumption site, never
+  through the arm's position. Member-type precedence is therefore
+  order-INDEPENDENT today, and the quoted rationale's stated justification does not
+  hold for it. What the order actually protects is the RENDERED TYPE TEXT /
+  authored-order display fidelity: a reordered carrier renders `B & A & { x: number
+  }` where the authored type is `A & B & { x: number }`, changing hover and display
+  output. The overload-order half of the quoted rationale stands as stated — it is
+  genuinely pinned by an existing assertion reading the first and last projected
+  signature. TA1B's construction-site closure still excludes these ordered
+  carriers per the Enforcement exclusion list above; the reason to cite is display
+  and authored-order fidelity, not member precedence.
 - **Alias and policy discipline.** "Alias and source identity are preserved through
   carriers and origin edges; normalization never inlines aliases or whole
   declaration graphs, and normalizes only the already-demanded semantic portion.
@@ -206,7 +226,7 @@ boundary; it contains no independently dispatchable subblocks.
 
 ## Acceptance IDs and discriminating proof
 
-Preflight evidence selection: preserve all five acceptance outcomes below, then
+Preflight evidence selection: preserve all four acceptance outcomes below, then
 select the smallest evidence set that actually discriminates the touched contract.
 Existing behavioral coverage, compiler/type/capability enforcement, static
 validation, canonical gates, bounded inspection, and benchmarks are valid when
@@ -241,18 +261,6 @@ accompanied by a terse rationale.
   closure pass — no unbounded global fingerprint or representative cache. Use
   applicable existing counters, inspection, or benchmarks; otherwise record a terse
   not-applicable rationale.
-- **TA1B-AC5 — environment-scoped callability:** classify `keyof`, string primitive,
-  and string-literal carriers through the existing apparent-type authority as
-  `Callable`, `SignatureFree`, or `Unknown`; never infer signature-freedom from the
-  raw graph shape. `Callable` and `Unknown` preserve the raw authored-order overload
-  carrier; only `SignatureFree` may enter `canonical_intersection`. A table-driven
-  two-project test demands the same interned carriers for `keyof { k: 0 }`, `string`,
-  and `"literal"`: one project's ambient `String` has a call signature and preserves
-  adversarial authored order with the pinned TypeScript overload result, while the
-  other's is signature-free and canonicalizes with ordering and deduplication. A
-  missing or unresolved ambient row remains raw and is not warm-admitted;
-  re-registering `String` invalidates the prior result; and neither project may
-  warm-hit the other's classification.
 - Every proposed new test must name a plausible regression or contract boundary not
   already discriminated; prose/format assertions are allowed only when those bytes
   are the public contract. Do not add implementation mirrors, duplicate
@@ -351,10 +359,13 @@ FIX_REQUIRED disposition.
 
 ## Trusted implementation ledger
 
-Before squashing or review, the implementation patch transitions this node's predeclared row in `authority/state/implemented.toml` from `status = "pending"` to `status = "implemented"` with the planned squash commit message, approximate date with timezone, and optional pull-request number. The transitioned row is the implementation fact. Commit metadata is a loose locator only and is
-never resolved or validated against Git or GitHub. Reviewers inspect the squashed
-candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound
-orchestration manifests.
+Before squashing or review, the implementation patch transitions this node's
+predeclared row in `authority/state/implemented.toml` from `status = "pending"`
+to `status = "implemented"` with the planned squash commit message, approximate
+date with timezone, and optional pull-request number. The transitioned row is the
+implementation fact. Commit metadata is a loose locator only and is never resolved or
+validated against Git or GitHub. Reviewers inspect the squashed candidate patch without
+SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
 
 ## Boundary correction inherited from the predecessor's review
 
@@ -376,7 +387,7 @@ remaining site, this node cannot silently miss one, which is precisely why the
 architecture authority refused a split around the sites that happened to be published
 at measurement time.
 
-## Apparent-type callability policy
+## Inherited observation — apparent-type callability is wider than the carriers already moved
 
 The predecessor's closing round moved arrays, tuples and template literals from
 "provably yields no call signatures" to the fail-closed arm, after measuring against
@@ -384,19 +395,26 @@ the pinned compiler that a global interface augmentation makes values of all thr
 callable. Mapped types and object-spread programs were verified genuinely
 signature-free and stayed.
 
-The same argument extends further: a `keyof` domain and the string primitive and
-string-literal carriers are equally callable under a `String` augmentation. TA1B
-therefore owns a real, environment-scoped apparent-type callability classification;
-it must not decide from those carriers' raw graph shapes. This completes and consumes
-the existing `ApparentType` authority rather than introducing a parallel classifier.
+The same argument extends further and was deliberately NOT acted on there: a `keyof`
+domain and the string primitive and string literal carriers are equally callable under
+a `String` augmentation. Moving them too would have broadly disabled the canonical
+route for member-value intersections, which is a scope decision this node is the right
+place to make rather than a closing round on its predecessor.
 
-The classification has three outcomes: `Callable`, `SignatureFree`, and `Unknown`.
-Resolve string primitives and literals through the demand project's ambient `String`
-surface. Reduce a `KeyOf` carrier through the existing semantic query, then classify
-the resulting apparent domain. `Callable` or `Unknown` preserves the raw authored-order
-overload carrier; only `SignatureFree` may enter `canonical_intersection`. Missing
-scope, ambient lookup failure, unresolved `keyof`, recursion, or budget exhaustion is
-`Unknown`, never proof of signature-freedom. Ambient reads enter the ordinary fact/read
-set, and no graph-only guess or global policy boolean is permitted. This preserves
-canonicalization for genuinely signature-free carriers without silently reversing an
-overload set when project-local augmentation makes the same carrier callable.
+The implementation therefore had to choose between admitting those carriers to the
+fail-closed arm or adding a real apparent-type callability question. It could not retain
+the disproven claim that those carriers never yield call signatures, because that would
+silently reverse an overload set.
+
+RESOLVED in the landed implementation
+(`walk.rs::value_may_contribute_call_signatures`): the augmentable
+apparent-type carriers — a deferred `keyof` shell, and every surface whose
+global backing interface user code may legally augment with a call signature
+(`Array` / `String`, so arrays, tuples, and template literals) — joined the
+fail-closed possibly-callable arm and preserve their raw ordered form. SCALAR
+primitive and literal arms alone stay on the canonical route, by the measured
+order-safety argument rather than a shape guess: different-domain scalar pairs
+collapse to `never` before any ordering exists, and same-domain scalar arms
+share one backing interface's signature list, so commutative reordering is
+unobservable to overload resolution. No documented never-callable claim
+remains for the augmentable carriers.

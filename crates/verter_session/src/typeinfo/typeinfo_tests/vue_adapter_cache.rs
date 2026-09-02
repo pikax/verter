@@ -560,7 +560,6 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
     let TypeInfoSurface {
         entries,
         members,
-        members_complete,
         call_signatures,
         construct_signatures,
         index_signatures,
@@ -569,7 +568,6 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
     } = &surface.surface;
     let _entries: &Arc<[crate::typeinfo::surface::TypeInfoSurfaceEntry]> = entries;
     let _members: &Arc<[TypeInfoSurfaceMember]> = members;
-    let _members_complete: &bool = members_complete;
     let _call_signatures: &Arc<[TypeInfoSurfaceSignature]> = call_signatures;
     let _construct_signatures: &Arc<[TypeInfoSurfaceSignature]> = construct_signatures;
     let _index_signatures: &Arc<[TypeInfoIndexSignature]> = index_signatures;

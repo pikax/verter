@@ -73,7 +73,11 @@ fn build_diamond(
     let mut cur = leaf;
     for _ in 0..n {
         let alias = graph.intern_node(SemanticNodeData::Alias(cur));
-        cur = graph.intern_node(SemanticNodeData::Union(Arc::from(vec![alias, alias])));
+        cur = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(vec![
+                alias, alias,
+            ])),
+        ));
     }
     cur
 }
@@ -413,11 +417,15 @@ fn wide_unique_union_result_is_bounded_by_halt_not_grown_to_n() {
             ))))
         })
         .collect();
-    let wide = graph.intern_node(SemanticNodeData::Union(Arc::from(leaves)));
+    let wide = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(leaves)),
+    ));
     // `top` re-merges `wide`'s memoized set through ONE arm: the merge loop then
     // carries all N candidates with NO intervening `enter_node` charge, so the
     // per-insert halt is the only thing that can bound it.
-    let top = graph.intern_node(SemanticNodeData::Union(Arc::from(vec![wide])));
+    let top = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(vec![wide])),
+    ));
 
     // Measure the full cost `total` under a generous budget (separate install).
     // All N distinct candidates are produced. This self-calibrates the cap below,

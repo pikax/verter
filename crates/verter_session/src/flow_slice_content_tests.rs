@@ -24,8 +24,9 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
     FlowSliceSelection, SliceBindingKind, SliceCall, SliceCallSite, SliceContent, SliceExpr,
-    SliceGuard, SliceGuardLiteral, SliceNarrowRoot, SliceObjectEntry, SliceObjectMember,
-    SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind, SliceUnsupported,
+    SliceFreshness, SliceGuard, SliceGuardLiteral, SliceNarrowRoot, SliceObjectEntry,
+    SliceObjectMember, SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind,
+    SliceUnsupported,
 };
 
 /// The MEMBER entries of a structural object literal, in authored order.
@@ -228,7 +229,7 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
             &consequent.statements[0],
             SliceStatement::Return {
                 argument: Some(SliceExpr::Type(leaf)),
-                widening_literal: true,
+                freshness: SliceFreshness::Fresh,
             } if matches!(leaf.ty(), TypeExpr::Literal(LiteralValue::Number(_)))
         ),
         "a return argument PRESERVES its fresh literal and flags it: tsc \
@@ -243,7 +244,7 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
             &alternate.statements[0],
             SliceStatement::Return {
                 argument: Some(SliceExpr::Type(leaf)),
-                widening_literal: true,
+                freshness: SliceFreshness::Fresh,
             } if matches!(leaf.ty(), TypeExpr::Literal(LiteralValue::String(_)))
         ),
         "the else arm likewise preserves its fresh literal"
@@ -292,7 +293,7 @@ fn bare_return_carries_no_argument() {
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
             argument: None,
-            widening_literal: false,
+            freshness: SliceFreshness::Pinned,
         }],
     );
 }
@@ -379,6 +380,89 @@ fn selected_loop_transfers_are_unsupported_but_inert_loops_stay_transparent() {
         ),
         "an inert arithmetic control read must not turn the loop into a transfer"
     );
+}
+
+/// Whether any statement of `region` — recursing through the lowered
+/// containers the fixtures below nest loops under — is the typed loop
+/// refusal.
+fn region_contains_unsupported_loop(region: &SliceRegion) -> bool {
+    region.statements.iter().any(|statement| match statement {
+        SliceStatement::Unsupported(SliceUnsupported::Loop) => true,
+        SliceStatement::Labeled { body, .. } => region_contains_unsupported_loop(body),
+        SliceStatement::Block(body) => region_contains_unsupported_loop(body),
+        SliceStatement::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            region_contains_unsupported_loop(consequent)
+                || alternate
+                    .as_deref()
+                    .is_some_and(region_contains_unsupported_loop)
+        }
+        _ => false,
+    })
+}
+
+/// A `break <label>` targeting an ENCLOSING lowered construct is a control
+/// transfer the transparent loop summary cannot carry: the loop's body
+/// vanishes with the lowering, the labeled exit edge vanishes with it, the
+/// enclosing `Labeled`'s `may_break` never records the exit — so
+/// contributors reachable only through the break are dropped and code the
+/// break skips is treated reachable. Measured against the checker,
+/// `outer: { for (;;) { break outer } return 0 } return x` on
+/// `x: string | null` is `string | 0 | null` (transparency published
+/// `number`), and the guarded twin is `0 | null`. Such a loop takes the
+/// typed refusal, exactly like a return-bearing one.
+///
+/// The escaping fixtures are deliberately OUTSIDE the selected-transfer
+/// nets: an unconditional break, and one whose path condition reads a slot
+/// with no downstream-selected read inside the loop — neither a guard, a
+/// call, a write, nor an invoked closure catches them.
+///
+/// The refusal is about the TARGET, not the label: a label chain DIRECTLY
+/// wrapping the loop names the loop's own exit — its continuation IS the
+/// loop's fall-through point — so those shapes keep the transparent path
+/// (measured: every direct-wrap control below stays `string | null`).
+#[test]
+fn loop_break_to_enclosing_label_refuses_while_direct_wrap_labels_stay_transparent() {
+    for source in [
+        // Unconditional break out of a labeled BLOCK: skips `return 0`.
+        "export {};\nfunction f(x: string | null) { outer: { for (;;) { break outer } return 0 } return x }",
+        // The path condition reads `x`, but no read inside the loop
+        // reaches a downstream-selected slot: the guard net stays silent.
+        "export {};\nfunction f(x: string | null) { outer: { if (x === null) { for (;;) { break outer } } return 0 } return x }",
+    ] {
+        let node = content_for(source, "f");
+        assert!(
+            region_contains_unsupported_loop(&node.body),
+            "a break to an enclosing lowered target must refuse the loop: {source}"
+        );
+    }
+
+    // Positive controls: a label chain directly wrapping the loop is the
+    // loop's own exit, and a break/continue from a NESTED loop to the
+    // classified outer loop's direct label stays inside the transparent
+    // summary's continuation.
+    for source in [
+        "export {};\nfunction f(x: string | null) { outer: for (;;) { break outer } return x }",
+        "export {};\nfunction f(x: string | null) { a: b: for (;;) { break a } return x }",
+        "export {};\nfunction f(x: string | null) { outer: for (;;) { for (;;) { break outer } } return x }",
+        "export {};\nfunction f(x: string | null) { outer: for (;;) { for (;;) { continue outer } } return x }",
+    ] {
+        let node = content_for(source, "f");
+        assert!(
+            !region_contains_unsupported_loop(&node.body),
+            "a direct-wrap label is the loop's own exit and must stay transparent: {source}"
+        );
+        assert!(
+            node.body.statements.iter().any(|statement| matches!(
+                statement,
+                SliceStatement::Labeled { .. } | SliceStatement::TransparentLoop
+            )),
+            "the transparent lowering must survive: {source}"
+        );
+    }
 }
 
 /// @ai-generated - unknown logical operands stay explicit so the evaluator
@@ -3196,7 +3280,7 @@ fn return_of_parameter_is_param_carrier() {
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
             argument: Some(SliceExpr::Param { ordinal: 0 }),
-            widening_literal: false,
+            freshness: SliceFreshness::Pinned,
         }],
     );
 }
@@ -3246,7 +3330,7 @@ fn local_reaching_definition_is_binding_and_local() {
         kind,
         init,
         declared,
-        widening_literal,
+        freshness,
     } = &node.body.statements[0]
     else {
         panic!("the first statement must be the const binding");
@@ -3265,7 +3349,7 @@ fn local_reaching_definition_is_binding_and_local() {
         "a const initializer keeps its literal: {init:?}"
     );
     assert!(
-        *widening_literal,
+        freshness.all_fresh(),
         "an unannotated bare-literal const is a WIDENING literal binding"
     );
     assert_eq!(
@@ -3276,7 +3360,7 @@ fn local_reaching_definition_is_binding_and_local() {
                 param: None,
                 captured: false,
             }),
-            widening_literal: false,
+            freshness: SliceFreshness::Pinned,
         },
     );
 }
@@ -3292,7 +3376,7 @@ fn direct_self_call_is_recursion_hold() {
                 SliceCall::DirectSelf,
                 SliceCallSite::new(0, false, false, verter_span::Span::new(26, 33)),
             )),
-            widening_literal: false,
+            freshness: SliceFreshness::Pinned,
         }],
     );
 }
@@ -3338,7 +3422,7 @@ fn symbolic_and_unrepresentable_calls() {
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
             argument: Some(SliceExpr::UnreducedCallValue),
-            widening_literal: false,
+            freshness: SliceFreshness::Pinned,
         }],
         "a `this` receiver is not modeled, so the call has no structural \
          arm and fails closed rather than fabricating `any`"
@@ -3532,7 +3616,7 @@ fn arrow_expression_body_is_single_return() {
             argument: Some(SliceExpr::Gap(
                 crate::semantic_query::FlowGap::UnmodeledExpression
             )),
-            widening_literal: false,
+            freshness: SliceFreshness::Pinned,
         }],
         "a binary expression is an unmodelled leaf, not semantic any"
     );
@@ -4595,29 +4679,48 @@ fn guard_narrowing_gap_lands_immediately_ahead_of_the_construct_never_inside_an_
 }
 
 // ---------------------------------------------------------------------------
-// A truthiness subject wrapped in the postfix non-null assertion — an
-// unmodeled member-access route the classifier must not silently accept.
+// A truthiness subject wrapped in the postfix non-null assertion — the
+// assertion names the reference, but the fact must not travel to the parent.
 // ---------------------------------------------------------------------------
 
-/// The postfix non-null assertion is transparent when it wraps the WHOLE
-/// test (`(expr)!`), but it is NOT a member-chain step this half's
-/// subject walker descends through: `x!.y` still reaches `y` through an
-/// access route [`narrow_subject_of`] cannot express, so the truthiness
-/// test over it must degrade — the same discipline already covers a
-/// computed and an optional member step.
+/// The postfix non-null assertion is transparent to reference identity at
+/// EVERY step of the subject walk, not only around a whole test: `x!.y`
+/// names the same reference as `x.y`, so the truthiness test over it is
+/// MODELLED on that reference rather than degrading as an inexpressible
+/// access route. Measured — `typeof a!.b === "string"` and
+/// `typeof a.b! === "string"` both narrow `a.b`.
+///
+/// The parent is a separate question, and the answer is NO: a truthiness
+/// fact on a non-discriminant property must not select arms of `x`
+/// itself. The checker keeps `undefined` in `x` after `if (x!.y)` —
+/// unlike `if (x?.y)`, where the optional chain itself proves
+/// `x != null`. Propagating this fact upward would drop a real
+/// contributor, the SUBSET direction. The published-surface half of that
+/// fence is the `truthy3_non_null_asserted_member_keeps_parent_union`
+/// case of `truthiness_domain_facts_narrow_like_the_checker`.
 #[test]
-fn truthiness_of_a_non_null_asserted_member_subject_takes_the_typed_gap() {
+fn truthiness_of_a_non_null_asserted_member_subject_names_the_asserted_reference() {
     let node = content_for(
         "export {};\nfunction f(x: { y: number } | undefined) { if (x!.y) { return x } return 0 }",
         "f",
     );
-    assert!(
-        matches!(if_guard(&node), SliceGuard::None),
-        "an inexpressible access route degrades to the explicit None: {node:?}"
+    let SliceGuard::Truthy { subject, negated } = if_guard(&node) else {
+        panic!("the asserted reference is modelled, not degraded: {node:?}");
+    };
+    assert!(!negated, "a bare truthiness test is not negated: {node:?}");
+    assert_eq!(
+        subject.root,
+        SliceNarrowRoot::Param(0),
+        "the assertion is peeled to the parameter it wraps: {node:?}"
+    );
+    assert_eq!(
+        subject.path.as_ref(),
+        [Arc::<str>::from("y")],
+        "the member step survives the peel as the narrowed path: {node:?}"
     );
     assert_eq!(
         guard_gap_count(&node),
-        1,
-        "a non-null-asserted member subject takes the typed gap: {node:?}"
+        0,
+        "a reference this half CAN express carries no guard gap: {node:?}"
     );
 }

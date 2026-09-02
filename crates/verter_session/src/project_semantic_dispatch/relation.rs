@@ -317,6 +317,10 @@ pub(super) struct DrainedRelationMember {
 pub(super) struct DrainedFlowReturnMember {
     pub(super) key: crate::semantic_query::FlowReturnKey,
     pub(super) outcome: super::dispatch_txn::FlowReturnPendingOutcome,
+    /// The refusal recorded when this member's own demand could not be
+    /// planned — the batch reports it so the root classifies by the
+    /// cause that actually refused, not by its own clean preparation.
+    pub(super) plan_refusal: Option<super::dispatch_txn::flow_obligation_state::FlowPlanRefusal>,
     pub(super) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
     /// The coinductive hold targets the member's evaluation met — the SCC
     /// close discharges an empty-cycle member on its targets' admitted
@@ -379,6 +383,13 @@ pub(super) struct RelationDischargeOutcome {
     /// flows to the caller, and nothing warms around an unproven
     /// flow-derived value.
     pub(super) flow_batch_unproven: bool,
+    /// The union of the partiality classes the refused members' recorded
+    /// causes belong to — empty when the batch is proven, or when the
+    /// refusal carried no cause. The root unions this into its own
+    /// class: its consumers must see a member's budget edge or torn view
+    /// as the faulting class it is, not as the contained unverified
+    /// class the root's own clean preparation would report.
+    pub(super) flow_batch_partial_reasons: crate::semantic_query::PartialReasonSet,
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -1249,6 +1260,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     flow_members.push(DrainedFlowReturnMember {
                         key,
                         outcome: state.outcome,
+                        plan_refusal: state.plan_refusal,
                         inline_flight: state.inline_flight,
                         holds: state.holds,
                         self_roots: state.self_roots,
@@ -1446,10 +1458,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // the same funnel primitives the inline flow-root
                     // refusal folds (an answer composed around an
                     // unproven flow value must not warm).
+                    // A member refused for a budget edge or a torn
+                    // view faults consumers the contained unverified
+                    // class does not reach: the root's own preparation
+                    // being clean says nothing about why the batch was
+                    // refused.
                     self.fold_cache_read_rails(
                         true,
                         true,
-                        crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+                        crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED
+                            .union(outcome.flow_batch_partial_reasons),
                     );
                     if let Some(step) = outcome.self_step {
                         return FramePop::Provisional(step);
@@ -1859,7 +1877,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // to the caller but must never warm (`ReturnOnly`).
         let mut proven_flow_members = Vec::with_capacity(flow_members.len());
         let mut flow_batch_unproven = false;
+        let mut flow_batch_partial_reasons = crate::semantic_query::PartialReasonSet::default();
         for member in flow_members {
+            // Read before the outcome moves: the cause survives the
+            // member, because the close is where it is finally needed.
+            let member_plan_refusal = member.plan_refusal;
             // The member's per-key substitution applies BEFORE its value
             // leaves the component: the pop substituted only the
             // caller-return clone, so the value channel, the finalizer's
@@ -1868,9 +1890,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // finalizes.
             let outcome = match member.outcome {
                 FlowReturnPendingOutcome::EvaluatedValue(result) => {
-                    FlowReturnPendingOutcome::EvaluatedValue(
+                    // Per-key substitution, then the final idempotent
+                    // pre-seal closure — the member's proof, the value
+                    // channel and the batch publish all see the closed
+                    // value.
+                    FlowReturnPendingOutcome::EvaluatedValue(self.close_flow_result_pre_seal(
                         self.apply_frame_key_substitution(&member.key, result),
-                    )
+                    ))
                 }
                 no_value => no_value,
             };
@@ -1917,8 +1943,54 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         materialized: member.materialized,
                     });
                 }
-                _ => {
+                unproven => {
                     flow_batch_unproven = true;
+                    // The member's OWN cause, unioned rather than
+                    // ranked: two members refused for different reasons
+                    // leave the batch both over budget and unstable, and
+                    // picking one would drop a class a consumer needs.
+                    // Both cause channels are read — the recorded plan
+                    // refusal FIRST (it is the member's primary cause and
+                    // the finalizer's undischarged echo must not shadow
+                    // it), then the finalizer's typed partial. Two member
+                    // states deliberately contribute NO class of their
+                    // own: a cleanly-planned member whose obligations
+                    // were merely left pending carries the batch close's
+                    // OWN withholding signature (`IncompleteObligations`
+                    // — a genuinely budget-refused obligation reaches
+                    // here as a typed `Failed` budget record instead),
+                    // and a NO-VALUE member is already represented
+                    // POSITIONALLY in the value the root consumed (its
+                    // typed marker names the exact position; blanketing
+                    // the frame-wide missing-surface class here would
+                    // erase the faithfully-typed sibling members a
+                    // value-deriving consumer can still serve). The batch
+                    // stays unproven either way — nothing warms.
+                    let member_reasons = if member_plan_refusal.is_some() {
+                        super::flow_return::plan_refusal_reason_class(member_plan_refusal)
+                    } else {
+                        match &unproven {
+                            Some(super::flow_solve::FlowSolveOutcome::Partial(partial)) => {
+                                match &partial.reason {
+                                    super::flow_solve::FlowPartialReason::IncompleteObligations => {
+                                        crate::semantic_query::PartialReasonSet::default()
+                                    }
+                                    _ => super::flow_return::flow_partial_reason_class(
+                                        &partial.reason,
+                                        partial.value.degradation(),
+                                    ),
+                                }
+                            }
+                            Some(super::flow_solve::FlowSolveOutcome::NoValue(_)) | None => {
+                                crate::semantic_query::PartialReasonSet::default()
+                            }
+                            // Matched by the arm above.
+                            Some(super::flow_solve::FlowSolveOutcome::Complete(_)) => {
+                                unreachable!()
+                            }
+                        }
+                    };
+                    flow_batch_partial_reasons = flow_batch_partial_reasons.union(member_reasons);
                     self.flow_return_abort_inline_flight(member.inline_flight.as_ref());
                 }
             }
@@ -1935,6 +2007,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self_publish,
                 self_step,
                 flow_batch_unproven: true,
+                flow_batch_partial_reasons,
             });
         }
         let mut rootless_flights = Vec::new();
@@ -1967,6 +2040,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self_publish,
             self_step,
             flow_batch_unproven: false,
+            flow_batch_partial_reasons: crate::semantic_query::PartialReasonSet::default(),
         })
     }
 
@@ -2994,7 +3068,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             match data.as_ref() {
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
-                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());
                 }
                 SemanticNodeData::Array { element, .. } => stack.push(*element),
@@ -3707,7 +3782,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Alias(inner) => stack.push((*inner, shadowed)),
-                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().map(|member| (*member, shadowed)));
                 }
                 SemanticNodeData::Array { element, .. } => stack.push((*element, shadowed)),
@@ -4259,7 +4335,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match data.as_ref() {
             SemanticNodeData::Union(arms) => {
                 // Target disjunction: each arm is one accepting alternative.
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let mut branches = Vec::with_capacity(arms.len());
                 for arm in arms.iter() {
@@ -5216,14 +5292,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // ── Union/Intersection distribution ────────────────────────────
         if let SemanticNodeData::Union(members) = &*source_data {
-            let members = Arc::clone(members);
+            let members = members.members_arc();
             drop(source_data);
             drop(target_data);
             distribute_and(work, results, &members, |m| (*m, target));
             return;
         }
         if let SemanticNodeData::Union(members) = &*target_data {
-            let members = Arc::clone(members);
+            let members = members.members_arc();
             drop(source_data);
             drop(target_data);
             let alternatives: Vec<_> = members.iter().map(|member| (source, *member)).collect();
@@ -5235,7 +5311,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return;
         }
         if let SemanticNodeData::Intersection(members) = &*source_data {
-            let members = Arc::clone(members);
+            let members = members.members_arc();
             drop(source_data);
             drop(target_data);
             let alternatives: Vec<_> = members.iter().map(|member| (*member, target)).collect();
@@ -5247,7 +5323,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return;
         }
         if let SemanticNodeData::Intersection(members) = &*target_data {
-            let members = Arc::clone(members);
+            let members = members.members_arc();
             drop(source_data);
             drop(target_data);
             distribute_and(work, results, &members, |m| (source, *m));
@@ -5965,7 +6041,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 vec![Arc::from(super::build::js_number_to_string(*n).as_str())]
             }
             SemanticNodeData::Union(members) => {
-                let members = Arc::clone(members);
+                let members = members.members_arc();
                 drop(key_data);
                 let mut keys: Vec<Arc<str>> = Vec::with_capacity(members.len());
                 for member in members.iter() {

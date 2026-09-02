@@ -242,13 +242,15 @@ pub enum SliceStatement {
     Return {
         /// The lowered return argument, when present.
         argument: Option<SliceExpr>,
-        /// Whether the argument is a FRESH literal source (a bare
-        /// literal expression with no const assertion). tsc widens a
-        /// fresh literal return only when it is the function's SOLE
-        /// return contributor; a multi-contributor join keeps every
-        /// literal, so the widening decision belongs to the join, not
-        /// to this position.
-        widening_literal: bool,
+        /// The argument's freshness mirror ([`SliceFreshness::Fresh`] =
+        /// a bare literal expression with no const assertion; a ternary
+        /// recurses per arm). tsc widens a fresh literal return only
+        /// when it is the function's SOLE return contributor — a
+        /// multi-contributor join keeps every literal — so the widening
+        /// decision belongs to the join, not to this position; the
+        /// per-arm tree additionally tells the evaluator WHICH kept
+        /// constituents stay fresh on the sealed return.
+        freshness: SliceFreshness,
     },
     /// An `if` statement. Each arm is its own region; the test lowers to
     /// a [`SliceGuard`] — never to value content, since the evaluator
@@ -407,14 +409,18 @@ pub enum SliceStatement {
         /// body-local type declarations ARE in scope in it, so it always
         /// carries the frame gate's verdict.
         declared: Option<GatedType>,
-        /// Whether the binding carries a WIDENING literal type: an
-        /// unannotated `const` whose initializer is a bare literal
-        /// expression with no const assertion (`const b = 1`). Reads of
-        /// such a binding widen to the literal's primitive at
-        /// return-object member positions and at the return join —
-        /// `1 as const` / an annotated `const b: 1` stay non-widening
-        /// and preserve the literal.
-        widening_literal: bool,
+        /// The initializer's FRESHNESS shape for an unannotated `const` —
+        /// the evaluator's widening-membership input, mirroring the
+        /// lowered value tree exactly as an assignment's does. An
+        /// all-fresh tree (`const b = 1`, `f ? 1 : "s"`) is the classic
+        /// widening-literal binding: reads widen every literal arm at
+        /// return-object member positions and at the return join. A MIXED
+        /// tree carries per-arm verdicts, so the evaluator widens exactly
+        /// the fresh arms and keeps authored pins (`1 as const`, a call,
+        /// a reference). Annotated declarators and `let` / `var` (whose
+        /// bare literal initializers already widened at lowering) stay
+        /// `Pinned`.
+        freshness: SliceFreshness,
     },
     /// A return-free loop with no selected downstream transfer: fall-through
     /// transparent because no captured guard, call, write, or escaping `var`
@@ -1666,6 +1672,7 @@ pub(crate) fn build_flow_slice_content(
         active_guard_bindings: Vec::new(),
         active_guard_names: Vec::new(),
         break_targets: Vec::new(),
+        loop_direct_labels: Vec::new(),
         break_target_followed_by_return: Vec::new(),
         current_statement_followed_by_return: false,
     };
@@ -1688,7 +1695,7 @@ pub(crate) fn build_flow_slice_content(
                 can_fall_through: false,
             }
         } else {
-            let widening_literal = expr_is_bare_literal(&expression.expression);
+            let freshness = expression_freshness(&expression.expression);
             let argument = if lowerer.value_span_selected(expression.expression.span()) {
                 lowerer.lower_expr(&expression.expression, ExprMode::Return)
             } else {
@@ -1705,7 +1712,7 @@ pub(crate) fn build_flow_slice_content(
             }
             statements.push(SliceStatement::Return {
                 argument: Some(argument),
-                widening_literal,
+                freshness,
             });
             SliceRegion {
                 statements: Arc::from(statements.into_boxed_slice()),
@@ -2231,14 +2238,45 @@ pub enum SliceFreshness {
     PerArm(Arc<[SliceFreshness]>),
 }
 
-/// The freshness mirror for one assignment right-hand side. See
+impl SliceFreshness {
+    /// Whether EVERY leaf of the tree is fresh (and the tree is
+    /// non-empty) — the classic widening-literal shape.
+    #[must_use]
+    pub fn all_fresh(&self) -> bool {
+        match self {
+            Self::Fresh => true,
+            Self::Pinned => false,
+            Self::PerArm(arms) => !arms.is_empty() && arms.iter().all(Self::all_fresh),
+        }
+    }
+
+    /// Whether ANY leaf of the tree is fresh.
+    #[must_use]
+    pub fn any_fresh(&self) -> bool {
+        match self {
+            Self::Fresh => true,
+            Self::Pinned => false,
+            Self::PerArm(arms) => arms.iter().any(Self::any_fresh),
+        }
+    }
+
+    /// Whether the tree mixes fresh and pinned leaves — the shape whose
+    /// widening decision needs PER-ARM evaluation.
+    #[must_use]
+    pub fn is_mixed(&self) -> bool {
+        self.any_fresh() && !self.all_fresh()
+    }
+}
+
+/// The freshness mirror for one value expression — an assignment or
+/// binding right-hand side, or a `return` argument. See
 /// [`SliceFreshness`] for the alignment contract with `lower_expr`.
-fn assignment_rhs_freshness(expression: &Expression<'_>) -> SliceFreshness {
+fn expression_freshness(expression: &Expression<'_>) -> SliceFreshness {
     match expression {
-        Expression::ParenthesizedExpression(paren) => assignment_rhs_freshness(&paren.expression),
+        Expression::ParenthesizedExpression(paren) => expression_freshness(&paren.expression),
         Expression::ConditionalExpression(conditional) => SliceFreshness::PerArm(Arc::from([
-            assignment_rhs_freshness(&conditional.consequent),
-            assignment_rhs_freshness(&conditional.alternate),
+            expression_freshness(&conditional.consequent),
+            expression_freshness(&conditional.alternate),
         ])),
         _ => {
             if expr_is_bare_literal(expression) {
@@ -2258,6 +2296,131 @@ fn declares_var(statement: &Statement<'_>) -> bool {
     !inventory_statement_list(std::slice::from_ref(statement))
         .var_names
         .is_empty()
+}
+
+/// Whether a labeled statement's body chain terminates at a loop it
+/// DIRECTLY wraps: a chain of labeled statements whose terminal body is
+/// the loop itself, with nothing in between. A `break` naming such a
+/// label is the loop's own exit — the label's continuation IS the loop's
+/// fall-through point — and a `continue` naming it is the loop's own
+/// iteration edge, so neither transfers control past lowered content.
+fn label_directly_wraps_loop(body: &Statement<'_>) -> bool {
+    let mut body = body;
+    loop {
+        match body {
+            Statement::LabeledStatement(labeled) => body = &labeled.body,
+            Statement::DoWhileStatement(_)
+            | Statement::ForInStatement(_)
+            | Statement::ForOfStatement(_)
+            | Statement::ForStatement(_)
+            | Statement::WhileStatement(_) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Whether the loop statement's tree contains a labeled `break` /
+/// `continue` whose target resolves OUTSIDE the loop: the label is
+/// neither defined within the walked tree nor one of `direct_labels`
+/// (the labels directly wrapping the walked loop — see
+/// [`label_directly_wraps_loop`]). Such a jump exits THROUGH the
+/// transparent summary into an enclosing lowered construct: the loop's
+/// body vanishes with the lowering, so the labeled exit edge would
+/// vanish with it — the enclosing `Labeled`'s `may_break` never records
+/// the exit, contributors reachable only through the break are dropped,
+/// and code the break skips is treated reachable (measured:
+/// `outer: { for (;;) { break outer } return 0 } return x` on
+/// `x: string | null` is `string | 0 | null`; transparency published
+/// `number`). The loop takes the typed refusal instead, exactly like a
+/// return-bearing one — this deliberately does not carry the edge.
+///
+/// Nested function/class frames are never entered, and need not be: a
+/// label cannot cross a function boundary, so every labeled jump this
+/// walk can see belongs to the walked frame, and a jump inside a nested
+/// frame can only target a label inside that frame. Unlabeled jumps
+/// always bind within the loop (the loop itself, or a nested
+/// loop/switch) and never escape it.
+fn loop_transfers_to_enclosing_label(
+    loop_statement: &Statement<'_>,
+    direct_labels: &[Arc<str>],
+) -> bool {
+    fn target_escapes(
+        label: Option<&oxc_ast::ast::LabelIdentifier<'_>>,
+        locals: &[&str],
+        direct: &[Arc<str>],
+    ) -> bool {
+        let Some(label) = label else {
+            return false;
+        };
+        let name = label.name.as_str();
+        !locals.contains(&name) && !direct.iter().any(|direct| &**direct == name)
+    }
+    fn walk_statement<'a>(
+        statement: &'a Statement<'a>,
+        locals: &mut Vec<&'a str>,
+        direct: &[Arc<str>],
+    ) -> bool {
+        match statement {
+            Statement::BreakStatement(break_stmt) => {
+                target_escapes(break_stmt.label.as_ref(), locals, direct)
+            }
+            Statement::ContinueStatement(continue_stmt) => {
+                target_escapes(continue_stmt.label.as_ref(), locals, direct)
+            }
+            Statement::LabeledStatement(labeled) => {
+                locals.push(labeled.label.name.as_str());
+                let escapes = walk_statement(&labeled.body, locals, direct);
+                locals.pop();
+                escapes
+            }
+            Statement::BlockStatement(block) => block
+                .body
+                .iter()
+                .any(|statement| walk_statement(statement, locals, direct)),
+            Statement::IfStatement(if_stmt) => {
+                walk_statement(&if_stmt.consequent, locals, direct)
+                    || if_stmt
+                        .alternate
+                        .as_ref()
+                        .is_some_and(|alternate| walk_statement(alternate, locals, direct))
+            }
+            Statement::DoWhileStatement(do_while) => walk_statement(&do_while.body, locals, direct),
+            Statement::WhileStatement(while_stmt) => {
+                walk_statement(&while_stmt.body, locals, direct)
+            }
+            Statement::ForStatement(for_stmt) => walk_statement(&for_stmt.body, locals, direct),
+            Statement::ForInStatement(for_in) => walk_statement(&for_in.body, locals, direct),
+            Statement::ForOfStatement(for_of) => walk_statement(&for_of.body, locals, direct),
+            Statement::SwitchStatement(switch) => switch.cases.iter().any(|case| {
+                case.consequent
+                    .iter()
+                    .any(|statement| walk_statement(statement, locals, direct))
+            }),
+            Statement::TryStatement(try_stmt) => {
+                try_stmt
+                    .block
+                    .body
+                    .iter()
+                    .any(|statement| walk_statement(statement, locals, direct))
+                    || try_stmt.handler.as_ref().is_some_and(|handler| {
+                        handler
+                            .body
+                            .body
+                            .iter()
+                            .any(|statement| walk_statement(statement, locals, direct))
+                    })
+                    || try_stmt.finalizer.as_ref().is_some_and(|finalizer| {
+                        finalizer
+                            .body
+                            .iter()
+                            .any(|statement| walk_statement(statement, locals, direct))
+                    })
+            }
+            Statement::WithStatement(with_stmt) => walk_statement(&with_stmt.body, locals, direct),
+            _ => false,
+        }
+    }
+    walk_statement(loop_statement, &mut Vec::new(), direct_labels)
 }
 
 /// Whether entering this statement guarantees that the current function
@@ -2772,6 +2935,17 @@ struct Lowerer<'a> {
     /// accept unlabeled breaks), a labeled one the innermost matching
     /// name. Loop bodies never lower, so a loop is never an entry.
     break_targets: Vec<Option<Arc<str>>>,
+    /// The labels whose statements DIRECTLY wrap the loop currently being
+    /// classified for transparency: a chain of labeled statements whose
+    /// terminal body is the loop itself, with nothing in between. A
+    /// `break`/`continue` naming one of these is the loop's OWN exit or
+    /// iteration edge — the label's continuation IS the loop's
+    /// fall-through point — so it never transfers control past a lowered
+    /// construct and does not defeat transparency. Distinct from
+    /// [`Self::break_targets`], which also carries labels separated from
+    /// the loop by an intervening statement (a block with statements after
+    /// the loop): breaking to THOSE skips lowered content.
+    loop_direct_labels: Vec<Arc<str>>,
     /// For each break target, whether the target statement has a guaranteed
     /// current-function return later in its enclosing statement list. A
     /// pending break contributes implicit `undefined` only when its
@@ -3891,7 +4065,10 @@ impl Lowerer<'_> {
             let statement_start = out.len();
             match statement {
                 Statement::ReturnStatement(ret) => {
-                    let widening_literal = ret.argument.as_ref().is_some_and(expr_is_bare_literal);
+                    let freshness = ret
+                        .argument
+                        .as_ref()
+                        .map_or(SliceFreshness::Pinned, expression_freshness);
                     let argument = ret.argument.as_ref().map(|arg| {
                         if self.value_span_selected(arg.span()) {
                             self.lower_expr(arg, ExprMode::Return)
@@ -3904,7 +4081,7 @@ impl Lowerer<'_> {
                     });
                     out.push(SliceStatement::Return {
                         argument,
-                        widening_literal,
+                        freshness,
                     });
                     can_fall_through = false;
                 }
@@ -4085,20 +4262,35 @@ impl Lowerer<'_> {
                                 &[],
                             )
                         });
-                        // A WIDENING literal binding: an unannotated
-                        // `const` initialized from a bare literal with no
-                        // const assertion. `let` / `var` initializers
-                        // already widened at `BindingInit` lowering, and
-                        // an annotated `const` takes its declared type.
-                        let widening_literal = kind == SliceBindingKind::Const
-                            && declared.is_none()
-                            && declarator.init.as_ref().is_some_and(expr_is_bare_literal);
+                        // The initializer's FRESHNESS shape for an
+                        // unannotated `const` — the evaluator's widening
+                        // membership input. An all-fresh tree (a bare
+                        // literal, or a conditional whose EVERY leaf is
+                        // one — `f ? 1 : "s"`) is the classic
+                        // widening-literal binding: the checker widens
+                        // every arm at a widening read (`{ label: v }`
+                        // reads `string | number`). A MIXED tree (an
+                        // `as const` arm, a call, a reference beside a
+                        // fresh leaf) carries per-arm verdicts so the
+                        // evaluator widens exactly the fresh arms and
+                        // keeps the authored pins. `let` / `var`
+                        // initializers already widened at `BindingInit`
+                        // lowering, and an annotated `const` takes its
+                        // declared type — both stay `Pinned` here.
+                        let freshness = if kind == SliceBindingKind::Const && declared.is_none() {
+                            declarator
+                                .init
+                                .as_ref()
+                                .map_or(SliceFreshness::Pinned, expression_freshness)
+                        } else {
+                            SliceFreshness::Pinned
+                        };
                         out.push(SliceStatement::Binding {
                             name: Arc::from(id.name.as_str()),
                             kind,
                             init,
                             declared,
-                            widening_literal,
+                            freshness,
                         });
                     }
                 }
@@ -4138,13 +4330,18 @@ impl Lowerer<'_> {
                 | Statement::ForStatement(_)
                 | Statement::WhileStatement(_) => {
                     // A return-free loop is fall-through TRANSPARENT only
-                    // while it binds nothing that outlives it and carries no
+                    // while it binds nothing that outlives it, transfers
+                    // no control past a lowered construct, and carries no
                     // unmodelled transfer for a downstream-selected slot. A
-                    // `var` declaration escapes the loop; a selected guard,
-                    // call/assertion, or write depends on iteration flow.
-                    // Either shape takes the existing typed loop refusal.
+                    // `var` declaration escapes the loop; a `break`/
+                    // `continue` naming an enclosing label exits an edge
+                    // the vanished body can no longer record; a selected
+                    // guard, call/assertion, or write depends on iteration
+                    // flow. Every shape takes the existing typed loop
+                    // refusal.
                     if self.control_has_return(statement)
                         || declares_var(statement)
+                        || loop_transfers_to_enclosing_label(statement, &self.loop_direct_labels)
                         || self.loop_has_selected_transfer(statement)
                     {
                         out.push(SliceStatement::Unsupported(SliceUnsupported::Loop));
@@ -4163,7 +4360,18 @@ impl Lowerer<'_> {
                     self.break_targets.push(Some(Arc::clone(&label)));
                     self.break_target_followed_by_return
                         .push(self.current_statement_followed_by_return);
+                    // A label chain directly wrapping a loop names the
+                    // loop's own exit/iteration edge: record it so the
+                    // loop's transparency classification treats a jump to
+                    // it as local rather than an escaping transfer.
+                    let direct_wrap = label_directly_wraps_loop(&labeled.body);
+                    if direct_wrap {
+                        self.loop_direct_labels.push(Arc::clone(&label));
+                    }
                     let child = self.lower_arm(&labeled.body);
+                    if direct_wrap {
+                        self.loop_direct_labels.pop();
+                    }
                     self.break_targets.pop();
                     self.break_target_followed_by_return.pop();
                     let mut absorbed = false;
@@ -4643,10 +4851,17 @@ impl Lowerer<'_> {
     /// WITHOUT degrading the enclosing statement.
     fn classify_guard(&mut self, test: &Expression<'_>) -> GuardDisposition {
         // The whole test rides the same reference-transparent wrappers a
-        // leaf reference does: `(typeof x === "string")!` and its
-        // `satisfies` twin still establish the inner fact, so the entry
-        // must peel them before dispatching or the composing forms behind
-        // one collapse to a proved absence of narrowing.
+        // leaf reference does — parentheses and the postfix non-null
+        // assertion ONLY: `(typeof x === "string")!` still establishes
+        // the inner fact, so the entry must peel them before dispatching
+        // or the composing forms behind one collapse to a proved absence
+        // of narrowing. `satisfies` and the `as` / angle-bracket type
+        // assertion are deliberately NOT peeled: neither is a matching
+        // reference for narrowing (measured, `typeof (x satisfies string
+        // | number) === "string"` narrows nothing), and peeling one would
+        // narrow where the checker does not — a SUBSET of the checker's
+        // type, which drops a real contributor. See
+        // [`unwrap_reference_transparent`].
         match unwrap_reference_transparent(test) {
             Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
                 self.classify_guard(&unary.argument).negated()
@@ -4763,11 +4978,15 @@ impl Lowerer<'_> {
     /// the arms, so the fact lands on the reference the expression NAMES.
     ///
     /// The reference is read through the checker's transparent wrappers
-    /// only — parentheses, the postfix non-null assertion and
-    /// `satisfies`. An `as` / angle-bracket type assertion is NOT one of
-    /// them: it is not a matching reference for narrowing, so a test
+    /// only — parentheses and the postfix non-null assertion.
+    /// `satisfies` and the `as` / angle-bracket type assertion are NOT
+    /// among them: neither is a matching reference for narrowing
+    /// (measured — `if ((x satisfies string | undefined))` leaves
+    /// `undefined` in the result, exactly like its `as` twin), so a test
     /// behind one establishes nothing and is proved inert rather than
-    /// degraded.
+    /// degraded. Peeling either would narrow where the checker does not —
+    /// a SUBSET of the checker's type, worse than the superset a missing
+    /// narrow produces. See [`unwrap_reference_transparent`].
     fn classify_truthiness_guard(&mut self, expression: &Expression<'_>) -> GuardDisposition {
         let reference = unwrap_reference_transparent(expression);
         match self.narrow_subject_of(reference) {
@@ -5685,14 +5904,31 @@ impl Lowerer<'_> {
     /// Anything else — a call result, a computed member, a captured or
     /// free root — is not positionally substitutable, so no narrow can
     /// land on it.
+    ///
+    /// Every step reads through [`unwrap_reference_transparent`], so the
+    /// wrappers the checker treats as transparent to reference identity —
+    /// parentheses and the postfix non-null assertion — name the SAME
+    /// subject as the bare spelling, at the root and at every member step:
+    /// `typeof x! === "string"` narrows `x`, `u!.kind === "a"` selects on
+    /// `u.kind`, and `typeof a.b!` narrows `a.b` (all measured). Reading
+    /// through parentheses ALONE left those spellings reference-less, so a
+    /// guard over one was classified unrecognized and the whole result
+    /// degraded behind a typed gap instead of narrowing.
+    ///
+    /// `satisfies` and the `as` / angle-bracket type assertion are
+    /// deliberately NOT transparent here: neither is a matching reference
+    /// for narrowing, so peeling one would narrow where the checker does
+    /// not — a SUBSET of the checker's type, which drops a real
+    /// contributor and is worse than the superset a missing narrow
+    /// produces.
     fn narrow_subject_of(&self, expression: &Expression<'_>) -> Option<SliceNarrowSubject> {
         let mut segments: Vec<Arc<str>> = Vec::new();
-        let mut current = unwrap_parenthesized(expression);
+        let mut current = unwrap_reference_transparent(expression);
         let identifier = loop {
             match current {
                 Expression::StaticMemberExpression(member) => {
                     segments.push(Arc::from(member.property.name.as_str()));
-                    current = unwrap_parenthesized(&member.object);
+                    current = unwrap_reference_transparent(&member.object);
                 }
                 Expression::Identifier(identifier) => break identifier,
                 _ => return None,
@@ -5881,7 +6117,7 @@ impl Lowerer<'_> {
             // IDENTIFIER — never the whole assignment expression.
             span: self.rebase(identifier.span),
             value: Box::new(value),
-            freshness: assignment_rhs_freshness(&assignment.right),
+            freshness: expression_freshness(&assignment.right),
         })
     }
 
@@ -6601,6 +6837,7 @@ impl Lowerer<'_> {
             active_guard_bindings: Vec::new(),
             active_guard_names: Vec::new(),
             break_targets: Vec::new(),
+            loop_direct_labels: Vec::new(),
             break_target_followed_by_return: Vec::new(),
             current_statement_followed_by_return: false,
         };
@@ -6632,11 +6869,11 @@ impl Lowerer<'_> {
                     .map(|statement| match statement {
                         Statement::ExpressionStatement(expression) => (
                             nested.lower_expr(&expression.expression, ExprMode::Return),
-                            expr_is_bare_literal(&expression.expression),
+                            expression_freshness(&expression.expression),
                         ),
                         _ => (
                             SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression),
-                            false,
+                            SliceFreshness::Pinned,
                         ),
                     });
                 // The expression body's ternary-test gap lands ahead of
@@ -6647,12 +6884,12 @@ impl Lowerer<'_> {
                         crate::semantic_query::FlowGap::GuardNarrowing,
                     ));
                 }
-                statements.extend(argument.map(|(argument, widening_literal)| {
-                    SliceStatement::Return {
+                statements.extend(
+                    argument.map(|(argument, freshness)| SliceStatement::Return {
                         argument: Some(argument),
-                        widening_literal,
-                    }
-                }));
+                        freshness,
+                    }),
+                );
                 SliceRegion {
                     statements: Arc::from(statements.into_boxed_slice()),
                     can_fall_through: false,

@@ -208,24 +208,34 @@ fn root_only_projection_root_kind_matches_full_fold() {
 
     // Collapsed-intersection cases (directly interned so lowering does NOT
     // pre-collapse them): the fold DROPS the `{}` arm and classifies the survivor.
-    let int_obj = graph.intern_node(SemanticNodeData::Intersection(StdArc::from(
-        vec![empty_obj, open_obj].into_boxed_slice(),
-    )));
-    let int_indexed = graph.intern_node(SemanticNodeData::Intersection(StdArc::from(
-        vec![empty_obj, indexed].into_boxed_slice(),
-    )));
-    let int_typeof = graph.intern_node(SemanticNodeData::Intersection(StdArc::from(
-        vec![empty_obj, typeof_node].into_boxed_slice(),
-    )));
+    let int_obj = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+            vec![empty_obj, open_obj].into_boxed_slice(),
+        )),
+    ));
+    let int_indexed = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+            vec![empty_obj, indexed].into_boxed_slice(),
+        )),
+    ));
+    let int_typeof = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+            vec![empty_obj, typeof_node].into_boxed_slice(),
+        )),
+    ));
     // A single-arm Union is NOT collapsed → a Union (`Other`) root.
-    let union_int_obj = graph.intern_node(SemanticNodeData::Union(StdArc::from(
-        vec![int_obj].into_boxed_slice(),
-    )));
+    let union_int_obj = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+            vec![int_obj].into_boxed_slice(),
+        )),
+    ));
     // An Intersection collapsing to a single-call-signature object → the Function
     // (`Other`) root, NOT `Object`.
-    let int_callsig = graph.intern_node(SemanticNodeData::Intersection(StdArc::from(
-        vec![empty_obj, call_sig_obj].into_boxed_slice(),
-    )));
+    let int_callsig = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+            vec![empty_obj, call_sig_obj].into_boxed_slice(),
+        )),
+    ));
 
     let cases = [
         ("string", string),
@@ -770,15 +780,19 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     let asymmetric = [
         (
             "union.member",
-            graph.intern_node(SemanticNodeData::Union(StdArc::from(
-                vec![present, dangling].into_boxed_slice(),
-            ))),
+            graph.intern_node(SemanticNodeData::Union(
+                crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+                    vec![present, dangling].into_boxed_slice(),
+                )),
+            )),
         ),
         (
             "intersection.member",
-            graph.intern_node(SemanticNodeData::Intersection(StdArc::from(
-                vec![present, dangling].into_boxed_slice(),
-            ))),
+            graph.intern_node(SemanticNodeData::Intersection(
+                crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+                    vec![present, dangling].into_boxed_slice(),
+                )),
+            )),
         ),
         (
             "tuple.element",

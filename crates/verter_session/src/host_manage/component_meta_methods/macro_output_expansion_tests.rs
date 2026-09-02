@@ -115,16 +115,20 @@ fn sink_projects_leaf_fact_or_preserves_fallback_across_carrier_shapes() {
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![string_id, number_id].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_id, number_id].into_boxed_slice(),
+        )),
+    ));
     let array = graph.intern_node(SemanticNodeData::Array {
         element: string_id,
         readonly: false,
     });
-    let mixed_union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![string_id, array].into_boxed_slice(),
-    )));
+    let mixed_union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_id, array].into_boxed_slice(),
+        )),
+    ));
     let raw = graph.intern_node(SemanticNodeData::RawFallback {
         value: verter_type_expr::UnknownValue::unsupported_syntax("SomeText"),
     });

@@ -79,6 +79,21 @@ pub struct FlowReturnResult {
     /// which derives this field from the RESULT NODE rather than accepting
     /// a caller's word for it. See [`FlowReturnDegradation::UnresolvedValue`].
     degradation: Option<FlowReturnDegradation>,
+    /// The FRESH (widening) literal constituents kept at the return's
+    /// top level: the function's own authored fresh literal arms (a bare
+    /// literal return, a widening-`const` read, a fresh ternary arm) and
+    /// the fresh values calls it returns carried through, after the
+    /// pinned-wins fold (a same-value `as const` / annotated sibling
+    /// anywhere in the join cancels the value) — the checker's
+    /// fresh/regular literal-type split on the inferred return. A caller
+    /// VALUE position (an object member, an array element, a mutable
+    /// declaration) widens exactly these; the caller's return join and a
+    /// `const` binding keep them, the `const` recording them as its
+    /// widening membership. Always a subset of the return's top-level
+    /// literal constituents — [`Self::new`] filters by literal VALUE, so
+    /// a widened or substituted rebuild can never list a value the
+    /// return no longer carries.
+    fresh_literal_arms: std::sync::Arc<[SemanticNodeId]>,
 }
 
 impl FlowReturnResult {
@@ -106,6 +121,22 @@ impl FlowReturnResult {
         can_fall_through: bool,
         degradation: Option<FlowReturnDegradation>,
     ) -> Self {
+        Self::new_with_fresh_literal_arms(graph, return_type, can_fall_through, degradation, &[])
+    }
+
+    /// [`Self::new`] with the join's surviving fresh literal arms. The
+    /// list is FILTERED here, by literal value, to the constituents the
+    /// return actually keeps at top level — the constructor owns the
+    /// subset invariant exactly as it owns the degradation fold, so no
+    /// caller can attach freshness to a value the join absorbed.
+    #[must_use]
+    pub(crate) fn new_with_fresh_literal_arms(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        return_type: SemanticNodeId,
+        can_fall_through: bool,
+        degradation: Option<FlowReturnDegradation>,
+        fresh_literal_arms: &[SemanticNodeId],
+    ) -> Self {
         let degradation = degradation.or_else(|| {
             flow_return_value_is_unresolved(graph, return_type)
                 .then_some(FlowReturnDegradation::UnresolvedValue)
@@ -114,6 +145,7 @@ impl FlowReturnResult {
             return_type,
             can_fall_through,
             degradation,
+            fresh_literal_arms: retained_fresh_literal_arms(graph, return_type, fresh_literal_arms),
         }
     }
 
@@ -129,18 +161,75 @@ impl FlowReturnResult {
         self.degradation
     }
 
+    /// The surviving FRESH literal constituents at the return's top
+    /// level (see the field). Empty means every kept literal is pinned.
+    #[must_use]
+    pub(crate) fn fresh_literal_arms(&self) -> &std::sync::Arc<[SemanticNodeId]> {
+        &self.fresh_literal_arms
+    }
+
     /// The same value with its RETURN TYPE replaced — the only
     /// field-level rebuild (the post-convergence literal widening in the
     /// SCC discharge), and it re-derives the verdict through
-    /// [`Self::new`] rather than carrying the old one over.
+    /// [`Self::new_with_fresh_literal_arms`] rather than carrying the
+    /// old one over. The fresh arms carry forward and re-filter against
+    /// the NEW return: a widened literal or an absorbed constituent
+    /// drops out of the list with the value it named.
     #[must_use]
     pub(crate) fn with_return_type(
         &self,
         graph: &crate::semantic_query_memo::SemanticGraphStore,
         return_type: SemanticNodeId,
     ) -> Self {
-        Self::new(graph, return_type, self.can_fall_through, self.degradation)
+        Self::new_with_fresh_literal_arms(
+            graph,
+            return_type,
+            self.can_fall_through,
+            self.degradation,
+            &self.fresh_literal_arms,
+        )
     }
+}
+
+/// The subset of `fresh_literal_arms` the return actually keeps at top
+/// level, matched by literal VALUE (node data): scalar literals can
+/// intern to distinct ids across lowering arenas, so an id comparison
+/// would silently drop a constituent respelled by normalization.
+fn retained_fresh_literal_arms(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    return_type: SemanticNodeId,
+    fresh_literal_arms: &[SemanticNodeId],
+) -> std::sync::Arc<[SemanticNodeId]> {
+    use crate::semantic_query::SemanticNodeData;
+    if fresh_literal_arms.is_empty() {
+        return std::sync::Arc::from([]);
+    }
+    let mut top_level: Vec<SemanticNodeId> = Vec::new();
+    match graph.node_data(return_type).as_deref() {
+        Some(SemanticNodeData::Literal(_)) => top_level.push(return_type),
+        Some(SemanticNodeData::Union(members)) => {
+            for member in members.iter() {
+                if matches!(
+                    graph.node_data(*member).as_deref(),
+                    Some(SemanticNodeData::Literal(_))
+                ) {
+                    top_level.push(*member);
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut retained: Vec<SemanticNodeId> = Vec::new();
+    for kept in top_level {
+        let kept_data = graph.node_data(kept);
+        let is_fresh = fresh_literal_arms
+            .iter()
+            .any(|arm| graph.node_data(*arm) == kept_data);
+        if is_fresh && !retained.contains(&kept) {
+            retained.push(kept);
+        }
+    }
+    std::sync::Arc::from(retained.into_boxed_slice())
 }
 
 /// Whether a flow-return VALUE reaches a semantic-miss carrier — a node

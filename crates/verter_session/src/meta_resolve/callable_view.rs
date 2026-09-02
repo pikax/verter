@@ -200,13 +200,14 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     }
 
     /// Normalize the root to its underlying callable node through the shared
-    /// carrier-shell normalizer. Returns a `Function` node, or a
-    /// `Union` / `Intersection` of realized `Function` arms, or `None` when the
-    /// root does not realize to a callable.
+    /// carrier-shell normalizer. `Resolved` carries a `Function` node or a
+    /// `Union` / `Intersection` of realized `Function` arms; `NoSurface` is
+    /// the complete "does not realize to a callable" answer; `Incomplete`
+    /// names why the realization could not resolve.
     pub(crate) fn realized_callable_root(
         &self,
         context: ProjectionReductionContext,
-    ) -> Option<SemanticNodeId> {
+    ) -> crate::typeinfo::surface_resolution::SurfaceResolution<SemanticNodeId> {
         realize_callable_member(self.dispatch, self.root, context)
     }
 
@@ -265,9 +266,10 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             // `never`) and is therefore NOT callable — matching
             // `realize_callable_member`, whose intersection arm already refuses
             // when any arm (incl. `undefined`) fails to realize.
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 let is_intersection = matches!(data.as_ref(), SemanticNodeData::Intersection(_));
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let mut callable: Option<SemanticNodeId> = None;
                 for arm in arms.iter() {
@@ -317,10 +319,33 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             // A non-composite leaf that is not itself a `Function` (a residual
             // carrier the primitive could not resolve, a `Conditional` the
             // realizer can still decide, or a non-callable scalar): compose the
-            // shared per-arm callable realizer. A no-progress realize (or a
-            // non-callable shape) refuses.
+            // shared per-arm callable realizer. A no-progress realize, a
+            // non-callable shape, or an UNRESOLVED carrier all refuse — this
+            // is a strict CLASSIFIER whose callers apply their own policy to a
+            // refusal; the surface-producing consumers reach the realizer's
+            // typed incomplete claim through `realized_callable_root` /
+            // `collect_callable_arms` instead.
             _ => {
-                let realized = realize_callable_member(self.dispatch, normalized, context)?;
+                let realized = match realize_callable_member(self.dispatch, normalized, context) {
+                    crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
+                    | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                        id.into_inner()
+                    }
+                    crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                        return None;
+                    }
+                    // An UNRESOLVED leaf refuses WITH its typed reason on
+                    // record — matching the sibling collector below: a
+                    // classification refused over an operational miss is
+                    // partial, never byte-identical to a genuinely
+                    // non-callable leaf.
+                    crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(
+                        incomplete,
+                    ) => {
+                        let _ = incomplete.into_recorded_partial();
+                        return None;
+                    }
+                };
                 if realized == normalized {
                     None
                 } else {
@@ -370,9 +395,13 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
 
     /// The Vue emit event name(s) the realized callable's FIRST parameter
     /// declares — its string-literal type, or each `Literal(String)` of a union
-    /// first parameter, flattened recursively. `None` when the root is not a
-    /// callable, has no first parameter, or the first parameter carries no
-    /// string literal.
+    /// first parameter, flattened recursively. The outcome is the TYPED surface
+    /// resolution: `Resolved(names)` for a fully-enumerated non-empty set,
+    /// `NoSurface` for the complete negative answer (not a single callable, no
+    /// first parameter, or a fully-enumerated position carrying no string
+    /// literal), and `Incomplete(reason)` when the enumeration FAILED — a
+    /// producer that cannot enumerate the authored name set can no longer
+    /// spell that failure as "no event names".
     ///
     /// This is the node-domain event-name AUTHORITY: it carrier-resolves the
     /// first-param type (`Alias` / `DeclRef` / `InstantiationRef`) through the
@@ -383,37 +412,51 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     /// `DeclRef` / `InstantiationRef` shallow and would miss those names — the
     /// decided correct Vue semantics. A residual carrier the demand primitive
     /// could NOT resolve — where a string literal could still hide — fails the
-    /// WHOLE enumeration (fail-closed-whole → `None`), never a partial name set
-    /// presented as complete. Zero `TypeExpr` materialization.
-    pub(crate) fn event_names(&self, context: ProjectionReductionContext) -> Option<Vec<Arc<str>>> {
-        let first_ty = self.signature(context)?.first_param()?;
+    /// WHOLE enumeration (fail-closed-whole → `Incomplete` with the failure's
+    /// typed reason), never a partial name set presented as complete. Zero
+    /// `TypeExpr` materialization.
+    pub(crate) fn event_names(
+        &self,
+        context: ProjectionReductionContext,
+    ) -> crate::typeinfo::surface_resolution::SurfaceResolution<Vec<Arc<str>>> {
+        use crate::typeinfo::surface_resolution::SurfaceResolution;
+        // A root that does not classify to a single callable, or a callable
+        // with no first parameter, declares no event name — the complete
+        // negative answer. (An OPERATIONAL refusal inside the classification
+        // already recorded its typed reason at the classifier's own
+        // `Incomplete` discharge.)
+        let Some(signature) = self.signature(context) else {
+            return SurfaceResolution::no_surface();
+        };
+        let Some(first_ty) = signature.first_param() else {
+            return SurfaceResolution::no_surface();
+        };
         let mut names = Vec::new();
         let mut visited = FxHashSet::default();
-        // FAIL-CLOSED-WHOLE: a depth-fuse trip OR a cycle revisit ANYWHERE in the
-        // enumeration discards the WHOLE name set — presenting a partial
-        // enumeration as complete is a poisoned fact. Only a FULLY-enumerated,
-        // non-empty set surfaces; a partial result (even with names already
-        // collected) yields `None`.
-        let complete =
-            self.collect_string_literal_names(first_ty, context, 0, &mut visited, &mut names);
-        if complete && !names.is_empty() {
-            Some(names)
-        } else {
-            None
+        // FAIL-CLOSED-WHOLE: a depth-fuse trip, a cycle revisit, or an
+        // unresolved carrier ANYWHERE in the enumeration discards the WHOLE
+        // (possibly partial) name set AND names why — presenting a partial
+        // enumeration as complete is a poisoned fact, and presenting the
+        // failure as "no names" deletes authored contributors silently.
+        match self.collect_string_literal_names(first_ty, context, 0, &mut visited, &mut names) {
+            Ok(()) if !names.is_empty() => SurfaceResolution::resolved(names),
+            Ok(()) => SurfaceResolution::no_surface(),
+            Err(reasons) => SurfaceResolution::incomplete(reasons),
         }
     }
 
     /// Collect the string-literal event names reachable from `node` into `out`,
     /// carrier-resolving each hop through the shared structural-fact primitive.
     ///
-    /// Returns `true` when the subtree was FULLY enumerated (complete) and
-    /// `false` when enumeration FAILED — a depth-fuse trip, an active-path
-    /// cycle revisit, OR a residual unresolved carrier (a `DeclRef` /
-    /// `InstantiationRef` / `BareRef` / `Opaque(Miss)` the demand primitive
-    /// could not resolve) where a string literal could still hide. A `false`
-    /// return makes [`Self::event_names`] discard the WHOLE (possibly partial)
-    /// `out` and yield `None` (fail-closed-whole): an incomplete enumeration
-    /// must NEVER be presented as a complete name set.
+    /// Returns `Ok(())` when the subtree was FULLY enumerated (complete) and
+    /// the typed failure reason when enumeration FAILED — a depth-fuse trip,
+    /// an active-path cycle revisit, OR a residual unresolved carrier (a
+    /// `DeclRef` / `InstantiationRef` / `BareRef` / `Opaque(Miss)` the demand
+    /// primitive could not resolve) where a string literal could still hide.
+    /// An `Err` makes [`Self::event_names`] discard the WHOLE (possibly
+    /// partial) `out` and return the reason-bearing incomplete claim
+    /// (fail-closed-whole): an incomplete enumeration must NEVER be presented
+    /// as a complete name set, and the failure must never read as "no names".
     fn collect_string_literal_names(
         &self,
         node: SemanticNodeId,
@@ -421,21 +464,25 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         depth: u32,
         visited: &mut FxHashSet<SemanticNodeId>,
         out: &mut Vec<Arc<str>>,
-    ) -> bool {
+    ) -> Result<(), crate::typeinfo::surface_resolution::NonEmptyReasons> {
+        use crate::semantic_query::PartialReason;
+        use crate::typeinfo::surface_resolution::NonEmptyReasons;
         // Fail-closed recursion fuse — the SAME `CALLABLE_VIEW_DEPTH_FUSE` bound
         // `classify_single_callable` / `collect_callable_arms` carry. A trip is a
-        // WHOLE failure (`false`), NEVER a silent truncation that leaves the
+        // WHOLE failure, NEVER a silent truncation that leaves the
         // already-collected names looking complete.
         if depth > CALLABLE_VIEW_DEPTH_FUSE {
-            return false;
+            return Err(NonEmptyReasons::of(PartialReason::ProjectionWorkLimit));
         }
         // Carrier-resolve before EVERY structural match — a `DeclRef` /
         // `InstantiationRef` event-name union resolves to its `Union` here, and
         // each union arm is normalized again on recursion. A PARTIAL demand
         // fails the WHOLE enumeration (a truncated resolution could hide a
-        // string literal), matching the fail-closed-whole contract.
+        // string literal), matching the fail-closed-whole contract. The demand
+        // primitive already recorded the partial read.s own classes; this
+        // enumeration marks the downstream propagation.
         let Some(normalized) = self.normalized_fact_node(node, context) else {
-            return false;
+            return Err(NonEmptyReasons::of(PartialReason::Propagated));
         };
         // ACTIVE-PATH cycle guard keyed by the NORMALIZED node id. An INDIRECT
         // (mutual) union cycle — `type A = 'a' | B; type B = 'b' | A` — re-yields
@@ -449,32 +496,33 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         // subtree reachable via two distinct sibling branches is NOT a false
         // cycle.
         if !visited.insert(normalized) {
-            return false;
+            return Err(NonEmptyReasons::of(PartialReason::SamePathRecursion));
         }
         let complete = match self.data(normalized) {
             // Missing node data is fail-closed — matches the sibling
             // `classify_single_callable` / `collect_callable_arms` `?`-on-data.
-            None => false,
+            None => Err(NonEmptyReasons::of(PartialReason::MissingSemanticNodeData)),
             Some(data) => match data.as_ref() {
                 SemanticNodeData::Literal(LiteralValue::String(name)) => {
                     out.push(Arc::from(name.as_str()));
-                    true
+                    Ok(())
                 }
                 SemanticNodeData::Union(members) => {
-                    let members = Arc::clone(members);
+                    let members = members.members_arc();
                     drop(data);
                     // Fail-closed-WHOLE: the FIRST arm that fails to fully
-                    // enumerate fails the whole union (stop scanning).
-                    let mut all = true;
+                    // enumerate fails the whole union with its typed reason
+                    // (stop scanning).
+                    let mut all = Ok(());
                     for member in members.iter() {
-                        if !self.collect_string_literal_names(
+                        if let Err(reasons) = self.collect_string_literal_names(
                             *member,
                             context,
                             depth + 1,
                             visited,
                             out,
                         ) {
-                            all = false;
+                            all = Err(reasons);
                             break;
                         }
                     }
@@ -499,7 +547,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Array { .. }
                 | SemanticNodeData::Tuple { .. }
-                | SemanticNodeData::Signature { .. } => true,
+                | SemanticNodeData::Signature { .. } => Ok(()),
                 // ── TRUE / CARVE-OUT ── the shared resolver's DIRECT
                 // self-reference carrier-stop (`type S = 'x' | S` resolves to
                 // `Union(Literal('x'), Opaque(RecursiveRef))`). A CLOSED back-edge
@@ -508,11 +556,11 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 // Distinct from an UNRESOLVED `Opaque` miss below — this is a
                 // *decided* recursion stop, NOT a "could-not-resolve". MUST stay
                 // BEFORE the general `Opaque(_)` fail-closed arm.
-                SemanticNodeData::Opaque(QueryError::RecursiveRef { .. }) => true,
-                // ── FALSE / FAIL-CLOSED ── could BE or HIDE a string literal, is
+                SemanticNodeData::Opaque(QueryError::RecursiveRef { .. }) => Ok(()),
+                // ── ERR / FAIL-CLOSED ── could BE or HIDE a string literal, is
                 // an unresolved carrier the demand primitive could NOT resolve, or
-                // is genuinely ambiguous → fail-closed-whole is the safe choice
-                // (`event_names` → `None`), never a partial-as-complete poison: we
+                // is genuinely ambiguous → fail-closed-whole WITH the typed reason,
+                // never a partial-as-complete poison and never a silent "no names": we
                 // don't KNOW the node isn't (or doesn't hide) a literal.
                 //   could BE / HIDE a literal:
                 //   - `Alias`           — a still-shaped alias normalize did not unwrap
@@ -547,7 +595,15 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 | SemanticNodeData::ImportType(_)
                 | SemanticNodeData::Opaque(_)
                 | SemanticNodeData::RawFallback { .. }
-                | SemanticNodeData::SyntheticBinding { .. } => false,
+                | SemanticNodeData::SyntheticBinding { .. } => {
+                    match unenumerable_event_name_reasons(self.dispatch.ctx, data.as_ref()) {
+                        Some(reasons) => Err(reasons),
+                        // A STABLE authored miss (a non-import mirror, an
+                        // honest lib-less `Miss`) is a decided complete
+                        // non-contributor — see the classifier's contract.
+                        None => Ok(()),
+                    }
+                }
                 // ── FUTURE-VARIANT DEFAULT ── every one of the 26 known
                 // `SemanticNodeData` variants is classified explicitly above, so
                 // this catch-all is currently unreachable; it is KEPT so a variant
@@ -558,7 +614,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 // documents that the catch-all is intentional forward-compat, not
                 // dead code to delete.
                 #[allow(unreachable_patterns)]
-                _ => false,
+                _ => Err(NonEmptyReasons::of(PartialReason::SemanticQueryFault)),
             },
         };
         // Remove on unwind: the visited set is an ACTIVE-PATH cycle guard, not a
@@ -613,6 +669,10 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 ProjectionReductionContext::published(ProjectionMode::Shallow),
                 None,
             )
+            // An INCOMPLETE projection records its typed reason before the
+            // no-surface answer; a failed resolution never reads as "the
+            // param has no object surface".
+            .recorded()
     }
 
     /// All positional params of the realized callable — leading `this` skipped,
@@ -776,8 +836,9 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             // view OWNS the arm recursion (the normalizer never iterates `Union`):
             // recurse per arm (fail-closed on ANY non-snippet arm) and combine by
             // index.
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
-                let arms = Arc::clone(arms);
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
+                let arms = arms.members_arc();
                 drop(data);
                 let mut per_arm: Vec<Vec<PositionalParamNode>> = Vec::with_capacity(arms.len());
                 for arm in arms.iter() {
@@ -874,12 +935,13 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 out.push(normalized);
                 Some(())
             }
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 // Same nullish split as `classify_single_callable`: a `Union`
                 // narrows a nullish arm away; an `Intersection` collapses to
                 // `never` on one (`Fn & undefined`) → not slot-callable.
                 let is_intersection = matches!(data.as_ref(), SemanticNodeData::Intersection(_));
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 for arm in arms.iter() {
                     // A PARTIAL arm normalization refuses the whole collection.
@@ -899,10 +961,27 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 }
                 Some(())
             }
-            // A non-composite leaf: realize to a callable `Function`. FAIL CLOSED
-            // (a non-callable non-nullish arm makes the member not slot-callable).
+            // A non-composite leaf: realize to a callable `Function`. FAIL
+            // CLOSED (a non-callable non-nullish arm makes the member not
+            // slot-callable); an UNRESOLVED arm RECORDS its typed reason
+            // before the refusal, so a slot dropped over an import miss is
+            // partial — never byte-identical to a genuinely non-callable one.
             _ => {
-                let realized = realize_callable_member(self.dispatch, normalized, context)?;
+                let realized = match realize_callable_member(self.dispatch, normalized, context) {
+                    crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
+                    | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                        id.into_inner()
+                    }
+                    crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                        return None;
+                    }
+                    crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(
+                        incomplete,
+                    ) => {
+                        let _ = incomplete.into_recorded_partial();
+                        return None;
+                    }
+                };
                 if realized == normalized {
                     None
                 } else {
@@ -1107,6 +1186,46 @@ impl SignatureNodeView<'_, '_> {
             });
         }
         Some(out)
+    }
+}
+
+/// Classify an unenumerable event-NAME node: `Some(reasons)` when the arm
+/// makes the enumeration INCOMPLETE, `None` when it is a DECIDED complete
+/// non-contributor.
+///
+/// Follows the established stable-carrier classification
+/// ([`crate::typeinfo::surface_resolution::stable_member_carrier_partiality`]):
+/// a STABLE authored miss — a non-import `BareRef` mirror, an honest
+/// `Opaque(Miss)` from a lib-less environment, the walker's well-formed open
+/// markers — is deterministic and recompute-invariant, so it contributes no
+/// name and stays COMPLETE (an unresolvable `Date` first param must not turn
+/// every event contract partial). An IMPORT-BACKED unresolvable, an
+/// unresolved `DeclRef` / `InstantiationRef` the demand primitive could not
+/// resolve, and every operational fault name their typed reason. A
+/// resolved-but-undecidable shape (an intersection-branded literal, an open
+/// operator, an ambiguous artifact) is a fault THIS enumerator cannot decide
+/// — a name could hide inside it, so completing over it would delete an
+/// authored contributor silently.
+fn unenumerable_event_name_reasons(
+    ctx: &dyn ResolverContext,
+    data: &SemanticNodeData,
+) -> Option<crate::typeinfo::surface_resolution::NonEmptyReasons> {
+    use crate::semantic_query::PartialReason;
+    use crate::typeinfo::surface_resolution::{stable_member_carrier_partiality, NonEmptyReasons};
+    match data {
+        // The stable-carrier classes: import-backed unresolvables and
+        // operational faults name a reason; a stable authored miss is the
+        // complete non-contributing branch.
+        SemanticNodeData::BareRef(_)
+        | SemanticNodeData::ImportType(_)
+        | SemanticNodeData::Opaque(_)
+        | SemanticNodeData::RawFallback { .. } => stable_member_carrier_partiality(ctx, Some(data)),
+        // An unresolved reference carrier the demand primitive could not
+        // resolve — the declaration behind it is genuinely unavailable.
+        SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. } => {
+            Some(NonEmptyReasons::of(PartialReason::MissingDependency))
+        }
+        _ => Some(NonEmptyReasons::of(PartialReason::SemanticQueryFault)),
     }
 }
 

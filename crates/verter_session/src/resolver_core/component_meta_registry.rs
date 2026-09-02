@@ -1921,7 +1921,8 @@ fn collect_registry_member_surface_refs_node(
                 );
             }
         }
-        SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+        composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+            let arms = composite.composite_members().expect("composite arm");
             for arm in arms.iter() {
                 recurse(ctx, *arm, queued_names, output, member_ref_policy, visited);
             }
@@ -2083,7 +2084,8 @@ pub(crate) fn collect_node_ref_names(
             SemanticNodeData::Tuple { elements, .. } => {
                 worklist.extend(elements.iter().map(|element| element.value));
             }
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 worklist.extend(arms.iter().copied());
             }
             SemanticNodeData::TemplateLiteral { expressions, .. } => {
@@ -2214,7 +2216,8 @@ pub(crate) fn node_root_has_non_object_top_level_surface(
         return true;
     }
     match data.as_ref() {
-        SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+        composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+            let arms = composite.composite_members().expect("composite arm");
             arms.iter()
                 .any(|arm| node_root_has_non_object_top_level_surface(ctx, *arm))
                 || arms.iter().any(|arm| {
@@ -2241,9 +2244,13 @@ pub(crate) fn node_root_has_explicit_object_surface(
     let node = registry_unalias(ctx, node);
     match registry_node_data(ctx, node).as_deref() {
         Some(SemanticNodeData::Object(_)) => true,
-        Some(SemanticNodeData::Union(arms)) | Some(SemanticNodeData::Intersection(arms)) => arms
-            .iter()
-            .any(|arm| node_root_has_explicit_object_surface(ctx, *arm)),
+        Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
+            composite
+                .composite_members()
+                .expect("composite arm")
+                .iter()
+                .any(|arm| node_root_has_explicit_object_surface(ctx, *arm))
+        }
         _ => false,
     }
 }

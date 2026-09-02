@@ -150,9 +150,11 @@ fn sealed_carrier_none_arm_splits_unraisable_failure_from_genuine_absence() {
     // absent — degrades to the typed `Miss` carrier (partial; `semanticMiss`
     // compat projection), and the torn read notes `OutputMaterializationLoss`
     // (NON-CACHEABLE) on the admission rail.
-    let unraisable = graph.intern_node(SemanticNodeData::Union(StdArc::from(
-        vec![str_id, crate::semantic_query::SemanticNodeId(u64::MAX)].into_boxed_slice(),
-    )));
+    let unraisable = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+            vec![str_id, crate::semantic_query::SemanticNodeId(u64::MAX)].into_boxed_slice(),
+        )),
+    ));
     let (_carrier, facts) =
         host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
             let carrier = super::raise_node_to_sealed_carrier(

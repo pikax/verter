@@ -934,7 +934,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 ArmKnows::No
             }
-            Some(SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms)) => {
+            Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
+                let arms = composite.composite_members().expect("composite arm");
                 let arms = arms.clone();
                 let mut any_undecidable = false;
                 for inner in arms.iter() {

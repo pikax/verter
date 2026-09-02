@@ -713,11 +713,21 @@ mod tests {
         let number_node = graph
             .intern_node_with_scope(SemanticNodeData::Primitive(PrimitiveKind::Number), scope());
         let union_ab = graph.intern_node_with_scope(
-            SemanticNodeData::Union(Arc::from([string_node, number_node])),
+            SemanticNodeData::Union(
+                crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+                    string_node,
+                    number_node,
+                ])),
+            ),
             scope(),
         );
         let union_ba = graph.intern_node_with_scope(
-            SemanticNodeData::Union(Arc::from([number_node, string_node])),
+            SemanticNodeData::Union(
+                crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+                    number_node,
+                    string_node,
+                ])),
+            ),
             scope(),
         );
         assert_ne!(

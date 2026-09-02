@@ -677,7 +677,8 @@ fn node_has_direct_macro_reference(
             SemanticNodeData::Tuple { elements, .. } => {
                 worklist.extend(elements.iter().map(|element| element.value));
             }
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 worklist.extend(arms.iter().copied());
             }
             SemanticNodeData::TemplateLiteral { expressions, .. } => {

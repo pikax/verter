@@ -20,7 +20,7 @@ measured against the pinned checker and the live public boundary
   produces the same shape but rides a degradation and never warms.
 - **C** `type C1 = { x: string }; type C2 = { x: number }; (v: C1 & C2) => v.x` —
   checker `{ v: never }`, substrate `{ v: Intersection(number & string) }`, clean and warm.
-- **D** `type Tag = ` + "`item-${string}`" + ` | "none"` under a truthiness guard —
+- **D** ``type Tag = `item-${string}` | "none"`` under a truthiness guard —
   the checker excludes `""` from the falsy edge; the substrate keeps both arms,
   clean and warm.
 
@@ -365,3 +365,101 @@ NOT split now. If exact preflight exceeds the revised ceiling, escalate again �
 only permissible further mechanism boundary is the opaque-payload and exhaustive-site
 seal first, the idempotent pre-seal closure second. A subset of construction sites
 remains refused.
+
+## Ratified budget variance — the closure node
+
+The closure node exceeded the file ceiling that had just been revised for it, and the
+breach was escalated rather than absorbed. Ruling: ratify, do not split.
+
+- measurement: cumulative GROSS additions from the node's start point
+- approved actual: 663 gross lines added, 28 production files, 1 related crate
+- accounting: two further changed files are modified only inside cfg-gated test
+  modules and do NOT count as production files; the implementer's 26-file figure is
+  not adopted
+- disposition: architect-ratified overrun, no further split
+
+The thresholds themselves stay unchanged, as they did for the substrate node, so the
+escalation remains visible in the record rather than being erased by a rewritten row.
+
+The overage is the predicted compiler-enforced fanout of the opaque-payload seal: the
+seal is what forces every construction and read site to declare a category, which
+produces many small edits across many files and few lines overall — 663 lines across 28
+files. The only permitted split would leave the seal half above the ceiling anyway, so
+it would not satisfy the rescope condition it was meant to answer.
+
+No second node is created. Forced, it would contain only the idempotent whole-result
+re-close before sealing plus its placement and idempotence proof, which does not
+justify a separate landing and review cycle. That closure is instead reviewed as a
+dedicated concern inside the closure node's own review profile.
+
+This variance concerns budget only and prejudges neither correctness nor the
+apparent-type callability decision.
+
+## Bounded-work rationale for the closure node
+
+The charter routes bounded-work evidence to the review report and permits a terse
+not-applicable rationale in place of counters, forbidding their creation solely to
+satisfy it. Recorded here because no in-tree evidence convention exists.
+
+The seal adds no cache, counter, retained candidate or global fingerprint. Its memo
+change only SUPPRESSES publishes. Canonicalization at the newly routed sites runs on
+changed paths only, under budgets the substrate node already established.
+
+CORRECTED TWICE. First, review measured that the closure was NOT free. It early-returns
+only after the full canonical pipeline has already run — flatten with per-member root
+recording, the dedup comparator, absorption, sort and re-intern — so every union-top
+flow close pays that pipeline and deposits non-trivial canonical evidence, advancing
+the evidence epoch even on the pure no-op path. The original wording here, that it
+re-interns an already-canonical top with no new repeated work to count, was inaccurate
+and is retracted rather than quietly amended.
+
+Two consequences were checked. The epoch advance cannot suppress a substitution
+publish, because a substitution walk never calls flow and each substitution captures
+its own epoch baseline after any prior bump. But an incomplete canonicalization inside
+the closure is a new suppression ingress: with a build frame it folds cache-suppress
+onto the enclosing flow build, and without one it marks the whole request partial. The
+direction is safe — it suppresses and never promotes — and no incomplete deposit was
+observed on that path, but the breadth is unquantified.
+
+One real cost is disclosed rather than measured. The evidence-blind-replay fence makes
+the cross-request substitution memo permanently unpublishable for any walk whose
+canonicalization observed file-scoped roots, and file-rooted composites are the common
+case in real user code, so that path now recomputes per request. That is the sound
+direction: the alternative is replaying an under-rooted entry into a request that never
+observed the roots it depends on, which is a stale warm read and a correctness-budget
+violation rather than a performance one. Making it cheap again requires per-entry root
+carriage on the memo, which is a cache-model change owned elsewhere and deliberately
+not attempted here.
+
+No counters or soak were built to quantify it, per the charter. The trade is stated so
+a later owner can find it, not buried in a measurement that would have had to be
+invented.
+
+CORRECTED A THIRD TIME (architect review, 2026-09-01): the paragraph below's opening
+claim that the following review round "made it free" is itself an overbroad
+performance claim — this same rationale has now been corrected for an inaccurate
+performance claim twice already, immediately above. It is retracted in place rather
+than deleted, per this trail's convention, and retained only as the historical record
+of what was previously claimed. The accurate final state, and the only claim made
+here, is: proved-canonical union tops re-close in O(1); unproven/untagged tops still
+run the pipeline; and the substitution-memo replay fence described above still causes
+disclosed cross-request recomputation. No stronger, and no newly-measured, performance
+claim is asserted beyond that sentence.
+
+[HISTORICAL / "made it free" framing retracted above — mechanism description retained]
+Then the review round that followed made it free: a canonically-tagged union top now
+skips the pipeline entirely on an O(1) tag test, with no evidence deposit and no epoch
+advance, and the tag's own semantics guarantee that skip is exactly the idempotence
+no-op — but only under a qualifier a later probe had to force. As first written the
+builder stamped the tag UNCONDITIONALLY, incomplete paths included: an over-cap arm
+set, an exhausted compare budget, a dangling arm or an undecided peek all carried a
+tag asserting a canonical form they did not have, so the skip fired on a list that was
+not canonical and a budget-exceeded result became warm-classifiable on resurfacing,
+against the rule that budget exhaustion never warms. The builder now REFUSES the tag on
+incomplete evidence — those results carry a distinct unproven tag and pay the full
+re-close — so the tag is a witness of proven canonical form rather than of mint
+provenance. The paragraph above therefore describes the state between those two rounds and
+is retained rather than deleted, because the measurement that produced it is what
+forced the cheap path to exist. For the common case the closure is now O(1); the
+pipeline still runs, with its evidence deposit and epoch advance, for a top that is not
+canonically tagged.

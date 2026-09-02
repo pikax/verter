@@ -2910,6 +2910,10 @@ impl Engine {
         )
     }
 
+    // Six inputs plus the `ResolutionOperation` carrier (which bundles the
+    // expected published root, the mutable input-resolution ledger, and the
+    // caller's final revalidation): each remaining parameter is
+    // independently meaningful and none is derivable from another.
     pub(crate) fn resolve_import_outcome_for_published_in_operation(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
@@ -3306,6 +3310,10 @@ impl Engine {
         conflict
     }
 
+    // Six inputs plus the `ResolutionOperation` carrier it destructures
+    // (the expected published root, the mutable input-resolution ledger,
+    // and the caller's final revalidation): each remaining parameter is
+    // independently meaningful and none is derivable from another.
     fn resolve_import_outcome_in_published(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,

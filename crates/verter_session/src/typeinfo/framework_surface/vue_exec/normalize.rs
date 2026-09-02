@@ -745,11 +745,22 @@ pub(crate) fn emits_from_typeinfo_surface(
         };
         let view = CallableNodeView::new(&dispatch, sig.node);
         // The event name(s): the realized callable's FIRST-param string literal /
-        // union, carrier-resolved (fail-closed-whole). `None` (no first param, or
-        // a first param carrying no string literal) contributes NO events (no
-        // event name ⇒ no emit field).
-        let Some(names) = view.event_names(context) else {
-            continue;
+        // union, carrier-resolved (fail-closed-whole). `NoSurface` (no first
+        // param, or a fully-enumerated first param carrying no string literal)
+        // contributes NO events — the complete negative answer. An INCOMPLETE
+        // enumeration records its typed reason BEFORE the skip: this is the
+        // published emit-metadata lane, so the deleted authored names make the
+        // result PARTIAL, never an empty complete emit set.
+        let names = match view.event_names(context) {
+            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(names)
+            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(names) => {
+                names.into_inner()
+            }
+            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
+            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                let _ = incomplete.into_recorded_partial();
+                continue;
+            }
         };
         // Payload = the realized signature's params AFTER the leading event-name
         // param (`[1..]`), materialized ONCE at the terminal sink. `event_names`
@@ -1315,7 +1326,8 @@ fn authored_candidate_matches_member_value(
     // shape or a stable unresolved carrier — fails the proof and therefore
     // selects the graph-native merged replay source.
     match node_data_for(dispatch.ctx, member_value).as_deref() {
-        Some(SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms)) => {
+        Some(composite @ (SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_))) => {
+            let arms = composite.composite_members().expect("composite arm");
             !arms.is_empty()
                 && arms.iter().all(|&arm| {
                     crate::project_semantic_dispatch::raise::raised_shape_eq_nodes(

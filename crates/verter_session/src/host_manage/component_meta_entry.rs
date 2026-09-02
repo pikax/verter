@@ -97,6 +97,33 @@ fn run_warm_output_pre_evidence_hook() {
     }
 }
 
+/// What one cold component-meta build hands back to its caller.
+///
+/// `completeness` is the MERGED
+/// [`PublishedCompleteness`](crate::meta_resolve::PublishedCompleteness) —
+/// the resolve-phase term merged with the whole-extract scope, i.e. exactly
+/// the signal the publish decision gated admission on. It is carried here
+/// rather than left for the caller to reconstruct because the caller has no
+/// extract phase to merge: reading `resolved.completeness` off this struct
+/// silently drops every extract-phase partiality source (the pre-choke
+/// macro-DTO read, the fallthrough cold compute) and publishes a wire payload
+/// as complete that this same compute refused to warm.
+pub(super) struct ComponentMetaColdResult {
+    /// The resolved state the analysis was extracted from.
+    pub(super) resolved: crate::meta_resolve::ResolvedComponentMetaState,
+    /// The projected analysis.
+    pub(super) analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    /// The merged resolve + extract completeness.
+    pub(super) completeness: crate::meta_resolve::PublishedCompleteness,
+    /// The admitted final result, when the cold publish produced one — the
+    /// basis for this build's output publication evidence.
+    pub(super) admitted: Option<
+        crate::component_meta_result_db::AdmittedComponentMetaResult<
+            crate::component_meta_result_db::CachedComponentMetaResult,
+        >,
+    >,
+}
+
 /// The publish fence a cold component-meta compute must pass before its
 /// result may warm the shared cache.
 ///
@@ -307,14 +334,16 @@ impl VerterHost {
             overlay,
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        let (_resolved, meta, _admitted) = self.component_meta_via_view_cold(
-            canonical.as_str(),
-            &view,
-            &fixed,
-            ctx,
-            &seed_fence,
-            validated_at_generation,
-        )?;
+        let meta = self
+            .component_meta_via_view_cold(
+                canonical.as_str(),
+                &view,
+                &fixed,
+                ctx,
+                &seed_fence,
+                validated_at_generation,
+            )?
+            .analysis;
 
         if let Some(started) = started {
             component_meta_debug(format!(
@@ -486,6 +515,13 @@ impl VerterHost {
                         canonical.as_str(),
                         cached.analysis.clone(),
                         seed,
+                        // A warm entry only exists when the merged term was
+                        // Complete, but the claim is stated rather than
+                        // assumed: the publish decision that admitted this
+                        // entry gated on exactly this value.
+                        crate::meta_resolve::PublishedCompleteness::from_admitted_cache_entry(
+                            cached.resolution_template.completeness,
+                        ),
                     )
                 }
             );
@@ -524,14 +560,20 @@ impl VerterHost {
             overlay,
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
-        let Some((resolved, meta, admitted)) = self.component_meta_via_view_cold(
+        let Some(ComponentMetaColdResult {
+            resolved,
+            analysis: meta,
+            completeness,
+            admitted,
+        }) = self.component_meta_via_view_cold(
             canonical.as_str(),
             view,
             fixed,
             ctx,
             &seed_fence,
             validated_at_generation,
-        ) else {
+        )
+        else {
             return Ok(None);
         };
         let seed = with_resolution.then(|| {
@@ -555,6 +597,7 @@ impl VerterHost {
                     canonical.as_str(),
                     meta,
                     seed,
+                    completeness,
                 )
             }
         );
@@ -741,7 +784,7 @@ impl VerterHost {
             overlay,
         );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
-        let (_resolved, meta, _admitted) = self.component_meta_via_view_cold(
+        let cold = self.component_meta_via_view_cold(
             canonical.as_str(),
             view,
             fixed,
@@ -749,6 +792,7 @@ impl VerterHost {
             &seed_fence,
             validated_at_generation,
         )?;
+        let meta = cold.analysis;
 
         if let Some(started) = started {
             component_meta_debug(format!(
@@ -782,15 +826,7 @@ impl VerterHost {
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         seed_fence: &ColdSeedFence,
         validated_at_generation: u64,
-    ) -> Option<(
-        crate::meta_resolve::ResolvedComponentMetaState,
-        verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-        Option<
-            crate::component_meta_result_db::AdmittedComponentMetaResult<
-                crate::component_meta_result_db::CachedComponentMetaResult,
-            >,
-        >,
-    )> {
+    ) -> Option<ComponentMetaColdResult> {
         #[cfg(test)]
         run_cold_body_pre_resolve_hook();
         // Pin the request executor to the caller's fixed view (FENCED), so
@@ -848,8 +884,21 @@ impl VerterHost {
             },
         );
         let resolved = resolved_opt?;
-        let (meta, _extract_completeness) = meta_opt?;
-        Some((resolved, meta, admitted))
+        let (meta, extract_completeness) = meta_opt?;
+        // The SAME merged signal the publish decision above gated on. Returning
+        // the resolve term alone here is what let an output-bearing caller
+        // serialize a wire payload as complete while this very compute refused
+        // to warm it.
+        let completeness = crate::meta_resolve::PublishedCompleteness::merged(
+            resolved.completeness,
+            extract_completeness,
+        );
+        Some(ComponentMetaColdResult {
+            resolved,
+            analysis: meta,
+            completeness,
+            admitted,
+        })
     }
 
     /// Canonical builder for the

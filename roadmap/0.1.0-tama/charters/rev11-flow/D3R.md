@@ -7,7 +7,7 @@ product=rev11
 kind=implementation
 semantic_role=delivery
 class=foundational
-predecessors=D2B,C1
+predecessors=D2B,C1,D2C
 owner=rev11.flow:sole shared flow authority
 conflict_domains=flowslice
 resource_class=rust-mixed
@@ -54,6 +54,7 @@ Nominal relation authority (codex D3 scope ruling, `decisions/2026-08-30-rev11-f
 
 - **D2B:** implemented ledger row for “Atomic public flow-proof cutover and distributed-admission retirement”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **C1:** implemented ledger row for “ModuleResolverCore convergence and non-flow semantic basis”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **D2C:** implemented ledger row for “Flow-return partiality audit projection”; ledger presence alone satisfies the predecessor. Added as an explicit D3R predecessor by the D2C DEFER ruling (`decisions/2026-09-01-d2c-flow-return-audit-partiality-defer.md`), which holds that D2C must land before D3R dispatch and may not survive to plan close. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope
@@ -109,4 +110,10 @@ Apply `architecture-3`: 3 fresh distinct harness tasks covering exactly `adversa
 
 ## Trusted implementation ledger
 
-Before squashing or review, the implementation patch transitions this node's predeclared row in `authority/state/implemented.toml` from `status = "pending"` to `status = "implemented"` with the planned squash commit message, approximate date with timezone, and optional pull-request number. The transitioned row is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
+Before squashing or review, the implementation patch transitions this node's
+predeclared row in `authority/state/implemented.toml` from `status = "pending"`
+to `status = "implemented"` with the planned squash commit message, approximate
+date with timezone, and optional pull-request number. The transitioned row is the
+implementation fact. Commit metadata is a loose locator only and is never resolved or
+validated against Git or GitHub. Reviewers inspect the squashed candidate patch without
+SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.

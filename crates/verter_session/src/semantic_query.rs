@@ -112,7 +112,7 @@ pub mod admit;
 /// [`SemanticNodeData::carrier_type_args`]; the sole rebuild channel is
 /// [`SemanticNodeData::map_carrier_type_args`].
 pub mod carrier;
-pub(crate) mod composite;
+pub mod composite;
 mod flow_return_result;
 pub use flow_return_result::FlowReturnResult;
 
@@ -1962,13 +1962,19 @@ pub enum ResolvedCallResult {
         substitution: CanonicalTypeSubstitution,
         /// The call's return type under that substitution.
         return_type: SemanticNodeId,
-        /// Whether `return_type` is a FRESH primitive literal: the naked
-        /// declared return of an UNCONSTRAINED type parameter that fixed
-        /// to a bare-literal argument. Freshness is provenance consumed by
-        /// position — an enclosing unannotated function-return contributor
-        /// widens a fresh result to its base primitive, while a value
-        /// position (a `const` initializer) keeps the literal.
-        fresh_literal_return: bool,
+        /// The FRESH primitive-literal deposits the winner's return keeps
+        /// at TOP LEVEL: an UNCONSTRAINED type parameter fixed to a
+        /// bare-literal argument, reached from the return annotation
+        /// through the binder itself or through UNION constituents
+        /// (intersection reduction pins its literal, and a
+        /// conditional-embedded binder already widened at the call
+        /// boundary). Freshness is provenance consumed by position — an
+        /// enclosing unannotated function-return contributor widens a
+        /// whole-return fresh literal (`return_type` itself listed here)
+        /// to its base primitive, an object-member position widens every
+        /// listed constituent, and a `const` initializer records them as
+        /// the binding's widening membership.
+        fresh_literal_returns: std::sync::Arc<[SemanticNodeId]>,
     },
     /// A UNION callee selected one first-applicable signature in EVERY
     /// callable arm; the call's return is the union of the selected arm
@@ -3651,7 +3657,13 @@ pub struct SurfaceMember {
     /// file. Spans are content-version facts: BOTH `spans` and
     /// `declaration_origin` participate in node interning / graph identity
     /// (eq + hash) — an identical same-file shape at a different source location
-    /// interns to a distinct node — but never enter `parse_stable_hash`. `None`
+    /// interns to a distinct node — but never enter `parse_stable_hash`.
+    /// Interning identity is as far as spans reach: derived-composite
+    /// CONSTITUENT identity (the canonical algebra's structural comparator)
+    /// deliberately excludes them, so two union/intersection arms that
+    /// differ only by source location collapse under `T | T = T` while the
+    /// discarded arm's spans stay recoverable through the arena node and
+    /// the normalization origin edge. `None`
     /// components for genuinely synthetic members (union common-members,
     /// mapped-produced members) with no single source site.
     pub spans: verter_type_expr::MemberSpans,
@@ -4356,6 +4368,109 @@ impl PartialReasonSet {
     #[must_use]
     pub const fn without(self, other: Self) -> Self {
         Self(self.0 & !other.0)
+    }
+
+    /// The recorded reasons as the closed [`PartialReason`] taxonomy, in bit
+    /// order. The projection a consumer that must NAME why a result is
+    /// partial (the component-meta wire boundary) reads instead of testing
+    /// bits one at a time: such a consumer then matches exhaustively over
+    /// [`PartialReason`], so a new reason class cannot reach the wire as a
+    /// silently dropped bit.
+    pub fn iter(self) -> impl Iterator<Item = PartialReason> {
+        PartialReason::ALL
+            .into_iter()
+            .filter(move |reason| self.contains(reason.bit()))
+    }
+}
+
+/// One recorded partial-result reason: the closed per-bit taxonomy of
+/// [`PartialReasonSet`]. Every single-reason constant on that set names
+/// exactly one variant here, so a consumer projecting the set is checked by
+/// the compiler instead of enumerating bits by hand. A new reason class is
+/// added as a constant AND a variant together — the pairing is what
+/// `partial_reason_taxonomy_covers_every_bit_exactly_once` pins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PartialReason {
+    /// [`PartialReasonSet::BUDGET_EXCEEDED`].
+    BudgetExceeded,
+    /// [`PartialReasonSet::CANCELLED`].
+    Cancelled,
+    /// [`PartialReasonSet::SUPERSEDED_GENERATION`].
+    SupersededGeneration,
+    /// [`PartialReasonSet::UNSTABLE_STATE`].
+    UnstableState,
+    /// [`PartialReasonSet::SAME_PATH_RECURSION`].
+    SamePathRecursion,
+    /// [`PartialReasonSet::WALKER_FATAL`].
+    WalkerFatal,
+    /// [`PartialReasonSet::PROPAGATED`].
+    Propagated,
+    /// [`PartialReasonSet::DEFERRED_EVALUATION_LIMIT`].
+    DeferredEvaluationLimit,
+    /// [`PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT`].
+    StructuralFactDemandLimit,
+    /// [`PartialReasonSet::SEMANTIC_QUERY_FAULT`].
+    SemanticQueryFault,
+    /// [`PartialReasonSet::MISSING_SEMANTIC_NODE_DATA`].
+    MissingSemanticNodeData,
+    /// [`PartialReasonSet::PROJECTION_WORK_LIMIT`].
+    ProjectionWorkLimit,
+    /// [`PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT`].
+    ConnectedQueryDepthLimit,
+    /// [`PartialReasonSet::MISSING_DEPENDENCY`].
+    MissingDependency,
+    /// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`].
+    FlowReturnUninferred,
+    /// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`].
+    FlowReturnUnverified,
+    /// [`PartialReasonSet::FLOW_RETURN_NO_SURFACE`].
+    FlowReturnNoSurface,
+}
+
+impl PartialReason {
+    /// Every reason, in [`PartialReasonSet`] bit order.
+    pub const ALL: [Self; 17] = [
+        Self::BudgetExceeded,
+        Self::Cancelled,
+        Self::SupersededGeneration,
+        Self::UnstableState,
+        Self::SamePathRecursion,
+        Self::WalkerFatal,
+        Self::Propagated,
+        Self::DeferredEvaluationLimit,
+        Self::StructuralFactDemandLimit,
+        Self::SemanticQueryFault,
+        Self::MissingSemanticNodeData,
+        Self::ProjectionWorkLimit,
+        Self::ConnectedQueryDepthLimit,
+        Self::MissingDependency,
+        Self::FlowReturnUninferred,
+        Self::FlowReturnUnverified,
+        Self::FlowReturnNoSurface,
+    ];
+
+    /// The single-reason set this variant names.
+    #[must_use]
+    pub const fn bit(self) -> PartialReasonSet {
+        match self {
+            Self::BudgetExceeded => PartialReasonSet::BUDGET_EXCEEDED,
+            Self::Cancelled => PartialReasonSet::CANCELLED,
+            Self::SupersededGeneration => PartialReasonSet::SUPERSEDED_GENERATION,
+            Self::UnstableState => PartialReasonSet::UNSTABLE_STATE,
+            Self::SamePathRecursion => PartialReasonSet::SAME_PATH_RECURSION,
+            Self::WalkerFatal => PartialReasonSet::WALKER_FATAL,
+            Self::Propagated => PartialReasonSet::PROPAGATED,
+            Self::DeferredEvaluationLimit => PartialReasonSet::DEFERRED_EVALUATION_LIMIT,
+            Self::StructuralFactDemandLimit => PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT,
+            Self::SemanticQueryFault => PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            Self::MissingSemanticNodeData => PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
+            Self::ProjectionWorkLimit => PartialReasonSet::PROJECTION_WORK_LIMIT,
+            Self::ConnectedQueryDepthLimit => PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT,
+            Self::MissingDependency => PartialReasonSet::MISSING_DEPENDENCY,
+            Self::FlowReturnUninferred => PartialReasonSet::FLOW_RETURN_UNINFERRED,
+            Self::FlowReturnUnverified => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+            Self::FlowReturnNoSurface => PartialReasonSet::FLOW_RETURN_NO_SURFACE,
+        }
     }
 }
 
@@ -5091,8 +5206,9 @@ pub enum QueryResult<T> {
 /// [`TypeNode`](Self::TypeNode) — the interned graph node id for the
 /// resolved type — EXCEPT [`SemanticQueryKey::ProjectObjectSpread`],
 /// [`SemanticQueryKey::ResolveOverloadSet`],
-/// [`SemanticQueryKey::ClassifyBroadRuntime`], and
-/// [`SemanticQueryKey::ClassifyMaterializationCycleGate`]. The projection
+/// [`SemanticQueryKey::ClassifyBroadRuntime`],
+/// [`SemanticQueryKey::ClassifyMaterializationCycleGate`], and
+/// [`SemanticQueryKey::ClassifyTruthinessDomain`]. The projection
 /// family has the
 /// dedicated [`ObjectProjection`](Self::ObjectProjection) domain and remains
 /// non-producing until its ordered-effect evaluator lands; the next two live
@@ -5111,8 +5227,9 @@ pub enum QueryResult<T> {
 pub enum SemanticQueryValue {
     /// The interned graph node id for the resolved type — the domain every
     /// live query produces, EXCEPT [`SemanticQueryKey::ResolveOverloadSet`],
-    /// [`SemanticQueryKey::ClassifyBroadRuntime`], and
-    /// [`SemanticQueryKey::ClassifyMaterializationCycleGate`].
+    /// [`SemanticQueryKey::ClassifyBroadRuntime`],
+    /// [`SemanticQueryKey::ClassifyMaterializationCycleGate`], and
+    /// [`SemanticQueryKey::ClassifyTruthinessDomain`].
     TypeNode(SemanticNodeId),
     /// Selector-aware correlated projection facts for one authored object
     /// construction program. This is intentionally not disguised as a graph
@@ -5168,6 +5285,13 @@ pub enum SemanticQueryValue {
     /// [`MaterializationCycleGateOutcome::Decided`] admits into the family
     /// memo; a `LegacyFallback` flows to the caller suppressed.
     MaterializationCycleGate(MaterializationCycleGateOutcome),
+    /// The truthiness DOMAIN of the classified type — the LIVE value
+    /// domain of [`SemanticQueryKey::ClassifyTruthinessDomain`], the sole
+    /// authority for "does this type have truthy and/or falsy runtime
+    /// inhabitants". Only a fully decided domain admits into the family
+    /// memo; a domain with any `Undecided` bucket flows to the caller
+    /// suppressed.
+    TruthinessDomain(TruthinessDomain),
     /// Reserved native-checker seam for diagnostic analysis. NON-LIVE: no
     /// producer, no key spec row. Uses a local shell so this crate keeps no
     /// back-edge to `verter_tsc::CheckResult`.
@@ -5189,6 +5313,7 @@ pub enum SemanticQueryValueTag {
     MaterializationCycleGate,
     FlowReturn,
     ResolveCall,
+    TruthinessDomain,
     DiagnosticAnalysis,
 }
 
@@ -5207,6 +5332,7 @@ impl SemanticQueryValue {
             Self::MaterializationCycleGate(_) => SemanticQueryValueTag::MaterializationCycleGate,
             Self::FlowReturn(_) => SemanticQueryValueTag::FlowReturn,
             Self::ResolveCall(_) => SemanticQueryValueTag::ResolveCall,
+            Self::TruthinessDomain(_) => SemanticQueryValueTag::TruthinessDomain,
             Self::DiagnosticAnalysis(_) => SemanticQueryValueTag::DiagnosticAnalysis,
         }
     }
@@ -5481,6 +5607,118 @@ pub struct MaterializationCycleGateKey {
     pub parse_env_hash: HashValue,
     /// Import / name-resolution dimension (`R`).
     pub resolve_env_hash: HashValue,
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Truthiness domain (ClassifyTruthinessDomain)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Three-valued inhabitance verdict for ONE bucket of a type's truthiness
+/// domain: whether a runtime inhabitant of the classified type exists on
+/// that bucket. `Yes` and `No` are decided from the demanded structure
+/// under the checker's MEASURED truthiness-fact rules (which are the
+/// contract, not a pure inhabitance proof: the checker's own template and
+/// intersection fact rules are mirrored where they diverge from set
+/// semantics — see the classifier); `Undecided` is the honest verdict
+/// for a form the classifier may not resolve (an unresolved
+/// reference/operator carrier, a constraint it cannot see, a tripped
+/// walk budget) — never guessed in either direction. Consumers treat `Undecided` as "keep the arm on this edge"
+/// AND record their own typed gap; only a fully decided domain is ever
+/// admitted warm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TruthinessInhabitance {
+    Yes,
+    No,
+    Undecided,
+}
+
+impl TruthinessInhabitance {
+    /// Three-valued union composition (a union has an inhabitant on a
+    /// bucket iff ANY arm does): `Yes` dominates, all-`No` stays `No`,
+    /// anything else is `Undecided`.
+    #[must_use]
+    pub(crate) fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Yes, _) | (_, Self::Yes) => Self::Yes,
+            (Self::No, Self::No) => Self::No,
+            _ => Self::Undecided,
+        }
+    }
+}
+
+/// The truthiness DOMAIN of one demanded type — the LIVE value domain of
+/// [`SemanticQueryKey::ClassifyTruthinessDomain`]: whether the type has a
+/// truthy runtime inhabitant and whether it has a falsy one. A domain
+/// fact, not a narrowed type: producing the narrowed arm from the fact
+/// stays with the consumer. Only a FULLY decided domain admits into the
+/// family memo; a domain with any `Undecided` bucket is `ReturnOnly`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TruthinessDomain {
+    /// Whether a truthy inhabitant of the classified type exists.
+    pub truthy: TruthinessInhabitance,
+    /// Whether a falsy inhabitant (`""`, `0`, `-0`, `0n`, `false`,
+    /// `null`, `undefined`, `NaN`) of the classified type exists.
+    pub falsy: TruthinessInhabitance,
+}
+
+impl TruthinessDomain {
+    /// Both buckets undecided — the conservative non-answer.
+    pub const UNDECIDED: Self = Self {
+        truthy: TruthinessInhabitance::Undecided,
+        falsy: TruthinessInhabitance::Undecided,
+    };
+    /// No inhabitants at all (`never`, an uninhabited template).
+    pub const UNINHABITED: Self = Self {
+        truthy: TruthinessInhabitance::No,
+        falsy: TruthinessInhabitance::No,
+    };
+    /// Truthy inhabitants only (objects, functions, `symbol`, …).
+    pub const TRUTHY_ONLY: Self = Self {
+        truthy: TruthinessInhabitance::Yes,
+        falsy: TruthinessInhabitance::No,
+    };
+    /// Falsy inhabitants only (`undefined`, `null`, `void`, `""`, …).
+    pub const FALSY_ONLY: Self = Self {
+        truthy: TruthinessInhabitance::No,
+        falsy: TruthinessInhabitance::Yes,
+    };
+    /// Both buckets inhabited (`string`, `number`, `unknown`, …).
+    pub const BOTH: Self = Self {
+        truthy: TruthinessInhabitance::Yes,
+        falsy: TruthinessInhabitance::Yes,
+    };
+
+    /// Whether BOTH buckets are proven — the family-memo admission gate:
+    /// anything less is `ReturnOnly`.
+    #[must_use]
+    pub fn is_decided(&self) -> bool {
+        self.truthy != TruthinessInhabitance::Undecided
+            && self.falsy != TruthinessInhabitance::Undecided
+    }
+
+    /// Union composition (per-bucket three-valued OR).
+    #[must_use]
+    pub(crate) fn union_with(self, other: Self) -> Self {
+        Self {
+            truthy: self.truthy.or(other.truthy),
+            falsy: self.falsy.or(other.falsy),
+        }
+    }
+
+    /// Intersection composition — the checker's measured rule: a `never`
+    /// arm empties the whole intersection, otherwise buckets compose by
+    /// per-bucket OR exactly like a union (measured: `string & {x: 1}`
+    /// KEEPS the falsy edge — the branded `""` inhabits it — while
+    /// `{a: 1} & {b: 2}` leaves it). Joint-inhabitance reduction of a
+    /// deeply empty intersection is the normalization layer's law, not a
+    /// classification concern.
+    #[must_use]
+    pub(crate) fn intersect_with(self, other: Self) -> Self {
+        if self == Self::UNINHABITED || other == Self::UNINHABITED {
+            return Self::UNINHABITED;
+        }
+        self.union_with(other)
+    }
 }
 
 /// A single call/construct signature: its graph node (a
@@ -7429,6 +7667,28 @@ pub enum SemanticQueryKey {
     ///
     /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
     ResolveCall(Box<ResolveCallKey>),
+    /// Classify the truthiness DOMAIN of one demanded type: whether it
+    /// has truthy runtime inhabitants and whether it has falsy ones —
+    /// the sole truthiness-domain authority, owned by the canonical
+    /// semantic-types layer and CONSUMED by the flow narrowing frames
+    /// (which hold no private truthiness rule).
+    ///
+    /// Demand-scoped and structural: the producer walks the demanded
+    /// node's interned structure (union arms, template quasis and
+    /// placeholder types, surface emptiness, type-parameter constraint
+    /// nodes) and NEVER resolves references, inlines aliases, or reduces
+    /// types — an unresolved carrier is an `Undecided` bucket, reported,
+    /// never guessed. `subject` is the interned node (content-free, R6);
+    /// version-rooting lives on the cached value's observed self-roots,
+    /// one per file-scoped node the walk inspected. Value domain:
+    /// [`SemanticQueryValueTag::TruthinessDomain`]; only a FULLY decided
+    /// domain admits into the family memo — an `Undecided` bucket or a
+    /// tripped walk budget is `ReturnOnly`, never warm.
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    ClassifyTruthinessDomain {
+        subject: SemanticNodeId,
+    },
 }
 
 /// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
@@ -7473,6 +7733,7 @@ pub enum SemanticQueryKeyTag {
     ClassifyMaterializationCycleGate,
     FlowReturn,
     ResolveCall,
+    ClassifyTruthinessDomain,
 }
 
 impl SemanticQueryKeyTag {
@@ -7507,6 +7768,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::ClassifyMaterializationCycleGate,
         SemanticQueryKeyTag::FlowReturn,
         SemanticQueryKeyTag::ResolveCall,
+        SemanticQueryKeyTag::ClassifyTruthinessDomain,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -7545,6 +7807,7 @@ impl SemanticQueryKeyTag {
             }
             SemanticQueryKeyTag::FlowReturn => "FlowReturn",
             SemanticQueryKeyTag::ResolveCall => "ResolveCall",
+            SemanticQueryKeyTag::ClassifyTruthinessDomain => "ClassifyTruthinessDomain",
         }
     }
 
@@ -7556,7 +7819,7 @@ impl SemanticQueryKeyTag {
     /// nested `execute_read` sub-dispatches are recorded too) ORs
     /// `1 << bit_index()` into a `u32` mask surfaced on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
-    /// `ALL.len()` is 26 (≤ 32) so the mask never overflows `u32`.
+    /// `ALL.len()` is 28 (≤ 32) so the mask never overflows `u32`.
     #[must_use]
     pub fn bit_index(self) -> u32 {
         Self::ALL
@@ -7636,6 +7899,9 @@ impl SemanticQueryKey {
             }
             SemanticQueryKey::FlowReturn(_) => SemanticQueryKeyTag::FlowReturn,
             SemanticQueryKey::ResolveCall(_) => SemanticQueryKeyTag::ResolveCall,
+            SemanticQueryKey::ClassifyTruthinessDomain { .. } => {
+                SemanticQueryKeyTag::ClassifyTruthinessDomain
+            }
         }
     }
 }
@@ -8044,8 +8310,21 @@ pub enum SemanticNodeData {
     Alias(SemanticNodeId),
     Object(SurfaceView),
     ObjectSpreadProgram(ObjectSpreadProgram),
-    Union(Arc<[SemanticNodeId]>),
-    Intersection(Arc<[SemanticNodeId]>),
+    /// Union composite. The payload is the OPAQUE, KIND-BOUND
+    /// [`composite::CompositeList`] carrier: construction requires an
+    /// explicit [`composite::CompositeCarrierCategory`] mint (the canonical
+    /// algebra for derived composites; a sealed per-category bypass for
+    /// authored shells, ordered carriers, preserving rebuilds and the
+    /// normalize-query subject), so a raw member list cannot become a
+    /// semantic union without classifying its carrier semantics — and the
+    /// [`composite::UnionKind`] type parameter pins the payload to THIS
+    /// variant, so a payload extracted from a union cannot be replayed
+    /// into [`Self::Intersection`] (compile error). Reads deref to
+    /// [`composite::CompositeMembers`], then to `[SemanticNodeId]`.
+    Union(composite::CompositeList<composite::UnionKind>),
+    /// Intersection composite — same opaque payload discipline as
+    /// [`Self::Union`], kind-bound to [`composite::IntersectionKind`].
+    Intersection(composite::CompositeList<composite::IntersectionKind>),
     Primitive(PrimitiveKind),
     /// Literal-value carrier. Preserves exact literal identity
     /// (`"idle"`, `42`, `true`) so unions of literals don't collapse
@@ -8390,6 +8669,20 @@ pub enum SemanticNodeData {
 }
 
 impl SemanticNodeData {
+    /// The kind-erased composite payload of a [`Self::Union`] /
+    /// [`Self::Intersection`] arm — the uniform binding for readers that
+    /// handle both composite kinds in one arm (the kind-bound payload
+    /// types differ, so a joint or-pattern cannot bind them directly).
+    /// `None` for every other variant.
+    #[must_use]
+    pub fn composite_members(&self) -> Option<&composite::CompositeMembers> {
+        match self {
+            Self::Union(list) => Some(list),
+            Self::Intersection(list) => Some(list),
+            _ => None,
+        }
+    }
+
     /// Stable discriminant index used by arena instrumentation
     /// to bucket per-variant push counts on
     /// [`crate::types::MetaProvenance::node_arena_pushes_per_discriminant`].
@@ -9068,6 +9361,50 @@ mod tests {
     use super::*;
     use verter_type_expr::TopLevelOwnerId;
 
+    /// The `PartialReason` taxonomy and the `PartialReasonSet` bits are two
+    /// halves of one closed vocabulary: every variant must name a DISTINCT
+    /// single bit, and iterating a set must recover exactly the variants that
+    /// built it, in bit order. A variant wired to the wrong constant (or two
+    /// variants sharing one) would publish the wrong reason for a partial
+    /// result — a consumer told "cancelled" for a budget trip acts on it.
+    #[test]
+    fn partial_reason_taxonomy_covers_every_bit_exactly_once() {
+        let mut seen = PartialReasonSet::empty();
+        for reason in PartialReason::ALL {
+            let bit = reason.bit();
+            assert!(
+                !bit.is_empty(),
+                "{reason:?} maps to the empty set instead of its own bit",
+            );
+            assert!(
+                !seen.contains(bit),
+                "{reason:?} shares a bit with an earlier variant",
+            );
+            assert_eq!(
+                bit.iter().collect::<Vec<_>>(),
+                vec![reason],
+                "{reason:?}'s bit must round-trip to exactly itself",
+            );
+            seen = seen.union(bit);
+        }
+
+        assert_eq!(
+            seen.iter().collect::<Vec<_>>(),
+            PartialReason::ALL.to_vec(),
+            "iterating the union of every bit yields the taxonomy in bit order",
+        );
+        assert_eq!(
+            PartialReasonSet::FLOW_RETURN_DEGRADED
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![
+                PartialReason::FlowReturnUninferred,
+                PartialReason::FlowReturnUnverified,
+            ],
+            "the composite degraded-success set projects both of its classes",
+        );
+    }
+
     /// Every `QueryError` variant must own a UNIQUE `u8` discriminant tag:
     /// the tags are hand-assigned, and while the arena resolves hash collisions
     /// by full equality, a REUSED tag silently shares the fast-path identity
@@ -9594,6 +9931,10 @@ mod tests {
                 SemanticQueryValueTag::ResolveCall,
             ),
             (
+                SemanticQueryValue::TruthinessDomain(TruthinessDomain::TRUTHY_ONLY),
+                SemanticQueryValueTag::TruthinessDomain,
+            ),
+            (
                 SemanticQueryValue::DiagnosticAnalysis(DiagnosticAnalysisShell),
                 SemanticQueryValueTag::DiagnosticAnalysis,
             ),
@@ -9601,15 +9942,15 @@ mod tests {
         for (value, tag) in &cases {
             assert_eq!(value.tag(), *tag, "tag must match the value domain");
         }
-        // Distinctness: eleven cases, eleven unique tags. Sort before dedup so
-        // non-adjacent duplicates are caught (`Vec::dedup` only collapses
+        // Distinctness: twelve cases, twelve unique tags. Sort before dedup
+        // so non-adjacent duplicates are caught (`Vec::dedup` only collapses
         // consecutive runs).
         let mut tags: Vec<SemanticQueryValueTag> = cases.iter().map(|(_, t)| *t).collect();
         tags.sort_by_key(|t| *t as u8);
         tags.dedup();
         assert_eq!(
             tags.len(),
-            11,
+            12,
             "every value domain must have a distinct tag"
         );
     }

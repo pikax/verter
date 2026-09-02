@@ -29,7 +29,8 @@ pub(crate) fn component_meta_registry_node_has_explicit_object_surface(
         match data.as_ref() {
             SemanticNodeData::Object(_) | SemanticNodeData::MergedDecl { .. } => return true,
             SemanticNodeData::Alias(inner) => stack.push(*inner),
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 stack.extend(arms.iter().copied());
             }
             _ => {}

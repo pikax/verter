@@ -120,12 +120,9 @@ pub struct FlowRequirement { pub operation: SemanticQueryKeyTag, pub requirement
 /// wildcard-free match over the family vocabulary.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-// The shared `Facts` postfix distinguishes expansion rules from the matching
-// fact-family discriminants; it is domain information, not naming noise.
-#[allow(clippy::enum_variant_names)]
 pub enum FlowExpansionRule {
-    BindingSlotFacts, ReturnSiteFacts, SelectedEdgeFacts, CallSiteFacts,
-    GuardPredicateFacts, ContextualTargetFacts, CaptureFacts, SemanticRelationFacts,
+    BindingSlot, ReturnSite, SelectedEdge, CallSite,
+    GuardPredicate, ContextualTarget, Capture, SemanticRelation,
 }
 
 /// Whether a family route's facts participate in the solve's fixed point
@@ -152,14 +149,14 @@ pub struct FlowFamilyRoute {
 #[rustfmt::skip]
 pub const fn flow_family_route(family: &FlowFactFamily) -> FlowFamilyRoute {
     match family {
-        FlowFactFamily::GraphEdge(_) => FlowFamilyRoute { rule: FlowExpansionRule::SelectedEdgeFacts, fixed_point: FlowFixedPointRequirement::FixedPoint, accepted_gap: FlowGap::UnmodeledExpression },
-        FlowFactFamily::BindingSlot => FlowFamilyRoute { rule: FlowExpansionRule::BindingSlotFacts, fixed_point: FlowFixedPointRequirement::FixedPoint, accepted_gap: FlowGap::UnmodeledExpression },
-        FlowFactFamily::ReturnSite => FlowFamilyRoute { rule: FlowExpansionRule::ReturnSiteFacts, fixed_point: FlowFixedPointRequirement::SinglePass, accepted_gap: FlowGap::AbruptCompletion },
-        FlowFactFamily::GuardPredicate => FlowFamilyRoute { rule: FlowExpansionRule::GuardPredicateFacts, fixed_point: FlowFixedPointRequirement::FixedPoint, accepted_gap: FlowGap::GuardNarrowing },
-        FlowFactFamily::CallSite => FlowFamilyRoute { rule: FlowExpansionRule::CallSiteFacts, fixed_point: FlowFixedPointRequirement::SinglePass, accepted_gap: FlowGap::UnmodeledExpression },
-        FlowFactFamily::ContextualTarget => FlowFamilyRoute { rule: FlowExpansionRule::ContextualTargetFacts, fixed_point: FlowFixedPointRequirement::SinglePass, accepted_gap: FlowGap::UnmodeledExpression },
-        FlowFactFamily::Capture => FlowFamilyRoute { rule: FlowExpansionRule::CaptureFacts, fixed_point: FlowFixedPointRequirement::SinglePass, accepted_gap: FlowGap::ClosureCapture },
-        FlowFactFamily::SemanticRelation => FlowFamilyRoute { rule: FlowExpansionRule::SemanticRelationFacts, fixed_point: FlowFixedPointRequirement::FixedPoint, accepted_gap: FlowGap::NominalRelation },
+        FlowFactFamily::GraphEdge(_) => FlowFamilyRoute { rule: FlowExpansionRule::SelectedEdge, fixed_point: FlowFixedPointRequirement::FixedPoint, accepted_gap: FlowGap::UnmodeledExpression },
+        FlowFactFamily::BindingSlot => FlowFamilyRoute { rule: FlowExpansionRule::BindingSlot, fixed_point: FlowFixedPointRequirement::FixedPoint, accepted_gap: FlowGap::UnmodeledExpression },
+        FlowFactFamily::ReturnSite => FlowFamilyRoute { rule: FlowExpansionRule::ReturnSite, fixed_point: FlowFixedPointRequirement::SinglePass, accepted_gap: FlowGap::AbruptCompletion },
+        FlowFactFamily::GuardPredicate => FlowFamilyRoute { rule: FlowExpansionRule::GuardPredicate, fixed_point: FlowFixedPointRequirement::FixedPoint, accepted_gap: FlowGap::GuardNarrowing },
+        FlowFactFamily::CallSite => FlowFamilyRoute { rule: FlowExpansionRule::CallSite, fixed_point: FlowFixedPointRequirement::SinglePass, accepted_gap: FlowGap::UnmodeledExpression },
+        FlowFactFamily::ContextualTarget => FlowFamilyRoute { rule: FlowExpansionRule::ContextualTarget, fixed_point: FlowFixedPointRequirement::SinglePass, accepted_gap: FlowGap::UnmodeledExpression },
+        FlowFactFamily::Capture => FlowFamilyRoute { rule: FlowExpansionRule::Capture, fixed_point: FlowFixedPointRequirement::SinglePass, accepted_gap: FlowGap::ClosureCapture },
+        FlowFactFamily::SemanticRelation => FlowFamilyRoute { rule: FlowExpansionRule::SemanticRelation, fixed_point: FlowFixedPointRequirement::FixedPoint, accepted_gap: FlowGap::NominalRelation },
     }
 }
 
@@ -389,14 +386,14 @@ pub fn require_registered_flow_requirement(
 /// identity encodes this exact list, so a change to the registered
 /// expansion semantics changes every minted contract identity.
 const REGISTERED_EXPANSION_RULES: &[FlowExpansionRule] = &[
-    E::BindingSlotFacts,
-    E::ReturnSiteFacts,
-    E::SelectedEdgeFacts,
-    E::CallSiteFacts,
-    E::GuardPredicateFacts,
-    E::ContextualTargetFacts,
-    E::CaptureFacts,
-    E::SemanticRelationFacts,
+    E::BindingSlot,
+    E::ReturnSite,
+    E::SelectedEdge,
+    E::CallSite,
+    E::GuardPredicate,
+    E::ContextualTarget,
+    E::Capture,
+    E::SemanticRelation,
 ];
 
 /// The fixed-point iteration cap every plan carries.
@@ -471,10 +468,10 @@ const fn finalizer_discriminant(finalizer: FlowFinalizerKind) -> u32 {
 #[rustfmt::skip]
 const fn expansion_rule_discriminant(rule: FlowExpansionRule) -> u32 {
     match rule {
-        FlowExpansionRule::BindingSlotFacts => 1, FlowExpansionRule::ReturnSiteFacts => 2,
-        FlowExpansionRule::SelectedEdgeFacts => 3, FlowExpansionRule::CallSiteFacts => 4,
-        FlowExpansionRule::GuardPredicateFacts => 5, FlowExpansionRule::ContextualTargetFacts => 6,
-        FlowExpansionRule::CaptureFacts => 7, FlowExpansionRule::SemanticRelationFacts => 8,
+        FlowExpansionRule::BindingSlot => 1, FlowExpansionRule::ReturnSite => 2,
+        FlowExpansionRule::SelectedEdge => 3, FlowExpansionRule::CallSite => 4,
+        FlowExpansionRule::GuardPredicate => 5, FlowExpansionRule::ContextualTarget => 6,
+        FlowExpansionRule::Capture => 7, FlowExpansionRule::SemanticRelation => 8,
     }
 }
 
@@ -1178,7 +1175,7 @@ pub(crate) fn build_flow_demand_plan(
                             node: *node, binding, kind: bundle.skeleton.binding(binding).kind,
                         },
                     };
-                    let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::BindingSlot) }, FlowObligationOrigin::Expansion(E::BindingSlotFacts), basis, Arc::from([]), Arc::from([]))?;
+                    let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::BindingSlot) }, FlowObligationOrigin::Expansion(E::BindingSlot), basis, Arc::from([]), Arc::from([]))?;
                     note_node_obligation(&mut node_obligations, *node, id);
                     expanded.push(id);
                 }
@@ -1186,7 +1183,7 @@ pub(crate) fn build_flow_demand_plan(
             F::ReturnSite => {
                 for node in &selected {
                     let kind @ FlowNodeKind::ReturnSite(_) = graph.node_kind(*node) else { continue };
-                    let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::ReturnSite) }, FlowObligationOrigin::Expansion(E::ReturnSiteFacts), FlowObligationBasis::Site { node: *node, kind }, Arc::from([]), Arc::from([]))?;
+                    let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::ReturnSite) }, FlowObligationOrigin::Expansion(E::ReturnSite), FlowObligationBasis::Site { node: *node, kind }, Arc::from([]), Arc::from([]))?;
                     note_node_obligation(&mut node_obligations, *node, id);
                     expanded.push(id);
                 }
@@ -1197,7 +1194,7 @@ pub(crate) fn build_flow_demand_plan(
                 for node in &selected {
                     let FlowNodeKind::Region(region) = graph.node_kind(*node) else { continue };
                     let Some(control_input) = bundle.skeleton.region(region).control_input else { continue };
-                    let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::GuardPredicate) }, FlowObligationOrigin::Expansion(E::GuardPredicateFacts), FlowObligationBasis::Guard { node: *node, region, control_input }, Arc::from([]), Arc::from([]))?;
+                    let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::GuardPredicate) }, FlowObligationOrigin::Expansion(E::GuardPredicate), FlowObligationBasis::Guard { node: *node, region, control_input }, Arc::from([]), Arc::from([]))?;
                     note_node_obligation(&mut node_obligations, *node, id);
                     expanded.push(id);
                 }
@@ -1213,7 +1210,7 @@ pub(crate) fn build_flow_demand_plan(
                         let call_ordinal = u32::try_from(call_ordinal).unwrap_or(u32::MAX);
                         let id = push(
                             FlowRequirement { operation: SemanticQueryKeyTag::ResolveCall, requirement: RK::FactFamily(F::CallSite) },
-                            FlowObligationOrigin::Expansion(E::CallSiteFacts),
+                            FlowObligationOrigin::Expansion(E::CallSite),
                             FlowObligationBasis::CallSite { node: *node, site, call_ordinal },
                             Arc::from([]), Arc::from([SemanticQueryKeyTag::ResolveCall]),
                         )?;
@@ -1227,7 +1224,7 @@ pub(crate) fn build_flow_demand_plan(
                 // One contextual target per selected expression site.
                 for node in &selected {
                     let FlowNodeKind::ExprSite(site) = graph.node_kind(*node) else { continue };
-                    let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::ContextualTarget) }, FlowObligationOrigin::Expansion(E::ContextualTargetFacts), FlowObligationBasis::ContextualTarget { node: *node, site }, Arc::from([]), Arc::from([]))?;
+                    let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::ContextualTarget) }, FlowObligationOrigin::Expansion(E::ContextualTarget), FlowObligationBasis::ContextualTarget { node: *node, site }, Arc::from([]), Arc::from([]))?;
                     note_node_obligation(&mut node_obligations, *node, id);
                     expanded.push(id);
                 }
@@ -1244,7 +1241,7 @@ pub(crate) fn build_flow_demand_plan(
                     if bundle.skeleton.binding(binding).kind != SkeletonBindingKind::NestedFunction { continue; }
                     let id = push(
                         FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
-                        FlowObligationOrigin::Expansion(E::CaptureFacts),
+                        FlowObligationOrigin::Expansion(E::Capture),
                         FlowObligationBasis::Capture { node: *node, binding, identity: identities[binding.index()].clone() },
                         Arc::from([]), Arc::from([]),
                     )?;
@@ -1281,7 +1278,7 @@ pub(crate) fn build_flow_demand_plan(
                             };
                             let id = push(
                                 FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
-                                FlowObligationOrigin::Expansion(E::CaptureFacts),
+                                FlowObligationOrigin::Expansion(E::Capture),
                                 basis,
                                 Arc::from([]), Arc::from([]),
                             )?;
@@ -1304,7 +1301,7 @@ pub(crate) fn build_flow_demand_plan(
                 for (node, site, call_ordinal, call_id) in &call_obligations {
                     let id = push(
                         FlowRequirement { operation: tag, requirement: RK::FactFamily(F::SemanticRelation) },
-                        FlowObligationOrigin::Expansion(E::SemanticRelationFacts),
+                        FlowObligationOrigin::Expansion(E::SemanticRelation),
                         FlowObligationBasis::SemanticRelation { node: *node, site: *site, call_ordinal: *call_ordinal },
                         Arc::from(vec![*call_id].into_boxed_slice()),
                         Arc::from([SemanticQueryKeyTag::Relate]),
@@ -1332,7 +1329,7 @@ pub(crate) fn build_flow_demand_plan(
                     Some(dependency) => Arc::from(vec![*dependency].into_boxed_slice()),
                     None => Arc::from([]),
                 };
-                let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::GraphEdge(*class)) }, FlowObligationOrigin::Expansion(E::SelectedEdgeFacts), basis, dependencies, Arc::from([]))?;
+                let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::GraphEdge(*class)) }, FlowObligationOrigin::Expansion(E::SelectedEdge), basis, dependencies, Arc::from([]))?;
                 expanded.push(id);
             }
         }
@@ -1545,6 +1542,25 @@ impl FlowSolveOutcome {
 /// runtime-observed convergence matches the plan's policy. Every gap,
 /// stale basis, cancellation, budget exhaustion, panic marker, internal
 /// failure, non-convergence, or degraded value is a typed partial.
+///
+/// VISIBILITY is crate-internal by design, and deliberately wider than
+/// the sole production caller (`finalize_flow_demand`). The mint is not
+/// held by this function's reachability but by what it consumes: a
+/// production build can obtain a `SealedFlowCompletion` only through the
+/// runtime's seal over the one-shot evaluation outcome
+/// `evaluate_flow_return` mints (provenance-triangulated at the dispatch
+/// finalizer against the installed carrier and the CURRENT freshness
+/// mint), `CompleteFlowResult` construction is confined to this module,
+/// and the sealed-witness/proof constructors are compile-time private —
+/// held by `production_flow_proof_has_evaluator_origin`,
+/// `foreign_flow_value_provenance_is_rejected`, and the
+/// `complete_flow_result_constructor_is_private` /
+/// `flow_solve_sealed_witnesses_not_constructible` compile-fail
+/// fixtures. Crate-internal code that drove a synthetic runtime
+/// lifecycle to a proof would still produce evidence bearing its OWN
+/// runtime's identity, which the dispatch-side triangulation refuses on
+/// any real demand; narrowing this symbol further would only re-house
+/// the dispatch finalizer without strengthening that gate.
 #[rustfmt::skip]
 pub fn finalize_flow_solve(
     runtime: &ObligationRuntime, handle: FlowDemandHandle, plan: &FlowDemandPlan, completion: SealedFlowCompletion,

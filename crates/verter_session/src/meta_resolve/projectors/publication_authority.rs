@@ -345,6 +345,10 @@ pub(crate) fn resolve_payload_surface(
     expansion_kind: MacroExpansionKind,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) -> Option<ResolvedPayloadSurface> {
+    // Structural discharge: the resolver's typed outcome records an
+    // incomplete claim's reasons (request-sticky + cold-compute scope) BEFORE
+    // any usable subset flows — the reasons ride the carrier, never a bare
+    // side effect a deleted call line could silently drop.
     let node = super::resolve_payload_surface(
         dispatch,
         payload.node,
@@ -352,7 +356,8 @@ pub(crate) fn resolve_payload_surface(
         expansion_kind,
         super::macro_payload_surface_provenance(payload.macro_kind),
         diag_sink,
-    )?;
+    )
+    .recorded()?;
     Some(ResolvedPayloadSurface {
         owner: payload.owner.clone(),
         macro_index: payload.macro_index,
@@ -376,6 +381,10 @@ pub(crate) fn resolve_payload_surface_with_scope(
     scope: PayloadSurfaceScope,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) -> Option<ResolvedPayloadSurface> {
+    // Structural discharge — see `resolve_payload_surface` above: an
+    // incomplete branch-merge's typed reasons ride the returned carrier and
+    // are recorded here, at the single authority discharge, before the
+    // usable one-branch subset flows onward.
     let node = super::resolve_payload_surface_with_scope(
         dispatch,
         payload.node,
@@ -383,7 +392,8 @@ pub(crate) fn resolve_payload_surface_with_scope(
         expansion_kind,
         scope,
         diag_sink,
-    )?;
+    )
+    .recorded()?;
     Some(ResolvedPayloadSurface {
         owner: payload.owner.clone(),
         macro_index: payload.macro_index,
@@ -406,7 +416,11 @@ pub(crate) fn read_surface_member_candidates(
     ctx: &dyn ResolverContext,
     surface: &ResolvedPayloadSurface,
 ) -> Vec<SurfaceMemberCandidate> {
-    let members = super::read_positive_surface_members(ctx, surface.node);
+    // An INCOMPLETE member read records its typed reason and enumerates only
+    // the usable subset — never a silently truncated candidate set.
+    let members = super::read_positive_surface_members(ctx, surface.node)
+        .recorded()
+        .unwrap_or_default();
     members
         .into_iter()
         .map(|member| SurfaceMemberCandidate {

@@ -195,11 +195,42 @@ Best-architecture target for component-meta:
 
 ## Component-Meta Completeness Contract (CRITICAL)
 
+**Producer-boundary typed outcome.** Every resolution-to-surface producer
+(`project_shallow_surface_from_base` / `project_shallow_surface_graph_only`,
+`navigate_param_to_object_surface`, `realize_callable_member` /
+`CallableNodeView::realized_callable_root`, `read_positive_surface_members`,
+`TypeInfoSurface::from_spread_projection`) returns
+`crate::typeinfo::surface_resolution::SurfaceResolution` — `Resolved(surface)`
+(closed complete domain), `OpenPresence(surface)` (positive presence-only
+projection of an open domain; complete-as-a-result, warm-capable),
+`NoSurface` (the complete negative answer), or `Incomplete` carrying a
+non-empty `PartialReasonSet`. The raw empty-success pair is unconstructible:
+`IncompleteSurface`'s fields are module-private, the outcome has no `Default`
+and no `unwrap_or_default`, and the discharges are named
+(`recorded()` / `into_recorded_partial()` fold the reason into the
+request/cold-compute completeness before any value flows;
+`into_authored_fallback()` is reserved for codegen lanes that splice the
+authored source). Guarded by the trybuild fixture
+`tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs`.
+A genuinely empty resolved surface stays `Resolved(empty)` — complete, exact,
+warm-capable.
+
+
 Component-meta completeness is part of the public API surface.
 
 - `acceptedSurfaceCompleteness`, expansion exactness, bridge-depth state, unsupported operators, unresolved branches, and budget exits must remain explicit through Rust payloads, protocol conversion, the TS bridge, native component-meta, and compat adapters.
 - Missing native data is a native bug or a structured unsupported result, not a compat repair opportunity.
 - `Complete` / `Exact` means all required semantic inputs were current and all required branches represented. Stale cache data, missing analysis, unavailable providers, bridge truncation, unsupported operators, and budget exits must produce partial/degraded state and must not warm final-result caches as exact.
+
+**RESULT-level completeness is a published field, on every lane.** `FfiComponentMeta.result_completeness` (`resultCompleteness` on the JSON lane, `ComponentMetaBody.result_completeness` on the protobuf lane, `NativeResultCompleteness` / `ComponentMeta.resultCompleteness` in TS) is the closed `Complete | Partial { reasons }` state of the surface the payload publishes. Its reasons are the wire projection of the producer's `ResultCompleteness` / `PartialReasonSet`, walked through the closed `PartialReason` taxonomy so a new producer reason class is a compile error at the converter rather than a silently dropped reason.
+
+- The truth source is the cold compute's `ResolvedComponentMetaState.completeness` (warm reads carry it through `ResolutionTemplate`); `synthesis_should_suppress` is an ADMISSION signal derived from it and is NOT public API.
+- Completeness reaches `build_component_meta_output` as its OWN parameter, never off the resolution sidecar. Both output lanes run the same resolve and only the sidecar (plus its registry name-overlay finalize) is optional, so a sidecar-derived reading would publish every degraded sidecar-less payload — the plain WASM `getComponentMeta` entry and the LSP document-analysis read — as complete.
+- Without this field an empty-because-degraded payload is byte-identical to an empty-because-nothing-is-declared payload — the worst direction of wrongness, because the consumer cannot tell "nothing is declared" from "we failed to find what is declared". Neither the `props` lane nor `componentPublicContract` discriminates the two on its own.
+- **An UNRESOLVABLE macro type-argument root is one of those producers, and records its own partiality.** `resolve_vue_macro_surface_with_ctx` drops the surface when the root resolves to a carrier rather than a projectable surface (`BareRef` / `ImportType` / `RawFallback` / `Opaque`, or no node data) — an authored `defineProps<P>()` whose `P` comes from a module that does not exist, or from a module that does not export that name. The drop folds the typed reason into the producer's cold-compute completeness scope FIRST (`unresolved_macro_root_partiality`: `MISSING_DEPENDENCY` for a preserved authored reference, the `QueryError`'s own class for an opaque carrier, `MISSING_SEMANTIC_NODE_DATA` for an absent node), so the empty `MacroSurfaceDtos` bundle it produces is returned PARTIAL, is refused `FrameworkSurfaceStore` admission, and reaches the payload as `Partial` + `degraded` instead of a wrong-complete silence. A component that authored no macro type at all never enters this path and stays `Complete` / `exact` / warm-capable.
+- A partial result may NEVER pair with `componentPublicContract.exactness: "exact"`. The aggregate exactness is computed once, in `verter_session::framework::public_contract`, from the per-member degradation list AND the result completeness: a partial result is always `degraded`, because the members the projector could not see are exactly the ones the result is missing.
+- The completeness field reports admission; it does not change it. A partial result is still refused warm admission to `ComponentMetaResultDb`, so an identical follow-up request recomputes rather than replaying the partial as complete.
+- Adding a wire field to the component-meta payload bumps `COMPONENT_META_SCHEMA_VERSION` in lockstep with the TS decoder gate (`GRAPH_FORMAT_VERSION`, exact equality), so a decoder that trusts the completeness position can never accept a payload old enough to omit it.
 
 ## JSDoc & Default-Value Publication
 

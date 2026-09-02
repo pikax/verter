@@ -392,6 +392,16 @@ pub struct ProjectSemanticDispatch<'a> {
     /// a cache key, never thread-local — it rides this dispatch exactly
     /// like the other cold-compute cycle guards above.
     pub(super) dispatch_txn: std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
+    /// Monotonic count of NON-TRIVIAL canonical-evidence deposits (a
+    /// deposit carrying file self-roots or an `incomplete` verdict).
+    /// Snapshot-and-compare fences an evidence-blind memo publish: the
+    /// substitution hash-cons memo is store-owned and cross-request, so a
+    /// result whose canonicalization observed file-scoped structure (or
+    /// could not prove itself complete) must NOT be replayed to a later
+    /// request that would then skip the deposit — the epoch advancing
+    /// across a walk suppresses the publish (and every enclosing
+    /// publish, since ancestors observe the same advance).
+    pub(super) canonical_evidence_epoch: std::cell::Cell<u64>,
     connected_demand: ConnectedDemandState,
     #[cfg(test)]
     connected_work_limit_for_tests: std::cell::Cell<usize>,
@@ -534,6 +544,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             dispatch_txn: std::cell::RefCell::new(
                 dispatch_txn::CheckerDispatchTransaction::default(),
             ),
+            canonical_evidence_epoch: std::cell::Cell::new(0),
             connected_demand: ConnectedDemandState::new(
                 MAX_CONNECTED_PROJECTION_WORK,
                 MAX_CONNECTED_QUERY_DEPTH,
@@ -752,11 +763,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 false_branch_ref: *false_branch,
                 distributive: *distributive,
             }),
+            // The normalize-query SUBJECT representation: the
+            // pre-normalization member list interned verbatim (the query's
+            // subject must stay distinct from its canonical result).
             SemanticQueryKey::NormalizeUnion { members } => {
-                graph.intern_node(SemanticNodeData::Union(Arc::clone(members)))
+                graph.intern_node(SemanticNodeData::Union(
+                    crate::semantic_query::composite::CompositeList::query_subject(Arc::clone(
+                        members,
+                    )),
+                ))
             }
             SemanticQueryKey::NormalizeIntersection { members } => {
-                graph.intern_node(SemanticNodeData::Intersection(Arc::clone(members)))
+                graph.intern_node(SemanticNodeData::Intersection(
+                    crate::semantic_query::composite::CompositeList::query_subject(Arc::clone(
+                        members,
+                    )),
+                ))
             }
             SemanticQueryKey::Relate { source, .. } => *source,
             _ => {
@@ -875,26 +897,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// With an ACTIVE cold-build taint frame: the inspected file self-roots
     /// extend the frame's root set (deduplicated), and an incomplete
-    /// comparison folds `cache_suppress` — ReturnOnly, never a warm
-    /// canonical result.
+    /// comparison folds BOTH rails — `cache_suppress` (the build's memo
+    /// publish is refused) AND `result_is_partial` (the build's returned
+    /// `CacheRead` carries the partial, which the read funnel folds into
+    /// the request sticky). `incomplete` is NOT subsumable by any read
+    /// set, so suppressing only the intermediate memo would still hand the
+    /// enclosing publication a warm-admissible "complete" value; the
+    /// partial disposition of the deposit is frame-position-independent.
     ///
     /// With NO active frame (a top-level graph consumer outside any cold
     /// build — projector member merges, typeinfo surface joins): the roots
     /// are subsumed by the caller's own fact-railed read set (every arm
     /// reached such a caller through fact-recorded reads on the same rail
-    /// that validates its publication), but `incomplete` is NOT subsumable
-    /// by any read set — it marks the REQUEST result partial, so the
+    /// that validates its publication), but `incomplete` — for the same
+    /// reason as above — marks the REQUEST result partial directly, so the
     /// enclosing publication (component-meta warm gate, typeinfo
     /// promotion) refuses warm admission of the unproven-canonical value.
     pub(super) fn deposit_canonical_evidence(
         &self,
         evidence: canonical_algebra::CanonicalEvidence,
     ) {
+        if evidence.incomplete || !evidence.inspected_file_roots.is_empty() {
+            self.canonical_evidence_epoch
+                .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        }
         if evidence.incomplete {
             if self.build_local_taint.borrow().is_empty() {
                 crate::request_context::mark_request_result_partial();
             } else {
-                self.fold_into_top_build_local_taint(false, true);
+                self.fold_into_top_build_local_taint(true, true);
             }
         }
         if evidence.inspected_file_roots.is_empty() {
@@ -2519,6 +2550,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if let SemanticQueryKey::ClassifyMaterializationCycleGate(key) = &key_for_build {
                 return self.build_classify_materialization_cycle_gate(key);
             }
+            if let SemanticQueryKey::ClassifyTruthinessDomain { subject } = &key_for_build {
+                return self.build_classify_truthiness_domain(*subject);
+            }
             // The SOLE relation authority (design
             // `.claude/skills/type-resolution/SKILL.md`): `execute(Relate)`
             // is a LIVE producer — decided binary judgements admit into
@@ -2698,6 +2732,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     unreachable!("typed classifier returned before node-domain build")
                 }
                 SemanticQueryKey::ClassifyMaterializationCycleGate(_) => {
+                    unreachable!("typed classifier returned before node-domain build")
+                }
+                SemanticQueryKey::ClassifyTruthinessDomain { .. } => {
                     unreachable!("typed classifier returned before node-domain build")
                 }
                 // ApparentType — LIVE producer for the CALLABLE arm. A base
@@ -3831,9 +3868,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // return the bare literal and break that uniformity. All arms are
         // `Global`-scoped literals — no freshness evidence exists to lose.
         match lit_ids.as_slice() {
-            [_] => graph.intern_node(SemanticNodeData::Union(Arc::from(
-                lit_ids.into_boxed_slice(),
-            ))),
+            [_] => graph.intern_node(SemanticNodeData::Union(
+                crate::semantic_query::composite::CompositeList::query_subject(Arc::from(
+                    lit_ids.into_boxed_slice(),
+                )),
+            )),
             _ => self.intern_normalized_union_or_intersection(&lit_ids, true),
         }
     }
@@ -4107,5 +4146,8 @@ mod broad_runtime_tests;
 
 #[cfg(test)]
 mod cycle_gate_tests;
+
 #[cfg(test)]
 mod projection_stack_safety_tests;
+#[cfg(test)]
+mod truthiness_domain_tests;

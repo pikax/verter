@@ -159,6 +159,11 @@ pub enum LoadedResolutionInput {
     },
     PackageManifest {
         key: InputKey,
+        /// Boxed so a manifest probe that finds nothing costs a niche rather
+        /// than the ~400 bytes a parsed manifest occupies — this enum is held
+        /// per loaded input, and the other two variants are an order of
+        /// magnitude smaller. `Option<Box<_>>` rather than `Box<Option<_>>`
+        /// keeps the absent case allocation-free.
         value: Option<Box<crate::types::PackageManifest>>,
         manifest_path: String,
         directories: Vec<String>,

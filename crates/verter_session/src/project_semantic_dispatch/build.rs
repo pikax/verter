@@ -4332,7 +4332,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     aliases.push(current);
                     current = *target;
                 }
-                SemanticNodeData::Intersection(arms) => break Arc::clone(arms),
+                SemanticNodeData::Intersection(arms) => break arms.members_arc(),
                 _ => return contributor,
             }
         };
@@ -4357,9 +4357,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return contributor;
         }
 
+        // ORDERED-carrier companion filter: the heritage intersection's
+        // arm order (own-body-last topology, rendered type text) survives
+        // the suppression filter verbatim — never the commutative route.
         let mut filtered_node = self.graph().intern_preserving_scope(
             current,
-            SemanticNodeData::Intersection(Arc::from(filtered.into_boxed_slice())),
+            SemanticNodeData::Intersection(
+                crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
+                    filtered.into_boxed_slice(),
+                )),
+            ),
         );
         for alias in aliases.into_iter().rev() {
             filtered_node = self
@@ -6508,7 +6515,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Alias(target) => stack.push(*target),
-                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());
                 }
                 SemanticNodeData::Array { element, .. } => stack.push(*element),
@@ -6975,7 +6983,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .evaluate_deferred_semantic_node_with_context(*index_node, context)
             .into_active_query_build_node(self);
         let members = match self.graph().node_data(resolved).as_deref() {
-            Some(SemanticNodeData::Union(members)) => Arc::clone(members),
+            Some(SemanticNodeData::Union(members)) => members.members_arc(),
             _ => return None,
         };
         if members.is_empty() {
@@ -7819,11 +7827,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // through the source's heritage) is not re-lifted as the
         // anonymous `PROPAGATED` bridge downstream.
         let mut mapped_partial_reasons = crate::semantic_query::PartialReasonSet::empty();
+        let source_projection = self.source_members_for_published_projection(source, context);
+        // A source that RESOLVED (to any surface, including an EMPTY one)
+        // is distinct from a source that did NOT project: only the latter
+        // defers a homomorphic mapping — see the resolved-empty arm below.
+        let source_surface_resolved = source_projection.is_some();
         let (source_members, source_member_reasons): (
             Vec<SurfaceMember>,
             crate::semantic_query::PartialReasonSet,
-        ) = self
-            .source_members_for_published_projection(source, context)
+        ) = source_projection
             .unwrap_or_else(|| (Vec::new(), crate::semantic_query::PartialReasonSet::empty()));
         mapped_partial_reasons = mapped_partial_reasons.union(source_member_reasons);
         let source_member_keys = |members: &[SurfaceMember]| {
@@ -7834,6 +7846,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .collect(),
             )
         };
+        // A HOMOMORPHIC mapper (`[K in keyof S]` over this same source,
+        // `as` remaps included) inherits per-member modifiers from `S`;
+        // enumerated key NAMES alone cannot carry them. When the source
+        // surface has not projected yet, a keyspace-only enumeration
+        // would synthesize every produced member non-optional /
+        // non-readonly, so the build defers exactly as an unenumerable
+        // keyspace does — the re-dispatch enumerates keys AND the
+        // source surface together. A source that RESOLVED to an EMPTY
+        // surface is NOT that case: its key domain is CLOSED and empty
+        // (`Partial<{}>` is `{}` at the checker), so the build proceeds
+        // with zero keys and materialises the empty object — complete
+        // and warm-capable, never a deferred carrier every re-dispatch
+        // returns unchanged. The resolved-empty classification is DIRECT:
+        // the source node's own data must be a plainly empty `Object`
+        // (no members, signatures, index signatures, or keyspace). A
+        // projection that merely SYNTHESISED an empty surface for an
+        // open carrier — an `infer T` mapped source, an unbound generic
+        // — is NOT closed-and-empty: the deferred shell must survive for
+        // the reverse-inference and re-dispatch machinery, and an
+        // index-signature-bearing source keeps its deferral (homomorphic
+        // mapping preserves index signatures, which zero keys cannot).
+        let homomorphic_over_source = matches!(
+            graph.node_data(mapper.key_space).as_deref(),
+            Some(SemanticNodeData::KeyOf { base }) if *base == source
+        );
+        let homomorphic_over_unprojected_source =
+            source_members.is_empty() && !source_surface_resolved && homomorphic_over_source;
+        let resolved_empty_homomorphic_source = source_members.is_empty()
+            && homomorphic_over_source
+            && matches!(
+                graph.node_data(source).as_deref(),
+                Some(SemanticNodeData::Object(view))
+                    if view.entries.is_empty()
+                        && view.positive_members().is_empty()
+                        && view.call_signatures.is_empty()
+                        && view.construct_signatures.is_empty()
+                        && view.index_signatures.is_empty()
+                        && view.keyspace.is_none()
+            );
         let keys: Vec<super::enumerate::KeyDomainKey> = if !source_members.is_empty() {
             if self.uses_synthetic_mapped_key_names(&source_members) {
                 match self.key_literals_from_keyspace_node(mapper.key_space) {
@@ -7843,7 +7894,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } else {
                 source_member_keys(&source_members)
             }
-        } else if let Some(keys) = self.key_literals_from_keyspace_node(mapper.key_space) {
+        } else if resolved_empty_homomorphic_source {
+            Vec::new()
+        } else if let Some(keys) = (!homomorphic_over_unprojected_source)
+            .then(|| self.key_literals_from_keyspace_node(mapper.key_space))
+            .flatten()
+        {
             keys
         } else {
             // Change M: `KeyEnumeration::Unresolvable`. Neither the
@@ -8714,7 +8770,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => MappedKeyRemapOutcome::Drop,
             Some(SemanticNodeData::Union(members)) => {
-                let members = Arc::clone(members);
+                let members = members.members_arc();
                 let mut keys: Vec<PropertyKey> = Vec::new();
                 for member in members.iter() {
                     let evaluated = self
@@ -9005,7 +9061,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> Option<Arc<[SemanticNodeId]>> {
         let union_members_of = |node: SemanticNodeId| {
             self.graph().node_data(node).and_then(|data| match &*data {
-                SemanticNodeData::Union(members) => Some(Arc::clone(members)),
+                SemanticNodeData::Union(members) => Some(members.members_arc()),
                 _ => None,
             })
         };
@@ -9305,7 +9361,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match data.as_ref() {
                 SemanticNodeData::Infer { .. } => return true,
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
-                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let members = composite.composite_members().expect("composite arm");
                     for member in members.iter() {
                         stack.push(*member);
                     }
@@ -9515,7 +9572,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(transformed)))
             }
             Some(SemanticNodeData::Union(members)) => {
-                let members = Arc::clone(members);
+                let members = members.members_arc();
                 let mapped: Vec<SemanticNodeId> = members
                     .iter()
                     .map(|m| {
@@ -9778,7 +9835,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => Some(Vec::new()),
             Some(SemanticNodeData::Union(members)) => {
-                let members = Arc::clone(members);
+                let members = members.members_arc();
                 let mut out: Vec<Arc<str>> = Vec::new();
                 for member in members.iter() {
                     let choices = self.template_arg_literal_choices(*member, eval_context)?;
@@ -10097,6 +10154,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         self.deposit_canonical_evidence(composite.evidence);
         composite.node
+    }
+
+    /// Whether a member-wise composite REBUILD may re-decide its arm list
+    /// through the canonical authority — the carrier-semantics dispatch for
+    /// projection/expansion/realization rebuild sites, driven by the
+    /// original payload's at-rest [`CompositeOriginCategory`] fact.
+    ///
+    /// A rebuild of a `Canonical`, `CanonicalUnproven` or `AuthoredShell`
+    /// composite is a DERIVED result (the authored shell stays recoverable
+    /// through the original node and origin evidence; an unproven-canonical
+    /// list is the budgeted derived value, and re-deciding gives the
+    /// authority another complete attempt), so it routes canonical. Every
+    /// other category preserves verbatim: `OrderedCarrier` order IS
+    /// overload precedence; `PreservingRebuild` lost its original's
+    /// category, so re-deciding is unproven; `QuerySubject` shape is
+    /// caller contract; `TestFixture` is a deliberately raw fixture.
+    ///
+    /// INTERSECTION rebuilds additionally fail CLOSED on callability —
+    /// mirroring the substitution split: when any rebuilt arm may
+    /// contribute call signatures the rebuilt list is an overload-ordered
+    /// carrier and the commutative route must not reorder it. (This guard
+    /// NARROWS — it does not close — the one order-bearing first-wins tag
+    /// collision: order semantics independent of callability, such as
+    /// heritage topology, rendered-text fidelity and intersection-merge
+    /// slot order, stay exposed when an ordered mint collides with an
+    /// earlier `Canonical`-tagged twin — see the `composite` module docs'
+    /// identity discipline for the disclosed window.)
+    ///
+    /// EXHAUSTIVE over the category registry — no wildcard arm.
+    pub(crate) fn composite_rebuild_re_decides(
+        &self,
+        category: crate::semantic_query::composite::CompositeOriginCategory,
+        rebuilt: &[SemanticNodeId],
+        is_union: bool,
+    ) -> bool {
+        use crate::semantic_query::composite::CompositeOriginCategory as C;
+        let derived = match category {
+            C::Canonical | C::CanonicalUnproven | C::AuthoredShell => true,
+            C::OrderedCarrier | C::PreservingRebuild | C::QuerySubject => false,
+            #[cfg(any(test, feature = "test-support"))]
+            C::TestFixture => false,
+        };
+        derived
+            && (is_union
+                || !rebuilt.iter().any(|&arm| {
+                    super::walk::value_may_contribute_call_signatures(self.graph(), arm)
+                }))
     }
 }
 

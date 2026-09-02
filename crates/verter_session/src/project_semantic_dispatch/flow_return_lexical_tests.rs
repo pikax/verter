@@ -1079,6 +1079,10 @@ export function gcFlowInferred() {
   return gcFlowT("a");
 }
 
+export function gcFlowAsConst() {
+  return gcFlowT("a" as const);
+}
+
 export function gcBareExplicit() {
   return gcBareT<string>();
 }
@@ -3814,11 +3818,10 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
     }
 
     // Argument inference from a literal instantiates the clause; the
-    // fresh-literal return widens at the caller's return join for the
-    // DECLARED-carrier callee, while the body-derived carrier keeps the
-    // bare literal today (its freshness does not yet reach the join) —
-    // the un-widened literal of the checker's `string`, never the
-    // callee's binder either way.
+    // fresh-literal return widens at the caller's return join for BOTH
+    // carriers — the declared annotation and the body-derived flow
+    // return close on the same fresh-preserved literal — and never
+    // publishes the callee's binder.
     let name = "gcDeclInferred";
     r5_node(
         &host,
@@ -3951,7 +3954,8 @@ fn reachable_type_param_names(
             SemanticNodeData::TypeParam { display_name, .. } => {
                 names.push(display_name.to_string());
             }
-            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let members = composite.composite_members().expect("composite arm");
                 stack.extend(members.iter().copied());
             }
             SemanticNodeData::Array { element, .. } => stack.push(*element),
@@ -4265,8 +4269,27 @@ fn flow_return_callee_clause_shadowing_a_file_scope_declaration_still_instantiat
         |dispatch, node| {
             assert_eq!(
                 node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::String),
+                "a body-derived callee's naked return closes on the fresh-preserved \
+                 literal argument, and the caller's return join widens it — the \
+                 checker's `string`, never the bare literal and never the binder"
+            );
+        },
+    );
+
+    // CONTROL — an `as const` argument deposits as AUTHORED: no fresh
+    // provenance, so the instantiated literal stays pinned exactly as
+    // the checker keeps a constrained `("a" as const)` call at `"a"`.
+    r5_node(
+        &host,
+        "gcFlowAsConst",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
                 NodeShape::Other("Literal(String(\"a\"))".to_string()),
-                "the body-derived carrier keeps the bare literal today (its                  freshness does not yet reach the join) — never the binder"
+                "an `as const` argument is not a fresh literal source: the naked \
+                 return keeps the authored literal, never widens to `string`"
             );
         },
     );
@@ -4525,14 +4548,11 @@ fn flow_return_resolved_overload_never_publishes_a_fabricated_any() {
 fn flow_return_callee_clause_default_applies_only_when_inference_has_no_candidate() {
     let host = make_r5_host();
 
-    // Inference HAS a candidate: the inferred type — the un-widened
-    // literal for a literal argument, the explicit type argument when
-    // authored — never the declared default.
+    // Inference HAS a candidate: the inferred type — the fresh literal's
+    // widened primitive for a bare literal argument, the explicit type
+    // argument when authored — never the declared default.
     for (name, expected) in [
-        (
-            "zzMismACall",
-            NodeShape::Other("Literal(Number(1.0))".to_string()),
-        ),
+        ("zzMismACall", NodeShape::Primitive(PrimitiveKind::Number)),
         ("zzMismBCall", NodeShape::Primitive(PrimitiveKind::Boolean)),
         (
             "zpExplicitCall",
@@ -4540,7 +4560,7 @@ fn flow_return_callee_clause_default_applies_only_when_inference_has_no_candidat
         ),
         (
             "rvDefaultedFlowCall",
-            NodeShape::Other("Literal(Number(1.0))".to_string()),
+            NodeShape::Primitive(PrimitiveKind::Number),
         ),
     ] {
         r5_node(
@@ -5356,8 +5376,10 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
     // the same descent the content half performs.
     for (name, expected) in [
         ("ctObj", "{a:number}|2"),
-        // The recorded dedup divergence: the checker publishes ONE arm.
-        ("ctObjBoth", "{a:number}|{a:number}"),
+        // Two branches returning the same object shape are ONE arm, exactly
+        // as the checker publishes it: the arms differ only in where they
+        // were written, and source coordinates are not constituent identity.
+        ("ctObjBoth", "{a:number}"),
         ("ctObjDisjoint", "{a:number}|{b:number}"),
         ("ctObjLocalRead", "2|{a:number}"),
         ("ctObjMethod", "2|{m():number}"),

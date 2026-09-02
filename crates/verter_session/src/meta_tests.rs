@@ -2476,6 +2476,606 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
     }
 }
 
+/// PUBLIC BOUNDARY — a deep macro path projection whose TERMINAL hop misses
+/// never publishes an empty props surface as COMPLETE, and never warms.
+///
+/// `defineProps<Deep['ui']['missing']>()` where `Deep['ui']` resolves but has
+/// no `missing` member: the checker REJECTS the program (`Property 'missing'
+/// does not exist`), so zero props is not "nothing was declared" — it is a
+/// resolution that could not produce the demanded surface. Publishing it
+/// complete makes an ill-typed component byte-identical to a props-less one,
+/// and warming it replays the wrong-complete answer for the file's lifetime.
+///
+/// The boundary triple: published `props`, `synthesis_should_suppress`, and
+/// the `component_meta_result_cache_hits` delta across a replay.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_missed_terminal_hop_on_a_deep_macro_projection_never_publishes_complete_or_warm() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/DeepMiss.vue",
+            r#"<script setup lang="ts">
+interface Deep { ui: { header: { title: string } } }
+defineProps<Deep['ui']['missing']>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/DeepMiss.vue");
+    let names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    assert!(
+        names.is_empty(),
+        "a missed terminal hop must not fabricate props; got {names:?}"
+    );
+
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/DeepMiss.vue")
+        .expect("the resolve must still return metadata");
+    assert!(
+        resolved.synthesis_should_suppress,
+        "a props surface whose terminal hop missed must NOT report COMPLETE — \
+         the emptiness is a failed resolution, not an authored empty surface"
+    );
+
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/DeepMiss.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a missed terminal hop must NOT warm `ComponentMetaResultDb` \
+         (hits_before={hits_before}, hits_after={hits_after})"
+    );
+}
+
+/// THE DISCRIMINATION CONTROL for the missed-terminal-hop rule: the SAME deep
+/// path whose terminal hop EXISTS and is a genuinely empty object type still
+/// publishes zero props as COMPLETE, exact, and WARM. A fix that marks every
+/// empty surface partial passes the test above and fails this one.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_resolved_empty_terminal_hop_still_publishes_complete_and_warm() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/DeepEmpty.vue",
+            r#"<script setup lang="ts">
+interface Deep { ui: { header: {} } }
+defineProps<Deep['ui']['header']>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/DeepEmpty.vue");
+    assert!(
+        meta.props.is_empty(),
+        "the genuinely empty terminal object declares no props"
+    );
+
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/DeepEmpty.vue")
+        .expect("the resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "a genuinely empty resolved surface IS the complete answer"
+    );
+
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/DeepEmpty.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after,
+        hits_before + 1,
+        "a genuinely empty resolved surface WARMS on replay \
+         (hits_before={hits_before}, hits_after={hits_after})"
+    );
+}
+
+/// PUBLIC BOUNDARY — a `defineSlots` surface with an UNRESOLVABLE slot value
+/// never publishes as COMPLETE and never warms. Three spellings of the same
+/// drop, each with a different producer that used to spell the failure as
+/// silence:
+///
+/// 1. a slot member typed DIRECTLY by an unresolvable import — the slot
+///    cannot be classified callable at all;
+/// 2. a slot member typed by a LOCAL alias whose body is the unresolvable
+///    import — the alias demand-validates but the callable realization walks
+///    into the unresolved body;
+/// 3. a resolvable slot CALLABLE whose first-param (binding) type is the
+///    unresolvable import — the slot publishes, its binding surface cannot.
+///
+/// In every row: no fabricated slots/bindings, `synthesis_should_suppress`,
+/// and no `ComponentMetaResultDb` warm on replay.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_unresolvable_slot_surface_never_publishes_complete_or_warm() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    const ROWS: &[(&str, &str)] = &[
+        (
+            "/src/SlotValueMissing.vue",
+            r#"<script setup lang="ts">
+import type { SlotFn } from './missing'
+defineSlots<{ default: SlotFn }>()
+</script>
+<template><div /></template>"#,
+        ),
+        (
+            "/src/SlotAliasMissing.vue",
+            r#"<script setup lang="ts">
+import type { Missing } from './missing'
+type SlotFn = Missing
+defineSlots<{ default: SlotFn }>()
+</script>
+<template><div /></template>"#,
+        ),
+        (
+            "/src/SlotBindingMissing.vue",
+            r#"<script setup lang="ts">
+import type { MissingProps } from './missing'
+defineSlots<{ default: (props: MissingProps) => any }>()
+</script>
+<template><div /></template>"#,
+        ),
+    ];
+
+    for (canonical, source) in ROWS {
+        let project = make_project();
+        project.upsert_base(canonical, source).unwrap();
+        let host = project.host();
+        let meta = get_meta(&project, canonical);
+        for slot in &meta.slots {
+            assert!(
+                slot.bindings.is_empty(),
+                "{canonical}: an unresolvable slot surface must not fabricate \
+                 bindings; slot `{}` got {:?}",
+                slot.name,
+                slot.bindings
+            );
+        }
+
+        let (_, resolved) = host
+            .get_component_meta_with_resolution(canonical)
+            .expect("the resolve must still return metadata");
+        assert!(
+            resolved.synthesis_should_suppress,
+            "{canonical}: a slots surface built around an unresolvable value \
+             must NOT report COMPLETE"
+        );
+
+        let hits_before = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        let _ = get_meta(&project, canonical);
+        let hits_after = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        assert_eq!(
+            hits_after, hits_before,
+            "{canonical}: an unresolvable slot surface must NOT warm \
+             `ComponentMetaResultDb`"
+        );
+    }
+
+    // THE DISCRIMINATION CONTROL: a resolvable slot whose binding object is
+    // genuinely EMPTY publishes the slot, zero bindings, COMPLETE, and WARMS.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/SlotEmptyBindings.vue",
+            r#"<script setup lang="ts">
+defineSlots<{ default: (props: {}) => any }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/SlotEmptyBindings.vue");
+    assert!(
+        meta.slots.iter().any(|slot| slot.name == "default"),
+        "the control publishes its declared slot"
+    );
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/SlotEmptyBindings.vue")
+        .expect("the control resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "a resolvable slot with a genuinely empty binding object is COMPLETE"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/SlotEmptyBindings.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(hits_after, hits_before + 1, "the control WARMS on replay");
+}
+
+/// PUBLIC BOUNDARY — a compound (union) macro type argument with an
+/// UNRESOLVABLE arm publishes the resolvable arm's members as a usable
+/// subset, but never as a COMPLETE surface, and never warms. The presence-
+/// only branch reader used to yield zero members for the unresolved arm
+/// with no signal, making `Known | Missing` byte-identical to `Known`.
+///
+/// CONTROL: both arms resolvable — the union surface is complete and warms.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_union_macro_arg_with_an_unresolvable_arm_never_publishes_complete_or_warm() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/UnionMissingArm.vue",
+            r#"<script setup lang="ts">
+import type { Extra } from './missing'
+interface Known { label: string }
+defineProps<Known | Extra>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let _ = get_meta(&project, "/src/UnionMissingArm.vue");
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/UnionMissingArm.vue")
+        .expect("the resolve must still return metadata");
+    assert!(
+        resolved.synthesis_should_suppress,
+        "a union props argument with an unresolvable arm must NOT report COMPLETE"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/UnionMissingArm.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a union props argument with an unresolvable arm must NOT warm"
+    );
+
+    // CONTROL: both arms resolvable.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/UnionBothArms.vue",
+            r#"<script setup lang="ts">
+interface Known { label: string }
+interface Extra { count: number }
+defineProps<Known | Extra>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let _ = get_meta(&project, "/src/UnionBothArms.vue");
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/UnionBothArms.vue")
+        .expect("the control resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the both-arm union control is COMPLETE"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/UnionBothArms.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after,
+        hits_before + 1,
+        "the both-arm union control WARMS on replay"
+    );
+}
+
+/// PUBLIC BOUNDARY — a call-signature `defineEmits` whose EVENT-NAME position
+/// cannot be fully enumerated never publishes the emit surface as COMPLETE and
+/// never warms. Two spellings of the same drop:
+///
+/// 1. the event-name parameter typed by an unresolvable import — the whole
+///    name enumeration fails;
+/// 2. a union name position with one authored RESOLVABLE literal beside an
+///    unresolvable arm — fail-closed-whole still refuses the enumeration, but
+///    the refusal must be a typed partial: the authored `'a'` contributor is
+///    dropped, which is only sound when the result says it is incomplete.
+///
+/// The SAME unresolvable import on the props lane fails closed; the emit lane
+/// must not be the one producer that spells the identical failure as an empty
+/// complete surface.
+///
+/// CONTROL: a resolvable literal event name publishes, stays COMPLETE, and
+/// WARMS.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_unresolvable_emit_event_name_never_publishes_complete_or_warm() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    // 1. The whole name position behind an unresolvable import.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/EmitNameMissing.vue",
+            r#"<script setup lang="ts">
+import type { E } from './missing'
+defineEmits<{ (e: E, v: number): void }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let _ = get_meta(&project, "/src/EmitNameMissing.vue");
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/EmitNameMissing.vue")
+        .expect("the resolve must still return metadata");
+    assert!(
+        resolved.synthesis_should_suppress,
+        "an emit surface whose event-name position is unresolvable must NOT \
+         report COMPLETE — the empty emit set is a failed enumeration, not an \
+         authored empty surface"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/EmitNameMissing.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "an unresolvable emit event-name surface must NOT warm"
+    );
+
+    // 2. A resolvable authored literal beside an unresolvable union arm: the
+    // fail-closed-whole enumeration drops the authored `'a'`, so the result
+    // must say PARTIAL — never complete-and-warm.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/EmitNameUnionMissing.vue",
+            r#"<script setup lang="ts">
+import type { Unknown1 } from './missing'
+defineEmits<{ (e: 'a' | Unknown1, v: number): void }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let _ = get_meta(&project, "/src/EmitNameUnionMissing.vue");
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/EmitNameUnionMissing.vue")
+        .expect("the resolve must still return metadata");
+    assert!(
+        resolved.synthesis_should_suppress,
+        "dropping the authored resolvable 'a' over an unresolvable union arm \
+         must publish a typed PARTIAL, never an empty complete emit set"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/EmitNameUnionMissing.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a partially-enumerable emit name union must NOT warm"
+    );
+
+    // CONTROL: the resolvable literal name publishes complete and warms.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/EmitNameOk.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ (e: 'save', v: number): void }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/EmitNameOk.vue");
+    assert!(
+        meta.events.iter().any(|event| event.name == "save"),
+        "the control publishes the authored 'save' event; got {:?}",
+        meta.events.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/EmitNameOk.vue")
+        .expect("the control resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the resolvable-name control is COMPLETE"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/EmitNameOk.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(hits_after, hits_before + 1, "the control WARMS on replay");
+}
+
+/// PUBLIC BOUNDARY — an SFC-generic props payload (`<script setup
+/// generic="T"> defineProps<T>()`) is an OPEN member domain, not a complete
+/// empty surface: the constraint's closed part publishes as the presence
+/// lower bound, and the surface stays warm-capable (an open domain is a
+/// complete RESULT — never a false partial).
+///
+/// The constrained arm is the public discrimination: `T extends { a: number }`
+/// must publish the `a` prop rather than an empty exact surface.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_sfc_generic_props_payload_publishes_its_constraint_lower_bound() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/GenericConstrained.vue",
+            r#"<script setup lang="ts" generic="T extends { a: number }">
+defineProps<T>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/GenericConstrained.vue");
+    assert!(
+        meta.props.iter().any(|prop| prop.name == "a"),
+        "the constraint's closed member `a` is the props lower bound; got {:?}",
+        meta.props.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/GenericConstrained.vue")
+        .expect("the resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "an open generic payload is a complete open RESULT, never a false partial"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/GenericConstrained.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after,
+        hits_before + 1,
+        "an open generic payload stays warm-capable"
+    );
+
+    // The UNCONSTRAINED arm: zero members is the honest presence floor of an
+    // open domain — still not a partial, still warm-capable.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/GenericBare.vue",
+            r#"<script setup lang="ts" generic="T">
+defineProps<T>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/GenericBare.vue");
+    assert!(
+        meta.props.is_empty(),
+        "an unconstrained generic payload has no closed lower-bound members"
+    );
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/GenericBare.vue")
+        .expect("the resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the unconstrained open domain is a complete open RESULT"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/GenericBare.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after,
+        hits_before + 1,
+        "the open floor stays warm-capable"
+    );
+}
+
+/// PUBLIC BOUNDARY — `accepted_surface_completeness` is an EXHAUSTIVENESS
+/// claim over the accepted surface. A component whose own props resolution is
+/// PARTIAL (an unresolvable props import) cannot claim `Exact`: the accepted
+/// set was computed against a props surface that may be missing members, so
+/// the claim demotes to `LowerBound`.
+///
+/// CONTROL: a genuinely props-less component keeps `Exact` — the whole point
+/// of the demotion is that it fires on partial COMPUTE, not on emptiness.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_partial_props_resolution_demotes_accepted_surface_exactness() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/AcceptedMissing.vue",
+            r#"<script setup lang="ts">
+import type { P } from './missing'
+defineProps<P>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let meta = get_meta(&project, "/src/AcceptedMissing.vue");
+    assert_eq!(
+        meta.accepted_surface_completeness,
+        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound,
+        "a partial props resolution must demote the accepted-surface claim: \
+         `Exact` says every accepted member is known, and the declared props \
+         that would subtract from the accepted set are unknown"
+    );
+
+    // CONTROL: props-less component — the empty declared surface is COMPLETE
+    // and the accepted claim stays Exact.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/AcceptedPropless.vue",
+            r#"<script setup lang="ts">
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let meta = get_meta(&project, "/src/AcceptedPropless.vue");
+    assert_eq!(
+        meta.accepted_surface_completeness,
+        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+        "a genuinely props-less component keeps the Exact accepted claim"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn one_unmodeled_member_marks_its_prop_and_the_props_surface_survives() {
@@ -26644,6 +27244,64 @@ withDefaults(defineProps<{ orientation?: string, count?: number, active?: boolea
     }
 }
 
+/// A Keep-modifier homomorphic mapped type over an IMPORTED interface
+/// (`{ [K in keyof ImportedProps]: ImportedProps[K] }`) inherits each
+/// member's optionality from the source — `orientation?: string` stays
+/// OPTIONAL through the identity mapping (TS `Keep` semantics). The
+/// mapped enumeration must resolve the imported source's MEMBER surface,
+/// not only its key names: a names-only enumeration would default `Keep`
+/// to required/mutable and publish `orientation` as a required prop.
+/// Pins both directions — the optional member stays optional (never
+/// modifier-defaulted) AND both members publish (never a blanket
+/// deferral that drops the surface).
+#[test]
+fn keep_modifier_homomorphic_mapped_over_import_inherits_optionality() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface ImportedProps {
+  orientation?: string
+  count: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { ImportedProps } from './types'
+
+defineProps<{ [K in keyof ImportedProps]: ImportedProps[K] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Comp.vue")
+        .expect("component meta resolves");
+
+    let prop = |name: &str| {
+        meta.props
+            .iter()
+            .find(|prop| prop.name == name)
+            .unwrap_or_else(|| panic!("prop {name} must be published: {:?}", meta.props))
+    };
+    assert!(
+        !prop("orientation").required,
+        "Keep optionality inherits from the imported source member — \
+         `orientation?` stays optional through the identity mapping"
+    );
+    assert!(
+        prop("count").required,
+        "a required source member stays required through the identity mapping"
+    );
+}
+
 #[test]
 fn cross_file_prop_jsdoc_survives_homomorphic_mapped_types() {
     let project = make_project();
@@ -28154,6 +28812,7 @@ defineEmits<{ change: [value: number]; close: [] }>()
         "/App.vue",
         analysis.clone(),
         None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("the untampered analysis must materialize");
     let (_a, _r, ok_types) = ok.into_parts();
@@ -28183,7 +28842,11 @@ defineEmits<{ change: [value: number]; close: [] }>()
     );
 
     let err = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", tampered, None,
+        host,
+        "/App.vue",
+        tampered,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect_err(
         "a present-but-unraisable payload source must FAIL the output with a typed \
@@ -28263,7 +28926,11 @@ defineEmits<{ (event: 'change', value: number): boolean }>()
         ));
 
     let err = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect_err("a failed callable return must fail output materialization");
     assert_eq!(
@@ -29262,7 +29929,11 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
     };
 
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("None sources never fail materialization");
     let (analysis, _resolution, types) = output.into_parts();
@@ -29345,7 +30016,11 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
             declared_in_macro_type_arg: true,
         });
     let err = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect_err("an unraisable present source must FAIL the output");
     assert_eq!(
@@ -29402,7 +30077,11 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
             ],
         };
     let err = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect_err("an unraisable fallthrough source must FAIL the output");
     assert_eq!(
@@ -29454,6 +30133,7 @@ fn component_meta_output_recovers_after_missing_dependency_is_available() {
         "/App.vue",
         analysis.clone(),
         None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect_err("the dependency file does not exist yet — the output must fail typed");
     assert_eq!(err.lane, crate::meta_resolve::ComponentMetaOutputLane::Prop);
@@ -29463,7 +30143,11 @@ fn component_meta_output_recovers_after_missing_dependency_is_available() {
         .unwrap();
 
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("the SAME source succeeds once the dependency is available");
     let lanes = output.into_parts().2.into_lanes();
@@ -29515,7 +30199,13 @@ fn build_output_with_prop_source(
             tags: Vec::new(),
             declared_in_macro_type_arg: false,
         });
-    crate::meta_resolve::projectors::build_component_meta_output(host, "/App.vue", analysis, None)
+    crate::meta_resolve::projectors::build_component_meta_output(
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
+    )
 }
 
 /// FIX-3 regression: a failed INTERIOR required locator inside a
@@ -30452,6 +31142,7 @@ defineProps<{ own: SharedAlias }>()
         "/Parent.vue",
         analysis,
         None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("the nested composite inherited source materializes under its producing scope");
     let lanes = output.into_parts().2.into_lanes();
@@ -30567,7 +31258,11 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
     );
 
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("closed sources materialize");
     let calls =
@@ -30658,7 +31353,11 @@ fn output_memo_hash_work_is_one_traversal_per_lane_slot() {
     }
 
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", analysis, None,
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("the repeated composite source materializes");
     let calls =
@@ -30800,9 +31499,14 @@ const cond = true
             },
         ],
     };
-    let output =
-        crate::meta_resolve::projectors::build_component_meta_output(host, "/App.vue", probe, None)
-            .expect("the closed inherited source materializes");
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
+        host,
+        "/App.vue",
+        probe,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
+    )
+    .expect("the closed inherited source materializes");
     let calls =
         crate::meta_resolve::projectors::LAST_OUTPUT_MATERIALIZE_CALLS.with(std::cell::Cell::get);
     assert_eq!(
@@ -30875,6 +31579,7 @@ fn output_registry_overlay_finalize_replaces_in_place_and_appends() {
         "/App.vue",
         analysis,
         Some(seed),
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("closed registry sources materialize");
     let (analysis, resolution, types) = output.into_parts();
@@ -31743,6 +32448,7 @@ defineEmits<{ save: [id: number] }>()
         "/App.vue",
         analysis.clone(),
         None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("a present source materializes");
     let (_analysis, _resolution, types) = output.into_parts();
@@ -31758,7 +32464,11 @@ defineEmits<{ save: [id: number] }>()
         verter_type_expr::facts::SourcePosition::unannotated(),
     );
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", absent, None,
+        host,
+        "/App.vue",
+        absent,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("schema absence keeps materializing the output");
     let (_analysis, _resolution, types) = output.into_parts();
@@ -31778,10 +32488,15 @@ defineEmits<{ save: [id: number] }>()
         ),
     );
     let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", failed, None,
+        host,
+        "/App.vue",
+        failed,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("a typed failed publication remains an occurrence-owned output row");
-    let (_analysis, _resolution, types, contract) = output.into_parts_with_contract();
+    let (_analysis, _resolution, types, contract, _completeness) =
+        output.into_parts_with_contract();
     let lanes = types.into_lanes();
     assert!(matches!(
         lanes.events[0].payload.publication(),
@@ -33988,5 +34703,257 @@ fn an_entry_form_over_a_call_spread_reaches_the_runtime_lane_intact() {
         !numeric.contains("1:"),
         "/src/F2NumericKey.vue: the numeric-named member does not reach the runtime props \
          option today — if it starts to, this assertion is the place that says so:\n{numeric}"
+    );
+}
+
+/// Build the fixture whose partiality is reachable ONLY through the extract
+/// phase: a WIDE child (24 inherited prop interfaces) whose surface the parent
+/// touches solely through its fallthrough compute, and a parent whose own
+/// macro surface is a single inline literal.
+///
+/// With a projection budget large enough for the parent's own resolve but too
+/// small for the fallthrough walk over the child's surface,
+/// `resolved.completeness` stays Complete while the extract scope trips —
+/// exactly the shape the resolve-phase term cannot see. A generous budget is
+/// the control: nothing trips, the result is Complete, and it warms.
+#[cfg(not(target_arch = "wasm32"))]
+fn extract_only_partial_project(projection_op_budget: usize) -> Arc<MetaProject> {
+    use std::fmt::Write as _;
+    let project = make_project_with_config(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget,
+        ..HostConfig::default()
+    });
+    let mut helper = String::new();
+    for n in 1..=24u32 {
+        let _ = writeln!(helper, "export interface P{n:02} {{ a{n:02}: string }}");
+    }
+    let _ = writeln!(
+        helper,
+        "export interface ChildProps extends {} {{ label: string }}",
+        (1..=24u32)
+            .map(|n| format!("P{n:02}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    project.upsert_base("/src/child_props.ts", &helper).unwrap();
+    project
+        .upsert_base(
+            "/src/WideChild.vue",
+            "<script setup lang=\"ts\">\nimport type { ChildProps } from './child_props'\ndefineProps<ChildProps>()\n</script>\n<template><div /></template>",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/WideParent.vue",
+            "<script setup lang=\"ts\">\nimport Child from '/src/WideChild.vue'\ndefineProps<{ title: string }>()\n</script>\n<template><Child label=\"x\" /></template>",
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/WideChild.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./child_props".to_string(),
+            resolved_canonical_id: Some("/src/child_props.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/WideParent.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "/src/WideChild.vue".to_string(),
+            resolved_canonical_id: Some("/src/WideChild.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project
+}
+
+/// The budget at which the parent's OWN resolve completes but the fallthrough
+/// extract trips. Measured on this fixture: the window is 4..=100 (below 4 the
+/// resolve itself is partial, so the resolve term would already carry it; at
+/// 150 and above nothing trips at all).
+#[cfg(not(target_arch = "wasm32"))]
+const EXTRACT_ONLY_PARTIAL_BUDGET: usize = 20;
+
+/// The completeness an OUTPUT ENVELOPE publishes must be the SAME merged
+/// signal the result-cache admission gate refuses on
+/// (`resolved.completeness.merge(extract_scope_completeness)`), never the
+/// resolve-phase term alone.
+///
+/// Extract-phase partiality has two sources the resolve phase cannot observe:
+/// the pre-choke macro-DTO read and the fallthrough cold compute. A component
+/// whose own macro surface resolves cleanly but whose fallthrough walk over a
+/// wide child root trips the projection fuse is partial ONLY in the extract
+/// scope. Publishing the resolve term alone makes that payload serialize as
+/// `Complete` while the very same compute permanently refuses to warm it — the
+/// wrong-complete outcome the wire field exists to prevent.
+///
+/// The two premise assertions pin the fixture in that exact state (own resolve
+/// Complete + admission refused), so a drift in the measured budget window
+/// fails loudly here instead of silently un-discriminating the test. The
+/// generous-budget control proves the merge does not blanket-degrade.
+///
+/// RED proof: pass `resolved.completeness` at the cold output entry instead of
+/// the merged signal and the envelope reports Complete while
+/// `has_owner_entry_in_test` stays false — the discriminating assertion fails.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn output_envelope_completeness_carries_extract_phase_partiality() {
+    let project = extract_only_partial_project(EXTRACT_ONLY_PARTIAL_BUDGET);
+    let host = project.host();
+
+    // PREMISE 1 — the parent's OWN resolve is Complete, so the resolve term
+    // alone cannot carry the partiality and the test discriminates.
+    let resolved = host
+        .resolve_component_meta(
+            "/src/WideParent.vue",
+            crate::types::ProjectionMode::Expanded,
+        )
+        .expect("the parent resolves");
+    assert!(
+        !resolved.completeness.is_partial(),
+        "the parent's own macro surface must resolve COMPLETE at this budget — otherwise the \
+         resolve-phase term already carries the partiality and this test proves nothing"
+    );
+
+    let (.., completeness) = host
+        .get_component_meta_output("/src/WideParent.vue")
+        .expect("the output envelope materializes")
+        .expect("the component resolves")
+        .into_parts_with_contract();
+
+    // PREMISE 2 — the merged gate permanently refuses this result warm
+    // admission. That refusal is what makes a `Complete` envelope wrong.
+    assert!(
+        !crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
+            host,
+            "/src/WideParent.vue"
+        ),
+        "the merged admission gate must refuse the extract-partial parent (the fixture's premise)"
+    );
+
+    // THE DISCRIMINATOR.
+    assert!(
+        completeness.is_partial(),
+        "the published envelope must report the MERGED completeness: this result's partiality \
+         lives entirely in the extract scope, so a `Complete` envelope is wrong-complete on a \
+         payload the same compute refuses to warm"
+    );
+
+    // CONTROL: a generous budget trips nothing → Complete envelope AND a warm
+    // entry, proving the merge does not blanket-degrade and the fixture's
+    // admission path is live.
+    let control = extract_only_partial_project(0);
+    let control_host = control.host();
+    let (.., control_completeness) = control_host
+        .get_component_meta_output("/src/WideParent.vue")
+        .expect("the control envelope materializes")
+        .expect("the control component resolves")
+        .into_parts_with_contract();
+    assert!(
+        !control_completeness.is_partial(),
+        "the generous-budget control must still publish Complete"
+    );
+    assert!(
+        crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
+            control_host,
+            "/src/WideParent.vue"
+        ),
+        "the control must warm, proving the admission path this fixture exercises is live"
+    );
+}
+
+/// The RESOLUTION-bearing output entry
+/// (`get_component_meta_output_with_resolution` — the audited NAPI / WASM /
+/// LSP surface) is a SEPARATE cold body with its own envelope-build call site.
+/// It must publish the same merged completeness: a per-entry fix that misses
+/// this lane leaves the audited surface wrong-complete while the plain entry
+/// is correct.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn resolution_bearing_output_envelope_carries_extract_phase_partiality() {
+    let project = extract_only_partial_project(EXTRACT_ONLY_PARTIAL_BUDGET);
+    let host = project.host();
+    let (output, _request_id) = host
+        .get_component_meta_output_with_resolution("/src/WideParent.vue")
+        .expect("the resolution-bearing envelope materializes");
+    let (.., completeness) = output
+        .expect("the component resolves")
+        .into_parts_with_contract();
+    assert!(
+        !crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
+            host,
+            "/src/WideParent.vue"
+        ),
+        "the merged admission gate must refuse the extract-partial parent (the fixture's premise)"
+    );
+    assert!(
+        completeness.is_partial(),
+        "the resolution-bearing envelope must report the MERGED completeness"
+    );
+
+    let control = extract_only_partial_project(0);
+    let (control_output, _) = control
+        .host()
+        .get_component_meta_output_with_resolution("/src/WideParent.vue")
+        .expect("the control envelope materializes");
+    let (.., control_completeness) = control_output
+        .expect("the control component resolves")
+        .into_parts_with_contract();
+    assert!(
+        !control_completeness.is_partial(),
+        "the generous-budget control must still publish Complete on the resolution-bearing entry"
+    );
+}
+
+/// The ENCODED-PAYLOAD lane (`resolve_one_payload_item`, shared by the scalar
+/// and batch payload surfaces) is the third envelope-build call site. Its
+/// merged signal is already a live local — it decides the payload-cache write
+/// forty lines below — so the envelope must carry that value and not the
+/// resolve term the two other entries used.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn payload_lane_envelope_carries_extract_phase_partiality() {
+    let encode_completeness = |output: crate::meta_resolve::ComponentMetaOutput| {
+        let (.., completeness) = output.into_parts_with_contract();
+        if completeness.is_partial() {
+            b"partial".to_vec()
+        } else {
+            b"complete".to_vec()
+        }
+    };
+
+    let project = extract_only_partial_project(EXTRACT_ONLY_PARTIAL_BUDGET);
+    let session = project.open_session_batch().expect("batch session");
+    let host = project.host();
+    let view = crate::session_view::HostViewRef::new(host);
+    let fixed = host.capture_batch_fixed_view(&view);
+    let payload = session
+        .resolve_one_payload_item("/src/WideParent.vue", &view, &fixed, encode_completeness)
+        .expect("the payload item resolves")
+        .expect("the component resolves");
+    assert_eq!(
+        payload, b"partial",
+        "the payload lane's envelope must report the MERGED completeness — the same signal it \
+         uses forty lines later to refuse the payload-cache write"
+    );
+
+    let control = extract_only_partial_project(0);
+    let control_session = control.open_session_batch().expect("batch session");
+    let control_host = control.host();
+    let control_view = crate::session_view::HostViewRef::new(control_host);
+    let control_fixed = control_host.capture_batch_fixed_view(&control_view);
+    let control_payload = control_session
+        .resolve_one_payload_item(
+            "/src/WideParent.vue",
+            &control_view,
+            &control_fixed,
+            encode_completeness,
+        )
+        .expect("the control payload item resolves")
+        .expect("the control component resolves");
+    assert_eq!(
+        control_payload, b"complete",
+        "the generous-budget control must still publish Complete on the payload lane"
     );
 }

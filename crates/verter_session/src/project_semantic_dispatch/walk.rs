@@ -682,8 +682,8 @@ pub(crate) fn presence_intersection_members(
 /// under the macro enumeration rule (value union on collision,
 /// visibility most-restrictive, optional when not universal), NEVER a
 /// completeness claim. Callers own the incompleteness signal (walker
-/// partial flag, `members_complete = false`, or the macro diagnostic
-/// envelope). A single arm bypasses the merge so member fidelity
+/// partial flag, the open-presence resolution arm, or the macro
+/// diagnostic envelope). A single arm bypasses the merge so member fidelity
 /// (method kind, spans, origins) survives verbatim.
 #[must_use]
 pub(crate) fn presence_union_members(
@@ -993,11 +993,15 @@ pub(crate) fn reduce_merged_decl_with_graph(
     }
     // Preserve heritage: own-body object LAST so the intersection heritage-shadow
     // reducer lets the merged own members shadow inherited same-name members.
+    // ORDERED carrier: arm order is own-body-last topology and rendered
+    // type-text fidelity — never the commutative canonical route.
     let mut arms = heritage_arms;
     arms.push(own_object);
-    graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        arms.into_boxed_slice(),
-    )))
+    graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
+            arms.into_boxed_slice(),
+        )),
+    ))
 }
 
 /// Compute the peer-merged declaration surface for display without interning
@@ -1036,7 +1040,7 @@ fn collect_merged_contributor_arms(
     match data.as_ref() {
         SemanticNodeData::Object(view) => own_surfaces.push(ShallowSurface::from_object(view)),
         SemanticNodeData::Intersection(arms) => {
-            let arms = Arc::clone(arms);
+            let arms = arms.members_arc();
             drop(data);
             for arm in arms.iter() {
                 if arm_is_object_surface(graph, *arm) {
@@ -3520,9 +3524,27 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// Combine the top `arm_count` entries from `results` using the
     /// intersection contributor rule: opaque arms drop,
     /// surviving contributors intersect. Zero contributors → `Opaque(Miss)`.
+    ///
+    /// The join is a MEMBER-VALUE intersection, so it applies the same
+    /// carrier-semantics split as the member-value merge
+    /// (`merge_value_nodes_recursive`): a POSSIBLY-callable contributor
+    /// makes the joined value an overload-ordered carrier — call
+    /// resolution over an intersected member tries signatures in
+    /// DECLARATION order (measured against the pinned checker:
+    /// `interface A { m(x: string): "fromA" }` / `interface B { m(x:
+    /// string): "fromB" }`, `(ab: A & B).m("s")` is `"fromA"`), and the
+    /// commutative canonical sort orders by interned node id, which can
+    /// front the later declaration's overloads. Provably signature-free
+    /// contributors keep the canonical route — including the
+    /// proven-disjoint scalar collapse (`string & number = never`) the
+    /// checker applies to a member projected through an intersection.
     fn join_intersection(&self, arm_count: usize, results: &mut Vec<SemanticNodeId>) {
         let split = results.len().saturating_sub(arm_count);
-        let partials: Vec<SemanticNodeId> = results.drain(split..).collect();
+        let mut partials: Vec<SemanticNodeId> = results.drain(split..).collect();
+        // Arm `Step` frames push in declaration order and pop LIFO, so the
+        // drained per-arm results arrive REVERSED; restore declaration
+        // order before it becomes overload precedence.
+        partials.reverse();
         let contributors: Vec<SemanticNodeId> = partials
             .into_iter()
             .filter(|r| {
@@ -3534,10 +3556,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .collect();
         if contributors.is_empty() {
             results.push(self.opaque_miss());
+        } else if contributors.len() >= 2
+            && contributors
+                .iter()
+                .any(|v| value_may_contribute_call_signatures(self.graph(), *v))
+        {
+            // Overload-ordered carrier: a deliberate bypass of the
+            // canonical (commutative) authority — reordering is
+            // checker-observable through overload selection. The
+            // classification fails CLOSED (order preserved) on anything
+            // undecidable from the graph alone.
+            results.push(self.graph().intern_node(SemanticNodeData::Intersection(
+                crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
+                    contributors.into_boxed_slice(),
+                )),
+            )));
         } else {
-            // Canonical construction — includes the proven-disjoint scalar
-            // collapse (`string & number = never`) the checker applies to a
-            // member projected through an intersection.
             results.push(
                 self.dispatch
                     .intern_normalized_union_or_intersection(&contributors, false),
@@ -3771,7 +3805,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
             }
             SemanticNodeData::Intersection(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 if arms.is_empty() {
                     results.push(node);
@@ -3786,7 +3820,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
             }
             SemanticNodeData::Union(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 if arms.is_empty() {
                     results.push(node);
@@ -3838,16 +3872,43 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             results.push(parent);
             return;
         }
-        let rebuilt = match kind {
-            ExpansionCombineKind::Intersection => {
-                self.graph()
-                    .intern_node(SemanticNodeData::Intersection(Arc::from(
+        // Carrier-semantics dispatch on the ORIGINAL composite's at-rest
+        // origin category: the expansion of a canonical/authored composite
+        // is a DERIVED projection result and routes through the canonical
+        // authority (two reference arms expanding to the same surface
+        // collapse — `T | T = T` over the expansion output — while the
+        // authored shell stays recoverable via `parent`); an ordered
+        // carrier (or any category whose order was not proven re-decidable)
+        // keeps the order- and arity-preserving rebuild verbatim.
+        let is_union = matches!(kind, ExpansionCombineKind::Union);
+        let category = self
+            .graph()
+            .node_data(parent)
+            .as_deref()
+            .and_then(SemanticNodeData::composite_members)
+            .map(crate::semantic_query::composite::CompositeMembers::origin_category);
+        let re_decides = category.is_some_and(|category| {
+            self.dispatch
+                .composite_rebuild_re_decides(category, &expanded, is_union)
+        });
+        let rebuilt = if re_decides {
+            self.dispatch
+                .intern_normalized_union_or_intersection(&expanded, is_union)
+        } else {
+            match kind {
+                ExpansionCombineKind::Intersection => {
+                    self.graph().intern_node(SemanticNodeData::Intersection(
+                        crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                            Arc::from(expanded.into_boxed_slice()),
+                        ),
+                    ))
+                }
+                ExpansionCombineKind::Union => self.graph().intern_node(SemanticNodeData::Union(
+                    crate::semantic_query::composite::CompositeList::preserving_rebuild(Arc::from(
                         expanded.into_boxed_slice(),
-                    )))
+                    )),
+                )),
             }
-            ExpansionCombineKind::Union => self.graph().intern_node(SemanticNodeData::Union(
-                Arc::from(expanded.into_boxed_slice()),
-            )),
         };
         results.push(rebuilt);
     }
@@ -4441,7 +4502,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 );
             }
             SemanticNodeData::Intersection(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let buffer_id = *next_buffer_id;
                 *next_buffer_id += 1;
@@ -4470,7 +4531,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
             }
             SemanticNodeData::Union(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let buffer_id = *next_buffer_id;
                 *next_buffer_id += 1;
@@ -5566,6 +5627,21 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // result means neither the source surface nor the key
                     // space enumerated, so the deferred `Mapped` shell owns it.
                     if keys.is_empty() {
+                        // A HOMOMORPHIC mapper (`[K in keyof S]` over this
+                        // same source) inherits per-member modifiers from
+                        // `S`; keyspace-enumerated NAMES alone cannot carry
+                        // them, so with the source projection unavailable
+                        // the deferred `Mapped` shell owns the shape — the
+                        // re-dispatch enumerates keys and modifiers
+                        // together. The fallback stays for the non-source
+                        // keyspaces this branch exists to serve.
+                        let homomorphic_over_source = matches!(
+                            self.graph().node_data(mapper.key_space).as_deref(),
+                            Some(SemanticNodeData::KeyOf { base }) if *base == source
+                        );
+                        if homomorphic_over_source {
+                            return None;
+                        }
                         match self
                             .dispatch
                             .key_literals_from_keyspace_node(mapper.key_space)
@@ -6059,9 +6135,14 @@ fn merge_declaration_surfaces(
                 == Some(verter_type_expr::ObjectMethodKind::Method)
                 && merged.values.len() > 1
             {
-                let group = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-                    merged.values.into_boxed_slice(),
-                )));
+                // ORDERED carrier: a same-name method overload group in
+                // source order — commutative sorting would reverse the
+                // observed overload set.
+                let group = graph.intern_node(SemanticNodeData::Intersection(
+                    crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
+                        merged.values.into_boxed_slice(),
+                    )),
+                ));
                 ShallowSurfaceMember {
                     value: group,
                     ..merged.member
@@ -6510,9 +6591,11 @@ fn merge_value_nodes_recursive(
         .iter()
         .any(|v| value_may_contribute_call_signatures(graph, *v))
     {
-        graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-            values.to_vec().into_boxed_slice(),
-        )))
+        graph.intern_node(SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
+                values.to_vec().into_boxed_slice(),
+            )),
+        ))
     } else {
         let composite = crate::project_semantic_dispatch::canonical_algebra::canonical_intersection(
             graph, values,
@@ -6532,21 +6615,33 @@ fn merge_value_nodes_recursive(
 /// classification follows transparent `Alias` chains, recurses composite
 /// arms, and FAILS CLOSED: an unresolved reference carrier (`DeclRef`,
 /// `InstantiationRef`, `BareRef`, `ImportType`, `TypeOf`), an open generic
-/// position, an unreduced operator, an apparent type whose global backing
-/// interface user code may legally augment with a call signature
-/// (`Array` / `String` — so arrays, tuples and template literals), a
-/// dangling node, or a budget-exceeded walk all count as possibly-callable
-/// — the authored order is preserved (the pre-canonical shape) rather than
-/// risking a wrong overload reorder. Failing closed is the SAFE direction
-/// here: it keeps the raw ordered carrier.
+/// position, an unreduced operator (a deferred `keyof` shell included —
+/// its OPEN key domain may span BOTH the `String` and `Number` backing
+/// interfaces, so its augmentation-supplied signature set matches no
+/// single arm's), an apparent type whose global backing interface user
+/// code may legally augment with a call signature (`Array` / `String` —
+/// so arrays, tuples and template literals), a dangling node, or a
+/// budget-exceeded walk all count as possibly-callable — the authored
+/// order is preserved (the pre-canonical shape) rather than risking a
+/// wrong overload reorder. Failing closed is the SAFE direction here: it
+/// keeps the raw ordered carrier.
 ///
-/// Only values whose surface PROVABLY carries no call/construct signature
-/// admit the commutative canonical route: a mapped type (the mapping
-/// produces properties only — TS drops the source's call signatures) and
-/// an object-spread program (spreading copies own enumerable properties,
+/// The commutative canonical route admits two classes, for two DIFFERENT
+/// reasons. PROVABLY signature-free surfaces: a mapped type (the mapping
+/// produces properties only — TS drops the source's call signatures), an
+/// object-spread program (spreading copies own enumerable properties,
 /// never callability), a signature-free object surface, and terminal
-/// error/miss carriers.
-fn value_may_contribute_call_signatures(graph: &SemanticGraphStore, value: SemanticNodeId) -> bool {
+/// error/miss carriers. And SCALAR primitive / literal arms, which are
+/// NOT signature-free (a global `String` augmentation makes `string`
+/// callable — measured, TS2349 without it) but ARE provably order-safe:
+/// different-domain scalar pairs collapse to `never` before any ordering
+/// exists, and same-domain scalar arms share one backing interface's
+/// signature list, so commutative reordering is unobservable to overload
+/// resolution.
+pub(super) fn value_may_contribute_call_signatures(
+    graph: &SemanticGraphStore,
+    value: SemanticNodeId,
+) -> bool {
     const CLASSIFY_NODE_BUDGET: usize = 64;
     let mut stack: Vec<SemanticNodeId> = vec![value];
     let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
@@ -6586,7 +6681,8 @@ fn value_may_contribute_call_signatures(graph: &SemanticGraphStore, value: Seman
             }
             // Transparent carriers / composites — classify what they carry.
             SemanticNodeData::Alias(inner) => stack.push(*inner),
-            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                let arms = composite.composite_members().expect("composite arm");
                 stack.extend(arms.iter().copied());
             }
             SemanticNodeData::SyntheticBinding { value_node, .. } => {
@@ -6594,13 +6690,28 @@ fn value_may_contribute_call_signatures(graph: &SemanticGraphStore, value: Seman
             }
             // Shapes whose surface provably carries no call/construct
             // signature: the mapping of a mapped type produces properties
-            // only (TS drops the source's call signatures), an object
+            // only (TS drops the source's call signatures), and an object
             // spread program produces a plain surface (spreading copies own
-            // enumerable properties, never callability), and a scalar /
-            // key domain contributes no signature of its own.
+            // enumerable properties, never callability).
+            //
+            // A SCALAR (primitive / literal) arm is NOT signature-free —
+            // measured against the pinned compiler, a global `String`
+            // augmentation with a call signature makes both `string` and a
+            // string literal callable (TS2349 without it). It stays on the
+            // commutative canonical route because it is provably
+            // ORDER-SAFE inside a retained intersection: two
+            // DIFFERENT-domain scalar arms never coexist (the
+            // proven-disjoint collapse fires first — `string & number` is
+            // `never`, mirroring the checker), and two SAME-domain scalar
+            // arms draw their entire apparent call-signature list from the
+            // ONE shared global backing interface, so a commutative
+            // reorder permutes identical signature blocks and cannot
+            // change first-match overload resolution. Any co-arm that
+            // could contribute a DIFFERENT signature set is independently
+            // classified possibly-callable and already fails the whole
+            // intersection closed.
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
-            | SemanticNodeData::KeyOf { .. }
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::ObjectSpreadProgram(_) => {}
             SemanticNodeData::Opaque(err) => {
@@ -6621,9 +6732,23 @@ fn value_may_contribute_call_signatures(graph: &SemanticGraphStore, value: Seman
             // number]` callable, and `String` augmentation does the same
             // for a template-literal type. Callability is therefore not
             // decidable from the node alone; fail closed.
+            //
+            // A deferred `KeyOf` shell fails closed for a STRONGER reason
+            // than the scalars it superficially resembles: measured
+            // against the pinned compiler, `String` augmentation makes a
+            // `keyof`-typed value callable, and a MIXED-key domain
+            // (`keyof { a: 1; 3: 2 }` = `"a" | 3`) draws its
+            // call-signature set from TWO independently augmentable
+            // backing interfaces (`String` AND `Number`) — a set no
+            // single scalar arm shares, so the same-interface order-safety
+            // argument does not extend to it. The shell's operand is OPEN
+            // (a closed domain would already have materialised as a
+            // literal union), so its key domains are undecidable from the
+            // node alone; keep the authored overload order.
             SemanticNodeData::Array { .. }
             | SemanticNodeData::Tuple { .. }
-            | SemanticNodeData::TemplateLiteral { .. } => return true,
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::KeyOf { .. } => return true,
             // Undecidable without resolution — fail closed.
             SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::IndexedAccess { .. }
@@ -7214,7 +7339,7 @@ fn collect_literal_keys(
             true
         }
         SemanticNodeData::Union(arms) => {
-            let arms = Arc::clone(arms);
+            let arms = arms.members_arc();
             drop(data);
             for arm in arms.iter() {
                 if !collect_literal_keys(graph, *arm, out) {
@@ -7877,6 +8002,41 @@ mod overload_carrier_exclusion_tests {
             let a = apparent_type_carrier(&graph, kind, PrimitiveKind::String);
             assert_authored_order_preserved(&graph, a, b, kind);
         }
+    }
+
+    /// A `keyof` domain fails closed. Measured against the pinned
+    /// TypeScript compiler: a global `String` augmentation with a call
+    /// signature makes a value typed `keyof { a: 1; b: 2 }` callable
+    /// (the un-augmented program rejects with TS2349 "No constituent of
+    /// type '\"a\" | \"b\"' is callable"), and a MIXED-key domain
+    /// (`keyof { a: 1; 3: 2 }` = `"a" | 3`) draws its call-signature
+    /// set from TWO independently augmentable backing interfaces
+    /// (`String` AND `Number`) — a set no single scalar arm shares. The
+    /// deferred `KeyOf` shell's operand is OPEN, so neither its key
+    /// domains nor its backing-interface set is decidable from the node
+    /// alone; the classification must fail closed and keep the authored
+    /// overload order.
+    #[test]
+    fn keyof_domain_keeps_authored_overload_order() {
+        let graph = SemanticGraphStore::new();
+        let type_param = |name: &str| {
+            graph.intern_node(SemanticNodeData::TypeParam {
+                decl: crate::semantic_query::DeclIdentity::synthetic(name),
+                param_index: 0,
+                constraint: None,
+                default: None,
+                display_name: std::sync::Arc::from(name),
+            })
+        };
+        // Adversarial interning order: the SECOND authored contributor
+        // is minted first, so its ordinal sorts lower.
+        let b = graph.intern_node(SemanticNodeData::KeyOf {
+            base: type_param("B"),
+        });
+        let a = graph.intern_node(SemanticNodeData::KeyOf {
+            base: type_param("A"),
+        });
+        assert_authored_order_preserved(&graph, a, b, "KeyOf");
     }
 
     /// Every UNRESOLVED reference carrier fails closed. A `DeclRef`,

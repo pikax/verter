@@ -2216,9 +2216,11 @@ fn canonical_algebra_collapses_only_proven_facts() {
 
     // Nested composites FLATTEN recursively (a union is never an arm of a
     // union), across the raw-constructor seam too.
-    let inner = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![lit_a, string].into_boxed_slice(),
-    )));
+    let inner = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![lit_a, string].into_boxed_slice(),
+        )),
+    ));
     let flattened = canonical_algebra::canonical_union(&graph, &[inner, number]);
     match graph.node_data(flattened.node).as_deref() {
         Some(SemanticNodeData::Union(m)) => {
@@ -2229,6 +2231,251 @@ fn canonical_algebra_collapses_only_proven_facts() {
         }
         other => panic!("expected a flattened union, got {other:?}"),
     }
+}
+
+/// Derived-composite constituent identity ignores source-coordinate span
+/// payloads: two arms that differ ONLY by where they were written collapse
+/// under `T | T = T` / `T & T = T`, while declaration-site interning keeps
+/// them distinct arena nodes (an identical same-file shape at a different
+/// source location still interns to a distinct node), and a pair that
+/// differs in a SEMANTIC field never collapses.
+///
+/// Two `return { label: "…" }` statements in one function produce
+/// byte-identical widened object arms whose only difference is
+/// `MemberSpans` — without the span exclusion the inferred return union
+/// keeps both arms forever and the canonical idempotence law can never
+/// fire for multi-return functions.
+#[test]
+fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() {
+    use crate::project_semantic_dispatch::canonical_algebra;
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    let member_span_object = |span_start: u32, value: SemanticNodeId| -> SemanticNodeId {
+        let member = SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string("label"),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: verter_type_expr::MemberSpans {
+                declaration: Some(verter_span::Span::new(span_start, span_start + 10)),
+                name: Some(verter_span::Span::new(span_start, span_start + 5)),
+                type_annotation: None,
+            },
+            declaration_origin: None,
+        };
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+            members: Arc::from(vec![member].into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }))
+    };
+
+    // Declaration-site interning is span-bearing and UNCHANGED: the same
+    // shape at two source locations is two arena nodes. This assertion
+    // fails if the span exclusion is over-applied to arena `Eq`.
+    let at_62 = member_span_object(62, string);
+    let at_94 = member_span_object(94, string);
+    assert_ne!(
+        at_62, at_94,
+        "member spans participate in arena interning identity — two source \
+         locations must intern to two nodes"
+    );
+
+    // Derived-composite constituent identity is span-insensitive: the union
+    // of the two collapses to the first retained arm, complete and
+    // warm-eligible.
+    let union = canonical_algebra::canonical_union(&graph, &[at_62, at_94]);
+    assert_eq!(
+        union.node,
+        at_62,
+        "arms that differ only by source coordinates collapse under T | T = T \
+         (first occurrence survives); got {:?}",
+        graph.node_data(union.node)
+    );
+    assert!(
+        !union.evidence.incomplete,
+        "a span-only collapse is a completed comparison, never Incomplete"
+    );
+    let intersection = canonical_algebra::canonical_intersection(&graph, &[at_62, at_94]);
+    assert_eq!(
+        intersection.node, at_62,
+        "the intersection twin collapses under T & T = T"
+    );
+
+    // Boundary control: a SEMANTIC field difference (the member's value
+    // type) keeps both arms even when the spans are identical — the span
+    // exclusion must not widen into value identity.
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let number_at_62 = member_span_object(62, number);
+    let distinct = canonical_algebra::canonical_union(&graph, &[at_62, number_at_62]);
+    assert!(
+        matches!(
+            graph.node_data(distinct.node).as_deref(),
+            Some(SemanticNodeData::Union(m)) if m.len() == 2
+        ),
+        "value-distinct arms never collapse; got {:?}",
+        graph.node_data(distinct.node)
+    );
+
+    // Index-signature spans are excluded the same way.
+    let index_span_object = |span_start: u32| -> SemanticNodeId {
+        let signature = IndexSignature {
+            key_type: string,
+            value_type: string,
+            readonly: false,
+            spans: verter_type_expr::IndexSignatureSpans {
+                declaration: Some(verter_span::Span::new(span_start, span_start + 12)),
+                key: Some(verter_span::Span::new(span_start + 1, span_start + 4)),
+                value: None,
+            },
+            declaration_origin: None,
+        };
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(vec![signature].into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: true,
+        }))
+    };
+    let index_a = index_span_object(10);
+    let index_b = index_span_object(200);
+    assert_ne!(
+        index_a, index_b,
+        "index-signature spans stay arena identity"
+    );
+    let index_union = canonical_algebra::canonical_union(&graph, &[index_a, index_b]);
+    assert_eq!(
+        index_union.node, index_a,
+        "index-signature-span-only arms collapse"
+    );
+
+    // Signature spans (whole-signature + return-type + per-param) are
+    // excluded too; the occurrence and return-carrier identities remain.
+    let signature_node = |span_start: u32| -> SemanticNodeId {
+        graph.intern_node(SemanticNodeData::Signature {
+            kind: crate::semantic_query::SignatureKind::Call,
+            params: Arc::from(
+                vec![crate::semantic_query::FunctionParam {
+                    name: Some("p".into()),
+                    ty: string,
+                    optional: false,
+                    rest: false,
+                    span: Some(verter_span::Span::new(span_start + 1, span_start + 2)),
+                }]
+                .into_boxed_slice(),
+            ),
+            return_type: string,
+            type_parameters: Arc::from(
+                Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
+            ),
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string),
+            signature_span: Some(verter_span::Span::new(span_start, span_start + 20)),
+            return_type_span: Some(verter_span::Span::new(span_start + 15, span_start + 20)),
+        })
+    };
+    let sig_a = signature_node(30);
+    let sig_b = signature_node(300);
+    assert_ne!(sig_a, sig_b, "signature spans stay arena identity");
+    let sig_union = canonical_algebra::canonical_union(&graph, &[sig_a, sig_b]);
+    assert_eq!(
+        sig_union.node, sig_a,
+        "signature-span-only arms collapse under T | T = T"
+    );
+}
+
+/// The pairwise tier's candidate-narrowing bucket hash must never be FINER
+/// than canonical identity: `compare_structural(a, b) == Equal` implies
+/// `bucket(a) == bucket(b)`, or the pair is never compared and `T | T = T`
+/// silently stops applying above the narrowing threshold. The discriminating
+/// shape is a union with MORE than `STRUCTURAL_PREHASH_MIN_ARMS`
+/// child-bearing arms where two arms are equal except for their source
+/// spans: a span-sensitive bucketing hash narrows the pair into different
+/// groups and both arms survive, so the below-threshold tests all pass
+/// while wide unions keep the duplicate.
+#[test]
+fn span_only_duplicates_collapse_above_prehash_narrowing_threshold() {
+    use crate::project_semantic_dispatch::canonical_algebra;
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    let spanned_object = |name: &str, span_start: u32| -> SemanticNodeId {
+        let member = SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
+            value: string,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: verter_type_expr::MemberSpans {
+                declaration: Some(verter_span::Span::new(span_start, span_start + 10)),
+                name: Some(verter_span::Span::new(span_start, span_start + 5)),
+                type_annotation: None,
+            },
+            declaration_origin: None,
+        };
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+            members: Arc::from(vec![member].into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }))
+    };
+
+    // Ten structurally DISTINCT child-bearing arms (distinct member names)
+    // plus one span-variant duplicate of the first — 11 child-bearing arms,
+    // above the narrowing threshold, so the pairwise tier runs over bucket
+    // groups rather than directly.
+    let mut arms: Vec<SemanticNodeId> = (0..10)
+        .map(|index| spanned_object(&format!("k{index}"), 100 + index * 50))
+        .collect();
+    let duplicate = spanned_object("k0", 9000);
+    assert_ne!(arms[0], duplicate, "the duplicate differs only by spans");
+    arms.push(duplicate);
+
+    let union = canonical_algebra::canonical_union(&graph, &arms);
+    match graph.node_data(union.node).as_deref() {
+        Some(SemanticNodeData::Union(members)) => {
+            assert_eq!(
+                members.len(),
+                10,
+                "the span-only duplicate must collapse above the narrowing \
+                 threshold exactly as it does below it"
+            );
+            assert!(
+                members.contains(&arms[0]) && !members.contains(&duplicate),
+                "first occurrence survives; the span-variant duplicate is discarded"
+            );
+        }
+        other => panic!("expected a ten-arm union, got {other:?}"),
+    }
+    assert!(
+        !union.evidence.incomplete,
+        "bucketed narrowing must stay complete — distinct arms skip the \
+         pairwise tier without consuming budget"
+    );
 }
 
 /// TypeScript interns `0` and `-0` as ONE numeric literal type (SameValueZero
@@ -2617,6 +2864,175 @@ fn frameless_incomplete_canonical_evidence_marks_request_partial() {
         "a frameless caller's Incomplete must reach the request partial \
          sticky — never silently dropped"
     );
+}
+
+/// The FRAMED twin of the frameless disposition: with an ACTIVE cold-build
+/// taint frame, an `Incomplete` canonical-evidence deposit must taint the
+/// frame's RESULT-PARTIAL rail (which the build output copies onto the
+/// returned `CacheRead` and the read funnel folds into the request sticky),
+/// not only `cache_suppress`. `cache_suppress` alone suppresses the
+/// intermediate memo publishes while the VALUE still flows upward as
+/// complete — the enclosing publication's read set cannot represent the
+/// unproven canonicalization (`incomplete` "is NOT subsumable by any read
+/// set"), so component-meta / typeinfo promotion would warm-admit an
+/// unproven-canonical value that the SAME deposit at top level already
+/// refuses. Partiality of the deposit must be frame-position-independent.
+///
+/// The COMPLETE leg is the AC3 fence: a deposit that carries only file
+/// self-roots (a complete canonicalization) must leave BOTH partial rails
+/// clean — a legitimately complete nested build stays complete and
+/// warm-capable.
+#[test]
+fn framed_incomplete_canonical_evidence_taints_frame_partial_not_only_suppressed() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // Incomplete evidence through the real producer: an over-deep alias
+    // chain makes the canonicalization UNDECIDED (same fixture as the
+    // frameless twin).
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+    let mut aliased = never;
+    for _ in 0..9 {
+        aliased = graph.intern_node(SemanticNodeData::Alias(aliased));
+    }
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let union = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+        &graph,
+        &[aliased, string],
+    );
+    assert!(union.evidence.incomplete, "fixture produces incompleteness");
+
+    let guard =
+        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    dispatch.deposit_canonical_evidence(union.evidence);
+    let frame = guard.finish();
+    assert!(
+        frame.cache_suppress,
+        "an Incomplete deposit suppresses the enclosing build's memo publish"
+    );
+    assert!(
+        frame.result_is_partial,
+        "an Incomplete deposit under an active cold-build frame must mark the \
+         frame RESULT-PARTIAL — cache_suppress alone lets the value flow to \
+         the enclosing publication as complete and warm-admissible, while \
+         the identical frameless deposit marks the request partial"
+    );
+
+    // AC3 fence: a COMPLETE deposit (roots only) leaves the frame clean.
+    let complete_guard =
+        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    let mut complete =
+        crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+    complete
+        .inspected_file_roots
+        .push((Arc::from("/w/frame_complete.ts"), [7u8; 16]));
+    dispatch.deposit_canonical_evidence(complete);
+    let clean = complete_guard.finish();
+    assert!(
+        !clean.result_is_partial && !clean.cache_suppress,
+        "a complete roots-only deposit must not taint either partial rail — \
+         a legitimately complete nested build stays complete and warm-capable"
+    );
+    assert_eq!(
+        clean.observed_self_roots.len(),
+        1,
+        "the complete deposit still records its file self-root on the frame"
+    );
+}
+
+/// Projecting a member THROUGH an intersection joins the per-arm member
+/// values as an intersection whose ARM ORDER is overload precedence:
+/// `(A & B).m` with callable `m` on both arms calls A's signature first
+/// (measured against the pinned checker — `interface A { m(x: string):
+/// "fromA" }`, `interface B { m(x: string): "fromB" }`, `(ab.m("s"))` is
+/// `"fromA"`). The walker's intersection join must therefore mint the
+/// ORDER-PRESERVING carrier for possibly-callable contributors — the same
+/// carrier-semantics split the member-value merge applies — instead of
+/// routing them through the commutative canonical sort, which orders by
+/// interned node id and can front the second declaration's overloads.
+/// The fixture interns B's callable FIRST so the id order is adversarial
+/// to the declaration order.
+#[test]
+fn path_projection_through_intersection_keeps_callable_member_order() {
+    use crate::semantic_query::{SurfaceEntry, SurfaceView};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let callable_obj = |ret: SemanticNodeId| {
+        graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+            vec![SurfaceEntry::CallSignature(ret)],
+            None,
+            false,
+        )))
+    };
+    // Adversarial interning order: B's callable value FIRST, so an
+    // id-ordered commutative rebuild fronts it.
+    let value_b = callable_obj(number);
+    let value_a = callable_obj(string);
+    assert!(value_b.0 < value_a.0, "fixture needs the reversed ordinals");
+
+    let member_obj = |value: SemanticNodeId| {
+        let member = crate::semantic_query::SurfaceMember {
+            key: crate::semantic_query::AuthoredPropertyKey::string("m"),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: None,
+        };
+        graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+            vec![SurfaceEntry::Member(member)],
+            None,
+            false,
+        )))
+    };
+    let obj_a = member_obj(value_a);
+    let obj_b = member_obj(value_b);
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![obj_a, obj_b].into_boxed_slice(),
+        )),
+    ));
+
+    let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("m"),
+            )]
+            .into_boxed_slice(),
+        ),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
+    });
+    let QueryResult::Value(joined) = read.value else {
+        panic!("member projection through the intersection produces a value");
+    };
+    match graph.node_data(joined).as_deref() {
+        Some(SemanticNodeData::Intersection(arms)) => {
+            assert_eq!(
+                arms.as_ref(),
+                &[value_a, value_b],
+                "declaration order IS the overload order for a member \
+                 projected through an intersection — the commutative \
+                 canonical sort must not reorder possibly-callable \
+                 contributors"
+            );
+        }
+        other => panic!("expected the joined member intersection, got {other:?}"),
+    }
 }
 
 /// `intern_string_literal_union` documents "always a `Union`, even at arity
@@ -5267,9 +5683,11 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
         has_index_signature: false,
     };
     let object_node = graph.intern_node(SemanticNodeData::Object(surface));
-    let union_node = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![object_node, array_node, string_node].into_boxed_slice(),
-    )));
+    let union_node = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![object_node, array_node, string_node].into_boxed_slice(),
+        )),
+    ));
 
     // Substituted parameter (TypeParam K) is not present anywhere
     // in the tree above.
@@ -5310,7 +5728,12 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
 /// Change-tracking must NOT regress correctness when the parameter
 /// DOES appear: substitute(T → string) produces a node whose `T`
 /// references are replaced. Standard correctness check to pair with
-/// the no-op discriminator above.
+/// the no-op discriminator above. Substitution is a composite
+/// CONSTRUCTION site: the substituted `T | string` with `T := string`
+/// carries two structurally equal arms, and the canonical algebra
+/// (`T | T = T`, singleton unwrap) must collapse it to the retained
+/// member — a raw order-preserving rebuild that keeps both arms fails
+/// this contract.
 #[test]
 fn substitute_change_tracking_preserves_correctness_when_parameter_appears() {
     let host = host();
@@ -5325,26 +5748,255 @@ fn substitute_change_tracking_preserves_correctness_when_parameter_appears() {
         default: None,
         display_name: Arc::from("T"),
     });
-    let union_node = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![parameter_node, string_node].into_boxed_slice(),
-    )));
+    let union_node = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![parameter_node, string_node].into_boxed_slice(),
+        )),
+    ));
 
     let result = dispatch.substitute_semantic_type_param(union_node, parameter_node, string_node);
-    // Post-substitution union has both arms = string_node; structural
-    // intern dedups equivalent arms but the arm count is preserved.
-    let data = graph.node_data(result).expect("result data");
-    match data.as_ref() {
-        SemanticNodeData::Union(arms) => {
-            assert_eq!(arms.len(), 2);
-            assert_eq!(arms[0], string_node);
-            assert_eq!(arms[1], string_node);
+    // Post-substitution both arms are `string_node`: the canonical
+    // union algebra (`T | T = T`, singleton unwrap) collapses the
+    // substituted composite to the retained member itself. A raw
+    // order-preserving rebuild that keeps `Union(string, string)`
+    // (case-B shape: a duplicate constituent surviving substitution)
+    // fails this contract.
+    assert_eq!(
+        result, string_node,
+        "substituting T := string into `T | string` must canonicalize \
+         to the single retained `string` member, not a duplicate-arm union"
+    );
+}
+
+/// Evidence-blind-replay fence, SUPPRESSION direction. The substitute
+/// hash-cons memo is store-owned and CROSS-REQUEST, so a walk whose
+/// canonical composite routing inspected file-scoped structure must not
+/// be replayed to a later request that would then never observe those
+/// self-roots — a warm read served on an under-rooted entry, exactly the
+/// stale-publication class the correctness budget puts at zero.
+///
+/// `T | string` with the `string` arm `File`-scoped: substituting
+/// `T := number` routes the CHANGED union through the canonical
+/// authority, whose flatten records the file-scoped arm's self-root, so
+/// `deposit_canonical_evidence` advances the epoch and the publish is
+/// suppressed. The result still flows to the caller — only the memo
+/// write is withheld.
+#[test]
+fn substitute_publish_suppressed_when_canonicalization_inspects_file_scope() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    // The evidence-bearing arm: a `File`-scoped `string`. Scope is arena
+    // identity, so this is a distinct id from the Global `string`.
+    let file_string = graph.intern_node_with_scope(
+        SemanticNodeData::Primitive(PrimitiveKind::String),
+        NodeScopeId::File {
+            canonical_id: Arc::from("/w/substitute_arm_owner.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: [23; 16],
+            local_scope: None,
+        },
+    );
+    let union_node = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![parameter_node, file_string].into_boxed_slice(),
+        )),
+    ));
+
+    let result = dispatch.substitute_semantic_type_param(union_node, parameter_node, number);
+    // The walk really did canonicalize a composite over the file-scoped
+    // arm (both arms survive — distinct primitive domains).
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Union(m)) if m.len() == 2
+        ),
+        "fixture must reach the canonical union route over the file-scoped arm"
+    );
+    assert_eq!(
+        graph.substitute_memo_get(union_node, parameter_node, number),
+        None,
+        "a walk whose canonicalization deposited file self-roots must NOT reach \
+         the cross-request substitute memo — replaying it to a request that never \
+         observes those roots is a stale warm read on an under-rooted entry"
+    );
+}
+
+/// Evidence-blind-replay fence, PUBLISH direction. The fence is armed by
+/// NON-TRIVIAL evidence only: a walk whose canonicalization inspected no
+/// file-scoped node and proved itself complete deposits nothing, leaves
+/// the epoch untouched, and stays freely replayable. Without this leg an
+/// over-broad fence (advancing the epoch on EVERY deposit, trivial ones
+/// included) would silently make the memo permanently unpublishable and
+/// still look correct.
+///
+/// The evidence-free twin of the suppression fixture: every arm is
+/// `Global`, so `T | string` with `T := number` canonicalizes with an
+/// empty root set.
+#[test]
+fn evidence_free_substitute_walk_still_publishes_to_the_memo() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let union_node = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![parameter_node, string].into_boxed_slice(),
+        )),
+    ));
+
+    let result = dispatch.substitute_semantic_type_param(union_node, parameter_node, number);
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Union(m)) if m.len() == 2
+        ),
+        "same canonical union route as the suppression twin, minus the file scope"
+    );
+    assert_eq!(
+        graph.substitute_memo_get(union_node, parameter_node, number),
+        Some(result),
+        "an all-Global walk deposits no self-roots and proves itself complete, so \
+         the fence must leave it replayable — the fence is armed by NON-TRIVIAL \
+         evidence, never by the mere fact that a canonicalization ran"
+    );
+}
+
+/// Substituted-intersection carrier split, POSSIBLY-CALLABLE leg. A
+/// changed intersection carrying a possibly-callable contributor is an
+/// overload-ordered carrier: call resolution tries arms in declaration
+/// order, so the rebuild must preserve the AUTHORED order rather than
+/// route through the commutative canonical authority, whose deterministic
+/// ordering sorts arms by node ordinal.
+///
+/// The fixture is built so the two routes are DISTINGUISHABLE. Members
+/// substituted during the walk intern in authored order, which would make
+/// the canonical sort reproduce the authored order and discriminate
+/// nothing; so the SUBSTITUTED forms are pre-interned with the SECOND
+/// authored arm minted FIRST, giving it the lower ordinal. A regression
+/// to the canonical route therefore emits the REVERSED carrier — a
+/// silently reversed overload set.
+#[test]
+fn substituted_possibly_callable_intersection_preserves_authored_arm_order() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string = primitive(&graph, PrimitiveKind::String);
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+
+    // Adversarial ordinals: mint the SECOND authored arm's substituted
+    // form first so it sorts lower than the first's.
+    let a_substituted = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: crate::semantic_query::DeclIdentity::synthetic("A"),
+        args: Arc::from(vec![string].into_boxed_slice()),
+    });
+    let b_substituted = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: crate::semantic_query::DeclIdentity::synthetic("B"),
+        args: Arc::from(vec![string].into_boxed_slice()),
+    });
+    assert!(
+        a_substituted.0 < b_substituted.0,
+        "fixture precondition: the SECOND authored arm must carry the LOWER \
+         ordinal, otherwise the canonical sort reproduces authored order and \
+         the test discriminates nothing"
+    );
+
+    // `A<T>` / `B<T>` — `InstantiationRef` recurses into `args`, so the
+    // intersection is genuinely CHANGED, and it is fail-closed
+    // possibly-callable, so it takes the order-preserving leg.
+    let a_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: crate::semantic_query::DeclIdentity::synthetic("A"),
+        args: Arc::from(vec![parameter_node].into_boxed_slice()),
+    });
+    let b_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: crate::semantic_query::DeclIdentity::synthetic("B"),
+        args: Arc::from(vec![parameter_node].into_boxed_slice()),
+    });
+    // Authored order is `B<T> & A<T>`.
+    let intersection_node = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![b_ref, a_ref].into_boxed_slice(),
+        )),
+    ));
+
+    let result = dispatch.substitute_semantic_type_param(intersection_node, parameter_node, string);
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Intersection(members)) => {
+            assert_eq!(
+                &members[..],
+                &[b_substituted, a_substituted][..],
+                "a possibly-callable substituted intersection must keep the AUTHORED \
+                 arm order; the canonical route's ordinal sort would emit the \
+                 reversed carrier, silently reversing the overload set"
+            );
         }
-        other => panic!("expected substituted Union, got {other:?}"),
+        other => panic!("expected a retained Intersection carrier, got {other:?}"),
     }
-    // Sanity: result id differs from union_node since the union body changed.
-    assert_ne!(
-        result, union_node,
-        "substituted union must intern to a fresh node id"
+}
+
+/// Substituted-intersection carrier split, ORDER-SAFE leg. When every
+/// substituted contributor is provably order-safe (scalars draw their
+/// entire apparent call-signature list from one shared global backing
+/// interface), the derived instantiation routes through the canonical
+/// authority — and must actually get the authority's semantics.
+///
+/// `T & string` with `T := number` is the sharpest witness: the
+/// proven-disjoint scalar collapse reduces it to `never`. A regression
+/// that sent this leg down the order-preserving rebuild would emit a
+/// retained `number & string` carrier instead, a wrong-complete result.
+#[test]
+fn substituted_order_safe_intersection_routes_through_the_canonical_authority() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let intersection_node = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![parameter_node, string].into_boxed_slice(),
+        )),
+    ));
+
+    let result = dispatch.substitute_semantic_type_param(intersection_node, parameter_node, number);
+    assert_eq!(
+        result, never,
+        "every substituted contributor is an order-safe scalar, so the changed \
+         intersection must reach the canonical authority and collapse the \
+         proven-disjoint `number & string` to `never` — never a retained carrier"
     );
 }
 
@@ -5559,9 +6211,11 @@ fn build_conditional_distributive_union_distributes_per_member_via_execute_no_st
     // check = string | number ; extends = string ;
     // distributive = true → expect NormalizeUnion([ true_branch (for
     // string), false_branch (for number) ]).
-    let union_check = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![string_node, number_node].into_boxed_slice(),
-    )));
+    let union_check = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_node, number_node].into_boxed_slice(),
+        )),
+    ));
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
         check: union_check,
@@ -5616,9 +6270,11 @@ fn build_conditional_distributive_false_on_union_check_does_not_distribute() {
     let true_branch = primitive(&graph, PrimitiveKind::Boolean);
     let false_branch = primitive(&graph, PrimitiveKind::Symbol);
 
-    let union_check = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![string_node, number_node].into_boxed_slice(),
-    )));
+    let union_check = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_node, number_node].into_boxed_slice(),
+        )),
+    ));
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
         check: union_check,
@@ -5671,9 +6327,11 @@ fn build_conditional_distributive_union_behind_alias_carrier_distributes_per_mem
     let true_branch = primitive(&graph, PrimitiveKind::Boolean);
     let false_branch = primitive(&graph, PrimitiveKind::Symbol);
 
-    let union_node = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![string_node, number_node].into_boxed_slice(),
-    )));
+    let union_node = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_node, number_node].into_boxed_slice(),
+        )),
+    ));
     // The carrier shell the union hides behind — the deferred-shell
     // evaluator unwraps it at the union-ness fact demand.
     let alias_check = graph.intern_node(SemanticNodeData::Alias(union_node));
@@ -5738,9 +6396,11 @@ fn build_conditional_distributive_per_member_subquery_has_distributive_false() {
     // Two decl anchors vs. a primitive extends — each per-member
     // conditional returns a deferred `Conditional` shell because the
     // shallow relation check cannot decide the relation.
-    let union_check = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![a, b].into_boxed_slice(),
-    )));
+    let union_check = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![a, b].into_boxed_slice(),
+        )),
+    ));
 
     // Compute the expected per-member deferred shells with
     // `distributive: false`.
@@ -5908,9 +6568,11 @@ fn intersection_arm_without_path_segment_is_ignored() {
     let num = primitive(&graph, PrimitiveKind::Number);
     let with_m = simple_object(&graph, &[("m", num)]);
     let without_m = simple_object(&graph, &[("n", num)]);
-    let intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![with_m, without_m].into_boxed_slice(),
-    )));
+    let intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![with_m, without_m].into_boxed_slice(),
+        )),
+    ));
 
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
@@ -5947,9 +6609,11 @@ fn union_miss_propagates() {
     let num = primitive(&graph, PrimitiveKind::Number);
     let with_m = simple_object(&graph, &[("m", num)]);
     let without_m = simple_object(&graph, &[("n", num)]);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![with_m, without_m].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![with_m, without_m].into_boxed_slice(),
+        )),
+    ));
 
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
@@ -6373,6 +7037,69 @@ fn key_of_records_source_members() {
 // ──────────────────────────────────────────────────────────────────
 
 use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
+
+/// A homomorphic mapped type over a RESOLVED EMPTY object source
+/// (`Partial<{}>`, `{ [K in keyof {}]: ... }`) is a legitimately complete
+/// EMPTY surface — the checker reduces `Partial<{}>` to `{}`. The
+/// resolved-empty source must not be conflated with an UNPROJECTED
+/// source: the deferral exists for a source whose surface has not
+/// projected yet (keys and modifiers must enumerate together on the
+/// re-dispatch), while a source that RESOLVED to zero members has a
+/// CLOSED, empty key domain and materialises the empty object —
+/// complete, exact, and warm-capable, never a deferred `Mapped` carrier
+/// that every re-dispatch returns unchanged.
+#[test]
+fn homomorphic_mapped_over_resolved_empty_source_publishes_empty_object() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let source = simple_object(&graph, &[]);
+    let key_space = graph.intern_node(SemanticNodeData::KeyOf { base: source });
+    let value_placeholder = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let binder = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let mapper = MapperKey {
+        parameter_node: binder,
+        key_space,
+        value_expr: value_placeholder,
+        optionality: OptionalityMod::Add,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: crate::semantic_query::MapperKind::Identity,
+    };
+
+    let read = dispatch.execute_read(SemanticQueryKey::MappedType {
+        source,
+        mapper,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    });
+    let QueryResult::Value(id) = read.value else {
+        panic!("Partial<{{}}> produces a value, got {:?}", read.value);
+    };
+    match graph.node_data(id).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            assert!(
+                view.positive_members().is_empty(),
+                "the empty source maps to the empty surface"
+            );
+        }
+        other => panic!(
+            "a resolved-empty homomorphic source materialises the empty \
+             object, never the deferred Mapped carrier — got {other:?}"
+        ),
+    }
+    assert!(
+        !read.result_is_partial,
+        "a legitimately empty mapped surface is complete, never partial"
+    );
+}
 
 /// Different `(optionality, readonly)` combinations on the same
 /// `(source, key_space, value_expr)` produce distinct mapped
@@ -7563,9 +8290,11 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
     let key_y = graph.intern_node(SemanticNodeData::Literal(
         crate::semantic_query::LiteralValue::String("y".to_string()),
     ));
-    let keys_xy = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_x, key_y].into_boxed_slice(),
-    )));
+    let keys_xy = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_x, key_y].into_boxed_slice(),
+        )),
+    ));
     let never = primitive(&graph, PrimitiveKind::Never);
     let broad_string = primitive(&graph, PrimitiveKind::String);
 
@@ -7721,9 +8450,11 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
     }
 
     // Pick<any, "x" | 1> = { x: any; 1: any } — mixed literal union.
-    let keys_x_or_1 = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_x, key_1].into_boxed_slice(),
-    )));
+    let keys_x_or_1 = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_x, key_1].into_boxed_slice(),
+        )),
+    ));
     let picked_mixed = instantiate_utility(&dispatch, &graph, "Pick", &[any, keys_x_or_1]);
     match graph.node_data(picked_mixed).as_deref() {
         Some(SemanticNodeData::Object(surface)) => {
@@ -7828,9 +8559,11 @@ fn numeric_literal_keys_enumerate_for_closed_pick_omit_and_mapped() {
     let key_1 = graph.intern_node(SemanticNodeData::Literal(
         crate::semantic_query::LiteralValue::Number(1.0),
     ));
-    let keys_a_or_1 = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_a, key_1].into_boxed_slice(),
-    )));
+    let keys_a_or_1 = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_a, key_1].into_boxed_slice(),
+        )),
+    ));
 
     // Pick<{ a: string; 1: number }, "a" | 1> = the full source surface.
     let picked = instantiate_utility(&dispatch, &graph, "Pick", &[source, keys_a_or_1]);
@@ -8018,9 +8751,11 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
     }
 
     // `{ [K in 1 | "a"]: K }` = `{ 1: 1; a: "a" }`.
-    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_1, key_a].into_boxed_slice(),
-    )));
+    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_1, key_a].into_boxed_slice(),
+        )),
+    ));
     let param = key_param();
     let mapped = build_mapped(mapper_over(keys_1_or_a, param, param, None));
     match graph.node_data(mapped).as_deref() {
@@ -8089,9 +8824,11 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
 
     // `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }` — duplicate produced names
     // UNION their per-K values.
-    let keys_dup = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_1, key_1_str].into_boxed_slice(),
-    )));
+    let keys_dup = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_1, key_1_str].into_boxed_slice(),
+        )),
+    ));
     let param = key_param();
     let mapped = build_mapped(mapper_over(keys_dup, param, param, None));
     match graph.node_data(mapped).as_deref() {
@@ -8698,9 +9435,11 @@ fn key_remap_publishes_numeric_literal_keys() {
     let key_a = graph.intern_node(SemanticNodeData::Literal(
         crate::semantic_query::LiteralValue::String("a".to_string()),
     ));
-    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![number_literal(1.0), key_a].into_boxed_slice(),
-    )));
+    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![number_literal(1.0), key_a].into_boxed_slice(),
+        )),
+    ));
     let param = key_param();
     let mapped = build_mapped(keys_1_or_a, param, Some(param));
     match graph.node_data(mapped).as_deref() {
@@ -9042,9 +9781,11 @@ fn union_index_distribution_projects_numeric_literal_arms() {
         ))
     };
     let project_by_union = |base: SemanticNodeId, arms: &[SemanticNodeId]| -> SemanticNodeId {
-        let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-            arms.to_vec().into_boxed_slice(),
-        )));
+        let union = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                arms.to_vec().into_boxed_slice(),
+            )),
+        ));
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base,
             path: Arc::from(vec![PathSegment::Index(IndexKey::Computed(union))].into_boxed_slice()),
@@ -9170,9 +9911,11 @@ fn union_index_distribution_preserves_carrier_valued_member_arms() {
         }
     };
     let union_of = |arms: &[SemanticNodeId]| -> SemanticNodeId {
-        graph.intern_node(SemanticNodeData::Union(Arc::from(
-            arms.to_vec().into_boxed_slice(),
-        )))
+        graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                arms.to_vec().into_boxed_slice(),
+            )),
+        ))
     };
 
     // Convention anchor: the SINGLE-KEY path publishes the opaque member
@@ -9301,9 +10044,11 @@ fn object_record_relation_accepts_numeric_literal_keys() {
     let key_a = graph.intern_node(SemanticNodeData::Literal(
         crate::semantic_query::LiteralValue::String("a".to_string()),
     ));
-    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![number_literal(1.0), key_a].into_boxed_slice(),
-    )));
+    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![number_literal(1.0), key_a].into_boxed_slice(),
+        )),
+    ));
     let source_both = simple_object(&graph, &[("1", string_node), ("a", string_node)]);
     assert_eq!(
         relate(source_both, keys_1_or_a),
@@ -10001,9 +10746,11 @@ fn awaited_distributes_over_union_arms() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string_node = primitive(&graph, PrimitiveKind::String);
     let num = primitive(&graph, PrimitiveKind::Number);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![promise_carrier(&graph, string_node), num].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![promise_carrier(&graph, string_node), num].into_boxed_slice(),
+        )),
+    ));
 
     let result = instantiate_utility(&dispatch, &graph, "Awaited", &[union]);
     let data = graph.node_data(result).expect("node data");
@@ -10137,9 +10884,11 @@ fn non_nullable_reduces_settled_operands() {
     let string_node = primitive(&graph, PrimitiveKind::String);
     let null_node = primitive(&graph, PrimitiveKind::Null);
     let undefined_node = primitive(&graph, PrimitiveKind::Undefined);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![string_node, null_node, undefined_node].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_node, null_node, undefined_node].into_boxed_slice(),
+        )),
+    ));
     let filtered = run(union);
     assert_eq!(
         filtered, string_node,
@@ -10170,9 +10919,11 @@ fn non_nullable_reduces_settled_operands() {
         "NonNullable over `never` must reduce to `never`"
     );
     // `NonNullable<null | undefined>` = `never` (every arm filtered).
-    let nullish_union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![null_node, undefined_node].into_boxed_slice(),
-    )));
+    let nullish_union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![null_node, undefined_node].into_boxed_slice(),
+        )),
+    ));
     assert_eq!(
         run(nullish_union),
         never_node,
@@ -13483,9 +14234,11 @@ fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_ba
         &graph,
         vec![surface_member("keep", union_projection, false, false)],
     );
-    let union_template = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![losing_target, winning_target].into_boxed_slice(),
-    )));
+    let union_template = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![losing_target, winning_target].into_boxed_slice(),
+        )),
+    ));
     let union_source_value = intern_object_with_members(
         &graph,
         vec![
@@ -13543,9 +14296,11 @@ fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_ba
             surface_member("tag", string, false, false),
         ],
     );
-    let intersection_source_value = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![losing_source_arm, winning_source_arm].into_boxed_slice(),
-    )));
+    let intersection_source_value = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![losing_source_arm, winning_source_arm].into_boxed_slice(),
+        )),
+    ));
     let intersection_target = reverse_test_target(
         &graph,
         intersection_infer,
@@ -14035,9 +14790,11 @@ fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
         default: None,
         display_name: Arc::from("K"),
     });
-    let intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![obj, type_param].into_boxed_slice(),
-    )));
+    let intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![obj, type_param].into_boxed_slice(),
+        )),
+    ));
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: intersection,
@@ -16233,9 +16990,11 @@ fn nested_builtin_object_filter_key_domain_judged_by_family_semantics() {
             s.to_string(),
         )))
     };
-    let keys_ab = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![lit("a"), lit("b")].into_boxed_slice(),
-    )));
+    let keys_ab = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![lit("a"), lit("b")].into_boxed_slice(),
+        )),
+    ));
     let builtin = |name: &str| DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -20404,6 +21163,7 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
             ClassifyMaterializationCycleGate(_) => "ClassifyMaterializationCycleGate",
             FlowReturn(_) => "FlowReturn",
             ResolveCall(_) => "ResolveCall",
+            ClassifyTruthinessDomain { .. } => "ClassifyTruthinessDomain",
         }
     }
     // Sanity probe: each variant carries a distinct label and the
@@ -20611,9 +21371,11 @@ fn shallow_intersection_object_and_instantiation_ref_merges_members() {
         base: decl_identity_value(&host, "/w/inst.ts", "Foo"),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
     });
-    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![object_a, inst_ref].into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![object_a, inst_ref].into_boxed_slice(),
+        )),
+    ));
 
     let result = run_empty_path_shallow(&dispatch, base);
     let view = require_object_surface(
@@ -20651,9 +21413,11 @@ fn shallow_intersection_optionality_required_wins() {
     let t = primitive(&graph, PrimitiveKind::String);
     let optional_a = intern_object_with_members(&graph, vec![surface_member("a", t, true, false)]);
     let required_a = intern_object_with_members(&graph, vec![surface_member("a", t, false, false)]);
-    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![optional_a, required_a].into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![optional_a, required_a].into_boxed_slice(),
+        )),
+    ));
 
     let result = run_empty_path_shallow(&dispatch, base);
     let view = require_object_surface(
@@ -20682,9 +21446,11 @@ fn shallow_intersection_readonly_or_merged() {
     let t = primitive(&graph, PrimitiveKind::String);
     let readonly_a = intern_object_with_members(&graph, vec![surface_member("a", t, false, true)]);
     let mutable_a = intern_object_with_members(&graph, vec![surface_member("a", t, false, false)]);
-    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![readonly_a, mutable_a].into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![readonly_a, mutable_a].into_boxed_slice(),
+        )),
+    ));
 
     let result = run_empty_path_shallow(&dispatch, base);
     let view = require_object_surface(&graph, result, "shallow_intersection_readonly_or_merged");
@@ -20819,9 +21585,11 @@ fn shallow_intersection_value_merge_intersection_node() {
         intern_object_with_members(&graph, vec![surface_member("a", value_a, false, false)]);
     let arm_b =
         intern_object_with_members(&graph, vec![surface_member("a", value_b, false, false)]);
-    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![arm_a, arm_b].into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![arm_a, arm_b].into_boxed_slice(),
+        )),
+    ));
 
     let result = run_empty_path_shallow(&dispatch, base);
     let view = require_object_surface(
@@ -20871,9 +21639,11 @@ fn shallow_union_member_intersection_of_arms() {
     let num_id = primitive(&graph, PrimitiveKind::Number);
     let arm_a = intern_object_with_members(&graph, vec![surface_member("a", str_id, false, false)]);
     let arm_b = intern_object_with_members(&graph, vec![surface_member("a", num_id, false, false)]);
-    let base = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![arm_a, arm_b].into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![arm_a, arm_b].into_boxed_slice(),
+        )),
+    ));
 
     let result = run_empty_path_shallow(&dispatch, base);
     let view = require_object_surface(&graph, result, "shallow_union_member_intersection_of_arms");
@@ -20888,9 +21658,11 @@ fn shallow_union_member_intersection_of_arms() {
     );
 
     // Negative: `{a: A} | string` — string arm has no `a` member.
-    let mixed = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![arm_a, str_id].into_boxed_slice(),
-    )));
+    let mixed = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![arm_a, str_id].into_boxed_slice(),
+        )),
+    ));
     let mixed_result = run_empty_path_shallow(&dispatch, mixed);
     let mixed_view = require_object_surface(
         &graph,
@@ -21003,9 +21775,11 @@ fn shallow_mapped_type_enumerates_keyset() {
     let key_b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "b".to_string(),
     )));
-    let key_space = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_a, key_b].into_boxed_slice(),
-    )));
+    let key_space = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_a, key_b].into_boxed_slice(),
+        )),
+    ));
     let mapper_param = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("__Mapper"),
         param_index: 0,
@@ -21193,9 +21967,11 @@ fn shallow_walker_stack_depth_bounded_for_100_intersection() {
             )
         })
         .collect();
-    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        arms.into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            arms.into_boxed_slice(),
+        )),
+    ));
 
     // The query MUST terminate without stack overflow. The
     // walker hardening guarantee is an iterative frame stack so a
@@ -22529,9 +23305,11 @@ fn identity_utility_mapped_carrier_projects_existing_members_not_miss() {
         }
     };
     let union_of = |arms: &[SemanticNodeId]| -> SemanticNodeId {
-        graph.intern_node(SemanticNodeData::Union(Arc::from(
-            arms.to_vec().into_boxed_slice(),
-        )))
+        graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                arms.to_vec().into_boxed_slice(),
+            )),
+        ))
     };
 
     // Single-key Identity rule: `Partial<{p: string}>` carrier walked at
@@ -24750,9 +25528,11 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
     let key_b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "b".to_string(),
     )));
-    let key_space = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_a, key_b].into_boxed_slice(),
-    )));
+    let key_space = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_a, key_b].into_boxed_slice(),
+        )),
+    ));
     let mapper_param = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("__Mapper"),
         param_index: 0,
@@ -25184,9 +25964,11 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
         ),
         crate::semantic_query::ObjectConstructionEffect::Spread(type_param),
     ]);
-    let open_intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![a_object, open_program].into_boxed_slice(),
-    )));
+    let open_intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![a_object, open_program].into_boxed_slice(),
+        )),
+    ));
     assert_eq!(
         dispatch.key_names_from_base_node(open_intersection),
         None,
@@ -25199,9 +25981,11 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
     let closed_program = program_of(vec![
         crate::semantic_query::ObjectConstructionEffect::Spread(b_object),
     ]);
-    let closed_intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![a_object, closed_program].into_boxed_slice(),
-    )));
+    let closed_intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![a_object, closed_program].into_boxed_slice(),
+        )),
+    ));
     let mut names = dispatch
         .key_names_from_base_node(closed_intersection)
         .expect("a closed program arm enumerates");
@@ -25217,9 +26001,11 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
 
     // Pre-existing rule unchanged: a TypeParam arm is dropped, the
     // enumerable arm's keys survive.
-    let param_intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![a_object, type_param].into_boxed_slice(),
-    )));
+    let param_intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![a_object, type_param].into_boxed_slice(),
+        )),
+    ));
     assert_eq!(
         dispatch.key_names_from_base_node(param_intersection),
         Some(vec![crate::semantic_query::PropertyKey::string_literal(
@@ -25273,12 +26059,16 @@ fn keyof_intersection_poisons_through_union_nesting() {
             ),
         },
     ));
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![simple_object(&graph, &[("a", string)]), open_program].into_boxed_slice(),
-    )));
-    let intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![union, simple_object(&graph, &[("c", string)])].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![simple_object(&graph, &[("a", string)]), open_program].into_boxed_slice(),
+        )),
+    ));
+    let intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![union, simple_object(&graph, &[("c", string)])].into_boxed_slice(),
+        )),
+    ));
     assert_eq!(
         dispatch.key_names_from_base_node(intersection),
         None,
@@ -26531,9 +27321,11 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
                 ))))
             })
             .collect();
-        graph.intern_node(SemanticNodeData::Union(Arc::from(
-            members.into_boxed_slice(),
-        )))
+        graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                members.into_boxed_slice(),
+            )),
+        ))
     };
     let a = make_union("a");
     let b = make_union("b");
@@ -26959,9 +27751,11 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
     // value below.
     let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("a".into())));
     let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("b".into())));
-    let key_union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![a, b].into_boxed_slice(),
-    )));
+    let key_union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![a, b].into_boxed_slice(),
+        )),
+    ));
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
@@ -27892,9 +28686,11 @@ fn shallow_empty_path_intersection_root_still_rebuilds_merged_surface() {
         vec![surface_member("right", str_id, false, false)],
         false,
     );
-    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![left, right].into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![left, right].into_boxed_slice(),
+        )),
+    ));
 
     let result = run_empty_path_shallow(&dispatch, base);
     assert_ne!(result, left, "intersection root must not alias an arm");
@@ -28189,7 +28985,11 @@ fn oracle_value_union(
     ids.dedup();
     match ids.as_slice() {
         [only] => *only,
-        _ => graph.intern_node(SemanticNodeData::Union(Arc::from(ids.into_boxed_slice()))),
+        _ => graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                ids.into_boxed_slice(),
+            )),
+        )),
     }
 }
 
@@ -28943,5 +29743,573 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
         !classes.contains(PartialReasonSet::PROPAGATED),
         "a contained positional class must NOT be re-lifted as the anonymous bridge, \
          observed {classes:?}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// The final idempotent pre-seal closure (`close_flow_result_pre_seal`).
+//
+// Through the live path the closure is defense-in-depth: the flow join,
+// substitution and widening all already produce canonical values, so a
+// non-canonical pre-seal value is unconstructible through the public
+// boundary — the laws are proven directly on the helper instead of
+// through a vacuous end-to-end fixture.
+// ──────────────────────────────────────────────────────────────────────
+
+/// A raw duplicate-arm union handed to the pre-seal closure collapses
+/// through the canonical authority (`T | T = T`, singleton unwrap), and
+/// re-closing the closed result is a no-op — the idempotence law.
+#[test]
+fn pre_seal_closure_canonicalizes_union_top_and_is_idempotent() {
+    use crate::semantic_query::FlowReturnResult;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let never_node = primitive(&graph, PrimitiveKind::Never);
+    // A raw (pre-canonical) union fixture: duplicate arms plus a `never`
+    // arm the lattice absorbs.
+    let raw = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_node, never_node, string_node].into_boxed_slice(),
+        )),
+    ));
+    let result = FlowReturnResult::new(&graph, raw, false, None);
+
+    let closed = dispatch.close_flow_result_pre_seal(result);
+    assert_eq!(
+        closed.return_type(),
+        string_node,
+        "the pre-seal closure must collapse `string | never | string` to `string`"
+    );
+    // Idempotence: closing an already-closed result is a no-op.
+    let reclosed = dispatch.close_flow_result_pre_seal(closed.clone());
+    assert_eq!(
+        reclosed.return_type(),
+        closed.return_type(),
+        "re-closing an already-closed result must be a no-op"
+    );
+}
+
+/// An INTERSECTION top passes through the pre-seal closure verbatim —
+/// NOT because flow cannot derive one (substitution inside the close
+/// path rebuilds intersections, and predicate narrowing constructs one),
+/// but because every flow-derived intersection top is already closed by
+/// its constructor or is an overload-ordered carrier the commutative
+/// route must not reorder; the pinned compiler preserves the same
+/// duplicated intersection for the composed-generic case (measured, see
+/// `close_flow_result_pre_seal`).
+#[test]
+fn pre_seal_closure_leaves_intersection_top_untouched() {
+    use crate::semantic_query::FlowReturnResult;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    // A raw intersection top — even one the canonical route WOULD
+    // collapse (`string & number = never`) stays untouched: the closure
+    // does not re-decide a constructor-owned intersection carrier.
+    let inter = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![number_node, string_node].into_boxed_slice(),
+        )),
+    ));
+    let result = FlowReturnResult::new(&graph, inter, false, None);
+    let closed = dispatch.close_flow_result_pre_seal(result);
+    assert_eq!(
+        closed.return_type(),
+        inter,
+        "an intersection top is constructor-owned and passes through the \
+         pre-seal closure verbatim"
+    );
+}
+
+/// The pre-seal closure's canonicality test is O(1): a union top MINTED by
+/// the canonical authority is already closed, so the closure returns it
+/// unchanged WITHOUT re-running the canonical pipeline — no evidence
+/// deposit and no evidence-epoch advance. (The epoch is what makes the
+/// cross-request substitute memo unpublishable for walks that observed
+/// file-scoped roots, so a pure no-op close must not burn it; the
+/// file-scoped members below make the pipeline's deposit observable.)
+#[test]
+fn pre_seal_closure_skips_the_pipeline_for_a_canonical_tagged_union_top() {
+    use crate::semantic_query::FlowReturnResult;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let file_scope = |canonical: &str, hash: u8| NodeScopeId::File {
+        canonical_id: Arc::from(canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [hash; 16],
+        local_scope: None,
+    };
+    let a = graph.intern_node_with_scope(
+        SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String("a".to_string())),
+        file_scope("/w/pre-seal-skip-a.ts", 7),
+    );
+    let b = graph.intern_node_with_scope(
+        SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String("b".to_string())),
+        file_scope("/w/pre-seal-skip-b.ts", 9),
+    );
+    let top = dispatch.intern_normalized_union_or_intersection(&[a, b], true);
+    assert!(
+        matches!(
+            graph.node_data(top).as_deref(),
+            Some(SemanticNodeData::Union(_))
+        ),
+        "the fixture needs a multi-arm canonical union top"
+    );
+
+    let epoch_before = dispatch.canonical_evidence_epoch.get();
+    let closed =
+        dispatch.close_flow_result_pre_seal(FlowReturnResult::new(&graph, top, false, None));
+    assert_eq!(
+        closed.return_type(),
+        top,
+        "a canonical top re-closes to itself (idempotence)"
+    );
+    assert_eq!(
+        dispatch.canonical_evidence_epoch.get(),
+        epoch_before,
+        "a canonical-tagged top skips the pipeline: no evidence deposit, no \
+         evidence-epoch advance on the no-op path"
+    );
+}
+
+/// An empty-path `Expanded` projection whose arm expansion lands on a node
+/// the union already carries (`A | <A's own object>`: the reference arm
+/// expands to the sibling arm's node) rebuilds a DERIVED projection
+/// result, not an ordered carrier: it routes through the canonical
+/// authority, so the duplicate constituents collapse to the shared object
+/// instead of publishing `Union(sharedObject, sharedObject)`.
+#[test]
+fn expanded_projection_of_alias_twin_union_collapses_to_the_shared_object() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/alias-twin-union.ts",
+        "export type A = { x: string };\n",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(
+            "/w/alias-twin-union.ts",
+            "A",
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let shared_object = outcome.ok().flatten().expect("A must resolve");
+    assert!(
+        matches!(
+            graph.node_data(shared_object).as_deref(),
+            Some(SemanticNodeData::Object(_))
+        ),
+        "the fixture needs A's materialised object"
+    );
+    let whole_hash = host
+        .shallow_file_state("/w/alias-twin-union.ts")
+        .expect("the fixture file must have shallow state")
+        .whole_hash;
+    let placeholder = graph.intern_node(SemanticNodeData::Opaque(
+        crate::semantic_query::QueryError::DeclPlaceholder {
+            canonical_id: Arc::from("/w/alias-twin-union.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name: Arc::from("A"),
+            whole_hash,
+        },
+    ));
+    let base = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
+            vec![placeholder, shared_object].into_boxed_slice(),
+        )),
+    ));
+    let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    });
+    let QueryResult::Value(SemanticQueryOutput { value: result, .. }) = projected else {
+        panic!("the duplicate-expansion union must project, got {projected:?}");
+    };
+    assert_eq!(
+        result,
+        shared_object,
+        "the reference arm expands onto the sibling's object — the derived \
+         rebuild must collapse `obj | obj` to the one object, got {:?}",
+        graph.node_data(result)
+    );
+}
+
+/// An `Instantiate` whose generic locator VIEW projection reduces BOTH
+/// union arms to the same node (`T["a"] | T["b"]` over a source whose two
+/// members share one value type) rebuilds a DERIVED projection result: it
+/// routes through the canonical authority, so the instantiated body is
+/// the one shared member type, never `Union(string, string)`. (The
+/// substitution walk is not on this route — the view worklist applies the
+/// binding and reduces the operator in-view — so this pins the locator
+/// view worklist's rebuild specifically.)
+#[test]
+fn instantiation_of_duplicate_projection_union_collapses_to_the_shared_arm() {
+    use crate::semantic_query::{InstantiateContext, InstantiateKey, SemanticQueryKey};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/dup-param-union.ts",
+        "export type Src = { a: string; b: string };\n\
+         export type Both<T> = T[\"a\"] | T[\"b\"];\n",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(
+            "/w/dup-param-union.ts",
+            "Src",
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let src_node = outcome.ok().flatten().expect("Src must resolve");
+
+    let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
+        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("/w/dup-param-union.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("Both"),
+        ),
+        Arc::from(vec![src_node].into_boxed_slice()),
+        InstantiateContext::non_file(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+            BodySourceWitness::mint_for_unit_tests(),
+        ),
+    )));
+    let QueryResult::Value(result) = read.value else {
+        panic!(
+            "`Both<Src>` must instantiate to a value, got {:?}",
+            read.value
+        );
+    };
+    let data = graph.node_data(result);
+    assert!(
+        matches!(
+            data.as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+        ),
+        "both projected arms are the one `string` node — the derived \
+         projection rebuild must collapse to it, got {data:?}"
+    );
+}
+
+/// Substitution's canonical composite routes intern the DERIVED rebuild
+/// under `Global` (a derived multi-arm composite has no lexical scope; its
+/// file dependence rides the canonical evidence and observed self-roots),
+/// while the possibly-callable intersection rebuild — an overload-ordered
+/// carrier — PRESERVES the origin shell's `File` scope. The one prior
+/// regression for the `intern_preserving_scope` invariant exercises an
+/// `Object` shell only; this pins the composite split explicitly.
+#[test]
+fn substituted_union_interns_global_while_callable_intersection_preserves_scope() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let file_scope = || NodeScopeId::File {
+        canonical_id: Arc::from("/w/subst-composite-scope.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [11; 16],
+        local_scope: None,
+    };
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+
+    // UNION: `T | string` under a File-scoped authored shell; `T := number`
+    // routes the changed rebuild through the canonical authority — Global.
+    let union_node = graph.intern_node_with_scope(
+        SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
+                vec![parameter_node, string_node].into_boxed_slice(),
+            )),
+        ),
+        file_scope(),
+    );
+    let substituted =
+        dispatch.substitute_semantic_type_param(union_node, parameter_node, number_node);
+    assert!(
+        matches!(
+            graph.node_data(substituted).as_deref(),
+            Some(SemanticNodeData::Union(_))
+        ),
+        "`number | string` keeps both arms"
+    );
+    assert_eq!(
+        graph.node_scope(substituted),
+        Some(NodeScopeId::Global),
+        "a substituted DERIVED union interns under Global — the origin File \
+         scope is deliberately NOT copied onto the canonical rebuild"
+    );
+
+    // INTERSECTION with a possibly-callable contributor: the substituted
+    // rebuild is an overload-ordered carrier and PRESERVES the origin
+    // shell's File scope.
+    let callable = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
+        params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new().into_boxed_slice()),
+        return_type: string_node,
+        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string_node),
+        signature_span: None,
+        return_type_span: None,
+    });
+    let intersection_node = graph.intern_node_with_scope(
+        SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
+                vec![callable, parameter_node].into_boxed_slice(),
+            )),
+        ),
+        file_scope(),
+    );
+    let substituted =
+        dispatch.substitute_semantic_type_param(intersection_node, parameter_node, number_node);
+    assert_eq!(
+        graph.node_scope(substituted),
+        Some(file_scope()),
+        "a possibly-callable substituted intersection is an overload-ordered \
+         carrier and keeps its origin File scope"
+    );
+}
+
+/// An INCOMPLETE canonicalization (here an undecidable over-deep alias
+/// peek; the over-cap arm set, an exhausted compare budget and a dangling
+/// arm take the same evidence path) must REFUSE the `Canonical` stamp on
+/// its multi-arm output. The stamp is the pre-seal closure's O(1) skip
+/// witness of canonical FORM; stamping an unproven list would let a
+/// budget-degraded result resurface in a later request as skip-eligible
+/// — warm-classifiable with no fresh canonicalization and no evidence
+/// deposit — the budget-exceeded-never-warm class. The unproven top pays
+/// the full idempotent re-close instead: its evidence re-deposits (epoch
+/// advance), so suppression re-arms in every request that resurfaces it.
+#[test]
+fn incomplete_canonicalization_refuses_the_canonical_stamp_and_pays_the_re_close() {
+    use crate::semantic_query::FlowReturnResult;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // Over-deep alias chain: the bounded lattice peek cannot decide the
+    // arm, so the canonicalization completes with `incomplete` evidence
+    // while keeping both arms.
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let mut aliased = never;
+    for _ in 0..9 {
+        aliased = graph.intern_node(SemanticNodeData::Alias(aliased));
+    }
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let union = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+        &graph,
+        &[aliased, string_node],
+    );
+    assert!(union.evidence.incomplete, "fixture produces incompleteness");
+    let data = graph.node_data(union.node);
+    let Some(SemanticNodeData::Union(members)) = data.as_deref() else {
+        panic!("the undecided-arm union keeps both arms, got {data:?}");
+    };
+    assert_eq!(
+        members.origin_category(),
+        crate::semantic_query::composite::CompositeOriginCategory::CanonicalUnproven,
+        "an incomplete canonicalization is not proven canonical form — the \
+         Canonical stamp (the O(1) skip witness) must be refused in favour \
+         of the unproven fact"
+    );
+    drop(data);
+
+    // The unproven top must PAY the pre-seal re-close: no O(1) skip, so
+    // the pipeline's evidence deposit advances the epoch and re-arms
+    // warm-admission suppression in the resurfacing request.
+    let epoch_before = dispatch.canonical_evidence_epoch.get();
+    let closed =
+        dispatch.close_flow_result_pre_seal(FlowReturnResult::new(&graph, union.node, false, None));
+    assert_eq!(
+        closed.return_type(),
+        union.node,
+        "the budgeted algorithm is deterministic and idempotent on its own output"
+    );
+    assert_ne!(
+        dispatch.canonical_evidence_epoch.get(),
+        epoch_before,
+        "a not-proven-canonical top must re-enter the full closure pipeline — \
+         evidence deposits and the epoch advances; the skip is reserved for \
+         the proven `Canonical` stamp"
+    );
+}
+
+/// The ordered-PRESERVE leg of the projection-rebuild carrier dispatch,
+/// pinned at a real rebuild site (the expansion walk's arm combine): an
+/// `OrderedCarrier` union whose expansion CHANGES an arm — and whose
+/// expanded arm ids are DESCENDING, so a commutative re-decide's ordinal
+/// sort would provably reorder them — keeps its verbatim arm order and
+/// comes back as a `PreservingRebuild` carrier, never a canonical
+/// re-decide. Arm order on an ordered carrier is overload precedence and
+/// rendered-text fidelity; this leg is what the fail-closed side of
+/// `composite_rebuild_re_decides` protects.
+#[test]
+fn expanded_projection_preserves_ordered_carrier_arm_order() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/ordered-preserve.ts",
+        "export type B = { y: number };\nexport type A = { x: string };\n",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // Resolve B FIRST so its object interns with the LOWER node id: the
+    // preserved order below is then DESCENDING by id, which an ordinal
+    // sort cannot reproduce — the fixture discriminates order, not just
+    // membership.
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(
+            "/w/ordered-preserve.ts",
+            "B",
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let obj_b = outcome.ok().flatten().expect("B must resolve");
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(
+            "/w/ordered-preserve.ts",
+            "A",
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let obj_a = outcome.ok().flatten().expect("A must resolve");
+    assert!(
+        obj_a.0 > obj_b.0,
+        "fixture guard: the preserved order must be descending by id so a \
+         commutative re-decide would provably reorder it"
+    );
+
+    let whole_hash = host
+        .shallow_file_state("/w/ordered-preserve.ts")
+        .expect("the fixture file must have shallow state")
+        .whole_hash;
+    let placeholder_a = graph.intern_node(SemanticNodeData::Opaque(
+        crate::semantic_query::QueryError::DeclPlaceholder {
+            canonical_id: Arc::from("/w/ordered-preserve.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name: Arc::from("A"),
+            whole_hash,
+        },
+    ));
+    let base = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
+            vec![placeholder_a, obj_b].into_boxed_slice(),
+        )),
+    ));
+    let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    });
+    let QueryResult::Value(SemanticQueryOutput { value: result, .. }) = projected else {
+        panic!("the ordered union must project, got {projected:?}");
+    };
+    let data = graph.node_data(result);
+    let Some(SemanticNodeData::Union(members)) = data.as_deref() else {
+        panic!("the ordered carrier's expansion stays a union, got {data:?}");
+    };
+    assert_eq!(
+        &***members,
+        &[obj_a, obj_b],
+        "an OrderedCarrier rebuild preserves verbatim arm order — the \
+         descending-id order proves no ordinal sort ran"
+    );
+    assert_eq!(
+        members.origin_category(),
+        crate::semantic_query::composite::CompositeOriginCategory::PreservingRebuild,
+        "the preserved rebuild inherits the not-proven-re-decidable \
+         disposition, never a canonical re-decide"
+    );
+}
+
+/// The carrier dispatch of a member-wise composite rebuild, pinned per
+/// category and per fail-closed leg: derived categories (canonical,
+/// unproven-canonical, authored shell) re-decide; order-bearing and
+/// caller-contract categories preserve; and ANY intersection whose
+/// rebuilt arms may contribute call signatures fails closed to preserve
+/// regardless of the tag (the overload-ordered class).
+#[test]
+fn composite_rebuild_re_decision_is_per_category_with_callable_fail_closed() {
+    use crate::semantic_query::composite::CompositeOriginCategory as C;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let plain = [string_node, number_node];
+    let callable = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
+        params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new().into_boxed_slice()),
+        return_type: string_node,
+        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string_node),
+        signature_span: None,
+        return_type_span: None,
+    });
+    let with_callable = [callable, number_node];
+
+    // Union rebuilds: the category alone decides.
+    for (category, decides) in [
+        (C::Canonical, true),
+        (C::CanonicalUnproven, true),
+        (C::AuthoredShell, true),
+        (C::OrderedCarrier, false),
+        (C::PreservingRebuild, false),
+        (C::QuerySubject, false),
+        (C::TestFixture, false),
+    ] {
+        assert_eq!(
+            dispatch.composite_rebuild_re_decides(category, &plain, true),
+            decides,
+            "union rebuild of {category:?}"
+        );
+    }
+    // Intersection rebuilds: derived categories re-decide only when NO
+    // rebuilt arm may contribute call signatures.
+    assert!(
+        dispatch.composite_rebuild_re_decides(C::AuthoredShell, &plain, false),
+        "signature-free derived intersection re-decides"
+    );
+    assert!(
+        !dispatch.composite_rebuild_re_decides(C::AuthoredShell, &with_callable, false),
+        "a possibly-callable rebuilt arm fails the intersection closed"
+    );
+    assert!(
+        !dispatch.composite_rebuild_re_decides(C::Canonical, &with_callable, false),
+        "the callable fail-closed leg holds even for the canonical tag"
     );
 }

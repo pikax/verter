@@ -940,7 +940,8 @@ fn collect_surface_member_names(
                 out.push(m.string_name().expect("string-key fixture").to_string());
             }
         }
-        Some(SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms)) => {
+        Some(composite @ (SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_))) => {
+            let arms = composite.composite_members().expect("composite arm");
             for arm in arms.iter() {
                 collect_surface_member_names(store, *arm, out);
             }

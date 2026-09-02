@@ -3053,9 +3053,11 @@ fn union_callee(
     dispatch: &ProjectSemanticDispatch<'_>,
     arms: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
-    dispatch
-        .graph()
-        .intern_node(SemanticNodeData::Union(Arc::from(arms.into_boxed_slice())))
+    dispatch.graph().intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            arms.into_boxed_slice(),
+        )),
+    ))
 }
 
 /// `(() => 1) | (() => 2)` selects a first-applicable signature in EVERY

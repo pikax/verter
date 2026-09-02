@@ -220,16 +220,6 @@ fn assert_complete_warm(trace: &Trace, expected_json: Option<&str>) {
 fn flow_gap_known_gap_results_are_typed_partial_and_never_warm() {
     let fixtures = [
         (
-            "g1",
-            "function makeProps(x: string) { if (typeof x === \"number\") return \"dead\" as const; return \"live\" as const }",
-            FlowGap::GuardNarrowing,
-        ),
-        (
-            "g2",
-            "type A = { kind: \"a\" }; type B = { kind: \"b\" }\nfunction isA(x: A | B): x is A { return x.kind === \"a\" }\nfunction isB(x: A | B): x is B { return x.kind === \"b\" }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? { dead: true } : \"ok\") : \"no\" } }",
-            FlowGap::GuardNarrowing,
-        ),
-        (
             "g3",
             "declare const A_KIND: unique symbol; declare const B_KIND: unique symbol;\ntype A = { kind: typeof A_KIND; a: number }; type B = { kind: typeof B_KIND; b: number };\nfunction isA(x: A | B): x is A { return x.kind === A_KIND }\nfunction isB(x: A | B): x is B { return x.kind === B_KIND }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? x : \"ok\") : \"no\" } }",
             FlowGap::NominalRelation,
@@ -657,6 +647,21 @@ fn flow_gap_false_refusal_controls_remain_complete_and_warm() {
             "impossible_typeof_exact_subject_read",
             "function makeProps(x: string) { if (typeof x === \"number\") return x; return \"live\" as const }",
             Some(r#"{"kind":"literal","literalKind":"string","value":"live"}"#),
+        ),
+        // A guard edge no arm survives stays ALIVE with its subject read
+        // as `never` — a contributor on that edge that reads a DIFFERENT
+        // value keeps its own type (measured: the checker counts the
+        // `"dead"` return of the uninhabited `typeof` edge, and the dead
+        // predicate arm's object value, in the joined return type).
+        (
+            "impossible_typeof_non_subject_read",
+            "function makeProps(x: string) { if (typeof x === \"number\") return \"dead\" as const; return \"live\" as const }",
+            Some(r#"{"kind":"union","types":[{"kind":"literal","literalKind":"string","value":"dead"},{"kind":"literal","literalKind":"string","value":"live"}]}"#),
+        ),
+        (
+            "impossible_predicate_non_subject_value",
+            "type A = { kind: \"a\" }; type B = { kind: \"b\" }\nfunction isA(x: A | B): x is A { return x.kind === \"a\" }\nfunction isB(x: A | B): x is B { return x.kind === \"b\" }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? { dead: true } : \"ok\") : \"no\" } }",
+            None,
         ),
         ("n23", "function makeProps(x: string | number | boolean) { if (!((typeof x === \"string\" && typeof x === \"number\") || typeof x === \"number\" || typeof x === \"boolean\")) throw 0; return { v: x } }", None),
         ("x70", "declare function sink(cb: () => void): void\nfunction makeProps() { let x: \"a\" | \"b\" = \"a\"; do { sink(() => { x = \"b\" }) } while (false); return x }", Some(r#"{"kind":"literal","literalKind":"string","value":"a"}"#)),

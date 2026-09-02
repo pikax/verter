@@ -457,6 +457,7 @@ semantic_query_names! {
     ClassifyMaterializationCycleGate,
     FlowReturn,
     ResolveCall,
+    ClassifyTruthinessDomain,
 }
 
 /// Deterministic identifier for a generated TS7 oracle snapshot. Closed
@@ -747,6 +748,10 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
         // a sealed classifier family whose `Decided` verdicts admit
         // through the family singleflight.
         ClassifyMaterializationCycleGate => U2QueryValueDomain,
+        // The demand-scoped truthiness-domain classifier is the canonical
+        // type algebra's own key: the algebra layer owns truthiness-domain
+        // classification, and the flow narrowing frames CONSUME the fact.
+        ClassifyTruthinessDomain => U2CanonicalTypeAlgebra,
     }
 }
 
@@ -2068,6 +2073,11 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         // admit through the singleflight like every other value-domain
         // family.
         (ClassifyMaterializationCycleGate, U2QueryValueDomain),
+        // The demand-scoped truthiness-domain classifier at
+        // U2.CANONICAL_TYPE_ALGEBRA — the canonical algebra layer owns
+        // truthiness-domain classification; the flow narrowing
+        // truthiness frame consumes the fact and holds no private rule.
+        (ClassifyTruthinessDomain, U2CanonicalTypeAlgebra),
     ];
 
     // DISCRIMINATING per-key pin: a wrong `key_owning_block` arm FAILS here.

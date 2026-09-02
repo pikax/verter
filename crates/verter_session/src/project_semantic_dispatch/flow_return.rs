@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use super::call_resolve::union_self_roots;
 use super::dispatch_txn::flow_obligation_state::{
-    FlowDemandCarrier, FlowEvaluationProvenance, ObservedFlowConvergence,
+    FlowDemandCarrier, FlowEvaluationProvenance, FlowPlanRefusal, ObservedFlowConvergence,
 };
 use super::dispatch_txn::{
     CompletedFlowReturnMember, FlowReturnPendingOutcome, FlowReturnPendingState,
@@ -114,7 +114,7 @@ pub(crate) enum FunctionReturnNode {
 /// `tsc_class_inference_budget_is_exact_partial_and_non_cacheable`), and
 /// the typed `FlowReturnFailure` itself is what the flow-return consumers
 /// branch on.
-const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_NO_SURFACE;
+pub(super) const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_NO_SURFACE;
 
 /// The partial class a DEGRADED SUCCESS's typed
 /// [`FlowReturnDegradation`] carries.
@@ -154,6 +154,34 @@ const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_NO
 /// [`FlowReturnDegradation`] a written frame reports and when the
 /// evaluator first observes it, so it belongs with the work that APPLIES
 /// write effects rather than beside it.
+/// The partial class of a verdict-less close: the demand installed no
+/// proof layer, so the evaluated value flows unproven. The class follows
+/// the recorded CAUSE, because the causes sit on opposite sides of the
+/// consumer containment axis:
+///
+/// - a BUDGET refusal (the obligation-set cap, or the slice budget read
+///   through the retained plan) is a statement about the REQUEST — the
+///   same axis as the adjacent slice-budget refusal — and takes
+///   [`PartialReasonSet::BUDGET_EXCEEDED`], which every Vue macro
+///   projection lane refuses to contain. Landing it on the contained
+///   degraded-success class let a value-deriving lane publish `type:
+///   null` for every member while reporting Complete;
+/// - a TORN prepare-time view (the retained artifacts were missing at
+///   preparation while the evaluation still produced a value) is a
+///   transient-state statement, non-deterministic by nature, and takes
+///   [`PartialReasonSet::UNSTABLE_STATE`];
+/// - an UNPLANNABLE demand — and the deliberate refused-member-batch
+///   close, which records no cause — keeps the contained
+///   [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`]: the member set is
+///   complete and the value usable, merely unverified.
+pub(super) fn plan_refusal_reason_class(refusal: Option<FlowPlanRefusal>) -> PartialReasonSet {
+    match refusal {
+        Some(FlowPlanRefusal::Budget) => PartialReasonSet::BUDGET_EXCEEDED,
+        Some(FlowPlanRefusal::TornView) => PartialReasonSet::UNSTABLE_STATE,
+        Some(FlowPlanRefusal::Unplannable) | None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+    }
+}
+
 fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReasonSet {
     match degradation {
         FlowReturnDegradation::FlowGap(_) => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
@@ -168,6 +196,71 @@ fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReason
         | FlowReturnDegradation::ConditionalVarDefinition
         | FlowReturnDegradation::UnreducedDeclaredUnion => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
     }
+}
+
+/// The partial class of a finalizer PARTIAL verdict: the typed
+/// [`FlowPartialReason`] and the value's own typed degradation, UNIONED —
+/// a cause recorded on either channel must reach the consumer, because
+/// the causes sit on opposite sides of the containment axis. A torn,
+/// stale, foreign, or incoherent proof state (`NoDemandInstalled` /
+/// `StaleBasis` / `ForeignProvenance` / `ObligationSetMismatch`, plus a
+/// stale/panic/internal typed failure) is a transient-state statement and
+/// takes [`PartialReasonSet::UNSTABLE_STATE`]; non-convergence and a
+/// budget-class failure are resource-cap statements and take
+/// [`PartialReasonSet::BUDGET_EXCEEDED`]; a cancellation takes
+/// [`PartialReasonSet::CANCELLED`]. The evidence-shaped causes — a typed
+/// obligation gap, an unprovable operation contract, the degraded-value
+/// echo — keep the contained degraded-success classes, and so does the
+/// bare `IncompleteObligations` echo: an obligation left PENDING is the
+/// close's own withholding signature (a genuinely budget-refused
+/// obligation reaches the ledger as a typed `Failed` budget record and
+/// takes the budget class here). Classifying a faulting cause onto a
+/// contained class would let every Vue macro projection lane publish and
+/// warm around work that never ran.
+///
+/// [`FlowPartialReason`]: super::flow_solve::FlowPartialReason
+pub(super) fn flow_partial_reason_class(
+    reason: &super::flow_solve::FlowPartialReason,
+    degradation: Option<FlowReturnDegradation>,
+) -> PartialReasonSet {
+    use super::flow_solve::{FlowFailureClass, FlowPartialReason};
+    let value_class = match degradation {
+        Some(degradation) => degradation_reason_class(degradation),
+        None => PartialReasonSet::default(),
+    };
+    let reason_class = match reason {
+        // Two ECHO reasons contribute nothing beyond the value's own
+        // class: `DegradedValue` restates the degradation the value
+        // already carries, and a bare pending-obligation echo is the
+        // close's own withholding signature (a genuinely budget-refused
+        // obligation reaches the ledger as a typed `Failed` budget
+        // record instead). Widening either onto the frame-wide class
+        // would erase a positional degradation's faithful siblings; the
+        // frame-wide contained class covers only the degradation-free
+        // spelling.
+        FlowPartialReason::DegradedValue | FlowPartialReason::IncompleteObligations => {
+            match degradation {
+                Some(_) => PartialReasonSet::default(),
+                None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+            }
+        }
+        FlowPartialReason::Gap(_)
+        | FlowPartialReason::OperationNotProvable
+        | FlowPartialReason::ResultContractMismatch => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        FlowPartialReason::NoDemandInstalled
+        | FlowPartialReason::StaleBasis
+        | FlowPartialReason::ForeignProvenance
+        | FlowPartialReason::ObligationSetMismatch => PartialReasonSet::UNSTABLE_STATE,
+        FlowPartialReason::NonConverged => PartialReasonSet::BUDGET_EXCEEDED,
+        FlowPartialReason::Failed(failure) => match failure.class {
+            FlowFailureClass::BudgetExhausted => PartialReasonSet::BUDGET_EXCEEDED,
+            FlowFailureClass::Cancelled => PartialReasonSet::CANCELLED,
+            FlowFailureClass::StaleBasis | FlowFailureClass::Panic | FlowFailureClass::Internal => {
+                PartialReasonSet::UNSTABLE_STATE
+            }
+        },
+    };
+    value_class.union(reason_class)
 }
 
 /// Veto-side fault injection for the flow admission guards' negative
@@ -222,6 +315,39 @@ pub(crate) mod flow_admission_fault_injection {
         /// demand carrier with a provenance from another store/generation
         /// — modelling a demand handle and value pair minted elsewhere.
         pub(crate) stale_demand_carrier: AtomicBool,
+
+        /// When armed, `prepare_flow_return_demand` plans under a ZERO
+        /// obligation budget, so the demand planner returns its typed
+        /// budget refusal before constructing a single obligation —
+        /// modelling a real demand whose obligation set exceeds the
+        /// request's resource policy without authoring a function large
+        /// enough to trip the production cap. Refuse-only: no demand
+        /// installs, no proof can mint, nothing can warm.
+        pub(crate) zero_obligation_budget: AtomicBool,
+
+        /// When armed, the NEXT demand-site derivation sees the function's
+        /// own file as UNSERVED and refuses — modelling the store read
+        /// that did not serve an artifact the resolved declaration slot
+        /// was minted over. Consumed by that first derivation (one shot),
+        /// so the evaluation's own derivation then succeeds: exactly the
+        /// torn shape the transient class exists for — preparation
+        /// refuses while the evaluation still produces a value. There is
+        /// no way to author this race; the slot presents it. Refuse-only:
+        /// no demand installs, no proof can mint, nothing can warm.
+        pub(crate) unserved_demand_site: AtomicBool,
+
+        /// When armed, the INJECTED unproven member records a
+        /// preparation refusal, while the enclosing root — of any
+        /// domain, including a flow root that plans a demand of its own
+        /// — prepares normally. Consumed by the injection (one shot).
+        ///
+        /// It exists because the cause under test must provably come
+        /// from the MEMBER: a globally armed slot would refuse the
+        /// root's own preparation too, and the resulting class would say
+        /// nothing about whether a member's cause survives its deferral.
+        /// Refuse-only: a recorded refusal withholds proof and can never
+        /// mint, promote, or warm anything.
+        pub(crate) refuse_injected_member_demand: AtomicBool,
 
         /// When armed, `finalize_flow_demand` sees convergence evidence
         /// with ZERO observed iterations — modelling a caller-fabricated
@@ -336,6 +462,17 @@ struct EvaluatedFlowRoot {
     scc_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     materialized: crate::semantic_query::demand::MaterializedSet,
     verdict: Option<super::flow_solve::FlowSolveOutcome>,
+    /// The recorded preparation refusal when `verdict` is `None` because
+    /// no demand installed — the close classifies the unproven outcome by
+    /// this cause ([`plan_refusal_reason_class`]). `None` for the
+    /// refused-member-batch withholding, whose own cause is carried
+    /// separately below.
+    plan_refusal: Option<FlowPlanRefusal>,
+    /// The partiality classes the REFUSED MEMBERS' recorded causes belong
+    /// to. The root's own preparation can be spotless while a member's
+    /// budget edge or torn view is what withheld the verdict, so the two
+    /// causes are unioned rather than either one standing alone.
+    member_batch_partial_reasons: PartialReasonSet,
 }
 
 /// The shared demand-site of one flow demand — derived ONCE by
@@ -355,6 +492,28 @@ struct FlowSliceDemandSite {
     /// The frame's binding inventory — the cross-frame binding authority
     /// the demand planner resolves slot identities against.
     inventory: super::flow_solve::FlowBindingInventory,
+}
+
+/// A demand site that could not be derived: the typed no-value failure
+/// the evaluation surfaces, the roots observed before the failure, and
+/// the preparation-refusal class this particular edge belongs to.
+///
+/// The refusal class is decided HERE and not re-derived from `failure`
+/// because the site is the only place that can tell the two apart: a
+/// store read that did not serve the artifact is a TRANSIENT torn view,
+/// while an index lookup that found no such function is a DETERMINISTIC
+/// statement about the program. Both spell
+/// [`FlowReturnFailure::Missing`], so a caller matching on the failure
+/// alone would classify the transient edge as contained and under-fault
+/// every consumer of an unstable read.
+struct FlowSliceDemandSiteError {
+    /// The typed no-value failure the evaluation path surfaces.
+    failure: FlowReturnFailure,
+    /// The roots observed before the failure (empty when the failure
+    /// preceded the serve).
+    self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// The preparation-refusal class this edge belongs to.
+    refusal: FlowPlanRefusal,
 }
 
 /// One flow frame's evaluation result, before the frame closes.
@@ -1285,6 +1444,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scc_self_roots,
                     materialized,
                     verdict,
+                    plan_refusal,
+                    member_batch_partial_reasons,
                 } = *root;
                 // The no-value verdict cannot arise on the
                 // evaluated-value close arm (the evaluation failed →
@@ -1327,22 +1488,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // ONCE into the build's own rails (the displaced root
                     // channel). The value still flows to the caller; the
                     // memo refuses admission — the proof gate and the
-                    // boolean rails now agree.
+                    // boolean rails now agree. The class follows BOTH
+                    // recorded causes — the value's degradation AND the
+                    // finalizer's typed reason: a stale basis or an
+                    // undischarged obligation over a non-degraded value
+                    // must fault the lanes, never fall to the contained
+                    // class.
                     Some(FlowSolveOutcome::Partial(partial)) => {
                         output.cache_suppress = true;
                         output.result_is_partial = true;
-                        output.partial_reasons = match partial.value.degradation() {
-                            Some(degradation) => degradation_reason_class(degradation),
-                            None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
-                        };
+                        output.partial_reasons =
+                            flow_partial_reason_class(&partial.reason, partial.value.degradation());
                     }
-                    // The demand could not be planned at all (a typed
-                    // planning refusal — an over-budget obligation set or
-                    // an unrepresentable demand): unproven, ReturnOnly.
+                    // The demand could not be planned at all, or a
+                    // refused member batch withheld the root's proof:
+                    // unproven, ReturnOnly. The partial class follows the
+                    // recorded CAUSE — a budget refusal takes the faulting
+                    // request class its sibling slice-budget axis takes, a
+                    // torn prepare-time view takes the unstable-state
+                    // class, and only a genuinely unplannable demand (or
+                    // the member-batch withholding, which records no
+                    // cause) keeps the contained degraded-success class.
                     None => {
                         output.cache_suppress = true;
                         output.result_is_partial = true;
-                        output.partial_reasons = PartialReasonSet::FLOW_RETURN_UNVERIFIED;
+                        output.partial_reasons = plan_refusal_reason_class(plan_refusal)
+                            .union(member_batch_partial_reasons);
                     }
                     // Handled above.
                     Some(FlowSolveOutcome::NoValue(_)) => unreachable!(),
@@ -1408,7 +1579,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             FlowFramePop::Provisional(step) => step,
             FlowFramePop::RootClose(close) => match close {
                 FlowRootClose::EvaluatedValue(root) => FlowReturnStep::Complete(root.result),
-                FlowRootClose::NoValue(failure) => FlowReturnStep::NoValue(failure),
+                FlowRootClose::NoValue(failure) => {
+                    // The inline path produces NO memo read, so the
+                    // universal read funnel never sees this failure: fold
+                    // its rails into the ENCLOSING build here — exactly as
+                    // the machinery root's build output does and the
+                    // consumer-side hold arm does — so the request-partial
+                    // sticky survives even a lenient composition that
+                    // absorbs the typed failure into a usable answer. The
+                    // typed failure itself still rides the returned step.
+                    self.fold_cache_read_rails(true, true, NO_VALUE_REASON_CLASS);
+                    FlowReturnStep::NoValue(failure)
+                }
             },
         }
     }
@@ -1431,6 +1613,80 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return result;
         }
         result.with_return_type(self.graph().as_ref(), substituted)
+    }
+
+    /// The final IDEMPOTENT pre-seal closure of a flow result: one
+    /// canonical re-close of the whole-return node, run exactly once per
+    /// close — after the component's fixed point, the post-convergence
+    /// literal widening, and the per-key substitution, and strictly
+    /// BEFORE `finalize_flow_demand` seals the value (the proof then
+    /// covers exactly the closed value). It never runs in a forbidden
+    /// position: it touches no flow-slice hash input, no raw-evidence
+    /// storage, no `MergedDecl` or other ordered merge carrier, no
+    /// already-sealed completion, and no display path.
+    ///
+    /// Scope is deliberately the TOP-LEVEL composite only — the join flow
+    /// construction derives is UNION-kinded, and "normalization normalizes
+    /// only the already-demanded semantic portion". A UNION top re-closes
+    /// through the canonical authority (flatten, lattice absorption,
+    /// structural `T | T = T`) — with an O(1) canonicality test first: a
+    /// top whose payload carries the at-rest `Canonical` origin category
+    /// was minted by a COMPLETE canonicalization — the canonical builder
+    /// refuses that stamp on incomplete evidence (over-cap arm set,
+    /// exhausted compare budget, dangling arm, undecided peek all mint
+    /// `CanonicalUnproven`) — so its list IS in canonical form (a
+    /// complete canonicalization is deterministic over immutable node
+    /// data) and the closure returns it unchanged WITHOUT re-running the
+    /// pipeline — no evidence deposit and no evidence-epoch advance on
+    /// the pure no-op path. Any other tag pays the full idempotent
+    /// re-close: `CanonicalUnproven` (so a budget-degraded list
+    /// resurfacing in a later request re-deposits its `incomplete`
+    /// evidence — ReturnOnly, never warm-classified), and a
+    /// canonical-form list that first interned under a bypass mint (the
+    /// first-wins tag).
+    ///
+    /// An INTERSECTION top passes through verbatim — but NOT because flow
+    /// cannot derive one. It can: the per-key substitution inside this
+    /// same close path rebuilds intersections (`substitute.rs`), and
+    /// predicate narrowing constructs one directly. The passthrough is
+    /// sound because every flow-derived intersection top is already
+    /// closed by its constructor — predicate narrowing and the
+    /// order-safe substitution arm route through the canonical
+    /// authority, while the possibly-callable substitution arm is an
+    /// overload-ORDERED carrier the commutative route must not reorder —
+    /// and it is checker-faithful: the pinned compiler preserves the
+    /// same duplicated intersection for the composed-generic case
+    /// (`declare function tag<T>(v: T): T & (() => void)` composed over
+    /// a function argument declaration-emits
+    /// `(() => void) & (() => void)`, measured against tsc 7.0.2).
+    /// Every other shape passes through verbatim.
+    ///
+    /// Canonicalization evidence deposits ambiently through the single
+    /// disposition funnel: inspected file self-roots reach the enclosing
+    /// build's memo entry, and an `Incomplete` comparison suppresses
+    /// warm admission (ReturnOnly) without altering the value.
+    pub(super) fn close_flow_result_pre_seal(&self, result: FlowReturnResult) -> FlowReturnResult {
+        let node = result.return_type();
+        let Some(data) = self.graph().node_data(node) else {
+            return result;
+        };
+        let SemanticNodeData::Union(members) = &*data else {
+            return result;
+        };
+        if members.origin_category()
+            == crate::semantic_query::composite::CompositeOriginCategory::Canonical
+        {
+            // O(1) canonicality: a canonical-minted list is canonical form;
+            // re-closing it is the idempotence no-op — skip the pipeline.
+            return result;
+        }
+        let members: Vec<crate::semantic_query::SemanticNodeId> = members.iter().copied().collect();
+        drop(data);
+        let closed = self.intern_normalized_union_or_intersection(&members, true);
+        if closed == node {
+            return result;
+        }
+        result.with_return_type(self.graph().as_ref(), closed)
     }
 
     /// Close the machinery ROOT frame.
@@ -1567,7 +1823,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let watermark = txn.obligations.pending().pending_len();
             txn.reentry_mut().push_flow_return(key.clone(), watermark)
         };
+        let knobs = &self.ctx.host_for_fact_tracer_install().flow_fault_injection;
+        let refuse_member = knobs
+            .refuse_injected_member_demand
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
         self.prepare_flow_return_demand(&key, idx);
+        if refuse_member {
+            // Recorded DIRECTLY rather than by refusing one of the
+            // preparation's own edges. Which edge a given member's
+            // preparation would refuse on depends on its planning inputs
+            // — a zero budget is satisfied by an empty obligation set,
+            // and a site refusal installs no carrier — so driving the
+            // cause through the planner made this slot's outcome depend
+            // on the member's incidental shape. Those edges have their
+            // own tests; this slot's subject is whether a recorded cause
+            // SURVIVES the member's deferral to the root that consumed
+            // its value, and that is what it presents.
+            self.record_flow_plan_refusal(idx, FlowPlanRefusal::TornView);
+        }
         let provenance = match self.flow_demand_carrier_of(&key) {
             Some(carrier) => carrier.provenance,
             None => self.current_flow_evaluation_provenance(),
@@ -1647,8 +1920,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// can mint and the close finalizes unproven (`ReturnOnly`).
     pub(super) fn prepare_flow_return_demand(&self, key: &FlowReturnKey, frame_idx: usize) {
         use super::flow_solve::{build_flow_demand_plan, FlowDemandRequest, FlowResourcePolicy};
-        let Ok(site) = self.flow_slice_demand_site(key) else {
-            return;
+        let site = match self.flow_slice_demand_site(key) {
+            Ok(site) => site,
+            // The SITE classifies its own edge: a store read that did not
+            // serve is transient, an unrepresentable demand is not. A
+            // blanket `Unplannable` here would report every torn
+            // prepare-time read as a contained unverified result.
+            Err(err) => {
+                self.record_flow_plan_refusal(frame_idx, err.refusal);
+                return;
+            }
         };
         let flow_slice = self.ctx.project_type_store().flow_slice();
         // The retained structural plan of the ONE cold planning run (the
@@ -1662,12 +1943,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(planned)) => {
                 planned
             }
-            // An over-budget plan or a torn view installs no demand: the
-            // evaluation's own hash-node lookup reaches the same outcome
-            // and fails closed with the typed failure.
-            _ => return,
+            // The slice-budget refusal installs no demand: the
+            // evaluation's own hash-node lookup normally reaches the same
+            // typed failure, and if a racing recompute hands the
+            // evaluation a planned slice instead, the close still
+            // classifies the unproven value as the budget edge it is.
+            Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::BudgetExceeded(
+                _,
+            )) => {
+                self.record_flow_plan_refusal(frame_idx, FlowPlanRefusal::Budget);
+                return;
+            }
+            // No retained outcome at all: a torn prepare-time view — the
+            // evaluation may still find one, so the close classifies the
+            // unproven value as unstable state, never as a verified-shape
+            // degradation.
+            None => {
+                self.record_flow_plan_refusal(frame_idx, FlowPlanRefusal::TornView);
+                return;
+            }
         };
         let Some(bound) = flow_slice.bound_graph_for(&site.slice_key_function) else {
+            self.record_flow_plan_refusal(frame_idx, FlowPlanRefusal::TornView);
             return;
         };
         // The demand-unique axis of this demand's provenance: the ledger
@@ -1701,17 +1998,51 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             provenance
         };
+        let resources = FlowResourcePolicy::default();
+        #[cfg(any(test, feature = "test-support"))]
+        let resources = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .zero_obligation_budget
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            FlowResourcePolicy {
+                max_obligations: 0,
+                ..resources
+            }
+        } else {
+            resources
+        };
         let request = FlowDemandRequest {
             query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
             // The in-flight observation identity of this demand: derived
             // from the SAME provenance mint the carrier and the evaluation
             // outcome bear — never a cache-candidate axis.
             input_basis: verter_identity::identity::InputBasisId::from_canonical(&provenance),
-            resources: FlowResourcePolicy::default(),
+            resources,
             additional_requirements: Arc::from([]),
         };
-        let Ok(plan) = build_flow_demand_plan(request, &bound, &planned, &site.inventory) else {
-            return;
+        let plan = match build_flow_demand_plan(request, &bound, &planned, &site.inventory) {
+            Ok(plan) => plan,
+            Err(error) => {
+                use super::flow_solve::FlowDemandPlanError as E;
+                let refusal = match error {
+                    // Both budget axes are statements about the REQUEST.
+                    E::SliceBudget(_) | E::ObligationBudget { .. } => FlowPlanRefusal::Budget,
+                    // Retained artifacts that do not match the demand's
+                    // bound graph: a torn intermediate view.
+                    E::BasisKeyMismatch
+                    | E::SelectionOutOfRange
+                    | E::SelectionDemandMismatch
+                    | E::SelectionProvenanceMismatch => FlowPlanRefusal::TornView,
+                    E::UnregisteredOperation | E::NotAnEnabledRoot | E::UnrepresentableDemand => {
+                        FlowPlanRefusal::Unplannable
+                    }
+                };
+                self.record_flow_plan_refusal(frame_idx, refusal);
+                return;
+            }
         };
         flow_slice.note_demand_planned();
         let plan = Arc::new(plan);
@@ -1732,6 +2063,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 plan,
                 provenance,
             });
+        }
+    }
+
+    /// Record WHY the demand preparation installed no proof layer on the
+    /// open frame, so the frame close classifies the unproven outcome onto
+    /// the cause's partial class rather than the one merged
+    /// degraded-success class ([`plan_refusal_reason_class`]).
+    fn record_flow_plan_refusal(&self, frame_idx: usize, refusal: FlowPlanRefusal) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        if let Some(state) = txn
+            .reentry_mut()
+            .frame_mut_for_update(frame_idx)
+            .and_then(super::dispatch_txn::ObligationFrame::flow_return_mut)
+        {
+            state.plan_refusal = Some(refusal);
         }
     }
 
@@ -2134,6 +2480,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // open. It rides the deferral so the component close finalizes the
         // member against EXACTLY its own demand.
         let flow_demand = flow_state.flow_demand;
+        // The recorded preparation refusal, when the demand could not be
+        // planned — the close classifies a verdict-less unproven outcome
+        // by this cause.
+        let plan_refusal = flow_state.plan_refusal;
         // Tagged holds recorded against this frame by indexed call
         // evaluation while it was active ride into the close with the
         // evaluator's own holds — a resolved-call dependency joins the
@@ -2185,6 +2535,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 identity: ObligationIdentity::FlowReturn(root_key),
                 domain: PendingObligationDomain::FlowReturn(FlowReturnPendingState {
                     outcome,
+                    plan_refusal,
                     inline_flight,
                     holds,
                     self_roots,
@@ -2242,6 +2593,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     flow_members.push(super::relation::DrainedFlowReturnMember {
                         key,
                         outcome: state.outcome,
+                        plan_refusal: state.plan_refusal,
                         inline_flight: state.inline_flight,
                         holds: state.holds,
                         self_roots: state.self_roots,
@@ -2443,6 +2795,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // admission below: the root's fixed point consumed the members'
         // evaluated values, so its verdict may flow but must never warm.
         let mut member_batch_unproven = false;
+        let mut member_batch_partial_reasons = PartialReasonSet::default();
         if !relation_members.is_empty() || !flow_members.is_empty() || !call_results.is_empty() {
             match self.relation_discharge_and_route(
                 false,
@@ -2454,7 +2807,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 cyclic,
                 &convergence,
             ) {
-                Ok(outcome) => member_batch_unproven = outcome.flow_batch_unproven,
+                Ok(outcome) => {
+                    member_batch_unproven = outcome.flow_batch_unproven;
+                    member_batch_partial_reasons = outcome.flow_batch_partial_reasons;
+                }
                 Err(_) => {
                     self.flow_return_abort_inline_flight(inline_flight.as_ref());
                     let _ =
@@ -2476,6 +2832,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // value under an instantiation key is the instantiated
                 // return — one transfer point for both publish channels.
                 let result = self.apply_frame_key_substitution(&root_key, result);
+                // The final idempotent pre-seal closure: after fixed
+                // point, widening and substitution, before the seal — the
+                // proof and both publish channels see the closed value.
+                let result = self.close_flow_result_pre_seal(result);
                 // FINALIZE the root's own demand — after the component
                 // fixed point, the literal widening, and the per-key
                 // substitution: the proof covers exactly this value. A
@@ -2510,6 +2870,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scc_self_roots,
                             materialized,
                             verdict,
+                            plan_refusal,
+                            member_batch_partial_reasons,
                         },
                     )))
                 } else {
@@ -2545,15 +2907,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // hold arm uses) — an answer composed around an
                             // unproven flow value must not warm.
                             let reasons = match &verdict {
+                                // Both recorded causes — the value's
+                                // degradation and the finalizer's typed
+                                // reason — reach the rails.
                                 Some(FlowSolveOutcome::Partial(partial)) => {
-                                    match partial.value.degradation() {
-                                        Some(degradation) => degradation_reason_class(degradation),
-                                        None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
-                                    }
+                                    flow_partial_reason_class(
+                                        &partial.reason,
+                                        partial.value.degradation(),
+                                    )
                                 }
-                                _ => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+                                // Verdict-less: classify by the recorded
+                                // preparation refusal — a budget edge and
+                                // a torn view fault consumers the merged
+                                // degraded-success class is contained by.
+                                None => plan_refusal_reason_class(plan_refusal),
+                                // A no-value verdict cannot arise on this
+                                // arm (a failed evaluation closes through
+                                // the no-value path). Should it ever
+                                // reach here, it takes the SAME class the
+                                // machinery root's twin arm takes — a
+                                // milder class on one of two twins is a
+                                // fail-closed asymmetry, not a saving.
+                                Some(FlowSolveOutcome::NoValue(_)) => NO_VALUE_REASON_CLASS,
+                                // Handled by the arm above.
+                                Some(FlowSolveOutcome::Complete(_)) => unreachable!(),
                             };
-                            self.fold_cache_read_rails(true, true, reasons);
+                            // A refused member batch carries its own
+                            // causes: the root's clean preparation must
+                            // not report a member's budget edge as the
+                            // contained unverified class.
+                            self.fold_cache_read_rails(
+                                true,
+                                true,
+                                reasons.union(member_batch_partial_reasons),
+                            );
                         }
                     }
                     FlowFramePop::Provisional(FlowReturnStep::Complete(result))
@@ -2680,13 +3067,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         _ => flat.push(arm),
                     }
                 }
-                let next = FlowReturnResult::new(
+                // The SEED's surviving fresh literal arms carry through
+                // the fixed point (the constructor re-filters them to the
+                // joined return's kept constituents); hold-target arms
+                // join pinned — the component's own widening is the
+                // all-fresh-seed rule below, and per-constituent
+                // freshness never crosses a recursive edge.
+                let seed_fresh: Vec<SemanticNodeId> = current[i]
+                    .as_ref()
+                    .map(|result| result.fresh_literal_arms().to_vec())
+                    .unwrap_or_default();
+                let next = FlowReturnResult::new_with_fresh_literal_arms(
                     graph,
                     self.intern_normalized_union_or_intersection(&flat, true),
                     current[i]
                         .as_ref()
                         .is_some_and(|result| result.can_fall_through),
                     degradation,
+                    &seed_fresh,
                 );
                 if current[i].as_ref() != Some(&next) {
                     current[i] = Some(next);
@@ -2901,13 +3299,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn flow_slice_demand_site(
         &self,
         key: &FlowReturnKey,
-    ) -> Result<
-        FlowSliceDemandSite,
-        (
-            FlowReturnFailure,
-            Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
-        ),
-    > {
+    ) -> Result<FlowSliceDemandSite, FlowSliceDemandSiteError> {
         // The evaluation models the whole-return point and the
         // single-named-member projection point, both at the empty input
         // point. Any other demand/input point fails CLOSED with a typed
@@ -2915,7 +3307,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // never a sibling materialisation the narrower demand did not ask
         // for.
         if !key.input.is_empty() {
-            return Err((FlowReturnFailure::UnmodeledDemandPoint, Vec::new()));
+            return Err(FlowSliceDemandSiteError {
+                failure: FlowReturnFailure::UnmodeledDemandPoint,
+                self_roots: Vec::new(),
+                refusal: FlowPlanRefusal::Unplannable,
+            });
         }
         let demanded_member: Option<Arc<str>> = if key.demand.is_whole_return() {
             None
@@ -2923,15 +3319,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match flow_demanded_member_name(&key.demand) {
                 Some(name) => Some(name),
                 None => {
-                    return Err((FlowReturnFailure::UnmodeledDemandPoint, Vec::new()));
+                    return Err(FlowSliceDemandSiteError {
+                        failure: FlowReturnFailure::UnmodeledDemandPoint,
+                        self_roots: Vec::new(),
+                        refusal: FlowPlanRefusal::Unplannable,
+                    });
                 }
             }
         };
         let canonical = key.function.declaration_slot.defining_canonical.as_ref();
         let owner = key.function.declaration_slot.owner;
         let name = key.function.declaration_slot.merged_symbol_name.as_ref();
-        let Some(serve) = self.ctx.ensure_indexed_ready_serve(canonical) else {
-            return Err((FlowReturnFailure::Missing, Vec::new()));
+        #[cfg(any(test, feature = "test-support"))]
+        let unserved = self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .unserved_demand_site
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(any(test, feature = "test-support")))]
+        let unserved = false;
+        let served = (!unserved)
+            .then(|| self.ctx.ensure_indexed_ready_serve(canonical))
+            .flatten();
+        let Some(serve) = served else {
+            // The store did not serve the function's own file. The
+            // canonical here came from a RESOLVED declaration slot, so
+            // the file was served when that slot was minted: a later
+            // non-serve is a statement about the store's state, not
+            // about the program. It therefore faults consumers as the
+            // transient read it is, rather than passing as a contained
+            // "we could not verify this" — the class a genuinely absent
+            // function position below takes.
+            return Err(FlowSliceDemandSiteError {
+                failure: FlowReturnFailure::Missing,
+                self_roots: Vec::new(),
+                refusal: FlowPlanRefusal::TornView,
+            });
         };
         let indexed = serve.indexed;
         let self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
@@ -2949,14 +3373,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
             .map(|matched| matched.entry())
         else {
-            return Err((FlowReturnFailure::Missing, self_roots));
+            // The served file genuinely holds no such function position:
+            // a deterministic statement about the program, not a torn
+            // read.
+            return Err(FlowSliceDemandSiteError {
+                failure: FlowReturnFailure::Missing,
+                self_roots,
+                refusal: FlowPlanRefusal::Unplannable,
+            });
         };
         // A body whose own bytes could not be read has no exact-content
         // axis, so no content-addressed key can be built for it: fail
         // closed rather than key on a constant every unreadable body
         // shares.
         let Some(flow_body_exact_hash) = entry.flow_body_exact_hash else {
-            return Err((FlowReturnFailure::Unresolved, self_roots));
+            return Err(FlowSliceDemandSiteError {
+                failure: FlowReturnFailure::Unresolved,
+                self_roots,
+                refusal: FlowPlanRefusal::TornView,
+            });
         };
         // The source axes come from the request-bound artifact identity
         // (the served `IndexedReady` through the canonical
@@ -2972,7 +3407,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             indexed.framework_parse.as_deref(),
             indexed.parse_env_hash,
         ) else {
-            return Err((FlowReturnFailure::Unresolved, self_roots));
+            return Err(FlowSliceDemandSiteError {
+                failure: FlowReturnFailure::Unresolved,
+                self_roots,
+                refusal: FlowPlanRefusal::TornView,
+            });
         };
         let slice_key_function = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
             canonical_id: Arc::from(canonical),
@@ -3078,7 +3517,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // (The gate lives in the shared demand-site derivation.)
         let site = match self.flow_slice_demand_site(key) {
             Ok(site) => site,
-            Err((failure, self_roots)) => return degraded(failure, self_roots),
+            Err(err) => return degraded(err.failure, err.self_roots),
         };
         let FlowSliceDemandSite {
             indexed,
@@ -3376,8 +3815,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             declared_locals: rustc_hash::FxHashMap::default(),
             var_locals: rustc_hash::FxHashMap::default(),
             var_declared_locals: rustc_hash::FxHashMap::default(),
-            widening_locals: rustc_hash::FxHashSet::default(),
-            var_widening_locals: rustc_hash::FxHashSet::default(),
+            widening_locals: rustc_hash::FxHashMap::default(),
+            var_widening_locals: rustc_hash::FxHashMap::default(),
             bare_return_seen: false,
             implicit_undefined_seen: false,
             member_filter,
@@ -3638,6 +4077,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `if (c) return 1;` is `1 | undefined`. Deduplicate FIRST — the
         // graph interns identical literals to one node id — then widen a
         // lone FRESH literal.
+        // The sealed result's FRESH set: every fresh literal value any
+        // contribution carries, minus every value some contribution
+        // spells PINNED at its own top level (pinned wins, by literal
+        // VALUE — measured against the pinned checker). The constructor
+        // then filters the survivors to the final return's kept top-level
+        // constituents, so join-widening and union absorption drop their
+        // values with them. A wholly-fresh contribution (a bare literal,
+        // a hold-marked equation arm) pins nothing.
+        let mut fresh_candidates: Vec<SemanticNodeId> = Vec::new();
+        let mut pinned_blockers: Vec<SemanticNodeId> = Vec::new();
+        for contribution in &contributors {
+            for value in &contribution.fresh_values {
+                if !fresh_candidates.contains(value) {
+                    fresh_candidates.push(*value);
+                }
+            }
+            if contribution.fresh_literal {
+                continue;
+            }
+            for lit in top_level_literal_nodes_in(graph, contribution.node) {
+                let data = graph.node_data(lit);
+                let fresh_here = contribution
+                    .fresh_values
+                    .iter()
+                    .any(|value| graph.node_data(*value) == data);
+                if !fresh_here && !pinned_blockers.contains(&lit) {
+                    pinned_blockers.push(lit);
+                }
+            }
+        }
+        let sealed_fresh: Vec<SemanticNodeId> = fresh_candidates
+            .into_iter()
+            .filter(|value| {
+                let data = graph.node_data(*value);
+                !pinned_blockers
+                    .iter()
+                    .any(|pinned| graph.node_data(*pinned) == data)
+            })
+            .collect();
         let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(contributors.len());
         let mut inference_only: Vec<bool> = Vec::with_capacity(contributors.len());
         let mut all_fresh = true;
@@ -3661,6 +4139,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             arms.push(contribution.node);
             inference_only.push(contribution.inference_only);
+        }
+        // A multi-arm join aggregates over EVALUATED constituents, exactly
+        // as the checker's return aggregation does: an alias-instantiation
+        // contributor whose one-level expansion is a UNION enters the join
+        // as that union, so the canonical union below flattens and dedups
+        // it (`if (c) { return fu("x") } return "x" as const` for
+        // `fu<T>(v: T): UA<T>` with `UA<T> = T | undefined` reads
+        // `"x" | undefined` — the checker's own flatten). A non-union
+        // expansion keeps its shallow carrier (the checker keeps the alias
+        // label for those constituents), and a lone contributor keeps its
+        // carrier untouched — nothing materialises without a join to
+        // normalise.
+        if arms.len() >= 2 {
+            for arm in arms.iter_mut() {
+                if !matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::InstantiationRef { .. })
+                ) {
+                    continue;
+                }
+                if let Some(expanded) = self.expand_alias_instantiation_one_level(*arm) {
+                    if matches!(
+                        graph.node_data(expanded).as_deref(),
+                        Some(SemanticNodeData::Union(_))
+                    ) {
+                        *arm = expanded;
+                    }
+                }
+            }
         }
         // A recursive HOLD counts as a contributor: the SCC close joins
         // its discharged return into this result, so the join is not a
@@ -3751,7 +4258,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let return_type = self.intern_normalized_union_or_intersection(&arms, true);
         Ok((
-            FlowReturnResult::new(graph, return_type, can_fall_through, degradation),
+            FlowReturnResult::new_with_fresh_literal_arms(
+                graph,
+                return_type,
+                can_fall_through,
+                degradation,
+                &sealed_fresh,
+            ),
             fresh_seed,
         ))
     }
@@ -3843,6 +4356,104 @@ fn flow_demanded_member_name(
             value,
         )) => Some(Arc::clone(value)),
         crate::semantic_query::PathSegment::Index(_) => None,
+    }
+}
+
+/// The bare identifier one indexed argument expression reads, if it is
+/// exactly a frame-binding read: a bare `Ref` or a single-segment
+/// `typeof` path — the two spellings the indexed lowering mints for one.
+fn indexed_bare_name(expression: &verter_type_expr::IndexedValueExpression) -> Option<&str> {
+    match expression {
+        verter_type_expr::IndexedValueExpression::Value(verter_type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        }) if type_arguments.is_empty() && !name.contains('.') => Some(name.as_ref()),
+        verter_type_expr::IndexedValueExpression::Value(verter_type_expr::TypeExpr::TypeOf(
+            verter_type_expr::ValueRef { path, type_args },
+        )) if type_args.is_empty() && path.len() == 1 => Some(path[0].as_str()),
+        _ => None,
+    }
+}
+
+/// Widen a FRESH value at a widening READ position: a lone literal
+/// widens to its primitive, and a UNION widens every literal arm — the
+/// value a widening-literal `const` bound from an all-fresh conditional
+/// carries (`const v = f ? 1 : "s"` reads `string | number` at a member
+/// position; a narrowed read of the same binding widens the surviving
+/// arm the same way). Sound only where every literal arm is KNOWN
+/// fresh, which the widening-locals membership guarantees: it admits a
+/// union-valued binding only when every conditional leaf was a bare
+/// literal.
+fn widen_fresh_read_node(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> SemanticNodeId {
+    let graph = dispatch.graph();
+    if let Some(SemanticNodeData::Union(members)) = graph.node_data(node).as_deref() {
+        let widened: Vec<SemanticNodeId> = members
+            .iter()
+            .map(|member| widen_literal_node(dispatch, *member))
+            .collect();
+        if widened.as_slice() == members.as_ref() {
+            return node;
+        }
+        return dispatch.intern_normalized_union_or_intersection(&widened, true);
+    }
+    widen_literal_node(dispatch, node)
+}
+
+/// Widen exactly the listed literal values within `node`: the node
+/// itself when listed, or the listed constituents of a union. Everything
+/// else passes through unchanged — an authored pinned arm beside a fresh
+/// one keeps its literal.
+fn widen_values_within(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    values: &[SemanticNodeId],
+) -> SemanticNodeId {
+    if values.contains(&node) {
+        return widen_literal_node(dispatch, node);
+    }
+    let graph = dispatch.graph();
+    if let Some(SemanticNodeData::Union(members)) = graph.node_data(node).as_deref() {
+        let widened: Vec<SemanticNodeId> = members
+            .iter()
+            .map(|member| {
+                if values.contains(member) {
+                    widen_literal_node(dispatch, *member)
+                } else {
+                    *member
+                }
+            })
+            .collect();
+        if widened.as_slice() == members.as_ref() {
+            return node;
+        }
+        return dispatch.intern_normalized_union_or_intersection(&widened, true);
+    }
+    node
+}
+
+/// The top-level LITERAL constituents of one value node — the shared
+/// walk behind the evaluator's freshness fold and the join's sealed
+/// fresh set.
+fn top_level_literal_nodes_in(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Vec<SemanticNodeId> {
+    match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Literal(_)) => vec![node],
+        Some(SemanticNodeData::Union(members)) => members
+            .iter()
+            .copied()
+            .filter(|member| {
+                matches!(
+                    graph.node_data(*member).as_deref(),
+                    Some(SemanticNodeData::Literal(_))
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -4000,17 +4611,37 @@ fn signature_answer_is_frame_shadowed(
         .any(|name| owner_scope_answers_frame_name(dispatch, binder_env, name))
 }
 
-/// One branch-local narrowing verdict. `Impossible` is distinct from
-/// `Unchanged`: a conjunction whose later fact removes its last survivor is a
-/// dead alternative, not an alternative that contributes the earlier overlay
-/// to an enclosing disjunction.
+/// One branch-local narrowing verdict. There is deliberately no
+/// "impossible branch" variant: the checker's rule for a guard edge no
+/// arm survives is that the SUBJECT reads `never` while the edge stays
+/// ALIVE — narrowing impossibility never removes an edge, so a
+/// contributor on that edge that reads a different binding still
+/// contributes its own narrowed type (measured: `if (typeof x ===
+/// "string" && typeof y === "string")` over `x: number` types `return y`
+/// as `string`, and a conjunction whose later fact removes its last
+/// survivor contributes `never` for that subject to an enclosing
+/// disjunction rather than removing the alternative). Each guard family
+/// converts an empty survivor set ([`ArmFilter::NoSurvivor`]) under its
+/// own measured checker rule.
 enum GuardNarrowing {
     Unchanged,
     Narrowed(
         crate::flow_slice_content::SliceNarrowSubject,
         SemanticNodeId,
     ),
-    Impossible,
+}
+
+/// One union-arm filter verdict, BEFORE the calling guard family applies
+/// its empty-survivor rule. `NoSurvivor` is a positive proof that every
+/// arm is off the tested edge — never "unrecognized" — and the caller
+/// decides what the checker does with it: most filters collapse the
+/// subject to `never` (the edge stays alive), while the two measured
+/// exceptions (a truthiness/equality test through a member that does not
+/// DISCRIMINATE its parent's arms) establish nothing.
+enum ArmFilter {
+    Unchanged,
+    Narrowed(SemanticNodeId),
+    NoSurvivor,
 }
 
 /// One union arm's verdict against a runtime guard test. `NoMatch` is
@@ -4020,8 +4651,8 @@ enum GuardNarrowing {
 /// `Unclassified`: the checker still narrows such an arm, so it stays
 /// possible on BOTH edges of the test and the narrow records the typed
 /// guard gap instead of silently deciding either reading. This is what
-/// keeps [`GuardNarrowing::Impossible`] a positive proof: a branch goes
-/// dead only when every arm is proved off its edge.
+/// keeps an empty survivor set a positive proof: a subject reads `never`
+/// on an edge only when every arm is proved off it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ArmGuardClass {
     Match,
@@ -4085,34 +4716,6 @@ fn slice_expr_is_exact_subject_read(
         ) => name == subject_name,
         _ => false,
     }
-}
-
-fn guard_has_subject_matching(
-    guard: &crate::flow_slice_content::SliceGuard,
-    predicate: &impl Fn(&crate::flow_slice_content::SliceNarrowSubject) -> bool,
-) -> bool {
-    use crate::flow_slice_content::SliceGuard;
-    match guard {
-        SliceGuard::None => false,
-        SliceGuard::Typeof { subject, .. }
-        | SliceGuard::Truthy { subject, .. }
-        | SliceGuard::EqLiteral { subject, .. }
-        | SliceGuard::Instanceof { subject, .. }
-        | SliceGuard::TypePredicate { subject, .. } => predicate(subject),
-        SliceGuard::In { subject, .. } => predicate(subject),
-        SliceGuard::And(parts) | SliceGuard::Or(parts) => parts
-            .iter()
-            .any(|part| guard_has_subject_matching(part, predicate)),
-    }
-}
-
-fn slice_expr_is_exact_guard_subject_read(
-    expr: &crate::flow_slice_content::SliceExpr,
-    guard: &crate::flow_slice_content::SliceGuard,
-) -> bool {
-    guard_has_subject_matching(guard, &|subject| {
-        slice_expr_is_exact_subject_read(expr, subject)
-    })
 }
 
 fn slice_region_has_non_subject_return(
@@ -4214,14 +4817,16 @@ struct FlowEvaluator<'d, 'b> {
     var_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     /// Function-scoped twin of `declared_locals`.
     var_declared_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
-    /// Locals bound to a WIDENING literal (`const b = 1` — unannotated,
-    /// no const assertion). Reads of these widen to the literal's
-    /// primitive at return-object member positions and at the return
-    /// join (tsc's widening-literal-type rule); `as const` / annotated
-    /// literals never enter this set and stay pinned.
-    widening_locals: rustc_hash::FxHashSet<String>,
+    /// Widening membership of lexical locals (`const b = 1` —
+    /// unannotated, no const assertion — is `All`; a mixed-freshness
+    /// conditional initializer or a union-carried fresh call deposit is
+    /// `Partial` over exactly its fresh values). Reads of these widen at
+    /// return-object member positions and at the return join (tsc's
+    /// widening-literal-type rule); `as const` / annotated literals never
+    /// enter this map and stay pinned.
+    widening_locals: rustc_hash::FxHashMap<String, WideningMembership>,
     /// The `var`-layer widening membership (same rule, function scope).
-    var_widening_locals: rustc_hash::FxHashSet<String>,
+    var_widening_locals: rustc_hash::FxHashMap<String, WideningMembership>,
     /// Whether a bare `return;` was evaluated. A body whose ONLY return
     /// contributions are bare returns models as `void` (BL12);
     /// alongside value returns a bare return contributes `undefined`.
@@ -4298,16 +4903,16 @@ struct FlowEvaluator<'d, 'b> {
     /// Whether the current path exists only for return inference after an
     /// abrupt `finally` replaced the pending break at runtime.
     inference_only_path: bool,
-    /// Return nodes a COMPLETED call in this frame marked
-    /// `fresh_literal_return` (a generic callee whose naked-binder return
-    /// fixed to a fresh-preserved literal). The call executor records the
-    /// provenance; the flow frame's freshness widening happens at the
-    /// return join, so a `return f(…)` whose call closed fresh
-    /// contributes WITH the freshness bit — a value position (an object
-    /// member, a binding initializer) keeps the literal, exactly as the
-    /// return equation's own flow/call domain split decides for held
-    /// calls.
-    call_fresh_literal_returns: Vec<SemanticNodeId>,
+    /// COMPLETED calls in this frame that closed with fresh-preserved
+    /// literal deposits, recorded by their authored call-site span — the
+    /// call-SITE identity a consuming position matches against, never the
+    /// interned literal value, so a sibling arm's authored pin of the
+    /// same value can never borrow a call's freshness. The whole return
+    /// being one of the deposits is the naked case (fresh at the return
+    /// join); every listed deposit widens at a value (member /
+    /// mutable-declaration) position and seeds a `const` binding's
+    /// widening membership.
+    call_fresh_literal_returns: Vec<FreshCallReturn>,
     /// The `break` exits captured as `break` statements evaluate, in
     /// source order: the target (anonymous = the innermost switch) and
     /// the COMPLETE layer state at the break point. The absorbing
@@ -4442,7 +5047,7 @@ struct FlowExecutionWitness<'w> {
 /// of a widening-literal `const`). tsc widens a fresh literal return only
 /// when the deduplicated contributor set has exactly ONE member, so the
 /// freshness bit must survive to the join.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct FlowContribution {
     /// The evaluated contributor node.
     node: SemanticNodeId,
@@ -4451,6 +5056,26 @@ struct FlowContribution {
     /// The contributor is reached only through an overridden break's
     /// return-inference suffix edge.
     inference_only: bool,
+    /// The FRESH literal values this contribution carries into the join,
+    /// at its own top level: the node itself for a bare-literal return,
+    /// the membership's values for a widening-local read, a completed
+    /// call's kept fresh deposits and callee-authored fresh arms, and
+    /// the per-arm collection of a ternary argument. The join folds
+    /// these pinned-wins into the sealed result's fresh set; they never
+    /// affect the join's own widening decision (`fresh_literal` owns
+    /// that, unchanged).
+    fresh_values: Vec<SemanticNodeId>,
+}
+
+/// One evaluated arm of a mixed value position (a ternary initializer,
+/// assignment right-hand side, or ternary return argument): the settled
+/// node, whether the arm as a WHOLE is a fresh spelling, and the fresh
+/// literal values it carries at its own top level
+/// ([`FlowEvaluator::position_fresh_values`]).
+struct EvolvingPart {
+    node: SemanticNodeId,
+    fresh: bool,
+    fresh_values: Vec<SemanticNodeId>,
 }
 
 /// One captured `break` exit: the target the lowering resolved
@@ -4467,8 +5092,38 @@ struct FlowBreakExit {
 /// fresh in the scope).
 struct ScopeShadow {
     name: String,
-    prior: Option<(SemanticNodeId, bool, bool, bool)>,
+    prior: Option<(SemanticNodeId, Option<WideningMembership>, bool, bool)>,
     prior_declared: Option<SemanticNodeId>,
+}
+
+/// One COMPLETED call that closed with fresh-preserved literal deposits,
+/// recorded by its authored call-site span so a sibling return arm's
+/// authored pin of the same interned literal value can never borrow the
+/// call's freshness.
+#[derive(Clone, Debug)]
+struct FreshCallReturn {
+    /// The authored call expression's span (frame coordinates) — the
+    /// call-SITE identity a consuming position matches against.
+    span: verter_span::Span,
+    /// The call's settled return node.
+    node: SemanticNodeId,
+    /// The fresh literal deposits kept at the return's top level. The
+    /// whole return being ONE of these is the naked case — fresh at the
+    /// return join; every listed value widens at a value position.
+    values: Arc<[SemanticNodeId]>,
+}
+
+/// The widening membership of one binding — WHICH of its literal values
+/// widen at a widening read. `All` is the classic widening-literal
+/// `const`; `Partial` records exactly the fresh values of a
+/// mixed-freshness conditional initializer or a union-carried fresh call
+/// deposit, so an authored pinned arm alongside them stays pinned.
+#[derive(Clone, Debug, PartialEq)]
+enum WideningMembership {
+    /// Every literal (arm) widens at a widening read.
+    All,
+    /// Exactly these literal values widen; sibling arms stay pinned.
+    Partial(Arc<[SemanticNodeId]>),
 }
 
 /// One point-in-time snapshot of the evaluator's binding layers — the
@@ -4484,11 +5139,11 @@ struct FlowLayerState {
     locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     declared_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     degraded_locals: rustc_hash::FxHashSet<String>,
-    widening_locals: rustc_hash::FxHashSet<String>,
+    widening_locals: rustc_hash::FxHashMap<String, WideningMembership>,
     var_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     var_declared_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     var_degraded_locals: rustc_hash::FxHashSet<String>,
-    var_widening_locals: rustc_hash::FxHashSet<String>,
+    var_widening_locals: rustc_hash::FxHashMap<String, WideningMembership>,
     var_conditional_locals: rustc_hash::FxHashSet<String>,
     param_writes: rustc_hash::FxHashMap<u32, SemanticNodeId>,
     narrowings: Vec<(
@@ -4711,7 +5366,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // literal locals stay pinned. Direct literal members already
             // widened (or stayed pinned under a const assertion) at IR
             // lowering.
-            let value = self.widen_if_widening_local_read(member_value, value);
+            let value = self.widen_value_position_read(member_value, value);
             // A non-static key is its own evaluated position. It names
             // the member only if it settles to a LITERAL; anything else
             // leaves the surface's key SET unknown, which an object
@@ -4877,7 +5532,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         name: &str,
         kind: crate::flow_slice_content::SliceBindingKind,
         node: SemanticNodeId,
-        widening: bool,
+        widening: Option<WideningMembership>,
         degraded: bool,
     ) {
         let function_scoped = kind == crate::flow_slice_content::SliceBindingKind::Var;
@@ -4906,10 +5561,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         } else {
             degraded_set.remove(name);
         }
-        if widening {
-            widening_set.insert(name.to_string());
-        } else {
-            widening_set.remove(name);
+        match widening {
+            Some(membership) => {
+                widening_set.insert(name.to_string(), membership);
+            }
+            None => {
+                widening_set.remove(name);
+            }
         }
         locals.insert(name.to_string(), node);
         // A (re)binding replaces the binding's value: every narrow fact a
@@ -5040,29 +5698,38 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::flow_slice_content::SliceFreshness::PerArm(_),
         ) = (expr, freshness)
         {
-            let mut parts: Vec<(SemanticNodeId, bool)> = Vec::new();
+            let mut parts: Vec<EvolvingPart> = Vec::new();
             self.collect_evolving_parts(expr, freshness, &mut parts);
             // Pinned-wins collapse of equal constituents, THEN widen the
             // surviving fresh ones. Node data (not id) is the equality,
             // exactly as the reaching-definition dedup below compares.
-            let mut merged: Vec<(SemanticNodeId, bool)> = Vec::new();
-            for (node, fresh) in parts {
-                let data = self.dispatch.graph().node_data(node);
+            let pinned = self.pinned_literal_blockers(&parts);
+            let mut merged: Vec<EvolvingPart> = Vec::new();
+            for part in parts {
+                let data = self.dispatch.graph().node_data(part.node);
                 match merged
                     .iter_mut()
-                    .find(|(existing, _)| self.dispatch.graph().node_data(*existing) == data)
+                    .find(|existing| self.dispatch.graph().node_data(existing.node) == data)
                 {
-                    Some((_, existing_fresh)) => *existing_fresh &= fresh,
-                    None => merged.push((node, fresh)),
+                    Some(existing) => {
+                        existing.fresh &= part.fresh;
+                        existing.fresh_values.extend(part.fresh_values);
+                    }
+                    None => merged.push(part),
                 }
             }
             let nodes: Vec<SemanticNodeId> = merged
                 .into_iter()
-                .map(|(node, fresh)| {
-                    if fresh {
-                        widen_literal_node(self.dispatch, node)
+                .map(|part| {
+                    if part.fresh {
+                        widen_fresh_read_node(self.dispatch, part.node)
                     } else {
-                        node
+                        // The arm keeps its own shape, but a fresh value
+                        // it CARRIES (a call's kept deposit or authored
+                        // fresh arm) still widens at this write position
+                        // — unless a sibling arm pinned the same value.
+                        let values = self.uncancelled_fresh_values(&part.fresh_values, &pinned);
+                        widen_values_within(self.dispatch, part.node, &values)
                     }
                 })
                 .collect();
@@ -5075,30 +5742,33 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let Positional::Value(node) = outcome else {
             return outcome;
         };
-        let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
-            || self.reads_widening_literal_local(expr);
+        let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh);
         Positional::Value(if fresh {
-            widen_literal_node(self.dispatch, node)
+            widen_fresh_read_node(self.dispatch, node)
         } else {
-            node
+            // A non-fresh spelling may still carry read-side widening
+            // provenance: a widening-membership local, or a completed
+            // fresh-literal call — the same value-position rule the
+            // object-member read applies.
+            self.widen_value_position_read(expr, node)
         })
     }
 
-    /// The recursive collector behind [`Self::eval_evolving_rhs`]: a
-    /// ternary's arms evaluate under the SAME guard scoping as the
-    /// ordinary `SliceExpr::Union` evaluation (positive reading on the
-    /// consequent, negated on the alternate, arm-scoped narrows) and each
-    /// contributes `(node, fresh)`. The freshness tree mirrors the
-    /// lowering's own descent, so a Union/PerArm pair aligns by
-    /// construction; a mismatch means the mirror missed a form — the
-    /// widening decision is then UNPROVEN, so the whole position fails
-    /// toward the typed gap (unwidened, degraded, never warm) rather than
-    /// guessing either direction.
+    /// The recursive collector behind [`Self::eval_evolving_rhs`] and the
+    /// ternary return argument: a ternary's arms evaluate under the SAME
+    /// guard scoping as the ordinary `SliceExpr::Union` evaluation
+    /// (positive reading on the consequent, negated on the alternate,
+    /// arm-scoped narrows) and each contributes one [`EvolvingPart`]. The
+    /// freshness tree mirrors the lowering's own descent, so a
+    /// Union/PerArm pair aligns by construction; a mismatch means the
+    /// mirror missed a form — the widening decision is then UNPROVEN, so
+    /// the whole position fails toward the typed gap (unwidened,
+    /// degraded, never warm) rather than guessing either direction.
     fn collect_evolving_parts(
         &mut self,
         expr: &crate::flow_slice_content::SliceExpr,
         freshness: &crate::flow_slice_content::SliceFreshness,
-        parts: &mut Vec<(SemanticNodeId, bool)>,
+        parts: &mut Vec<EvolvingPart>,
     ) {
         if let crate::flow_slice_content::SliceExpr::Union { arms, guard } = expr {
             match freshness {
@@ -5106,23 +5776,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if facts.len() == arms.len() =>
                 {
                     for (index, (arm, fact)) in arms.iter().zip(facts.iter()).enumerate() {
-                        let holds_before = self.holds.len();
                         let narrow_len = self.narrowings.len();
-                        let possible = self.apply_guard_scoped(guard, index == 0);
-                        if !possible
-                            && !guard_has_subject_matching(guard, &|subject| {
-                                slice_expr_is_exact_subject_read(arm, subject)
-                            })
-                        {
-                            self.record_degradation(FlowReturnDegradation::FlowGap(
-                                crate::semantic_query::FlowGap::GuardNarrowing,
-                            ));
-                        }
-                        if possible {
-                            self.collect_evolving_parts(arm, fact, parts);
-                        } else {
-                            self.holds.truncate(holds_before);
-                        }
+                        self.apply_guard_scoped(guard, index == 0);
+                        self.collect_evolving_parts(arm, fact, parts);
                         self.narrowings.truncate(narrow_len);
                     }
                     return;
@@ -5137,9 +5793,128 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let holds_before = self.holds.len();
         let outcome = self.eval_expr(expr);
         let node = self.settle_composite_part(outcome, holds_before);
-        let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
-            || self.reads_widening_literal_local(expr);
-        parts.push((node, fresh));
+        let bare_literal = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh);
+        let fresh = bare_literal
+            || self.reads_widening_literal_local(expr)
+            || self
+                .fresh_call_return_for(expr, node)
+                .is_some_and(|call| call.values.contains(&node));
+        let fresh_values = self.position_fresh_values(expr, node, bare_literal);
+        parts.push(EvolvingPart {
+            node,
+            fresh,
+            fresh_values,
+        });
+    }
+
+    /// The literal values any part contributes PINNED — its top-level
+    /// literal constituents outside its own fresh set. A pinned spelling
+    /// of a value cancels every sibling's freshness for that value
+    /// (pinned wins, measured), so these are the fold's blockers.
+    fn pinned_literal_blockers(&self, parts: &[EvolvingPart]) -> Vec<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        let mut pinned = Vec::new();
+        for part in parts {
+            for lit in self.top_level_literal_nodes(part.node) {
+                let data = graph.node_data(lit);
+                let fresh_here = part.fresh
+                    || part
+                        .fresh_values
+                        .iter()
+                        .any(|value| graph.node_data(*value) == data);
+                if !fresh_here && !pinned.contains(&lit) {
+                    pinned.push(lit);
+                }
+            }
+        }
+        pinned
+    }
+
+    /// `values` minus every entry whose literal VALUE some sibling
+    /// contributed pinned.
+    fn uncancelled_fresh_values(
+        &self,
+        values: &[SemanticNodeId],
+        pinned: &[SemanticNodeId],
+    ) -> Vec<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        values
+            .iter()
+            .copied()
+            .filter(|value| {
+                let data = graph.node_data(*value);
+                !pinned.iter().any(|p| graph.node_data(*p) == data)
+            })
+            .collect()
+    }
+
+    /// The top-level LITERAL constituents of one value node: the node
+    /// itself when it is a literal, a union's literal members, nothing
+    /// otherwise (intersection reduction pins its literal — measured).
+    fn top_level_literal_nodes(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        top_level_literal_nodes_in(self.dispatch.graph(), node)
+    }
+
+    /// The FRESH literal values one evaluated position carries, at its
+    /// own top level: the node itself for a bare-literal spelling, the
+    /// widening membership's values for a local read (`All` = every
+    /// kept literal), and a completed call's kept fresh values (argument
+    /// deposits plus the callee's own authored fresh arms). Every other
+    /// spelling carries none — annotations, assertions, and structural
+    /// values are pinned.
+    fn position_fresh_values(
+        &self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        node: SemanticNodeId,
+        bare_literal: bool,
+    ) -> Vec<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        if bare_literal
+            && matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Literal(_))
+            )
+        {
+            return vec![node];
+        }
+        if let crate::flow_slice_content::SliceExpr::Local {
+            name,
+            captured: false,
+            ..
+        } = expr
+        {
+            match self.membership_of(name.as_ref()) {
+                Some(WideningMembership::All) => return self.top_level_literal_nodes(node),
+                Some(WideningMembership::Partial(values)) => {
+                    let values = values.clone();
+                    return self
+                        .top_level_literal_nodes(node)
+                        .into_iter()
+                        .filter(|kept| {
+                            let data = graph.node_data(*kept);
+                            values.iter().any(|value| graph.node_data(*value) == data)
+                        })
+                        .collect();
+                }
+                None => {}
+            }
+        }
+        if let Some(call) = self.fresh_call_return_for(expr, node) {
+            let values = Arc::clone(&call.values);
+            if values.contains(&node) {
+                // The WHOLE return is the fresh deposit — the naked case.
+                return vec![node];
+            }
+            return self
+                .top_level_literal_nodes(node)
+                .into_iter()
+                .filter(|kept| {
+                    let data = graph.node_data(*kept);
+                    values.iter().any(|value| graph.node_data(*value) == data)
+                })
+                .collect();
+        }
+        Vec::new()
     }
 
     /// Read the newest narrow fact for exactly `subject`, if a guard
@@ -5197,7 +5972,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // `bind_local` itself clears the narrow facts about the
                 // replaced value (the invalidation cannot be forgotten at
                 // one of the two write sites).
-                self.bind_local(name, kind, node, false, degraded);
+                self.bind_local(name, kind, node, None, degraded);
             }
         }
     }
@@ -5260,7 +6035,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 name,
                 crate::flow_slice_content::SliceBindingKind::Let,
                 joined,
-                false,
+                None,
                 false,
             );
         }
@@ -5298,7 +6073,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 name,
                 crate::flow_slice_content::SliceBindingKind::Var,
                 joined,
-                false,
+                None,
                 false,
             );
         }
@@ -5428,10 +6203,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             match &shadow.prior {
                 Some((node, widening, degraded, conditional)) => {
                     state.locals.insert(shadow.name.clone(), *node);
-                    if *widening {
-                        state.widening_locals.insert(shadow.name.clone());
-                    } else {
-                        state.widening_locals.remove(&shadow.name);
+                    match widening {
+                        Some(membership) => {
+                            state
+                                .widening_locals
+                                .insert(shadow.name.clone(), membership.clone());
+                        }
+                        None => {
+                            state.widening_locals.remove(&shadow.name);
+                        }
                     }
                     if *degraded {
                         state.degraded_locals.insert(shadow.name.clone());
@@ -5463,7 +6243,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let prior = self.locals.get(name).map(|node| {
             (
                 *node,
-                self.widening_locals.contains(name),
+                self.widening_locals.get(name).cloned(),
                 self.degraded_locals.contains(name),
                 self.conditional_lexicals.contains(name),
             )
@@ -5592,15 +6372,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         joined
             .degraded_locals
             .extend(b.degraded_locals.iter().cloned());
-        joined
-            .widening_locals
-            .extend(b.widening_locals.iter().cloned());
+        joined.widening_locals.extend(
+            b.widening_locals
+                .iter()
+                .map(|(name, membership)| (name.clone(), membership.clone())),
+        );
         joined
             .var_degraded_locals
             .extend(b.var_degraded_locals.iter().cloned());
-        joined
-            .var_widening_locals
-            .extend(b.var_widening_locals.iter().cloned());
+        joined.var_widening_locals.extend(
+            b.var_widening_locals
+                .iter()
+                .map(|(name, membership)| (name.clone(), membership.clone())),
+        );
         joined
             .var_conditional_locals
             .extend(b.var_conditional_locals.iter().cloned());
@@ -5775,7 +6559,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 param.as_ref(),
                 crate::flow_slice_content::SliceBindingKind::Const,
                 unknown,
-                false,
+                None,
                 false,
             );
         }
@@ -5969,7 +6753,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             name,
             crate::flow_slice_content::SliceBindingKind::Const,
             node,
-            false,
+            None,
             degraded,
         );
     }
@@ -6474,60 +7258,38 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// or two structural surfaces with the same required member carrying
     /// conflicting concrete tags. Different object key sets can overlap and
     /// therefore are never declared disjoint here.
+    ///
+    /// The tag-level half DELEGATES to the crate's sole proven-disjoint
+    /// authority ([`super::canonical_algebra::tag_level_disjoint`] — TS
+    /// literal identity with SameValueZero numbers, the `undefined`/`void`
+    /// widening pair, conservative `false` for every undecided shape), so
+    /// this consumer cannot drift from the canonical intersection collapse
+    /// and the relation engine. This site adds ONLY the nominal-identity
+    /// axis the authority does not model: a `symbol` operand has no
+    /// tag-level identity to compare, so a narrow over one is undecidable
+    /// here rather than provably anything.
     fn nodes_provably_disjoint(
         &self,
         left: SemanticNodeId,
         right: SemanticNodeId,
     ) -> NodeDisjointness {
-        fn tag_disjoint(left: &SemanticNodeData, right: &SemanticNodeData) -> NodeDisjointness {
-            fn literal_base(value: &crate::semantic_query::LiteralValue) -> PrimitiveKind {
-                match value {
-                    crate::semantic_query::LiteralValue::String(_) => PrimitiveKind::String,
-                    crate::semantic_query::LiteralValue::Number(_) => PrimitiveKind::Number,
-                    crate::semantic_query::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
-                    crate::semantic_query::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
-                }
-            }
-            fn concrete(kind: PrimitiveKind) -> bool {
-                !matches!(
-                    kind,
-                    PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Never
+        let graph = self.dispatch.graph();
+        let tag_relation = |a: SemanticNodeId, b: SemanticNodeId| -> NodeDisjointness {
+            let is_symbol = |id: SemanticNodeId| {
+                matches!(
+                    graph.node_data(id).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol))
                 )
-            }
-            let nominal_identity_missing = matches!(
-                (left, right),
-                (SemanticNodeData::Primitive(PrimitiveKind::Symbol), _)
-                    | (_, SemanticNodeData::Primitive(PrimitiveKind::Symbol))
-            );
-            let provably_disjoint = match (left, right) {
-                (SemanticNodeData::Primitive(a), SemanticNodeData::Primitive(b)) => {
-                    let widening_pair = matches!(
-                        (*a, *b),
-                        (PrimitiveKind::Undefined, PrimitiveKind::Void)
-                            | (PrimitiveKind::Void, PrimitiveKind::Undefined)
-                    );
-                    concrete(*a) && concrete(*b) && a != b && !widening_pair
-                }
-                (SemanticNodeData::Literal(a), SemanticNodeData::Literal(b)) => a != b,
-                (SemanticNodeData::Literal(literal), SemanticNodeData::Primitive(primitive))
-                | (SemanticNodeData::Primitive(primitive), SemanticNodeData::Literal(literal)) => {
-                    concrete(*primitive) && literal_base(literal) != *primitive
-                }
-                _ => false,
             };
             NodeDisjointness {
-                provably_disjoint,
-                nominal_identity_missing,
+                provably_disjoint: super::canonical_algebra::tag_level_disjoint(graph, a, b),
+                nominal_identity_missing: is_symbol(a) || is_symbol(b),
             }
-        }
+        };
 
-        let graph = self.dispatch.graph();
-        if let (Some(left_data), Some(right_data)) = (graph.node_data(left), graph.node_data(right))
-        {
-            let relation = tag_disjoint(&left_data, &right_data);
-            if relation.provably_disjoint || relation.nominal_identity_missing {
-                return relation;
-            }
+        let relation = tag_relation(left, right);
+        if relation.provably_disjoint || relation.nominal_identity_missing {
+            return relation;
         }
         let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
         let (Some(left_view), Some(right_view)) = (
@@ -6552,13 +7314,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if right_member.optional {
                 continue;
             }
-            let member_relation = match (
-                graph.node_data(left_member.value),
-                graph.node_data(right_member.value),
-            ) {
-                (Some(left_data), Some(right_data)) => tag_disjoint(&left_data, &right_data),
-                _ => NodeDisjointness::default(),
-            };
+            let member_relation = tag_relation(left_member.value, right_member.value);
             relation.nominal_identity_missing |= member_relation.nominal_identity_missing;
             if member_relation.provably_disjoint {
                 relation.provably_disjoint = true;
@@ -6577,10 +7333,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         guard: &crate::flow_slice_content::SliceGuard,
         positive: bool,
-    ) -> bool {
+    ) {
         use crate::flow_slice_content::SliceGuard;
         let fact = match guard {
-            SliceGuard::None => return true,
+            SliceGuard::None => return,
             SliceGuard::Typeof {
                 subject,
                 kind,
@@ -6644,43 +7400,36 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             // A conjunction applies every fact at once; its NEGATION is
             // the disjunction of the negated facts (De Morgan — the same
-            // symmetry the lowering's `!` uses).
+            // symmetry the lowering's `!` uses). A later conjunct that
+            // empties its subject pushes that subject's `never` overlay —
+            // the overlay's newest-wins read is the "final alternative
+            // overlay" rule an enclosing disjunction consumes.
             SliceGuard::And(parts) => {
                 if positive {
-                    let base = self.narrowings.len();
                     for part in parts.iter() {
-                        if !self.apply_guard_scoped(part, true) {
-                            self.narrowings.truncate(base);
-                            return false;
-                        }
+                        self.apply_guard_scoped(part, true);
                     }
-                    return true;
                 } else {
-                    return self.apply_guard_union(parts, false);
+                    self.apply_guard_union(parts, false);
                 }
+                return;
             }
             SliceGuard::Or(parts) => {
                 if positive {
-                    return self.apply_guard_union(parts, true);
+                    self.apply_guard_union(parts, true);
                 } else {
-                    let base = self.narrowings.len();
                     for part in parts.iter() {
-                        if !self.apply_guard_scoped(part, false) {
-                            self.narrowings.truncate(base);
-                            return false;
-                        }
+                        self.apply_guard_scoped(part, false);
                     }
-                    return true;
                 }
+                return;
             }
         };
         match fact {
-            GuardNarrowing::Unchanged => true,
+            GuardNarrowing::Unchanged => {}
             GuardNarrowing::Narrowed(subject, node) => {
                 self.narrowings.push((subject, node));
-                true
             }
-            GuardNarrowing::Impossible => false,
         }
     }
 
@@ -6694,7 +7443,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         parts: &[crate::flow_slice_content::SliceGuard],
         positive: bool,
-    ) -> bool {
+    ) {
         let mut alternatives: Vec<
             Vec<(
                 crate::flow_slice_content::SliceNarrowSubject,
@@ -6703,11 +7452,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         > = Vec::with_capacity(parts.len());
         for part in parts.iter() {
             let base = self.narrowings.len();
-            let possible = self.apply_guard_scoped(part, positive);
+            self.apply_guard_scoped(part, positive);
             let applied = self.narrowings.split_off(base);
-            if !possible {
-                continue;
-            }
             let mut final_overlay = Vec::with_capacity(applied.len());
             for (subject, node) in applied {
                 match final_overlay
@@ -6719,9 +7465,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
             alternatives.push(final_overlay);
-        }
-        if alternatives.is_empty() {
-            return false;
         }
         let mut subjects: Vec<crate::flow_slice_content::SliceNarrowSubject> = Vec::new();
         for alternative in &alternatives {
@@ -6754,22 +7497,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .intern_normalized_union_or_intersection(&nodes, true);
             self.narrowings.push((subject, node));
         }
-        true
     }
 
     /// Filter `subject`'s arms by a per-arm predicate, joining the
-    /// survivors back into the narrow's node. An empty survivor set is an
-    /// impossible branch, distinct from an unchanged/undecidable fact, so a
-    /// disjunction can omit the dead alternative without retaining an
-    /// intermediate conjunction overlay.
+    /// survivors back into the narrow's node. An empty survivor set is a
+    /// positive PROOF that every arm is off the tested edge, distinct
+    /// from an unchanged/undecidable fact — the CALLER converts it under
+    /// its guard family's measured checker rule (usually a `never`
+    /// subject on a still-alive edge).
     fn narrow_arms_by(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
-        entry_subject: &crate::flow_slice_content::SliceNarrowSubject,
         mut keep: impl FnMut(&mut Self, SemanticNodeId) -> Option<bool>,
-    ) -> GuardNarrowing {
+    ) -> ArmFilter {
         let Some(current) = self.subject_current_node(subject) else {
-            return GuardNarrowing::Unchanged;
+            return ArmFilter::Unchanged;
         };
         let arms = self.enumerated_union_arms_or_self(current);
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
@@ -6777,19 +7519,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             match keep(self, *arm) {
                 Some(true) => survivors.push(*arm),
                 Some(false) => {}
-                None => return GuardNarrowing::Unchanged,
+                None => return ArmFilter::Unchanged,
             }
         }
         if survivors.is_empty() {
-            return GuardNarrowing::Impossible;
+            return ArmFilter::NoSurvivor;
         }
         if survivors.len() == arms.len() {
-            return GuardNarrowing::Unchanged;
+            return ArmFilter::Unchanged;
         }
         let node = self
             .dispatch
             .intern_normalized_union_or_intersection(&survivors, true);
-        GuardNarrowing::Narrowed(entry_subject.clone(), node)
+        ArmFilter::Narrowed(node)
+    }
+
+    /// The graph's `never` — what a subject reads on a guard edge every
+    /// arm is proved off of. The edge itself stays alive.
+    fn never_node(&self) -> SemanticNodeId {
+        self.dispatch
+            .graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
     }
 
     /// `typeof subject === "kind"`: keep the arms whose runtime type the
@@ -6804,23 +7554,104 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         kind: crate::flow_slice_content::SliceTypeofKind,
         negated: bool,
     ) -> GuardNarrowing {
+        let Some(current) = self.subject_current_node(subject) else {
+            return GuardNarrowing::Unchanged;
+        };
+        let arms = self.enumerated_union_arms_or_self(current);
+        let mut out: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        let mut changed = false;
         let mut unclassified = false;
-        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(match this.arm_typeof_class(arm, kind) {
-                ArmGuardClass::Match => !negated,
-                ArmGuardClass::NoMatch => negated,
+        for arm in &arms {
+            // The non-primitive `object` inhabits BOTH the `"object"` and
+            // the `"function"` runtime kinds (functions are objects), so
+            // the positive `"function"` edge narrows it to the global
+            // `Function` surface (measured: `x: object` reads `Function`
+            // inside `typeof x === "function"`); an unavailable lib
+            // surface keeps the arm possible, degraded. The other edges
+            // keep the plain classification: `"object"` matches on both
+            // edges, scalar kinds are proved off, and the negated
+            // `"function"` edge keeps the arm unchanged — the checker has
+            // no "object minus functions" type to narrow to.
+            if kind == crate::flow_slice_content::SliceTypeofKind::Function
+                && !negated
+                && matches!(
+                    self.dispatch.graph().node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Object))
+                )
+            {
+                match self.lower_global_function_surface() {
+                    Some(function) => {
+                        out.push(function);
+                        changed = true;
+                    }
+                    None => {
+                        out.push(*arm);
+                        unclassified = true;
+                    }
+                }
+                continue;
+            }
+            match self.arm_typeof_class(*arm, kind) {
+                ArmGuardClass::Match => {
+                    if negated {
+                        changed = true;
+                    } else {
+                        out.push(*arm);
+                    }
+                }
+                ArmGuardClass::NoMatch => {
+                    if negated {
+                        out.push(*arm);
+                    } else {
+                        changed = true;
+                    }
+                }
                 ArmGuardClass::Unclassified => {
                     unclassified = true;
-                    true
+                    out.push(*arm);
                 }
-            })
-        });
+            }
+        }
         if unclassified {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 crate::semantic_query::FlowGap::GuardNarrowing,
             ));
         }
-        fact
+        if out.is_empty() {
+            // Every arm is proved off the tested edge: the subject reads
+            // `never` and the edge stays alive.
+            return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
+        }
+        if !changed && out.len() == arms.len() {
+            return GuardNarrowing::Unchanged;
+        }
+        let node = self
+            .dispatch
+            .intern_normalized_union_or_intersection(&out, true);
+        GuardNarrowing::Narrowed(subject.clone(), node)
+    }
+
+    /// The global `Function` surface, lowered through the owner scope the
+    /// way an `instanceof` constructor reference is. `None` when the lib
+    /// surface is unavailable — including a lowering that only reaches an
+    /// UNRESOLVED bare reference or an opaque carrier, which must never
+    /// publish as a resolved narrow — so the caller keeps the arm
+    /// possible, degraded, never proved off an edge.
+    fn lower_global_function_surface(&mut self) -> Option<SemanticNodeId> {
+        let ty = verter_type_expr::TypeExpr::Ref {
+            name: Arc::from("Function"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+            self.canonical,
+            self.owner,
+            &ty,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )?;
+        match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::BareRef(_)) | Some(SemanticNodeData::Opaque(_)) | None => None,
+            _ => Some(node),
+        }
     }
 
     /// One union arm's verdict against the runtime type a `typeof`
@@ -6831,7 +7662,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// the graph cannot place under exactly one runtime kind — `any`,
     /// `unknown`, a memberless `{}` surface (primitives inhabit it), an
     /// unresolved carrier — is `Unclassified`: `NoMatch` means PROVED
-    /// non-inhabitance of the tested edge, never "unrecognized".
+    /// non-inhabitance of the tested edge, never "unrecognized". The one
+    /// dual-kind value domain — the non-primitive `object`, which also
+    /// inhabits `"function"` — is intercepted by [`Self::narrow_typeof`]
+    /// on the positive `"function"` edge before this classification;
+    /// the `Object` mapping here serves the remaining edges, where the
+    /// checker keeps the arm (negated `"function"`, either `"object"`
+    /// edge) or proves it off (scalar kinds).
     fn arm_typeof_class(
         &self,
         arm: SemanticNodeId,
@@ -6879,10 +7716,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// A bare truthiness test keeps every arm that CAN take the requested
-    /// edge. Broad primitives such as `boolean`, `string`, and `number` can
-    /// be either truthy or falsy; treating "not definitely falsy" as
-    /// "definitely truthy" would incorrectly make their negative edge dead.
+    /// A bare truthiness test keeps every arm the shared truthiness-domain
+    /// authority proves CAN take the requested edge — the flow frame holds
+    /// no truthiness rule of its own: per enumerated arm it CONSUMES the
+    /// demand-scoped [`ClassifyTruthinessDomain`] fact (settling identity
+    /// carriers through the same shared unwrap the enumeration and the
+    /// relation engine use) and reads the tested edge's bucket. Broad
+    /// primitives such as `boolean`, `string`, and `number` inhabit both
+    /// buckets, so both edges keep them; an UNDECIDED bucket keeps the arm
+    /// on the tested edge AND records the typed guard gap — the checker
+    /// decides such arms, so treating "undecided" as "proved on/off the
+    /// edge" would publish a wrong narrow clean and warm. An edge no arm
+    /// survives narrows the subject to `never` WITHOUT killing the branch:
+    /// the checker keeps the branch's syntactic returns, typed through the
+    /// `never` subject (measured: `` `item-${string}` | "none" `` under
+    /// `if (v)` reads `{ v: never }` from the falsy edge's `return { v }`).
+    ///
+    /// [`ClassifyTruthinessDomain`]: crate::semantic_query::SemanticQueryKey::ClassifyTruthinessDomain
     fn narrow_truthy(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
@@ -6897,6 +7747,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // falsy edge (`""` inhabits it). The parent fact rides the
         // narrowing overlay directly; the leaf fact is the returned
         // narrow, so both land under the same guard scope.
+        let mut undecided = false;
         if !subject.path.is_empty() {
             let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
                 root: subject.root.clone(),
@@ -6911,88 +7762,88 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .to_vec()
                     .into_boxed_slice(),
             );
-            let parent_fact = self.narrow_arms_by(&parent_subject, &parent_subject, |this, arm| {
+            let parent_fact = self.narrow_arms_by(&parent_subject, |this, arm| {
                 let member = this.project_segments_navigate(arm, &last)?;
                 let leaves = this.enumerated_union_arms_or_self(member);
-                Some(leaves.iter().any(|leaf| {
-                    if negated {
-                        this.arm_can_be_falsy(*leaf)
-                    } else {
-                        this.arm_can_be_truthy(*leaf)
-                    }
-                }))
+                Some(
+                    leaves
+                        .iter()
+                        .any(|leaf| match this.arm_truthiness_edge(*leaf, negated) {
+                            crate::semantic_query::TruthinessInhabitance::Yes => true,
+                            crate::semantic_query::TruthinessInhabitance::No => false,
+                            crate::semantic_query::TruthinessInhabitance::Undecided => {
+                                undecided = true;
+                                true
+                            }
+                        }),
+                )
             });
             match parent_fact {
-                GuardNarrowing::Impossible => return GuardNarrowing::Impossible,
-                GuardNarrowing::Narrowed(fact_subject, node) => {
-                    self.narrowings.push((fact_subject, node));
+                // Every parent arm is proved off the tested edge. The
+                // checker filters a PARENT through a property test only
+                // when the member DISCRIMINATES its arms; a filter that
+                // would empty the parent proves the member's edge verdict
+                // identical across the arms (or the parent non-union),
+                // and the checker then keeps the parent's declared type
+                // unchanged (measured: `{ ok: false }`, and a two-arm
+                // union whose `ok` is `false` in both, keep their types
+                // inside `if (x.ok)`). Only the tested LEAF collapses —
+                // it does below.
+                ArmFilter::NoSurvivor => {}
+                ArmFilter::Narrowed(node) => {
+                    self.narrowings.push((parent_subject, node));
                 }
-                GuardNarrowing::Unchanged => {}
+                ArmFilter::Unchanged => {}
             }
         }
-        self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(if negated {
-                this.arm_can_be_falsy(arm)
-            } else {
-                this.arm_can_be_truthy(arm)
-            })
-        })
-    }
-
-    /// Whether one union arm has a truthy runtime inhabitant.
-    fn arm_can_be_truthy(&self, arm: SemanticNodeId) -> bool {
-        match self.dispatch.graph().node_data(arm).as_deref() {
-            Some(SemanticNodeData::Primitive(
-                PrimitiveKind::Undefined | PrimitiveKind::Null | PrimitiveKind::Void,
-            )) => false,
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => false,
-            Some(SemanticNodeData::Literal(literal)) => match literal {
-                crate::semantic_query::LiteralValue::Boolean(value) => *value,
-                crate::semantic_query::LiteralValue::String(value) => !value.is_empty(),
-                crate::semantic_query::LiteralValue::Number(value) => *value != 0.0,
-                crate::semantic_query::LiteralValue::BigInt(value) => {
-                    !value.trim_start_matches('-').chars().all(|c| c == '0')
+        let fact = self.narrow_arms_by(subject, |this, arm| {
+            Some(match this.arm_truthiness_edge(arm, negated) {
+                crate::semantic_query::TruthinessInhabitance::Yes => true,
+                crate::semantic_query::TruthinessInhabitance::No => false,
+                crate::semantic_query::TruthinessInhabitance::Undecided => {
+                    undecided = true;
+                    true
                 }
-            },
-            _ => true,
+            })
+        });
+        if undecided {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        match fact {
+            ArmFilter::NoSurvivor => GuardNarrowing::Narrowed(subject.clone(), self.never_node()),
+            ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(subject.clone(), node),
+            ArmFilter::Unchanged => GuardNarrowing::Unchanged,
         }
     }
 
-    /// Whether one union arm has a falsy runtime inhabitant. Only broad
-    /// scalar primitives and the concrete falsy values qualify; object and
-    /// callable surfaces are always truthy, while unresolved forms stay
-    /// conservative and keep both edges.
-    fn arm_can_be_falsy(&self, arm: SemanticNodeId) -> bool {
-        match self.dispatch.graph().node_data(arm).as_deref() {
-            Some(SemanticNodeData::Primitive(primitive)) => matches!(
-                primitive,
-                PrimitiveKind::Any
-                    | PrimitiveKind::Unknown
-                    | PrimitiveKind::Undefined
-                    | PrimitiveKind::Null
-                    | PrimitiveKind::Void
-                    | PrimitiveKind::String
-                    | PrimitiveKind::Number
-                    | PrimitiveKind::BigInt
-                    | PrimitiveKind::Boolean
-            ),
-            Some(SemanticNodeData::Literal(literal)) => match literal {
-                crate::semantic_query::LiteralValue::Boolean(value) => !value,
-                crate::semantic_query::LiteralValue::String(value) => value.is_empty(),
-                crate::semantic_query::LiteralValue::Number(value) => *value == 0.0,
-                crate::semantic_query::LiteralValue::BigInt(value) => {
-                    value.trim_start_matches('-').chars().all(|c| c == '0')
-                }
-            },
-            Some(
-                SemanticNodeData::Object(_)
-                | SemanticNodeData::ObjectSpreadProgram(_)
-                | SemanticNodeData::Array { .. }
-                | SemanticNodeData::Tuple { .. }
-                | SemanticNodeData::Signature { .. },
-            ) => false,
-            Some(SemanticNodeData::Union(_)) | Some(SemanticNodeData::Intersection(_)) => true,
-            Some(_) | None => true,
+    /// The tested edge's bucket of one arm's truthiness domain, CONSUMED
+    /// from the sole authority ([`ClassifyTruthinessDomain`]): the falsy
+    /// bucket on the negated edge, the truthy bucket otherwise. The arm is
+    /// settled through the shared identity-carrier unwrap first (the same
+    /// `Instantiate`-backed peel the arm enumeration and the relation
+    /// engine use) so an alias/`DeclRef` arm classifies by its concrete
+    /// structure; an unresolvable carrier is `Undecided` — reported, never
+    /// guessed.
+    ///
+    /// [`ClassifyTruthinessDomain`]: crate::semantic_query::SemanticQueryKey::ClassifyTruthinessDomain
+    fn arm_truthiness_edge(
+        &mut self,
+        arm: SemanticNodeId,
+        negated: bool,
+    ) -> crate::semantic_query::TruthinessInhabitance {
+        let settled = match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+            super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+            super::relation::IdentityCarrierUnwrap::Unresolvable => {
+                return crate::semantic_query::TruthinessInhabitance::Undecided;
+            }
+        };
+        let domain = self.dispatch.classify_truthiness_domain_read(settled).value;
+        if negated {
+            domain.falsy
+        } else {
+            domain.truthy
         }
     }
 
@@ -7029,7 +7880,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // `` `item-${string}` `` edge), so treating "undecided" as
             // "proved unchanged" published a superset clean and warm.
             let mut undecided = false;
-            let narrowed = self.narrow_arms_by(subject, subject, |this, arm| {
+            let narrowed = self.narrow_arms_by(subject, |this, arm| {
                 if matches!(
                     this.dispatch.graph().node_data(arm).as_deref(),
                     Some(SemanticNodeData::Primitive(
@@ -7060,7 +7911,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     crate::semantic_query::FlowGap::GuardNarrowing,
                 ));
             }
-            if matches!(narrowed, GuardNarrowing::Unchanged) && !negated {
+            match narrowed {
+                // No arm overlaps the literal at all: the subject reads
+                // `never` on this edge and the edge stays alive
+                // (measured: `x: "a"` is `never` inside `if (x === "b")`,
+                // and only its own reads collapse — a sibling binding's
+                // contributor keeps its type).
+                ArmFilter::NoSurvivor => {
+                    return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
+                }
+                ArmFilter::Narrowed(node) => {
+                    return GuardNarrowing::Narrowed(subject.clone(), node);
+                }
+                ArmFilter::Unchanged => {}
+            }
+            if !negated {
                 // No arm was filtered. The literal can still be a STRICT
                 // subtype of the subject's whole type — then the literal
                 // IS the narrow (`x: string` guarded by `=== "a"` reads
@@ -7075,7 +7940,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     return GuardNarrowing::Narrowed(subject.clone(), literal_node);
                 }
             }
-            narrowed
+            GuardNarrowing::Unchanged
         } else {
             // The discriminant narrows the tested property's PARENT
             // reference, so the fact lands at the parent subject: a
@@ -7100,8 +7965,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // degrades the result — undecided is never "proved off this
             // edge" nor "proved unchanged".
             let mut undecided = false;
-            let narrowed = self.narrow_arms_by(&parent_subject, &parent_subject, |this, arm| {
+            let mut projected: Vec<SemanticNodeId> = Vec::new();
+            let narrowed = self.narrow_arms_by(&parent_subject, |this, arm| {
                 let member = this.project_segments_navigate(arm, &last)?;
+                projected.push(member);
                 let verdict = if negated {
                     // Excluding one literal removes a parent arm only when
                     // the projected member is wholly that literal. A named
@@ -7126,7 +7993,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     crate::semantic_query::FlowGap::GuardNarrowing,
                 ));
             }
-            narrowed
+            match narrowed {
+                // The checker filters a PARENT through a member test only
+                // when the member DISCRIMINATES its arms. A no-survivor
+                // filter whose projections DIFFER is the genuine
+                // discriminant case with no matching arm: the parent reads
+                // `never` and the edge stays alive (measured:
+                // `{ kind: "a" } | { kind: "c" }` under `x.kind === "b"`).
+                // A non-union parent, or one whose member projects
+                // identically in every arm, is never discriminated — the
+                // checker keeps its declared type — so no fact lands.
+                ArmFilter::NoSurvivor => {
+                    if projected.len() > 1 && projected.windows(2).any(|pair| pair[0] != pair[1]) {
+                        GuardNarrowing::Narrowed(parent_subject, self.never_node())
+                    } else {
+                        GuardNarrowing::Unchanged
+                    }
+                }
+                ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(parent_subject, node),
+                ArmFilter::Unchanged => GuardNarrowing::Unchanged,
+            }
         }
     }
 
@@ -7393,7 +8279,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // instance type. An assignable-but-not-identical arm may or
             // may not be derived: it stays possible, degraded.
             let mut gapped = false;
-            let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+            let fact = self.narrow_arms_by(subject, |this, arm| {
                 if this.instanceof_arm_is_unclassifiable(arm) {
                     gapped = true;
                     return Some(true);
@@ -7419,94 +8305,117 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     crate::semantic_query::FlowGap::GuardNarrowing,
                 ));
             }
-            return fact;
+            return match fact {
+                // Every arm IS the tested class: excluding it empties the
+                // subject — `never`, on a still-alive edge.
+                ArmFilter::NoSurvivor => {
+                    GuardNarrowing::Narrowed(subject.clone(), self.never_node())
+                }
+                ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(subject.clone(), node),
+                ArmFilter::Unchanged => GuardNarrowing::Unchanged,
+            };
         }
-        // The positive edge is the checker's own per-arm rule, the same
-        // rule `narrow_to_predicate_target` applies to `x is T`: an arm
-        // assignable to the instance type survives as itself; an arm the
-        // instance type is assignable to narrows TO the instance type
-        // (the downcast reading — `x: Base` guarded by `instanceof Sub`
-        // reads `Sub`); an arm related in neither direction keeps the
-        // checker's intersection unless the two are provably disjoint
-        // (a primitive arm against a class instance), which is the one
-        // proved dead reading. Arms the graph cannot classify or relate
-        // stay possible, degraded.
+        // The POSITIVE edge, measured against the checker over a
+        // local-class matrix:
+        //
+        // * `null` / `undefined` arms are STRIPPED first — they never
+        //   survive the positive edge and never enter the fallback
+        //   intersection (`L | null` narrows to `L & K`, never
+        //   `(L | null) & K`).
+        // * an arm IDENTICAL to the instance type survives as itself,
+        //   and with any surviving arm every unrelated arm is DROPPED
+        //   (`string | K` narrows to `K`; `K | L` to `K` — never to
+        //   `K | (K & L)`).
+        // * when NO arm is related in EITHER direction, the checker
+        //   intersects the WHOLE remaining subject with the instance
+        //   type (`string | L` narrows to `(string | L) & K`) — a
+        //   primitive arm stays INSIDE the intersection, never dropped;
+        //   dropping it published a strict subset of the checker's
+        //   type, clean and warm.
+        // * an arm ASSIGNABLE to the instance type without being it —
+        //   or one the instance type is assignable to — is the
+        //   direction structural assignability cannot decide: a genuine
+        //   subclass relationship and a same-shape underived
+        //   constructor are indistinguishable, and the checker treats
+        //   them differently (the derived arm survives or downcasts;
+        //   the underived twin routes through the subtype fallback).
+        //   The subject stays UNCHANGED behind the typed guard gap — a
+        //   superset, ReturnOnly, never a partial narrow that could
+        //   drop a real contributor.
+        //
+        // Each unrelated-arm proof is per-arm and the instance type is
+        // a class instance (not a union), so the checker's union-level
+        // fallback clauses (candidate-subtype-of-subject,
+        // subject-assignable-to-candidate) are provably closed off when
+        // every remaining arm is unrelated in both directions: the
+        // whole-subject intersection is exact, not an approximation.
         let Some(current) = self.subject_current_node(subject) else {
             return GuardNarrowing::Unchanged;
         };
         let arms = self.enumerated_union_arms_or_self(current);
-        let mut out: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
-        let mut changed = false;
-        let mut gapped = false;
+        let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        let mut remainder: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in &arms {
             if self.instanceof_arm_is_unclassifiable(*arm) {
-                out.push(*arm);
-                gapped = true;
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+                return GuardNarrowing::Unchanged;
+            }
+            if matches!(
+                self.dispatch.graph().node_data(*arm).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined | PrimitiveKind::Never,
+                ))
+            ) {
                 continue;
             }
-            match self.assignable(*arm, instance) {
-                Some(true) => out.push(*arm),
-                Some(false) => {
-                    match self.assignable(instance, *arm) {
-                        Some(true) => {
-                            out.push(instance);
-                            changed = true;
-                        }
-                        Some(false) => {
-                            // The instance type is a CLASS instance by
-                            // the fact-minting rule, so a primitive or
-                            // literal arm is proved off the positive
-                            // edge outright — no primitive value is a
-                            // class instance, and the checker drops such
-                            // arms rather than intersect them.
-                            if self.arm_is_non_object_runtime_value(*arm) {
-                                changed = true;
-                            } else {
-                                let relation = self.nodes_provably_disjoint(*arm, instance);
-                                if relation.nominal_identity_missing {
-                                    self.record_degradation(FlowReturnDegradation::FlowGap(
-                                        crate::semantic_query::FlowGap::NominalRelation,
-                                    ));
-                                }
-                                if relation.provably_disjoint {
-                                    changed = true;
-                                } else {
-                                    out.push(
-                                        self.dispatch.intern_normalized_union_or_intersection(
-                                            &[*arm, instance],
-                                            false,
-                                        ),
-                                    );
-                                    changed = true;
-                                }
-                            }
-                        }
-                        None => {
-                            out.push(*arm);
-                            gapped = true;
-                        }
-                    }
-                }
-                None => {
-                    out.push(*arm);
-                    gapped = true;
+            if *arm == instance {
+                survivors.push(*arm);
+                remainder.push(*arm);
+                continue;
+            }
+            match (
+                self.assignable(*arm, instance),
+                self.assignable(instance, *arm),
+            ) {
+                (Some(false), Some(false)) => remainder.push(*arm),
+                _ => {
+                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                        crate::semantic_query::FlowGap::GuardNarrowing,
+                    ));
+                    return GuardNarrowing::Unchanged;
                 }
             }
         }
-        if gapped {
-            self.record_degradation(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing,
-            ));
+        if !survivors.is_empty() {
+            if survivors.len() == arms.len() {
+                return GuardNarrowing::Unchanged;
+            }
+            let node = self
+                .dispatch
+                .intern_normalized_union_or_intersection(&survivors, true);
+            return GuardNarrowing::Narrowed(subject.clone(), node);
         }
-        if out.is_empty() {
-            return GuardNarrowing::Impossible;
+        if remainder.is_empty() {
+            // Only nullish / `never` arms: no runtime value can take the
+            // positive edge, which reads `never` while the edge stays
+            // alive — a non-subject contributor on it keeps its own type.
+            return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
         }
-        if !changed && out.len() == arms.len() {
-            return GuardNarrowing::Unchanged;
-        }
+        // No survivor and every remaining arm proved unrelated: the
+        // whole remaining subject intersects the instance type. When
+        // nothing was stripped the AUTHORED subject node is kept as the
+        // intersection's subject arm, preserving its spelling.
+        let subject_node = if remainder.len() == arms.len() {
+            current
+        } else {
+            self.dispatch
+                .intern_normalized_union_or_intersection(&remainder, true)
+        };
         let node = self
             .dispatch
-            .intern_normalized_union_or_intersection(&out, true);
+            .intern_normalized_union_or_intersection(&[subject_node, instance], false);
         GuardNarrowing::Narrowed(subject.clone(), node)
     }
 
@@ -7526,63 +8435,93 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Whether one union arm's runtime values are never objects — a
-    /// scalar primitive or a literal. Such an arm cannot inhabit the
-    /// positive edge of an `instanceof` test against a class instance
-    /// type, so it is proved off that edge without consulting the
-    /// relation oracle. `object` is object-like and the top/uninhabited
-    /// kinds are classified elsewhere, so none of them answer here.
-    fn arm_is_non_object_runtime_value(&self, arm: SemanticNodeId) -> bool {
-        match self.dispatch.graph().node_data(arm).as_deref() {
-            Some(SemanticNodeData::Primitive(primitive)) => matches!(
-                primitive,
-                PrimitiveKind::String
-                    | PrimitiveKind::Number
-                    | PrimitiveKind::BigInt
-                    | PrimitiveKind::Boolean
-                    | PrimitiveKind::Symbol
-                    | PrimitiveKind::Undefined
-                    | PrimitiveKind::Null
-                    | PrimitiveKind::Void
-                    | PrimitiveKind::Never
-            ),
-            Some(SemanticNodeData::Literal(_)) => true,
-            _ => false,
-        }
-    }
-
-    /// `"key" in subject`: keep the arms proved to carry the member;
-    /// negation keeps the ones proved not to. Proof is per edge and
-    /// per arm ([`InArmPresence`]): a closed surface's REQUIRED member
-    /// proves the arm off the negated edge, a closed surface with the
-    /// key ABSENT proves it off the positive edge, and an OPTIONAL
-    /// member proves EXACT retention on both edges — the checker keeps
-    /// an optional arm unchanged on the positive edge (presence of the
-    /// key is a separate fact from the value's non-`undefined`-ness,
-    /// which the member READ carries), so no gap rides it. An arm whose
-    /// key set the graph cannot decide — a type parameter, an
-    /// index-signature surface, an unresolvable carrier — stays
-    /// possible on BOTH edges and records the typed guard gap: the
-    /// checker narrows such an arm, so dropping it would fabricate a
-    /// dead edge and silently lose that edge's return contributor.
+    /// `"key" in subject` follows the checker's TWO regimes (measured;
+    /// the checker's own `in`-narrowing split):
+    ///
+    /// * a KNOWN key — some arm proves it present, required or optional —
+    ///   filters the arms per edge ([`InArmPresence`]): a REQUIRED member
+    ///   proves the arm off the negated edge, a proven-ABSENT key on a
+    ///   closed surface proves it off the positive edge, and an OPTIONAL
+    ///   member proves EXACT retention on both edges (presence of the key
+    ///   is a separate fact from the value's non-`undefined`-ness, which
+    ///   the member READ carries). A filter no arm survives collapses the
+    ///   subject to `never` on a still-alive edge.
+    /// * an UNKNOWN key — NO arm proves it present — never filters: the
+    ///   checker's positive edge is the WHOLE subject intersected with
+    ///   `Record<key, unknown>`, a carrier the substrate cannot mint, so
+    ///   the subject stays unchanged as a typed superset behind the guard
+    ///   gap — never a dropped edge; the negated edge keeps the subject
+    ///   unchanged exactly.
+    ///
+    /// An arm whose key set the graph cannot decide — a type parameter,
+    /// an index-signature surface, an unresolvable carrier — stays
+    /// possible on BOTH edges, leaves the regime undecided, and records
+    /// the typed guard gap: the checker narrows such an arm, so deciding
+    /// either way would fabricate a dead edge or a clean warm superset.
     fn narrow_in(
         &mut self,
         key: &Arc<str>,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         negated: bool,
     ) -> GuardNarrowing {
+        let Some(current) = self.subject_current_node(subject) else {
+            return GuardNarrowing::Unchanged;
+        };
+        let arms = self.enumerated_union_arms_or_self(current);
+        let presences: Vec<InArmPresence> = arms
+            .iter()
+            .map(|arm| self.arm_in_presence(*arm, key))
+            .collect();
+        let key_is_known = presences
+            .iter()
+            .any(|presence| matches!(presence, InArmPresence::Always | InArmPresence::Optional));
         let mut gapped = false;
-        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(match this.arm_in_presence(arm, key) {
-                InArmPresence::Always => !negated,
-                InArmPresence::Never => negated,
-                InArmPresence::Optional => true,
-                InArmPresence::Unknown => {
-                    gapped = true;
-                    true
+        let fact = if key_is_known {
+            let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+            for (arm, presence) in arms.iter().zip(presences.iter()) {
+                let keep = match presence {
+                    InArmPresence::Always => !negated,
+                    InArmPresence::Never => negated,
+                    InArmPresence::Optional => true,
+                    InArmPresence::Unknown => {
+                        gapped = true;
+                        true
+                    }
+                };
+                if keep {
+                    survivors.push(*arm);
                 }
-            })
-        });
+            }
+            if survivors.is_empty() {
+                // Every arm carries the key and the test excludes it: the
+                // subject reads `never` on the negated edge and the edge
+                // stays alive.
+                GuardNarrowing::Narrowed(subject.clone(), self.never_node())
+            } else if survivors.len() == arms.len() {
+                GuardNarrowing::Unchanged
+            } else {
+                let node = self
+                    .dispatch
+                    .intern_normalized_union_or_intersection(&survivors, true);
+                GuardNarrowing::Narrowed(subject.clone(), node)
+            }
+        } else if !negated {
+            // Unknown key, positive edge: the unmintable
+            // `(subject) & Record<key, unknown>` stays a typed superset.
+            gapped = true;
+            GuardNarrowing::Unchanged
+        } else {
+            // Unknown key, negated edge: the checker keeps the subject
+            // unchanged — exact when every arm's absence is proved; an
+            // undecided arm could flip the regime, so it degrades.
+            if presences
+                .iter()
+                .any(|presence| matches!(presence, InArmPresence::Unknown))
+            {
+                gapped = true;
+            }
+            GuardNarrowing::Unchanged
+        };
         if gapped {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 crate::semantic_query::FlowGap::GuardNarrowing,
@@ -7776,10 +8715,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     consumption,
                 );
             }
-            return (GuardNarrowing::Impossible, consumption);
+            // The target is PROVED disjoint from the whole subject — the
+            // checker's intersection reduces to `never`, so the subject
+            // reads `never` on the positive edge while the edge stays
+            // alive: a contributor there that reads a different binding
+            // keeps its own type.
+            return (
+                GuardNarrowing::Narrowed(subject.clone(), self.never_node()),
+                consumption,
+            );
         }
         let mut undecided = false;
-        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+        let fact = self.narrow_arms_by(subject, |this, arm| {
             match this.assignable(arm, target_node) {
                 Some(kept) => Some(kept != negated),
                 None => {
@@ -7793,6 +8740,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         } else {
             Consumption::Decided
         };
+        let fact = match fact {
+            // The predicate covers the subject entirely: excluding its
+            // target empties the subject — `never`, on a still-alive edge.
+            ArmFilter::NoSurvivor => GuardNarrowing::Narrowed(subject.clone(), self.never_node()),
+            ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(subject.clone(), node),
+            ArmFilter::Unchanged => GuardNarrowing::Unchanged,
+        };
         (fact, consumption)
     }
 
@@ -7801,10 +8755,58 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// degradation, because asking about widening is not an observation
     /// of the binding's value.
     fn widening_of(&self, name: &str) -> bool {
+        matches!(self.membership_of(name), Some(WideningMembership::All))
+    }
+
+    /// The full widening MEMBERSHIP of a local binding, if it has one —
+    /// the layer resolution mirrors [`Self::widening_of`], which is its
+    /// `All`-only projection.
+    fn membership_of(&self, name: &str) -> Option<&WideningMembership> {
         if self.locals.contains_key(name) {
-            return self.widening_locals.contains(name);
+            return self.widening_locals.get(name);
         }
-        self.var_locals.contains_key(name) && self.var_widening_locals.contains(name)
+        if self.var_locals.contains_key(name) {
+            return self.var_widening_locals.get(name);
+        }
+        None
+    }
+
+    /// The widening membership one PLAIN (non-mixed) binding initializer
+    /// establishes: an all-fresh literal tree on an unannotated `const`
+    /// (`All` — the classic widening-literal binding), a read of a local
+    /// that already carries membership (`const w = v` propagates it; a
+    /// `let` widens it at the declaration), or a completed fresh-literal
+    /// call (`All` when the whole return is the deposit, `Partial` over a
+    /// union-carried one). Authored pins, annotated initializers, and
+    /// every other spelling establish none.
+    fn binding_init_membership(
+        &self,
+        kind: crate::flow_slice_content::SliceBindingKind,
+        init: &crate::flow_slice_content::SliceExpr,
+        node: SemanticNodeId,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+    ) -> Option<WideningMembership> {
+        if kind == crate::flow_slice_content::SliceBindingKind::Const && freshness.all_fresh() {
+            return Some(WideningMembership::All);
+        }
+        if let crate::flow_slice_content::SliceExpr::Local {
+            name,
+            captured: false,
+            ..
+        } = init
+        {
+            if let Some(membership) = self.membership_of(name.as_ref()) {
+                return Some(membership.clone());
+            }
+        }
+        if let Some(call) = self.fresh_call_return_for(init, node) {
+            return Some(if call.values.contains(&node) {
+                WideningMembership::All
+            } else {
+                WideningMembership::Partial(Arc::clone(&call.values))
+            });
+        }
+        None
     }
 
     /// Evaluate ONE return site under the member-projection demand: the
@@ -7859,7 +8861,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         let outcome = self.eval_expr(&member.value);
         match self.settle(outcome) {
-            Some(node) => Ok(Some(self.widen_if_widening_local_read(&member.value, node))),
+            Some(node) => Ok(Some(self.widen_value_position_read(&member.value, node))),
             // A hold inside the demanded member is the same coinductive
             // hold the whole-return object path reports.
             None => Ok(None),
@@ -7876,18 +8878,61 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.widening_of(name.as_ref())
     }
 
-    /// Widen `node` to its literal's primitive when `expr` is a read of a
-    /// WIDENING-literal local and the evaluated node IS that literal.
-    /// Every other shape passes through unchanged.
-    fn widen_if_widening_local_read(
+    /// The completed fresh-literal call this expression IS (transparently)
+    /// a read of, matched by the authored call-site SPAN — never by the
+    /// interned literal value, so a sibling arm's authored pin of the same
+    /// value can never borrow a call's freshness.
+    fn fresh_call_return_for(
+        &self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        node: SemanticNodeId,
+    ) -> Option<&FreshCallReturn> {
+        match expr {
+            crate::flow_slice_content::SliceExpr::Call(_, site) => {
+                let span = site.span();
+                self.call_fresh_literal_returns
+                    .iter()
+                    .rev()
+                    .find(|call| call.span == span && call.node == node)
+            }
+            crate::flow_slice_content::SliceExpr::FrameShadowed { inner, .. } => {
+                self.fresh_call_return_for(inner, node)
+            }
+            _ => None,
+        }
+    }
+
+    /// Widen `node` at a VALUE (member / mutable-declaration) position
+    /// when the read carries widening provenance: a completed
+    /// fresh-literal call (the whole value listed → it widens; a
+    /// union-carried deposit → exactly the listed constituents widen), or
+    /// a widening-membership local read (`All` → a lone literal widens to
+    /// its primitive and a union widens every literal arm; `Partial` →
+    /// exactly the recorded fresh values). Every other read passes
+    /// through unchanged.
+    fn widen_value_position_read(
         &self,
         expr: &crate::flow_slice_content::SliceExpr,
         node: SemanticNodeId,
     ) -> SemanticNodeId {
-        if !self.reads_widening_literal_local(expr) {
-            return node;
+        if let Some(call) = self.fresh_call_return_for(expr, node) {
+            if call.values.contains(&node) {
+                return widen_fresh_read_node(self.dispatch, node);
+            }
+            return widen_values_within(self.dispatch, node, &call.values);
         }
-        widen_literal_node(self.dispatch, node)
+        if let crate::flow_slice_content::SliceExpr::Local { name, .. } = expr {
+            match self.membership_of(name.as_ref()) {
+                Some(WideningMembership::All) => {
+                    return widen_fresh_read_node(self.dispatch, node);
+                }
+                Some(WideningMembership::Partial(values)) => {
+                    return widen_values_within(self.dispatch, node, values);
+                }
+                None => {}
+            }
+        }
+        node
     }
 
     /// Lower one body-position `TypeExpr` (a fully lowered expression
@@ -7986,7 +9031,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // evaluate. The returned fall-through is the lowering's flag
         // ANDed with this — the override only ever narrows downward.
         let mut path_alive = true;
-        for (statement_index, statement) in region.statements.iter().enumerate() {
+        for statement in region.statements.iter() {
             if !path_alive {
                 break;
             }
@@ -7998,7 +9043,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 crate::flow_slice_content::SliceStatement::Return {
                     argument,
-                    widening_literal,
+                    freshness,
                 } => {
                     path_alive = false;
                     if self.member_filter.is_some() {
@@ -8009,6 +9054,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 node,
                                 fresh_literal: false,
                                 inference_only: self.inference_only_path,
+                                fresh_values: Vec::new(),
                             }),
                             Ok(None) => {}
                             Err(failure) => return (Err(failure), region.can_fall_through),
@@ -8018,6 +9064,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     match argument {
                         Some(expr) => {
+                            let bare_literal = matches!(
+                                freshness,
+                                crate::flow_slice_content::SliceFreshness::Fresh
+                            );
                             // A FRESH literal contribution is a bare literal
                             // return argument or a read of a
                             // widening-literal `const`. The join decides
@@ -8025,7 +9075,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // contributor (`return 1` is `number`, but
                             // `if (c) return 1; return 0` is `0 | 1`).
                             let mut fresh_literal =
-                                *widening_literal || self.reads_widening_literal_local(expr);
+                                bare_literal || self.reads_widening_literal_local(expr);
                             // A `return f(…)` whose callee pops as a
                             // PROVISIONAL member of this component is
                             // fresh-NEUTRAL: its value is re-derived by the
@@ -8035,19 +9085,70 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // whether the callee was already in flight —
                             // i.e. on demand ORDER.
                             let holds_before = self.holds.len();
-                            let outcome = self.eval_expr(expr);
-                            if let Some(node) = self.settle(outcome) {
+                            // A TERNARY argument evaluates PER ARM (the
+                            // same guard-scoped walk `eval_expr` performs
+                            // over the union), so each arm's carried
+                            // freshness — a bare fresh literal, a
+                            // membership read, a call's kept fresh values
+                            // — enters the join instead of vanishing into
+                            // the joined node.
+                            let evaluated = match (expr, freshness) {
+                                (
+                                    crate::flow_slice_content::SliceExpr::Union { .. },
+                                    crate::flow_slice_content::SliceFreshness::PerArm(_),
+                                ) => {
+                                    let mut parts: Vec<EvolvingPart> = Vec::new();
+                                    self.collect_evolving_parts(expr, freshness, &mut parts);
+                                    let nodes: Vec<SemanticNodeId> =
+                                        parts.iter().map(|part| part.node).collect();
+                                    let node = self
+                                        .dispatch
+                                        .intern_normalized_union_or_intersection(&nodes, true);
+                                    // Pinned wins per literal VALUE: a
+                                    // sibling arm's authored pin of the
+                                    // same literal cancels the freshness.
+                                    let pinned = self.pinned_literal_blockers(&parts);
+                                    let mut fresh_values = Vec::new();
+                                    for part in &parts {
+                                        if part.fresh {
+                                            fresh_values
+                                                .extend(self.top_level_literal_nodes(part.node));
+                                        }
+                                        fresh_values.extend_from_slice(&part.fresh_values);
+                                    }
+                                    let fresh_values =
+                                        self.uncancelled_fresh_values(&fresh_values, &pinned);
+                                    Some((node, fresh_values))
+                                }
+                                _ => {
+                                    let outcome = self.eval_expr(expr);
+                                    self.settle(outcome).map(|node| {
+                                        let fresh_values =
+                                            self.position_fresh_values(expr, node, bare_literal);
+                                        (node, fresh_values)
+                                    })
+                                }
+                            };
+                            if let Some((node, fresh_values)) = evaluated {
                                 fresh_literal |= self.holds.len() > holds_before;
-                                // A COMPLETED call that closed fresh feeds
-                                // the same join: its executor-marked
-                                // fresh-literal return is a fresh source
-                                // here, exactly as a bare literal argument
-                                // is.
-                                fresh_literal |= self.call_fresh_literal_returns.contains(&node);
+                                // A COMPLETED call that closed on a
+                                // WHOLE-return fresh literal feeds the
+                                // same join — matched by its authored
+                                // call-site span, never by the interned
+                                // literal value, so a sibling arm's
+                                // authored pin of the same value is never
+                                // fresh. A union-carried fresh deposit
+                                // stays pinned at the return position (the
+                                // checker widens it only at value
+                                // positions).
+                                fresh_literal |= self
+                                    .fresh_call_return_for(expr, node)
+                                    .is_some_and(|call| call.values.contains(&node));
                                 contributors.push(FlowContribution {
                                     node,
                                     fresh_literal,
                                     inference_only: self.inference_only_path,
+                                    fresh_values,
                                 });
                             }
                         }
@@ -8098,21 +9199,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let return_base = self.return_edges.len();
                     let throw_base = self.throw_points.len();
                     self.conditional_arm_nesting += 1;
-                    let consequent_possible = self.apply_guard_scoped(guard, true);
-                    if !consequent_possible
-                        && slice_region_has_non_subject_return(consequent, &|expr| {
-                            slice_expr_is_exact_guard_subject_read(expr, guard)
-                        })
-                    {
-                        self.record_degradation(FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::GuardNarrowing,
-                        ));
-                    }
-                    let (consequent_result, consequent_falls) = if consequent_possible {
-                        self.eval_region(consequent)
-                    } else {
-                        (Ok(Vec::new()), false)
-                    };
+                    self.apply_guard_scoped(guard, true);
+                    let (consequent_result, consequent_falls) = self.eval_region(consequent);
                     self.narrowings.truncate(narrow_len);
                     // Close the arm's lexical scope BEFORE snapshotting its
                     // contribution to the post-if join, and replay the same
@@ -8142,27 +9230,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     };
                     contributors.extend(consequent_contributors);
-                    let mut implicit_alternate_falls = true;
                     let alternate_layers = if let Some(alternate) = alternate {
                         let shadow_base = self.scope_shadows.len();
                         let break_base = self.break_exits.len();
                         let return_base = self.return_edges.len();
                         let throw_base = self.throw_points.len();
-                        let alternate_possible = self.apply_guard_scoped(guard, false);
-                        if !alternate_possible
-                            && slice_region_has_non_subject_return(alternate, &|expr| {
-                                slice_expr_is_exact_guard_subject_read(expr, guard)
-                            })
-                        {
-                            self.record_degradation(FlowReturnDegradation::FlowGap(
-                                crate::semantic_query::FlowGap::GuardNarrowing,
-                            ));
-                        }
-                        let (alternate_result, alternate_falls) = if alternate_possible {
-                            self.eval_region(alternate)
-                        } else {
-                            (Ok(Vec::new()), false)
-                        };
+                        self.apply_guard_scoped(guard, false);
+                        let (alternate_result, alternate_falls) = self.eval_region(alternate);
                         self.narrowings.truncate(narrow_len);
                         let shadows = self.split_scope_shadows_close_exits(
                             shadow_base,
@@ -8196,26 +9270,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             alternate_falls,
                         ))
                     } else {
-                        implicit_alternate_falls = self.apply_guard_scoped(guard, false);
-                        // The IMPLICIT alternate's impossibility takes the
-                        // same fail-close as an explicit arm's: the
-                        // checker keeps a fall-through contribution that
-                        // never reads the subject (narrowing
-                        // impossibility collapses subject READS to
-                        // `never`, it does not remove the edge), so
-                        // dropping the fall-through must ride the typed
-                        // guard gap — degraded, never a silent warm drop.
-                        if !implicit_alternate_falls
-                            && slice_statements_have_non_subject_return(
-                                region.statements.iter().skip(statement_index + 1),
-                                &|expr| slice_expr_is_exact_guard_subject_read(expr, guard),
-                            )
-                        {
-                            self.record_degradation(FlowReturnDegradation::FlowGap(
-                                crate::semantic_query::FlowGap::GuardNarrowing,
-                            ));
-                        }
-                        self.narrowings.truncate(narrow_len);
                         None
                     };
                     self.conditional_arm_nesting -= 1;
@@ -8230,10 +9284,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Some((locals, var, param_writes, falls)) => {
                                 (Some(locals), Some(var), Some(param_writes), *falls)
                             }
-                            // No `else`: the implicit alternate reaches past
-                            // the `if` only when the guard's negated edge is
-                            // possible under the current overlay.
-                            None => (None, None, None, implicit_alternate_falls),
+                            // No `else`: the implicit alternate always
+                            // reaches past the `if` — narrowing
+                            // impossibility collapses subject READS to
+                            // `never`, it never removes the edge.
+                            None => (None, None, None, true),
                         };
                     self.join_arm_writes(
                         &consequent_locals,
@@ -8252,25 +9307,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // rest of the region, exactly where an arm-scoped
                     // truncation does not erase them. (Both arms reaching
                     // establishes nothing; both terminating makes the rest
-                    // of the region unreachable.)
-                    let surviving_edge_possible = if !consequent_falls && alternate_falls {
-                        self.apply_guard_scoped(guard, false)
+                    // of the region unreachable.) An edge no arm survives
+                    // stays alive with its subject narrowed to `never` —
+                    // the application never kills the path.
+                    if !consequent_falls && alternate_falls {
+                        self.apply_guard_scoped(guard, false);
                     } else if consequent_falls && !alternate_falls {
-                        self.apply_guard_scoped(guard, true)
-                    } else {
-                        true
-                    };
-                    path_alive = (consequent_falls || alternate_falls) && surviving_edge_possible;
-                    if !surviving_edge_possible
-                        && slice_statements_have_non_subject_return(
-                            region.statements.iter().skip(statement_index + 1),
-                            &|expr| slice_expr_is_exact_guard_subject_read(expr, guard),
-                        )
-                    {
-                        self.record_degradation(FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::GuardNarrowing,
-                        ));
+                        self.apply_guard_scoped(guard, true);
                     }
+                    path_alive = consequent_falls || alternate_falls;
                 }
                 crate::flow_slice_content::SliceStatement::Switch {
                     discriminant,
@@ -8365,6 +9410,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 crate::flow_slice_content::SliceSwitchTest::Unmodeled => {}
                                 // The dispatch edge: the discriminant IS
                                 // this test.
+                                // A test no discriminant arm matches bakes
+                                // the subject's `never` narrow instead of
+                                // killing the dispatch edge: the checker
+                                // keeps the clause's contributors typed
+                                // through the `never` subject (measured:
+                                // `switch (x) { case "b": return 1 }` over
+                                // `x: "a"` still contributes `1`).
                                 crate::flow_slice_content::SliceSwitchTest::Literal(test) => {
                                     match self.narrow_eq_literal(subject, test, false) {
                                         GuardNarrowing::Narrowed(fact_subject, node) => {
@@ -8373,9 +9425,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                                 &fact_subject,
                                                 node,
                                             );
-                                        }
-                                        GuardNarrowing::Impossible => {
-                                            dead_dispatch = true;
                                         }
                                         GuardNarrowing::Unchanged => {}
                                     }
@@ -8927,7 +9976,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     kind,
                     init,
                     declared,
-                    widening_literal,
+                    freshness,
                 } => {
                     // A lexical declaration shadows any outer same-named
                     // binding for the extent of its block scope: record
@@ -8984,7 +10033,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             let marker = self.unmodeled_position();
                             self.set_declared_local(name, *kind, Some(marker));
                             if !no_init_var_with_reaching_value {
-                                self.bind_local(name, *kind, marker, false, false);
+                                self.bind_local(name, *kind, marker, None, false);
                             }
                             continue;
                         }
@@ -9000,7 +10049,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let arms = self.dispatch.union_arms_of(declared_node);
                         match (init, arms) {
                             (None, _) | (Some(_), None) => {
-                                self.bind_local(name, *kind, declared_node, false, false);
+                                self.bind_local(name, *kind, declared_node, None, false);
                                 continue;
                             }
                             (Some(init), Some(arms)) => {
@@ -9021,7 +10070,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                         declared_node
                                     }
                                 };
-                                self.bind_local(name, *kind, node, false, false);
+                                self.bind_local(name, *kind, node, None, false);
                                 continue;
                             }
                         }
@@ -9032,9 +10081,95 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // the whole declaration, so nothing here can observe
                     // an unselected sibling.
                     if let Some(init) = init {
+                        // A MIXED-freshness conditional `const`
+                        // initializer (a bare fresh literal arm beside an
+                        // authored pin, a call, a reference): evaluate
+                        // per-arm so the binding records EXACTLY which
+                        // values widen at a widening read — pinned-wins
+                        // collapse of equal constituents, then Partial
+                        // membership over the surviving fresh values. An
+                        // all-fresh or all-pinned tree keeps the plain
+                        // path below.
+                        if *kind == crate::flow_slice_content::SliceBindingKind::Const
+                            && freshness.is_mixed()
+                            && matches!(init, crate::flow_slice_content::SliceExpr::Union { .. })
+                        {
+                            let mut parts: Vec<EvolvingPart> = Vec::new();
+                            self.collect_evolving_parts(init, freshness, &mut parts);
+                            let pinned = self.pinned_literal_blockers(&parts);
+                            let mut merged: Vec<EvolvingPart> = Vec::new();
+                            for part in parts {
+                                let data = self.dispatch.graph().node_data(part.node);
+                                match merged.iter_mut().find(|existing| {
+                                    self.dispatch.graph().node_data(existing.node) == data
+                                }) {
+                                    Some(existing) => {
+                                        existing.fresh &= part.fresh;
+                                        existing.fresh_values.extend(part.fresh_values);
+                                    }
+                                    None => merged.push(part),
+                                }
+                            }
+                            let nodes: Vec<SemanticNodeId> =
+                                merged.iter().map(|part| part.node).collect();
+                            let value = self
+                                .dispatch
+                                .intern_normalized_union_or_intersection(&nodes, true);
+                            let all_fresh = merged.iter().all(|part| part.fresh);
+                            let mut fresh_values: Vec<SemanticNodeId> = Vec::new();
+                            for part in &merged {
+                                if part.fresh {
+                                    fresh_values.push(part.node);
+                                } else {
+                                    // A pinned-shaped arm may still CARRY
+                                    // fresh values (a call's kept deposit
+                                    // or authored fresh arm) — those enter
+                                    // the membership so a widening read of
+                                    // the binding widens them.
+                                    fresh_values.extend_from_slice(&part.fresh_values);
+                                }
+                            }
+                            let fresh_values =
+                                self.uncancelled_fresh_values(&fresh_values, &pinned);
+                            let membership = if fresh_values.is_empty() {
+                                None
+                            } else if all_fresh {
+                                Some(WideningMembership::All)
+                            } else {
+                                Some(WideningMembership::Partial(Arc::from(
+                                    fresh_values.into_boxed_slice(),
+                                )))
+                            };
+                            self.bind_local(name, *kind, value, membership, false);
+                            continue;
+                        }
                         match self.eval_expr(init) {
                             Positional::Value(node) => {
-                                self.bind_local(name, *kind, node, *widening_literal, false);
+                                let membership =
+                                    self.binding_init_membership(*kind, init, node, freshness);
+                                match kind {
+                                    crate::flow_slice_content::SliceBindingKind::Const => {
+                                        self.bind_local(name, *kind, node, membership, false);
+                                    }
+                                    // A MUTABLE declaration widens its
+                                    // fresh provenance AT the declaration
+                                    // (`let a = idInf(1)` is `number`),
+                                    // exactly as a bare literal
+                                    // initializer already lowered widened.
+                                    crate::flow_slice_content::SliceBindingKind::Let
+                                    | crate::flow_slice_content::SliceBindingKind::Var => {
+                                        let node = match &membership {
+                                            Some(WideningMembership::All) => {
+                                                widen_fresh_read_node(self.dispatch, node)
+                                            }
+                                            Some(WideningMembership::Partial(values)) => {
+                                                widen_values_within(self.dispatch, node, values)
+                                            }
+                                            None => node,
+                                        };
+                                        self.bind_local(name, *kind, node, None, false);
+                                    }
+                                }
                             }
                             Positional::Hold => {}
                             // An UNMODELLED initializer binds the typed
@@ -9051,7 +10186,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 let marker = super::flow_return_callee::unmodeled_position_marker(
                                     self.dispatch,
                                 );
-                                self.bind_local(name, *kind, marker, false, true);
+                                self.bind_local(name, *kind, marker, None, true);
                             }
                         }
                     }
@@ -9117,17 +10252,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     match fact {
                         GuardNarrowing::Narrowed(subject, node) => {
                             self.narrowings.push((subject, node));
-                        }
-                        GuardNarrowing::Impossible => {
-                            if slice_statements_have_non_subject_return(
-                                region.statements.iter().skip(statement_index + 1),
-                                &|expr| slice_expr_is_exact_subject_read(expr, subject),
-                            ) {
-                                self.record_degradation(FlowReturnDegradation::FlowGap(
-                                    crate::semantic_query::FlowGap::GuardNarrowing,
-                                ));
-                            }
-                            path_alive = false;
                         }
                         GuardNarrowing::Unchanged => {}
                     }
@@ -9926,21 +11050,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // of the union survives, degraded.
                     let holds_before = self.holds.len();
                     let narrow_len = self.narrowings.len();
-                    let possible = self.apply_guard_scoped(guard, index == 0);
-                    if !possible
-                        && !guard_has_subject_matching(guard, &|subject| {
-                            slice_expr_is_exact_subject_read(arm, subject)
-                        })
-                    {
-                        self.record_degradation(FlowReturnDegradation::FlowGap(
-                            crate::semantic_query::FlowGap::GuardNarrowing,
-                        ));
-                    }
-                    let outcome = possible.then(|| self.eval_expr(arm));
+                    self.apply_guard_scoped(guard, index == 0);
+                    let outcome = self.eval_expr(arm);
                     self.narrowings.truncate(narrow_len);
-                    if let Some(outcome) = outcome {
-                        nodes.push(self.settle_composite_part(outcome, holds_before));
-                    }
+                    nodes.push(self.settle_composite_part(outcome, holds_before));
                 }
                 Positional::Value(
                     self.dispatch
@@ -9974,8 +11087,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             match graph.node_data(node).as_deref() {
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => return true,
                 Some(SemanticNodeData::Alias(target)) => pending.push(*target),
-                Some(SemanticNodeData::Union(arms))
-                | Some(SemanticNodeData::Intersection(arms)) => {
+                Some(
+                    composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
+                ) => {
+                    let arms = composite.composite_members().expect("composite arm");
                     pending.extend(arms.iter().copied());
                 }
                 _ => {}
@@ -9996,16 +11111,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // reaching local), which owner-scope lowering cannot see. The
         // indexed lowering spells one as either a bare `Ref` or a
         // single-segment `typeof` path — both are the same read here.
-        let bare_name = match expression {
-            verter_type_expr::IndexedValueExpression::Value(verter_type_expr::TypeExpr::Ref {
-                name,
-                type_arguments,
-            }) if type_arguments.is_empty() && !name.contains('.') => Some(name.as_ref()),
-            verter_type_expr::IndexedValueExpression::Value(
-                verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef { path, type_args }),
-            ) if type_args.is_empty() && path.len() == 1 => Some(path[0].as_str()),
-            _ => None,
-        };
+        let bare_name = indexed_bare_name(expression);
         if let Some(name) = bare_name {
             // The narrowing overlay answers a bare-argument read exactly
             // like the frame's own `Param` / `Local` carriers do.
@@ -10144,6 +11250,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // typed marker with one less hop.
                 return Some(self.degraded_unrepresentable_callee());
             };
+            // A read of a WIDENING-literal `const` is a FRESH literal
+            // source exactly as a bare literal argument is (the checker
+            // widens `wrap(a)` for `const a = "x"` identically to
+            // `wrap("x")`); the indexed lowering classifies every
+            // reference as pinned because only this frame knows the
+            // binding's widening membership.
+            let reads_widening_local =
+                indexed_bare_name(&argument.expression).is_some_and(|name| self.widening_of(name));
             args.push(crate::semantic_query::CallArgKey::Eager {
                 ty,
                 spread: argument.spread,
@@ -10153,7 +11267,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         crate::semantic_query::ArgumentLiteralMode::Widened
                     }
                     verter_type_expr::IndexedValueLiteralMode::Literal => {
-                        crate::semantic_query::ArgumentLiteralMode::Literal
+                        if reads_widening_local {
+                            crate::semantic_query::ArgumentLiteralMode::Widened
+                        } else {
+                            crate::semantic_query::ArgumentLiteralMode::Literal
+                        }
                     }
                 },
             });
@@ -10203,11 +11321,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // a value position keeps it.
                 if let crate::semantic_query::ResolvedCallResult::Selected {
                     return_type,
-                    fresh_literal_return: true,
+                    fresh_literal_returns,
                     ..
                 } = &result
                 {
-                    self.call_fresh_literal_returns.push(*return_type);
+                    if !fresh_literal_returns.is_empty() {
+                        self.call_fresh_literal_returns.push(FreshCallReturn {
+                            span: site.span(),
+                            node: *return_type,
+                            values: Arc::clone(fresh_literal_returns),
+                        });
+                    }
                 }
                 Some(Positional::Value(CallValue::of_resolved_call(
                     self.dispatch,
@@ -10533,12 +11657,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     self.holds
                                         .push(HeldCallee::foreign(key, callee_clause.clone()));
                                 }
-                                Positional::Value(CallValue::of_served_return(
+                                let value = CallValue::of_served_return(
                                     self.dispatch,
                                     &callee_clause,
                                     result.return_type(),
                                     ReturnOrigin::ClauseScoped,
-                                ))
+                                );
+                                // The callee's sealed fresh literal arms
+                                // stay fresh across this direct-call rail
+                                // exactly as across the executor route:
+                                // record the call's fresh provenance so a
+                                // value position widens them, the return
+                                // join keeps them, and a `const` binding
+                                // records its widening membership.
+                                if !result.fresh_literal_arms().is_empty() {
+                                    self.call_fresh_literal_returns.push(FreshCallReturn {
+                                        span: site.span(),
+                                        node: value.node(),
+                                        values: Arc::clone(result.fresh_literal_arms()),
+                                    });
+                                }
+                                Positional::Value(value)
                             }
                             FlowReturnStep::Hold(key) => {
                                 self.holds
@@ -10786,5 +11925,156 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.call_return_of_callee_node(callee_node, site)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_refusal_class_tests {
+    use super::*;
+
+    /// The three preparation-refusal causes map onto three
+    /// consumer-distinct partial classes, and the split is load-bearing:
+    /// the two REQUEST/STATE causes must fault the Vue macro projection
+    /// lanes (which refuse to contain `BUDGET_EXCEEDED` and
+    /// `UNSTABLE_STATE`), while only the unplannable-demand cause — and
+    /// the cause-less member-batch withholding — may keep the contained
+    /// degraded-success class. The torn-view arm is a RACE (the
+    /// prepare-time read missing what the evaluation then finds) with no
+    /// deterministic public-boundary fixture, so its routing is pinned
+    /// here; the budget arm additionally has the public-boundary proof
+    /// (`obligation_budget_refusal_takes_the_faulting_request_class`).
+    /// Mutation: merging either faulting arm back onto
+    /// `FLOW_RETURN_UNVERIFIED` fails its assertion.
+    #[test]
+    fn plan_refusal_classes_split_by_cause() {
+        assert_eq!(
+            plan_refusal_reason_class(Some(FlowPlanRefusal::Budget)),
+            PartialReasonSet::BUDGET_EXCEEDED,
+        );
+        assert_eq!(
+            plan_refusal_reason_class(Some(FlowPlanRefusal::TornView)),
+            PartialReasonSet::UNSTABLE_STATE,
+        );
+        assert_eq!(
+            plan_refusal_reason_class(Some(FlowPlanRefusal::Unplannable)),
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        );
+        assert_eq!(
+            plan_refusal_reason_class(None),
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        );
+    }
+
+    /// The finalizer-partial classifier is the twin of the plan-refusal
+    /// split, applied to the verdict channel: a torn/stale/foreign or
+    /// incoherent proof state faults as UNSTABLE_STATE, undischarged or
+    /// non-converged work as BUDGET_EXCEEDED, a cancellation as
+    /// CANCELLED — while only the evidence-shaped causes (a typed gap,
+    /// an unprovable contract, the degraded-value echo) keep the
+    /// contained classes. Mutation: classifying any faulting reason from
+    /// the value's degradation alone (the dropped-cause default) fails
+    /// the non-degraded rows below.
+    #[test]
+    fn finalizer_partial_classes_split_by_reason() {
+        use super::super::flow_solve::{FlowFailure, FlowFailureClass, FlowPartialReason};
+
+        let faulting = [
+            (
+                FlowPartialReason::StaleBasis,
+                PartialReasonSet::UNSTABLE_STATE,
+            ),
+            (
+                FlowPartialReason::NoDemandInstalled,
+                PartialReasonSet::UNSTABLE_STATE,
+            ),
+            (
+                FlowPartialReason::ForeignProvenance,
+                PartialReasonSet::UNSTABLE_STATE,
+            ),
+            (
+                FlowPartialReason::ObligationSetMismatch,
+                PartialReasonSet::UNSTABLE_STATE,
+            ),
+            (
+                FlowPartialReason::NonConverged,
+                PartialReasonSet::BUDGET_EXCEEDED,
+            ),
+            (
+                FlowPartialReason::Failed(FlowFailure {
+                    class: FlowFailureClass::BudgetExhausted,
+                }),
+                PartialReasonSet::BUDGET_EXCEEDED,
+            ),
+            (
+                FlowPartialReason::Failed(FlowFailure {
+                    class: FlowFailureClass::Cancelled,
+                }),
+                PartialReasonSet::CANCELLED,
+            ),
+            (
+                FlowPartialReason::Failed(FlowFailure {
+                    class: FlowFailureClass::Internal,
+                }),
+                PartialReasonSet::UNSTABLE_STATE,
+            ),
+        ];
+        for (reason, expected) in faulting {
+            // A non-degraded value must not launder the faulting cause
+            // into the contained class.
+            assert_eq!(flow_partial_reason_class(&reason, None), expected);
+            // A degraded value ADDS its own class; the faulting cause
+            // still reaches the consumer.
+            let with_degradation =
+                flow_partial_reason_class(&reason, Some(FlowReturnDegradation::UnmodeledPosition));
+            assert_eq!(
+                with_degradation,
+                expected.union(PartialReasonSet::FLOW_RETURN_UNINFERRED)
+            );
+        }
+
+        // The contained causes: evidence-shaped, not faulting.
+        assert_eq!(
+            flow_partial_reason_class(
+                &FlowPartialReason::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+                None
+            ),
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        );
+        assert_eq!(
+            flow_partial_reason_class(&FlowPartialReason::OperationNotProvable, None),
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        );
+        // The bare pending-obligation echo is the close's own withholding
+        // signature, not a member fault: a genuinely budget-refused
+        // obligation reaches the ledger as a typed `Failed` budget
+        // record (asserted BUDGET_EXCEEDED above) — the two must not
+        // collapse onto one class in either direction. Over a DEGRADED
+        // value the echo adds nothing: widening a positional marker onto
+        // the frame-wide class would erase its faithful siblings.
+        assert_eq!(
+            flow_partial_reason_class(&FlowPartialReason::IncompleteObligations, None),
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        );
+        assert_eq!(
+            flow_partial_reason_class(
+                &FlowPartialReason::IncompleteObligations,
+                Some(FlowReturnDegradation::UnmodeledPosition)
+            ),
+            PartialReasonSet::FLOW_RETURN_UNINFERRED,
+        );
+        // The degraded-value echo classifies from the degradation itself
+        // — a positional marker stays the positional class, never
+        // widened by the echo.
+        assert_eq!(
+            flow_partial_reason_class(
+                &FlowPartialReason::DegradedValue,
+                Some(FlowReturnDegradation::UnmodeledPosition)
+            ),
+            PartialReasonSet::FLOW_RETURN_UNINFERRED,
+        );
+        assert_eq!(
+            flow_partial_reason_class(&FlowPartialReason::DegradedValue, None),
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        );
     }
 }

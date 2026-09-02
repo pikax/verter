@@ -114,11 +114,12 @@ surviving a `switch` join (finding B), and an unreduced provably-conflicting
 intersection (finding C) — publish correct and warm once routed through this
 substrate via the interning funnel and the live dispatch join.
 
-The layering this node owns is the ruling's **canonical semantic types** layer: it
-owns "universal algebraic laws and reusable facts: `T | never = T`, `T | T = T`,
-flattening, provably disjoint scalar intersections to `never`, truthiness-domain
-classification" (truthiness-domain classification is TA2's node; this node supplies
-only the union/intersection half) and may assume "raw evidence is complete. It may
+The layering this node owns is the union/intersection half of the ruling's
+**canonical semantic types** layer. The ruling defines that layer as "universal
+algebraic laws and reusable facts: `T | never = T`, `T | T = T`, flattening,
+provably disjoint scalar intersections to `never`, truthiness-domain
+classification" — of which truthiness-domain classification is OWNED BY TA2, not
+this node; TA1A implements no truthiness work. The layer may assume "raw evidence is complete. It may
 preserve source carriers through origin sidecars, but may not retain redundant
 algebra members merely to preserve provenance." It does NOT own the raw-flow-evidence
 layer, the TypeScript-compatible-inference layer, or the display layer. Per the
@@ -385,10 +386,13 @@ FIX_REQUIRED disposition.
 
 ## Trusted implementation ledger
 
-Before squashing or review, the implementation patch transitions this node's predeclared row in `authority/state/implemented.toml` from `status = "pending"` to `status = "implemented"` with the planned squash commit message, approximate date with timezone, and optional pull-request number. The transitioned row is the implementation fact. Commit metadata is a loose locator only and is
-never resolved or validated against Git or GitHub. Reviewers inspect the squashed
-candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound
-orchestration manifests.
+Before squashing or review, the implementation patch transitions this node's
+predeclared row in `authority/state/implemented.toml` from `status = "pending"`
+to `status = "implemented"` with the planned squash commit message, approximate
+date with timezone, and optional pull-request number. The transitioned row is the
+implementation fact. Commit metadata is a loose locator only and is never resolved or
+validated against Git or GitHub. Reviewers inspect the squashed candidate patch without
+SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
 
 ## Scope disposition recorded on review
 
@@ -408,3 +412,140 @@ dispatch-reachable joins with the payload still transparent; TA1B holds the flip
 carrier-category registry, the compile-fail proof, the pre-seal closure, and the
 exhaustive closure the flip forces. Neither a published-subset split nor a partially
 closed authority was created.
+
+
+## Amendment: derived-composite constituent identity excludes source-coordinate spans (architect ruling, 2026-09-01)
+
+Architect ruling, verbatim:
+
+> **A1 — choose (a):** exclude source-coordinate span payloads from
+> derived-composite constituent identity only; declaration-site interning
+> remains unchanged, and discarded-arm spans remain provenance/freshness
+> evidence.
+>
+> **Acceptance status:** A1 reopens TA1A-AC1/AC2; AC3's existing fixtures
+> remain valid but are insufficient for acceptance.
+
+**What was measured.** A review lens over the flow-shape corpus found rows
+labelled clean (`MatchesChecker`, no degradation, one warm candidate) whose
+published node differs from the checker. Dumped from raw arm payloads: the two
+`D06_switch_return` arms are byte-identical except `MemberSpans` (`62..72` vs
+`94..104`), and the structural comparator returned `Distinct`. That verdict was
+faithful to this charter as previously worded — the identity-mechanism clause
+says scope-insensitivity "does NOT mean ignoring scope-bearing semantic payload
+fields", and `SurfaceMember.spans` is documented as interning identity — but
+the consequence is now rejected: under that reading, canonical `T | T = T`
+could never fire for object arms produced by distinct `return` statements, so
+every multi-return function published a structurally non-canonical union.
+
+**Corrected contract.** The comparator's identity is `SemanticNodeData`'s
+manual equality rules, recursively replacing child ordinals with child
+structural identity, ignoring EXACTLY TWO payload axes: the arena sidecar
+scope (as before), and the source-coordinate span payloads —
+`SurfaceMember.spans`, `IndexSignature.spans`, `Signature.signature_span` /
+`Signature.return_type_span`, and `FunctionParam.span`. On this one point the
+Identity-mechanism clause and TA1A-AC1's "ignores only the arena sidecar
+scope" are RETRACTED and superseded; every other part of AC1/AC2 stands
+unchanged (`Equal | Distinct | Incomplete`, iterative and cycle-safe,
+`Incomplete` preserves both arms and suppresses warm admission, a `Distinct`
+pair never collapses, an undecided disjointness never reduces to `never`,
+derived composites intern under `Global`, singleton normalization returns the
+retained member with its own scope). Scope-bearing semantic payload fields —
+`BareRef` scope, declaration identity (`declaration_origin` included), value
+roots, infer-binder identity, and `Signature.occurrence` (a served-position
+identity, not a raw coordinate) — remain identity.
+
+The boundary, drawn precisely:
+
+- **Declaration-site interning is UNCHANGED.** Spans stay arena `Eq`/`Hash`
+  identity: an identical same-file shape at a different source location still
+  interns to a distinct node. Only the derived-composite (union/intersection
+  arm) comparison changed. Held by the arena-distinctness leg of the
+  discriminating test named below, which fails if the exclusion is
+  over-applied to arena `Eq`.
+- **Heritage/surface-merge dedup is NOT span-stripped.** The surface merge's
+  union-side signature and index-signature dedup ("Distinct declarations stay
+  distinct — their source spans participate in node data") is
+  declaration-site semantics and is deliberately outside this amendment.
+- **Discarded-arm spans remain provenance/freshness evidence.** No span data
+  is deleted or un-recorded: a discarded arm keeps its spans on its arena
+  node, the normalization origin edge still records it as a contributor, and
+  its transitive file roots still enter `CanonicalEvidence`
+  (`tier1_payload_equal_discard_roots_descendant_files` and the discarded-arm
+  rooting in the comparator remain in force).
+- **Candidate narrowing is bucketed on canonical identity, not on the audit
+  fingerprint.** The pairwise tier's bucket key is a LOCAL,
+  per-canonicalization hash aligned with the comparator (`arm_bucket_keys`
+  in `canonical_algebra.rs`): `compare_structural(a, b) == Equal` implies
+  equal bucket keys, so `T | T = T` fires identically below and above the
+  narrowing threshold. `structural_hash_of` keeps its byte contract
+  untouched, as this charter requires — it is the audit subsystem's
+  fingerprint and correctly covers the spans and `TypeParam.display_name`
+  that canonical identity excludes, which is exactly why it is no longer
+  the group key. Cycle-reaching arms share one coarse bucket (coinductive
+  equality is not positionally hashable, and `Equal` never pairs a cyclic
+  arm with an acyclic one); a tripped bucket-hash node cap disables the
+  narrowing for that run (one all-arms group under the ordinary pairwise
+  budget) instead of grouping on partial keys.
+- **Opaque payloads stay conservative.** `ObjectSpreadProgram` /
+  `DeferredCallable` arms compare payload-`Eq` only; a pair differing only by
+  internal spans stays `Distinct` (both arms kept) — a preservation, never a
+  collapse, so it is not reopened by this ruling.
+
+**Re-verified acceptance.**
+
+- **TA1A-AC1 (re-verified against the amended identity):**
+  `span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct`
+  (`crates/verter_session/src/project_semantic_dispatch/tests.rs`) is the
+  discriminating evidence for the amended rule specifically: written first and
+  observed failing against the pre-amendment comparator (the union kept both
+  span-only-distinct arms), passing after; it pins the span-only collapse for
+  member, index-signature, signature and parameter spans, the arena
+  distinctness of every span-differing pair (the over-application tripwire),
+  and the semantic-field negative control that never collapses.
+  `span_only_duplicates_collapse_above_prehash_narrowing_threshold` extends
+  the proof past the candidate-narrowing threshold: a union with more
+  child-bearing arms than the narrowing minimum, holding one span-only
+  duplicate pair, collapses to the deduplicated arm set — written first and
+  observed failing while the narrowing still bucketed on the span-covering
+  audit fingerprint (11 arms survived), passing once the bucketing was
+  aligned with canonical identity. The pre-existing AC1 suite
+  (`canonical_algebra_collapses_only_proven_facts`,
+  the cross-scope dedup and discard-rooting tests) stays green and continues
+  to hold the unchanged clauses.
+- **TA1A-AC2 (re-verified):** the builder laws are unchanged and their
+  existing evidence stands; the amended constituent identity now feeds
+  `T | T = T` through the same tests above, and at the live public boundary
+  (`get_flow_return_type_with_audit`, cold + warm-replay) the span-class
+  corpus rows publish the collapsed canonical shape clean and warm:
+  `D06_switch_return`, `X04_try_catch_join`, `X15_labelled_block_return`,
+  `X16_switch_fallthrough`, `X25_try_assertion_catch_scope`,
+  `X35_labeled_break_carries_write_state`, `X44_switch_exhaustive_boolean`
+  now publish the checker's single object, and `X22_switch_break_case_entry`
+  publishes exactly the checker's two distinct arms (deep-pinned:
+  `Expect::Node` + `Boundary::Audit`, warm replay) — the no-over-collapse
+  control alongside the untouched `X100` / `X111` negative controls.
+- **TA1A-AC3:** the Y01/Y02/Y03 fixtures remain valid and green; per the
+  ruling they are insufficient alone for acceptance — the discriminating
+  evidence for the amended identity is the test and boundary rows named
+  above.
+
+**Residue disclosed, out of this ruling's scope.** Re-measurement against the
+pinned checker (tsc 7.0.2, `--noEmit --strict`, every probe rejected with the
+exact type printed and an `IsAny` control) confirmed the recorded checker
+answers of all sixteen A1-listed rows. Eight of the sixteen moved to the
+checker's exact shape under A1 (the rows named under AC2 above, plus the
+arm-count reduction inside `X22`). The other eight — `X26`, `X36`, `X39`,
+`X45`, `X46`, `X47`, `X48`, `X49` — retain a DIFFERENT divergence class the
+span exclusion cannot and must not touch: each keeps a subtype pair the
+checker merges by return-position subtype reduction (e.g. `{ v: number }`
+absorbed into `{ v: string | number }`). `X26` reduced from three arms to two
+(its span-duplicate collapsed); `X36`, `X39`, `X45`–`X49` are byte-identical
+to their pre-A1 shapes — their divergence was never the span class. This
+charter forbids subtype absorption in the canonical layer ("a supertype arm
+never swallows a subtype arm here"), and the predecessor decision assigns
+"context-specific subtype-to-supertype reunion" to the TypeScript-compatible
+inference layer, so the residue is owned there (the flow-return evaluator's
+inference layer, `U6.VALUE_INFERENCE`), not by this node. The rows stay
+extensionally equal to the checker and keep their corpus labels; closing them
+needs an inference-layer decision, not a canonical-identity one.

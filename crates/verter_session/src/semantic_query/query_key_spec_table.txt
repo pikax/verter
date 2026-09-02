@@ -28,3 +28,4 @@ LowerLocator | Live | TypeNode | P R T L J | — | LocatorLoweringKey | lower_lo
 ClassifyMaterializationCycleGate | Live | MaterializationCycleGate | P R T L J | — | MaterializationCycleGateKey | classify_materialization_cycle_gate_keys_do_not_warm_hit_across_env_axes | Singleflight
 FlowReturn | Live | FlowReturn | P R T L J | — | FlowReturnContext | flow_return_keys_do_not_warm_hit_across_env_axes | Singleflight
 ResolveCall | Live | ResolveCall | P R T L J | — | ResolveCallContext | resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit | Singleflight
+ClassifyTruthinessDomain | Live | TruthinessDomain | T L J | — | (subject) | — | Singleflight

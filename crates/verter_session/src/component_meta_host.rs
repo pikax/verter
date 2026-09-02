@@ -792,6 +792,13 @@ fn extract_component_meta_from_resolved_with_evaluated(
         }
     }
 
+    // Mirror the production extract surfaces: a PARTIAL resolve cannot
+    // support the `Exact` accepted-surface exhaustiveness claim — the
+    // declared props/events the accepted set subtracts may be missing
+    // members.
+    if resolved.completeness.is_partial() {
+        meta.accepted_surface_completeness = AcceptedSurfaceCompleteness::LowerBound;
+    }
     crate::host_manage::populate_public_instance_sidecar(&mut meta);
     crate::host_resolve::populate_ordered_sfc_structure(host, canonical_id, &mut meta);
     meta

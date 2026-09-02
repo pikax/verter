@@ -10592,6 +10592,14 @@ mod prepared_identity_bijection {
                 resolve_call_test_key("a.ts", 0),
                 resolve_call_test_key("a.ts", 1),
             ),
+            SemanticQueryKeyTag::ClassifyTruthinessDomain => (
+                SemanticQueryKey::ClassifyTruthinessDomain {
+                    subject: SemanticNodeId(1),
+                },
+                SemanticQueryKey::ClassifyTruthinessDomain {
+                    subject: SemanticNodeId(2),
+                },
+            ),
         }
     }
 

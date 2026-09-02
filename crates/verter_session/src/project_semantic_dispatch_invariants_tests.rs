@@ -354,9 +354,11 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
     let lit_b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "b".to_string(),
     )));
-    let key_space = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![lit_a, lit_b].into_boxed_slice(),
-    )));
+    let key_space = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![lit_a, lit_b].into_boxed_slice(),
+        )),
+    ));
 
     // Value expression IS the mapper's K parameter — so
     // post-substitution each key's value is the literal of that
@@ -459,9 +461,11 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
     let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "a".to_string(),
     )));
-    let key_space = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![lit_a].into_boxed_slice(),
-    )));
+    let key_space = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![lit_a].into_boxed_slice(),
+        )),
+    ));
 
     // Value expression is `source[K]`. At build time we can't project
     // into a Primitive via an indexed access, so evaluation yields
@@ -686,9 +690,11 @@ fn build_key_of_over_intersection_returns_distributed_union() {
     let b = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         required_member("b", number),
     ])));
-    let intersection = graph.intern_node(SemanticNodeData::Intersection(std::sync::Arc::from(
-        vec![a, b].into_boxed_slice(),
-    )));
+    let intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(std::sync::Arc::from(
+            vec![a, b].into_boxed_slice(),
+        )),
+    ));
 
     let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::KeyOf {
         base: intersection,
@@ -734,9 +740,11 @@ fn build_key_of_over_union_returns_intersection_of_keys() {
         required_member("common", string),
         required_member("b_only", string),
     ])));
-    let union = graph.intern_node(SemanticNodeData::Union(std::sync::Arc::from(
-        vec![a, b].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(std::sync::Arc::from(
+            vec![a, b].into_boxed_slice(),
+        )),
+    ));
 
     let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::KeyOf {
         base: union,
@@ -4773,9 +4781,11 @@ fn mutable_array_infer_element_binds_covariantly() {
     // bidirectional element check — `string[] ≤ (string | number)[]`
     // (mutable) stays NotAssignable (the reverse arm fails).
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let union_node = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![string_node, number_node].into_boxed_slice(),
-    )));
+    let union_node = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_node, number_node].into_boxed_slice(),
+        )),
+    ));
     let union_array = graph.intern_node(SemanticNodeData::Array {
         element: union_node,
         readonly: false,
@@ -6025,7 +6035,11 @@ pub(crate) mod fresh_excess_property_checking {
             required_member("required", string),
         ])));
         let open_arm = spread_program(operand, graph);
-        let target = graph.intern_node(SemanticNodeData::Union(Arc::from([closed_arm, open_arm])));
+        let target = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+                closed_arm, open_arm,
+            ])),
+        ));
 
         let actual = relate_fresh_excess(&host, source, target);
         assert!(
@@ -6106,9 +6120,11 @@ pub(crate) mod fresh_excess_property_checking {
             required_member("kind", lit_b),
             required_member("b", string),
         ])));
-        let target = graph.intern_node(SemanticNodeData::Union(Arc::from(
-            vec![arm_a, arm_b].into_boxed_slice(),
-        )));
+        let target = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                vec![arm_a, arm_b].into_boxed_slice(),
+            )),
+        ));
 
         assert_not_assignable(
             &relate_fresh_excess(&host, source, target),
@@ -6146,9 +6162,11 @@ pub(crate) mod fresh_excess_property_checking {
             required_member("kind", lit_b),
             required_member("c", number),
         ])));
-        let target = graph.intern_node(SemanticNodeData::Union(Arc::from(
-            vec![arm_a, arm_b].into_boxed_slice(),
-        )));
+        let target = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                vec![arm_a, arm_b].into_boxed_slice(),
+            )),
+        ));
 
         let rejecting = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
             fresh_member("kind", lit_a),
@@ -6437,9 +6455,11 @@ pub(crate) mod fresh_excess_property_checking {
         let arm_b = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
             required_member("b", number),
         ])));
-        let target = graph.intern_node(SemanticNodeData::Union(Arc::from(
-            vec![arm_a, arm_b].into_boxed_slice(),
-        )));
+        let target = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                vec![arm_a, arm_b].into_boxed_slice(),
+            )),
+        ));
 
         assert_assignable(
             &relate_fresh_excess(&host, source, target),
@@ -6530,9 +6550,11 @@ pub(crate) mod fresh_excess_property_checking {
             required_member("kind", lit_b),
             required_member("c", number),
         ])));
-        let target = graph.intern_node(SemanticNodeData::Union(Arc::from(
-            vec![arm_a, arm_b].into_boxed_slice(),
-        )));
+        let target = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                vec![arm_a, arm_b].into_boxed_slice(),
+            )),
+        ));
 
         let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
             fresh_member("kind", lit_a),
@@ -6600,9 +6622,11 @@ pub(crate) mod fresh_excess_property_checking {
         let known_arm = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
             required_member("p", number),
         ])));
-        let nested = graph.intern_node(SemanticNodeData::Union(Arc::from(
-            vec![known_arm, exhausted_arm].into_boxed_slice(),
-        )));
+        let nested = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                vec![known_arm, exhausted_arm].into_boxed_slice(),
+            )),
+        ));
         // This outer arm makes the ordinary relation decidably assignable
         // after a buggy prepass fabricates `undefined` for the exhausted
         // nested arm. Without it, the ordinary relation independently sees
@@ -6610,9 +6634,11 @@ pub(crate) mod fresh_excess_property_checking {
         let accepting_arm = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
             optional_member("p", number),
         ])));
-        let target = graph.intern_node(SemanticNodeData::Union(Arc::from(
-            vec![accepting_arm, nested].into_boxed_slice(),
-        )));
+        let target = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                vec![accepting_arm, nested].into_boxed_slice(),
+            )),
+        ));
         let source =
             graph.intern_node(SemanticNodeData::Object(empty_surface(vec![fresh_member(
                 "p", number,
@@ -6793,9 +6819,11 @@ pub(crate) mod fresh_excess_property_checking {
             required_member("kind", unresolvable_kind),
             required_member("b", number),
         ])));
-        let target = graph.intern_node(SemanticNodeData::Union(Arc::from(
-            vec![arm_a, arm_b].into_boxed_slice(),
-        )));
+        let target = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                vec![arm_a, arm_b].into_boxed_slice(),
+            )),
+        ));
         let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
             fresh_member("kind", lit_a),
             fresh_member("b", one),

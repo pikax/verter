@@ -469,9 +469,11 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
         !node_contains_semantic_miss_or_unraisable(&host, object_surface_other_arm),
         "Opaque(Other(\"semanticObjectSurface\")) is INERT — MATERIALIZED"
     );
-    let inter_other_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![object_surface_other_arm, real_obj].into_boxed_slice(),
-    )));
+    let inter_other_real = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![object_surface_other_arm, real_obj].into_boxed_slice(),
+        )),
+    ));
     assert_classifier_parity(
         &host,
         inter_other_real,
@@ -808,9 +810,11 @@ fn parity_intersection_arm_drop_and_collapse() {
     // `{} & RealObject` ⇒ drops the empty arm, collapses to RealObject ⇒
     // MATERIALIZED (proves the collapse: the raw graph has 2 arms, the raised
     // shape is a single materialized Object).
-    let inter_empty_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![empty_obj, real_obj].into_boxed_slice(),
-    )));
+    let inter_empty_real = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![empty_obj, real_obj].into_boxed_slice(),
+        )),
+    ));
     assert_classifier_parity(&host, inter_empty_real, "intersection-empty-and-real");
     assert!(
         !node_contains_semantic_miss_or_unraisable(&host, inter_empty_real),
@@ -833,9 +837,11 @@ fn parity_intersection_arm_drop_and_collapse() {
 
     // `{} & {}` ⇒ every arm vacuous ⇒ falls back to empty `Object{}` ⇒
     // materialized.
-    let inter_both_empty = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![empty_obj, empty_obj].into_boxed_slice(),
-    )));
+    let inter_both_empty = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![empty_obj, empty_obj].into_boxed_slice(),
+        )),
+    ));
     assert_classifier_parity(&host, inter_both_empty, "intersection-both-empty");
 
     // A `SEMANTIC_OBJECT_SURFACE`-raising Object arm: an Object surface that is
@@ -870,9 +876,11 @@ fn parity_intersection_arm_drop_and_collapse() {
     // `SurfaceSentinel & RealObject` ⇒ drops the SEMANTIC_OBJECT_SURFACE arm,
     // collapses to RealObject ⇒ MATERIALIZED (the sentinel-arm drop + 1-arm
     // collapse, mirroring how `Id<T> = {} & { … }` helper patterns reduce).
-    let inter_sentinel_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![surface_sentinel, real_obj].into_boxed_slice(),
-    )));
+    let inter_sentinel_real = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![surface_sentinel, real_obj].into_boxed_slice(),
+        )),
+    ));
     assert_classifier_parity(&host, inter_sentinel_real, "intersection-sentinel-and-real");
     assert!(
         !node_contains_semantic_miss_or_unraisable(&host, inter_sentinel_real),
@@ -891,9 +899,11 @@ fn parity_intersection_arm_drop_and_collapse() {
     let real_obj2 = graph.intern_node(SemanticNodeData::Object(object_surface(&[(
         "b", number_id,
     )])));
-    let inter_two_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![real_obj, real_obj2].into_boxed_slice(),
-    )));
+    let inter_two_real = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![real_obj, real_obj2].into_boxed_slice(),
+        )),
+    ));
     assert_classifier_parity(&host, inter_two_real, "intersection-two-real");
     assert!(
         node_is_expanded_surface_legacy_equivalent(&host, inter_two_real),
@@ -920,9 +930,11 @@ fn intersection_drops_only_typed_root_unrepresentable_surface() {
     // collapses to `Real`.
     let typed_surface =
         graph.intern_node(SemanticNodeData::Opaque(QueryError::UnrepresentableSurface));
-    let inter_typed_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![typed_surface, real_obj].into_boxed_slice(),
-    )));
+    let inter_typed_real = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![typed_surface, real_obj].into_boxed_slice(),
+        )),
+    ));
     assert_eq!(
         raised_shape_eq_nodes(&host, inter_typed_real, real_obj),
         Some(true),
@@ -937,9 +949,11 @@ fn intersection_drops_only_typed_root_unrepresentable_surface() {
     let genuine_surface_spelling = graph.intern_node(SemanticNodeData::RawFallback {
         value: verter_type_expr::UnknownValue::unsupported_syntax("semanticObjectSurface"),
     });
-    let inter_genuine_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![genuine_surface_spelling, real_obj].into_boxed_slice(),
-    )));
+    let inter_genuine_real = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![genuine_surface_spelling, real_obj].into_boxed_slice(),
+        )),
+    ));
     assert_eq!(
         raised_shape_eq_nodes(&host, inter_genuine_real, real_obj),
         Some(false),
@@ -964,9 +978,11 @@ fn intersection_drops_only_typed_root_unrepresentable_surface() {
     let other_surface = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
         "semanticObjectSurface",
     ))));
-    let inter_other_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![other_surface, real_obj].into_boxed_slice(),
-    )));
+    let inter_other_real = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![other_surface, real_obj].into_boxed_slice(),
+        )),
+    ));
     assert_eq!(
         raised_shape_eq_nodes(&host, inter_other_real, real_obj),
         Some(false),
@@ -1098,9 +1114,11 @@ fn parity_union_and_terminals_and_none() {
     assert_classifier_parity(&host, str_id, "primitive-string");
 
     // `string | number` ⇒ materialized union, expanded.
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![str_id, num_id].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![str_id, num_id].into_boxed_slice(),
+        )),
+    ));
     assert_classifier_parity(&host, union, "union-string-number");
     assert!(
         node_is_expanded_surface_legacy_equivalent(&host, union),
@@ -1110,9 +1128,11 @@ fn parity_union_and_terminals_and_none() {
     // `string | Opaque(Miss)` ⇒ the miss arm raises to a sentinel ⇒ the union
     // contains a semantic miss (Union recurses).
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
-    let union_with_miss = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![str_id, miss].into_boxed_slice(),
-    )));
+    let union_with_miss = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![str_id, miss].into_boxed_slice(),
+        )),
+    ));
     assert_classifier_parity(&host, union_with_miss, "union-with-miss");
     assert!(
         node_contains_semantic_miss_or_unraisable(&host, union_with_miss),
@@ -2174,9 +2194,11 @@ fn parity_union_no_collapse_single_and_empty() {
 
     // `Union([A])` — a single-member union — stays a `Union`, NOT collapsed to A.
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let single = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![str_id].into_boxed_slice(),
-    )));
+    let single = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![str_id].into_boxed_slice(),
+        )),
+    ));
     assert_classifier_parity(&host, single, "union-single-member");
     match raise_oracle(&host, single) {
         Some(TypeExpr::Union(ref members)) => assert_eq!(
@@ -2209,9 +2231,11 @@ fn parity_union_no_collapse_single_and_empty() {
     );
 
     // An empty `Union([])` stays an empty union (NO empty→sentinel).
-    let empty = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        Vec::<SemanticNodeId>::new().into_boxed_slice(),
-    )));
+    let empty = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            Vec::<SemanticNodeId>::new().into_boxed_slice(),
+        )),
+    ));
     assert_classifier_parity(&host, empty, "union-empty");
     match raise_oracle(&host, empty) {
         Some(TypeExpr::Union(ref members)) => assert!(
@@ -2224,9 +2248,11 @@ fn parity_union_no_collapse_single_and_empty() {
     // FAIL-CLOSED (R2-F1): a `Union([A, <absent>])` FAILS THE WHOLE raise —
     // a present-but-unraisable member is never silently erased.
     let absent = SemanticNodeId(u64::MAX);
-    let with_absent = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![str_id, absent].into_boxed_slice(),
-    )));
+    let with_absent = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![str_id, absent].into_boxed_slice(),
+        )),
+    ));
     assert!(
         raise_oracle(&host, with_absent).is_none(),
         "Union([String, <absent>]) must FAIL the whole raise (presence-aware)"
@@ -2486,15 +2512,19 @@ fn publication_score_corpus(
         ("alias", graph.intern_node(SemanticNodeData::Alias(foo))),
         (
             "union",
-            graph.intern_node(SemanticNodeData::Union(Arc::from(
-                vec![string, number].into_boxed_slice(),
-            ))),
+            graph.intern_node(SemanticNodeData::Union(
+                crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                    vec![string, number].into_boxed_slice(),
+                )),
+            )),
         ),
         (
             "intersection",
-            graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-                vec![foo, bar].into_boxed_slice(),
-            ))),
+            graph.intern_node(SemanticNodeData::Intersection(
+                crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                    vec![foo, bar].into_boxed_slice(),
+                )),
+            )),
         ),
         (
             "array",
@@ -2826,9 +2856,11 @@ fn intersection_arm_drop_keeps_typed_degradation_in_sidecar() {
     )])));
     let typed_surface =
         graph.intern_node(SemanticNodeData::Opaque(QueryError::UnrepresentableSurface));
-    let inter = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![typed_surface, real_obj].into_boxed_slice(),
-    )));
+    let inter = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![typed_surface, real_obj].into_boxed_slice(),
+        )),
+    ));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
     let mut active = rustc_hash::FxHashSet::default();
@@ -2897,9 +2929,11 @@ fn union_with_unraisable_member_fails_whole() {
     let host = host();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let node = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![str_id, SemanticNodeId(u64::MAX)].into_boxed_slice(),
-    )));
+    let node = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![str_id, SemanticNodeId(u64::MAX)].into_boxed_slice(),
+        )),
+    ));
     assert!(
         !fold_raises(&host, node),
         "Union([String, <absent>]) must fail whole"
@@ -2911,9 +2945,11 @@ fn intersection_with_unraisable_arm_fails_whole() {
     let host = host();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let node = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![str_id, SemanticNodeId(u64::MAX)].into_boxed_slice(),
-    )));
+    let node = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![str_id, SemanticNodeId(u64::MAX)].into_boxed_slice(),
+        )),
+    ));
     assert!(
         !fold_raises(&host, node),
         "Intersection([String, <absent>]) must fail whole"
@@ -3115,9 +3151,11 @@ fn terminal_marks_unraisable_composite_partial_and_genuine_absence_exact() {
     // (1) A present-but-unraisable composite: reduce succeeds (the union node
     // exists), the raise FAILS on the absent child — the terminal payload must
     // be PARTIAL (typed unmaterialized failure), never admitted complete.
-    let union_absent = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![str_id, SemanticNodeId(u64::MAX)].into_boxed_slice(),
-    )));
+    let union_absent = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![str_id, SemanticNodeId(u64::MAX)].into_boxed_slice(),
+        )),
+    ));
     let dispatch = ProjectSemanticDispatch::new(&host);
     let reduced = dispatch.raise_and_reduce_with_context(
         union_absent,

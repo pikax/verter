@@ -1,0 +1,105 @@
+error[E0603]: module `project_semantic_dispatch` is private
+  --> tests/cases/compile-fail/composite_mint_unforgeable.rs:37:29
+   |
+37 |     let _ = verter_session::project_semantic_dispatch::canonical_algebra::CanonicalMint {};
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^ private module      ------------- struct `CanonicalMint` is not publicly re-exported
+   |
+note: the module `project_semantic_dispatch` is defined here
+  --> src/lib.rs
+   |
+   | pub(crate) mod project_semantic_dispatch;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: enum `CompositeCarrierCategory` is private
+  --> tests/cases/compile-fail/composite_mint_unforgeable.rs:44:56
+   |
+44 |     let _ = verter_session::semantic_query::composite::CompositeCarrierCategory::Canonical(todo!());
+   |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^  --------- tuple variant `Canonical` is not publicly re-exported
+   |                                                        |
+   |                                                        private enum
+   |
+note: the enum `CompositeCarrierCategory` is defined here
+  --> src/semantic_query/composite.rs
+   |
+   | pub(crate) enum CompositeCarrierCategory {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0624]: associated function `minted` is private
+  --> tests/cases/compile-fail/composite_mint_unforgeable.rs:33:28
+   |
+33 |       let _ = CompositeList::minted(Arc::clone(&members), todo!());
+   |                              ^^^^^^ private associated function
+   |
+  ::: src/semantic_query/composite.rs
+   |
+   | /     pub(crate) fn minted(
+   | |         members: Arc<[SemanticNodeId]>,
+   | |         category: CompositeCarrierCategory,
+   | |     ) -> Self {
+   | |_____________- private associated function defined here
+
+warning: unreachable call
+  --> tests/cases/compile-fail/composite_mint_unforgeable.rs:33:13
+   |
+33 |     let _ = CompositeList::minted(Arc::clone(&members), todo!());
+   |             ^^^^^^^^^^^^^^^^^^^^^ unreachable call      ------- any code following this expression is unreachable
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error: cannot construct `verter_session::project_semantic_dispatch::canonical_algebra::CanonicalMint` with struct literal syntax due to private fields
+  --> tests/cases/compile-fail/composite_mint_unforgeable.rs:37:13
+   |
+37 |     let _ = verter_session::project_semantic_dispatch::canonical_algebra::CanonicalMint {};
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0624]: associated function `authored_shell` is private
+  --> tests/cases/compile-fail/composite_mint_unforgeable.rs:39:28
+   |
+39 |     let _ = CompositeList::authored_shell(Arc::clone(&members));
+   |                            ^^^^^^^^^^^^^^ private associated function
+   |
+  ::: src/semantic_query/composite.rs
+   |
+   |     pub(crate) fn authored_shell(members: Arc<[SemanticNodeId]>) -> Self {
+   |     -------------------------------------------------------------------- private associated function defined here
+
+error[E0624]: associated function `ordered_carrier` is private
+  --> tests/cases/compile-fail/composite_mint_unforgeable.rs:40:28
+   |
+40 |     let _ = CompositeList::ordered_carrier(Arc::clone(&members));
+   |                            ^^^^^^^^^^^^^^^ private associated function
+   |
+  ::: src/semantic_query/composite.rs
+   |
+   |     pub(crate) fn ordered_carrier(members: Arc<[SemanticNodeId]>) -> Self {
+   |     --------------------------------------------------------------------- private associated function defined here
+
+error[E0624]: associated function `preserving_rebuild` is private
+  --> tests/cases/compile-fail/composite_mint_unforgeable.rs:41:28
+   |
+41 |     let _ = CompositeList::preserving_rebuild(Arc::clone(&members));
+   |                            ^^^^^^^^^^^^^^^^^^ private associated function
+   |
+  ::: src/semantic_query/composite.rs
+   |
+   |     pub(crate) fn preserving_rebuild(members: Arc<[SemanticNodeId]>) -> Self {
+   |     ------------------------------------------------------------------------ private associated function defined here
+
+error[E0624]: associated function `query_subject` is private
+  --> tests/cases/compile-fail/composite_mint_unforgeable.rs:42:28
+   |
+42 |     let _ = CompositeList::query_subject(Arc::clone(&members));
+   |                            ^^^^^^^^^^^^^ private associated function
+   |
+  ::: src/semantic_query/composite.rs
+   |
+   |     pub(crate) fn query_subject(members: Arc<[SemanticNodeId]>) -> Self {
+   |     ------------------------------------------------------------------- private associated function defined here
+
+warning: unreachable call
+  --> tests/cases/compile-fail/composite_mint_unforgeable.rs:44:13
+   |
+44 |     let _ = verter_session::semantic_query::composite::CompositeCarrierCategory::Canonical(todo!());
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
+   |             |
+   |             unreachable call
