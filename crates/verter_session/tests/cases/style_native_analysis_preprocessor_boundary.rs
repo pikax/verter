@@ -321,3 +321,39 @@ fn only_the_style_axis_reports_its_lang_byte_exactly() {
          the author wrote"
     );
 }
+
+/// `<style lang="CSS">` is plain CSS, and the byte-exact rule does not reach it.
+///
+/// The exact-key rule exists to stop a spelling resolving here while every
+/// preprocessor table the block is handed to fails to find it. Plain CSS is
+/// handed to no such table: nothing downstream can fail on the casing, and the
+/// reference Vue pipeline compiles the block. Failing it closed would demand
+/// preprocessed content for an unambiguously-CSS block and take every CSS
+/// diagnostic, hover and colour the editor otherwise serves with it — a
+/// user-visible loss for no agreement gained.
+///
+/// The `lang="SCSS"` control in `only_the_style_axis_reports_its_lang_byte_exactly`
+/// is what keeps this from reading as the widening step returning: exactly the
+/// spelling that names a preprocessor still fails closed.
+#[test]
+fn a_case_variant_css_style_lang_stays_native() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let update = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/CasedCss.vue".to_string(),
+            source: Arc::from(
+                "<template><div class=\"cased-root\"/></template>\
+                 <style lang=\"CSS\">.cased { color: red; }</style>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    assert!(
+        update.preprocessor_requests.is_empty(),
+        "plain CSS reaches no preprocessor table, so its spelling cannot fail \
+         closed here: {:?}",
+        update.preprocessor_requests
+    );
+}

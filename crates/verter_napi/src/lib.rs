@@ -258,17 +258,28 @@ pub struct TransformVueStyleResult {
     pub moduleName: Option<String>,
     /// v-bind() expressions found and replaced
     pub vBindVars: Vec<VueStyleVBind>,
-    /// Per-selector soft refusals the cascade tolerated (`code` still
-    /// published, minus the untrustworthy rule each entry names) — a
-    /// caller-visible signal for exactly the case
-    /// `cascade_output_is_publishable` deliberately does NOT refuse the
-    /// whole call over. Empty on every ordinary successful transform.
+    /// Every refusal the cascade published for this call and still returned
+    /// code for: the per-selector soft refusals (`code` published minus the
+    /// untrustworthy rule each entry names) plus any stage failure
+    /// `cascade_output_is_publishable` deliberately does NOT refuse the whole
+    /// call over. Empty on every ordinary successful transform.
+    ///
+    /// Read from the cascade's single publication route
+    /// (`outcome.result.diagnostics()`), not re-derived from its own record of
+    /// what each authority reported — re-deriving would format every refusal a
+    /// second time and is how the same refusal ends up reported twice.
     pub refusals: Vec<String>,
 }
 
 /// Run Vue's v-bind + CSS-Modules + scoped-selector cascade over CSS the
-/// caller already treats as plain (already preprocessed, if it originated as
-/// SCSS/Less/Stylus).
+/// caller already treats as plain.
+///
+/// The bytes are taken as the CALLER'S OWN, at their own stage: this entry
+/// receives no provenance and cannot invent any, so the reported spans address
+/// exactly the buffer that was passed in. It deliberately does NOT claim the
+/// bytes came from a preprocessor — a caller that knows they did, and knows
+/// which tool produced them, records that at the admission boundary
+/// (`PreprocessedStyle`) rather than here.
 #[napi]
 pub fn transform_vue_style(
     css: Buffer,
@@ -300,10 +311,12 @@ pub fn transform_vue_style(
         let want_source_map = options.sourcemap.unwrap_or(false);
         let outcome = verter_compiler::style_planner::transform_vue_style(
             verified,
-            // This entry takes bytes the caller labels plain CSS and says
-            // nothing about who made them. Naming an anonymous external
-            // producer would assert the tool identified itself nowhere; the
-            // caller's own bytes at their own stage is what it actually knows.
+            // The caller supplies bytes and no provenance. `Authored` is the
+            // only arm that asserts nothing beyond what is known here — that
+            // these are the caller's own bytes, and that reported spans
+            // address exactly them. `Preprocessed` would assert an external
+            // tool ran, which this entry has no way to know; a caller that
+            // does know records it at the admission boundary instead.
             verter_compiler::style_planner::CascadeInput::Authored,
             filename,
             filename,
@@ -335,10 +348,10 @@ pub fn transform_vue_style(
             None
         };
         let refusals = outcome
-            .facts
-            .refusals
+            .result
+            .diagnostics()
             .iter()
-            .map(ToString::to_string)
+            .map(|diagnostic| diagnostic.message().to_string())
             .collect();
         Ok(TransformVueStyleResult {
             code: outcome.result.into_code(),

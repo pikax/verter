@@ -42,13 +42,23 @@ impl CssDialect {
     /// one, and the drift is silent: the same `lang="…"` resolves in one route
     /// and fails closed in another.
     ///
-    /// Matching is byte-exact, and deliberately so. A `lang="…"` value is
-    /// looked up by exact bytes in every preprocessor table the ecosystem
-    /// hands these blocks to, so `lang="SCSS"` has no preprocessor and must
-    /// fail closed here too — accepting it would publish a complete-looking
-    /// SCSS surface for a block nothing downstream can compile. `styl` is
-    /// accepted because it is a real key in those tables, not a casing
-    /// variant.
+    /// Matching is byte-exact for every dialect that needs an external tool,
+    /// and deliberately so. Such a `lang="…"` value is looked up by exact
+    /// bytes in every preprocessor table the ecosystem hands these blocks to,
+    /// so `lang="SCSS"` has no preprocessor and must fail closed here too —
+    /// accepting it would publish a complete-looking SCSS surface for a block
+    /// nothing downstream can compile. `styl` is accepted because it is a real
+    /// key in those tables, not a casing variant.
+    ///
+    /// `css` is the one exception, and it is an exception because the reason
+    /// above does not reach it: plain CSS is handed to no preprocessor table
+    /// at all, so no downstream tool can fail on the spelling, and
+    /// `<style lang="CSS">` is unambiguously a CSS block that the reference
+    /// Vue pipeline compiles. Failing it closed would cost the block every
+    /// CSS diagnostic, hover and colour the editor otherwise serves, and buy
+    /// no agreement with anything. It is therefore matched
+    /// ASCII-case-insensitively — the only spelling for which the exact-key
+    /// rule has nothing to protect.
     ///
     /// The wider carrier-level dialect classification (`PostCss` and the
     /// unrecognised state, which have no [`CssDialect`] to map onto) is a
@@ -56,6 +66,9 @@ impl CssDialect {
     /// projection; this function is not its authority.
     #[must_use]
     pub fn from_lang(value: &str) -> Option<Self> {
+        if value.eq_ignore_ascii_case("css") {
+            return Some(Self::Css);
+        }
         Self::LANG_SPELLINGS
             .into_iter()
             .find_map(|(spelling, dialect)| (value == spelling).then_some(dialect))

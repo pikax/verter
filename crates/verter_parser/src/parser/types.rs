@@ -446,9 +446,19 @@ fn props_modifier_spill(props: &[NodeProp]) -> usize {
 
 impl StyleLang {
     /// Parse a style language from the raw `lang` attribute bytes.
+    ///
+    /// Byte-exact for every dialect an external tool compiles: those tools
+    /// look the spelling up by exact bytes, so `lang="SCSS"` names nothing
+    /// that can build the block and must not resolve here either. `css` is
+    /// matched ASCII-case-insensitively instead, because plain CSS reaches no
+    /// such table — nothing downstream can fail on its casing, and refusing
+    /// `lang="CSS"` would cost an unambiguously-CSS block every CSS feature
+    /// the editor serves.
     pub fn from_bytes(lang: &[u8]) -> Self {
+        if lang.eq_ignore_ascii_case(b"css") {
+            return StyleLang::Css;
+        }
         match lang {
-            b"css" => StyleLang::Css,
             b"scss" => StyleLang::Scss,
             b"sass" => StyleLang::Sass,
             b"less" => StyleLang::Less,

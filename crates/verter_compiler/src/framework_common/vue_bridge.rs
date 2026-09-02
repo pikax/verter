@@ -2028,8 +2028,8 @@ mod tests {
         );
     }
 
-    /// @ai-generated - A10i must hold for the "supplied-preprocessor-output"
-    /// branch too (authored SCSS whose supplied bytes are already-compiled
+    /// @ai-generated - one parse per content identity must hold for the
+    /// "supplied-preprocessor-output" branch too (authored SCSS whose supplied bytes are already-compiled
     /// plain CSS, so the authored-v-bind stage does not apply): the modules
     /// stage produces no edits here (no class selector to hash), so its
     /// retained IR must hand straight into the scoped-selector stage

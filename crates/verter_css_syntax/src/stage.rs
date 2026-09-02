@@ -214,13 +214,22 @@ pub(crate) const SASS_NON_EMITTING_BUILTIN_MODULES: [&str; 6] = [
     "sass:string",
 ];
 
-/// Kind of stylesheet inclusion an at-rule declares.
+/// Kind of stylesheet inclusion a directive declares.
 ///
-/// Closed over the at-rules that pull other stylesheets into the current one
-/// across this crate's five dialects. Anything else is not a dependency.
+/// Closed over the inclusion directives of this crate's five dialects — every
+/// keyword that pulls another stylesheet into the current one. Anything else
+/// is not a dependency.
+///
+/// A missing member is not a cosmetic gap. An unrecognised inclusion keyword
+/// records no dependency at all, so
+/// [`crate::StyleSyntaxIr::pulls_in_unparsed_bytes`] answers "this sheet
+/// declares its whole surface" for a sheet that plainly pulls in another one —
+/// the wrong-complete direction, which publishes an exhaustive `v-bind()`
+/// liveness inventory for a block whose bindings live in a sheet nothing here
+/// parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StyleDependencyKind {
-    /// CSS/Less/Stylus `@import`.
+    /// CSS/Sass/SCSS/Less/Stylus `@import`.
     Import,
     /// Sass/SCSS `@use`.
     Use,
@@ -228,11 +237,20 @@ pub enum StyleDependencyKind {
     Forward,
     /// Less `@plugin`.
     Plugin,
+    /// Stylus `@require`, the language's include-once form. It brings in
+    /// exactly the bytes `@import` does; only the repeat-inclusion behaviour
+    /// differs, and that is not a distinction any consumer of this inventory
+    /// makes.
+    Require,
 }
 
 impl StyleDependencyKind {
     /// Classify an at-rule name (without the `@`). ASCII-case-insensitive, as
     /// CSS at-keywords are.
+    ///
+    /// Stylus also spells `import`/`require` as a bare statement with no `@`.
+    /// That form carries no at-keyword and never reaches an at-rule frame, so
+    /// it is recognised separately — see [`Self::from_stylus_statement_keyword`].
     #[must_use]
     pub fn from_at_rule_name(name: &str) -> Option<Self> {
         use crate::token::css_identifier_eq_ignore_ascii_case as eq;
@@ -244,6 +262,31 @@ impl StyleDependencyKind {
             Some(Self::Forward)
         } else if eq(name, "plugin") {
             Some(Self::Plugin)
+        } else if eq(name, "require") {
+            Some(Self::Require)
+        } else {
+            None
+        }
+    }
+
+    /// Classify a Stylus statement that opens with a bare identifier.
+    ///
+    /// Stylus accepts `require 'theme'` and `import 'theme'` without the `@`,
+    /// and both mean exactly what their `@`-spelled forms mean. Such a
+    /// statement has no at-keyword for the layout pass to classify, so it
+    /// reaches the IR as an unclassified statement rather than an at-rule;
+    /// left unrecognised it records no dependency, which is the wrong-complete
+    /// direction this inventory exists to close.
+    ///
+    /// Only the two inclusion keywords are recognised, and only for Stylus.
+    /// Every other unclassified statement stays exactly that.
+    #[must_use]
+    pub fn from_stylus_statement_keyword(name: &str) -> Option<Self> {
+        use crate::token::css_identifier_eq_ignore_ascii_case as eq;
+        if eq(name, "import") {
+            Some(Self::Import)
+        } else if eq(name, "require") {
+            Some(Self::Require)
         } else {
             None
         }
@@ -318,7 +361,8 @@ impl StyleDependency {
         self.kind
     }
 
-    /// Span of the `@import`/`@use`/`@forward`/`@plugin` keyword itself.
+    /// Span of the inclusion keyword itself, `@` included when the form has
+    /// one and excluded for Stylus's bare `require`/`import` statement.
     #[must_use]
     pub const fn head_span(self) -> Span {
         self.head_span
@@ -341,13 +385,22 @@ impl StyleDependency {
 /// Constructed only through the stage constructors, each of which fixes the
 /// invariants its stage carries. There is no constructor that takes bytes
 /// alone, so preprocessed output cannot travel as an unqualified string.
+///
+/// It carries no inclusion list. A [`StyleDependency`]'s spans address the
+/// space of the PARSE that minted them, and reading a specifier's text needs
+/// that same [`crate::StyleSyntaxIr`] — which this carrier does not hold — so a
+/// list here would be kind-and-order only, would be empty both for a sheet with
+/// no inclusions and for bytes nothing ever parsed, and would cost a per-block
+/// copy for a question no consumer asks of it. The one question consumers do
+/// ask is whether the surface is exhaustive, and its owner is
+/// [`crate::StyleSyntaxIr::pulls_in_unparsed_bytes`]. A consumer that wants the
+/// targets themselves obtains the IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QualifiedStyleResult {
     stage: StyleStage,
     dialect: CssDialect,
     producer: StyleProducer,
     code: String,
-    dependencies: Vec<StyleDependency>,
     diagnostics: Vec<StyleDiagnostic>,
     /// See [`Self::refused`]. Set only by that constructor, and the one thing
     /// that makes "no bytes were produced" readable rather than inferred from
@@ -357,14 +410,10 @@ pub struct QualifiedStyleResult {
 
 impl QualifiedStyleResult {
     /// The bytes as authored, in the authored dialect.
-    ///
-    /// `dependencies` are the inclusions this crate's parse of exactly these
-    /// bytes observed, so their spans address `code`.
     #[must_use]
     pub fn authored(
         dialect: CssDialect,
         code: impl Into<String>,
-        dependencies: Vec<StyleDependency>,
         diagnostics: Vec<StyleDiagnostic>,
     ) -> Self {
         Self {
@@ -372,7 +421,6 @@ impl QualifiedStyleResult {
             dialect,
             producer: StyleProducer::Verter,
             code: code.into(),
-            dependencies,
             diagnostics,
             refused: false,
         }
@@ -388,14 +436,10 @@ impl QualifiedStyleResult {
     /// travelling on as an unqualified string is [`PreprocessedStyle`], the
     /// only shape a plain-CSS-only consumer accepts them in.
     ///
-    /// `dependencies` are the inclusions a parse of these bytes observed —
-    /// preprocessed CSS can still `@import` at runtime. A caller that has not
-    /// parsed them passes an empty list, which says "not observed", not "none".
     #[must_use]
     pub fn preprocessed(
         producer: StyleProducer,
         code: impl Into<String>,
-        dependencies: Vec<StyleDependency>,
         diagnostics: Vec<StyleDiagnostic>,
     ) -> Self {
         Self {
@@ -403,24 +447,16 @@ impl QualifiedStyleResult {
             dialect: CssDialect::Css,
             producer,
             code: code.into(),
-            dependencies,
             diagnostics,
             refused: false,
         }
     }
 
     /// Bytes a Verter style rewrite produced from `dialect` input.
-    ///
-    /// `dependencies` are carried forward from the parse of the rewrite's
-    /// INPUT, so their spans address the input space, not `code`. That is
-    /// exactly why [`Self::stage`] is recorded alongside them: a consumer that
-    /// wants a position must map it, and a consumer that only wants the target
-    /// list does not care.
     #[must_use]
     pub fn framework_rewritten(
         dialect: CssDialect,
         code: impl Into<String>,
-        dependencies: Vec<StyleDependency>,
         diagnostics: Vec<StyleDiagnostic>,
     ) -> Self {
         Self {
@@ -428,7 +464,6 @@ impl QualifiedStyleResult {
             dialect,
             producer: StyleProducer::Verter,
             code: code.into(),
-            dependencies,
             diagnostics,
             refused: false,
         }
@@ -454,7 +489,6 @@ impl QualifiedStyleResult {
     pub fn refused(
         stage: StyleStage,
         dialect: CssDialect,
-        dependencies: Vec<StyleDependency>,
         diagnostics: Vec<StyleDiagnostic>,
     ) -> Self {
         Self {
@@ -462,7 +496,6 @@ impl QualifiedStyleResult {
             dialect,
             producer: StyleProducer::Verter,
             code: String::new(),
-            dependencies,
             diagnostics,
             refused: true,
         }
@@ -507,21 +540,6 @@ impl QualifiedStyleResult {
         self.code
     }
 
-    /// Inclusions observed for this result, in source order.
-    ///
-    /// Kind-and-order only, as read from here. A [`StyleDependency`]'s
-    /// `head_span` and its specifier's span address the space of the parse
-    /// that minted them — which for [`StyleStage::FrameworkRewritten`] is the
-    /// rewrite's INPUT, not `code` — and the only reader of a specifier's text
-    /// is [`crate::StyleSyntaxIr::specifier_text`], which needs that same IR.
-    /// This result carries neither, so a consumer that wants specifier text or
-    /// a placeable position obtains the IR itself rather than resolving these
-    /// spans against anything reachable from here.
-    #[must_use]
-    pub fn dependencies(&self) -> &[StyleDependency] {
-        &self.dependencies
-    }
-
     /// Diagnostics observed while producing this result, in production order:
     /// each authority appends its own in the order it reported them, and the
     /// authorities themselves append in the order they ran.
@@ -530,19 +548,32 @@ impl QualifiedStyleResult {
         &self.diagnostics
     }
 
-    /// Borrow this result as preprocessor output, or `None` at any other
-    /// stage.
+    /// Borrow this result as preprocessor output, or `None` when it is not
+    /// one.
     ///
-    /// The single stage gate on the [`PreprocessedStyle`] witness: a consumer
-    /// that only accepts preprocessor output takes the witness, so authored or
+    /// The single gate on the [`PreprocessedStyle`] witness: a consumer that
+    /// only accepts preprocessor output takes the witness, so authored or
     /// framework-rewritten bytes are not something a caller can spell at that
     /// signature, let alone pass by mistake.
+    ///
+    /// All three recorded facts gate it, because the witness asserts all
+    /// three:
+    ///
+    /// - the stage is [`StyleStage::Preprocessed`] — the output space,
+    /// - the producer is external — the witness names the tool that made the
+    ///   bytes, and [`StyleProducer::Verter`] names Verter's own pipeline, and
+    /// - the result is not a refusal — [`Self::refused`] is public, sets the
+    ///   producer to `Verter` and leaves the stage where the refusing stage
+    ///   was, so a refusal AT the preprocessed stage would otherwise mint a
+    ///   witness over zero bytes and `prepare_supplied_style` would admit it
+    ///   as a valid empty stylesheet.
     #[must_use]
     pub fn as_preprocessed(&self) -> Option<PreprocessedStyle<'_>> {
-        (self.stage == StyleStage::Preprocessed).then(|| PreprocessedStyle {
-            code: &self.code,
-            producer: self.producer.clone(),
-        })
+        (!self.refused && self.stage == StyleStage::Preprocessed && self.producer.is_external())
+            .then(|| PreprocessedStyle {
+                code: &self.code,
+                producer: self.producer.clone(),
+            })
     }
 }
 
@@ -624,8 +655,7 @@ mod tests {
         let producer = StyleProducer::External(
             ExternalStyleProducer::new("sass", Some("1.77.0"), None).expect("named producer"),
         );
-        let result =
-            QualifiedStyleResult::preprocessed(producer, ".a{color:red}", Vec::new(), Vec::new());
+        let result = QualifiedStyleResult::preprocessed(producer, ".a{color:red}", Vec::new());
 
         assert_eq!(result.stage(), StyleStage::Preprocessed);
         assert_eq!(result.dialect(), CssDialect::Css);
@@ -648,7 +678,6 @@ mod tests {
             StyleProducer::ExternalAnonymous,
             ".a{}",
             Vec::new(),
-            Vec::new(),
         );
         assert!(anonymous.producer().is_external());
         assert!(anonymous.producer().external().is_none());
@@ -659,7 +688,6 @@ mod tests {
         let rewritten = QualifiedStyleResult::framework_rewritten(
             CssDialect::Scss,
             ".a{color:var(--x)}",
-            Vec::new(),
             Vec::new(),
         );
         assert_eq!(rewritten.dialect(), CssDialect::Scss);

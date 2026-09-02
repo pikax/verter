@@ -1567,9 +1567,9 @@ fn slotted_argument_edit_count_sweep_never_mints_a_nested_build() {
     }
 }
 
-// ─── A10i: the Vue-owned cascade parses each content identity once ─────────
+// ─── The Vue-owned cascade parses each content identity once ──────────────
 
-// @ai-generated - A10i: an `Unchanged` stage hands its already-parsed
+// @ai-generated - an `Unchanged` stage hands its already-parsed
 // `StyleSyntaxIr` to the next stage instead of causing a re-parse. Every
 // scenario below is a genuine, verified count for the exact scenario
 // described — never the pre-fix baseline's unconditional per-stage re-parse
@@ -2190,7 +2190,6 @@ fn cascade_output_is_publishable_refuses_a_parse_failure_that_wiped_non_empty_co
             verter_css_syntax::StyleStage::Authored,
             CssDialect::Css,
             Vec::new(),
-            Vec::new(),
         ),
         source_map: String::new(),
         facts: crate::style_planner::VueStyleFacts::default(),
@@ -2215,7 +2214,6 @@ fn cascade_output_is_publishable_accepts_an_overlapping_edits_refusal_on_v_bind_
         result: verter_css_syntax::QualifiedStyleResult::authored(
             CssDialect::Css,
             source,
-            Vec::new(),
             Vec::new(),
         ),
         source_map: String::new(),
@@ -2278,7 +2276,8 @@ fn cascade_output_is_publishable_accepts_a_clean_outcome() {
     assert!(cascade_output_is_publishable(&outcome, source));
 }
 
-// @ai-generated - A10i must hold through the REAL production compile()
+// @ai-generated - one parse per content identity must hold through the REAL
+// production compile()
 // entry point, not just the standalone `run_vue_style_cascade` orchestrator:
 // a `<style scoped module>` block where only the LAST stage (scoped) rewrites
 // anything must cost exactly 1 parse end-to-end. Before production routed
@@ -2295,7 +2294,7 @@ fn production_compile_reuses_parsed_style_ir_across_cascade_stages() {
         1,
         "the real compile() entry point must hand its retained IR across the \
          v-bind/module/scoped stages when only the last stage rewrites \
-         anything (A10i), not re-parse independently per stage"
+         anything, not re-parse independently per stage"
     );
 }
 

@@ -43,7 +43,7 @@ pub fn validate_capture_pipeline(pipeline: &str) -> Result<(), String> {
     }
     if pipeline.contains("lightningcss") {
         return Err(format!(
-            "lightningcss is not a live capture pipeline (got {pipeline:?}); capture as {CAPTURE_PIPELINE_DEFAULT:?} and compare with --expect-transition {PIPELINE_LEGACY_LIGHTNINGCSS}:{CAPTURE_PIPELINE_DEFAULT}"
+            "lightningcss is not a live capture pipeline (got {pipeline:?}); capture as              {CAPTURE_PIPELINE_DEFAULT:?} and compare with --expect-transition              {PIPELINE_LEGACY_LIGHTNINGCSS}:{CAPTURE_PIPELINE_DEFAULT}"
         ));
     }
     Ok(())

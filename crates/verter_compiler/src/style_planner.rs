@@ -11,8 +11,8 @@ use verter_css_syntax::{
     css_identifier_eq_ignore_ascii_case, parse_style_ir, CombinatorKind, ComplexSelector,
     ComplexSelectorPart, ComponentValue, ComponentValueTree, CssDialect, CssParseMode, CssSource,
     QualifiedStyleResult, SelectorComponent, SelectorComponentKind, SelectorList, SelectorPseudo,
-    StyleCompleteness, StyleDeclaration, StyleDependency, StyleDiagnostic, StyleDirective,
-    StyleStage, StyleStatement, StyleSyntaxIr, TokenKind, UnknownStatement, UnknownStatementKind,
+    StyleCompleteness, StyleDeclaration, StyleDiagnostic, StyleDirective, StyleStage,
+    StyleStatement, StyleSyntaxIr, TokenKind, UnknownStatement, UnknownStatementKind,
 };
 
 /// The witness a caller-preprocessed style block enters the compiler through,
@@ -131,10 +131,21 @@ impl StyleRewriteFailure {
     ///
     /// Crate-private on purpose. A failure is recorded in TWO shapes — as
     /// itself, on the facts and stage-failure lists, and as a diagnostic on
-    /// the result carrier — and only one of them is the publication route. A
-    /// consumer able to mint the second shape from the first could chain both
-    /// and report every refusal twice; outside this crate the carrier's
-    /// `diagnostics()` is the only way to obtain one.
+    /// the result carrier — and only one of them is the publication route.
+    /// Keeping the projection private is what makes the carrier's
+    /// `diagnostics()` the obvious way to obtain a diagnostic rather than one
+    /// of two.
+    ///
+    /// Read what the privacy buys, exactly. It removes THIS projection, with
+    /// its `space` argument, from the outside vocabulary — so no consumer can
+    /// accidentally re-derive a correctly-spaced diagnostic and publish the
+    /// same refusal twice. It is not a structural bar: `StyleDiagnostic::new`
+    /// is public, `Display` is public, and `refusals`/`stage_failures` stay
+    /// `pub` on the outcome, so a consumer that sets out to mint its own
+    /// shape can. The bar against double-reporting is the convention this
+    /// doc states plus the fact that the private helper is where the correct
+    /// answer lives; anything stronger would need the failure lists
+    /// themselves to stop being public.
     #[must_use]
     pub(crate) fn to_diagnostic(&self, space: StyleStage) -> StyleDiagnostic {
         StyleDiagnostic::new(space, self.to_string(), self.span)
@@ -369,28 +380,50 @@ pub struct VueStyleFacts {
     pub module_classes: Vec<(String, String)>,
     pub refusals: Vec<StyleRewriteFailure>,
     pub rewrites: VueStyleRewriteMask,
-    /// Stylesheets the parsed input pulls in, in source order, carried
-    /// forward from the parse that produced this stage's facts.
-    pub dependencies: Vec<StyleDependency>,
+    /// A parse of the cascade's INPUT surveyed its inclusions and answered
+    /// whether they reach bytes nothing here parsed — or `None` when no such
+    /// parse has run.
+    ///
+    /// Private, and three-state on purpose. The two states a `bool` conflates
+    /// are the ones that matter: "surveyed, nothing foreign" and "never
+    /// surveyed" are opposite answers to the question consumers ask, and only
+    /// the tri-state distinguishes them. It is also what memoizes the
+    /// recorder — a later stage parses whatever an earlier rewrite left
+    /// behind, and a sheet with no inclusions must not read as "not recorded
+    /// yet" and let that later parse publish its own space's answer as the
+    /// input's.
+    ///
+    /// Read through [`Self::pulls_in_unparsed_bytes`], which fails closed.
+    input_pulls_in_unparsed_bytes: Option<bool>,
+}
+
+impl VueStyleFacts {
     /// Whether this block pulls in stylesheet bytes nothing here parsed.
     ///
-    /// `true` means this block's declared surface is incomplete: classes,
-    /// custom properties and `v-bind()` calls exist outside anything Verter
-    /// saw, so a consumer publishing a complete-looking inventory has to fail
-    /// open on it. It is deliberately not `!dependencies.is_empty()`, and
-    /// deliberately not a fold over `dependencies` either — the style-syntax
-    /// owner answers it for the whole parse, because a parse that recovered
-    /// records FEWER inclusions than the sheet has, not more.
-    pub pulls_in_unparsed_bytes: bool,
-    /// Whether a parse of the cascade's INPUT has already published the two
-    /// fields above.
+    /// `true` means the block's declared surface is incomplete: classes,
+    /// custom properties and `v-bind()` calls may exist outside anything
+    /// Verter saw, so a consumer publishing a complete-looking inventory has
+    /// to fail open on it.
     ///
-    /// Private, and deliberately not derived from them: a sheet with no
-    /// inclusions and a cascade that has not parsed its input yet both leave
-    /// `dependencies` empty. Reading the empty list as "not recorded yet" lets
-    /// a later stage — which parses whatever an earlier rewrite left behind —
-    /// publish its own space's inventory as the input's.
-    recorded_input_inclusions: bool,
+    /// **An unsurveyed block answers `true`.** `false` is the STRONG claim —
+    /// "nothing outside these bytes can contribute to this block's surface" —
+    /// and no parse has earned it until one has run. The reachable state is a
+    /// cascade whose only parsing stage failed (a `v-bind()` stage that hits
+    /// an untrusted rewrite target or a parse error, with neither CSS Modules
+    /// nor scoping requested): nothing surveys the input, and answering
+    /// "exhaustive" there is exactly the wrong-complete direction.
+    ///
+    /// It is deliberately neither `!dependencies.is_empty()` nor a fold over
+    /// an inclusion list — the style-syntax owner answers it for the whole
+    /// parse, because a parse that recovered records FEWER inclusions than the
+    /// sheet has, not more.
+    #[must_use]
+    pub const fn pulls_in_unparsed_bytes(&self) -> bool {
+        match self.input_pulls_in_unparsed_bytes {
+            Some(pulls) => pulls,
+            None => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -461,7 +494,7 @@ thread_local! {
     /// or cascaded (`run_vue_style_cascade`) — routes through `parse_ir`, so this
     /// count is the authoritative, directly-observable proof that an `Unchanged`
     /// stage hands its parsed `StyleSyntaxIr` forward instead of re-parsing
-    /// (A10i / the one-parse-per-content-identity invariant). THREAD-LOCAL, not
+    /// (the one-parse-per-content-identity invariant). THREAD-LOCAL, not
     /// a process-global static: the Rust test harness runs each `#[test]` on its
     /// own thread, and every counted call this module makes stays on the calling
     /// test's thread (no internal spawning) — a thread-local counter is exactly
@@ -520,28 +553,28 @@ fn observe_style_ir(stage: StyleRewriteStage, ir: &ParsedStyleIr) {
 #[cfg(not(test))]
 fn observe_style_ir(_stage: StyleRewriteStage, _ir: &ParsedStyleIr) {}
 
-/// Record the inclusion inventory a parse of the cascade's INPUT observed.
+/// Record what a parse of the cascade's INPUT observed about its inclusions.
 ///
 /// Every entry point that parses those bytes calls this, so the published
-/// dependency list does not depend on which entry point the same source was
-/// routed through — the divergence a consumer would then inherit as a
-/// route-dependent answer about which sheets a block pulls in.
+/// answer does not depend on which entry point the same source was routed
+/// through — the divergence a consumer would otherwise inherit as a
+/// route-dependent yes/no about whether a block declares its whole surface.
 ///
 /// It records at most once per cascade, and only from a parse of the input
 /// bytes: a later stage parses whatever an earlier rewrite left behind, and
-/// the spans it mints address that space instead.
+/// its answer describes that space instead. A cascade that never reaches this
+/// recorder leaves the answer unrecorded, and
+/// [`VueStyleFacts::pulls_in_unparsed_bytes`] fails closed on it.
 fn record_input_dependencies(facts: &mut VueStyleFacts, ir: &ParsedStyleIr) {
-    if facts.recorded_input_inclusions {
+    if facts.input_pulls_in_unparsed_bytes.is_some() {
         return;
     }
-    facts.recorded_input_inclusions = true;
-    facts.dependencies = ir.dependencies().to_vec();
-    // Asked of the parse as a whole, not folded over the list above. A
-    // recovered parse hands back a dependency list that is a lower bound —
+    // Asked of the parse as a whole, never folded over the inclusion list it
+    // recorded. A recovered parse hands back a list that is a lower bound —
     // an inclusion inside the range it skipped never reached the at-rule
     // frame — so a fold over what it did record answers "nothing foreign
     // here" for exactly the sheets where it saw least.
-    facts.pulls_in_unparsed_bytes = ir.pulls_in_unparsed_bytes();
+    facts.input_pulls_in_unparsed_bytes = Some(ir.pulls_in_unparsed_bytes());
 }
 
 #[cfg(test)]
@@ -939,7 +972,7 @@ pub fn v_bind_vars_from_parsed_ir(
 /// Collects the authored v-bind edits/vars from an already-parsed IR, without
 /// itself calling `parse_ir` — the shared building block `transform_vue_v_bind`
 /// (parses then delegates here) and `run_vue_style_cascade` (reuses a
-/// retained IR across stages, A10i) both route through.
+/// retained IR across stages) both route through.
 fn v_bind_edits_from_ir(
     ir: &StyleSyntaxIr,
     dialect: CssDialect,
@@ -1561,8 +1594,8 @@ fn collect_module_selector_list(
 /// Collects the scoped-selector/keyframes edits and facts from an
 /// already-parsed IR, without itself calling `parse_ir` — the shared building
 /// block `transform_vue_scoped_css` (parses then delegates here) and
-/// `run_vue_style_cascade` (reuses a retained IR across stages, A10i) both
-/// route through.
+/// `run_vue_style_cascade` (reuses a retained IR across stages) both route
+/// through.
 fn scoped_edits_and_facts_from_ir(
     ir: &StyleSyntaxIr,
     scope_id: &str,
@@ -1628,15 +1661,9 @@ pub struct VueStyleCascadeOutcome {
     /// Authored-source-to-final-code map composed across every rewrite. Empty
     /// when no rewrite occurred or composition could not be completed.
     pub source_map: String,
-    /// This run's accumulated style facts.
-    ///
-    /// The inclusion inventory it collected has MOVED onto
-    /// `result.dependencies()` by the time the outcome exists — that is the
-    /// published surface, and retaining a second copy here would keep the
-    /// whole list alive per style block for no reader. `dependencies` is
-    /// therefore the recorder's in-cascade accumulator only, and is empty on a
-    /// finished outcome; `pulls_in_unparsed_bytes` is not, because the
-    /// single-stage entry points return these facts directly.
+    /// This run's accumulated style facts, including
+    /// `facts.pulls_in_unparsed_bytes()` — the answer every entry point
+    /// publishes for "does this block declare its whole surface".
     pub facts: VueStyleFacts,
     /// Stage-level failures (as opposed to `facts.refusals`' soft,
     /// individually-tolerated per-selector refusals): the authored-v-bind,
@@ -2006,7 +2033,7 @@ fn finish_vue_style_cascade(
     input_code: &str,
     spaces: CascadeStageSpaces,
     output: CascadeOutput,
-    mut facts: VueStyleFacts,
+    facts: VueStyleFacts,
     stage_failures: Vec<StyleRewriteFailure>,
 ) -> VueStyleCascadeOutcome {
     let input_stage = input.stage();
@@ -2023,31 +2050,31 @@ fn finish_vue_style_cascade(
         CascadeOutput::ClearedByRefusal => (String::new(), String::new()),
         CascadeOutput::Passthrough => (input_code.to_string(), String::new()),
     };
+    // Projected once, here, for every entry point. This is the SOLE
+    // publication route (see `VueStyleCascadeOutcome.result`), so doing it
+    // per-consumer instead would re-derive the same strings once per reader
+    // and lose the single-route property that keeps a refusal from being
+    // reported twice. A run with no refusals collects an empty `Vec`, which
+    // allocates nothing — the cost is exactly one projection per refusal, and
+    // only sheets that actually refused pay it.
     let diagnostics: Vec<StyleDiagnostic> = facts
         .refusals
         .iter()
         .chain(stage_failures.iter())
         .map(|failure| failure.to_diagnostic(spaces.space_of(failure.stage, input_stage)))
         .collect();
-    // Moved, not cloned: the qualified result below is where this inventory
-    // is read, and `facts` travels into the same outcome struct. Keeping a
-    // second copy alive on `facts` would retain the whole list twice per
-    // style block for no reader.
-    let dependencies = std::mem::take(&mut facts.dependencies);
     let result = if cleared_by_refusal {
         // Nothing produced these (absent) bytes, so nothing claims them. The
         // stage still names the space the refusals' own coordinates belong
         // to, which is what makes them placeable.
-        QualifiedStyleResult::refused(input_stage, dialect, dependencies, diagnostics)
+        QualifiedStyleResult::refused(input_stage, dialect, diagnostics)
     } else if rewritten {
-        QualifiedStyleResult::framework_rewritten(dialect, code, dependencies, diagnostics)
+        QualifiedStyleResult::framework_rewritten(dialect, code, diagnostics)
     } else {
         match input {
-            CascadeInput::Authored => {
-                QualifiedStyleResult::authored(dialect, code, dependencies, diagnostics)
-            }
+            CascadeInput::Authored => QualifiedStyleResult::authored(dialect, code, diagnostics),
             CascadeInput::Preprocessed(producer) => {
-                QualifiedStyleResult::preprocessed(producer, code, dependencies, diagnostics)
+                QualifiedStyleResult::preprocessed(producer, code, diagnostics)
             }
         }
     };
@@ -2088,7 +2115,7 @@ pub fn run_vue_style_authored_only(
 }
 
 /// Runs Vue's authored-v-bind → CSS-Modules → scoped-selector cascade,
-/// parsing each content identity at most once (A10i): a stage that produces
+/// parsing each content identity at most once: a stage that produces
 /// no edits hands its own already-parsed `StyleSyntaxIr` to the next stage
 /// instead of causing a re-parse. Only a stage that DID change bytes forces
 /// the following stage to parse fresh (the new bytes are a new content
@@ -2314,7 +2341,7 @@ struct PostVBindStages {
 
 /// Shared CSS-Modules → scoped-selector continuation of the style cascade
 /// (stages 2 and 3), used by both cascade entry points so the module→scoped
-/// IR hand-off (A10i) applies identically to each. `owned` is
+/// IR hand-off applies identically to each. `owned` is
 /// `Some((code, source_map))` when a stage rewrote bytes or hard-failed (in
 /// which case `code` is empty); `None` when neither stage produced output.
 ///

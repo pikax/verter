@@ -756,3 +756,65 @@ fn a_recovered_parse_never_reports_an_exhaustive_inclusion_surface() {
         "and a real inclusion still is"
     );
 }
+
+/// Every inclusion keyword a dialect spells is in the inventory — including
+/// the two Stylus forms `@import` does not cover.
+///
+/// The wrong-complete direction this closes: an unrecognised inclusion keyword
+/// records no dependency at all, so `pulls_in_unparsed_bytes()` answers "this
+/// sheet declares its whole surface" for a sheet that plainly pulls in another
+/// one. A consumer publishing a `v-bind()` liveness inventory then reports a
+/// binding used only from the included sheet as unused — the exact failure the
+/// `@import` leg above already guards for the other four dialects.
+///
+/// Stylus spells its include-once directive `@require`, and accepts BOTH
+/// `require` and `import` as bare statements with no `@`. The bare form carries
+/// no at-keyword, so it reaches the IR as an unclassified statement rather than
+/// an at-rule and needs its own recognition.
+#[test]
+fn every_stylus_inclusion_form_enters_the_inventory() {
+    for (input, kind, target) in [
+        (
+            "@require \"theme\"\n",
+            StyleDependencyKind::Require,
+            "theme",
+        ),
+        ("@import \"theme\"\n", StyleDependencyKind::Import, "theme"),
+        ("require 'theme'\n", StyleDependencyKind::Require, "theme"),
+        ("import 'theme'\n", StyleDependencyKind::Import, "theme"),
+    ] {
+        let parsed = ir(input, CssDialect::Stylus);
+        let [dependency] = parsed.dependencies() else {
+            panic!("{input:?}: {:?}", parsed.dependencies());
+        };
+        assert_eq!(dependency.kind(), kind, "{input:?}");
+        let specifier = dependency.specifier().expect("quoted specifier");
+        assert_eq!(parsed.specifier_text(specifier), target, "{input:?}");
+        assert!(
+            parsed.pulls_in_unparsed_bytes(),
+            "{input:?} pulls in a sheet nothing here parsed"
+        );
+    }
+
+    // The bare form is Stylus-only, and only when the statement OPENS with the
+    // keyword. Widening it would make ordinary CSS-ish statements read as
+    // inclusions and switch the exhaustive-surface path off for sheets that do
+    // declare their whole surface.
+    for (dialect, input) in [
+        (CssDialect::Css, "require 'theme';\n"),
+        (CssDialect::Scss, "require 'theme';\n"),
+        (CssDialect::Less, "require 'theme';\n"),
+        (CssDialect::Sass, "require 'theme'\n"),
+    ] {
+        assert!(
+            ir(input, dialect).dependencies().is_empty(),
+            "{dialect:?} has no bare-statement inclusion form"
+        );
+    }
+    assert!(
+        ir("stylus-require 'theme'\n", CssDialect::Stylus)
+            .dependencies()
+            .is_empty(),
+        "an identifier that merely starts with the keyword is not the keyword"
+    );
+}

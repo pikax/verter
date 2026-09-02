@@ -19,7 +19,7 @@ use verter_compiler::style_planner::{
 };
 use verter_css_syntax::{
     parse_style_ir, CssDialect, CssParseMode, CssSource, ExternalStyleProducer,
-    QualifiedStyleResult, StyleDependencyKind, StyleProducer, StyleStage,
+    QualifiedStyleResult, StyleProducer, StyleStage,
 };
 
 fn plain(code: &str) -> PlainCssInput<'_> {
@@ -179,7 +179,6 @@ fn only_the_preprocessed_stage_mints_the_supplied_style_witness() {
         ),
         css,
         Vec::new(),
-        Vec::new(),
     );
     let witness = named
         .as_preprocessed()
@@ -189,16 +188,32 @@ fn only_the_preprocessed_stage_mints_the_supplied_style_witness() {
     assert_eq!(prepared.ir().source().text(), css);
 
     assert!(
-        QualifiedStyleResult::authored(CssDialect::Css, css, Vec::new(), Vec::new())
+        QualifiedStyleResult::authored(CssDialect::Css, css, Vec::new())
             .as_preprocessed()
             .is_none(),
         "authored bytes are not preprocessor output, whatever they contain"
     );
     assert!(
-        QualifiedStyleResult::framework_rewritten(CssDialect::Css, css, Vec::new(), Vec::new())
+        QualifiedStyleResult::framework_rewritten(CssDialect::Css, css, Vec::new())
             .as_preprocessed()
             .is_none(),
         "Verter's own rewrite output is not an external supplied artifact"
+    );
+
+    // A refusal AT the preprocessed stage is the arm that reaches the gate
+    // with the right stage and the wrong everything else: `refused` is public,
+    // it leaves the stage where the refusing stage was, and it sets the
+    // producer to Verter over zero bytes. Minting a witness from it would
+    // hand `prepare_supplied_style` an "externally preprocessed" empty
+    // stylesheet that no preprocessor ever produced — admitted as a valid,
+    // silently empty surface.
+    let refused_at_preprocessed =
+        QualifiedStyleResult::refused(StyleStage::Preprocessed, CssDialect::Css, Vec::new());
+    assert_eq!(refused_at_preprocessed.stage(), StyleStage::Preprocessed);
+    assert!(refused_at_preprocessed.is_refused());
+    assert!(
+        refused_at_preprocessed.as_preprocessed().is_none(),
+        "a refusal produced no bytes, so nothing external produced them"
     );
 }
 
@@ -248,10 +263,31 @@ fn the_dialect_owner_accepts_exactly_what_the_carrier_parser_classifies() {
         );
     }
 
+    // `css` is the one spelling matched case-insensitively, on BOTH sides. The
+    // exact-key rule exists to keep a spelling from resolving here while no
+    // preprocessor table has a key for it — and plain CSS reaches no such
+    // table, so the rule has nothing to protect. Failing `lang="CSS"` closed
+    // instead costs an unambiguously-CSS block every diagnostic, hover and
+    // colour the editor serves it, and buys agreement with nothing.
+    for spelling in ["CSS", "Css", "cSS"] {
+        assert_eq!(
+            CssDialect::from_lang(spelling),
+            Some(CssDialect::Css),
+            "{spelling:?} names plain CSS in the dialect owner"
+        );
+        assert_eq!(
+            StyleLang::from_bytes(spelling.as_bytes()),
+            StyleLang::Css,
+            "{spelling:?} names plain CSS in the carrier parser too"
+        );
+    }
+
     // Spellings a carrier can plausibly author that neither side may accept:
     // a preprocessor table keyed by exact bytes has no entry for them, so a
-    // block spelled this way has nothing that can compile it.
-    for spelling in ["SCSS", "Less", " stylus ", "sass ", "nocss", ""] {
+    // block spelled this way has nothing that can compile it. `css` is absent
+    // from this list for the reason above, and `CSS ` (trailing space) is not
+    // a casing variant — it is a different string in every table.
+    for spelling in ["SCSS", "Less", " stylus ", "sass ", "CSS ", "nocss", ""] {
         assert!(
             CssDialect::from_lang(spelling).is_none(),
             "{spelling:?} must fail closed in the dialect owner"
@@ -316,49 +352,20 @@ fn every_cascade_entry_reports_the_same_inclusion_inventory() {
         false,
     );
 
-    // The inventory is BOTH the list and the derived "does any of this pull in
-    // bytes nothing here parsed" answer. Comparing only the list misses the
-    // route dependence on the field consumers actually branch on: an entry can
-    // publish the list and leave the derived answer at its default, and every
-    // later stage's recorder then sees a populated list and does nothing.
-    type Inventory = (Vec<StyleDependencyKind>, bool);
-    let inventory = |facts: &verter_compiler::style_planner::VueStyleFacts| -> Inventory {
-        (
-            facts
-                .dependencies
-                .iter()
-                .map(|dependency| dependency.kind())
-                .collect(),
-            facts.pulls_in_unparsed_bytes,
-        )
-    };
-    // A finished cascade publishes its inclusion list on the RESULT; the
-    // recorder's accumulator is moved into it rather than copied, so the list
-    // is read where consumers read it and the derived answer where the
-    // single-stage entries return it.
-    let cascade_inventory = |outcome: &VueStyleCascadeOutcome| -> Inventory {
-        assert!(
-            outcome.facts.dependencies.is_empty(),
-            "a finished cascade must not retain a second copy of the inclusion list"
-        );
-        (
-            outcome
-                .result
-                .dependencies()
-                .iter()
-                .map(|dependency| dependency.kind())
-                .collect(),
-            outcome.facts.pulls_in_unparsed_bytes,
-        )
-    };
-    let single_stage_inventory = |outcome: &StyleRewriteOutcome| -> Inventory {
+    // The answer under test is the one consumers actually branch on: "does
+    // this block declare its whole surface". The inclusion LIST is the IR
+    // owner's (pinned in `verter_css_syntax`); what must not depend on the
+    // entry point is the derived answer every cascade entry publishes.
+    let cascade_inventory =
+        |outcome: &VueStyleCascadeOutcome| -> bool { outcome.facts.pulls_in_unparsed_bytes() };
+    let single_stage_inventory = |outcome: &StyleRewriteOutcome| -> bool {
         match outcome {
             StyleRewriteOutcome::Unchanged { facts }
-            | StyleRewriteOutcome::Rewritten { facts, .. } => inventory(facts),
+            | StyleRewriteOutcome::Rewritten { facts, .. } => facts.pulls_in_unparsed_bytes(),
         }
     };
 
-    let expected: Inventory = (vec![StyleDependencyKind::Import], true);
+    let expected = true;
     assert_eq!(
         cascade_inventory(&via_authored),
         expected,
@@ -404,19 +411,79 @@ fn every_cascade_entry_reports_the_same_inclusion_inventory() {
     );
 
     // A sheet with no inclusions is not the same state as a parse that never
-    // recorded one, and both entries must say so rather than leaving the
-    // derived answer at whatever a default carries.
+    // ran, and only a sheet an entry actually SURVEYED may answer "exhaustive".
     let self_contained = ".a { color: v-bind(tone); }\n";
-    assert_eq!(
-        cascade_inventory(&run_vue_style_cascade(
+    assert!(
+        !cascade_inventory(&run_vue_style_cascade(
             authored(self_contained, CssDialect::Css),
             "sc1",
             false,
             true,
             false
         )),
-        (Vec::new(), false),
-        "a self-contained sheet declares its whole surface"
+        "a surveyed self-contained sheet declares its whole surface"
+    );
+}
+
+/// The unsurveyed state answers "this block may pull in bytes nothing here
+/// parsed", never "its surface is exhaustive".
+///
+/// The reachable state: a cascade whose only parsing stage is the authored
+/// `v-bind()` one, and that stage refuses. `module` and `scoped` are both
+/// false, so no later stage parses either, and NOTHING ever surveys the
+/// block's inclusions. A fail-open answer there is the wrong-complete
+/// direction the correctness budget puts at zero — it publishes "this block
+/// declares its whole surface" for a block no parse ever read, and a consumer
+/// that trusts it reports a binding used only from an imported sheet as
+/// unused.
+///
+/// Discriminates a derived `Default` on the published answer: `false` is the
+/// STRONG claim, and it is exactly what a plain `bool` field hands out for
+/// free.
+#[test]
+fn a_cascade_that_surveyed_nothing_never_claims_an_exhaustive_surface() {
+    // A Sass `v-bind()` spanning a line break is an indented-layout mutation:
+    // the authored stage refuses it before recording anything. With neither
+    // modules nor scoping requested, no later stage parses the block either.
+    //
+    // The sheet has NO inclusions, which is what makes this discriminating —
+    // a surveyed parse of it answers `false`, so `true` here can only come
+    // from the unsurveyed state and never from the sheet's own content.
+    let unsurveyable = ".a\n  color: v-bind(\n    tone)\n";
+    let outcome = run_vue_style_cascade(
+        authored(unsurveyable, CssDialect::Sass),
+        "sc1",
+        false,
+        false,
+        false,
+    );
+    assert!(
+        !outcome.stage_failures.is_empty(),
+        "the fixture must actually refuse, or it surveys after all"
+    );
+    assert!(
+        outcome.facts.pulls_in_unparsed_bytes(),
+        "a block nothing surveyed cannot claim its surface is exhaustive"
+    );
+
+    // Control: the same sheet with a single-line `v-bind()` IS surveyed, and
+    // then answers `false`. Without this leg the assertion above would also
+    // pass for a sheet that simply has an inclusion.
+    let surveyed = ".a\n  color: v-bind(tone)\n";
+    let control = run_vue_style_cascade(
+        authored(surveyed, CssDialect::Sass),
+        "sc1",
+        false,
+        false,
+        false,
+    );
+    assert!(
+        control.stage_failures.is_empty(),
+        "the control must not refuse"
+    );
+    assert!(
+        !control.facts.pulls_in_unparsed_bytes(),
+        "a surveyed inclusion-free sheet declares its whole surface"
     );
 }
 

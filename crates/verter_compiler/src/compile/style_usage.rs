@@ -100,7 +100,7 @@ fn accumulate_block_usage(input: AuthoredStyleInput<'_>, usage: &mut StyleVBindU
             // real SCSS — while a sheet the parse could only read by
             // skipping past a syntax error hides its `@import` from the
             // inclusion list entirely and has to fail open on that too.
-            if facts.pulls_in_unparsed_bytes {
+            if facts.pulls_in_unparsed_bytes() {
                 usage.complete = false;
             }
             for binding in facts.v_bind_vars {

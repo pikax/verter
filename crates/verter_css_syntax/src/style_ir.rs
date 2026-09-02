@@ -831,7 +831,13 @@ impl<'b> StyleSyntaxIrSink<'b> {
     /// string. The at-rule is still recorded as a dependency; only its target
     /// is unknown, which is a different fact from having no dependency.
     fn specifier_of(&self, prelude: &ComponentValueTree) -> Option<StyleSpecifier> {
-        for value in prelude.values() {
+        self.specifier_in(prelude.values())
+    }
+
+    /// [`Self::specifier_of`] over an already-sliced value run, for the
+    /// inclusion form whose keyword sits inside the same run as its target.
+    fn specifier_in(&self, values: &[ComponentValue]) -> Option<StyleSpecifier> {
+        for value in values {
             match value {
                 ComponentValue::Comment(_) => continue,
                 ComponentValue::String(token) => {
@@ -1068,12 +1074,15 @@ impl<'b> StyleSyntaxIrSink<'b> {
                     completeness,
                 }));
             }
-            SyntaxKind::AmbiguousStatement => self.push_unknown(
-                UnknownStatementKind::Ambiguous,
-                span,
-                frame.block,
-                frame.value_tree,
-            ),
+            SyntaxKind::AmbiguousStatement => {
+                self.record_stylus_bare_inclusion(frame.value_tree.as_ref());
+                self.push_unknown(
+                    UnknownStatementKind::Ambiguous,
+                    span,
+                    frame.block,
+                    frame.value_tree,
+                )
+            }
             SyntaxKind::Recovery => self.push_unknown(
                 UnknownStatementKind::Recovery,
                 span,
@@ -1093,6 +1102,53 @@ impl<'b> StyleSyntaxIrSink<'b> {
         } else {
             self.statements.push(statement);
         }
+    }
+
+    /// Record Stylus's bare `require 'theme'` / `import 'theme'` statement as
+    /// an inclusion.
+    ///
+    /// Stylus spells both inclusion keywords with and without the `@`. Only
+    /// the `@`-spelled form carries an at-keyword, so only that form reaches
+    /// an at-rule frame; the bare form has nothing the layout pass can
+    /// classify and arrives here as an unclassified statement. Left
+    /// unrecorded, a sheet whose only inclusion is spelled that way answers
+    /// [`StyleSyntaxIr::pulls_in_unparsed_bytes`] with "this sheet declares
+    /// its whole surface" — the wrong-complete direction, publishing an
+    /// exhaustive `v-bind()` inventory for a block whose bindings live in the
+    /// included sheet.
+    ///
+    /// Only Stylus, and only when the statement OPENS with the keyword: a
+    /// declaration or a selector that merely mentions it is classified
+    /// elsewhere and never reaches this arm.
+    fn record_stylus_bare_inclusion(&mut self, values: Option<&ComponentValueTree>) {
+        if self.dialect != CssDialect::Stylus {
+            return;
+        }
+        let Some(values) = values.map(ComponentValueTree::values) else {
+            return;
+        };
+        let Some(head) = values
+            .iter()
+            .position(|value| !matches!(value, ComponentValue::Comment(_)))
+        else {
+            return;
+        };
+        let ComponentValue::Token(keyword) = values[head] else {
+            return;
+        };
+        if keyword.kind() != TokenKind::Ident {
+            return;
+        }
+        let Some(kind) =
+            StyleDependencyKind::from_stylus_statement_keyword(self.source.slice(keyword.span()))
+        else {
+            return;
+        };
+        // Sliced, never collected: the target sits in the same run as the
+        // keyword, so the search continues from just past it.
+        let specifier = self.specifier_in(&values[head + 1..]);
+        self.dependencies
+            .push(StyleDependency::new(kind, keyword.span(), specifier));
     }
 
     fn push_unknown(
