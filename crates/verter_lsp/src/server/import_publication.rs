@@ -145,6 +145,25 @@ impl VerterLanguageServer {
         })
     }
 
+    /// Whether the document's OWN carrier contract — the third leg this pass
+    /// owns, alongside the imported-carrier and barrel legs — is already
+    /// settled.
+    ///
+    /// The delivered import receipt cannot answer this. Its key is
+    /// `(content_generation, resolver_snapshot_generation)`, and it survives an
+    /// edit whose dependency-root signature is unchanged, because such an edit
+    /// cannot change what the document imports. That reasoning does not extend
+    /// to the document's own public contract: the contract snapshot is bound to
+    /// the source revision and to a wider freshness key, so an edit that
+    /// preserves the receipt still retires the contract. Gating the whole pass
+    /// on the receipt alone therefore leaves the contract cold for the rest of
+    /// the generation — the sole producer returns early on every later enqueue,
+    /// and a parent importing this carrier never sees the edited surface.
+    fn own_carrier_contract_current(&self, canonical_id: &str) -> bool {
+        !verter_semantic::resolver_core::path_is_carrier(canonical_id)
+            || self.child_public_contract_is_settled(canonical_id)
+    }
+
     /// Enqueue a detached background publication of `uri`'s import-dependency
     /// closure (imported carrier APIs + barrel re-export graph). Never awaited
     /// by callers; the spawned task outlives any request, so a request
@@ -255,8 +274,9 @@ impl VerterLanguageServer {
         if let Some(key) = key {
             if self.import_sync.is_fresh_at(canonical_id, key)
                 && self.imported_child_contracts_current_for_parent(canonical_id)
+                && self.own_carrier_contract_current(canonical_id)
             {
-                return; // The import set was already delivered at this generation.
+                return; // Every leg of this pass is delivered at this generation.
             }
         }
 
