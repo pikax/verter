@@ -80,6 +80,32 @@ import type {
   HostVirtualQuery,
 } from "./request-types";
 
+export type {
+  BrowserHostCompileRequest,
+  BrowserHostRequestedProduct,
+  BrowserHostSvelteCompileRequest,
+  BrowserHostVueCompileRequest,
+  HostAnalysisProductOptions,
+  HostCompileIdentity,
+  HostCompileRequestResponse,
+  HostCompiledAnalysisProduct,
+  HostCompiledIdeProduct,
+  HostCompiledProduct,
+  HostCompiledRuntimeProduct,
+  HostCompiledVirtualNode,
+  HostDestructuredBlockMeta,
+  HostIdeProductOptions,
+  HostRuntimeProductOptions,
+  HostSvelteCompileOptions,
+  HostTemplateAnalysisSnapshot,
+  HostVueCompileOptions,
+} from "./compile-request-types";
+
+import type {
+  BrowserHostCompileRequest,
+  HostCompileRequestResponse,
+} from "./compile-request-types";
+
 // =============================================================================
 // WASM binding types
 // =============================================================================
@@ -96,6 +122,10 @@ type WasmHostGetIdeFn = (
   profile?: HostCompileProfile,
 ) => HostIdeResponse | null;
 type WasmHostEnsureIdeCompiledFn = (canonicalId: string, profile?: HostCompileProfile) => boolean;
+type WasmHostCompileRequestFn = (
+  canonicalId: string,
+  request: BrowserHostCompileRequest,
+) => HostCompileRequestResponse;
 type WasmHostGetAnalysisFn = (canonicalOrAlias: string) => unknown | null;
 type WasmHostSetImportDependenciesFn = (
   canonicalOrAlias: string,
@@ -121,6 +151,7 @@ interface WasmHostBinding {
   applyBlockOverrides: WasmHostApplyBlockOverridesFn;
   getIde: WasmHostGetIdeFn;
   ensureIdeCompiled: WasmHostEnsureIdeCompiledFn;
+  compileRequest: WasmHostCompileRequestFn;
   getVirtualFile: WasmHostGetVirtualFileFn;
   listVirtualFiles: WasmHostListVirtualFilesFn;
   remove: WasmHostRemoveFn;
@@ -214,6 +245,47 @@ export class Host {
    */
   ensureIdeCompiled(canonicalId: string, profile?: HostCompileProfile): boolean {
     return this.inner.ensureIdeCompiled(canonicalId, profile);
+  }
+
+  /**
+   * Execute one typed compile request against an already-registered source.
+   *
+   * The whole transaction is one call: `upsert` the carrier once, source
+   * only, then hand this the canonical id and the request. There is no
+   * ensure-then-read pair to order correctly and no boolean to interpret.
+   *
+   * The request is the demand document end to end — its product set is what
+   * gets compiled, and no compile profile is built from it on any path. The
+   * source is never copied into it.
+   *
+   * Returns every requested product, in request order, each row tagged with
+   * the same `kind` spelling the request used. This route can produce
+   * `runtimeClient`, `runtimeServer`, `ideCompanion`, and `analysis`.
+   * `publicApi` and `declarations` remain shared-schema arms but are refused
+   * for both frameworks.
+   *
+   * Diagnostic spans and destructured binding source spans are UTF-16
+   * offsets into the registered source. Destructured block bounds are
+   * UTF-16 offsets into the IDE row's generated `code`; the `analysis` row's
+   * own spans are UTF-8 byte offsets into the source, exactly as
+   * `getAnalysis()` publishes them.
+   *
+   * Every call is a COMPLETE compile: this route consults and publishes no
+   * compile cache slot, so two identical calls compile twice. A per-keystroke
+   * loop that only needs the IDE surface should stay on the cached
+   * `ensureIdeCompiled()` / `getIde()` pair; reach for this when the demand
+   * is a fresh multi-product compile.
+   *
+   * Complete-only: a payload the schema refuses, a request the compiler
+   * refuses, a framework arm the registered carrier contradicts, an
+   * unproducible product, or an execution refusal all THROW the refusal
+   * message as a string — never a partial result, a `null`, or a boolean.
+   */
+  compileRequest(
+    canonicalId: string,
+    request: BrowserHostCompileRequest,
+  ): HostCompileRequestResponse {
+    return this.inner.compileRequest(canonicalId, request);
   }
 
   /**

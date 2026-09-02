@@ -62,7 +62,6 @@ impl VerterHost {
     /// # Errors
     ///
     /// [`CompileRequestFailure`] — see its arms.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn compile_request(
         &self,
         canonical_id: &str,
@@ -220,7 +219,6 @@ impl VerterHost {
     /// virtual nodes, the IDE product publishes the IDE projection, and
     /// the analysis product publishes the host analysis payload — each row
     /// one-to-one with a requested kind, in request order.
-    #[cfg(not(target_arch = "wasm32"))]
     fn compile_request_entry(
         &self,
         snapshot: &CompileInput,

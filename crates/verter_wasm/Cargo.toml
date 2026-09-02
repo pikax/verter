@@ -37,13 +37,11 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 # dependency graph. `getrandom` 0.4 is the only major reached here.
 getrandom = { version = "0.4", features = ["wasm_js"] }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+
 [dev-dependencies]
 wasm-bindgen-test = "0.3.72"
-# The JS-boundary tests build one payload as a real JavaScript object graph:
-# an own key valued `undefined` cannot be expressed by serialising a
-# `serde_json::Value`, and that is precisely the shape where a closed schema
-# can be closed on paper and open in practice.
-js-sys = "0.3"
 verter_identity = { path = "../verter_identity" }
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
 verter_semantic = { path = "../verter_semantic", features = ["test-support"] }

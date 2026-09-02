@@ -126,8 +126,10 @@ console.log(main?.code);
 ```
 
 There is no standalone `compile()` / `compileSync()`. The WASM artifact
-exports `VerterHost` and nothing else compile-shaped, so those wrappers
-never worked; they were removed rather than left throwing. Use the host.
+exports `VerterHost` and nothing else compile-shaped, so those wrappers never
+worked; they were removed rather than left throwing. Compile through the host:
+`Host.compileRequest()` for a typed one-call compile, or the profile-bearing
+reads for a cached IDE surface.
 
 ### `isInitialized(): boolean`
 
@@ -143,10 +145,13 @@ if (!isInitialized()) {
 
 ### Types
 
-Host request and response types (`HostConfig`, `HostUpsertRequest`,
+Shared host request and response types (`HostConfig`, `HostUpsertRequest`,
 `HostVirtualQuery`, `HostVirtualFileResponse`, …) are re-exported from
-`@verter/native/host-types`, so the two packages type-check against one
-definition.
+`@verter/native/host-types`. `BrowserHostCompileRequest` and
+`HostCompileRequestResponse` are exported by this package: the browser wire
+form tags each arm by key (`{ vue: … }`) where the native one uses a
+`framework` field, so the prefix keeps the two from being mistaken for each
+other at an import site.
 
 ## Development / Build
 
@@ -234,16 +239,16 @@ pnpm test    # runs: vitest run
 
 ## Dependencies
 
-| Dependency                            | Purpose                                           |
-| ------------------------------------- | ------------------------------------------------- |
-| `verter_compiler` (Rust)                  | Core Vue template compiler                        |
-| `wasm-bindgen` (Rust)                 | Rust/WASM interop layer                           |
+| Dependency                            | Purpose                                               |
+| ------------------------------------- | ----------------------------------------------------- |
+| `verter_compiler` (Rust)              | Core Vue template compiler                            |
+| `wasm-bindgen` (Rust)                 | Rust/WASM interop layer                               |
 | `wasm-bindgen-cli` (tool)             | Generates browser JS glue and TypeScript declarations |
-| `binaryen` / `wasm-opt` (npm tool)    | Size-optimizes the compiled WASM binary           |
-| `serde` / `serde-wasm-bindgen` (Rust) | Serialization between Rust structs and JS objects |
-| `console_error_panic_hook` (Rust)     | Better panic messages in browser console          |
-| `oxc_allocator` (Rust)                | Memory allocator for OXC AST nodes                |
-| `tsdown` (dev)                        | TypeScript bundler for the JS wrapper             |
+| `binaryen` / `wasm-opt` (npm tool)    | Size-optimizes the compiled WASM binary               |
+| `serde` / `serde-wasm-bindgen` (Rust) | Serialization between Rust structs and JS objects     |
+| `console_error_panic_hook` (Rust)     | Better panic messages in browser console              |
+| `oxc_allocator` (Rust)                | Memory allocator for OXC AST nodes                    |
+| `tsdown` (dev)                        | TypeScript bundler for the JS wrapper                 |
 
 ## License
 

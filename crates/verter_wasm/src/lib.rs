@@ -32,6 +32,7 @@ use verter_session::component_meta_audit::{
 use wasm_bindgen::prelude::*;
 
 mod audit;
+mod compile_request_response;
 #[cfg(test)]
 mod host_compile_request_tests;
 mod typeinfo;
@@ -40,6 +41,9 @@ use audit::{
     parse_bundler_kind_wasm, parse_compile_target_wasm, parse_request_id_str_wasm,
     stored_audit_record_to_json_string, AuditRecordFilterWasm, BundlerBatchSummaryArgsWasm,
     WorkspaceOpArgWasm,
+};
+use compile_request_response::{
+    compile_request_failure_to_string, compile_request_response_to_wasm, ide_response_to_ffi,
 };
 
 /// WASM audit bundle — mirror of the NAPI binding's bundle shape.
@@ -284,8 +288,9 @@ fn default_known_dependency_extensions() -> Vec<String> {
 // decides whether the payload matches the schema, and the canonical
 // constructor decides whether the decoded request is admissible.
 //
-// The legacy `HostCompileProfile`-shaped entry points below are untouched
-// and still serve every call; nothing routes through this adapter yet.
+// The callable typed compile entry below is this adapter's only consumer.
+// The legacy `HostCompileProfile`-shaped entries stay on their existing
+// decode and execution paths.
 
 /// Why a JS host compile request did not become a canonical
 /// [`CompileRequest`].
@@ -370,6 +375,110 @@ pub fn host_compile_request_from_js(
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
+/// Match TypeScript's default optional-property semantics at the public
+/// callable boundary.
+///
+/// `ExactlyOneOf` can reject two populated tags, but without
+/// `exactOptionalPropertyTypes` an optional sibling key may be explicitly
+/// `undefined`. The serializer preserves that own key as JSON `null`, which
+/// an externally tagged enum correctly refuses as a second arm. Treat only
+/// known tag keys with an `undefined` value as absent before the single
+/// canonical decode; unknown keys and `null` values remain untouched and are
+/// still refused by the schema.
+#[cfg(target_arch = "wasm32")]
+fn normalize_compile_request_undefined_tags(request: JsValue) -> Result<JsValue, JsValue> {
+    use js_sys::{Array, Object, Reflect};
+    use wasm_bindgen::JsCast;
+
+    const FRAMEWORK_TAGS: &[&str] = &["vue", "svelte"];
+    const PRODUCT_TAGS: &[&str] = &["runtimeClient", "runtimeServer", "ideCompanion", "analysis"];
+
+    fn inspection_error() -> JsValue {
+        ffi_err("invalid host compile request: could not inspect tagged request properties")
+    }
+
+    fn clone_without_undefined_tags(
+        value: &JsValue,
+        tags: &[&str],
+    ) -> Result<Option<JsValue>, JsValue> {
+        if !value.is_object() || value.is_null() || Array::is_array(value) {
+            return Ok(None);
+        }
+
+        let mut has_defined_tag = false;
+        for tag in tags {
+            let tag = JsValue::from_str(tag);
+            has_defined_tag |= !Reflect::get(value, &tag)
+                .map_err(|_| inspection_error())?
+                .is_undefined();
+        }
+        // Preserve `Map` inputs: their entries are not reflected as object
+        // properties, and the existing decoder deliberately supports them.
+        if !has_defined_tag {
+            return Ok(None);
+        }
+
+        // An ordinary target inherits Object.prototype's `__proto__`
+        // setter. Object.assign would invoke it for an own enumerable source
+        // key of that name, changing the clone's prototype and erasing the
+        // key before the closed decoder can reject it. A null-prototype
+        // target has no inherited setters, so every enumerable own property
+        // remains an own property for Object.entries.
+        let cloned = Object::try_assign(
+            &Object::create(JsValue::NULL.unchecked_ref::<Object>()),
+            value.unchecked_ref::<Object>(),
+        )
+        .map_err(|_| inspection_error())?;
+        for tag in tags {
+            let tag = JsValue::from_str(tag);
+            if Reflect::get(value, &tag)
+                .map_err(|_| inspection_error())?
+                .is_undefined()
+            {
+                Reflect::delete_property(&cloned, &tag).map_err(|_| inspection_error())?;
+            }
+        }
+        Ok(Some(cloned.into()))
+    }
+
+    let Some(normalized) = clone_without_undefined_tags(&request, FRAMEWORK_TAGS)? else {
+        return Ok(request);
+    };
+    for framework_tag in FRAMEWORK_TAGS {
+        let framework_key = JsValue::from_str(framework_tag);
+        let body = Reflect::get(&normalized, &framework_key).map_err(|_| inspection_error())?;
+        if !body.is_object() || body.is_null() || Array::is_array(&body) {
+            continue;
+        }
+        let products_key = JsValue::from_str("products");
+        let products = Reflect::get(&body, &products_key).map_err(|_| inspection_error())?;
+        if !Array::is_array(&products) {
+            continue;
+        }
+
+        let normalized_products = Array::new();
+        for product in products.unchecked_ref::<Array>().iter() {
+            let product = clone_without_undefined_tags(&product, PRODUCT_TAGS)?.unwrap_or(product);
+            normalized_products.push(&product);
+        }
+        let normalized_body = Object::try_assign(
+            &Object::create(JsValue::NULL.unchecked_ref::<Object>()),
+            body.unchecked_ref::<Object>(),
+        )
+        .map_err(|_| inspection_error())?;
+        Reflect::set(&normalized_body, &products_key, &normalized_products)
+            .map_err(|_| inspection_error())?;
+        Reflect::set(&normalized, &framework_key, &normalized_body)
+            .map_err(|_| inspection_error())?;
+    }
+    Ok(normalized)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn normalize_compile_request_undefined_tags(request: JsValue) -> Result<JsValue, JsValue> {
+    Ok(request)
+}
+
 // =============================================================================
 // VerterHost (in-memory virtual file host)
 //
@@ -377,6 +486,7 @@ pub fn host_compile_request_from_js(
 // - Both: new, resolve, upsert, applyBlockOverrides, getVirtualFile,
 //         listVirtualFiles, remove, setImportDependencies, getAnalysis
 // - NAPI-only: prepareStyleForPreprocessor / transformVueStyle / analyzeStyle
+// - WASM-only: compileRequest
 // =============================================================================
 
 /// In-memory virtual file host for Vue SFC compilation (WASM variant).
@@ -608,34 +718,7 @@ impl WasmVerterHost {
         let host_profile = ffi_profile_to_host(ffi_profile).map_err(ffi_err)?;
         let result = catch_panic(|| self.inner.get_ide(canonical_id, &host_profile))?;
         let sfc_source = self.inner.get_source(canonical_id);
-        to_wasm_value(&result.map(|r| {
-            let destructured_block = r.destructured_block.as_ref().map(|meta| {
-                let sfc = sfc_source.as_deref().unwrap_or("");
-                let bindings: Vec<verter_ffi::convert::DestructuredBindingInput<'_>> = meta
-                    .bindings
-                    .iter()
-                    .map(|b| verter_ffi::convert::DestructuredBindingInput {
-                        name: &b.name,
-                        source_start: b.source_span.start,
-                        source_end: b.source_span.end,
-                    })
-                    .collect();
-                verter_ffi::convert::convert_destructured_block_meta(
-                    &bindings,
-                    meta.block_start,
-                    meta.block_end,
-                    sfc,
-                    &r.code,
-                    verter_ffi::convert::OffsetEncoding::Utf16,
-                )
-            });
-            FfiIdeResponse {
-                code: r.code.to_string(),
-                source_map: r.source_map.map(|s| s.to_string()),
-                is_jsx: r.is_jsx,
-                destructured_block,
-            }
-        }))
+        to_wasm_value(&result.map(|response| ide_response_to_ffi(&response, sfc_source.as_deref())))
     }
 
     /// Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
@@ -671,6 +754,83 @@ impl WasmVerterHost {
         let host_profile = ffi_profile_to_host(ffi_profile).map_err(ffi_err)?;
         catch_panic(|| self.inner.ensure_ide_compiled(canonical_id, &host_profile))?
             .map_err(host_err)
+    }
+
+    /// Execute ONE typed compile request against an already-registered
+    /// source and return its complete result.
+    ///
+    /// The whole transaction is one call: register the carrier once through
+    /// the ordinary source-only [`upsert`](Self::upsert), then hand this
+    /// entry the canonical id and the request. There is no ensure-then-read
+    /// pair whose ordering a caller has to get right, and no boolean whose
+    /// meaning a caller has to infer.
+    ///
+    /// - `canonical_id` — the registered carrier the request executes
+    ///   against. The source is NOT part of the request and is never copied
+    ///   into it.
+    /// - `request` — a framework-discriminated typed request
+    ///   (`{ vue: { identity, products, options } }` or
+    ///   `{ svelte: … }`). It is the demand document end to end: the
+    ///   product set is what gets compiled, and no compile profile is built
+    ///   from it on any path.
+    ///
+    /// Returns `{ canonicalId, diagnostics, products }` — one product row
+    /// per requested product kind, in request order, each tagged with the
+    /// same `kind` spelling the request used. This route produces
+    /// `runtimeClient`, `runtimeServer`, `ideCompanion`, and `analysis`.
+    /// The shared request schema's `publicApi` and `declarations` arms are
+    /// refused for both frameworks.
+    ///
+    /// Diagnostic spans and destructured binding source spans are UTF-16
+    /// offsets into the registered source. Destructured block bounds are
+    /// UTF-16 offsets into the IDE row's generated `code`; the `analysis`
+    /// row's own spans stay UTF-8 byte offsets into the source, exactly as
+    /// `getAnalysis` publishes them.
+    ///
+    /// Every call is a COMPLETE compile. This route consults and publishes
+    /// no compile cache slot, so two identical calls compile twice — a
+    /// per-keystroke loop that only needs the IDE surface stays cheaper on
+    /// the cached `ensureIdeCompiled` / `getIde` pair.
+    ///
+    /// Complete-only. A payload the schema refuses, a request the compiler
+    /// refuses, a framework arm the registered carrier contradicts, an
+    /// unproducible product, or an execution refusal all THROW the refusal
+    /// message as a string — never a partial response, a `null`, or a
+    /// boolean, and never a sibling product published beside a refusal.
+    #[wasm_bindgen(js_name = compileRequest)]
+    pub fn compile_request(
+        &self,
+        canonical_id: &str,
+        request: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        // Known sibling tags explicitly valued `undefined` are first read as
+        // absent, matching the published TypeScript type under its default
+        // compiler semantics. The result is then decoded ONCE, straight into
+        // the canonical request, through the existing schema boundary.
+        //
+        // Every host-resolved profile identity is absent: the wire has no
+        // slot for one, and the host execution route consumes none. A
+        // caller therefore cannot state one, and nothing is substituted on
+        // its behalf.
+        let request = host_compile_request_from_js(
+            normalize_compile_request_undefined_tags(request)?,
+            &HostResolvedCompileProfiles {
+                semantic: None,
+                output: None,
+                presentation: None,
+                serialization: None,
+            },
+        )?;
+        let response = catch_panic(|| self.inner.compile_request(canonical_id, request))?
+            .map_err(|failure| ffi_err(compile_request_failure_to_string(&failure)))?;
+        // The registered source is read AFTER the compile, by the canonical
+        // id the response resolved to, so the UTF-16 diagnostic offsets are
+        // indexed against the carrier the compile actually ran on rather
+        // than whatever alias the caller happened to name.
+        let sfc_source = self.inner.get_source(&response.canonical_id);
+        let published =
+            compile_request_response_to_wasm(response, sfc_source.as_deref()).map_err(ffi_err)?;
+        to_wasm_value(&published)
     }
 
     /// Retrieve TSC declaration output for a file.

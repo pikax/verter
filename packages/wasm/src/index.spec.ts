@@ -33,6 +33,14 @@ const mockHostListVirtualFiles = vi.fn(() => []);
 const mockHostRemove = vi.fn(() => null);
 const mockHostCollectResolvableModuleReferenceSpecifiers = vi.fn(() => ["./Foo.vue"]);
 const mockHostResolveKnownModuleReferenceDependencies = vi.fn(() => ["src/Foo.vue"]);
+// The analysis payload nests under its own key, exactly as the binding
+// publishes it — a mock that flattened it would teach the wrong row shape,
+// which is how a previous mocked surface outlived the artifact it stood for.
+const mockHostCompileRequest = vi.fn(() => ({
+  canonicalId: "Comp.vue",
+  diagnostics: { diagnostics: [], hasErrors: false },
+  products: [{ kind: "analysis", analysis: { bindingOccurrences: [] } }],
+}));
 const mockHostCtor = vi.fn<(config?: unknown) => void>();
 class MockHost {
   constructor(config?: unknown) {
@@ -46,6 +54,7 @@ class MockHost {
   remove = mockHostRemove;
   collectResolvableModuleReferenceSpecifiers = mockHostCollectResolvableModuleReferenceSpecifiers;
   resolveKnownModuleReferenceDependencies = mockHostResolveKnownModuleReferenceDependencies;
+  compileRequest = mockHostCompileRequest;
 }
 
 vi.mock("../wasm/verter_wasm.js", () => ({
@@ -66,6 +75,7 @@ beforeEach(async () => {
   mockHostRemove.mockClear();
   mockHostCollectResolvableModuleReferenceSpecifiers.mockClear();
   mockHostResolveKnownModuleReferenceDependencies.mockClear();
+  mockHostCompileRequest.mockClear();
 
   // Ensure module is initialized for each test
   await initialize();
@@ -96,6 +106,28 @@ describe("@verter/wasm host wrapper", () => {
       expect(mockHostGetVirtualFile).toHaveBeenCalled();
       expect(mockHostListVirtualFiles).toHaveBeenCalledWith("Comp.vue");
       expect(mockHostRemove).toHaveBeenCalledWith("Comp.vue");
+    });
+
+    it("forwards the typed compile request as two separate arguments", async () => {
+      const host = await createHost();
+      const request = {
+        vue: {
+          identity: { isProduction: false, forceJs: false },
+          products: [{ analysis: { wantScriptBindings: true, wantTemplateData: false } }],
+          options: { backend: "inferred", ssr: false, isCustomElement: [], babelParserPlugins: [] },
+        },
+      } as const;
+
+      const response = host.compileRequest("Comp.vue", request);
+
+      // The id and the request stay separate on the way through: a wrapper
+      // that folded the id into the request, or reordered the pair, would
+      // hand the binding a payload the schema refuses at run time.
+      expect(mockHostCompileRequest).toHaveBeenCalledWith("Comp.vue", request);
+      expect(response.canonicalId).toBe("Comp.vue");
+      expect(response.products).toEqual([
+        { kind: "analysis", analysis: { bindingOccurrences: [] } },
+      ]);
     });
 
     it("forwards shared module reference helper methods", async () => {
