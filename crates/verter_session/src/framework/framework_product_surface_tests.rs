@@ -1211,6 +1211,7 @@ fn standalone_vue_style(
             .expect("the verification parser produced native CSS syntax IR");
     verter_compiler::style_planner::transform_vue_style(
         verified,
+        verter_compiler::style_planner::CascadeInput::Authored,
         filename,
         filename,
         filename,
@@ -1230,7 +1231,7 @@ fn the_standalone_css_spelling_publishes_css_and_honours_its_source_map_axis() {
     let source = ".x{color:red}";
     let requested = standalone_vue_style(source, "/probe/Styled.vue", "probe1234", true, true);
     assert_eq!(
-        requested.code.as_str(),
+        requested.code(),
         ".x[data-v-probe1234]{color:red}",
         "the standalone CSS route's emitted bytes moved"
     );
@@ -1245,14 +1246,15 @@ fn the_standalone_css_spelling_publishes_css_and_honours_its_source_map_axis() {
         "the standalone CSS route published a source map that was never requested"
     );
     assert_eq!(
-        requested.code, unrequested.code,
+        requested.code(),
+        unrequested.code(),
         "the `sourcemap` axis changed the emitted CSS bytes"
     );
 
     let passthrough =
         standalone_vue_style(source, "/probe/Passthrough.css", "probe1234", false, true);
     assert_eq!(
-        passthrough.code.as_str(),
+        passthrough.code(),
         source,
         "untouched CSS must stay byte-identical to the authored input"
     );

@@ -915,6 +915,24 @@ mod tests {
     use verter_css_syntax::CssDialect;
     use verter_language::{ExternalLinkKind, ScriptRegionKind};
 
+    /// Stand in for the host's identity for the tool that produced the bytes
+    /// these tests supply.
+    fn supplied_producer() -> verter_css_syntax::PreprocessorIdentity {
+        verter_css_syntax::PreprocessorIdentity::Named(
+            verter_css_syntax::ExternalStyleProducer::new("sass", Some("1.77.0"), None)
+                .expect("named producer"),
+        )
+    }
+
+    /// Stand in for the host's admission of already-preprocessed bytes, which
+    /// is the shape these tests exercise.
+    fn supplied_style(css: &str) -> crate::style_planner::PreparedStyleIr {
+        crate::style_planner::prepare_supplied_style(
+            verter_css_syntax::PreprocessedStyle::admitted(css, supplied_producer()),
+        )
+        .expect("supplied css parses")
+    }
+
     fn workspace_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1221,6 +1239,7 @@ mod tests {
             content_artifact_token: format!("content:{lang}"),
             source_space_token: format!("space:{lang}"),
             parsed: None,
+            producer: None,
         }
     }
 
@@ -1830,6 +1849,7 @@ mod tests {
                             content_artifact_token: "artifact:theme-css".to_string(),
                             source_space_token: "space:theme-css".to_string(),
                             parsed: None,
+                            producer: None,
                         })],
                         ..Default::default()
                     },
@@ -1852,6 +1872,74 @@ mod tests {
         );
     }
 
+    /// Who made the selected bytes decides which stage the cascade records
+    /// them at — not a comparison between the authored and selected dialects.
+    ///
+    /// The block here is authored plain CSS AND the tool published plain CSS,
+    /// so the two dialects are equal and a dialect comparison answers "nobody
+    /// preprocessed this". The bytes are then recorded as the carrier's own
+    /// authored content and the tool that actually made them disappears from
+    /// the record — the provenance loss this routing exists to prevent. Only
+    /// the host knows, and it says so through the producer.
+    ///
+    /// The supplied route is fail-closed: it consumes the artifact the host
+    /// admitted rather than re-parsing bytes it did not make. Withholding that
+    /// artifact is therefore what makes the branch observable from outside —
+    /// under a dialect comparison this same input compiles as authored CSS.
+    #[test]
+    fn an_external_tools_output_over_a_plain_css_block_takes_the_supplied_route() {
+        let source = concat!(
+            "<template><div class=\"a\"/></template>",
+            "<style scoped>.a { color: red; }</style>"
+        );
+        let css = ".a { color: red; }";
+        let compile = |parsed: Option<crate::style_planner::PreparedStyleIr>| {
+            let compiler = VueCarrierCompiler;
+            let alloc = oxc_allocator::Allocator::new();
+            compiler.compile_bundle(
+                source,
+                &artifact_for(source),
+                &RuntimeCompileOptions {
+                    filename: Some("PlainSupplied.vue".to_string()),
+                    component_id: Some("scope123".to_string()),
+                    block_content: RuntimeBlockContentInputs {
+                        styles: vec![Some(RuntimeBlockContentInput {
+                            code: Arc::from(css),
+                            source_map: None,
+                            lang: "css".to_string(),
+                            content_artifact_token: "artifact:supplied-css".to_string(),
+                            source_space_token: "space:supplied-css".to_string(),
+                            parsed,
+                            producer: Some(supplied_producer()),
+                        })],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+        };
+
+        let CarrierCompileOutcome::Produced(output) =
+            compile(Some(supplied_style(css))).expect("an admitted external artifact compiles")
+        else {
+            panic!("this fixture produces a runtime surface");
+        };
+        assert!(
+            output.styles[0].code.contains(".a[data-v-scope123]"),
+            "the supplied route still runs every plain-CSS stage: {}",
+            output.styles[0].code
+        );
+
+        match compile(None) {
+            Err(CompileUnsupported::BlockContentRuntimeUnavailable { .. }) => {}
+            other => panic!(
+                "an external producer's bytes with no admitted artifact must refuse rather than \
+                 be re-read as the carrier's own authored content, got {other:?}"
+            ),
+        }
+    }
+
     /// @ai-generated - Unknown selected style lang must refuse, not rewrite as CSS.
     #[test]
     fn unknown_selected_style_lang_refuses_css_cascade_rewrite() {
@@ -1859,8 +1947,7 @@ mod tests {
             "<template><div class=\"a\"/></template>",
             "<style lang=\"postcss\" scoped>.a { color: red; }</style>"
         );
-        let prepared = crate::style_planner::prepare_supplied_plain_css(".a { color: red; }")
-            .expect("css parses");
+        let prepared = supplied_style(".a { color: red; }");
         let compiler = VueCarrierCompiler;
         let alloc = oxc_allocator::Allocator::new();
         let result = compiler.compile_bundle(
@@ -1877,6 +1964,7 @@ mod tests {
                         content_artifact_token: "artifact:postcss".to_string(),
                         source_space_token: "space:postcss".to_string(),
                         parsed: Some(prepared),
+                        producer: Some(supplied_producer()),
                     })],
                     ..Default::default()
                 },
@@ -1917,6 +2005,7 @@ mod tests {
                             content_artifact_token: "artifact:theme-css".to_string(),
                             source_space_token: "space:theme-css".to_string(),
                             parsed: None,
+                            producer: None,
                         })],
                         ..Default::default()
                     },
@@ -1939,8 +2028,8 @@ mod tests {
         );
     }
 
-    /// @ai-generated - A10i must hold for the "supplied-preprocessor-output"
-    /// branch too (authored SCSS whose supplied bytes are already-compiled
+    /// @ai-generated - one parse per content identity must hold for the
+    /// "supplied-preprocessor-output" branch too (authored SCSS whose supplied bytes are already-compiled
     /// plain CSS, so the authored-v-bind stage does not apply): the modules
     /// stage produces no edits here (no class selector to hash), so its
     /// retained IR must hand straight into the scoped-selector stage
@@ -2001,8 +2090,7 @@ mod tests {
         let compiler = VueCarrierCompiler;
         let alloc = oxc_allocator::Allocator::new();
         reset_parse_ir_invocation_count();
-        let prepared = crate::style_planner::prepare_supplied_plain_css("body { color: red; }")
-            .expect("supplied css parses");
+        let prepared = supplied_style("body { color: red; }");
         let output = compiler
             .compile_bundle_expect_produced(
                 source,
@@ -2019,6 +2107,7 @@ mod tests {
                             content_artifact_token: "artifact:theme-scss".to_string(),
                             source_space_token: "space:theme-scss".to_string(),
                             parsed: Some(prepared),
+                            producer: Some(supplied_producer()),
                         })],
                         ..Default::default()
                     },
@@ -2049,7 +2138,7 @@ mod tests {
             "<style module scoped lang=\"scss\" src=\"./b.scss\"></style>",
         );
         let css = ".card { color: red; }";
-        let prepared = crate::style_planner::prepare_supplied_plain_css(css).expect("css parses");
+        let prepared = supplied_style(css);
         let compiler = VueCarrierCompiler;
         let alloc = oxc_allocator::Allocator::new();
         let err = compiler
@@ -2068,6 +2157,7 @@ mod tests {
                                 content_artifact_token: "artifact:a".to_string(),
                                 source_space_token: "space:a".to_string(),
                                 parsed: None,
+                                producer: Some(supplied_producer()),
                             }),
                             Some(RuntimeBlockContentInput {
                                 code: Arc::from(css),
@@ -2076,6 +2166,7 @@ mod tests {
                                 content_artifact_token: "artifact:b".to_string(),
                                 source_space_token: "space:b".to_string(),
                                 parsed: None,
+                                producer: Some(supplied_producer()),
                             }),
                         ],
                         ..Default::default()

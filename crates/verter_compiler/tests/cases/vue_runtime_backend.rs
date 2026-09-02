@@ -213,6 +213,7 @@ fn selected_style(code: &str) -> RuntimeBlockContentInput {
         content_artifact_token: "artifact:theme-css".to_string(),
         source_space_token: "space:theme-css".to_string(),
         parsed: None,
+        producer: None,
     }
 }
 
@@ -228,6 +229,7 @@ fn selected_template_with_map(code: &str, source_map: Option<&str>) -> RuntimeBl
         content_artifact_token: "content:html".to_string(),
         source_space_token: "space:html".to_string(),
         parsed: None,
+        producer: None,
     }
 }
 
@@ -239,6 +241,7 @@ fn selected_style_with_map(code: &str, source_map: Option<&str>) -> RuntimeBlock
         content_artifact_token: "artifact:theme-css".to_string(),
         source_space_token: "space:theme-css".to_string(),
         parsed: None,
+        producer: None,
     }
 }
 
@@ -1778,5 +1781,6 @@ fn selected_script(code: &str, lang: &str) -> RuntimeBlockContentInput {
         content_artifact_token: format!("content:{lang}"),
         source_space_token: format!("space:{lang}"),
         parsed: None,
+        producer: None,
     }
 }

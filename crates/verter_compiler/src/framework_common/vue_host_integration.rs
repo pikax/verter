@@ -1718,6 +1718,7 @@ mod tests {
                     content_artifact_token: "content:ts".to_string(),
                     source_space_token: "space:ts".to_string(),
                     parsed: None,
+                    producer: None,
                 }),
                 ..Default::default()
             },

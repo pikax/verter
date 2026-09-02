@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use verter_css_syntax::{
     parse_style_ir, ComponentValue, CssDiagnosticKind, CssDialect, CssParseMode, CssSource,
-    SelectorComponentKind, StyleBlockKind, StyleStatement, UnknownStatementKind,
+    SelectorComponentKind, StyleBlockKind, StyleDependencyKind, StyleSpecifier, StyleSpecifierForm,
+    StyleStatement, UnknownStatementKind,
 };
 
 fn ir(input: &str, dialect: CssDialect) -> verter_css_syntax::StyleSyntaxIr {
@@ -377,8 +378,181 @@ fn dialect_mixin_function_and_directive_headers_are_contained_not_evaluated() {
         CssDialect::Stylus,
     ] {
         let parsed = ir("@import \"theme\";", dialect);
-        assert!(parsed.imports_unresolved(), "{dialect:?}");
+        let [dependency] = parsed.dependencies() else {
+            panic!("{dialect:?}: {:?}", parsed.dependencies());
+        };
+        assert_eq!(
+            dependency.kind(),
+            StyleDependencyKind::Import,
+            "{dialect:?}"
+        );
+        let specifier = dependency.specifier().expect("quoted specifier");
+        assert_eq!(specifier.form(), StyleSpecifierForm::Quoted, "{dialect:?}");
+        assert_eq!(parsed.specifier_text(specifier), "theme", "{dialect:?}");
     }
+}
+
+/// A consumer asking WHICH stylesheet this one pulls in, WHERE it was named
+/// and in WHAT form must get an exact answer from the parse. Without one it
+/// would walk the at-rules again — a second derivation of structure the parse
+/// already resolved — and a `url()` or `@forward` target would be missed or
+/// mis-sliced along with its quotes.
+#[test]
+fn inclusion_at_rules_are_recorded_with_exact_targets_in_source_order() {
+    let parsed = ir(
+        concat!(
+            "@use \"sass:math\";\n",
+            "@import url(reset.css);\n",
+            "@import url(\"print.css\") print;\n",
+            "@forward \"src/list\";\n",
+            "@plugin \"my-plugin\";\n",
+            "@media screen { .a { color: red } }\n",
+        ),
+        CssDialect::Scss,
+    );
+
+    let observed: Vec<_> = parsed
+        .dependencies()
+        .iter()
+        .map(|dependency| {
+            (
+                dependency.kind(),
+                dependency.specifier().map(StyleSpecifier::form),
+                dependency
+                    .specifier()
+                    .map(|specifier| parsed.specifier_text(specifier)),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        observed,
+        vec![
+            (
+                StyleDependencyKind::Use,
+                Some(StyleSpecifierForm::Quoted),
+                Some("sass:math")
+            ),
+            (
+                StyleDependencyKind::Import,
+                Some(StyleSpecifierForm::Url),
+                Some("reset.css")
+            ),
+            (
+                StyleDependencyKind::Import,
+                Some(StyleSpecifierForm::Url),
+                Some("print.css")
+            ),
+            (
+                StyleDependencyKind::Forward,
+                Some(StyleSpecifierForm::Quoted),
+                Some("src/list")
+            ),
+            (
+                StyleDependencyKind::Plugin,
+                Some(StyleSpecifierForm::Quoted),
+                Some("my-plugin")
+            ),
+        ],
+        "@media is not an inclusion, and every inclusion keeps source order"
+    );
+
+    // Head spans address the keyword itself, ascending with source order.
+    let heads: Vec<_> = parsed
+        .dependencies()
+        .iter()
+        .map(|dependency| dependency.head_span().start)
+        .collect();
+    assert!(
+        heads.windows(2).all(|pair| pair[0] < pair[1]),
+        "inclusion order must be source order: {heads:?}"
+    );
+}
+
+/// A target this crate cannot address exactly is recorded as an inclusion with
+/// no specifier. Dropping the whole at-rule would report "no dependencies" for
+/// a sheet that plainly has one; fabricating a specifier would report a target
+/// that was never written.
+#[test]
+fn an_unaddressable_target_stays_an_inclusion_without_a_specifier() {
+    let parsed = ir("@import $theme;\n@import \"real.css\";\n", CssDialect::Scss);
+
+    let specifiers: Vec<_> = parsed
+        .dependencies()
+        .iter()
+        .map(|dependency| {
+            dependency
+                .specifier()
+                .map(|specifier| parsed.specifier_text(specifier))
+        })
+        .collect();
+    assert_eq!(specifiers, vec![None, Some("real.css")]);
+}
+
+/// Which inclusions actually bring in bytes this parse never saw.
+///
+/// The consumers that publish an exhaustive surface (class inventories,
+/// `v-bind()` liveness) branch on this, so both directions are load-bearing.
+/// Answering "yes" for Sass's built-in modules switched the exhaustive path off
+/// for most real SCSS; answering "no" for anything whose target this parse
+/// could not address would publish a complete-looking surface for a sheet that
+/// might pull in anything.
+#[test]
+fn only_inclusions_that_can_carry_foreign_bytes_report_unparsed_bytes() {
+    let parsed = ir(
+        "@use \"sass:math\";
+@forward \"sass:color\";
+@use \"sass:meta\";
+@use \"./theme\";
+@import $dynamic;
+",
+        CssDialect::Scss,
+    );
+
+    let answers: Vec<_> = parsed
+        .dependencies()
+        .iter()
+        .map(|dependency| parsed.dependency_pulls_in_unparsed_bytes(*dependency))
+        .collect();
+    assert_eq!(
+        answers,
+        vec![false, false, true, true, true],
+        "built-in modules carry no stylesheet bytes; a real sheet and an unaddressable target both might"
+    );
+
+    // The namespace is reserved by the language, not a path shape: a sheet
+    // whose name merely starts with the same letters is a real sheet.
+    let lookalike = ir(
+        "@use \"sassy/theme\";
+",
+        CssDialect::Scss,
+    );
+    assert!(
+        lookalike
+            .dependencies()
+            .iter()
+            .all(|dependency| lookalike.dependency_pulls_in_unparsed_bytes(*dependency)),
+        "a sheet named like the reserved namespace is still a sheet"
+    );
+
+    // And the exemption is the closed set of non-emitting modules, not the
+    // namespace: `sass:meta` exposes `load-css()`, which emits another
+    // module's rules into this sheet. Exempting it publishes a
+    // complete-looking surface for bytes nothing here parsed — the false
+    // "this binding is unused" direction.
+    let load_css = ir(
+        "@use \"sass:meta\";
+.a { @include meta.load-css(\"theme\"); }
+",
+        CssDialect::Scss,
+    );
+    assert!(
+        load_css
+            .dependencies()
+            .iter()
+            .all(|dependency| load_css.dependency_pulls_in_unparsed_bytes(*dependency)),
+        "sass:meta can emit another module's css, so it is not a non-emitting built-in"
+    );
 }
 
 fn dialect_class_prefix(dialect: CssDialect) -> &'static str {
@@ -512,4 +686,135 @@ fn functional_pseudo_class_collection_is_per_component() {
         .map(|span| parsed.source().slice(span).to_owned())
         .collect();
     assert_eq!(component_classes, vec!["x", "a"]);
+}
+
+/// A parse that had to skip input never claims an exhaustive inclusion surface.
+///
+/// The recorded dependency list is a lower bound whenever recovery discarded
+/// anything: an `@import` inside a block the tokenizer had to force-close is
+/// simply absent from it. A consumer that folds the whole-surface question
+/// over that list therefore gets the WRONG-COMPLETE answer exactly where the
+/// parse saw least — "this sheet includes nothing" for a sheet that includes
+/// a stylesheet full of the classes and `v-bind()` calls it is about to
+/// publish as unused.
+#[test]
+fn a_recovered_parse_never_reports_an_exhaustive_inclusion_surface() {
+    let swallowed = ir(
+        ".a { content: \"unterminated
+@import \"theme.css\";
+",
+        CssDialect::Css,
+    );
+    assert!(
+        swallowed.dependencies().is_empty(),
+        "the recovery window swallowed the inclusion, so the list cannot show it"
+    );
+    assert!(
+        swallowed
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.recovery.discarded_input()),
+        "and the parse recorded that it dropped input"
+    );
+    assert!(
+        swallowed.pulls_in_unparsed_bytes(),
+        "so the whole-surface answer has to fail open, not fold over an empty list"
+    );
+
+    // The gate is the parse's recovery record, not "are there diagnostics":
+    // an ambiguity reported without dropping anything still parsed the
+    // surrounding structure, so its inventory is still exhaustive.
+    let ambiguous = ir(
+        "foo bar\n  .child\n    color red\nborder-radius 5px\n.safe\n  color blue\n",
+        CssDialect::Stylus,
+    );
+    assert!(
+        !ambiguous.diagnostics().is_empty(),
+        "the ambiguity is reported"
+    );
+    assert!(
+        ambiguous
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| !diagnostic.recovery.discarded_input()),
+        "but nothing was skipped"
+    );
+    assert!(
+        !ambiguous.pulls_in_unparsed_bytes(),
+        "a diagnostic alone must not switch the exhaustive path off"
+    );
+
+    // And a clean parse still answers from its inclusions alone.
+    let clean = ir("@use \"sass:math\";\n.a { color: red }\n", CssDialect::Scss);
+    assert!(clean.diagnostics().is_empty());
+    assert!(
+        !clean.pulls_in_unparsed_bytes(),
+        "a non-emitting built-in module is still not foreign bytes"
+    );
+    assert!(
+        ir("@import \"theme.css\";\n", CssDialect::Css).pulls_in_unparsed_bytes(),
+        "and a real inclusion still is"
+    );
+}
+
+/// Every inclusion keyword a dialect spells is in the inventory — including
+/// the two Stylus forms `@import` does not cover.
+///
+/// The wrong-complete direction this closes: an unrecognised inclusion keyword
+/// records no dependency at all, so `pulls_in_unparsed_bytes()` answers "this
+/// sheet declares its whole surface" for a sheet that plainly pulls in another
+/// one. A consumer publishing a `v-bind()` liveness inventory then reports a
+/// binding used only from the included sheet as unused — the exact failure the
+/// `@import` leg above already guards for the other four dialects.
+///
+/// Stylus spells its include-once directive `@require`, and accepts BOTH
+/// `require` and `import` as bare statements with no `@`. The bare form carries
+/// no at-keyword, so it reaches the IR as an unclassified statement rather than
+/// an at-rule and needs its own recognition.
+#[test]
+fn every_stylus_inclusion_form_enters_the_inventory() {
+    for (input, kind, target) in [
+        (
+            "@require \"theme\"\n",
+            StyleDependencyKind::Require,
+            "theme",
+        ),
+        ("@import \"theme\"\n", StyleDependencyKind::Import, "theme"),
+        ("require 'theme'\n", StyleDependencyKind::Require, "theme"),
+        ("import 'theme'\n", StyleDependencyKind::Import, "theme"),
+    ] {
+        let parsed = ir(input, CssDialect::Stylus);
+        let [dependency] = parsed.dependencies() else {
+            panic!("{input:?}: {:?}", parsed.dependencies());
+        };
+        assert_eq!(dependency.kind(), kind, "{input:?}");
+        let specifier = dependency.specifier().expect("quoted specifier");
+        assert_eq!(parsed.specifier_text(specifier), target, "{input:?}");
+        assert!(
+            parsed.pulls_in_unparsed_bytes(),
+            "{input:?} pulls in a sheet nothing here parsed"
+        );
+    }
+
+    // The bare form is Stylus-only, and only when the statement OPENS with the
+    // keyword. Widening it would make ordinary CSS-ish statements read as
+    // inclusions and switch the exhaustive-surface path off for sheets that do
+    // declare their whole surface.
+    for (dialect, input) in [
+        (CssDialect::Css, "require 'theme';\n"),
+        (CssDialect::Scss, "require 'theme';\n"),
+        (CssDialect::Less, "require 'theme';\n"),
+        (CssDialect::Sass, "require 'theme'\n"),
+    ] {
+        assert!(
+            ir(input, dialect).dependencies().is_empty(),
+            "{dialect:?} has no bare-statement inclusion form"
+        );
+    }
+    assert!(
+        ir("stylus-require 'theme'\n", CssDialect::Stylus)
+            .dependencies()
+            .is_empty(),
+        "an identifier that merely starts with the keyword is not the keyword"
+    );
 }

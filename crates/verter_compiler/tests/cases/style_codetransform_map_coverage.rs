@@ -320,7 +320,7 @@ fn vue_scoped_selector_inserted_attribute_stays_unmapped_across_its_entire_span(
     assert_eq!(
         (token.get_src_line(), token.get_src_col()),
         expected,
-        "the position right after the synthetic attribute must resume at the authored          trailing coordinates, not only a matching source_id"
+        "the position right after the synthetic attribute must resume at the authored trailing coordinates, not only a matching source_id"
     );
 }
 
@@ -510,6 +510,7 @@ fn vue_style_source_map_toggle_is_a_genuine_caller_facing_ab_option_through_comp
                 content_artifact_token: "artifact:theme-css".to_string(),
                 source_space_token: "space:theme-css".to_string(),
                 parsed: None,
+                producer: None,
             })],
             ..Default::default()
         },
@@ -583,9 +584,10 @@ fn vue_style_cascade_source_map_toggle_is_a_genuine_ab_option() {
     };
     let off = run_vue_style_cascade(input(), "scope123", false, true, false);
     let on = run_vue_style_cascade(input(), "scope123", false, true, true);
-    assert!(off.code.contains(".x[data-v-scope123]"), "{}", off.code);
+    assert!(off.code().contains(".x[data-v-scope123]"), "{}", off.code());
     assert_eq!(
-        off.code, on.code,
+        off.code(),
+        on.code(),
         "the source_map toggle must never change emitted code"
     );
     assert!(

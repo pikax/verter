@@ -556,6 +556,16 @@ pub struct RuntimeBlockContentInput {
     pub source_space_token: String,
     /// Parsed IR for these exact bytes, when the host admitted one.
     pub parsed: Option<crate::style_planner::PreparedStyleIr>,
+    /// The external tool the host names for these bytes, when they are an
+    /// external producer's output rather than the carrier's own content.
+    ///
+    /// `None` means the bytes are the carrier's own — inline or an external
+    /// `src` file — and the compiler records them at the stage they were
+    /// authored in. `Some` carries the identity the admitting host holds, so
+    /// the compiler records the tool that actually made them instead of
+    /// claiming it made them itself. Only the host can answer this: the bytes
+    /// look identical either way.
+    pub producer: Option<verter_css_syntax::PreprocessorIdentity>,
 }
 
 /// Parser-local projection of validated block content. Ordering exists only at

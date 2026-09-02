@@ -17,6 +17,10 @@ use crate::dialect::CssDialect;
 use crate::event::{NodeFlags, ParseEvent, ParseEventSink, SyntaxKind};
 use crate::parser::{parse_with_sink, CssEntryPoint, CssParseMode, CssSource};
 use crate::selector::{SelectorComponent, SelectorComponentKind, SelectorList, SelectorSink};
+use crate::stage::{
+    StyleDependency, StyleDependencyKind, StyleSpecifier, StyleSpecifierForm,
+    SASS_NON_EMITTING_BUILTIN_MODULES,
+};
 use crate::svelte_compat::svelte_read_value_text;
 use crate::token::{css_identifier_eq_ignore_ascii_case, SyntaxToken, TokenKind};
 use crate::version::CssSyntaxGrammarVersion;
@@ -398,7 +402,10 @@ struct StyleSyntaxIrData {
     dialect: CssDialect,
     statements: BumpSlice<StyleStatement>,
     diagnostics: Vec<CssDiagnostic>,
-    imports_unresolved: bool,
+    /// Every stylesheet this one pulls in, in ascending source order. Minted
+    /// by the parse that already had to recognise the at-rule; nothing
+    /// downstream re-derives inclusion structure from bytes.
+    dependencies: Vec<StyleDependency>,
     /// Every `/* … */` / line-comment span the tokenizer visited while
     /// parsing this stylesheet, in ascending source order (comments cannot
     /// overlap or nest, and tokens are produced in strictly increasing
@@ -446,8 +453,90 @@ impl StyleSyntaxIr {
         &self.data.diagnostics
     }
 
-    pub fn imports_unresolved(&self) -> bool {
-        self.data.imports_unresolved
+    /// Stylesheets this one pulls in, in ascending source order.
+    ///
+    /// Replaces a bare "this sheet has imports" flag: a consumer that has to
+    /// know WHICH sheet, WHERE it was named, or in WHAT form, would otherwise
+    /// have to walk the at-rules again to find out — a second pass over
+    /// structure this parse already resolved.
+    pub fn dependencies(&self) -> &[StyleDependency] {
+        &self.data.dependencies
+    }
+
+    /// The specifier text a dependency names, with quotes and any `url()`
+    /// wrapper already stripped.
+    pub fn specifier_text(&self, specifier: StyleSpecifier) -> &str {
+        self.source().slice(specifier.span())
+    }
+
+    /// Whether this stylesheet pulls in bytes this parse never saw.
+    ///
+    /// The single answer for a consumer publishing a "this is the whole
+    /// surface" inventory — class lists, custom properties, `v-bind()`
+    /// liveness. `false` is the strong claim: nothing outside these bytes can
+    /// contribute to the block's surface, so an inventory built from this
+    /// parse is exhaustive and a consumer may report what is missing from it
+    /// as genuinely absent.
+    ///
+    /// Two independent ways that claim fails, and BOTH are this owner's to
+    /// check:
+    ///
+    /// - an inclusion names a target whose bytes are elsewhere
+    ///   ([`Self::dependency_pulls_in_unparsed_bytes`] per inclusion), and
+    /// - the parse itself discarded input. Recovery mode returns a usable IR
+    ///   for a sheet it could not read end to end, and the inclusion
+    ///   inventory it minted is then a LOWER BOUND: an `@import` inside an
+    ///   unterminated block, or after a string the tokenizer had to advance
+    ///   past, never reaches the at-rule frame and never enters
+    ///   [`Self::dependencies`]. Reading the resulting empty list as "this
+    ///   sheet includes nothing" is exactly the wrong-complete direction —
+    ///   the block gets published as an exhaustive surface while its real
+    ///   `v-bind()` calls sit in a sheet nothing here parsed.
+    ///
+    /// The second check keys on the parse's own recovery record
+    /// ([`crate::RecoveryKind::discarded_input`]), not a list of diagnostic kinds:
+    /// which construct the parser could not read says nothing about whether an
+    /// inclusion was inside the range it skipped.
+    #[must_use]
+    pub fn pulls_in_unparsed_bytes(&self) -> bool {
+        self.data
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.recovery.discarded_input())
+            || self
+                .data
+                .dependencies
+                .iter()
+                .any(|dependency| self.dependency_pulls_in_unparsed_bytes(*dependency))
+    }
+
+    /// Whether an inclusion pulls in stylesheet bytes this parse never saw.
+    ///
+    /// The question a consumer publishing a "this is the whole surface"
+    /// inventory has to answer, and it is not the same as "does this sheet
+    /// have inclusions". Sass's non-emitting built-in modules (`@use
+    /// "sass:math"` and its peers) are function libraries that emit no rules,
+    /// declare no classes and cannot contain a `v-bind()`, so a sheet whose
+    /// only inclusions are those still declares its whole surface. Treating
+    /// them as foreign bytes switched the exhaustive-inventory path off for a
+    /// large share of real SCSS.
+    ///
+    /// The exemption is the exact closed set, not the `sass:` namespace:
+    /// `sass:meta` can emit another module's css through `load-css()`, so it
+    /// answers `true` like any other sheet.
+    ///
+    /// Everything else answers `true`, including an inclusion whose target
+    /// this parse could not address exactly: an unresolved target is a target
+    /// that might bring anything.
+    #[must_use]
+    pub fn dependency_pulls_in_unparsed_bytes(&self, dependency: StyleDependency) -> bool {
+        let Some(specifier) = dependency.specifier() else {
+            return true;
+        };
+        !matches!(
+            dependency.kind(),
+            StyleDependencyKind::Use | StyleDependencyKind::Forward
+        ) || !SASS_NON_EMITTING_BUILTIN_MODULES.contains(&self.specifier_text(specifier))
     }
 
     pub fn selector_components(&self) -> std::vec::IntoIter<&SelectorComponent> {
@@ -641,7 +730,9 @@ pub(crate) struct StyleSyntaxIrSink<'b> {
     statements: bumpalo::collections::Vec<'b, StyleStatement>,
     diagnostics: Vec<CssDiagnostic>,
     selector_sink: Option<(usize, SelectorSink<'b>)>,
-    imports_unresolved: bool,
+    /// Stylesheet inclusions, appended as their at-rules close, so the list is
+    /// in ascending source order by construction.
+    dependencies: Vec<StyleDependency>,
     root_value_tree: Option<ComponentValueTree>,
     /// Whole-source comment inventory, accumulated at event time. Comment
     /// spans are a fact about the SOURCE, not about the IR tree: a comment in
@@ -661,7 +752,7 @@ struct FrozenStyleIr {
     dialect: CssDialect,
     statements: BumpSlice<StyleStatement>,
     diagnostics: Vec<CssDiagnostic>,
-    imports_unresolved: bool,
+    dependencies: Vec<StyleDependency>,
     comment_spans: Vec<Span>,
     unpaired_cdo_span: Option<Span>,
     root_value_tree: Option<ComponentValueTree>,
@@ -697,7 +788,7 @@ impl<'b> StyleSyntaxIrSink<'b> {
             statements: bumpalo::collections::Vec::with_capacity_in(statement_cap, bump),
             diagnostics: Vec::new(),
             selector_sink: None,
-            imports_unresolved: false,
+            dependencies: Vec::new(),
             root_value_tree: None,
             comment_spans: Vec::new(),
             unpaired_cdo_span: None,
@@ -711,7 +802,7 @@ impl<'b> StyleSyntaxIrSink<'b> {
             dialect: self.dialect,
             statements: freeze_vec(self.statements),
             diagnostics: self.diagnostics,
-            imports_unresolved: self.imports_unresolved,
+            dependencies: self.dependencies,
             comment_spans: self.comment_spans,
             unpaired_cdo_span: self.unpaired_cdo_span,
             root_value_tree: self.root_value_tree,
@@ -730,6 +821,70 @@ impl<'b> StyleSyntaxIrSink<'b> {
             TokenKind::Comment | TokenKind::LineComment => ComponentValue::Comment(value),
             _ => ComponentValue::Token(value),
         }
+    }
+
+    /// The stylesheet an inclusion at-rule names, read from the prelude's
+    /// already-typed component values.
+    ///
+    /// Returns `None` when the prelude opens with anything this crate cannot
+    /// address exactly — a dialect interpolation, a variable, a recovered
+    /// string. The at-rule is still recorded as a dependency; only its target
+    /// is unknown, which is a different fact from having no dependency.
+    fn specifier_of(&self, prelude: &ComponentValueTree) -> Option<StyleSpecifier> {
+        self.specifier_in(prelude.values())
+    }
+
+    /// [`Self::specifier_of`] over an already-sliced value run, for the
+    /// inclusion form whose keyword sits inside the same run as its target.
+    fn specifier_in(&self, values: &[ComponentValue]) -> Option<StyleSpecifier> {
+        for value in values {
+            match value {
+                ComponentValue::Comment(_) => continue,
+                ComponentValue::String(token) => {
+                    return quoted_inner_span(token)
+                        .map(|span| StyleSpecifier::new(span, StyleSpecifierForm::Quoted));
+                }
+                ComponentValue::Token(token) if token.kind() == TokenKind::Url => {
+                    return self.url_token_specifier(token.span());
+                }
+                ComponentValue::Function(function) => {
+                    if !css_identifier_eq_ignore_ascii_case(
+                        self.source.slice(function.name_span()),
+                        "url",
+                    ) {
+                        return None;
+                    }
+                    return function.values().iter().find_map(|inner| match inner {
+                        ComponentValue::String(token) => quoted_inner_span(token)
+                            .map(|span| StyleSpecifier::new(span, StyleSpecifierForm::Url)),
+                        _ => None,
+                    });
+                }
+                ComponentValue::Token(_)
+                | ComponentValue::Block(_)
+                | ComponentValue::Interpolation(_) => return None,
+            }
+        }
+        None
+    }
+
+    /// Payload span of a `<url-token>` (`url(a.css)`), whitespace trimmed.
+    fn url_token_specifier(&self, span: Span) -> Option<StyleSpecifier> {
+        let text = self.source.slice(span);
+        let after_open = text.find('(')? + 1;
+        let close = text.len() - usize::from(text.ends_with(')'));
+        let inner = text.get(after_open..close)?;
+        let trimmed = inner.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let leading = inner.len() - inner.trim_start().len();
+        let start = span.start + u32::try_from(after_open + leading).ok()?;
+        let end = start + u32::try_from(trimmed.len()).ok()?;
+        Some(StyleSpecifier::new(
+            Span::new(start, end),
+            StyleSpecifierForm::Url,
+        ))
     }
 
     fn is_value_frame(kind: SyntaxKind) -> bool {
@@ -879,19 +1034,22 @@ impl<'b> StyleSyntaxIrSink<'b> {
                 let head_span = first.map_or(Span::new(frame.start, frame.start), |token| {
                     Span::new(token.start, token.end)
                 });
-                if first.is_some_and(|token| {
+                let dependency_kind = first.and_then(|token| {
                     let raw = self.source.token_text(token);
-                    raw.strip_prefix('@').is_some_and(|name| {
-                        ["import", "use", "forward", "plugin"]
-                            .iter()
-                            .any(|expected| css_identifier_eq_ignore_ascii_case(name, expected))
-                    })
-                }) {
-                    self.imports_unresolved = true;
-                }
+                    raw.strip_prefix('@')
+                        .and_then(StyleDependencyKind::from_at_rule_name)
+                });
                 let opaque_args = frame
                     .value_tree
                     .unwrap_or_else(|| ComponentValueTree::empty(head_span.end));
+                if let Some(kind) = dependency_kind {
+                    // The at-rule keyword has already been recognised here, so
+                    // recording the inclusion costs one walk of a prelude that
+                    // is in hand — never a later pass over the same bytes.
+                    let specifier = self.specifier_of(&opaque_args);
+                    self.dependencies
+                        .push(StyleDependency::new(kind, head_span, specifier));
+                }
                 let prelude_text = svelte_read_value_text(&self.source, opaque_args.span());
                 self.push_statement(StyleStatement::AtRule(StyleDirective {
                     span,
@@ -916,12 +1074,15 @@ impl<'b> StyleSyntaxIrSink<'b> {
                     completeness,
                 }));
             }
-            SyntaxKind::AmbiguousStatement => self.push_unknown(
-                UnknownStatementKind::Ambiguous,
-                span,
-                frame.block,
-                frame.value_tree,
-            ),
+            SyntaxKind::AmbiguousStatement => {
+                self.record_stylus_bare_inclusion(frame.value_tree.as_ref());
+                self.push_unknown(
+                    UnknownStatementKind::Ambiguous,
+                    span,
+                    frame.block,
+                    frame.value_tree,
+                )
+            }
             SyntaxKind::Recovery => self.push_unknown(
                 UnknownStatementKind::Recovery,
                 span,
@@ -943,6 +1104,53 @@ impl<'b> StyleSyntaxIrSink<'b> {
         }
     }
 
+    /// Record Stylus's bare `require 'theme'` / `import 'theme'` statement as
+    /// an inclusion.
+    ///
+    /// Stylus spells both inclusion keywords with and without the `@`. Only
+    /// the `@`-spelled form carries an at-keyword, so only that form reaches
+    /// an at-rule frame; the bare form has nothing the layout pass can
+    /// classify and arrives here as an unclassified statement. Left
+    /// unrecorded, a sheet whose only inclusion is spelled that way answers
+    /// [`StyleSyntaxIr::pulls_in_unparsed_bytes`] with "this sheet declares
+    /// its whole surface" — the wrong-complete direction, publishing an
+    /// exhaustive `v-bind()` inventory for a block whose bindings live in the
+    /// included sheet.
+    ///
+    /// Only Stylus, and only when the statement OPENS with the keyword: a
+    /// declaration or a selector that merely mentions it is classified
+    /// elsewhere and never reaches this arm.
+    fn record_stylus_bare_inclusion(&mut self, values: Option<&ComponentValueTree>) {
+        if self.dialect != CssDialect::Stylus {
+            return;
+        }
+        let Some(values) = values.map(ComponentValueTree::values) else {
+            return;
+        };
+        let Some(head) = values
+            .iter()
+            .position(|value| !matches!(value, ComponentValue::Comment(_)))
+        else {
+            return;
+        };
+        let ComponentValue::Token(keyword) = values[head] else {
+            return;
+        };
+        if keyword.kind() != TokenKind::Ident {
+            return;
+        }
+        let Some(kind) =
+            StyleDependencyKind::from_stylus_statement_keyword(self.source.slice(keyword.span()))
+        else {
+            return;
+        };
+        // Sliced, never collected: the target sits in the same run as the
+        // keyword, so the search continues from just past it.
+        let specifier = self.specifier_in(&values[head + 1..]);
+        self.dependencies
+            .push(StyleDependency::new(kind, keyword.span(), specifier));
+    }
+
     fn push_unknown(
         &mut self,
         kind: UnknownStatementKind,
@@ -957,6 +1165,18 @@ impl<'b> StyleSyntaxIrSink<'b> {
             opaque_values,
         }));
     }
+}
+
+/// Span inside a well-formed quoted string token, quotes excluded.
+///
+/// A `BadString` (unterminated) or a Less escaped string is not an exactly
+/// addressable specifier, so neither yields one.
+fn quoted_inner_span(token: &ComponentToken) -> Option<Span> {
+    if token.kind() != TokenKind::String {
+        return None;
+    }
+    let span = token.span();
+    (span.end >= span.start + 2).then(|| Span::new(span.start + 1, span.end - 1))
 }
 
 fn trim_delimiters<'b>(
@@ -1153,7 +1373,7 @@ fn ir_from_frozen(bump: Bump, frozen: FrozenStyleIr) -> StyleSyntaxIr {
             dialect: frozen.dialect,
             statements: frozen.statements,
             diagnostics: frozen.diagnostics,
-            imports_unresolved: frozen.imports_unresolved,
+            dependencies: frozen.dependencies,
             comment_spans: frozen.comment_spans,
             unpaired_cdo_span: frozen.unpaired_cdo_span,
             _bump: FrozenBump::freeze(bump),
@@ -1294,7 +1514,13 @@ mod tests {
         assert_eq!(ir.source().text(), input);
         assert_eq!(ir.grammar_version(), CssSyntaxGrammarVersion::CURRENT);
         assert_eq!(ir.statements().len(), 2);
-        assert!(ir.imports_unresolved());
+        let [dependency] = ir.dependencies() else {
+            panic!("one inclusion, got {:?}", ir.dependencies());
+        };
+        assert_eq!(dependency.kind(), StyleDependencyKind::Import);
+        let specifier = dependency.specifier().expect("quoted specifier");
+        assert_eq!(specifier.form(), StyleSpecifierForm::Quoted);
+        assert_eq!(ir.specifier_text(specifier), "theme.css");
 
         let StyleStatement::Rule(rule) = &ir.statements()[0] else {
             panic!("first statement must be a rule");

@@ -234,7 +234,7 @@ mod style_planner_allocation_baseline {
             "standalone:carrier-bytes",
         );
         let outcome = run_vue_style_cascade(input, SCOPE_ID, false, true, false);
-        std::hint::black_box(&outcome.code);
+        std::hint::black_box(outcome.code());
     }
 
     pub(super) fn measure(css: &str) -> u64 {
@@ -295,7 +295,7 @@ mod style_planner_allocation_baseline {
                 "standalone:carrier-bytes",
             );
             let outcome = run_vue_style_cascade(input, SCOPE_ID, false, true, want_source_map);
-            std::hint::black_box(&outcome.code);
+            std::hint::black_box(outcome.code());
         };
         run(css);
         reset_alloc_counter();

@@ -1925,12 +1925,18 @@ fn build_style_analyses_from_inventory(
         })
     }
 
+    /// Which native grammar analyses this block's bytes.
+    ///
+    /// An authored `lang` is classified by its owner rather than by a table
+    /// here, so a spelling cannot resolve for analysis while the pipeline that
+    /// compiles the same block fails closed on it. That owner is byte-exact,
+    /// and it accepts `styl`, which the table here did not.
     fn analysis_lang(
         dialect: &StyleDialect,
         authored: Option<&str>,
     ) -> verter_semantic::analysis::StyleAnalysisLang {
         use verter_semantic::analysis::StyleAnalysisLang;
-        match authored.map(str::to_ascii_lowercase).as_deref() {
+        match authored {
             None => match dialect {
                 StyleDialect::Css => StyleAnalysisLang::Css,
                 StyleDialect::Scss => StyleAnalysisLang::Scss,
@@ -1941,12 +1947,7 @@ fn build_style_analyses_from_inventory(
                     StyleAnalysisLang::Unknown
                 }
             },
-            Some("css") => StyleAnalysisLang::Css,
-            Some("scss") => StyleAnalysisLang::Scss,
-            Some("sass") => StyleAnalysisLang::Sass,
-            Some("less") => StyleAnalysisLang::Less,
-            Some("stylus") => StyleAnalysisLang::Stylus,
-            Some(_) => StyleAnalysisLang::Unknown,
+            Some(authored) => StyleAnalysisLang::from_lang(authored),
         }
     }
 

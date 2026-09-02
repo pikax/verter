@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use verter_compiler::style_planner::{transform_vue_style, VerifiedPlainCss};
+use verter_compiler::style_planner::{transform_vue_style, CascadeInput, VerifiedPlainCss};
 use verter_css_syntax::{
     parse_style_ir, parse_style_ir_thread_invocations, CssDialect, CssParseMode, CssSource,
 };
@@ -23,6 +23,7 @@ fn parsed_native_css_witness_runs_the_vue_transform_without_reparsing() {
 
     let outcome = transform_vue_style(
         verified,
+        CascadeInput::Authored,
         "component.css",
         "space:component",
         "artifact:component",
@@ -34,12 +35,12 @@ fn parsed_native_css_witness_runs_the_vue_transform_without_reparsing() {
 
     assert!(outcome.stage_failures.is_empty(), "{outcome:?}");
     assert!(
-        outcome.code.contains(".card[data-v-scope123]"),
+        outcome.code().contains(".card[data-v-scope123]"),
         "{}",
-        outcome.code
+        outcome.code()
     );
-    assert!(!outcome.code.contains(".card {"), "{}", outcome.code);
-    assert_ne!(outcome.code, ir.source().text());
+    assert!(!outcome.code().contains(".card {"), "{}", outcome.code());
+    assert_ne!(outcome.code(), ir.source().text());
     assert_eq!(
         parse_style_ir_thread_invocations(),
         before + 1,

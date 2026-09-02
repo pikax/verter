@@ -143,6 +143,25 @@ impl StyleBlockAnalysis {
         StyleAnalysisFlags::from_bits_truncate(self.flags)
     }
 
+    /// Whether bytes outside this block can still contribute to its surface.
+    ///
+    /// The shared style-syntax owner's single answer
+    /// (`StyleSyntaxIr::pulls_in_unparsed_bytes`), recorded at the one parse
+    /// that produced this analysis and read back here rather than re-derived.
+    /// `false` is the strong claim, so every state with no parse behind it —
+    /// an unrecognised language, a parse that yielded no IR, deferred external
+    /// content — answers `true`.
+    ///
+    /// A consumer that publishes an inventory as exhaustive (`v-bind()`
+    /// liveness, class lists) MUST fold this in. Reading the recorded
+    /// `v-bind()` list alone answers the question by omission: a sheet whose
+    /// `@import` sat inside a recovery window records no inclusion and no
+    /// binding, and looks indistinguishable from a self-contained block.
+    pub fn pulls_in_unparsed_bytes(&self) -> bool {
+        self.analysis_flags()
+            .contains(StyleAnalysisFlags::SURFACE_PULLS_UNPARSED_BYTES)
+    }
+
     /// Whether this block is an external `<style src="...">` whose content
     /// analysis is deferred (unavailable) rather than an analyzed inline block.
     pub fn content_is_available(&self) -> bool {
@@ -681,6 +700,13 @@ bitflags::bitflags! {
         const HAS_IMPORTS           = 1 << 8;
         const HAS_LAYERS            = 1 << 9;
         const HAS_CONTAINER_QUERIES = 1 << 10;
+        /// The analysed bytes are NOT the whole surface this block
+        /// contributes: an inclusion names a sheet elsewhere, or the parse
+        /// itself skipped input and its inclusion list is a lower bound.
+        /// Set whenever the answer is unknown, because a consumer publishing
+        /// "this name is absent from the block's surface" is only sound when
+        /// it is clear.
+        const SURFACE_PULLS_UNPARSED_BYTES = 1 << 11;
     }
 }
 
@@ -694,6 +720,57 @@ pub enum StyleAnalysisLang {
     Less,
     Stylus,
     Unknown,
+}
+
+impl StyleAnalysisLang {
+    /// Classify an authored `<style lang="…">` spelling.
+    ///
+    /// Delegates to the one spelling owner rather than keeping a table here.
+    /// That owner is byte-exact, so `lang="SCSS"` does not become SCSS merely
+    /// through case folding. This classification does not decide what a
+    /// framework compiler does after its processor lookup misses; Vue's
+    /// reference compiler falls through to plain CSS in that case. An
+    /// unrecognised spelling is [`Self::Unknown`], never an implicit dialect.
+    #[must_use]
+    pub fn from_lang(lang: &str) -> Self {
+        match verter_css_syntax::CssDialect::from_lang(lang) {
+            Some(verter_css_syntax::CssDialect::Css) => Self::Css,
+            Some(verter_css_syntax::CssDialect::Scss) => Self::Scss,
+            Some(verter_css_syntax::CssDialect::Sass) => Self::Sass,
+            Some(verter_css_syntax::CssDialect::Less) => Self::Less,
+            Some(verter_css_syntax::CssDialect::Stylus) => Self::Stylus,
+            None => Self::Unknown,
+        }
+    }
+
+    /// The native grammar behind this language, or `None` when there is none.
+    #[must_use]
+    pub const fn native_dialect(self) -> Option<verter_css_syntax::CssDialect> {
+        match self {
+            Self::Css => Some(verter_css_syntax::CssDialect::Css),
+            Self::Scss => Some(verter_css_syntax::CssDialect::Scss),
+            Self::Sass => Some(verter_css_syntax::CssDialect::Sass),
+            Self::Less => Some(verter_css_syntax::CssDialect::Less),
+            Self::Stylus => Some(verter_css_syntax::CssDialect::Stylus),
+            Self::Unknown => None,
+        }
+    }
+
+    /// Whether the shared syntax authority can parse this language's bytes as
+    /// authored. `false` means the block's facts depend on an external tool.
+    #[must_use]
+    pub const fn is_natively_parsed(self) -> bool {
+        self.native_dialect().is_some()
+    }
+
+    /// Whether bytes in this language need an external preprocessor before a
+    /// plain-CSS-only stage can run over them. `Unknown` answers `false`:
+    /// nothing here can claim to know what an unrecognised language needs.
+    #[must_use]
+    pub fn requires_external_preprocessing(self) -> bool {
+        self.native_dialect()
+            .is_some_and(verter_css_syntax::CssDialect::requires_external_preprocessing)
+    }
 }
 
 // =============================================================================
@@ -738,22 +815,15 @@ pub fn build_scanned_style_analysis(
     module_name: Option<&str>,
     content_offset: u32,
 ) -> StyleBlockAnalysis {
-    let dialect = match lang {
-        StyleAnalysisLang::Css => verter_css_syntax::CssDialect::Css,
-        StyleAnalysisLang::Scss => verter_css_syntax::CssDialect::Scss,
-        StyleAnalysisLang::Sass => verter_css_syntax::CssDialect::Sass,
-        StyleAnalysisLang::Less => verter_css_syntax::CssDialect::Less,
-        StyleAnalysisLang::Stylus => verter_css_syntax::CssDialect::Stylus,
-        StyleAnalysisLang::Unknown => {
-            return build_preprocessor_style_analysis(
-                lang,
-                vue_input,
-                scoped,
-                is_module,
-                module_name,
-                content_offset,
-            );
-        }
+    let Some(dialect) = lang.native_dialect() else {
+        return build_preprocessor_style_analysis(
+            lang,
+            vue_input,
+            scoped,
+            is_module,
+            module_name,
+            content_offset,
+        );
     };
 
     match super::style_syntax::parse_style_block(css_content, content_offset, dialect) {
@@ -784,14 +854,7 @@ pub fn parse_style_ir_for_analysis(
     content_offset: u32,
     lang: StyleAnalysisLang,
 ) -> Option<verter_css_syntax::StyleSyntaxIr> {
-    let dialect = match lang {
-        StyleAnalysisLang::Css => verter_css_syntax::CssDialect::Css,
-        StyleAnalysisLang::Scss => verter_css_syntax::CssDialect::Scss,
-        StyleAnalysisLang::Sass => verter_css_syntax::CssDialect::Sass,
-        StyleAnalysisLang::Less => verter_css_syntax::CssDialect::Less,
-        StyleAnalysisLang::Stylus => verter_css_syntax::CssDialect::Stylus,
-        StyleAnalysisLang::Unknown => return None,
-    };
+    let dialect = lang.native_dialect()?;
     super::style_syntax::parse_style_block(css_content, content_offset, dialect)
 }
 
@@ -818,7 +881,9 @@ pub fn build_incomplete_style_analysis(
     }
     let v_binds = convert_v_binds(&vue_input);
     let special_pseudos = convert_special_pseudos(&vue_input);
-    let flags = derive_flags(scoped, is_module, &v_binds, &special_pseudos, None);
+    // No IR behind these facts, so nothing here can claim the analysed bytes
+    // are the whole surface.
+    let flags = derive_flags(scoped, is_module, &v_binds, &special_pseudos, None, true);
     StyleBlockAnalysis {
         lang,
         scoped,
@@ -861,7 +926,17 @@ pub fn build_scanned_style_analysis_from_ir(
             special_pseudos.push(scanned);
         }
     }
-    let flags = derive_flags(scoped, is_module, &v_binds, &special_pseudos, css.as_ref());
+    // Asked of the parse itself, not folded over the projected facts: a
+    // recovered parse's at-rule list is a lower bound, so an inclusion inside
+    // the range it skipped is invisible to `css.at_rules`.
+    let flags = derive_flags(
+        scoped,
+        is_module,
+        &v_binds,
+        &special_pseudos,
+        css.as_ref(),
+        ir.pulls_in_unparsed_bytes(),
+    );
 
     StyleBlockAnalysis {
         lang,
@@ -892,7 +967,9 @@ pub fn build_external_src_style_analysis(
     module_name: Option<&str>,
     content_offset: u32,
 ) -> StyleBlockAnalysis {
-    let flags = derive_flags(scoped, is_module, &[], &[], None);
+    // External content is deferred: this block's surface is entirely bytes
+    // this analysis never saw.
+    let flags = derive_flags(scoped, is_module, &[], &[], None, true);
     StyleBlockAnalysis {
         lang,
         scoped,
@@ -923,7 +1000,9 @@ pub fn build_preprocessor_style_analysis(
 ) -> StyleBlockAnalysis {
     let v_binds = convert_v_binds(&vue_input);
     let special_pseudos = convert_special_pseudos(&vue_input);
-    let flags = derive_flags(scoped, is_module, &v_binds, &special_pseudos, None);
+    // No IR behind these facts, so nothing here can claim the analysed bytes
+    // are the whole surface.
+    let flags = derive_flags(scoped, is_module, &v_binds, &special_pseudos, None, true);
 
     StyleBlockAnalysis {
         lang,
@@ -981,8 +1060,13 @@ fn derive_flags(
     v_binds: &[AnalyzedVBind],
     special_pseudos: &[AnalyzedSpecialPseudo],
     css: Option<&CssAnalysis>,
+    pulls_in_unparsed_bytes: bool,
 ) -> StyleAnalysisFlags {
     let mut flags = StyleAnalysisFlags::empty();
+
+    if pulls_in_unparsed_bytes {
+        flags |= StyleAnalysisFlags::SURFACE_PULLS_UNPARSED_BYTES;
+    }
 
     if scoped {
         flags |= StyleAnalysisFlags::SCOPED;

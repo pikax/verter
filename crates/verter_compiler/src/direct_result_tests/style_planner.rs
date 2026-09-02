@@ -7,12 +7,13 @@ use crate::code_transform::{
 use crate::style_planner::{
     analyze_css_module_classes, analyze_style, build_string_invocation_count,
     cascade_output_is_publishable, cascade_requested_source_map, last_parse_ir_dialect,
-    parse_ir_invocation_count, reset_build_string_invocation_count, reset_last_parse_ir_dialect,
+    parse_ir_invocation_count, parse_plain_css_for_verification,
+    reset_build_string_invocation_count, reset_last_parse_ir_dialect,
     reset_parse_ir_invocation_count, reset_style_ir_stage_observations, run_vue_style_cascade,
-    run_vue_style_cascade_post_preprocess, style_ir_stage_observations, transform_vue_css_modules,
-    transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput, PlainCssInput,
+    style_ir_stage_observations, transform_vue_css_modules, transform_vue_scoped_css,
+    transform_vue_style, transform_vue_v_bind, AuthoredStyleInput, CascadeInput, PlainCssInput,
     StyleRewriteFailure, StyleRewriteFailureClass, StyleRewriteOutcome, StyleRewriteStage,
-    VueStyleCascadeOutcome,
+    VerifiedPlainCss, VueStyleCascadeOutcome,
 };
 use crate::{
     compile::{types::VueExecutionInputs, VueMacroSemanticInput},
@@ -634,6 +635,69 @@ fn vue_compile_routes_authored_styles_through_the_ir_planner() {
     assert_eq!(result.styles[0].code, ".bad { color: v-bind(tone; }");
 }
 
+/// A refusal reported against bytes an earlier stage rewrote must not be
+/// placed by the authored block's own offset arithmetic.
+///
+/// `v-bind(tone)` → `var(--sc1-tone)` grows the block by three bytes, so every
+/// offset the CSS-Modules stage reports after it is three past the construct it
+/// names in the source the user is looking at. Adding the block start to it
+/// underlines the wrong text — silently, and only for blocks where an earlier
+/// stage happened to edit. The diagnostic carries the space its span addresses,
+/// and there is no rewritten → SFC map at this boundary, so the refusal anchors
+/// on the block instead of pointing three bytes into the wrong token.
+#[test]
+fn a_refusal_against_rewritten_bytes_is_not_placed_by_authored_arithmetic() {
+    // The stray `}` is what the CSS-Modules stage refuses; it sits AFTER the
+    // `v-bind()` the earlier stage rewrites, so the two spaces disagree.
+    let style = "<style module>.a { color: v-bind(tone); }\n}\n</style>";
+    let source = format!("<template/>{style}");
+    let content_start = u32::try_from(source.find(".a {").expect("style content")).unwrap();
+    let content_end = u32::try_from(source.find("</style>").expect("close tag")).unwrap();
+
+    let request = CompileRequest::new(
+        vec![CompileProduct::RuntimeClient(
+            RuntimeProductRequest::default(),
+        )],
+        FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+        None,
+        None,
+        Some("sc1".to_string()),
+        false,
+        false,
+    )
+    .expect("a lone RuntimeClient product must construct");
+    let allocator = Allocator::new();
+    let result = crate::compile::compile(
+        &source,
+        &request,
+        &VueExecutionInputs::default(),
+        &VueMacroSemanticInput::Unavailable,
+        &allocator,
+    )
+    .expect("a plain RuntimeClient compile must not be refused");
+
+    let refusal = result
+        .errors
+        .iter()
+        .find(|diagnostic| diagnostic.message.contains("UntrustedRewriteTarget"))
+        .unwrap_or_else(|| panic!("planner refusal missing: {:?}", result.errors));
+    let span = refusal
+        .span
+        .expect("a refusal reaches the carrier positioned");
+
+    assert_eq!(
+        (span.start, span.end),
+        (content_start, content_end),
+        "a refusal in the rewritten space anchors on its block, not on an offset \
+         inside it that the block's own arithmetic cannot address"
+    );
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        ".a { color: v-bind(tone); }\n}\n",
+        "the anchor is the authored block content"
+    );
+}
+
 // ─── J1 §3.1 vue-benchmarks probe findings (A10d-h) ────────────────────────
 //
 // Oracle: literal, exact byte capture from the workspace's pinned
@@ -922,12 +986,16 @@ fn plain_passthrough_preserves_authored_bytes_all_five_dialects() {
         }
 
         let cascaded = run_vue_style_cascade(input, "sc1", false, false, false);
-        assert_eq!(cascaded.code, source, "{dialect:?} authored bytes changed");
+        assert_eq!(
+            cascaded.code(),
+            source,
+            "{dialect:?} authored bytes changed"
+        );
         for forbidden in ["data-v-sc1", "var(--sc1-", "active_"] {
             assert!(
-                !cascaded.code.contains(forbidden),
+                !cascaded.code().contains(forbidden),
                 "{dialect:?} unexpected rewrite {forbidden:?}: {}",
-                cascaded.code
+                cascaded.code()
             );
         }
     }
@@ -1122,7 +1190,7 @@ fn zero_edit_routes_construct_no_code_transform() {
             "artifact:probe",
         );
         let outcome = run_vue_style_cascade(input, "sc1", module, scoped, true);
-        assert_eq!(outcome.code, "");
+        assert_eq!(outcome.code(), "");
         assert_eq!(
             code_transform_construction_count(),
             0,
@@ -1130,20 +1198,24 @@ fn zero_edit_routes_construct_no_code_transform() {
         );
 
         reset_code_transform_construction_count();
-        let plain = PlainCssInput::try_new(
-            "",
-            CssDialect::Css,
+        let parsed = parse_plain_css_for_verification("", StyleRewriteStage::AuthoredVBind)
+            .expect("empty sheet parses");
+        let outcome = transform_vue_style(
+            VerifiedPlainCss::from_parsed_native_css(&parsed).expect("native-CSS provenance"),
+            CascadeInput::Preprocessed(verter_css_syntax::PreprocessorIdentity::Anonymous),
             "probe.css",
             "space:probe",
             "artifact:probe",
-        )
-        .unwrap();
-        let outcome = run_vue_style_cascade_post_preprocess(plain, "sc1", module, scoped, true);
-        assert_eq!(outcome.code, "");
+            "sc1",
+            module,
+            scoped,
+            true,
+        );
+        assert_eq!(outcome.code(), "");
         assert_eq!(
             code_transform_construction_count(),
             0,
-            "post-preprocess cascade module={module} scoped={scoped} constructed CodeTransform"
+            "preprocessed cascade module={module} scoped={scoped} constructed CodeTransform"
         );
     }
 }
@@ -1195,8 +1267,8 @@ fn build_string_call_count_matches_edit_composition_depth() {
         "artifact:probe",
     );
     let cascaded = run_vue_style_cascade(input, "sc1", true, true, true);
-    assert!(!cascaded.code.contains("v-bind("), "{}", cascaded.code);
-    assert!(!cascaded.code.contains(".a {"), "{}", cascaded.code);
+    assert!(!cascaded.code().contains("v-bind("), "{}", cascaded.code());
+    assert!(!cascaded.code().contains(".a {"), "{}", cascaded.code());
     assert_eq!(
         build_string_invocation_count(),
         3,
@@ -1495,9 +1567,9 @@ fn slotted_argument_edit_count_sweep_never_mints_a_nested_build() {
     }
 }
 
-// ─── A10i: the Vue-owned cascade parses each content identity once ─────────
+// ─── The Vue-owned cascade parses each content identity once ──────────────
 
-// @ai-generated - A10i: an `Unchanged` stage hands its already-parsed
+// @ai-generated - an `Unchanged` stage hands its already-parsed
 // `StyleSyntaxIr` to the next stage instead of causing a re-parse. Every
 // scenario below is a genuine, verified count for the exact scenario
 // described — never the pre-fix baseline's unconditional per-stage re-parse
@@ -1511,7 +1583,7 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
     reset_style_ir_stage_observations();
     let input = AuthoredStyleInput::new("", CssDialect::Css, "p.css", "space:p", "artifact:p");
     let outcome = run_vue_style_cascade(input, "sc1", true, true, true);
-    assert_eq!(outcome.code, "");
+    assert_eq!(outcome.code(), "");
     let observations = style_ir_stage_observations();
     assert_eq!(
         observations
@@ -1685,7 +1757,8 @@ fn style_pipeline_module_stage_failure_clears_output_and_skips_scoping() {
         StyleRewriteStage::PostPreprocessModules
     );
     assert_eq!(
-        outcome.code, "",
+        outcome.code(),
+        "",
         "a hard modules-stage failure must clear the final output, matching \
          running each stage independently"
     );
@@ -1721,7 +1794,8 @@ fn style_pipeline_v_bind_stage_failure_does_not_clear_output() {
         StyleRewriteStage::AuthoredVBind
     );
     assert_eq!(
-        outcome.code, ".a { color: v-bind(#{$x}); }",
+        outcome.code(),
+        ".a { color: v-bind(#{$x}); }",
         "a v-bind-stage failure alone must not clear the accumulated output"
     );
 }
@@ -1747,7 +1821,8 @@ fn cascade_publishability_gates_post_preprocess_failure_but_not_authored_v_bind_
         "wiped output after a post-preprocessor failure must not be publishable"
     );
     assert_eq!(
-        post_failure.code, "",
+        post_failure.code(),
+        "",
         "the refusal fixture must wipe output"
     );
 
@@ -1792,7 +1867,7 @@ fn cascade_passthrough_is_byte_identical_and_maps_after_non_bmp_character() {
         false,
         true,
     );
-    assert_eq!(outcome.code.as_bytes(), source.as_bytes());
+    assert_eq!(outcome.code().as_bytes(), source.as_bytes());
 
     let map_json = cascade_requested_source_map(&outcome, source, "emoji.css")
         .expect("byte-identical passthrough must have an identity map");
@@ -1831,12 +1906,12 @@ fn cascade_requested_map_returns_the_single_rewrite_map() {
         .expect("a single rewrite has an honest cascade map");
     assert_eq!(requested, outcome.source_map);
     assert!(
-        outcome.code.contains("var(--sc1-theme)"),
+        outcome.code().contains("var(--sc1-theme)"),
         "{}",
-        outcome.code
+        outcome.code()
     );
     assert!(
-        !outcome.code.contains("v-bind("),
+        !outcome.code().contains("v-bind("),
         "rewritten CSS must not retain the authored v-bind call"
     );
 }
@@ -1860,7 +1935,11 @@ fn cascade_requested_map_refuses_uncomposable_multi_stage_rewrite() {
     assert!(outcome.facts.rewrites.v_bind);
     assert!(outcome.facts.rewrites.css_modules);
     assert!(outcome.facts.rewrites.scoped_selector);
-    assert!(outcome.code.contains("[data-v-sc1]"), "{}", outcome.code);
+    assert!(
+        outcome.code().contains("[data-v-sc1]"),
+        "{}",
+        outcome.code()
+    );
     assert!(
         cascade_requested_source_map(&outcome, source, "multi.css").is_none(),
         "a later stage's local map must not be presented as the whole cascade map"
@@ -1882,7 +1961,8 @@ fn cascade_requested_source_map_builds_a_real_identity_map_for_an_unchanged_outc
         outcome.stage_failures
     );
     assert_eq!(
-        outcome.code, source,
+        outcome.code(),
+        source,
         "an unmarked block must pass through byte-identical"
     );
     assert!(
@@ -1934,7 +2014,7 @@ fn cascade_requested_source_map_builds_a_real_identity_map_across_multiple_lines
         "{:?}",
         outcome.stage_failures
     );
-    assert_eq!(outcome.code, source);
+    assert_eq!(outcome.code(), source);
 
     let map_json = cascade_requested_source_map(&outcome, source, "Multiline.css").expect(
         "an unchanged multi-line outcome with no stage failures must still yield a real map",
@@ -2001,7 +2081,7 @@ fn cascade_requested_source_map_passes_through_a_real_rewrite_map_unchanged() {
         "{:?}",
         outcome.stage_failures
     );
-    assert_ne!(outcome.code, source, "scoping must rewrite the selector");
+    assert_ne!(outcome.code(), source, "scoping must rewrite the selector");
     assert!(
         !outcome.source_map.is_empty(),
         "a rewriting stage must already produce a real map via emit()"
@@ -2025,7 +2105,8 @@ fn cascade_requested_source_map_is_none_after_a_hard_stage_failure_clears_output
         "malformed module input must hard-fail a stage"
     );
     assert_eq!(
-        outcome.code, "",
+        outcome.code(),
+        "",
         "a hard stage failure must clear the output"
     );
     assert_eq!(
@@ -2049,7 +2130,8 @@ fn cascade_output_is_publishable_refuses_a_hard_failure_that_wiped_non_empty_con
         StyleRewriteStage::PostPreprocessModules
     );
     assert_eq!(
-        outcome.code, "",
+        outcome.code(),
+        "",
         "sanity: the modules stage must have cleared the output"
     );
     assert!(
@@ -2072,7 +2154,7 @@ fn cascade_output_is_publishable_refuses_stage_requires_plain_css() {
         outcome.stage_failures[0].stage,
         StyleRewriteStage::PostPreprocessScoping
     );
-    assert_eq!(outcome.code, "");
+    assert_eq!(outcome.code(), "");
     assert!(!cascade_output_is_publishable(&outcome, source));
 }
 
@@ -2091,7 +2173,8 @@ fn cascade_output_is_publishable_accepts_an_indented_layout_mutation_refusal() {
         StyleRewriteStage::AuthoredVBind
     );
     assert_eq!(
-        outcome.code, source,
+        outcome.code(),
+        source,
         "sanity: an authored-v-bind-stage failure must not clear the output"
     );
     assert!(cascade_output_is_publishable(&outcome, source));
@@ -2101,7 +2184,13 @@ fn cascade_output_is_publishable_accepts_an_indented_layout_mutation_refusal() {
 fn cascade_output_is_publishable_refuses_a_parse_failure_that_wiped_non_empty_content() {
     let source = ".a { color: red; }";
     let outcome = VueStyleCascadeOutcome {
-        code: String::new(),
+        // The shape the runner really produces when a stage wipes the output:
+        // a refusal, not a rewrite that happened to emit nothing.
+        result: verter_css_syntax::QualifiedStyleResult::refused(
+            verter_css_syntax::StyleStage::Authored,
+            CssDialect::Css,
+            Vec::new(),
+        ),
         source_map: String::new(),
         facts: crate::style_planner::VueStyleFacts::default(),
         stage_failures: vec![StyleRewriteFailure {
@@ -2122,7 +2211,11 @@ fn cascade_output_is_publishable_refuses_a_parse_failure_that_wiped_non_empty_co
 fn cascade_output_is_publishable_accepts_an_overlapping_edits_refusal_on_v_bind_stage() {
     let source = ".a { color: v-bind(c); }";
     let outcome = VueStyleCascadeOutcome {
-        code: source.to_string(),
+        result: verter_css_syntax::QualifiedStyleResult::authored(
+            CssDialect::Css,
+            source,
+            Vec::new(),
+        ),
         source_map: String::new(),
         facts: crate::style_planner::VueStyleFacts::default(),
         stage_failures: vec![StyleRewriteFailure {
@@ -2160,7 +2253,8 @@ fn cascade_output_is_publishable_accepts_a_v_bind_only_failure() {
         StyleRewriteStage::AuthoredVBind
     );
     assert_eq!(
-        outcome.code, source,
+        outcome.code(),
+        source,
         "sanity: the v-bind failure must not clear the output"
     );
     assert!(
@@ -2182,7 +2276,8 @@ fn cascade_output_is_publishable_accepts_a_clean_outcome() {
     assert!(cascade_output_is_publishable(&outcome, source));
 }
 
-// @ai-generated - A10i must hold through the REAL production compile()
+// @ai-generated - one parse per content identity must hold through the REAL
+// production compile()
 // entry point, not just the standalone `run_vue_style_cascade` orchestrator:
 // a `<style scoped module>` block where only the LAST stage (scoped) rewrites
 // anything must cost exactly 1 parse end-to-end. Before production routed
@@ -2199,7 +2294,7 @@ fn production_compile_reuses_parsed_style_ir_across_cascade_stages() {
         1,
         "the real compile() entry point must hand its retained IR across the \
          v-bind/module/scoped stages when only the last stage rewrites \
-         anything (A10i), not re-parse independently per stage"
+         anything, not re-parse independently per stage"
     );
 }
 

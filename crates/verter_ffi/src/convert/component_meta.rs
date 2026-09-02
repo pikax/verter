@@ -302,6 +302,17 @@ fn authored_name_to_ffi(
     }
 }
 
+/// Project a block's role onto the wire DTO.
+///
+/// The `dialect` and `module` strings are `Debug` renderings of OPEN-domain
+/// enums — `StyleDialect::Custom { .. }` already produces arbitrary text — so a
+/// consumer must treat them as an open set of names, never a closed match.
+/// Naming a spelling the classifier previously called unrecognised
+/// (`lang="postcss"` moving from `"Missing"` to `"PostCss"`) is therefore a
+/// value within the field's existing domain and does not bump the structure
+/// DTO's `schema_version`, which tracks the SHAPE of these messages. A
+/// consumer that switches on these names and has no default arm is reading a
+/// closed contract that was never offered.
 fn block_role_to_ffi(
     role: &verter_language::parse_artifact::carrier_inventory::SectionRole,
 ) -> FfiCarrierBlockRole {

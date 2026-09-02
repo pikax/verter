@@ -75,7 +75,7 @@ use crate::framework_common::{
 use crate::parser::types::{sfc_script_dialect, ParsedSfc, SfcScriptDialect};
 use crate::style_planner::{
     prepared_style_for_sealed_slot, run_vue_style_cascade, transform_vue_style,
-    transform_vue_v_bind, AuthoredStyleInput, PreparedStyleIr, StyleRewriteOutcome,
+    transform_vue_v_bind, AuthoredStyleInput, CascadeInput, PreparedStyleIr, StyleRewriteOutcome,
     VerifiedPlainCss,
 };
 use crate::svelte::carrier::{
@@ -1137,13 +1137,12 @@ fn collect_style_v_bind_expressions(
     for (index, node) in parsed.style_nodes().iter().enumerate() {
         let (css, dialect): (&str, CssDialect) =
             if let Some(selected) = block_content.styles.get(index).and_then(Option::as_ref) {
-                let dialect = match selected.lang.as_str() {
-                    "css" => CssDialect::Css,
-                    "scss" => CssDialect::Scss,
-                    "sass" => CssDialect::Sass,
-                    "less" => CssDialect::Less,
-                    "stylus" | "styl" => CssDialect::Stylus,
-                    _ => continue,
+                // `lang` arrives as a caller-supplied string, so it is resolved
+                // through the one owner of the spelling → dialect identity. A
+                // table here would answer differently from every other route
+                // the same block travels, and nothing would report it.
+                let Some(dialect) = CssDialect::from_lang(&selected.lang) else {
+                    continue;
                 };
                 (selected.code.as_ref(), dialect)
             } else {
@@ -1331,17 +1330,21 @@ fn apply_selected_runtime_styles(
             continue;
         };
         let authored_dialect = style_dialect(node.lang);
-        let selected_dialect = match input.lang.as_str() {
-            "css" => CssDialect::Css,
-            "scss" => CssDialect::Scss,
-            "sass" => CssDialect::Sass,
-            "less" => CssDialect::Less,
-            "stylus" | "styl" => CssDialect::Stylus,
-            _ => return Err(VueParsedRuntimeError::BlockContentUnavailable),
+        // Same owner as every other `lang` route: a private table here would
+        // silently accept or refuse spellings the rest of the pipeline does not.
+        let Some(selected_dialect) = CssDialect::from_lang(&input.lang) else {
+            return Err(VueParsedRuntimeError::BlockContentUnavailable);
         };
-        let supplied_preprocessor_output =
-            selected_dialect == CssDialect::Css && authored_dialect != Some(CssDialect::Css);
-        if authored_dialect.is_none() && !supplied_preprocessor_output {
+        // Who made these bytes is a fact the host carries, not one the
+        // compiler infers from a dialect comparison. An external tool's output
+        // is plain CSS whatever the block was authored in, so it takes the
+        // verified plain-CSS route and is recorded at the preprocessed stage,
+        // named by the tool the host identified. Deriving it from
+        // "plain CSS selected for a non-plain-CSS block" instead missed the
+        // case a tool ran over an already-plain-CSS block and published its
+        // output as this compiler's own authored bytes.
+        let supplied_by_external_tool = input.producer.is_some();
+        if authored_dialect.is_none() && !supplied_by_external_tool {
             return Err(VueParsedRuntimeError::BlockContentUnavailable);
         }
         let mut current = input.code.to_string();
@@ -1357,7 +1360,7 @@ fn apply_selected_runtime_styles(
         );
         let mut applied_rewrite_stages = 0u8;
 
-        if !supplied_preprocessor_output {
+        if !supplied_by_external_tool {
             let mut authored = AuthoredStyleInput::new(
                 &current,
                 selected_dialect,
@@ -1373,7 +1376,7 @@ fn apply_selected_runtime_styles(
             ) {
                 authored = authored.with_prepared(prepared.ir());
             }
-            let cascade_module = node.module && selected_dialect == CssDialect::Css;
+            let cascade_module = node.module && !selected_dialect.requires_external_preprocessing();
             let outcome = run_vue_style_cascade(
                 authored,
                 &style_scope,
@@ -1397,7 +1400,7 @@ fn apply_selected_runtime_styles(
             .filter(|applied| *applied)
             .count();
             if stage_count > 0 {
-                current = outcome.code;
+                current = outcome.result.into_code();
                 current_map = compose_selected_style_map(
                     verter_options.source_map,
                     &outcome.source_map,
@@ -1424,9 +1427,17 @@ fn apply_selected_runtime_styles(
             .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
             let verified = VerifiedPlainCss::from_parsed_native_css(prepared.ir())
                 .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
-            let cascade_module = node.module && selected_dialect == CssDialect::Css;
+            // `supplied_by_external_tool` selected this branch, so the
+            // identity is present; refusing rather than fabricating one keeps
+            // that true by construction if the branch condition ever moves.
+            let producer = input
+                .producer
+                .clone()
+                .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
+            let cascade_module = node.module && !selected_dialect.requires_external_preprocessing();
             let outcome = transform_vue_style(
                 verified,
+                CascadeInput::Preprocessed(producer),
                 &input.source_space_token,
                 &input.source_space_token,
                 &input.content_artifact_token,
@@ -1451,7 +1462,7 @@ fn apply_selected_runtime_styles(
             .filter(|applied| *applied)
             .count();
             if stage_count > 0 {
-                current = outcome.code;
+                current = outcome.result.into_code();
                 current_map = compose_selected_style_map(
                     verter_options.source_map,
                     &outcome.source_map,

@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/cases/compile-fail/prepare_supplied_style_rejects_unqualified_bytes.rs:18:36
+   |
+18 |     let _ = prepare_supplied_style("$brand: red;\n.a { color: $brand; }");
+   |             ---------------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `PreprocessedStyle<'_>`, found `&str`
+   |             |
+   |             arguments to this function are incorrect
+   |
+note: function defined here
+  --> src/style_planner.rs
+   |
+   | pub fn prepare_supplied_style(style: PreprocessedStyle<'_>) -> Option<PreparedStyleIr> {
+   |        ^^^^^^^^^^^^^^^^^^^^^^

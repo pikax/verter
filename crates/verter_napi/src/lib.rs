@@ -138,9 +138,14 @@ fn css_dialect(value: Option<&str>) -> Result<verter_css_syntax::CssDialect> {
     match value {
         None => Ok(verter_css_syntax::CssDialect::Css),
         Some(lang) => verter_css_syntax::CssDialect::from_lang(lang).ok_or_else(|| {
+            // Listed from the owner's own table so the message cannot drift
+            // from what the call actually accepts.
+            let expected = verter_css_syntax::CssDialect::LANG_SPELLINGS
+                .map(|(spelling, _)| spelling)
+                .join(", ");
             Error::new(
                 Status::InvalidArg,
-                format!("unknown CSS dialect {lang:?}; expected css, scss, sass, less, or stylus"),
+                format!("unknown CSS dialect {lang:?}; expected one of: {expected}"),
             )
         }),
     }
@@ -253,17 +258,28 @@ pub struct TransformVueStyleResult {
     pub moduleName: Option<String>,
     /// v-bind() expressions found and replaced
     pub vBindVars: Vec<VueStyleVBind>,
-    /// Per-selector soft refusals the cascade tolerated (`code` still
-    /// published, minus the untrustworthy rule each entry names) — a
-    /// caller-visible signal for exactly the case
-    /// `cascade_output_is_publishable` deliberately does NOT refuse the
-    /// whole call over. Empty on every ordinary successful transform.
+    /// Every refusal the cascade published for this call and still returned
+    /// code for: the per-selector soft refusals (`code` published minus the
+    /// untrustworthy rule each entry names) plus any stage failure
+    /// `cascade_output_is_publishable` deliberately does NOT refuse the whole
+    /// call over. Empty on every ordinary successful transform.
+    ///
+    /// Read from the cascade's single publication route
+    /// (`outcome.result.diagnostics()`), not re-derived from its own record of
+    /// what each authority reported — re-deriving would format every refusal a
+    /// second time and is how the same refusal ends up reported twice.
     pub refusals: Vec<String>,
 }
 
 /// Run Vue's v-bind + CSS-Modules + scoped-selector cascade over CSS the
-/// caller already treats as plain (already preprocessed, if it originated as
-/// SCSS/Less/Stylus).
+/// caller already treats as plain.
+///
+/// The bytes are taken as the CALLER'S OWN, at their own stage: this entry
+/// receives no provenance and cannot invent any, so the reported spans address
+/// exactly the buffer that was passed in. It deliberately does NOT claim the
+/// bytes came from a preprocessor — a caller that knows they did, and knows
+/// which tool produced them, records that at the admission boundary
+/// (`PreprocessedStyle`) rather than here.
 #[napi]
 pub fn transform_vue_style(
     css: Buffer,
@@ -295,6 +311,13 @@ pub fn transform_vue_style(
         let want_source_map = options.sourcemap.unwrap_or(false);
         let outcome = verter_compiler::style_planner::transform_vue_style(
             verified,
+            // The caller supplies bytes and no provenance. `Authored` is the
+            // only arm that asserts nothing beyond what is known here — that
+            // these are the caller's own bytes, and that reported spans
+            // address exactly them. `Preprocessed` would assert an external
+            // tool ran, which this entry has no way to know; a caller that
+            // does know records it at the admission boundary instead.
+            verter_compiler::style_planner::CascadeInput::Authored,
             filename,
             filename,
             filename,
@@ -325,13 +348,13 @@ pub fn transform_vue_style(
             None
         };
         let refusals = outcome
-            .facts
-            .refusals
+            .result
+            .diagnostics()
             .iter()
-            .map(ToString::to_string)
+            .map(|diagnostic| diagnostic.message().to_string())
             .collect();
         Ok(TransformVueStyleResult {
-            code: outcome.code,
+            code: outcome.result.into_code(),
             sourceMap: source_map,
             moduleClasses: outcome
                 .facts
