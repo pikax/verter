@@ -97,7 +97,7 @@ schema = 2
 "CCA1O2C" = { status = "pending" }
 "CCA1O2D" = { status = "pending" }
 "CCA1O2E" = { status = "pending" }
-"CCA1O2F" = { status = "pending" }
+"CCA1O2F" = { status = "implemented", commit_message = "docs(session): name the framework-tagged host request in compile-lane comments", commit_date = "2026-09-02T01:28:36+01:00", pull_request = 466 }
 "CCA1O2G" = { status = "pending" }
 "CCA1O2H" = { status = "implemented", commit_message = "fix(napi): refuse a request key stated as undefined", commit_date = "2026-09-01T00:56:27+01:00" }
 "CCA1O2I" = { status = "implemented", commit_message = "refactor(napi): generate the published host compile-request declaration", commit_date = "2026-09-01T14:00:00+01:00" }
