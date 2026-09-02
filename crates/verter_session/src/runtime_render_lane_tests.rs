@@ -112,7 +112,8 @@ fn host_backed_one(
 
 /// Build the batch render profile mirroring an unplugin build. Non-varied
 /// output-affecting fields take the same defaults `CompileProfile::default`
-/// / an absent `HostCompileProfile` field would (so this matches the
+/// / an absent general product or framework-arm option on the
+/// framework-discriminated `HostCompileRequest` would (so this matches the
 /// `get_virtual_file` oracle unless a test overrides a field explicitly).
 fn render_profile(
     is_production: bool,
@@ -129,7 +130,8 @@ fn render_profile(
         force_vapor: false,
         source_map: false,
         // Tri-state: absent means "compiler default" (`!is_production`),
-        // exactly like an absent `HostCompileProfile.comments`.
+        // exactly like an absent `comments` in the `HostCompileRequest`'s
+        // framework-arm options.
         comments: None,
         filename: None,
         hmr_strategy: hmr,

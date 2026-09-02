@@ -240,8 +240,11 @@ impl CompileBatchEntry {
 /// This carries EVERY output-affecting field the render lane feeds into
 /// `RuntimeCompileOptions`, so the RuntimeRender lane reproduces the
 /// caller's build profile byte-for-byte against the HostBacked
-/// `get_virtual_file` path (which builds its profile from the same JS
-/// `HostCompileProfile`). Omitting a field would silently drop it — e.g.
+/// `get_virtual_file` path (which builds its profile from the same
+/// JS-supplied fields of the framework-discriminated `HostCompileRequest` —
+/// its identity, requested products and their general product options, plus
+/// the framework arm's options, as distinct from this flattened
+/// runtime-render profile). Omitting a field would silently drop it — e.g.
 /// without `source_map` a production build would lose its source maps.
 /// Optional fields keep the same "absent = `CompileProfile` default"
 /// semantics as the FFI profile conversion, so the render profile also
@@ -361,8 +364,10 @@ pub fn compile_profile_for_bundler() -> CompileProfile {
 ///
 /// Absent-field semantics match FFI (`ffi_profile_to_host`). Hash-
 /// load-bearing: the profile must hash identically to the
-/// `CompileProfile` from the same JS `HostCompileProfile`, because
-/// `apply_block_overrides` stores supplied content under that hash.
+/// `CompileProfile` projected from the same JS framework-discriminated
+/// `HostCompileRequest` identity, runtime-product options, and framework-arm
+/// options, because `apply_block_overrides` stores supplied content under
+/// that hash.
 fn render_base_profile(rp: &CompileBatchRenderProfile) -> CompileProfile {
     let mut profile = CompileProfile {
         filename: rp.filename.clone(),
