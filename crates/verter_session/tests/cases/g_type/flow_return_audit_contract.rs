@@ -27,6 +27,7 @@
 
 use std::sync::Arc;
 
+use verter_audit::payloads::flow_return::{FlowDegradationTag, FlowFailureTag, FlowPartialityTag};
 use verter_audit::{AuditCaptureState, RequestKind, StructuredAuditEvent};
 use verter_session::host_flow_return_audit::FlowReturnError;
 use verter_session::semantic_query::{demand, FlowReturnFailure, ReturnProjectionDemand};
@@ -301,4 +302,169 @@ fn filtered_kind_returns_cheap_noop_record_and_publishes_nothing() {
 
 fn whole() -> ReturnProjectionDemand {
     ReturnProjectionDemand::whole_return()
+}
+
+/// The audit record must explain WHY a request came back partial, not
+/// only THAT it did.
+///
+/// A `typeof`-guard over an unenumerable subject (`unknown`) retains a
+/// superset and records the typed guard-narrowing gap, so the value is
+/// usable but never warm: both calls recompute cold. Each record must
+/// name that reason. The `string | number` control classifies every arm,
+/// so it reports NO partiality and its second call is a warm hit.
+///
+/// Discrimination: against a payload that carries only the three
+/// occurrence counters, the `partiality` assertions fail on every leg —
+/// the counters are identical between the gapped subject and the control
+/// on the first call, so nothing else in the record distinguishes them.
+#[test]
+fn flow_return_audit_explains_partial_cold_recompute() {
+    let host = build_host(true, false);
+    let canonical = "/w/flow-audit-partiality.ts";
+    upsert(
+        &host,
+        canonical,
+        "export function gapped(x: unknown) { if (typeof x === \"string\") return x; return 0; }\n\
+         export function complete(x: string | number) { if (typeof x === \"string\") return x; return 0; }\n",
+    );
+
+    // Degraded-but-usable: two cold requests, each naming the gap.
+    let ident = identity(canonical, "gapped");
+    for call in 1..=2 {
+        let carrier = host.get_flow_return_type_with_audit(&ident, whole());
+        let record = carrier.audit();
+        let result = carrier
+            .as_result()
+            .unwrap_or_else(|err| panic!("call {call}: gap keeps the value usable, got {err:?}"));
+        assert!(
+            result.degradation().is_some(),
+            "call {call}: the retained superset is a degraded success"
+        );
+        assert!(
+            !record.from_cache,
+            "call {call}: a degraded result never warms"
+        );
+        let payload = record
+            .flow_return_inference_payload()
+            .expect("flow payload");
+        assert!(
+            payload.cold_computes >= 1,
+            "call {call}: a degraded result recomputes cold"
+        );
+        assert_eq!(
+            payload.partiality,
+            Some(FlowPartialityTag::Degraded(
+                FlowDegradationTag::GapGuardNarrowing
+            )),
+            "call {call}: the payload must name the guard-narrowing gap, \
+             not merely report counters"
+        );
+    }
+
+    // Complete control: no partiality, and the second call is warm.
+    let control = identity(canonical, "complete");
+    let cold = host.get_flow_return_type_with_audit(&control, whole());
+    assert!(cold.as_result().is_ok(), "control must resolve");
+    assert_eq!(
+        cold.audit()
+            .flow_return_inference_payload()
+            .expect("flow payload")
+            .partiality,
+        None,
+        "a complete evaluation reports no partiality"
+    );
+    let warm = host.get_flow_return_type_with_audit(&control, whole());
+    let warm_record = warm.audit();
+    assert!(
+        warm_record.from_cache,
+        "the complete control's second call is a warm hit"
+    );
+    assert_eq!(
+        warm_record
+            .flow_return_inference_payload()
+            .expect("flow payload")
+            .partiality,
+        None,
+        "a warm complete hit reports no partiality"
+    );
+}
+
+/// The typed no-value reason rides the `Err` arm's payload too: a
+/// narrower-than-whole-return demand fails closed, and the record names
+/// `UnmodeledDemandPoint` rather than leaving the caller to guess from
+/// three zero counters.
+#[test]
+fn flow_return_audit_names_the_no_value_failure_reason() {
+    let host = build_host(true, false);
+    let narrower = ReturnProjectionDemand {
+        point: demand::Demand::navigate(demand::ProjectionPath::empty()),
+    };
+    let carrier = host.get_flow_return_type_with_audit(&identity(CANONICAL, "makeThing"), narrower);
+    assert!(
+        matches!(
+            carrier.as_result(),
+            Err(FlowReturnError::Failure(
+                FlowReturnFailure::UnmodeledDemandPoint
+            ))
+        ),
+        "precondition: the narrower demand fails closed"
+    );
+    assert_eq!(
+        carrier
+            .audit()
+            .flow_return_inference_payload()
+            .expect("flow payload")
+            .partiality,
+        Some(FlowPartialityTag::NoValue(
+            FlowFailureTag::UnmodeledDemandPoint
+        )),
+        "the Err arm's payload must carry the typed no-value reason"
+    );
+}
+
+/// The partiality projection is READ-ONLY telemetry: it is derived from
+/// the outcome the evaluator already produced and is never consulted by
+/// admission. Disabling audit removes the projection entirely (the
+/// default-filled record reports no partiality), and the served value,
+/// the degradation verdict, and the cold/warm sequence must be
+/// byte-identical to the audited run.
+///
+/// Discrimination: against a tree where the projection feeds admission
+/// (or is computed before the outcome and mutates it), the audited and
+/// unaudited runs diverge on `from_cache` or on `degradation()`.
+#[test]
+fn partiality_projection_does_not_change_admission_or_warmth() {
+    let source = "export function gapped(x: unknown) { if (typeof x === \"string\") return x; return 0; }\n\
+                  export function complete(x: string | number) { if (typeof x === \"string\") return x; return 0; }\n";
+    let canonical = "/w/flow-audit-partiality-equiv.ts";
+
+    let observe = |audit_enabled: bool| {
+        let host = build_host(audit_enabled, false);
+        upsert(&host, canonical, source);
+        let mut trace = Vec::new();
+        for symbol in ["gapped", "complete"] {
+            let ident = identity(canonical, symbol);
+            for _ in 0..2 {
+                let carrier = host.get_flow_return_type_with_audit(&ident, whole());
+                let degradation = carrier.as_result().ok().and_then(|r| r.degradation());
+                trace.push((carrier.audit().from_cache, format!("{degradation:?}")));
+            }
+        }
+        trace
+    };
+
+    let audited = observe(true);
+    let unaudited = observe(false);
+    assert_eq!(
+        audited, unaudited,
+        "the partiality projection is observability only — admission, warmth \
+         and the degradation verdict must not depend on whether it ran"
+    );
+    // Precondition: the trace actually spans a degraded and a warm leg,
+    // so an equal-but-vacuous comparison cannot pass.
+    assert!(
+        audited.iter().any(|(warm, _)| *warm) && audited.iter().any(|(warm, _)| !*warm),
+        "the equivalence trace must cover both a never-warm degraded leg \
+         and a warm complete leg: {audited:?}"
+    );
 }

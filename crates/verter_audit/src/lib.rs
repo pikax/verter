@@ -111,9 +111,9 @@ pub use payloads::tags::{
 };
 pub use payloads::{
     AuditDiagnosticEntry, AuditDiagnosticKind, BundlerBatchPayload, CompilePayload,
-    ComponentMetaPayload, FlowReturnInferencePayload, LspRequestPayload, McpToolPayload,
-    SemanticAnalysisPayload, SlowRecordSummary, TypeResolutionPayload, WorkspaceOp,
-    WorkspacePayload,
+    ComponentMetaPayload, FlowDegradationTag, FlowFailureTag, FlowPartialityTag,
+    FlowReturnInferencePayload, LspRequestPayload, McpToolPayload, SemanticAnalysisPayload,
+    SlowRecordSummary, TypeResolutionPayload, WorkspaceOp, WorkspacePayload,
 };
 pub use record::{
     AuditCaptureState, Hash16, IncidentalFields, RequestAuditRecord, RequestKind,

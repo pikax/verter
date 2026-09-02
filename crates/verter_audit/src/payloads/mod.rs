@@ -23,7 +23,9 @@ pub mod workspace;
 pub use bundler::{BundlerBatchPayload, SlowRecordSummary};
 pub use compile::CompilePayload;
 pub use component_meta::{AuditDiagnosticEntry, AuditDiagnosticKind, ComponentMetaPayload};
-pub use flow_return::FlowReturnInferencePayload;
+pub use flow_return::{
+    FlowDegradationTag, FlowFailureTag, FlowPartialityTag, FlowReturnInferencePayload,
+};
 pub use lsp::{LspRequestPayload, PositionInfo};
 pub use mcp::McpToolPayload;
 pub use semantic::SemanticAnalysisPayload;

@@ -184,3 +184,84 @@ fn typeinfo_graph_payload_carries_every_documented_exactness_status() {
         "ExactnessTag must enumerate every closed status — missing: {missing:?}",
     );
 }
+
+#[test]
+fn flow_return_payload_exposes_its_typed_partiality_reason() {
+    let ts = read_audit_generated_ts();
+    assert!(
+        ts.contains("partiality: FlowPartialityTag | null"),
+        "FlowReturnInferencePayload must expose the typed partiality reason \
+         alongside its occurrence counters",
+    );
+    assert!(
+        ts.contains(
+            "export type FlowPartialityTag = { \"Degraded\": FlowDegradationTag } \
+             | { \"NoValue\": FlowFailureTag }"
+        ),
+        "FlowPartialityTag must split the degraded-but-usable arm from the \
+         no-value arm, each carrying its own closed reason tag",
+    );
+}
+
+/// Every flow-model gap, degradation, and no-value reason keeps a
+/// distinct wire spelling — no collapsed catch-all bucket, and no
+/// `Debug`-formatted string.
+///
+/// Discriminator: fold any two reasons onto one tag (or replace a nested
+/// `Unsupported` / `CallResolution` / `Budget` arm with a single bucket)
+/// and the corresponding name disappears from the generated union.
+#[test]
+fn flow_partiality_tags_enumerate_every_closed_reason() {
+    let ts = read_audit_generated_ts();
+    let expected = [
+        // Every `FlowGap` variant, reduced into the degradation tag.
+        "GapGuardNarrowing",
+        "GapNominalRelation",
+        "GapClosureCapture",
+        "GapAbruptCompletion",
+        "GapUnmodeledExpression",
+        // The remaining `FlowReturnDegradation` variants.
+        "NonCallableBinding",
+        "UnrepresentableCallee",
+        "FailedBindingInitializer",
+        "UnappliedWriteEffect",
+        "ConditionalVarDefinition",
+        "UnreducedDeclaredUnion",
+        "UnresolvedValue",
+        "UnmodeledPosition",
+        // Every `FlowReturnFailure` variant, nested reasons included.
+        "UnsupportedLoop",
+        "UnsupportedJump",
+        "UnsupportedInvokedClosureEffect",
+        "UnsupportedWith",
+        "UnsupportedModuleDeclaration",
+        "EmptyCycle",
+        "UnmodeledDemandPoint",
+        "CallNotCallable",
+        "CallNoApplicableOverload",
+        "CallUndecidable",
+        "CallBudget",
+        "BudgetDepthExceeded",
+        "BudgetWorkExceeded",
+        "UnstableState",
+    ];
+    let degradation = ts
+        .split_once("export type FlowDegradationTag = ")
+        .map(|(_, rest)| rest.split_once(';').map(|(line, _)| line).unwrap_or(rest))
+        .expect("audit.generated.ts must export FlowDegradationTag")
+        .to_string();
+    let failure = ts
+        .split_once("export type FlowFailureTag = ")
+        .map(|(_, rest)| rest.split_once(';').map(|(line, _)| line).unwrap_or(rest))
+        .expect("audit.generated.ts must export FlowFailureTag")
+        .to_string();
+    let unions = format!("{degradation}{failure}");
+    let missing: Vec<&str> = expected
+        .into_iter()
+        .filter(|reason| !unions.contains(&format!("\"{reason}\"")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the flow partiality tags must spell out every closed reason — missing: {missing:?}",
+    );
+}

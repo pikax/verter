@@ -996,7 +996,41 @@ lower_ms?: number | null, };
 export type FileRole = "Entry" | "DirectImport" | "TransitiveImport" | "TypeDep" | "IndexedReadyBuild" | "NotLoaded" | "ResolverWalk";
 
 /**
- * Per-request counters for one flow-return inference request.
+ * Closed mirror of the session's `FlowReturnDegradation` — the reason a
+ * usable flow-return value is incomplete.
+ *
+ * The domain's `FlowGap(_)` arm is reduced through its own gap variant,
+ * so each detected flow-model gap keeps a distinct wire spelling
+ * instead of collapsing into one "gap" bucket.
+ */
+export type FlowDegradationTag = "GapGuardNarrowing" | "GapNominalRelation" | "GapClosureCapture" | "GapAbruptCompletion" | "GapUnmodeledExpression" | "NonCallableBinding" | "UnrepresentableCallee" | "FailedBindingInitializer" | "UnappliedWriteEffect" | "ConditionalVarDefinition" | "UnreducedDeclaredUnion" | "UnresolvedValue" | "UnmodeledPosition";
+
+/**
+ * Closed mirror of the session's no-value flow-return reasons — the
+ * `FlowReturnFailure` class plus the host's own unstable-view refusal.
+ *
+ * The three `FlowReturnFailure` variants that nest a further closed
+ * enum (`Unsupported`, `CallResolution`, `Budget`) are reduced through
+ * that inner variant, so every distinct no-value reason keeps its own
+ * wire spelling.
+ */
+export type FlowFailureTag = "Missing" | "UnsupportedLoop" | "UnsupportedJump" | "UnsupportedInvokedClosureEffect" | "UnsupportedWith" | "UnsupportedModuleDeclaration" | "Unresolved" | "EmptyCycle" | "UnmodeledDemandPoint" | "CallNotCallable" | "CallNoApplicableOverload" | "CallUndecidable" | "CallBudget" | "BudgetDepthExceeded" | "BudgetWorkExceeded" | "UnstableState";
+
+/**
+ * Why a flow-return request was not a clean, complete value.
+ *
+ * The two arms mirror the audited entry-point's split result/carrier
+ * contract exactly: a DEGRADED SUCCESS is a usable value that refuses
+ * warm admission and rides the carrier's `Ok` arm; a NO-VALUE outcome
+ * rides the `Err` arm. A request that produced a complete, non-degraded
+ * value carries no partiality at all
+ * ([`FlowReturnInferencePayload::partiality`] is `None`).
+ */
+export type FlowPartialityTag = { "Degraded": FlowDegradationTag } | { "NoValue": FlowFailureTag };
+
+/**
+ * Per-request counters and the typed partiality reason for one
+ * flow-return inference request.
  *
  * The three counters mirror the cold-path structured events one to
  * one: each cold whole-function evaluation bumps `cold_computes`
@@ -1007,6 +1041,13 @@ export type FileRole = "Entry" | "DirectImport" | "TransitiveImport" | "TypeDep"
  * `FlowCycleSentinelHit`). A warm family hit bumps nothing — the
  * cold-vs-warm audit contract's counter-side witness is
  * `cold_computes == 0`.
+ *
+ * The counters report THAT a request did cold work, hit a budget, or
+ * held on a cycle; [`Self::partiality`] reports WHY the request came
+ * back degraded or with no value at all. It is read-only telemetry
+ * derived from the outcome the evaluator already produced — no
+ * admission decision, warm/cold classification, or cache identity
+ * consults it.
  */
 export type FlowReturnInferencePayload = {
 /**
@@ -1028,7 +1069,15 @@ budget_exceeded_events: number,
  * Number of coinductive re-entry holds recorded on the shared
  * obligation runtime (the flow-cycle sentinel).
  */
-cycle_reentry_holds: number, };
+cycle_reentry_holds: number,
+/**
+ * Why the request was partial: the typed degradation reason on a
+ * degraded-but-usable value, or the typed no-value reason on a
+ * refusal. `None` is the complete, warm-admissible outcome — and
+ * also the default-filled value on the filtered / audit-disabled
+ * record, where no payload was collected at all.
+ */
+partiality: FlowPartialityTag | null, };
 
 /**
  * Which flow-slice budget axis tripped — the substrate mirror of the

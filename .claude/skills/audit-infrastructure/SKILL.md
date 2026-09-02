@@ -81,8 +81,8 @@ entry `VerterHost::get_flow_return_type_with_audit(function, demand)`
 `AuditedResult<Arc<FlowReturnResult>, FlowReturnError>` — the carrier's
 `audit` field is populated on BOTH arms. `FlowReturnInferencePayload`
 (`crates/verter_audit/src/payloads/flow_return.rs`) carries
-`function_symbol` plus three per-request counters mirroring the cold-path
-structured events one to one:
+`function_symbol`, three per-request counters mirroring the cold-path
+structured events one to one, and the typed partiality reason:
 
 | Counter | Paired structured event | Bumped when |
 | --- | --- | --- |
@@ -90,13 +90,50 @@ structured events one to one:
 | `budget_exceeded_events` | `FlowSliceBudgetExceeded { axis: FlowSliceBudgetAxisTag }` | a flow-slice budget refusal routes through `ReturnOnly` |
 | `cycle_reentry_holds` | `FlowCycleSentinelHit` | a coinductive re-entry hold is recorded on the shared obligation runtime |
 
+The counters report THAT a request did cold work, hit a budget, or held
+on a cycle. `partiality: Option<FlowPartialityTag>` reports WHY it came
+back incomplete, and is `None` for the complete, warm-admissible outcome
+(and on the default-filled filtered / audit-disabled record, where no
+payload was collected at all):
+
+| Arm | Carries | Populated from |
+| --- | --- | --- |
+| `FlowPartialityTag::Degraded(FlowDegradationTag)` | the degraded-but-usable `Ok` outcome's reason | `FlowReturnResult::degradation()` |
+| `FlowPartialityTag::NoValue(FlowFailureTag)` | the `Err` outcome's no-value reason | the typed `FlowReturnError` |
+
+`FlowDegradationTag` and `FlowFailureTag` are CLOSED MIRRORS of the
+session's `FlowReturnDegradation` / `FlowGap` and `FlowReturnFailure`
+vocabularies, so the leaf audit substrate keeps no back-edge to
+`verter_session`. Both flatten their domain's nested closed enums —
+`FlowReturnDegradation::FlowGap(_)` reduces through the gap variant
+(`GapGuardNarrowing`, `GapNominalRelation`, `GapClosureCapture`,
+`GapAbruptCompletion`, `GapUnmodeledExpression`), and
+`FlowReturnFailure`'s `Unsupported` / `CallResolution` / `Budget` arms
+reduce through their inner reason (`UnsupportedLoop`, `CallUndecidable`,
+`BudgetWorkExceeded`, …) — so every distinct reason keeps its own wire
+spelling instead of collapsing into a catch-all bucket. `FlowFailureTag`
+additionally carries `UnstableState` for the host's own
+`FlowReturnError::UnstableState` refusal, so the `Err` arm never reports
+an unexplained no-value.
+
+The projection lives at the ONE producer,
+`observed_partiality` in `crates/verter_session/src/host_flow_return_audit.rs`,
+and maps through exhaustive matches (a new domain variant is a compile
+error, never a silently collapsed reason). It is READ-ONLY telemetry: it
+runs after the outcome is bound, and no admission decision, warm/cold
+classification, or cache identity reads it back.
+
 Cold-vs-warm contract: a warm family hit emits NO `FlowReturnStarted` and
 bumps NO counter (`cold_computes == 0` is the counter-side witness), and
-allocates no audit payload without an active accumulator. Guards:
+allocates no audit payload without an active accumulator. A degraded
+success never warms at all, so it reports its partiality on every call.
+Guards:
 `crates/verter_session/tests/cases/g_type/flow_return_audit_contract.rs`
-(cold/warm event + payload contract) and
+(cold/warm event + payload contract, the partial-vs-complete partiality
+contract, and the audited-vs-unaudited admission equivalence) and
 `crates/verter_session/tests/cases/g_misc0/flow_return_audit_tls_propagation.rs`
-(TLS observer propagation across the dispatch's worker hops).
+(TLS observer propagation across the dispatch's worker hops); the wire
+surface is pinned by `crates/verter_audit/tests/cases/ts_bindings.rs`.
 
 ## `AuditedResult<T, E>` Carrier
 
