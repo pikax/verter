@@ -82,20 +82,20 @@ const host = await createHost();
 The `Host` class exposes the shared host methods below plus the WASM-only
 `compileRequest()` route:
 
-| Method                                                                                      | Returns                    | Description                                                   |
-| ------------------------------------------------------------------------------------------- | -------------------------- | ------------------------------------------------------------- |
-| `resolve(rawId)`                                                                            | `HostResolvedId \| null`   | Resolve raw ID to canonical ID                                |
-| `upsert(request)`                                                                           | `HostUpdateResult`         | Register/update a file                                        |
-| `applyBlockOverrides(request)`                                                              | `HostUpdateResult`         | Apply preprocessed block overrides                            |
-| `getIde(canonicalId, profile?)`                                                             | `HostIdeResponse \| null`  | Get TSX or JSX for type checking                              |
-| `compileRequest(canonicalId, request)`                                                      | `HostCompileRequestResponse` | Execute one typed compile request (throws on refusal)       |
+| Method                                                                                      | Returns                           | Description                                                     |
+| ------------------------------------------------------------------------------------------- | --------------------------------- | --------------------------------------------------------------- |
+| `resolve(rawId)`                                                                            | `HostResolvedId \| null`          | Resolve raw ID to canonical ID                                  |
+| `upsert(request)`                                                                           | `HostUpdateResult`                | Register/update a file                                          |
+| `applyBlockOverrides(request)`                                                              | `HostUpdateResult`                | Apply preprocessed block overrides                              |
+| `getIde(canonicalId, profile?)`                                                             | `HostIdeResponse \| null`         | Get TSX or JSX for type checking                                |
+| `compileRequest(canonicalId, request)`                                                      | `HostCompileRequestResponse`      | Execute one typed compile request (throws on refusal)           |
 | `getVirtualFile(query)`                                                                     | `HostVirtualFileResponse \| null` | Get compiled virtual file (`null` when the node does not exist) |
-| `listVirtualFiles(canonicalId)`                                                             | `HostVirtualNodeKind[]`    | List virtual nodes for a file                                 |
-| `remove(canonicalOrAlias)`                                                                  | `HostRemoveResult \| null` | Remove file from host                                         |
-| `getAnalysis(canonicalOrAlias)`                                                             | `unknown \| null`          | Get analysis snapshot (native JS object)                      |
-| `setImportDependencies(id, deps)`                                                           | `void`                     | Set resolved import dependencies                              |
-| `collectResolvableModuleReferenceSpecifiers(moduleReferences)`                              | `string[]`                 | Return exact/finite candidate specifiers in encounter order   |
-| `resolveKnownModuleReferenceDependencies(ownerId, moduleReferences, knownIds, extensions?)` | `string[]`                 | Resolve exact/finite candidates against an in-memory file set |
+| `listVirtualFiles(canonicalId)`                                                             | `HostVirtualNodeKind[]`           | List virtual nodes for a file                                   |
+| `remove(canonicalOrAlias)`                                                                  | `HostRemoveResult \| null`        | Remove file from host                                           |
+| `getAnalysis(canonicalOrAlias)`                                                             | `unknown \| null`                 | Get analysis snapshot (native JS object)                        |
+| `setImportDependencies(id, deps)`                                                           | `void`                            | Set resolved import dependencies                                |
+| `collectResolvableModuleReferenceSpecifiers(moduleReferences)`                              | `string[]`                        | Return exact/finite candidate specifiers in encounter order     |
+| `resolveKnownModuleReferenceDependencies(ownerId, moduleReferences, knownIds, extensions?)` | `string[]`                        | Resolve exact/finite candidates against an in-memory file set   |
 
 See the [@verter/native documentation](./native.md) for detailed descriptions of each method and their parameter types.
 
@@ -123,16 +123,18 @@ const code = "<p>Hello</p>";
 
 host.applyBlockOverrides({
   canonicalId: update.canonicalId,
-  overrides: [{
-    correlationToken: pending.correlationToken,
-    blockToken: pending.blockToken,
-    ownerRevision: pending.ownerRevision,
-    artifactToken: pending.artifactToken,
-    basisToken: pending.basisToken,
-    sourceSpaceToken: pending.sourceSpaceToken,
-    code,
-    codeHash: await hashBlockContent(code),
-  }],
+  overrides: [
+    {
+      correlationToken: pending.correlationToken,
+      blockToken: pending.blockToken,
+      ownerRevision: pending.ownerRevision,
+      artifactToken: pending.artifactToken,
+      basisToken: pending.basisToken,
+      sourceSpaceToken: pending.sourceSpaceToken,
+      code,
+      codeHash: await hashBlockContent(code),
+    },
+  ],
 });
 ```
 
@@ -225,7 +227,7 @@ non-ASCII carrier.
 
 **No compile cache slot.** Every call is a complete compile: this route
 consults and publishes no cache slot, so two identical calls compile twice. The
-profile-bearing `ensureIdeCompiled()` / `getIde()` pair *is* cached, so a
+profile-bearing `ensureIdeCompiled()` / `getIde()` pair _is_ cached, so a
 per-keystroke editor loop that only needs the IDE surface stays cheaper there;
 reach for `compileRequest()` when the demand is a fresh multi-product compile.
 

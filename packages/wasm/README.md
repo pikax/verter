@@ -239,16 +239,16 @@ pnpm test    # runs: vitest run
 
 ## Dependencies
 
-| Dependency                            | Purpose                                           |
-| ------------------------------------- | ------------------------------------------------- |
-| `verter_compiler` (Rust)                  | Core Vue template compiler                        |
-| `wasm-bindgen` (Rust)                 | Rust/WASM interop layer                           |
+| Dependency                            | Purpose                                               |
+| ------------------------------------- | ----------------------------------------------------- |
+| `verter_compiler` (Rust)              | Core Vue template compiler                            |
+| `wasm-bindgen` (Rust)                 | Rust/WASM interop layer                               |
 | `wasm-bindgen-cli` (tool)             | Generates browser JS glue and TypeScript declarations |
-| `binaryen` / `wasm-opt` (npm tool)    | Size-optimizes the compiled WASM binary           |
-| `serde` / `serde-wasm-bindgen` (Rust) | Serialization between Rust structs and JS objects |
-| `console_error_panic_hook` (Rust)     | Better panic messages in browser console          |
-| `oxc_allocator` (Rust)                | Memory allocator for OXC AST nodes                |
-| `tsdown` (dev)                        | TypeScript bundler for the JS wrapper             |
+| `binaryen` / `wasm-opt` (npm tool)    | Size-optimizes the compiled WASM binary               |
+| `serde` / `serde-wasm-bindgen` (Rust) | Serialization between Rust structs and JS objects     |
+| `console_error_panic_hook` (Rust)     | Better panic messages in browser console              |
+| `oxc_allocator` (Rust)                | Memory allocator for OXC AST nodes                    |
+| `tsdown` (dev)                        | TypeScript bundler for the JS wrapper                 |
 
 ## License
 
