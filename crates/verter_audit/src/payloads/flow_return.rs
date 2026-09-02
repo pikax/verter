@@ -27,6 +27,12 @@ use serde::{Deserialize, Serialize};
 /// rides the `Err` arm. A request that produced a complete, non-degraded
 /// value carries no partiality at all
 /// ([`FlowReturnInferencePayload::partiality`] is `None`).
+///
+/// Exactly ONE reason is reported, never a set. The producer's typed
+/// outcome already reduced every observed gap to the FIRST one in
+/// source order, so a function carrying several distinct gaps still
+/// names only the earliest. Read the tag as "the reason this request
+/// was partial", never as "the complete inventory of what is missing".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export_to = "audit.generated.ts")]
 pub enum FlowPartialityTag {
@@ -45,12 +51,11 @@ pub enum FlowPartialityTag {
 /// The domain's `FlowGap(_)` arm is reduced through its own gap variant,
 /// so each detected flow-model gap keeps a distinct wire spelling
 /// instead of collapsing into one "gap" bucket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export_to = "audit.generated.ts")]
 pub enum FlowDegradationTag {
     /// A guard's subject arms could not be enumerated or classified, so
     /// the narrow retained a superset (`FlowGap::GuardNarrowing`).
-    #[default]
     GapGuardNarrowing,
     /// A nominal relation the flow model does not decide
     /// (`FlowGap::NominalRelation`).
@@ -99,11 +104,10 @@ pub enum FlowDegradationTag {
 /// enum (`Unsupported`, `CallResolution`, `Budget`) are reduced through
 /// that inner variant, so every distinct no-value reason keeps its own
 /// wire spelling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export_to = "audit.generated.ts")]
 pub enum FlowFailureTag {
     /// The function position has no served body.
-    #[default]
     Missing,
     /// A loop whose statement subtree contains a `return`.
     UnsupportedLoop,

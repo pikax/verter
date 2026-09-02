@@ -1025,6 +1025,12 @@ export type FlowFailureTag = "Missing" | "UnsupportedLoop" | "UnsupportedJump" |
  * rides the `Err` arm. A request that produced a complete, non-degraded
  * value carries no partiality at all
  * ([`FlowReturnInferencePayload::partiality`] is `None`).
+ *
+ * Exactly ONE reason is reported, never a set. The producer's typed
+ * outcome already reduced every observed gap to the FIRST one in
+ * source order, so a function carrying several distinct gaps still
+ * names only the earliest. Read the tag as "the reason this request
+ * was partial", never as "the complete inventory of what is missing".
  */
 export type FlowPartialityTag = { "Degraded": FlowDegradationTag } | { "NoValue": FlowFailureTag };
 

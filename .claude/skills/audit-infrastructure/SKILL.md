@@ -101,6 +101,12 @@ payload was collected at all):
 | `FlowPartialityTag::Degraded(FlowDegradationTag)` | the degraded-but-usable `Ok` outcome's reason | `FlowReturnResult::degradation()` |
 | `FlowPartialityTag::NoValue(FlowFailureTag)` | the `Err` outcome's no-value reason | the typed `FlowReturnError` |
 
+`partiality` reports exactly ONE reason, never a set: the producer's
+typed outcome already reduced every observed gap to the FIRST in source
+order, so a function carrying several distinct gaps still names only the
+earliest. Read it as "the reason this request was partial", never as
+"the complete inventory of what is missing".
+
 `FlowDegradationTag` and `FlowFailureTag` are CLOSED MIRRORS of the
 session's `FlowReturnDegradation` / `FlowGap` and `FlowReturnFailure`
 vocabularies, so the leaf audit substrate keeps no back-edge to
@@ -130,7 +136,10 @@ success never warms at all, so it reports its partiality on every call.
 Guards:
 `crates/verter_session/tests/cases/g_type/flow_return_audit_contract.rs`
 (cold/warm event + payload contract, the partial-vs-complete partiality
-contract, and the audited-vs-unaudited admission equivalence) and
+contract, and the filter-driven projected-vs-unprojected equivalence —
+denying `KindBit::FlowReturnInference` takes the `Noop` arm and removes
+the projection outright, and the served value, degradation verdict and
+warm/cold sequence are unchanged) and
 `crates/verter_session/tests/cases/g_misc0/flow_return_audit_tls_propagation.rs`
 (TLS observer propagation across the dispatch's worker hops); the wire
 surface is pinned by `crates/verter_audit/tests/cases/ts_bindings.rs`.
