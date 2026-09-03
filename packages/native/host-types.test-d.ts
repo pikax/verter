@@ -127,9 +127,13 @@ void [
 
 import type {
   HostAnalysisProduct,
+  HostCompiledProduct,
+  HostCompileResponse,
   HostCompileRequest,
+  HostCompileRequestsEntry,
   HostDeclarationsProduct,
   HostIdeCompanionProduct,
+  HostIdeResponse,
   HostPublicApiProduct,
   HostRequestedProduct,
   HostSvelteCompatibility,
@@ -156,6 +160,29 @@ type ProductKindsAreExactlyTheSixProducts = Expect<
     "runtimeClient" | "runtimeServer" | "ideCompanion" | "publicApi" | "declarations" | "analysis"
   >
 >;
+
+// @ai-generated - Pins the callable typed routes and their discriminated result envelopes.
+type CompiledProductKindsAreExactlyTheProducedProducts = Expect<
+  Equal<
+    HostCompiledProduct["kind"],
+    "runtimeClient" | "runtimeServer" | "ideCompanion" | "analysis"
+  >
+>;
+declare const typedHost: import("./index").VerterHost;
+declare const typedRequest: HostCompileRequest;
+const typedResponse = typedHost.compileRequest("/src/App.vue", typedRequest);
+type SingleRouteReturnsTheCompleteEnvelope = Expect<
+  Equal<typeof typedResponse, HostCompileResponse>
+>;
+const typedEntries = typedHost.compileRequests([
+  { canonicalId: "/src/App.vue", source: Buffer.alloc(0), request: typedRequest },
+]);
+type BatchRouteReturnsOneTerminalEnvelopePerInput = Expect<
+  Equal<(typeof typedEntries)[number], HostCompileRequestsEntry>
+>;
+// @ai-generated - Typed IDE products expose their public UTF-16 metadata.
+declare const typedIde: HostIdeResponse;
+const typedIdeBindingStart = typedIde.destructuredBlock?.bindings[0]?.sourceStart;
 
 /** Narrowing on `framework` reaches each arm's own option type, and the
  * union is exhausted — a third arm would leave `request` inhabited here. */
@@ -367,7 +394,7 @@ const capitalisedPropTypeSpelling: HostSvelteCustomElementDescriptor = {
   props: { value: { propType: "Number" }, label: { propType: "string" } },
 };
 
-void [capitalisedPropTypeSpelling];
+void [capitalisedPropTypeSpelling, typedIdeBindingStart];
 
 export type {
   ARequiredSlotAdmitsNeither,

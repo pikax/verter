@@ -4,7 +4,8 @@
  * (transformVueStyle / prepareStyleForPreprocessor / analyzeStyle)
  * work correctly with both string and Buffer inputs.
  */
-import { basename, sep } from "node:path";
+import { readFileSync } from "node:fs";
+import { basename, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { describe, it, expect } from "vitest";
@@ -917,6 +918,19 @@ describe("VerterHost type declarations in sync with native binary", () => {
   // They exist in the native binary but are internal / feature-gated.
   const INTERNAL_METHODS = new Set(["computeCrossFileOptimizations", "getMetrics"]);
 
+  it("generated addon declarations carry the typed compile routes", () => {
+    const declarationsPath = resolve(import.meta.dirname, "dist/napi.generated.d.ts");
+    const declarations = readFileSync(declarationsPath, "utf8");
+    for (const [method, response] of [
+      ["compileRequest", "NapiCompileRequestResponse"],
+      ["compileRequests", "NapiCompileRequestsEntry"],
+    ] as const) {
+      const declaration = declarations.match(new RegExp(`^\\s*${method}\\(.*$`, "m"))?.[0];
+      expect(declaration).toContain("host-compile-request.generated').HostCompileRequest");
+      expect(declaration).toContain(response);
+    }
+  });
+
   it("every native prototype method should have a TS type declaration", () => {
     const nativeMethods = Object.getOwnPropertyNames(VerterHost.prototype)
       .filter(
@@ -936,6 +950,8 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "close",
       "collectResolvableModuleReferenceSpecifiers",
       "compileMany",
+      "compileRequest",
+      "compileRequests",
       "compileWithAudit",
       "configureProjects",
       "ensureIdeCompiled",

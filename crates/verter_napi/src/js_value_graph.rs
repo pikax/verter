@@ -90,6 +90,75 @@ pub const MAX_NESTING_DEPTH: u32 = 64;
 /// Every array the schema carries is a short list of names or products.
 pub const MAX_ARRAY_ELEMENTS: u32 = 1 << 16;
 
+/// Shared accounting for payloads materialised during one batch call.
+///
+/// A batch may reuse the same JS value at many positions. Each traversal
+/// creates distinct native strings, vectors, and JSON values, so every
+/// traversal consumes the budget even when V8 stores the input only once.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct JsValueMaterializationBudget {
+    decoded_values: usize,
+    retained_bytes: usize,
+    max_decoded_values: usize,
+    max_retained_bytes: usize,
+    exhausted: bool,
+}
+
+impl JsValueMaterializationBudget {
+    #[doc(hidden)]
+    pub fn new(max_decoded_values: usize, max_retained_bytes: usize) -> Self {
+        Self {
+            decoded_values: 0,
+            retained_bytes: 0,
+            max_decoded_values,
+            max_retained_bytes,
+            exhausted: false,
+        }
+    }
+
+    fn ensure_decoded_values(&mut self, additional: usize) -> Result<()> {
+        let total = self.decoded_values.checked_add(additional);
+        if total.is_none_or(|total| total > self.max_decoded_values) {
+            self.exhausted = true;
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!(
+                    "A request batch materializes more than {} decoded values",
+                    self.max_decoded_values
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn retain_value(&mut self) -> Result<()> {
+        self.ensure_decoded_values(1)?;
+        self.decoded_values += 1;
+        Ok(())
+    }
+
+    pub(crate) fn retain_bytes(&mut self, additional: usize) -> Result<()> {
+        let total = self.retained_bytes.checked_add(additional);
+        if total.is_none_or(|total| total > self.max_retained_bytes) {
+            self.exhausted = true;
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!(
+                    "A request batch retains more than {} bytes of decoded payload",
+                    self.max_retained_bytes
+                ),
+            ));
+        }
+        self.retained_bytes = total.expect("the checked total was validated above");
+        Ok(())
+    }
+
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+}
+
 /// What a JS value is, as far as materialisation needs to know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsValueClass {
@@ -143,6 +212,10 @@ pub trait JsValueGraph {
     /// A [`JsValueClass::Leaf`] value as JSON, or a refusal saying why the
     /// value has no JSON representation.
     fn leaf(&self, value: &Self::Value) -> Result<Value>;
+
+    /// Native bytes the materialised leaf will retain. This is queried
+    /// before [`Self::leaf`] allocates them.
+    fn leaf_retained_bytes(&self, value: &Self::Value) -> Result<usize>;
 }
 
 /// Materialises `value` and everything reachable from it.
@@ -153,11 +226,27 @@ pub trait JsValueGraph {
 /// representation either, so it is refused by [`MAX_NESTING_DEPTH`]
 /// rather than followed.
 pub fn materialize_js_value<G: JsValueGraph>(graph: &G, value: &G::Value) -> Result<Value> {
-    materialize_nested(graph, value, 0)
+    let mut budget = JsValueMaterializationBudget::new(usize::MAX, usize::MAX);
+    materialize_js_value_with_budget(graph, value, &mut budget)
+}
+
+/// Materialises one value while charging a budget shared by its batch.
+#[doc(hidden)]
+pub fn materialize_js_value_with_budget<G: JsValueGraph>(
+    graph: &G,
+    value: &G::Value,
+    budget: &mut JsValueMaterializationBudget,
+) -> Result<Value> {
+    materialize_nested(graph, value, 0, budget)
 }
 
 /// `materialize_js_value` at a known nesting depth.
-fn materialize_nested<G: JsValueGraph>(graph: &G, value: &G::Value, depth: u32) -> Result<Value> {
+fn materialize_nested<G: JsValueGraph>(
+    graph: &G,
+    value: &G::Value,
+    depth: u32,
+    budget: &mut JsValueMaterializationBudget,
+) -> Result<Value> {
     if depth > MAX_NESTING_DEPTH {
         return Err(Error::new(
             Status::InvalidArg,
@@ -168,9 +257,14 @@ fn materialize_nested<G: JsValueGraph>(graph: &G, value: &G::Value, depth: u32) 
         ));
     }
 
+    budget.retain_value()?;
+
     Ok(match graph.classify(value)? {
         JsValueClass::Undefined => Value::Null,
-        JsValueClass::Leaf => graph.leaf(value)?,
+        JsValueClass::Leaf => {
+            budget.retain_bytes(graph.leaf_retained_bytes(value)?)?;
+            graph.leaf(value)?
+        }
         JsValueClass::Array => {
             // Checked before anything is reserved: the length is what a
             // caller declares, not what the array holds.
@@ -184,18 +278,22 @@ fn materialize_nested<G: JsValueGraph>(graph: &G, value: &G::Value, depth: u32) 
                     ),
                 ));
             }
+            // Refuse before reserving the array. Elements may contain more
+            // values and are charged recursively as they are traversed.
+            budget.ensure_decoded_values(declared as usize)?;
             let mut materialized = Vec::with_capacity(declared as usize);
             for index in 0..declared {
                 let element = graph.element(value, index)?;
-                materialized.push(materialize_nested(graph, &element, depth + 1)?);
+                materialized.push(materialize_nested(graph, &element, depth + 1, budget)?);
             }
             Value::Array(materialized)
         }
         JsValueClass::Object => {
             let mut materialized = Map::new();
             for key in graph.own_enumerable_keys(value)? {
+                budget.retain_bytes(key.len())?;
                 let property = graph.property(value, &key)?;
-                let property = materialize_nested(graph, &property, depth + 1)?;
+                let property = materialize_nested(graph, &property, depth + 1, budget)?;
                 materialized.insert(key, property);
             }
             Value::Object(materialized)
@@ -328,5 +426,22 @@ impl JsValueGraph for NapiValueGraph {
         // conversion, including the bigint arms and the refusals that name
         // a function, symbol or external as unrepresentable.
         unsafe { Value::from_napi_value(self.env, *value) }
+    }
+
+    fn leaf_retained_bytes(&self, value: &Self::Value) -> Result<usize> {
+        if napi::type_of!(self.env, *value)? != ValueType::String {
+            return Ok(0);
+        }
+
+        let mut length = 0;
+        // SAFETY: as `classify`. A null output buffer asks Node for the
+        // UTF-8 byte length without allocating the Rust string.
+        napi::check_status!(
+            unsafe {
+                sys::napi_get_value_string_utf8(self.env, *value, ptr::null_mut(), 0, &mut length)
+            },
+            "Failed to measure a request string"
+        )?;
+        Ok(length)
     }
 }

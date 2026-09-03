@@ -357,6 +357,87 @@ export interface CompileBatchEntry {
   downgradeReason?: DowngradeReason;
 }
 
+/** One separately-addressed output of a typed runtime compile product. */
+export interface HostCompileVirtualNode {
+  node: import("./host-types").HostVirtualNodeKind;
+  code: string;
+  sourceMap?: string;
+  lang?: string;
+  meta: import("./host-types").HostVirtualMeta;
+}
+
+export interface HostRuntimeCompiledProduct {
+  kind: "runtimeClient" | "runtimeServer";
+  nodes: HostCompileVirtualNode[];
+}
+
+export interface HostIdeCompiledProduct {
+  kind: "ideCompanion";
+  ide: import("./host-types").HostIdeResponse;
+}
+
+/** `analysis` is the JSON rendering used by the existing analysis route. */
+export interface HostAnalysisCompiledProduct {
+  kind: "analysis";
+  analysis: string;
+}
+
+export type HostCompiledProduct =
+  | HostRuntimeCompiledProduct
+  | HostIdeCompiledProduct
+  | HostAnalysisCompiledProduct;
+
+/** Complete response for one typed request. */
+export interface HostCompileResponse {
+  canonicalId: string;
+  diagnostics: import("./host-types").HostDiagnosticsSnapshot;
+  products: HostCompiledProduct[];
+}
+
+/** One source carrier beside one typed request. */
+export interface HostCompileRequestsInput {
+  canonicalId: string;
+  source: Buffer;
+  request: import("./host-types").HostCompileRequest;
+}
+
+export interface HostCompileRequestsOptions {
+  priority?: "interactive" | "background";
+}
+
+interface HostCompileFailureBase {
+  canonicalId: string;
+  message: string;
+  diagnostics: import("./host-types").HostDiagnosticsSnapshot;
+}
+
+/** Typed terminal failure for one plural-route entry. */
+export type HostCompileFailure =
+  | (HostCompileFailureBase & { kind: "host" | "refused" | "binding" })
+  | (HostCompileFailureBase & {
+      kind: "frameworkMismatch";
+      requestedFramework: string;
+      registeredFramework: string;
+    })
+  | (HostCompileFailureBase & {
+      kind: "unsupportedProduct" | "productNotProduced";
+      productKind:
+        | "runtimeClient"
+        | "runtimeServer"
+        | "ideCompanion"
+        | "publicApi"
+        | "declarations"
+        | "analysis";
+    })
+  | (HostCompileFailureBase & {
+      kind: "runtimeSurfaceRefused";
+      diagnosticCode: string;
+    });
+
+export type HostCompileRequestsEntry =
+  | { canonicalId: string; response: HostCompileResponse; failure: null }
+  | { canonicalId: string; response: null; failure: HostCompileFailure };
+
 // =============================================================================
 // VerterHost (in-memory virtual file host)
 //
@@ -380,6 +461,8 @@ export type {
   HostConfig,
   HostCompileProfile,
   HostIdeResponse,
+  HostDestructuredBinding,
+  HostDestructuredBlockMeta,
   HostVirtualNodeKind,
   HostSliceChanges,
   HostDiagnostic,
@@ -741,6 +824,16 @@ export declare class VerterHost {
 
   resolve(rawId: string): import("./host-types").HostResolvedId | null;
   upsert(request: HostUpsertRequest): import("./host-types").HostUpdateResult;
+  /** Execute one typed request against an already-registered source. */
+  compileRequest(
+    canonicalId: string,
+    request: import("./host-types").HostCompileRequest,
+  ): HostCompileResponse;
+  /** Register and execute one typed request per input, preserving input order. */
+  compileRequests(
+    inputs: HostCompileRequestsInput[],
+    options?: HostCompileRequestsOptions,
+  ): HostCompileRequestsEntry[];
   /**
    * Compile a batch of carrier inputs through the production host
    * path (scheduler + dispatch + compile_cache).

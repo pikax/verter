@@ -45,7 +45,9 @@ in place. Compile through [`Host` / `VerterHost`](#host--verterhost).
 
 ### `Host` / `VerterHost`
 
-In-memory host facade exposed by the WASM runtime. Provides the same multi-file compilation API as `@verter/native`'s `VerterHost`, but running in the browser via WebAssembly.
+In-memory host facade exposed by the WASM runtime. It shares the typed
+`compileRequest()` and profile-bearing read methods with `@verter/native`, but
+the native-only source-registering `compileRequests()` batch route is absent.
 
 ```ts
 import { createHost } from "@verter/wasm";
@@ -79,8 +81,8 @@ const host = await createHost();
 
 #### Host Methods
 
-The `Host` class exposes the shared host methods below plus the WASM-only
-`compileRequest()` route:
+The `Host` class exposes the shared host methods below, including
+`compileRequest()`:
 
 | Method                                                                                      | Returns                           | Description                                                     |
 | ------------------------------------------------------------------------------------------- | --------------------------------- | --------------------------------------------------------------- |
@@ -345,5 +347,6 @@ re-exported types.
 | `analyzeStyle()`                | Available                        | Not available                    |
 | `VerterHost`                    | Synchronous constructor          | Async via `createHost()`         |
 | `getAnalysis()` return          | JSON `string`                    | Native JS `object`               |
-| `compileRequest()`              | Not available yet                | Available                        |
+| `compileRequest()`              | Available                        | Available                        |
+| `compileRequests()`             | Available                        | Not available                    |
 | `source` accepts                | `string \| Buffer`               | `string`                         |

@@ -184,6 +184,19 @@ export interface HostIdeResponse {
   code: string;
   sourceMap?: string;
   isJsx: boolean;
+  destructuredBlock?: HostDestructuredBlockMeta;
+}
+
+export interface HostDestructuredBinding {
+  name: string;
+  sourceStart: number;
+  sourceEnd: number;
+}
+
+export interface HostDestructuredBlockMeta {
+  bindings: HostDestructuredBinding[];
+  blockStart: number;
+  blockEnd: number;
 }
 
 export interface HostVirtualNodeKind {

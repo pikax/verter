@@ -91,6 +91,8 @@ run(
     "build",
     "-o",
     "dist",
+    "--dts",
+    "napi.generated.d.ts",
     "--platform",
     "--target",
     target,

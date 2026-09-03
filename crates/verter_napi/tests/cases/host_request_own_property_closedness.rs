@@ -24,8 +24,9 @@ use napi::{Result, Status};
 use serde_json::{json, Number, Value};
 
 use verter_napi::{
-    decode_host_compile_request, materialize_js_value, napi_host_compile_request_to_ffi,
-    JsValueClass, JsValueGraph, NapiHostCompileRequest, MAX_ARRAY_ELEMENTS, MAX_NESTING_DEPTH,
+    decode_host_compile_request, materialize_js_value, materialize_js_value_with_budget,
+    napi_host_compile_request_to_ffi, JsValueClass, JsValueGraph, JsValueMaterializationBudget,
+    NapiHostCompileRequest, MAX_ARRAY_ELEMENTS, MAX_NESTING_DEPTH,
 };
 
 // ── a JS object graph, `undefined` included ──────────────────────────────
@@ -183,6 +184,13 @@ impl JsValueGraph for Graph {
             Js::Num(number) => Value::Number(number.clone()),
             Js::Str(text) => Value::String(text.clone()),
             other => panic!("not a leaf: {other:?}"),
+        })
+    }
+
+    fn leaf_retained_bytes(&self, value: &Js) -> Result<usize> {
+        Ok(match value {
+            Js::Str(text) => text.len(),
+            _ => 0,
         })
     }
 }
@@ -498,6 +506,34 @@ fn a_graph_that_refers_back_to_itself_is_refused_rather_than_followed() {
         nested = Js::Object(vec![("inner".to_string(), nested)]);
     }
     materialize_js_value(&Graph, &nested).expect("a graph within the depth budget materialises");
+}
+
+// @ai-generated - A batch-wide budget must count repeated shared payloads, not only each graph.
+#[test]
+fn one_materialization_budget_bounds_values_and_bytes_across_payloads() {
+    let mut value_budget = JsValueMaterializationBudget::new(3, usize::MAX);
+    materialize_js_value_with_budget(
+        &Graph,
+        &Js::Array(vec![Js::Null, Js::Null]),
+        &mut value_budget,
+    )
+    .expect("the first payload fits the shared value budget");
+    let error =
+        materialize_js_value_with_budget(&Graph, &Js::Array(vec![Js::Null]), &mut value_budget)
+            .expect_err("the second payload exceeds the shared value budget");
+    assert!(
+        error.reason.contains("3 decoded values"),
+        "{}",
+        error.reason
+    );
+
+    let mut byte_budget = JsValueMaterializationBudget::new(usize::MAX, 5);
+    materialize_js_value_with_budget(&Graph, &Js::Str("abc".to_string()), &mut byte_budget)
+        .expect("the first payload fits the shared byte budget");
+    let error =
+        materialize_js_value_with_budget(&Graph, &Js::Str("def".to_string()), &mut byte_budget)
+            .expect_err("the second payload exceeds the shared byte budget");
+    assert!(error.reason.contains("5 bytes"), "{}", error.reason);
 }
 
 // ── the control: a known optional slot stated as `undefined` ─────────────

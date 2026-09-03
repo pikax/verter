@@ -237,6 +237,45 @@ const result = host.upsert({
 
 Only the exact and finite-set cases should feed dependency resolution. Unknown dynamic imports are intentionally left unresolved.
 
+#### `host.compileRequest(canonicalId, request)`
+
+Executes a typed request against a source already registered by `upsert()`.
+Returns one complete product row per requested kind, in request order. A
+decode, admission, or compile refusal throws; no partial response is returned.
+
+```ts
+const source = `<template><h1>Hello</h1></template>`;
+const { canonicalId } = host.upsert({
+  inputId: "/src/App.vue",
+  source: Buffer.from(source),
+});
+
+const response = host.compileRequest(canonicalId, {
+  framework: "vue",
+  identity: { filename: canonicalId, isProduction: false, forceJs: false },
+  products: [{ kind: "runtimeClient", runtimeSourceMap: true }],
+  options: {
+    backend: "inferred",
+    ssr: false,
+    isCustomElement: [],
+    babelParserPlugins: [],
+  },
+});
+```
+
+#### `host.compileRequests(inputs, options?)`
+
+Registers each input's `Buffer` source and executes its typed request. The
+result preserves input order and contains either `response` or a typed
+`failure` per entry. Missing/wrong fields, invalid UTF-8, request decode
+refusals, and canonical request construction refusals fail only their own entry
+as `binding`; valid siblings still execute. Invalid batch-level options or a
+non-array/oversized outer input throw before execution, as does a batch above
+the aggregate 64 MiB decoded-payload or 262,144 decoded-value budget.
+
+`compileRequest()` is shared with `@verter/wasm`; `compileRequests()` is
+native-only because the browser binding has no source-registering batch route.
+
 #### `host.getVirtualFile(query)`
 
 Get a compiled virtual file from the host. Triggers compilation if needed.
@@ -619,8 +658,8 @@ interface HostDiagnostic {
   severity: "error" | "warning" | "info";
   code: string;
   message: string;
-  spanStart?: number;
-  spanEnd?: number;
+  spanStart: number;
+  spanEnd: number;
 }
 ```
 
