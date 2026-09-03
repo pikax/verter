@@ -6,7 +6,8 @@
  * ships) over a small set of committed carrier sources and snapshots the three
  * generated surfaces per source:
  *
- *   - IDE carrier      — `getIde(id, profile)`             → `Comp.vue.tsx`
+ *   - IDE carrier      — `compileRequest(id, { vue|svelte: {...} })`
+ *                        an `ideCompanion` product                 → `Comp.vue.tsx`
  *   - declaration      — `getPublicApi(id, "declaration")` → `Comp.d.vue.ts`
  *   - API carrier      — `getPublicApi(id)`                → `Comp.vue.verter.ts`
  *
@@ -151,6 +152,35 @@ function publicApiSurface(result) {
   return surface(result.value);
 }
 
+/**
+ * The single requested product: the IDE surface, with source maps on and
+ * every axis the legacy `{ sourceMap: true, target: "ide", forceJs: true }`
+ * profile implied left at its (false) default — the same values the typed
+ * host-request route's own equivalence tests pin against that profile.
+ */
+function ideRequest(fileKind) {
+  const identity = { isProduction: false, forceJs: true };
+  const products = [
+    {
+      ideCompanion: {
+        wantSourceMap: true,
+        embedAmbientTypes: false,
+        conditionalRootNarrowing: false,
+        strictSlots: false,
+        ideChunkBoundaries: false,
+      },
+    },
+  ];
+  if (fileKind === "svelte") return { svelte: { identity, products, options: {} } };
+  return {
+    vue: {
+      identity,
+      products,
+      options: { backend: "inferred", ssr: false, isCustomElement: [], babelParserPlugins: [] },
+    },
+  };
+}
+
 function capture(wasmModule, { filename, fileKind, source }) {
   // A fresh host per fixture keeps every entry independent of capture order.
   const host = new wasmModule.VerterHost({
@@ -158,16 +188,17 @@ function capture(wasmModule, { filename, fileKind, source }) {
     compileErrorPolicy: "devServeLastKnownGood",
     maxProfilesPerFile: 8,
   });
-  const profile = { filename, sourceMap: true, target: "ide", forceJs: true };
-  // Registration carries source only. Compile demand is stated on the compile
-  // calls below, which is the only place the host reads a profile from.
+  // Registration carries source only, no compile demand — the compile demand
+  // is stated on the typed request below, by canonical id, never by copying
+  // the source into it.
   host.upsert({ inputId: filename, source, fileKind, aliases: [] });
 
   let ide = null;
   let ideUnavailable = null;
   try {
-    host.ensureIdeCompiled(filename, profile);
-    ide = surface(host.getIde(filename, profile));
+    const response = host.compileRequest(filename, ideRequest(fileKind));
+    // Exactly one product was requested, so it is the sole row, in order.
+    ide = surface(response.products[0]);
   } catch (err) {
     // An IDE compile failure is recorded explicitly (`ideUnavailable`) so the
     // fixture stays honest about what the host produced — a guard asserting
