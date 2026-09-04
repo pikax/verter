@@ -260,6 +260,11 @@ path_roots = ["crates/verter_svelte","crates/verter_svelte_compiler","packages"]
 symbols = ["SvelteProduct","SvelteCompileRequest"]
 description = "Exclusive mutation lease for the concrete svelte product authority surface."
 [[domain]]
+id = "validation_observability"
+path_roots = ["crates/verter_validation_probe","crates/verter_vue_conformance/tests","crates/verter_bench/benches","packages/benchmark","scripts",".github/workflows"]
+symbols = ["ProbeOutcomeClass","ProbeStateManifest"]
+description = "Exclusive mutation lease for the test-only probe contract, external workload probe lane, false-green controls, and CI observation summaries."
+[[domain]]
 id = "vertical_manifest"
 path_roots = [".claude/skills","AGENTS.md","crates","packages","roadmap/0.1.0-tama"]
 symbols = ["VerticalManifest","CapabilityMatrix"]
