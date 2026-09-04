@@ -11,8 +11,8 @@ use verter_compiler::compile_request::{
     CapabilityCell, CompileRequestError, FrameworkOption, ProductKind, RuntimeStyleProcessing,
     VueOnlyAxis,
 };
-use verter_ffi::convert::{byte_offset_to_utf16, host_error_to_string};
-use verter_language::DiagnosticArg;
+use verter_ffi::convert::{host_diagnostics_to_ffi, host_error_to_string};
+use verter_protocol::types::{FfiDiagnostic, FfiDiagnosticArg};
 use verter_session as host;
 
 use crate::{
@@ -148,60 +148,36 @@ fn capability_cell_name(cell: CapabilityCell) -> &'static str {
     }
 }
 
-fn utf16_offset(byte_offset: u32, source: Option<&str>) -> u32 {
-    match source {
-        Some(source) => byte_offset_to_utf16(source, byte_offset),
-        None => byte_offset,
+// A diagnostic and its arguments project through the shared FFI converter
+// (`verter_ffi::convert::host_diagnostics_to_ffi`) so NAPI and WASM cannot
+// diverge on severity spelling, UTF-16 span mapping, or argument shape —
+// this crate only re-shapes the FFI struct into its `#[napi(object)]`
+// mirror, never re-derives the conversion.
+
+impl From<FfiDiagnosticArg> for NapiDiagnosticArg {
+    fn from(argument: FfiDiagnosticArg) -> Self {
+        NapiDiagnosticArg {
+            kind: argument.kind,
+            boolean: argument.boolean,
+            unsigned: argument.unsigned,
+            signed: argument.signed,
+            text: argument.text,
+            spanStart: argument.span_start,
+            spanEnd: argument.span_end,
+        }
     }
 }
 
-fn diagnostic_arg_to_napi(argument: &DiagnosticArg, source: Option<&str>) -> NapiDiagnosticArg {
-    match argument {
-        DiagnosticArg::Bool(value) => NapiDiagnosticArg {
-            kind: "bool".to_string(),
-            boolean: Some(*value),
-            unsigned: None,
-            signed: None,
-            text: None,
-            spanStart: None,
-            spanEnd: None,
-        },
-        DiagnosticArg::Unsigned(value) => NapiDiagnosticArg {
-            kind: "unsigned".to_string(),
-            boolean: None,
-            unsigned: Some(*value as f64),
-            signed: None,
-            text: None,
-            spanStart: None,
-            spanEnd: None,
-        },
-        DiagnosticArg::Signed(value) => NapiDiagnosticArg {
-            kind: "signed".to_string(),
-            boolean: None,
-            unsigned: None,
-            signed: Some(*value as f64),
-            text: None,
-            spanStart: None,
-            spanEnd: None,
-        },
-        DiagnosticArg::Text(value) => NapiDiagnosticArg {
-            kind: "text".to_string(),
-            boolean: None,
-            unsigned: None,
-            signed: None,
-            text: Some(value.clone()),
-            spanStart: None,
-            spanEnd: None,
-        },
-        DiagnosticArg::Span { start, end } => NapiDiagnosticArg {
-            kind: "span".to_string(),
-            boolean: None,
-            unsigned: None,
-            signed: None,
-            text: None,
-            spanStart: Some(utf16_offset(*start, source)),
-            spanEnd: Some(utf16_offset(*end, source)),
-        },
+impl From<FfiDiagnostic> for NapiDiagnostic {
+    fn from(diagnostic: FfiDiagnostic) -> Self {
+        NapiDiagnostic {
+            severity: diagnostic.severity,
+            code: diagnostic.code,
+            message: diagnostic.message,
+            spanStart: diagnostic.span_start,
+            spanEnd: diagnostic.span_end,
+            arguments: diagnostic.arguments.into_iter().map(Into::into).collect(),
+        }
     }
 }
 
@@ -209,35 +185,17 @@ pub(crate) fn host_diagnostic_to_napi(
     diagnostic: &host::HostDiagnostic,
     source: Option<&str>,
 ) -> NapiDiagnostic {
-    NapiDiagnostic {
-        severity: match diagnostic.severity {
-            host::HostSeverity::Error => "error".to_string(),
-            host::HostSeverity::Warning => "warning".to_string(),
-            host::HostSeverity::Info => "info".to_string(),
-        },
-        code: diagnostic.code.clone(),
-        message: diagnostic.message.clone(),
-        spanStart: utf16_offset(diagnostic.span.start, source),
-        spanEnd: utf16_offset(diagnostic.span.end, source),
-        arguments: diagnostic
-            .arguments
-            .iter()
-            .map(|argument| diagnostic_arg_to_napi(argument, source))
-            .collect(),
-    }
+    verter_ffi::convert::host_diagnostic_to_ffi(diagnostic, source).into()
 }
 
 pub(crate) fn host_diagnostics_to_napi(
     input: &host::DiagnosticsSnapshot,
     source: Option<&str>,
 ) -> NapiDiagnosticsSnapshot {
+    let snapshot = host_diagnostics_to_ffi(input, source);
     NapiDiagnosticsSnapshot {
-        diagnostics: input
-            .diagnostics
-            .iter()
-            .map(|diagnostic| host_diagnostic_to_napi(diagnostic, source))
-            .collect(),
-        hasErrors: input.has_errors,
+        diagnostics: snapshot.diagnostics.into_iter().map(Into::into).collect(),
+        hasErrors: snapshot.has_errors,
     }
 }
 

@@ -139,6 +139,86 @@ pub fn host_node_kind_to_ffi(input: &host::VirtualNodeKind) -> FfiVirtualNodeKin
     }
 }
 
+/// Converts one diagnostic argument, translating its `Span` variant's
+/// offsets to UTF-16. Shared by every FFI diagnostic producer — NAPI's
+/// [`host_diagnostic_to_ffi`] projection included — so a diagnostic's
+/// argument encoding cannot diverge between the two bindings.
+pub fn host_diagnostic_arg_to_ffi(
+    argument: &verter_language::DiagnosticArg,
+    source: Option<&str>,
+) -> FfiDiagnosticArg {
+    use verter_language::DiagnosticArg;
+    match argument {
+        DiagnosticArg::Bool(value) => FfiDiagnosticArg {
+            kind: "bool".to_string(),
+            boolean: Some(*value),
+            unsigned: None,
+            signed: None,
+            text: None,
+            span_start: None,
+            span_end: None,
+        },
+        DiagnosticArg::Unsigned(value) => FfiDiagnosticArg {
+            kind: "unsigned".to_string(),
+            boolean: None,
+            unsigned: Some(*value as f64),
+            signed: None,
+            text: None,
+            span_start: None,
+            span_end: None,
+        },
+        DiagnosticArg::Signed(value) => FfiDiagnosticArg {
+            kind: "signed".to_string(),
+            boolean: None,
+            unsigned: None,
+            signed: Some(*value as f64),
+            text: None,
+            span_start: None,
+            span_end: None,
+        },
+        DiagnosticArg::Text(value) => FfiDiagnosticArg {
+            kind: "text".to_string(),
+            boolean: None,
+            unsigned: None,
+            signed: None,
+            text: Some(value.clone()),
+            span_start: None,
+            span_end: None,
+        },
+        DiagnosticArg::Span { start, end } => FfiDiagnosticArg {
+            kind: "span".to_string(),
+            boolean: None,
+            unsigned: None,
+            signed: None,
+            text: None,
+            span_start: Some(mandatory_utf16_offset(*start, source)),
+            span_end: Some(mandatory_utf16_offset(*end, source)),
+        },
+    }
+}
+
+/// Converts one host diagnostic, UTF-16-mapped span included. The sole
+/// diagnostic projection every FFI consumer (NAPI and WASM alike) uses —
+/// see [`host_diagnostic_arg_to_ffi`] for why the arguments cannot fork.
+pub fn host_diagnostic_to_ffi(diagnostic: &host::HostDiagnostic, source: Option<&str>) -> FfiDiagnostic {
+    FfiDiagnostic {
+        severity: match diagnostic.severity {
+            host::HostSeverity::Error => "error".to_string(),
+            host::HostSeverity::Warning => "warning".to_string(),
+            host::HostSeverity::Info => "info".to_string(),
+        },
+        code: diagnostic.code.clone(),
+        message: diagnostic.message.clone(),
+        span_start: mandatory_utf16_offset(diagnostic.span.start, source),
+        span_end: mandatory_utf16_offset(diagnostic.span.end, source),
+        arguments: diagnostic
+            .arguments
+            .iter()
+            .map(|argument| host_diagnostic_arg_to_ffi(argument, source))
+            .collect(),
+    }
+}
+
 pub fn host_diagnostics_to_ffi(
     input: &host::DiagnosticsSnapshot,
     source: Option<&str>,
@@ -147,17 +227,7 @@ pub fn host_diagnostics_to_ffi(
         diagnostics: input
             .diagnostics
             .iter()
-            .map(|d| FfiDiagnostic {
-                severity: match d.severity {
-                    host::HostSeverity::Error => "error".to_string(),
-                    host::HostSeverity::Warning => "warning".to_string(),
-                    host::HostSeverity::Info => "info".to_string(),
-                },
-                code: d.code.clone(),
-                message: d.message.clone(),
-                span_start: mandatory_utf16_offset(d.span.start, source),
-                span_end: mandatory_utf16_offset(d.span.end, source),
-            })
+            .map(|d| host_diagnostic_to_ffi(d, source))
             .collect(),
         has_errors: input.has_errors,
     }

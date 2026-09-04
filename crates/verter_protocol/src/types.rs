@@ -568,6 +568,27 @@ pub struct FfiSliceChanges {
     pub descriptor_changed: bool,
 }
 
+/// One canonically comparable value substituted into a diagnostic's
+/// rendered message. Mirrors `verter_language::DiagnosticArg`, with its
+/// `Span` variant's offsets already converted to UTF-16.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiDiagnosticArg {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boolean: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsigned: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_start: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_end: Option<u32>,
+}
+
 /// A single diagnostic (error, warning, or info).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -577,6 +598,7 @@ pub struct FfiDiagnostic {
     pub message: String,
     pub span_start: u32,
     pub span_end: u32,
+    pub arguments: Vec<FfiDiagnosticArg>,
 }
 
 /// Collection of diagnostics with a precomputed `hasErrors` flag.
