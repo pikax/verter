@@ -918,6 +918,15 @@ describe("VerterHost type declarations in sync with native binary", () => {
   // They exist in the native binary but are internal / feature-gated.
   const INTERNAL_METHODS = new Set(["computeCrossFileOptimizations", "getMetrics"]);
 
+  // Mutation recipe: remove the `#[napi(ts_arg_type = "...HostCompileRequest")]`
+  // / return-type annotations from `compileRequest`/`compileRequests` in
+  // `crates/verter_napi/src/lib.rs` (letting napi-rs regenerate their
+  // declared arg/return shape from the raw Rust types) without updating
+  // `packages/native/index.ts` to match. `pnpm run build:native` then
+  // regenerates `dist/napi.generated.d.ts` with a diverged signature, and
+  // this case fails on the `toContain`/`toMatch` assertions below instead
+  // of the published surface silently drifting from what the addon
+  // actually exports.
   it("generated addon declarations carry the typed compile routes", () => {
     const declarationsPath = resolve(import.meta.dirname, "dist/napi.generated.d.ts");
     const declarations = readFileSync(declarationsPath, "utf8");

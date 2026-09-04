@@ -27,7 +27,7 @@ use verter_napi::{
     decode_host_compile_request, materialize_js_value, materialize_js_value_with_budget,
     napi_host_compile_request_to_ffi, JsObjectKeys, JsValueClass, JsValueGraph,
     JsValueMaterializationBudget, NapiHostCompileRequest, MAX_ARRAY_ELEMENTS,
-    MAX_DECODED_VALUES_PER_REQUEST, MAX_NESTING_DEPTH,
+    MAX_DECODED_VALUES_PER_REQUEST, MAX_NESTING_DEPTH, MIN_VALUE_RETAINED_BYTES,
 };
 
 // ── a JS object graph, `undefined` included ──────────────────────────────
@@ -553,6 +553,13 @@ fn a_graph_that_refers_back_to_itself_is_refused_rather_than_followed() {
 }
 
 // @ai-generated - A batch-wide budget must count repeated shared payloads, not only each graph.
+//
+// Mutation recipe: construct `JsValueMaterializationBudget` fresh per
+// `materialize_js_value_with_budget` call instead of threading the caller's
+// `&mut budget` through (e.g. shadow the parameter with
+// `Self::per_request()` at the top of `materialize_js_value_with_budget`).
+// Both `expect_err` calls below then observe a budget that was never
+// charged by the first payload, and the case fails on the first assertion.
 #[test]
 fn one_materialization_budget_bounds_values_and_bytes_across_payloads() {
     let mut value_budget = JsValueMaterializationBudget::new(3, usize::MAX);
@@ -609,15 +616,43 @@ fn an_object_declaring_more_keys_than_a_request_may_carry_is_refused_before_keys
     );
 }
 
-// Mutation recipe: charge key bytes after `keys.at`. A two-byte budget then
-// copies "abcd" before refusing, and this case no longer fails at retain_bytes.
+// Mutation recipe: charge key bytes after `keys.at`. Given the object's
+// one reserved value slot exactly fills the budget, copying "abcd" before
+// charging its bytes would succeed instead of refusing.
 #[test]
 fn object_key_bytes_are_charged_before_the_key_is_copied() {
     let object = Js::Object(vec![("abcd".to_string(), Js::Null)]);
-    let mut budget = JsValueMaterializationBudget::new(usize::MAX, 2);
+    // Exactly enough for the one reserved value slot's floor charge and
+    // nothing more, so the key's own 4 bytes is what must trip the cap.
+    let max_bytes = MIN_VALUE_RETAINED_BYTES;
+    let mut budget = JsValueMaterializationBudget::new(usize::MAX, max_bytes);
     let error = materialize_js_value_with_budget(&Graph, &object, &mut budget)
         .expect_err("key bytes must be charged before the property is walked");
-    assert!(error.reason.contains("2 bytes"), "{}", error.reason);
+    assert!(
+        error.reason.contains(&format!("{max_bytes} bytes")),
+        "{}",
+        error.reason
+    );
+}
+
+// Mutation recipe: drop the `MIN_VALUE_RETAINED_BYTES` floor charge added
+// to the array/object arms of `materialize_nested`. A shared budget then
+// admits an unbounded number of boolean-only-leaf payloads for zero
+// retained bytes, which is exactly the aggregate-batch-cost gap this floor
+// closes: a caller could otherwise submit unboundedly many entries whose
+// request graphs are wide arrays of booleans/numbers and pay nothing
+// against the retained-byte budget that is supposed to bound the whole
+// call's cumulative traversal cost.
+#[test]
+fn boolean_only_payloads_still_charge_retained_bytes_across_a_shared_budget() {
+    let two_leaf_array = Js::Array(vec![Js::Bool(true), Js::Bool(false)]);
+    let mut budget =
+        JsValueMaterializationBudget::new(usize::MAX, MIN_VALUE_RETAINED_BYTES * 2 + 1);
+    materialize_js_value_with_budget(&Graph, &two_leaf_array, &mut budget)
+        .expect("the first boolean-only array fits the shared byte budget");
+    let error = materialize_js_value_with_budget(&Graph, &two_leaf_array, &mut budget)
+        .expect_err("a second boolean-only array must still charge retained bytes");
+    assert!(error.reason.contains("bytes"), "{}", error.reason);
 }
 
 // Mutation recipe: restore `materialize_js_value`'s unlimited

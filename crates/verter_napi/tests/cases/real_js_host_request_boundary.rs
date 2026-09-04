@@ -150,6 +150,21 @@ const DRIVER: &str = r#"
 const addon = require(process.argv[2]);
 const decode = addon.decodeHostCompileRequest;
 
+// `VerterHost` is not re-exported by this fixture crate's own source; it
+// reaches this addon's cdylib only because a Rust `cdylib` statically links
+// its whole-archive Rust dependency closure (so `verter_napi`'s `#[napi]`
+// class registration survives even though nothing in the fixture crate
+// names the type). That is real, documented `rustc` `cdylib` linking
+// behavior, not a fragile accident — but it is also not something this
+// suite should trust silently: if it ever stops holding (a future
+// `--gc-sections`/LTO/strip setting, for example), every case below would
+// fail with a confusing "not a constructor" error instead of naming the
+// actual problem. Assert it explicitly, once, up front.
+if (typeof addon.VerterHost !== "function") {
+  console.log(`FAIL fixture-addon-exports-VerterHost: typeof addon.VerterHost is ${typeof addon.VerterHost}`);
+  process.exit(1);
+}
+
 function report(name, failure) {
   console.log(failure === null ? `PASS ${name}` : `FAIL ${name}: ${failure}`);
 }

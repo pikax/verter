@@ -8,8 +8,7 @@
 use napi::bindgen_prelude::*;
 use napi::{Env, Error, Result, Status};
 use verter_compiler::compile_request::{
-    CapabilityCell, CompileRequestError, FrameworkOption, ProductKind, RuntimeStyleProcessing,
-    VueOnlyAxis,
+    CapabilityCell, CompileRequestError, ProductKind, RuntimeStyleProcessing, VueOnlyAxis,
 };
 use verter_ffi::convert::{host_diagnostics_to_ffi, host_error_to_string};
 use verter_protocol::types::{FfiDiagnostic, FfiDiagnosticArg};
@@ -36,13 +35,10 @@ pub(crate) fn compile_product_kind_to_str(kind: ProductKind) -> &'static str {
 pub(crate) fn compile_request_construction_refused(error: &CompileRequestError) -> String {
     let detail = match error {
         CompileRequestError::UnsupportedOption { option, .. } => {
-            format!("unsupported option '{}'", framework_option_name(*option))
+            format!("unsupported option '{option}'")
         }
         CompileRequestError::MalformedOptionValue { option, value } => {
-            format!(
-                "malformed value '{value}' for option '{}'",
-                framework_option_name(*option)
-            )
+            format!("malformed value '{value}' for option '{option}'")
         }
         CompileRequestError::SsrVaporBackendUnsupported => {
             "SSR is unsupported with a Vapor backend".to_string()
@@ -85,13 +81,6 @@ pub(crate) fn compile_request_construction_refused(error: &CompileRequestError) 
         }
     };
     format!("compile request construction refused: {detail}")
-}
-
-fn framework_option_name(option: FrameworkOption) -> String {
-    match option {
-        FrameworkOption::Vue(option) => format!("vue:{option:?}"),
-        FrameworkOption::Svelte(option) => format!("svelte:{option:?}"),
-    }
 }
 
 fn vue_only_axis_name(axis: VueOnlyAxis) -> &'static str {

@@ -110,6 +110,25 @@ pub const MAX_DECODED_VALUES_PER_REQUEST: usize = (MAX_ARRAY_ELEMENTS as usize).
 /// Native bytes one request graph may retain.
 pub const MAX_RETAINED_BYTES_PER_REQUEST: usize = 8 * 1024 * 1024;
 
+/// The retained-byte floor every materialised JSON node charges, whatever
+/// its own byte length.
+///
+/// A `serde_json::Value` costs real stack/heap bytes to construct and hold
+/// even when it is a boolean, a number, or `null` — [`JsValueGraph::leaf`]
+/// / [`JsValueGraph::leaf_retained_bytes`] answer `0` bytes for those,
+/// because they retain no HEAP allocation of their own, but each one is
+/// still a distinct `Value` the traversal allocates and a distinct slot in
+/// its parent array/map. Without a floor, a batch of many entries — each
+/// under [`MAX_DECODED_VALUES_PER_REQUEST`] and resetting the per-entry
+/// decoded-value counter between entries — pays nothing against the
+/// aggregate retained-byte budget for a request graph built entirely from
+/// booleans or numbers, so the byte budget cannot bound the batch's total
+/// node count the way the module doc promises ("the traversal itself is
+/// what the budget bounds"). Charging this floor per node makes the
+/// aggregate retained-byte budget a real, node-count-proportional ceiling
+/// again, independent of leaf value shape.
+pub const MIN_VALUE_RETAINED_BYTES: usize = std::mem::size_of::<Value>();
+
 /// Shared accounting for payloads materialised during one call.
 ///
 /// A batch may reuse the same JS value at many positions. Each traversal
@@ -350,6 +369,11 @@ fn materialize_nested<G: JsValueGraph>(
                 ));
             }
             budget.reserve_decoded_values(declared as usize)?;
+            // Every reserved slot costs at least one `Value`'s worth of
+            // retained bytes, whatever ends up stored in it — the bound the
+            // aggregate batch budget needs to stay proportional to node
+            // count even for an all-leaf, zero-heap-cost array.
+            budget.retain_bytes(MIN_VALUE_RETAINED_BYTES.saturating_mul(declared as usize))?;
             let mut materialized = Vec::with_capacity(declared as usize);
             for index in 0..declared {
                 let element = graph.element(value, index)?;
@@ -376,6 +400,10 @@ fn materialize_nested<G: JsValueGraph>(
                 ));
             }
             budget.reserve_decoded_values(declared as usize)?;
+            // As the array arm: every reserved map entry costs at least one
+            // `Value`'s worth of retained bytes for its value slot, on top
+            // of whatever key bytes are charged below.
+            budget.retain_bytes(MIN_VALUE_RETAINED_BYTES.saturating_mul(declared as usize))?;
             let mut materialized = Map::new();
             for index in 0..declared {
                 budget.retain_bytes(keys.retained_bytes(index)?)?;

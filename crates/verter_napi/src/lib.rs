@@ -66,7 +66,7 @@ use compile_request_response::{
 pub use js_value_graph::{
     materialize_js_value, materialize_js_value_with_budget, JsObjectKeys, JsValueClass,
     JsValueGraph, JsValueMaterializationBudget, MAX_ARRAY_ELEMENTS, MAX_DECODED_VALUES_PER_REQUEST,
-    MAX_NESTING_DEPTH, MAX_RETAINED_BYTES_PER_REQUEST,
+    MAX_NESTING_DEPTH, MAX_RETAINED_BYTES_PER_REQUEST, MIN_VALUE_RETAINED_BYTES,
 };
 
 /// Maximum native payload bytes retained while decoding one typed batch,
@@ -275,6 +275,31 @@ fn decode_compile_requests_priority(
         }
         Err(error) => Err(recover_pending_exception(env, error)?),
     }
+}
+
+/// Answers a diagnostic message when `entries` (as returned by
+/// [`verter_session::VerterHost::compile_request_many`], one per input in
+/// original order) does not name `expected_canonical_ids` at the same
+/// position — `None` when every position matches.
+///
+/// The batch executor's own contract already guarantees positional order;
+/// this is the binding's own check that the guarantee actually held, so a
+/// future regression there fails the whole batch loudly instead of
+/// silently pairing a diagnostic with the wrong entry's source text.
+fn batch_entry_order_mismatch(
+    entries: &[host_compile::CompileRequestBatchEntry],
+    expected_canonical_ids: &[String],
+) -> Option<String> {
+    entries
+        .iter()
+        .zip(expected_canonical_ids)
+        .find(|(entry, expected)| entry.canonical_id != **expected)
+        .map(|(entry, expected)| {
+            format!(
+                "typed compile batch returned entry '{}' at the position expected for '{expected}'",
+                entry.canonical_id
+            )
+        })
 }
 
 fn read_batch_source_buffer(
@@ -2347,6 +2372,7 @@ impl NapiVerterHost {
             std::iter::repeat_with(|| None).take(len).collect();
         let mut positions = Vec::with_capacity(len);
         let mut sources = Vec::with_capacity(len);
+        let mut expected_canonical_ids = Vec::with_capacity(len);
         let mut converted = Vec::with_capacity(len);
         let mut payload_budget = JsValueMaterializationBudget::new(
             MAX_DECODED_VALUES_PER_REQUEST,
@@ -2494,6 +2520,7 @@ impl NapiVerterHost {
             };
             positions.push(position);
             sources.push(std::sync::Arc::clone(&source));
+            expected_canonical_ids.push(canonical_id.clone());
             converted.push(host_compile::CompileRequestBatchInput {
                 canonical_id,
                 source,
@@ -2512,6 +2539,15 @@ impl NapiVerterHost {
                 Status::GenericFailure,
                 "typed compile batch returned a different number of entries than inputs",
             ));
+        }
+
+        // The batch executor is trusted to preserve input order, but a
+        // silent-corruption regression there — one entry answering for
+        // another canonical id — must not silently pair a diagnostic with
+        // the wrong file's source text. Fail the whole batch loudly
+        // instead of trusting position alone.
+        if let Some(mismatch) = batch_entry_order_mismatch(&entries, &expected_canonical_ids) {
+            return Err(Error::new(Status::GenericFailure, mismatch));
         }
 
         for ((entry, source), position) in entries.into_iter().zip(sources).zip(positions) {
@@ -4293,6 +4329,27 @@ mod tests {
             !message.contains("DuplicateProduct") && !message.contains("RuntimeClient"),
             "{message}"
         );
+    }
+
+    // Mutation recipe: format `FrameworkOption` refusals with `{option:?}`
+    // (restore the pre-`Display` `framework_option_name`). The message then
+    // reads `vue:TransformOptionsHoistStatic` — a leaked PascalCase `Debug`
+    // spelling — instead of the lowerCamelCase rendering.
+    #[test]
+    fn unsupported_option_refusal_does_not_leak_the_debug_spelling() {
+        let message = compile_request_construction_refused(
+            &verter_compiler::compile_request::CompileRequestError::UnsupportedOption {
+                option: verter_compiler::compile_request::FrameworkOption::Vue(
+                    verter_compiler::compile_request::VueOption::TransformOptionsHoistStatic,
+                ),
+                capability: None,
+            },
+        );
+        assert!(
+            message.contains("unsupported option 'vue:transformOptionsHoistStatic'"),
+            "{message}"
+        );
+        assert!(!message.contains("TransformOptionsHoistStatic"), "{message}");
     }
 
     // Mutation recipe: reuse `host_diagnostics_to_ffi` and drop `arguments`.

@@ -38,6 +38,30 @@ pub enum FrameworkOption {
     Svelte(SvelteOption),
 }
 
+impl std::fmt::Display for FrameworkOption {
+    /// A wire-readable rendering every request-construction refusal message
+    /// uses instead of leaking the raw Rust `Debug` spelling of the
+    /// variant. `VueOption`/`SvelteOption` variant names are `Surface_option`
+    /// (per their own doc comments), a PascalCase identity derived one-to-one
+    /// from each TSV row; lowering only the leading letter turns that into a
+    /// plausible camelCase option path (`TransformOptionsHoistStatic` →
+    /// `transformOptionsHoistStatic`) without inventing per-row spellings
+    /// this crate would have to keep in sync with `vue-options.tsv` /
+    /// `svelte-options.tsv` by hand.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (framework, debug_name) = match self {
+            FrameworkOption::Vue(option) => ("vue", format!("{option:?}")),
+            FrameworkOption::Svelte(option) => ("svelte", format!("{option:?}")),
+        };
+        let mut chars = debug_name.chars();
+        let camel_case: String = match chars.next() {
+            Some(first) => first.to_lowercase().chain(chars).collect(),
+            None => String::new(),
+        };
+        write!(f, "{framework}:{camel_case}")
+    }
+}
+
 /// A Verter request axis that only the Vue projection implements.
 ///
 /// These are not official-framework options (see [`FrameworkOption`] for
