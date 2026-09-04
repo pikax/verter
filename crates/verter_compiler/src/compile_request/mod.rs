@@ -38,27 +38,53 @@ pub enum FrameworkOption {
     Svelte(SvelteOption),
 }
 
+impl FrameworkOption {
+    /// The exact (`surface`, `option`) column pair of this option's row in
+    /// `vue-options.tsv` / `svelte-options.tsv`.
+    pub const fn tsv_row(self) -> (&'static str, &'static str) {
+        match self {
+            FrameworkOption::Vue(option) => option.tsv_row(),
+            FrameworkOption::Svelte(option) => option.tsv_row(),
+        }
+    }
+
+    /// The framework tag this option belongs to — the `vue`/`svelte`
+    /// prefix a refusal message carries, and the same discriminant a
+    /// cross-framework key refusal names.
+    pub const fn framework(self) -> &'static str {
+        match self {
+            FrameworkOption::Vue(_) => "vue",
+            FrameworkOption::Svelte(_) => "svelte",
+        }
+    }
+}
+
 impl std::fmt::Display for FrameworkOption {
-    /// A wire-readable rendering every request-construction refusal message
-    /// uses instead of leaking the raw Rust `Debug` spelling of the
-    /// variant. `VueOption`/`SvelteOption` variant names are `Surface_option`
-    /// (per their own doc comments), a PascalCase identity derived one-to-one
-    /// from each TSV row; lowering only the leading letter turns that into a
-    /// plausible camelCase option path (`TransformOptionsHoistStatic` →
-    /// `transformOptionsHoistStatic`) without inventing per-row spellings
-    /// this crate would have to keep in sync with `vue-options.tsv` /
-    /// `svelte-options.tsv` by hand.
+    /// The caller-facing option path a request-construction refusal names,
+    /// read off the committed option inventory rather than reconstructed
+    /// from the Rust variant spelling. The path is the row's `option`
+    /// column, prefixed by whatever option-path segments its `surface`
+    /// column carries beyond the surface type itself, so a nested row keeps
+    /// its nesting (`svelte:SvelteOptions.customElement` + `tag` reads
+    /// `svelte:customElement.tag`) and a flat one does not gain any
+    /// (`compiler-core:TransformOptions` + `hoistStatic` reads
+    /// `vue:hoistStatic`, which is the field a caller actually wrote).
+    ///
+    /// Deriving the path from `{self:?}` instead would name a field no
+    /// schema and no caller has: the variant is `Surface_option`, so a
+    /// case-lowered `Debug` spelling reads `vue:transformOptionsHoistStatic`
+    /// while the request field is `hoistStatic`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (framework, debug_name) = match self {
-            FrameworkOption::Vue(option) => ("vue", format!("{option:?}")),
-            FrameworkOption::Svelte(option) => ("svelte", format!("{option:?}")),
+        let framework = self.framework();
+        let (surface, option) = self.tsv_row();
+        let local_surface = match surface.rsplit_once(':') {
+            Some((_, local)) => local,
+            None => surface,
         };
-        let mut chars = debug_name.chars();
-        let camel_case: String = match chars.next() {
-            Some(first) => first.to_lowercase().chain(chars).collect(),
-            None => String::new(),
-        };
-        write!(f, "{framework}:{camel_case}")
+        match local_surface.split_once('.') {
+            Some((_, nested_path)) => write!(f, "{framework}:{nested_path}.{option}"),
+            None => write!(f, "{framework}:{option}"),
+        }
     }
 }
 

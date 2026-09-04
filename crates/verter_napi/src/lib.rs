@@ -4331,12 +4331,13 @@ mod tests {
         );
     }
 
-    // Mutation recipe: format `FrameworkOption` refusals with `{option:?}`
-    // (restore the pre-`Display` `framework_option_name`). The message then
-    // reads `vue:TransformOptionsHoistStatic` — a leaked PascalCase `Debug`
-    // spelling — instead of the lowerCamelCase rendering.
+    // Mutation recipe: derive the option path from the Rust variant instead
+    // of the option inventory — case-lower `format!("{option:?}")` in
+    // `FrameworkOption`'s `Display`. The message then reads
+    // `vue:transformOptionsHoistStatic`, naming a request field that does
+    // not exist, and this case goes red on both assertions.
     #[test]
-    fn unsupported_option_refusal_does_not_leak_the_debug_spelling() {
+    fn unsupported_option_refusal_names_the_request_field() {
         let message = compile_request_construction_refused(
             &verter_compiler::compile_request::CompileRequestError::UnsupportedOption {
                 option: verter_compiler::compile_request::FrameworkOption::Vue(
@@ -4345,12 +4346,14 @@ mod tests {
                 capability: None,
             },
         );
+        // `hoistStatic` is the field a caller writes on the Vue options
+        // object; the surface it belongs to is not part of that path.
         assert!(
-            message.contains("unsupported option 'vue:transformOptionsHoistStatic'"),
+            message.contains("unsupported option 'vue:hoistStatic'"),
             "{message}"
         );
         assert!(
-            !message.contains("TransformOptionsHoistStatic"),
+            !message.contains("TransformOptions") && !message.contains("transformOptions"),
             "{message}"
         );
     }

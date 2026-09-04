@@ -115,6 +115,52 @@ impl SvelteOption {
             OptimizeOptionsHydrate => TestOnly,
         }
     }
+
+    /// The exact (`surface`, `option`) column pair of this row in
+    /// `packages/framework-conformance-harness/evidence/svelte-options.tsv` —
+    /// the schema identity a refusal names, never a spelling derived from
+    /// the Rust variant. Exhaustive for the same reason [`Self::class`] is: a
+    /// new TSV row without an arm here is a compile error.
+    pub const fn tsv_row(self) -> (&'static str, &'static str) {
+        use SvelteOption::*;
+        match self {
+            ParseFilename => ("svelte:parse", "filename"),
+            ParseModern => ("svelte:parse", "modern"),
+            ParseLoose => ("svelte:parse", "loose"),
+            ModuleDev => ("svelte:ModuleCompileOptions", "dev"),
+            ModuleGenerate => ("svelte:ModuleCompileOptions", "generate"),
+            ModuleFilename => ("svelte:ModuleCompileOptions", "filename"),
+            ModuleRootDir => ("svelte:ModuleCompileOptions", "rootDir"),
+            ModuleWarningFilter => ("svelte:ModuleCompileOptions", "warningFilter"),
+            ModuleExperimentalAsync => ("svelte:ModuleCompileOptions", "experimental.async"),
+            CompileOptionsName => ("svelte:CompileOptions", "name"),
+            CompileOptionsCustomElement => ("svelte:CompileOptions", "customElement"),
+            CompileOptionsAccessors => ("svelte:CompileOptions", "accessors"),
+            CompileOptionsNamespace => ("svelte:CompileOptions", "namespace"),
+            CompileOptionsImmutable => ("svelte:CompileOptions", "immutable"),
+            CompileOptionsCss => ("svelte:CompileOptions", "css"),
+            CompileOptionsCssHash => ("svelte:CompileOptions", "cssHash"),
+            CompileOptionsPreserveComments => ("svelte:CompileOptions", "preserveComments"),
+            CompileOptionsPreserveWhitespace => ("svelte:CompileOptions", "preserveWhitespace"),
+            CompileOptionsFragments => ("svelte:CompileOptions", "fragments"),
+            CompileOptionsRunes => ("svelte:CompileOptions", "runes"),
+            CompileOptionsDiscloseVersion => ("svelte:CompileOptions", "discloseVersion"),
+            CompileOptionsCompatibility => ("svelte:CompileOptions", "compatibility"),
+            CompileOptionsCompatibilityComponentApi => ("svelte:CompileOptions", "compatibility.componentApi"),
+            CompileOptionsSourcemap => ("svelte:CompileOptions", "sourcemap"),
+            CompileOptionsOutputFilename => ("svelte:CompileOptions", "outputFilename"),
+            CompileOptionsCssOutputFilename => ("svelte:CompileOptions", "cssOutputFilename"),
+            CompileOptionsHmr => ("svelte:CompileOptions", "hmr"),
+            CompileOptionsModernAst => ("svelte:CompileOptions", "modernAst"),
+            CustomElementTag => ("svelte:SvelteOptions.customElement", "tag"),
+            CustomElementShadow => ("svelte:SvelteOptions.customElement", "shadow"),
+            CustomElementExtend => ("svelte:SvelteOptions.customElement", "extend"),
+            CustomElementPropsAttribute => ("svelte:SvelteOptions.customElement.props", "*.attribute"),
+            CustomElementPropsReflect => ("svelte:SvelteOptions.customElement.props", "*.reflect"),
+            CustomElementPropsType => ("svelte:SvelteOptions.customElement.props", "*.type"),
+            OptimizeOptionsHydrate => ("svelte:OptimizeOptions", "hydrate"),
+        }
+    }
 }
 
 pub const ALL_SVELTE_OPTIONS: [SvelteOption; 35] = {
