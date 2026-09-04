@@ -24,7 +24,7 @@ export function createVerterHost(
   } as any);
 }
 
-function vueRuntimeClientRequest(filename: string): HostCompileRequest {
+export function vueRuntimeClientRequest(filename: string): HostCompileRequest {
   return {
     framework: "vue",
     identity: { filename, isProduction: false, forceJs: false },

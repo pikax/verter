@@ -63,7 +63,7 @@ interface FenceReport {
   officialSvelteExpectedVersion: string;
   analysisLevel: "none";
   sourceMapMode: "enabled-both-backends";
-  cacheMode: "verter-stateless-attested-per-sample";
+  cacheMode: "verter-stateless-by-construction";
   memoryMetric: "isolated-process-peak-rss";
   provenanceMode: "parent-initial-final";
   warmupIterations: number;
@@ -269,9 +269,10 @@ async function createCompiler(
       if (!upsert.changed || !upsert.changedVirtualNodes.some((node) => node.kind === "main")) {
         throw new Error(`${fixture.name}/verter benchmark revision did not invalidate Main`);
       }
-      // The typed compile request does not consult a compile-cache slot; each
-      // sample is a fresh client compile with source maps, matching the
-      // official Svelte equal-work fence.
+      // Stateless by construction: the typed compile request has no
+      // compile-cache slot, so each sample is a fresh client compile with
+      // source maps (equal-work with official Svelte). HostCompileResponse
+      // carries no cacheHit/mode fields to re-attest per sample.
       const compiled = host.compileRequest(upsert.canonicalId, {
         framework: "svelte",
         identity: { filename: upsert.canonicalId, isProduction: false, forceJs: false },
@@ -565,7 +566,7 @@ function runParent(): void {
     officialSvelteExpectedVersion: PINNED_OFFICIAL_SVELTE_VERSION,
     analysisLevel: "none",
     sourceMapMode: "enabled-both-backends",
-    cacheMode: "verter-stateless-attested-per-sample",
+    cacheMode: "verter-stateless-by-construction",
     memoryMetric: "isolated-process-peak-rss",
     provenanceMode: "parent-initial-final",
     warmupIterations,
@@ -590,7 +591,7 @@ function runParent(): void {
     process.stdout.write(
       `Verter/official-Svelte ${officialSvelteVersion} equal-work compiler fence ` +
         `(wall <= ${SVELTE_COMPILER_WALL_THRESHOLD.toFixed(2)}x, peak RSS <= ${SVELTE_COMPILER_RSS_THRESHOLD.toFixed(2)}x, ` +
-        `${rounds}x${iterations}, maps enabled, stateless attested)\n`,
+        `${rounds}x${iterations}, maps enabled, stateless by construction)\n`,
     );
     for (const result of results) {
       process.stdout.write(

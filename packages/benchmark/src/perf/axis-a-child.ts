@@ -93,12 +93,14 @@ export interface AxisAChildSample {
    * Both sides compile the SAME shared corpus dir at identical canonical paths, so
    * the hash is directly comparable without per-side normalization.
    *
-   * `null` (UNAVAILABLE) when ANY expected carrier is MISSING — the host returned
-   * no IDE result, or an absent/empty `code` or `sourceMap` (source maps are
-   * requested on this path, so both must be non-empty). A missing carrier is NEVER
-   * hashed from `""`: a coerced empty-string hash would compare EQUAL on two
-   * both-sides-missing runs and slip past the content-equality rail. With `null`
-   * the gate's content-equality presence rail hard-fails a full run instead.
+   * `null` (UNAVAILABLE) when ANY expected carrier is MISSING — an absent/empty
+   * `code` or `sourceMap` (source maps are requested on this path, so both must
+   * be non-empty). A missing carrier is NEVER hashed from `""`: a coerced
+   * empty-string hash would compare EQUAL on two both-sides-missing runs and slip
+   * past the content-equality rail. With `null` the gate's content-equality
+   * presence rail hard-fails a full run instead. The real singular compileRequest
+   * route never returns a product-less success: an admitted request either
+   * publishes every requested product or throws.
    */
   readonly carrierContentHash: string | null;
 }
@@ -249,17 +251,17 @@ export function runAxisA(
   // equality rail.
   //
   // Every expected carrier MUST yield a non-empty IDE `code` AND a non-empty
-  // `sourceMap` (source maps are requested on this path). A MISSING carrier (the
-  // host returned no IDE product, or an absent/empty code or source-map) is
-  // MISSING instrumentation — NEVER hashed from "" (which would let a
-  // both-sides-missing carrier compare as an equal empty-string hash and pass the
-  // content-equality rail). When ANY expected carrier is missing the content hash
-  // is UNAVAILABLE (null), and the gate's content-equality presence rail
-  // hard-fails a full run.
+  // `sourceMap` (source maps are requested on this path). A MISSING carrier (an
+  // absent/empty code or source-map) is MISSING instrumentation — NEVER hashed
+  // from "" (which would let a both-sides-missing carrier compare as an equal
+  // empty-string hash and pass the content-equality rail). When ANY expected
+  // carrier is missing the content hash is UNAVAILABLE (null), and the gate's
+  // content-equality presence rail hard-fails a full run. The real singular
+  // compileRequest route throws instead of returning a product-less success.
   const carrierEntries: CarrierContentEntry[] = [];
   let missingCarrier = false;
   for (const p of sfcPaths) {
-    const ide = ideCompanionFromResponse(host.compileRequest(p, vueIdeCompanionRequest(p)));
+    const ide = ideCompanionFromResponse(host.compileRequest(p, vueIdeCompanionRequest()));
     const code = ide?.code;
     const sourceMap = ide?.sourceMap;
     if (!code || !sourceMap) {
@@ -304,10 +306,12 @@ export interface VerterHostApi {
   compileRequest(canonicalId: string, request: HostCompileRequest): HostCompileResponse;
 }
 
-export function vueIdeCompanionRequest(filename: string): HostCompileRequest {
+export function vueIdeCompanionRequest(): HostCompileRequest {
   return {
     framework: "vue",
-    identity: { filename, isProduction: false, forceJs: false },
+    // Leave `filename` unset: bind_default_filename fills the canonical id.
+    // A caller-stated name wins and would pin Windows `C:\...` vs `c:/...`.
+    identity: { isProduction: false, forceJs: false },
     products: [
       {
         kind: "ideCompanion",
