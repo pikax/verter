@@ -200,7 +200,10 @@ pub fn host_diagnostic_arg_to_ffi(
 /// Converts one host diagnostic, UTF-16-mapped span included. The sole
 /// diagnostic projection every FFI consumer (NAPI and WASM alike) uses —
 /// see [`host_diagnostic_arg_to_ffi`] for why the arguments cannot fork.
-pub fn host_diagnostic_to_ffi(diagnostic: &host::HostDiagnostic, source: Option<&str>) -> FfiDiagnostic {
+pub fn host_diagnostic_to_ffi(
+    diagnostic: &host::HostDiagnostic,
+    source: Option<&str>,
+) -> FfiDiagnostic {
     FfiDiagnostic {
         severity: match diagnostic.severity {
             host::HostSeverity::Error => "error".to_string(),

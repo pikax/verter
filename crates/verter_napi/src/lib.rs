@@ -4349,7 +4349,10 @@ mod tests {
             message.contains("unsupported option 'vue:transformOptionsHoistStatic'"),
             "{message}"
         );
-        assert!(!message.contains("TransformOptionsHoistStatic"), "{message}");
+        assert!(
+            !message.contains("TransformOptionsHoistStatic"),
+            "{message}"
+        );
     }
 
     // Mutation recipe: reuse `host_diagnostics_to_ffi` and drop `arguments`.
