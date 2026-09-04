@@ -921,6 +921,17 @@ describe("VerterHost type declarations in sync with native binary", () => {
   it("generated addon declarations carry the typed compile routes", () => {
     const declarationsPath = resolve(import.meta.dirname, "dist/napi.generated.d.ts");
     const declarations = readFileSync(declarationsPath, "utf8");
+    const published = readFileSync(resolve(import.meta.dirname, "index.ts"), "utf8");
+    const hostTypes = readFileSync(resolve(import.meta.dirname, "host-types.ts"), "utf8");
+    const interfaceFields = (source: string, name: string): string[] => {
+      const block = source.match(
+        new RegExp(`(?:export )?(?:interface|type) ${name} \\{([\\s\\S]*?)\\n\\}`),
+      );
+      expect(block, `missing ${name}`).toBeTruthy();
+      return [...block![1].matchAll(/^\s*(?:readonly )?([A-Za-z_][A-Za-z0-9_]*)\??:/gm)].map(
+        (match) => match[1],
+      );
+    };
     for (const [method, response] of [
       ["compileRequest", "NapiCompileRequestResponse"],
       ["compileRequests", "NapiCompileRequestsEntry"],
@@ -929,6 +940,35 @@ describe("VerterHost type declarations in sync with native binary", () => {
       expect(declaration).toContain("host-compile-request.generated').HostCompileRequest");
       expect(declaration).toContain(response);
     }
+    const compileRequest = declarations.match(/^\s*compileRequest\(.*$/m)?.[0] ?? "";
+    expect(compileRequest).toMatch(/canonicalId:\s*string/);
+    expect(compileRequest).toMatch(/:\s*NapiCompileRequestResponse\s*$/);
+    const compileRequests = declarations.match(/^\s*compileRequests\(.*$/m)?.[0] ?? "";
+    expect(compileRequests).toMatch(/source:\s*Buffer/);
+    expect(compileRequests).toMatch(/priority\?:/);
+    expect(compileRequests).toMatch(/:\s*Array<NapiCompileRequestsEntry>\s*$/);
+
+    expect(interfaceFields(declarations, "NapiCompileRequestResponse").sort()).toEqual(
+      interfaceFields(published, "HostCompileResponse").sort(),
+    );
+    expect(interfaceFields(declarations, "NapiCompileRequestsEntry").sort()).toEqual(
+      ["canonicalId", "failure", "response"].sort(),
+    );
+    expect(interfaceFields(declarations, "NapiDiagnostic").sort()).toEqual(
+      interfaceFields(hostTypes, "HostDiagnostic").sort(),
+    );
+    expect(interfaceFields(declarations, "NapiDiagnosticArg").sort()).toEqual(
+      interfaceFields(hostTypes, "HostDiagnosticArg").sort(),
+    );
+    expect(interfaceFields(published, "HostRuntimeCompiledProduct")).toEqual(
+      expect.arrayContaining(["kind", "nodes"]),
+    );
+    expect(interfaceFields(published, "HostIdeCompiledProduct")).toEqual(
+      expect.arrayContaining(["kind", "ide"]),
+    );
+    expect(interfaceFields(published, "HostAnalysisCompiledProduct")).toEqual(
+      expect.arrayContaining(["kind", "analysis"]),
+    );
   });
 
   it("every native prototype method should have a TS type declaration", () => {

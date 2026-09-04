@@ -47,23 +47,29 @@
 //!
 //! ## Refusals this layer owns
 //!
-//! Two, both structural rather than about vocabulary, because a JS graph
-//! can describe things JSON has no term for:
+//! Structural rather than about vocabulary, because a JS graph can
+//! describe things JSON has no term for:
 //!
 //! - a value nested past [`MAX_NESTING_DEPTH`], which is also how a graph
 //!   that refers back to itself is refused — `const a = {}; a.self = a`
 //!   has no JSON representation at all, and without a bound the traversal
 //!   would run until the stack guard page killed the process;
-//! - an array declaring more than [`MAX_ARRAY_ELEMENTS`] elements. A
-//!   declared length is free in V8 — `new Array(2 ** 32 - 1)` allocates
-//!   nothing — so an unbounded materialiser would turn a cheap argument
-//!   into a tens-of-gigabytes reservation and abort the process on the
-//!   allocation failure. The count is checked before anything is
-//!   reserved.
-//!
-//! Object keys carry no equivalent bound: the key list Node hands back is
-//! a real array of the keys that exist, so its size is already paid for by
-//! the caller's own object and cannot be inflated by a declaration.
+//! - an array declaring more than [`MAX_ARRAY_ELEMENTS`] elements, and an
+//!   object exposing more than that many own enumerable keys. A declared
+//!   array length is free in V8 — `new Array(2 ** 32 - 1)` allocates
+//!   nothing — so the count is reserved against the decoded-value budget
+//!   before anything is reserved. Object keys are counted the same way,
+//!   and each key's UTF-8 length is charged before the Rust string is
+//!   copied;
+//! - a dense binary object (`Buffer`, typed array, `DataView`). Those
+//!   values expose every byte index as an enumerable own key, so
+//!   enumerating them would allocate millions of numeric key strings
+//!   before either budget ran. They are refused at classification,
+//!   before the key list is read;
+//! - a graph that exceeds [`MAX_DECODED_VALUES_PER_REQUEST`] values or
+//!   [`MAX_RETAINED_BYTES_PER_REQUEST`] retained bytes. A tiny shared JS
+//!   DAG expands into a distinct native copy on every visit, so the
+//!   traversal itself is what the budget bounds.
 //!
 //! ## What this layer does not own
 //!
@@ -85,16 +91,35 @@ use serde_json::{Map, Value};
 /// threatens the stack.
 pub const MAX_NESTING_DEPTH: u32 = 64;
 
-/// How many elements one request array may declare.
+/// How many elements one request array may declare, and how many own
+/// enumerable keys one request object may expose.
 ///
 /// Every array the schema carries is a short list of names or products.
+/// Object key lists are real, but a dense exotic object can still expose
+/// millions of index keys; the count is checked before those names are
+/// converted into Rust strings.
 pub const MAX_ARRAY_ELEMENTS: u32 = 1 << 16;
 
-/// Shared accounting for payloads materialised during one batch call.
+/// Decoded JSON nodes one request graph may materialise.
+///
+/// Sized to admit one legal max-length array plus the handful of objects
+/// the schema wraps it in, and to refuse a graph that expands far past
+/// that by revisiting a shared JS value.
+pub const MAX_DECODED_VALUES_PER_REQUEST: usize = (MAX_ARRAY_ELEMENTS as usize).saturating_mul(2);
+
+/// Native bytes one request graph may retain.
+pub const MAX_RETAINED_BYTES_PER_REQUEST: usize = 8 * 1024 * 1024;
+
+/// Shared accounting for payloads materialised during one call.
 ///
 /// A batch may reuse the same JS value at many positions. Each traversal
 /// creates distinct native strings, vectors, and JSON values, so every
 /// traversal consumes the budget even when V8 stores the input only once.
+///
+/// Decoded-value accounting is per request graph: a batch resets it
+/// between entries so a few thousand small requests are admitted by the
+/// retained-byte and entry-count bounds. Retained bytes accumulate across
+/// the whole call and abort it when exhausted.
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct JsValueMaterializationBudget {
@@ -102,7 +127,8 @@ pub struct JsValueMaterializationBudget {
     retained_bytes: usize,
     max_decoded_values: usize,
     max_retained_bytes: usize,
-    exhausted: bool,
+    values_exhausted: bool,
+    bytes_exhausted: bool,
 }
 
 impl JsValueMaterializationBudget {
@@ -113,18 +139,28 @@ impl JsValueMaterializationBudget {
             retained_bytes: 0,
             max_decoded_values,
             max_retained_bytes,
-            exhausted: false,
+            values_exhausted: false,
+            bytes_exhausted: false,
         }
+    }
+
+    /// Per-request decoded-value / retained-byte caps used by the singular
+    /// route and by each batch entry's request graph.
+    pub fn per_request() -> Self {
+        Self::new(
+            MAX_DECODED_VALUES_PER_REQUEST,
+            MAX_RETAINED_BYTES_PER_REQUEST,
+        )
     }
 
     fn ensure_decoded_values(&mut self, additional: usize) -> Result<()> {
         let total = self.decoded_values.checked_add(additional);
         if total.is_none_or(|total| total > self.max_decoded_values) {
-            self.exhausted = true;
+            self.values_exhausted = true;
             return Err(Error::new(
                 Status::InvalidArg,
                 format!(
-                    "A request batch materializes more than {} decoded values",
+                    "A compile request materializes more than {} decoded values",
                     self.max_decoded_values
                 ),
             ));
@@ -132,20 +168,27 @@ impl JsValueMaterializationBudget {
         Ok(())
     }
 
-    fn retain_value(&mut self) -> Result<()> {
-        self.ensure_decoded_values(1)?;
-        self.decoded_values += 1;
+    /// Increment the decoded-value counter before the caller allocates a
+    /// matching capacity. Nested sparse arrays therefore cannot reserve
+    /// many full buffers while the counter is still near zero.
+    fn reserve_decoded_values(&mut self, additional: usize) -> Result<()> {
+        self.ensure_decoded_values(additional)?;
+        self.decoded_values += additional;
         Ok(())
+    }
+
+    fn retain_value(&mut self) -> Result<()> {
+        self.reserve_decoded_values(1)
     }
 
     pub(crate) fn retain_bytes(&mut self, additional: usize) -> Result<()> {
         let total = self.retained_bytes.checked_add(additional);
         if total.is_none_or(|total| total > self.max_retained_bytes) {
-            self.exhausted = true;
+            self.bytes_exhausted = true;
             return Err(Error::new(
                 Status::InvalidArg,
                 format!(
-                    "A request batch retains more than {} bytes of decoded payload",
+                    "A compile request retains more than {} bytes of decoded payload",
                     self.max_retained_bytes
                 ),
             ));
@@ -154,8 +197,13 @@ impl JsValueMaterializationBudget {
         Ok(())
     }
 
-    pub(crate) fn is_exhausted(&self) -> bool {
-        self.exhausted
+    pub(crate) fn reset_decoded_values(&mut self) {
+        self.decoded_values = 0;
+        self.values_exhausted = false;
+    }
+
+    pub(crate) fn bytes_exhausted(&self) -> bool {
+        self.bytes_exhausted
     }
 }
 
@@ -175,6 +223,20 @@ pub enum JsValueClass {
     Leaf,
 }
 
+/// Own enumerable string keys of one object, counted before any key is
+/// converted into a retained Rust string.
+pub trait JsObjectKeys {
+    /// How many own enumerable string keys the object exposes.
+    fn count(&self) -> Result<u32>;
+
+    /// UTF-8 bytes the key at `index` will retain, measured before
+    /// [`Self::at`] copies them.
+    fn retained_bytes(&self, index: u32) -> Result<usize>;
+
+    /// The key at `index` in JS enumeration order.
+    fn at(&self, index: u32) -> Result<String>;
+}
+
 /// A JS object graph, read one value at a time.
 ///
 /// [`JsValueGraph::own_enumerable_keys`] and [`JsValueGraph::property`]
@@ -190,14 +252,17 @@ pub enum JsValueClass {
 pub trait JsValueGraph {
     /// One value in the graph.
     type Value;
+    /// One object's own enumerable string keys, counted before conversion.
+    type Keys: JsObjectKeys;
 
     /// Which materialisation rule `value` falls under.
     fn classify(&self, value: &Self::Value) -> Result<JsValueClass>;
 
-    /// Every own enumerable string-keyed property of `object`, in JS
+    /// Own enumerable string-keyed properties of `object`, in JS
     /// enumeration order. Inherited and symbol-keyed properties are not
-    /// part of the payload a caller wrote.
-    fn own_enumerable_keys(&self, object: &Self::Value) -> Result<Vec<String>>;
+    /// part of the payload a caller wrote. The returned handle is counted
+    /// and charged before any key string is retained.
+    fn own_enumerable_keys(&self, object: &Self::Value) -> Result<Self::Keys>;
 
     /// Whatever `object[key]` holds, `undefined` included.
     fn property(&self, object: &Self::Value, key: &str) -> Result<Self::Value>;
@@ -225,19 +290,22 @@ pub trait JsValueGraph {
 /// refers back to itself has no traversal that terminates and no JSON
 /// representation either, so it is refused by [`MAX_NESTING_DEPTH`]
 /// rather than followed.
+///
+/// Bounded by [`MAX_DECODED_VALUES_PER_REQUEST`] and
+/// [`MAX_RETAINED_BYTES_PER_REQUEST`].
 pub fn materialize_js_value<G: JsValueGraph>(graph: &G, value: &G::Value) -> Result<Value> {
-    let mut budget = JsValueMaterializationBudget::new(usize::MAX, usize::MAX);
+    let mut budget = JsValueMaterializationBudget::per_request();
     materialize_js_value_with_budget(graph, value, &mut budget)
 }
 
-/// Materialises one value while charging a budget shared by its batch.
+/// Materialises one value while charging a budget shared by its call.
 #[doc(hidden)]
 pub fn materialize_js_value_with_budget<G: JsValueGraph>(
     graph: &G,
     value: &G::Value,
     budget: &mut JsValueMaterializationBudget,
 ) -> Result<Value> {
-    materialize_nested(graph, value, 0, budget)
+    materialize_nested(graph, value, 0, budget, true)
 }
 
 /// `materialize_js_value` at a known nesting depth.
@@ -246,6 +314,7 @@ fn materialize_nested<G: JsValueGraph>(
     value: &G::Value,
     depth: u32,
     budget: &mut JsValueMaterializationBudget,
+    charge_self: bool,
 ) -> Result<Value> {
     if depth > MAX_NESTING_DEPTH {
         return Err(Error::new(
@@ -257,7 +326,9 @@ fn materialize_nested<G: JsValueGraph>(
         ));
     }
 
-    budget.retain_value()?;
+    if charge_self {
+        budget.retain_value()?;
+    }
 
     Ok(match graph.classify(value)? {
         JsValueClass::Undefined => Value::Null,
@@ -266,8 +337,8 @@ fn materialize_nested<G: JsValueGraph>(
             graph.leaf(value)?
         }
         JsValueClass::Array => {
-            // Checked before anything is reserved: the length is what a
-            // caller declares, not what the array holds.
+            // Checked and reserved before anything is allocated: the length
+            // is what a caller declares, not what the array holds.
             let declared = graph.element_count(value)?;
             if declared > MAX_ARRAY_ELEMENTS {
                 return Err(Error::new(
@@ -278,27 +349,73 @@ fn materialize_nested<G: JsValueGraph>(
                     ),
                 ));
             }
-            // Refuse before reserving the array. Elements may contain more
-            // values and are charged recursively as they are traversed.
-            budget.ensure_decoded_values(declared as usize)?;
+            budget.reserve_decoded_values(declared as usize)?;
             let mut materialized = Vec::with_capacity(declared as usize);
             for index in 0..declared {
                 let element = graph.element(value, index)?;
-                materialized.push(materialize_nested(graph, &element, depth + 1, budget)?);
+                materialized.push(materialize_nested(
+                    graph,
+                    &element,
+                    depth + 1,
+                    budget,
+                    false,
+                )?);
             }
             Value::Array(materialized)
         }
         JsValueClass::Object => {
+            let keys = graph.own_enumerable_keys(value)?;
+            let declared = keys.count()?;
+            if declared > MAX_ARRAY_ELEMENTS {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!(
+                        "A request object exposes {declared} keys, above the \
+                         {MAX_ARRAY_ELEMENTS} a request may carry"
+                    ),
+                ));
+            }
+            budget.reserve_decoded_values(declared as usize)?;
             let mut materialized = Map::new();
-            for key in graph.own_enumerable_keys(value)? {
-                budget.retain_bytes(key.len())?;
+            for index in 0..declared {
+                budget.retain_bytes(keys.retained_bytes(index)?)?;
+                let key = keys.at(index)?;
                 let property = graph.property(value, &key)?;
-                let property = materialize_nested(graph, &property, depth + 1, budget)?;
+                let property = materialize_nested(graph, &property, depth + 1, budget, false)?;
                 materialized.insert(key, property);
             }
             Value::Object(materialized)
         }
     })
+}
+
+/// UTF-8 byte length of a JavaScript string, without allocating a Rust
+/// copy. The value must already have been classified as a string.
+pub(crate) fn napi_utf8_string_len(env: sys::napi_env, value: sys::napi_value) -> Result<usize> {
+    let mut length = 0;
+    // SAFETY: the caller supplies a live env/value pair; a null output
+    // buffer asks Node for the UTF-8 byte length without allocating.
+    napi::check_status!(
+        unsafe { sys::napi_get_value_string_utf8(env, value, ptr::null_mut(), 0, &mut length) },
+        "Failed to measure a request string"
+    )?;
+    Ok(length)
+}
+
+fn napi_is_flag(
+    env: sys::napi_env,
+    value: sys::napi_value,
+    probe: unsafe fn(sys::napi_env, sys::napi_value, *mut bool) -> sys::napi_status,
+    what: &str,
+) -> Result<bool> {
+    let mut flag = false;
+    napi::check_status!(
+        // SAFETY: the environment/value pair is live per the graph
+        // constructor's contract; `flag` is a stack bool the probe writes.
+        unsafe { probe(env, value, &mut flag) },
+        "Failed to detect whether a request value is {what}"
+    )?;
+    Ok(flag)
 }
 
 /// The live JS object graph behind one Node environment.
@@ -317,31 +434,78 @@ impl NapiValueGraph {
     }
 }
 
+/// Own enumerable names of one live JS object, still as a JS string array
+/// so the count can be refused before any name is copied into Rust.
+pub(crate) struct NapiObjectKeys {
+    env: sys::napi_env,
+    names: sys::napi_value,
+}
+
+impl NapiObjectKeys {
+    fn name_at(&self, index: u32) -> Result<sys::napi_value> {
+        let mut name = ptr::null_mut();
+        napi::check_status!(
+            unsafe { sys::napi_get_element(self.env, self.names, index, &mut name) },
+            "Failed to read own enumerable key {index} of a request object"
+        )?;
+        Ok(name)
+    }
+}
+
+impl JsObjectKeys for NapiObjectKeys {
+    fn count(&self) -> Result<u32> {
+        let mut length = 0;
+        napi::check_status!(
+            unsafe { sys::napi_get_array_length(self.env, self.names, &mut length) },
+            "Failed to read the own enumerable key count of a request object"
+        )?;
+        Ok(length)
+    }
+
+    fn retained_bytes(&self, index: u32) -> Result<usize> {
+        let name = self.name_at(index)?;
+        napi_utf8_string_len(self.env, name)
+    }
+
+    fn at(&self, index: u32) -> Result<String> {
+        let name = self.name_at(index)?;
+        // SAFETY: `name` is a string element of the names array produced
+        // by `napi_get_all_property_names` with `numbers_to_strings`.
+        unsafe { String::from_napi_value(self.env, name) }
+    }
+}
+
 impl JsValueGraph for NapiValueGraph {
     type Value = sys::napi_value;
+    type Keys = NapiObjectKeys;
 
     fn classify(&self, value: &Self::Value) -> Result<JsValueClass> {
         match napi::type_of!(self.env, *value)? {
             ValueType::Undefined => Ok(JsValueClass::Undefined),
             ValueType::Object => {
-                let mut is_array = false;
-                // SAFETY: the environment/value pair is live per the
-                // constructor's contract.
-                napi::check_status!(
-                    unsafe { sys::napi_is_array(self.env, *value, &mut is_array) },
-                    "Failed to detect whether a request value is an array"
-                )?;
-                Ok(if is_array {
-                    JsValueClass::Array
-                } else {
-                    JsValueClass::Object
-                })
+                if napi_is_flag(self.env, *value, sys::napi_is_array, "an array")? {
+                    return Ok(JsValueClass::Array);
+                }
+                // Buffer, typed arrays and DataView expose every byte index
+                // as an enumerable own key. Refuse them before the key
+                // list is materialised.
+                if napi_is_flag(self.env, *value, sys::napi_is_buffer, "a Buffer")?
+                    || napi_is_flag(self.env, *value, sys::napi_is_typedarray, "a typed array")?
+                    || napi_is_flag(self.env, *value, sys::napi_is_dataview, "a DataView")?
+                {
+                    return Err(Error::new(
+                        Status::InvalidArg,
+                        "A request value is a binary or typed-array object, \
+                         which has no JSON representation",
+                    ));
+                }
+                Ok(JsValueClass::Object)
             }
             _ => Ok(JsValueClass::Leaf),
         }
     }
 
-    fn own_enumerable_keys(&self, object: &Self::Value) -> Result<Vec<String>> {
+    fn own_enumerable_keys(&self, object: &Self::Value) -> Result<Self::Keys> {
         let mut names = ptr::null_mut();
         // SAFETY: as `classify`. `own_only` excludes the prototype chain
         // and `skip_symbols` excludes symbol keys, so what comes back is
@@ -368,8 +532,10 @@ impl JsValueGraph for NapiValueGraph {
             },
             "Failed to read the own enumerable keys of a request object"
         )?;
-        // SAFETY: `names` is the string array the call above produced.
-        unsafe { Vec::<String>::from_napi_value(self.env, names) }
+        Ok(NapiObjectKeys {
+            env: self.env,
+            names,
+        })
     }
 
     fn property(&self, object: &Self::Value, key: &str) -> Result<Self::Value> {
@@ -432,16 +598,6 @@ impl JsValueGraph for NapiValueGraph {
         if napi::type_of!(self.env, *value)? != ValueType::String {
             return Ok(0);
         }
-
-        let mut length = 0;
-        // SAFETY: as `classify`. A null output buffer asks Node for the
-        // UTF-8 byte length without allocating the Rust string.
-        napi::check_status!(
-            unsafe {
-                sys::napi_get_value_string_utf8(self.env, *value, ptr::null_mut(), 0, &mut length)
-            },
-            "Failed to measure a request string"
-        )?;
-        Ok(length)
+        napi_utf8_string_len(self.env, *value)
     }
 }

@@ -18,12 +18,16 @@
 // error there rather than a shape that type-checks and then refuses at run
 // time.
 //
-// RESPONSE side — no native counterpart exists, so those names are
-// unprefixed. They reuse the shapes this package already re-exports from
-// `@verter/native` wherever the route serialises one, rather than restating
-// them: a second copy is only safe when something holds the two together,
-// and these have the strongest possible tie — the route serialises the very
-// Rust struct those declarations project.
+// RESPONSE side — `@verter/native` now has a counterpart
+// (`HostCompileResponse` / `HostCompiledProduct`), but the JavaScript
+// envelopes diverge: native nests `ide`, stringifies `analysis`, and throws
+// a structured Error; this binding flattens the IDE DTO, returns `analysis`
+// as an object, and throws a string. Names here stay unprefixed and reuse
+// the shapes this package already re-exports from `@verter/native` wherever
+// the route serialises one, rather than restating them: a second copy is
+// only safe when something holds the two together, and these have the
+// strongest possible tie — the route serialises the very Rust struct those
+// declarations project.
 //
 // They live in a leaf module rather than in `index.ts` so `tsc` can check
 // them: `index.ts` imports the gitignored wasm-bindgen artifact and cannot

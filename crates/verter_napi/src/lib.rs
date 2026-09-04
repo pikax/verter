@@ -40,6 +40,7 @@ use verter_session as host;
 use verter_type_expr::TypeExpr;
 
 mod audit;
+mod compile_request_response;
 mod host_compile_request;
 #[cfg(test)]
 mod host_compile_request_tests;
@@ -55,17 +56,22 @@ pub use host_compile_request::{
 };
 // Reachable so the boundary suites can drive materialisation over a
 // modelled graph. Not part of the addon's JS surface.
+pub use compile_request_response::compile_request_failure_to_napi;
+use compile_request_response::{
+    binding_failure_entry, binding_failure_to_napi, compile_request_construction_refused,
+    compile_request_error, compile_request_failure_status, compile_request_response_to_napi,
+    failure_canonical_id, host_diagnostic_to_napi, host_diagnostics_to_napi, host_ide_to_napi,
+};
 #[doc(hidden)]
 pub use js_value_graph::{
-    materialize_js_value, materialize_js_value_with_budget, JsValueClass, JsValueGraph,
-    JsValueMaterializationBudget, MAX_ARRAY_ELEMENTS, MAX_NESTING_DEPTH,
+    materialize_js_value, materialize_js_value_with_budget, JsObjectKeys, JsValueClass,
+    JsValueGraph, JsValueMaterializationBudget, MAX_ARRAY_ELEMENTS, MAX_DECODED_VALUES_PER_REQUEST,
+    MAX_NESTING_DEPTH, MAX_RETAINED_BYTES_PER_REQUEST,
 };
 
-/// Maximum native payload bytes retained while decoding one typed batch.
+/// Maximum native payload bytes retained while decoding one typed batch,
+/// covering every entry's source bytes and request graph.
 const MAX_COMPILE_REQUEST_BATCH_RETAINED_BYTES: usize = 64 * 1024 * 1024;
-
-/// Maximum JS values traversed while decoding one typed batch.
-const MAX_COMPILE_REQUEST_BATCH_DECODED_VALUES: usize = 1 << 18;
 
 // Re-imports for code actions and diagnostics (parity with verter_wasm)
 use verter_actions::{ActionContext, ActionEngine};
@@ -93,8 +99,62 @@ fn catch_panic<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Result<T> {
     })
 }
 
-fn ffi_err(msg: impl std::fmt::Display) -> Error {
+pub(crate) fn ffi_err(msg: impl std::fmt::Display) -> Error {
     Error::new(Status::InvalidArg, msg.to_string())
+}
+
+fn clear_pending_exception(env: &Env) -> Result<()> {
+    let mut pending = false;
+    let status = unsafe { napi::sys::napi_is_exception_pending(env.raw(), &mut pending) };
+    if status != napi::sys::Status::napi_ok {
+        return Err(Error::new(
+            Status::GenericFailure,
+            "failed to inspect a pending JavaScript exception",
+        ));
+    }
+    if !pending {
+        return Ok(());
+    }
+    let mut exception = std::ptr::null_mut();
+    let status = unsafe { napi::sys::napi_get_and_clear_last_exception(env.raw(), &mut exception) };
+    if status != napi::sys::Status::napi_ok {
+        return Err(Error::new(
+            Status::GenericFailure,
+            "failed to clear a pending JavaScript exception",
+        ));
+    }
+    Ok(())
+}
+
+/// Read an exception's message without invoking user-controlled string
+/// coercion. `Error::from(Unknown)` would run `toString` / `toPrimitive`,
+/// and a throw there would leave a new pending exception that poisons the
+/// next sibling's N-API call.
+fn exception_message_without_coercion(
+    env: &Env,
+    exception: napi::sys::napi_value,
+) -> Result<String> {
+    let ty = napi::type_of!(env.raw(), exception)?;
+    if ty == ValueType::String {
+        return js_value_graph::napi_utf8_string_len(env.raw(), exception)
+            .and_then(|_| unsafe { String::from_napi_value(env.raw(), exception) });
+    }
+    if ty != ValueType::Object {
+        return Ok("JavaScript exception".to_string());
+    }
+
+    let mut message = std::ptr::null_mut();
+    let status = unsafe {
+        napi::sys::napi_get_named_property(env.raw(), exception, c"message".as_ptr(), &mut message)
+    };
+    if status != napi::sys::Status::napi_ok {
+        clear_pending_exception(env)?;
+        return Ok("JavaScript exception".to_string());
+    }
+    if napi::type_of!(env.raw(), message)? != ValueType::String {
+        return Ok("JavaScript exception".to_string());
+    }
+    unsafe { String::from_napi_value(env.raw(), message) }
 }
 
 /// Capture and clear a JavaScript exception left pending by a recoverable
@@ -121,10 +181,14 @@ fn recover_pending_exception(env: &Env, fallback: Error) -> Result<Error> {
             "failed to clear a pending JavaScript exception",
         ));
     }
-    // SAFETY: Node returned this exception value from the same live env.
-    Ok(Error::from(unsafe {
-        Unknown::from_raw_unchecked(env.raw(), exception)
-    }))
+    let message = match exception_message_without_coercion(env, exception) {
+        Ok(message) if !message.is_empty() => message,
+        _ => {
+            clear_pending_exception(env)?;
+            fallback.reason.clone()
+        }
+    };
+    Ok(Error::new(fallback.status, message))
 }
 
 /// Measure a JavaScript string before converting it into an owned Rust value.
@@ -132,23 +196,117 @@ fn js_string_utf8_len(env: &Env, value: &Unknown<'_>) -> Result<usize> {
     if value.get_type()? != ValueType::String {
         return Err(Error::new(Status::StringExpected, "expected a string"));
     }
+    js_value_graph::napi_utf8_string_len(env.raw(), value.raw())
+}
 
-    let mut length = 0;
-    // SAFETY: the value belongs to `env`; a null output buffer asks Node for
-    // the UTF-8 length without allocating an owned Rust string.
+fn napi_value_is_array(env: &Env, value: napi::sys::napi_value) -> Result<bool> {
+    let mut is_array = false;
     napi::check_status!(
-        unsafe {
-            napi::sys::napi_get_value_string_utf8(
-                env.raw(),
-                value.raw(),
-                std::ptr::null_mut(),
-                0,
-                &mut length,
-            )
-        },
-        "Failed to measure a request string"
+        unsafe { napi::sys::napi_is_array(env.raw(), value, &mut is_array) },
+        "Failed to detect whether a value is an array"
     )?;
-    Ok(length)
+    Ok(is_array)
+}
+
+fn napi_value_is_buffer(env: &Env, value: napi::sys::napi_value) -> Result<bool> {
+    let mut is_buffer = false;
+    napi::check_status!(
+        unsafe { napi::sys::napi_is_buffer(env.raw(), value, &mut is_buffer) },
+        "Failed to detect whether a value is a Buffer"
+    )?;
+    Ok(is_buffer)
+}
+
+fn decode_compile_requests_priority(
+    env: &Env,
+    options: Option<Unknown<'_>>,
+) -> Result<Option<verter_scheduler::stage::Priority>> {
+    use js_value_graph::{JsObjectKeys, JsValueGraph, NapiValueGraph};
+    use verter_scheduler::stage::Priority;
+
+    let Some(value) = options else {
+        return Ok(Some(Priority::Background));
+    };
+    let ty = value.get_type()?;
+    if ty == ValueType::Undefined || ty == ValueType::Null {
+        return Ok(Some(Priority::Background));
+    }
+    if ty != ValueType::Object || napi_value_is_array(env, value.raw())? {
+        return Err(ffi_err("compile request batch options must be an object"));
+    }
+    // SAFETY: the options value belongs to this live env.
+    let graph = unsafe { NapiValueGraph::new(env.raw()) };
+    let keys = graph.own_enumerable_keys(&value.raw())?;
+    let count = keys.count()?;
+    if count > MAX_ARRAY_ELEMENTS {
+        return Err(ffi_err(format!(
+            "A request object exposes {count} keys, above the \
+             {MAX_ARRAY_ELEMENTS} a request may carry"
+        )));
+    }
+    for index in 0..count {
+        let key = keys.at(index)?;
+        if key != "priority" {
+            return Err(ffi_err(format!("unknown field `{key}`")));
+        }
+    }
+    // SAFETY: classified as a non-array object of this env above.
+    let object = unsafe { Object::from_napi_value(env.raw(), value.raw()) }?;
+    match object.get::<Unknown<'_>>("priority") {
+        Ok(None) => Ok(Some(Priority::Background)),
+        Ok(Some(raw)) => {
+            let ty = raw.get_type()?;
+            if ty == ValueType::Undefined {
+                return Ok(Some(Priority::Background));
+            }
+            if ty != ValueType::String {
+                return Err(ffi_err(
+                    "invalid priority, expected 'interactive' or 'background'",
+                ));
+            }
+            let priority = unsafe { String::from_napi_value(env.raw(), raw.raw()) }?;
+            match priority.as_str() {
+                "background" => Ok(Some(Priority::Background)),
+                "interactive" => Ok(Some(Priority::Interactive)),
+                other => Err(ffi_err(format!(
+                    "invalid priority '{other}', expected 'interactive' or 'background'"
+                ))),
+            }
+        }
+        Err(error) => Err(recover_pending_exception(env, error)?),
+    }
+}
+
+fn read_batch_source_buffer(
+    env: &Env,
+    raw: &Unknown<'_>,
+    budget: &mut JsValueMaterializationBudget,
+) -> Result<std::sync::Arc<str>> {
+    if !napi_value_is_buffer(env, raw.raw())? {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "compile request batch `source` must be a Buffer",
+        ));
+    }
+    let mut data = std::ptr::null_mut();
+    let mut len = 0usize;
+    napi::check_status!(
+        unsafe { napi::sys::napi_get_buffer_info(env.raw(), raw.raw(), &mut data, &mut len) },
+        "Failed to read compile request batch source length"
+    )?;
+    budget.retain_bytes(len)?;
+    // SAFETY: `napi_is_buffer` succeeded and `napi_get_buffer_info` filled a
+    // live pointer/length pair for this env; the copy is retained before the
+    // JS value can be collected.
+    let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) };
+    String::from_utf8(bytes.to_vec())
+        .map(std::sync::Arc::<str>::from)
+        .map_err(|error| {
+            Error::new(
+                Status::InvalidArg,
+                format!("Buffer is not valid UTF-8: {error}"),
+            )
+        })
 }
 
 /// Convert a `Buffer` (raw bytes) to a `String`, validating UTF-8.
@@ -161,7 +319,7 @@ fn buffer_to_string(buf: Buffer) -> Result<String> {
     })
 }
 
-fn host_error_status(err: &host::HostError) -> Status {
+pub(crate) fn host_error_status(err: &host::HostError) -> Status {
     match err {
         host::HostError::InvalidQuery
         | host::HostError::MissingSource { .. }
@@ -825,12 +983,24 @@ pub struct NapiSliceChanges {
 }
 
 #[napi(object)]
+pub struct NapiDiagnosticArg {
+    pub kind: String,
+    pub boolean: Option<bool>,
+    pub unsigned: Option<f64>,
+    pub signed: Option<f64>,
+    pub text: Option<String>,
+    pub spanStart: Option<u32>,
+    pub spanEnd: Option<u32>,
+}
+
+#[napi(object)]
 pub struct NapiDiagnostic {
     pub severity: String,
     pub code: String,
     pub message: String,
     pub spanStart: u32,
     pub spanEnd: u32,
+    pub arguments: Vec<NapiDiagnosticArg>,
 }
 
 #[napi(object)]
@@ -1064,14 +1234,6 @@ pub struct NapiCompileRequestResponse {
     pub canonicalId: String,
     pub diagnostics: NapiDiagnosticsSnapshot,
     pub products: Vec<NapiCompileRequestProduct>,
-}
-
-/// Scheduler options for a typed batch compile.
-#[napi(object)]
-#[derive(Default)]
-pub struct NapiCompileRequestsOptions {
-    /// `"background"` (default) or `"interactive"`.
-    pub priority: Option<String>,
 }
 
 /// Typed terminal failure for one batch entry.
@@ -1369,338 +1531,7 @@ pub struct NapiHostMetrics {
     pub compileTimeUsTotal: f64,
 }
 
-// =============================================================================
-// Direct Host → NAPI conversion (bypasses FFI intermediate types)
-// =============================================================================
-
-fn compile_product_kind_to_str(
-    kind: verter_compiler::compile_request::ProductKind,
-) -> &'static str {
-    use verter_compiler::compile_request::ProductKind;
-
-    match kind {
-        ProductKind::RuntimeClient => "runtimeClient",
-        ProductKind::RuntimeServer => "runtimeServer",
-        ProductKind::IdeCompanion => "ideCompanion",
-        ProductKind::PublicApi => "publicApi",
-        ProductKind::Declarations => "declarations",
-        ProductKind::Analysis => "analysis",
-    }
-}
-
-fn host_ide_to_napi(input: host::IdeResponse, source: &str) -> NapiIdeResponse {
-    let destructured_block = input.destructured_block.as_ref().map(|meta| {
-        let bindings: Vec<verter_ffi::convert::DestructuredBindingInput<'_>> = meta
-            .bindings
-            .iter()
-            .map(|binding| verter_ffi::convert::DestructuredBindingInput {
-                name: &binding.name,
-                source_start: binding.source_span.start,
-                source_end: binding.source_span.end,
-            })
-            .collect();
-        let ffi = verter_ffi::convert::convert_destructured_block_meta(
-            &bindings,
-            meta.block_start,
-            meta.block_end,
-            source,
-            &input.code,
-            verter_ffi::convert::OffsetEncoding::Utf16,
-        );
-        NapiDestructuredBlockMeta {
-            bindings: ffi
-                .bindings
-                .into_iter()
-                .map(|binding| NapiDestructuredBinding {
-                    name: binding.name,
-                    sourceStart: binding.source_start,
-                    sourceEnd: binding.source_end,
-                })
-                .collect(),
-            blockStart: ffi.block_start,
-            blockEnd: ffi.block_end,
-        }
-    });
-    NapiIdeResponse {
-        code: input.code.to_string(),
-        sourceMap: input.source_map.map(|map| map.to_string()),
-        isJsx: input.is_jsx,
-        destructuredBlock: destructured_block,
-    }
-}
-
-fn compile_request_response_to_napi(
-    input: host::CompileRequestResponse,
-    source: &str,
-) -> Result<NapiCompileRequestResponse> {
-    let host::CompileRequestResponse {
-        canonical_id,
-        diagnostics,
-        products,
-    } = input;
-    let products = products
-        .into_iter()
-        .map(|product| match product {
-            host::CompiledProduct::Runtime { kind, nodes } => {
-                use verter_compiler::compile_request::ProductKind;
-
-                let kind = match kind {
-                    ProductKind::RuntimeClient => "runtimeClient",
-                    ProductKind::RuntimeServer => "runtimeServer",
-                    kind @ (ProductKind::IdeCompanion
-                    | ProductKind::PublicApi
-                    | ProductKind::Declarations
-                    | ProductKind::Analysis) => {
-                        return Err(ffi_err(format!(
-                            "refused host compile request for {canonical_id}: the {} product published a runtime output row, which has no runtime wire tag",
-                            compile_product_kind_to_str(kind)
-                        )));
-                    }
-                };
-                Ok(NapiCompileRequestProduct {
-                    kind: kind.to_string(),
-                    nodes: Some(
-                        nodes
-                            .into_iter()
-                            .map(|node| NapiCompileRequestVirtualNode {
-                                node: host_node_kind_to_napi(&node.node),
-                                code: node.code.to_string(),
-                                sourceMap: node.source_map.map(|map| map.to_string()),
-                                lang: node.lang,
-                                meta: NapiVirtualMeta {
-                                    scopeId: node.meta.scope_id,
-                                    blockType: node.meta.block_type,
-                                },
-                            })
-                            .collect(),
-                    ),
-                    ide: None,
-                    analysis: None,
-                })
-            }
-            host::CompiledProduct::Ide(ide) => Ok(NapiCompileRequestProduct {
-                kind: "ideCompanion".to_string(),
-                nodes: None,
-                ide: Some(host_ide_to_napi(ide, source)),
-                analysis: None,
-            }),
-            host::CompiledProduct::Analysis(analysis) => {
-                let analysis = serde_json::to_string(analysis.as_ref()).map_err(|error| {
-                    Error::new(
-                        Status::GenericFailure,
-                        format!("analysis serialization error: {error}"),
-                    )
-                })?;
-                Ok(NapiCompileRequestProduct {
-                    kind: "analysis".to_string(),
-                    nodes: None,
-                    ide: None,
-                    analysis: Some(analysis),
-                })
-            }
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(NapiCompileRequestResponse {
-        canonicalId: canonical_id,
-        diagnostics: host_diagnostics_to_napi(&diagnostics, Some(source)),
-        products,
-    })
-}
-
-#[doc(hidden)]
-pub fn compile_request_failure_to_napi(
-    failure: host::CompileRequestFailure,
-    fallback_canonical_id: String,
-    source: Option<&str>,
-) -> NapiCompileRequestFailure {
-    let empty_diagnostics = || NapiDiagnosticsSnapshot {
-        diagnostics: Vec::new(),
-        hasErrors: true,
-    };
-    let diagnostic_message = |diagnostics: &host::DiagnosticsSnapshot, fallback: &str| {
-        diagnostics
-            .diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic.severity == host::HostSeverity::Error)
-            .or_else(|| diagnostics.diagnostics.first())
-            .map(|diagnostic| diagnostic.message.clone())
-            .unwrap_or_else(|| fallback.to_string())
-    };
-
-    match failure {
-        host::CompileRequestFailure::Host(error) => {
-            let message = host_error_to_string(&error);
-            let diagnostics = match &error {
-                host::HostError::CompileError(failure) => {
-                    host_diagnostics_to_napi(&failure.diagnostics, source)
-                }
-                _ => empty_diagnostics(),
-            };
-            NapiCompileRequestFailure {
-                kind: "host".to_string(),
-                canonicalId: fallback_canonical_id,
-                message,
-                diagnostics,
-                requestedFramework: None,
-                registeredFramework: None,
-                productKind: None,
-                diagnosticCode: None,
-            }
-        }
-        host::CompileRequestFailure::FrameworkMismatch {
-            canonical_id,
-            requested,
-            registered,
-        } => NapiCompileRequestFailure {
-            kind: "frameworkMismatch".to_string(),
-            canonicalId: canonical_id.clone(),
-            message: format!(
-                "compile request for '{canonical_id}' names framework '{requested}', but the registered source uses '{registered}'"
-            ),
-            diagnostics: empty_diagnostics(),
-            requestedFramework: Some(requested.to_string()),
-            registeredFramework: Some(registered),
-            productKind: None,
-            diagnosticCode: None,
-        },
-        host::CompileRequestFailure::UnsupportedProduct {
-            canonical_id,
-            kind,
-            diagnostics,
-        } => {
-            let message = diagnostic_message(&diagnostics, "compile product is unsupported");
-            NapiCompileRequestFailure {
-                kind: "unsupportedProduct".to_string(),
-                canonicalId: canonical_id,
-                message,
-                diagnostics: host_diagnostics_to_napi(&diagnostics, source),
-                requestedFramework: None,
-                registeredFramework: None,
-                productKind: Some(compile_product_kind_to_str(kind).to_string()),
-                diagnosticCode: None,
-            }
-        }
-        host::CompileRequestFailure::ProductNotProduced {
-            canonical_id,
-            kind,
-            diagnostics,
-        } => {
-            let message = diagnostic_message(&diagnostics, "compile product was not produced");
-            NapiCompileRequestFailure {
-                kind: "productNotProduced".to_string(),
-                canonicalId: canonical_id,
-                message,
-                diagnostics: host_diagnostics_to_napi(&diagnostics, source),
-                requestedFramework: None,
-                registeredFramework: None,
-                productKind: Some(compile_product_kind_to_str(kind).to_string()),
-                diagnosticCode: None,
-            }
-        }
-        host::CompileRequestFailure::RuntimeSurfaceRefused {
-            canonical_id,
-            diagnostic_code,
-            message,
-            diagnostics,
-        } => NapiCompileRequestFailure {
-            kind: "runtimeSurfaceRefused".to_string(),
-            canonicalId: canonical_id,
-            message,
-            diagnostics: host_diagnostics_to_napi(&diagnostics, source),
-            requestedFramework: None,
-            registeredFramework: None,
-            productKind: None,
-            diagnosticCode: Some(diagnostic_code),
-        },
-        host::CompileRequestFailure::Refused {
-            canonical_id,
-            diagnostics,
-        } => {
-            let message = diagnostic_message(&diagnostics, "compile request was refused");
-            NapiCompileRequestFailure {
-                kind: "refused".to_string(),
-                canonicalId: canonical_id,
-                message,
-                diagnostics: host_diagnostics_to_napi(&diagnostics, source),
-                requestedFramework: None,
-                registeredFramework: None,
-                productKind: None,
-                diagnosticCode: None,
-            }
-        }
-    }
-}
-
-fn binding_failure_to_napi(canonical_id: String, message: String) -> NapiCompileRequestFailure {
-    NapiCompileRequestFailure {
-        kind: "binding".to_string(),
-        canonicalId: canonical_id,
-        message,
-        diagnostics: NapiDiagnosticsSnapshot {
-            diagnostics: Vec::new(),
-            hasErrors: true,
-        },
-        requestedFramework: None,
-        registeredFramework: None,
-        productKind: None,
-        diagnosticCode: None,
-    }
-}
-
-fn compile_request_failure_status(failure: &host::CompileRequestFailure) -> Status {
-    match failure {
-        host::CompileRequestFailure::Host(error) => host_error_status(error),
-        host::CompileRequestFailure::FrameworkMismatch { .. }
-        | host::CompileRequestFailure::UnsupportedProduct { .. }
-        | host::CompileRequestFailure::Refused { .. } => Status::InvalidArg,
-        host::CompileRequestFailure::ProductNotProduced { .. }
-        | host::CompileRequestFailure::RuntimeSurfaceRefused { .. } => Status::GenericFailure,
-    }
-}
-
-fn compile_request_error(
-    env: &Env,
-    status: Status,
-    failure: NapiCompileRequestFailure,
-) -> Result<Error> {
-    let NapiCompileRequestFailure {
-        kind,
-        canonicalId,
-        message,
-        diagnostics,
-        requestedFramework,
-        registeredFramework,
-        productKind,
-        diagnosticCode,
-    } = failure;
-    let mut error = env.create_error(Error::new(status, message))?;
-    error.set_named_property("kind", kind)?;
-    error.set_named_property("canonicalId", canonicalId)?;
-    error.set_named_property("diagnostics", diagnostics)?;
-    if let Some(value) = requestedFramework {
-        error.set_named_property("requestedFramework", value)?;
-    }
-    if let Some(value) = registeredFramework {
-        error.set_named_property("registeredFramework", value)?;
-    }
-    if let Some(value) = productKind {
-        error.set_named_property("productKind", value)?;
-    }
-    if let Some(value) = diagnosticCode {
-        error.set_named_property("diagnosticCode", value)?;
-    }
-    Ok(Error::from((&error).into_unknown(env)?))
-}
-
-fn binding_failure_entry(canonical_id: String, message: String) -> NapiCompileRequestsEntry {
-    NapiCompileRequestsEntry {
-        canonicalId: canonical_id.clone(),
-        response: None,
-        failure: Some(binding_failure_to_napi(canonical_id, message)),
-    }
-}
-
-fn host_node_kind_to_napi(input: &host::VirtualNodeKind) -> NapiVirtualNodeKind {
+pub(crate) fn host_node_kind_to_napi(input: &host::VirtualNodeKind) -> NapiVirtualNodeKind {
     match input {
         host::VirtualNodeKind::Main => NapiVirtualNodeKind {
             kind: "main".to_string(),
@@ -1722,27 +1553,6 @@ fn host_node_kind_to_napi(input: &host::VirtualNodeKind) -> NapiVirtualNodeKind 
             kind: "custom".to_string(),
             index: Some(*index as u32),
         },
-    }
-}
-
-fn host_diagnostics_to_napi(
-    input: &host::DiagnosticsSnapshot,
-    source: Option<&str>,
-) -> NapiDiagnosticsSnapshot {
-    let ffi = host_diagnostics_to_ffi(input, source);
-    NapiDiagnosticsSnapshot {
-        diagnostics: ffi
-            .diagnostics
-            .into_iter()
-            .map(|diagnostic| NapiDiagnostic {
-                severity: diagnostic.severity,
-                code: diagnostic.code,
-                message: diagnostic.message,
-                spanStart: diagnostic.span_start,
-                spanEnd: diagnostic.span_end,
-            })
-            .collect(),
-        hasErrors: ffi.has_errors,
     }
 }
 
@@ -1768,17 +1578,7 @@ fn ffi_hmr_strategy_to_host(s: &str) -> std::result::Result<host::HmrStrategy, S
 /// shape. Used to surface the private Vue render worker's soft-macro warnings
 /// on [`NapiCompileBatchEntry::diagnostics`].
 fn napi_diagnostic_from_host(d: &host::HostDiagnostic) -> NapiDiagnostic {
-    NapiDiagnostic {
-        severity: match d.severity {
-            host::HostSeverity::Error => "error".to_string(),
-            host::HostSeverity::Warning => "warning".to_string(),
-            host::HostSeverity::Info => "info".to_string(),
-        },
-        code: d.code.clone(),
-        message: d.message.clone(),
-        spanStart: d.span.start,
-        spanEnd: d.span.end,
-    }
+    host_diagnostic_to_napi(d, None)
 }
 
 fn host_block_kind_to_str(kind: &host::ExternalBlockKind) -> &'static str {
@@ -2466,31 +2266,36 @@ impl NapiVerterHost {
                 Err(error) => {
                     let failure = binding_failure_to_napi(
                         canonical_id,
-                        format!("compile request construction refused: {error:?}"),
+                        compile_request_construction_refused(&error),
                     );
                     return Err(compile_request_error(&env, Status::InvalidArg, failure)?);
                 }
             };
-        let source = self.inner.get_source(&canonical_id);
         let response = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.compile_request(&canonical_id, request)
         }))?;
-        let response = match response {
-            Ok(response) => response,
+        match response {
+            Ok(response) => {
+                let source = self
+                    .inner
+                    .get_source(&response.canonical_id)
+                    .ok_or_else(|| {
+                        Error::new(
+                            Status::GenericFailure,
+                            "typed compile succeeded without a registered source",
+                        )
+                    })?;
+                compile_request_response_to_napi(response, &source)
+            }
             Err(failure) => {
+                let source_id = failure_canonical_id(&failure, &canonical_id).to_string();
+                let source = self.inner.get_source(&source_id);
                 let status = compile_request_failure_status(&failure);
                 let failure =
                     compile_request_failure_to_napi(failure, canonical_id, source.as_deref());
-                return Err(compile_request_error(&env, status, failure)?);
+                Err(compile_request_error(&env, status, failure)?)
             }
-        };
-        let source = source.as_deref().ok_or_else(|| {
-            Error::new(
-                Status::GenericFailure,
-                "typed compile succeeded without a registered source",
-            )
-        })?;
-        compile_request_response_to_napi(response, source)
+        }
     }
 
     /// Register and execute one typed request per batch entry.
@@ -2502,24 +2307,35 @@ impl NapiVerterHost {
             ts_arg_type = "Array<{ canonicalId: string; source: Buffer; request: import('./host-compile-request.generated').HostCompileRequest }>"
         )]
         inputs: Object<'_>,
-        options: Option<NapiCompileRequestsOptions>,
+        #[napi(ts_arg_type = "{ priority?: 'interactive' | 'background' }")] options: Option<
+            Unknown<'_>,
+        >,
     ) -> Result<Vec<NapiCompileRequestsEntry>> {
-        use verter_scheduler::stage::Priority;
-
-        let priority = match options.unwrap_or_default().priority.as_deref() {
-            None | Some("background") => Some(Priority::Background),
-            Some("interactive") => Some(Priority::Interactive),
-            Some(other) => {
-                return Err(ffi_err(format!(
-                    "invalid priority '{other}', expected 'interactive' or 'background'"
-                )));
-            }
-        };
+        let priority = decode_compile_requests_priority(&env, options)?;
         // `Vec<Object>` is unsafe at this boundary: napi-rs reserves the JS
         // array's declared length before entering this method. A sparse array
-        // can declare billions of elements without owning them, so validate
-        // the raw array before any allocation proportional to its length.
-        let declared = inputs.get_array_length()?;
+        // can declare billions of elements without owning them, so classify
+        // the value as an array, recover any pending exception, then enforce
+        // MAX_ARRAY_ELEMENTS before any allocation proportional to length.
+        if !match napi_value_is_array(&env, inputs.raw()) {
+            Ok(is_array) => is_array,
+            Err(error) => {
+                let error = recover_pending_exception(&env, error)?;
+                return Err(error);
+            }
+        } {
+            let _ = recover_pending_exception(
+                &env,
+                ffi_err("compile request batch input must be an array"),
+            );
+            return Err(ffi_err("compile request batch input must be an array"));
+        }
+        let declared = match inputs.get_array_length() {
+            Ok(declared) => declared,
+            Err(error) => {
+                return Err(recover_pending_exception(&env, error)?);
+            }
+        };
         if declared > MAX_ARRAY_ELEMENTS {
             return Err(ffi_err(format!(
                 "A request array declares {declared} elements, above the \
@@ -2533,7 +2349,7 @@ impl NapiVerterHost {
         let mut sources = Vec::with_capacity(len);
         let mut converted = Vec::with_capacity(len);
         let mut payload_budget = JsValueMaterializationBudget::new(
-            MAX_COMPILE_REQUEST_BATCH_DECODED_VALUES,
+            MAX_DECODED_VALUES_PER_REQUEST,
             MAX_COMPILE_REQUEST_BATCH_RETAINED_BYTES,
         );
         for array_index in 0..declared {
@@ -2596,12 +2412,15 @@ impl NapiVerterHost {
                     continue;
                 }
             };
-            let source = match input.get::<Buffer>("source") {
-                Ok(Some(source)) => {
-                    payload_budget.retain_bytes(source.len())?;
-                    match buffer_to_string(source) {
-                        Ok(source) => std::sync::Arc::<str>::from(source),
+            let source = match input.get::<Unknown<'_>>("source") {
+                Ok(Some(raw_source)) => {
+                    match read_batch_source_buffer(&env, &raw_source, &mut payload_budget) {
+                        Ok(source) => source,
                         Err(error) => {
+                            let error = recover_pending_exception(&env, error)?;
+                            if payload_budget.bytes_exhausted() {
+                                return Err(error);
+                            }
                             output[position] =
                                 Some(binding_failure_entry(canonical_id, error.reason.clone()));
                             continue;
@@ -2622,6 +2441,7 @@ impl NapiVerterHost {
                     continue;
                 }
             };
+            payload_budget.reset_decoded_values();
             let request = match input
                 .get::<host_compile_request::RawNapiHostCompileRequest>("request")
             {
@@ -2638,7 +2458,7 @@ impl NapiVerterHost {
                                 Err(error) => {
                                     output[position] = Some(binding_failure_entry(
                                         canonical_id.clone(),
-                                        format!("compile request construction refused: {error:?}"),
+                                        compile_request_construction_refused(&error),
                                     ));
                                     continue;
                                 }
@@ -2646,9 +2466,10 @@ impl NapiVerterHost {
                         }
                         Err(error) => {
                             let error = recover_pending_exception(&env, error)?;
-                            if payload_budget.is_exhausted() {
+                            if payload_budget.bytes_exhausted() {
                                 return Err(error);
                             }
+                            payload_budget.reset_decoded_values();
                             output[position] = Some(binding_failure_entry(
                                 canonical_id.clone(),
                                 error.reason.clone(),
@@ -4439,6 +4260,75 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.reason.contains("analysis"), "{}", error.reason);
+    }
+
+    // Mutation recipe: set `hasErrors: true` on `empty_diagnostics_snapshot`.
+    // This case then fails because a framework mismatch carries no diagnostics.
+    #[test]
+    fn empty_terminal_failure_snapshot_does_not_claim_errors() {
+        let failure = host::CompileRequestFailure::FrameworkMismatch {
+            canonical_id: "/src/App.vue".to_string(),
+            requested: "svelte",
+            registered: "vue".to_string(),
+        };
+        let projected = compile_request_failure_to_napi(failure, "/src/App.vue".to_string(), None);
+        assert!(!projected.diagnostics.hasErrors);
+        assert!(projected.diagnostics.diagnostics.is_empty());
+    }
+
+    // Mutation recipe: format construction refusals with `{error:?}`.
+    // The public message then contains `DuplicateProduct(RuntimeClient)`.
+    #[test]
+    fn construction_refusal_uses_the_wire_product_name() {
+        let message = compile_request_construction_refused(
+            &verter_compiler::compile_request::CompileRequestError::DuplicateProduct(
+                verter_compiler::compile_request::ProductKind::RuntimeClient,
+            ),
+        );
+        assert!(
+            message.contains("duplicate product 'runtimeClient'"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("DuplicateProduct") && !message.contains("RuntimeClient"),
+            "{message}"
+        );
+    }
+
+    // Mutation recipe: reuse `host_diagnostics_to_ffi` and drop `arguments`.
+    // The span argument then stays UTF-8 bytes (1, 5) instead of UTF-16 (1, 3).
+    #[test]
+    fn typed_diagnostics_preserve_utf16_span_arguments() {
+        let failure = host::CompileRequestFailure::Host(host::HostError::CompileError(
+            host::CompileFailure {
+                diagnostics: host::DiagnosticsSnapshot {
+                    diagnostics: vec![host::HostDiagnostic {
+                        severity: host::HostSeverity::Error,
+                        code: "E_ARG".to_string(),
+                        message: "has args".to_string(),
+                        arguments: vec![
+                            verter_language::DiagnosticArg::Text("name".into()),
+                            verter_language::DiagnosticArg::Span { start: 1, end: 5 },
+                        ],
+                        span: verter_span::Span::new(1, 5),
+                    }],
+                    has_errors: true,
+                },
+                requested_mode: host::CompileCacheMode::Stateless,
+                actual_mode: host::CompileCacheMode::Stateless,
+                downgrade_reason: None,
+            },
+        ));
+        let projected =
+            compile_request_failure_to_napi(failure, "/src/A.vue".to_string(), Some("a😀b"));
+        let diagnostic = &projected.diagnostics.diagnostics[0];
+        assert_eq!((diagnostic.spanStart, diagnostic.spanEnd), (1, 3));
+        assert_eq!(diagnostic.arguments.len(), 2);
+        assert_eq!(diagnostic.arguments[0].kind, "text");
+        assert_eq!(diagnostic.arguments[0].text.as_deref(), Some("name"));
+        assert_eq!(diagnostic.arguments[1].kind, "span");
+        assert_eq!(diagnostic.arguments[1].spanStart, Some(1));
+        assert_eq!(diagnostic.arguments[1].spanEnd, Some(3));
     }
 
     #[test]

@@ -21,6 +21,30 @@
 //! `napi_get_property_names`, which walks the prototype chain, so the
 //! inherited-key case is refused instead of accepted.
 //!
+//! Mutation recipes (each plant is unique in production source):
+//! - `JsValueMaterializationBudget::per_request` → `new(usize::MAX, usize::MAX)`
+//!   in `NapiHostCompileRequest::from_napi_value` turns
+//!   `typed-single-refuses-an-oversized-request-graph` green-false.
+//! - Drop `napi_is_typedarray` from `NapiValueGraph::classify` and
+//!   `typed-single-refuses-a-dense-typed-array` hangs or OOMs enumerating keys.
+//! - `empty_diagnostics_snapshot` `hasErrors: false` → `true` turns
+//!   `typed-single-throws-a-typed-framework-failure` red.
+//! - Restore `Error::from(Unknown::from_raw_unchecked(...))` in
+//!   `recover_pending_exception` and
+//!   `typed-batch-clears-hostile-thrown-values-and-preserves-siblings` poisons
+//!   the sibling.
+//! - `input.get::<Buffer>("source")` without `napi_is_buffer` turns
+//!   `typed-batch-isolates-a-wrong-typed-source` into a leaked reference;
+//!   the case still fails closed on the wrong type.
+//! - Skip `napi_is_array` before `get_array_length` and
+//!   `typed-batch-refuses-a-non-array-input` becomes a pending-exception
+//!   batch failure.
+//! - Restore `#[napi(object)] NapiCompileRequestsOptions` and
+//!   `typed-batch-refuses-unknown-options` is silently accepted.
+//! - Format construction refusals as `{error:?}` and
+//!   `typed-batch-isolates-a-canonical-request-refusal` matches
+//!   `DuplicateProduct(RuntimeClient)` again.
+//!
 //! # Where the addon comes from
 //!
 //! This suite builds nothing. The addon is its own `cdylib` package that
@@ -52,14 +76,23 @@ const EXPECTED_CASES: &[&str] = &[
     "typed-single-svelte-produces-runtime-output",
     "typed-single-vue-preserves-ide-utf16-offsets",
     "typed-single-vue-preserves-diagnostic-utf16-spans",
+    "typed-single-vue-analysis-is-a-json-string",
+    "typed-single-runtime-server-publishes-its-nodes",
+    "typed-single-refuses-public-api-and-declarations",
     "typed-single-refuses-an-own-unknown-key",
     "typed-single-throws-a-typed-framework-failure",
+    "typed-single-refuses-an-oversized-request-graph",
+    "typed-single-refuses-a-dense-typed-array",
     "typed-batch-isolates-a-request-decode-refusal",
     "typed-batch-isolates-a-canonical-request-refusal",
     "typed-batch-isolates-malformed-entry-fields",
     "typed-batch-isolates-invalid-canonical-ids",
+    "typed-batch-isolates-a-wrong-typed-source",
     "typed-batch-clears-throwing-accessors-and-preserves-siblings",
+    "typed-batch-clears-hostile-thrown-values-and-preserves-siblings",
     "typed-batch-preserves-order-isolates-failure-and-registers-once",
+    "typed-batch-refuses-a-non-array-input",
+    "typed-batch-refuses-unknown-options",
     "valid-request-accepted",
     "unknown-top-level-key-stated-as-undefined-refused",
     "unknown-option-key-stated-as-undefined-refused",
@@ -247,25 +280,67 @@ function runtimeMain(response) {
   return product.nodes.find((node) => node.node.kind === "main") || null;
 }
 
-function legacyRuntimeMain(canonicalId, source, fileKind) {
+function runtimeNodes(response, kind) {
+  if (!response || !Array.isArray(response.products)) return null;
+  const product = response.products.find((row) => row.kind === kind);
+  if (!product || !Array.isArray(product.nodes)) return null;
+  return product.nodes.map((node) => ({
+    kind: node.node && node.node.kind,
+    index: node.node && node.node.index != null ? node.node.index : null,
+    code: node.code,
+    sourceMap: node.sourceMap == null ? null : node.sourceMap,
+    lang: node.lang == null ? null : node.lang,
+    meta: node.meta,
+  }));
+}
+
+function runtimeProfile(canonicalId, ssr) {
+  return {
+    filename: canonicalId,
+    isProduction: false,
+    ssr: !!ssr,
+    componentId: "typed-route",
+    hmrStrategy: "none",
+    forceJs: false,
+    sourceMap: true,
+    target: "bundler",
+  };
+}
+
+function legacyRuntimeProduct(canonicalId, source, fileKind, ssr) {
   const host = new addon.VerterHost();
   upsertSource(host, canonicalId, source, fileKind);
-  const response = host.getVirtualFile({
+  const kinds = host.listVirtualFiles(canonicalId);
+  const compileProfile = runtimeProfile(canonicalId, ssr);
+  const nodes = kinds.map((nodeKind) => {
+    const file = host.getVirtualFile({ canonicalId, nodeKind, compileProfile });
+    return {
+      kind: nodeKind.kind,
+      index: nodeKind.index != null ? nodeKind.index : null,
+      code: file.code,
+      sourceMap: file.sourceMap == null ? null : file.sourceMap,
+      lang: file.lang == null ? null : file.lang,
+      meta: file.meta,
+    };
+  });
+  const main = host.getVirtualFile({
     canonicalId,
     nodeKind: { kind: "main" },
-    compileProfile: {
-      filename: canonicalId,
-      isProduction: false,
-      ssr: false,
-      componentId: "typed-route",
-      hmrStrategy: "none",
-      forceJs: false,
-      sourceMap: true,
-      target: "bundler",
-    },
+    compileProfile,
   });
   host.close();
-  return response;
+  return { nodes, diagnostics: main && main.diagnostics };
+}
+
+function legacyRuntimeMain(canonicalId, source, fileKind) {
+  const product = legacyRuntimeProduct(canonicalId, source, fileKind, false);
+  const main = product.nodes.find((node) => node.kind === "main") || null;
+  if (!main) return null;
+  return { code: main.code, sourceMap: main.sourceMap, diagnostics: product.diagnostics };
+}
+
+function sameRuntimeNodes(typed, legacy) {
+  return JSON.stringify(typed) === JSON.stringify(legacy);
 }
 
 function legacyIde(canonicalId, source) {
@@ -292,7 +367,8 @@ check("typed-single-vue-produces-runtime-output", () => {
   upsertSource(host, canonicalId, source, "vue");
   const response = host.compileRequest(canonicalId, vueRuntime(canonicalId));
   const main = runtimeMain(response);
-  const legacy = legacyRuntimeMain(canonicalId, source, "vue");
+  const typedNodes = runtimeNodes(response, "runtimeClient");
+  const legacy = legacyRuntimeProduct(canonicalId, source, "vue", false);
   const metrics = host.getMetrics();
   host.close();
   if (!main || typeof main.code !== "string" || !main.code.includes("Single")) {
@@ -303,11 +379,12 @@ check("typed-single-vue-produces-runtime-output", () => {
   }
   if (
     !legacy ||
-    main.code !== legacy.code ||
-    main.sourceMap !== legacy.sourceMap ||
+    !typedNodes ||
+    typedNodes.length === 0 ||
+    !sameRuntimeNodes(typedNodes, legacy.nodes) ||
     JSON.stringify(response.diagnostics) !== JSON.stringify(legacy.diagnostics)
   ) {
-    return `typed Vue output diverged from the profile route: ${JSON.stringify({ main, legacy })}`;
+    return `typed Vue output diverged from the profile route: ${JSON.stringify({ typedNodes, legacy })}`;
   }
   if (!metrics || metrics.upserts !== 1) {
     return `the source-only registration count was ${metrics && metrics.upserts}, expected 1`;
@@ -322,7 +399,8 @@ check("typed-single-svelte-produces-runtime-output", () => {
   upsertSource(host, canonicalId, source, "svelte");
   const response = host.compileRequest(canonicalId, svelteRuntime(canonicalId));
   const main = runtimeMain(response);
-  const legacy = legacyRuntimeMain(canonicalId, source, "svelte");
+  const typedNodes = runtimeNodes(response, "runtimeClient");
+  const legacy = legacyRuntimeProduct(canonicalId, source, "svelte", false);
   const metrics = host.getMetrics();
   host.close();
   if (!main || typeof main.code !== "string" || !main.code.includes("native-svelte")) {
@@ -333,11 +411,12 @@ check("typed-single-svelte-produces-runtime-output", () => {
   }
   if (
     !legacy ||
-    main.code !== legacy.code ||
-    main.sourceMap !== legacy.sourceMap ||
+    !typedNodes ||
+    typedNodes.length === 0 ||
+    !sameRuntimeNodes(typedNodes, legacy.nodes) ||
     JSON.stringify(response.diagnostics) !== JSON.stringify(legacy.diagnostics)
   ) {
-    return `typed Svelte output diverged from the profile route: ${JSON.stringify({ main, legacy })}`;
+    return `typed Svelte output diverged from the profile route: ${JSON.stringify({ typedNodes, legacy })}`;
   }
   if (!metrics || metrics.upserts !== 1) {
     return `the source-only registration count was ${metrics && metrics.upserts}, expected 1`;
@@ -409,9 +488,13 @@ check("typed-single-vue-preserves-diagnostic-utf16-spans", () => {
   if (JSON.stringify(published) !== JSON.stringify(spans(asciiResponse))) {
     return `diagnostic offsets changed with UTF-8 byte length: ${JSON.stringify({ published, ascii: spans(asciiResponse) })}`;
   }
-  const legacy = legacyRuntimeMain("/typed/Warn.vue", multibyte, "vue");
+  const legacy = legacyRuntimeProduct("/typed/Warn.vue", multibyte, "vue", false);
   if (!legacy || JSON.stringify(response.diagnostics) !== JSON.stringify(legacy.diagnostics)) {
     return `typed diagnostics diverged from the profile route: ${JSON.stringify({ typed: response.diagnostics, legacy: legacy && legacy.diagnostics })}`;
+  }
+  const diagnostic = response.diagnostics.diagnostics[0];
+  if (!Array.isArray(diagnostic.arguments)) {
+    return `typed diagnostics dropped arguments: ${JSON.stringify(diagnostic)}`;
   }
   return undefined;
 });
@@ -447,9 +530,100 @@ check("typed-single-throws-a-typed-framework-failure", () => {
   if (error.requestedFramework !== "svelte" || error.registeredFramework !== "vue") {
     return `thrown failure lost framework values: ${JSON.stringify({ requested: error.requestedFramework, registered: error.registeredFramework })}`;
   }
-  if (!error.diagnostics || error.diagnostics.hasErrors !== true || !Array.isArray(error.diagnostics.diagnostics)) {
-    return `thrown failure lost diagnostics: ${JSON.stringify(error.diagnostics)}`;
+  if (
+    !error.diagnostics ||
+    error.diagnostics.hasErrors !== false ||
+    !Array.isArray(error.diagnostics.diagnostics) ||
+    error.diagnostics.diagnostics.length !== 0
+  ) {
+    return `thrown failure snapshot must stay empty and not claim errors: ${JSON.stringify(error.diagnostics)}`;
   }
+  return undefined;
+});
+
+check("typed-single-vue-analysis-is-a-json-string", () => {
+  const canonicalId = "/typed/Analysis.vue";
+  const source = `<script setup>const n = 1</script><template><p>{{ n }}</p></template>`;
+  const host = new addon.VerterHost();
+  upsertSource(host, canonicalId, source, "vue");
+  const response = host.compileRequest(
+    canonicalId,
+    vueProducts(canonicalId, [{ kind: "analysis", wantScriptBindings: false, wantTemplateData: true }]),
+  );
+  host.close();
+  const product = response.products[0];
+  if (!product || product.kind !== "analysis" || typeof product.analysis !== "string") {
+    return `analysis row was not a JSON string: ${JSON.stringify(product)}`;
+  }
+  const keys = Object.keys(product).sort();
+  if (JSON.stringify(keys) !== JSON.stringify(["analysis", "kind"])) {
+    return `analysis row published inactive union keys: ${JSON.stringify(keys)}`;
+  }
+  const parsed = JSON.parse(product.analysis);
+  if (!parsed || typeof parsed !== "object") return "analysis JSON was not an object";
+  return undefined;
+});
+
+check("typed-single-runtime-server-publishes-its-nodes", () => {
+  const canonicalId = "/typed/Server.vue";
+  const source = `<script setup>const n = 1</script><template><p>{{ n }}</p></template>`;
+  const host = new addon.VerterHost();
+  upsertSource(host, canonicalId, source, "vue");
+  const request = vueProducts(canonicalId, [{ kind: "runtimeServer", runtimeSourceMap: true }]);
+  request.options.ssr = true;
+  const response = host.compileRequest(canonicalId, request);
+  host.close();
+  const typedNodes = runtimeNodes(response, "runtimeServer");
+  const legacy = legacyRuntimeProduct(canonicalId, source, "vue", true);
+  if (!typedNodes || typedNodes.length === 0) {
+    return `runtimeServer nodes were absent: ${JSON.stringify(response)}`;
+  }
+  if (!legacy || !sameRuntimeNodes(typedNodes, legacy.nodes)) {
+    return `runtimeServer nodes diverged from the profile route: ${JSON.stringify({ typedNodes, legacy })}`;
+  }
+  return undefined;
+});
+
+check("typed-single-refuses-public-api-and-declarations", () => {
+  const source = `<template><p>x</p></template>`;
+  for (const kind of ["publicApi", "declarations"]) {
+    const canonicalId = `/typed/Unsupported-${kind}.vue`;
+    const host = new addon.VerterHost();
+    upsertSource(host, canonicalId, source, "vue");
+    const error = errorOfRoute(() => host.compileRequest(canonicalId, vueProducts(canonicalId, [{ kind }])));
+    host.close();
+    if (!(error instanceof Error)) return `${kind} did not throw an Error`;
+    if (error.kind !== "unsupportedProduct" || error.productKind !== kind) {
+      return `${kind} failure was ${JSON.stringify({ kind: error.kind, productKind: error.productKind })}`;
+    }
+    if (error.products) return `${kind} published a product row`;
+  }
+  return undefined;
+});
+
+check("typed-single-refuses-an-oversized-request-graph", () => {
+  const canonicalId = "/typed/HugeGraph.vue";
+  const host = new addon.VerterHost();
+  upsertSource(host, canonicalId, `<template><p>x</p></template>`, "vue");
+  const request = vueRuntime(canonicalId);
+  request.options.isCustomElement = Array.from({ length: 40000 }, () => ({ a: 1, b: 2, c: 3 }));
+  const refusal = refusalOfRoute(() => host.compileRequest(canonicalId, request));
+  host.close();
+  if (refusal === null) return "accepted a request graph above the per-request value budget";
+  if (!refusal.includes("decoded values")) return `oversized request refusal was ${refusal}`;
+  return undefined;
+});
+
+check("typed-single-refuses-a-dense-typed-array", () => {
+  const canonicalId = "/typed/TypedArray.vue";
+  const host = new addon.VerterHost();
+  upsertSource(host, canonicalId, `<template><p>x</p></template>`, "vue");
+  const request = vueRuntime(canonicalId);
+  request.options.cssModules = new Uint8Array(1024);
+  const refusal = refusalOfRoute(() => host.compileRequest(canonicalId, request));
+  host.close();
+  if (refusal === null) return "accepted a typed array as a request object";
+  if (!refusal.includes("binary or typed-array")) return `typed-array refusal was ${refusal}`;
   return undefined;
 });
 
@@ -523,7 +697,10 @@ check("typed-batch-isolates-a-canonical-request-refusal", () => {
   if (entries[1].response || !entries[1].failure || entries[1].failure.kind !== "binding") {
     return `canonical refusal was not isolated: ${JSON.stringify(entries[1])}`;
   }
-  if (!entries[1].failure.message.includes("DuplicateProduct(RuntimeClient)")) {
+  if (
+    !entries[1].failure.message.includes("duplicate product 'runtimeClient'") ||
+    entries[1].failure.message.includes("DuplicateProduct")
+  ) {
     return `canonical refusal lost its reason: ${entries[1].failure.message}`;
   }
   if (!entries[2].response || entries[2].failure || !runtimeMain(entries[2].response)) {
@@ -657,6 +834,76 @@ check("typed-batch-clears-throwing-accessors-and-preserves-siblings", () => {
   }
   if (!entries.at(-1).response || entries.at(-1).failure || !runtimeMain(entries.at(-1).response)) {
     return `valid sibling after throwing accessors did not compile: ${JSON.stringify(entries.at(-1))}`;
+  }
+  return undefined;
+});
+
+check("typed-batch-clears-hostile-thrown-values-and-preserves-siblings", () => {
+  const goodId = "/typed/AfterHostileThrow.svelte";
+  const hostile = {
+    get message() { throw { get [Symbol.toPrimitive]() { throw new Error("boom-toPrimitive"); } }; },
+    [Symbol.toPrimitive]() { throw new Error("boom-toPrimitive"); },
+  };
+  const inputs = [
+    {
+      canonicalId: "/typed/Hostile.vue",
+      source: Buffer.from(`<template><p>hostile</p></template>`),
+      request: vueRuntime("/typed/Hostile.vue"),
+    },
+    {
+      canonicalId: goodId,
+      source: Buffer.from(`<p>still compiled</p>`),
+      request: svelteRuntime(goodId),
+    },
+  ];
+  Object.defineProperty(inputs, 0, {
+    enumerable: true,
+    get() { throw hostile; },
+  });
+  const host = new addon.VerterHost();
+  const entries = host.compileRequests(inputs);
+  host.close();
+  if (entries.length !== 2 || entries[1].canonicalId !== goodId) {
+    return `hostile throw changed entry count or order: ${JSON.stringify(entries)}`;
+  }
+  if (entries[0].response || entries[0].failure?.kind !== "binding") {
+    return `hostile throw was not an isolated binding failure: ${JSON.stringify(entries[0])}`;
+  }
+  if (!entries[1].response || entries[1].failure || !runtimeMain(entries[1].response)) {
+    return `valid sibling after a hostile throw did not compile: ${JSON.stringify(entries[1])}`;
+  }
+  return undefined;
+});
+
+check("typed-batch-isolates-a-wrong-typed-source", () => {
+  const badId = "/typed/WrongSource.vue";
+  const goodId = "/typed/AfterWrongSource.svelte";
+  const host = new addon.VerterHost();
+  const entries = host.compileRequests([
+    {
+      canonicalId: badId,
+      source: {},
+      request: vueRuntime(badId),
+    },
+    {
+      canonicalId: goodId,
+      source: Buffer.from(`<p>still compiled</p>`),
+      request: svelteRuntime(goodId),
+    },
+  ]);
+  host.close();
+  if (entries.length !== 2 || entries[1].canonicalId !== goodId) {
+    return `wrong-typed source changed entry count or order: ${JSON.stringify(entries)}`;
+  }
+  if (
+    entries[0].response ||
+    entries[0].failure?.kind !== "binding" ||
+    !entries[0].failure.message.includes("Buffer")
+  ) {
+    return `wrong-typed source was not an isolated Buffer refusal: ${JSON.stringify(entries[0])}`;
+  }
+  if (!entries[1].response || entries[1].failure || !runtimeMain(entries[1].response)) {
+    return `valid sibling after a wrong-typed source did not compile: ${JSON.stringify(entries[1])}`;
   }
   return undefined;
 });
@@ -849,18 +1096,26 @@ check("typed-batch-refuses-an-aggregate-source-payload", () => {
 
 // @ai-generated - Reusing one nested request array must consume one shared decode budget.
 check("typed-batch-refuses-an-aggregate-decoded-value-payload", () => {
-  const sharedRequest = vueRuntime("/typed/SharedRequest.vue");
-  sharedRequest.options.isCustomElement = new Array(32768).fill("x-element");
-  const inputs = Array.from({ length: 9 }, (_, index) => ({
-    canonicalId: `/typed/Values-${index}.vue`,
-    source: Buffer.from(`<template><x-element /></template>`),
-    request: sharedRequest,
-  }));
+  const canonicalId = "/typed/Values.vue";
+  const request = vueRuntime(canonicalId);
+  request.options.isCustomElement = Array.from({ length: 40000 }, () => ({ a: 1, b: 2, c: 3 }));
   const host = new addon.VerterHost();
-  const refusal = refusalOfRoute(() => host.compileRequests(inputs));
+  const entries = host.compileRequests([
+    {
+      canonicalId,
+      source: Buffer.from(`<template><p>x</p></template>`),
+      request,
+    },
+  ]);
   host.close();
-  if (refusal === null) return "accepted an aggregate request graph above the decode budget";
-  if (!refusal.includes("decoded values")) return `aggregate decode refusal was ${refusal}`;
+  if (
+    entries.length !== 1 ||
+    entries[0].response ||
+    entries[0].failure?.kind !== "binding" ||
+    !entries[0].failure.message.includes("decoded values")
+  ) {
+    return `per-request decode refusal was not isolated: ${JSON.stringify(entries)}`;
+  }
   return undefined;
 });
 
@@ -872,6 +1127,30 @@ check("typed-batch-refuses-an-invalid-priority", () => {
   if (refusal === null) return "accepted an invalid batch priority";
   if (!refusal.includes("invalid priority 'urgent'")) {
     return `invalid priority refusal was ${refusal}`;
+  }
+  return undefined;
+});
+
+check("typed-batch-refuses-unknown-options", () => {
+  const host = new addon.VerterHost();
+  const refusal = refusalOfRoute(() =>
+    host.compileRequests([], { priority: "background", prioirty: "interactive" }),
+  );
+  host.close();
+  if (refusal === null) return "accepted an unknown batch option";
+  if (!refusal.includes("unknown field `prioirty`")) {
+    return `unknown option refusal was ${refusal}`;
+  }
+  return undefined;
+});
+
+check("typed-batch-refuses-a-non-array-input", () => {
+  const host = new addon.VerterHost();
+  const refusal = refusalOfRoute(() => host.compileRequests({ length: 1 }));
+  host.close();
+  if (refusal === null) return "accepted a non-array batch input";
+  if (!refusal.includes("must be an array")) {
+    return `non-array batch refusal was ${refusal}`;
   }
   return undefined;
 });

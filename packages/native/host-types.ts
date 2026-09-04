@@ -213,12 +213,23 @@ export interface HostSliceChanges {
   descriptorChanged: boolean;
 }
 
+export interface HostDiagnosticArg {
+  kind: "bool" | "unsigned" | "signed" | "text" | "span";
+  boolean?: boolean;
+  unsigned?: number;
+  signed?: number;
+  text?: string;
+  spanStart?: number;
+  spanEnd?: number;
+}
+
 export interface HostDiagnostic {
   severity: "error" | "warning" | "info";
   code: string;
   message: string;
   spanStart: number;
   spanEnd: number;
+  arguments: HostDiagnosticArg[];
 }
 
 export interface HostDiagnosticsSnapshot {

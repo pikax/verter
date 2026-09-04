@@ -52,8 +52,7 @@ use serde_json::Value;
 
 use crate::host_compile_request_ts::tagged_js_union;
 use crate::js_value_graph::{
-    materialize_js_value, materialize_js_value_with_budget, JsValueMaterializationBudget,
-    NapiValueGraph,
+    materialize_js_value_with_budget, JsValueMaterializationBudget, NapiValueGraph,
 };
 
 use verter_ffi::convert::{
@@ -178,7 +177,8 @@ impl FromNapiValue for NapiHostCompileRequest {
         // own argument extraction, which is the contract `NapiValueGraph`
         // requires of the environment it reads.
         let graph = unsafe { NapiValueGraph::new(env) };
-        let value = materialize_js_value(&graph, &napi_val)?;
+        let mut budget = JsValueMaterializationBudget::per_request();
+        let value = materialize_js_value_with_budget(&graph, &napi_val, &mut budget)?;
         decode_host_compile_request(value)
     }
 }

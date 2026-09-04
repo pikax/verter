@@ -269,12 +269,22 @@ Registers each input's `Buffer` source and executes its typed request. The
 result preserves input order and contains either `response` or a typed
 `failure` per entry. Missing/wrong fields, invalid UTF-8, request decode
 refusals, and canonical request construction refusals fail only their own entry
-as `binding`; valid siblings still execute. Invalid batch-level options or a
-non-array/oversized outer input throw before execution, as does a batch above
-the aggregate 64 MiB decoded-payload or 262,144 decoded-value budget.
+as `binding`; valid siblings still execute. Invalid batch-level options
+(including unknown keys) or a non-array/oversized outer input throw before
+execution, as does a batch above the aggregate 64 MiB decoded-payload budget.
+Each request graph is also bounded by a per-request decoded-value cap.
 
-`compileRequest()` is shared with `@verter/wasm`; `compileRequests()` is
-native-only because the browser binding has no source-registering batch route.
+`compileRequest()` shares the typed request schema with `@verter/wasm`, but the
+JavaScript envelopes diverge and are not interchangeable:
+
+- Native nests the IDE payload under `ide`, stringifies `analysis` as JSON, and
+  throws a structured `Error` whose `kind` / `canonicalId` / `diagnostics`
+  fields carry the typed failure.
+- WASM flattens the IDE DTO beside `kind`, returns `analysis` as an object, and
+  throws the refusal as a string.
+
+`compileRequests()` is native-only because the browser binding has no
+source-registering batch route.
 
 #### `host.getVirtualFile(query)`
 
