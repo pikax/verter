@@ -608,13 +608,18 @@ fn runtime_render_refuses_ssr_and_force_vapor() {
     profile.force_vapor = true;
     let render = render_with_profile(&host, "/proj/SsrVaporRender.vue", src, profile, None);
     let errors = render.errors();
+    // The published message is the compiler's own refusal vocabulary, which
+    // this rule's `SsrVaporBackendUnsupported` arm renders as exactly this
+    // sentence and no other arm renders at all. Matching the Rust variant
+    // spelling instead would have asserted on a `{:?}` render of a
+    // user-visible diagnostic.
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("SsrVaporBackendUnsupported")),
+            .any(|e| e.contains("SSR is unsupported with a Vapor backend")),
         "ssr=true + force_vapor=true must refuse with the exact typed \
-         SsrVaporBackendUnsupported variant (caught at CompileRequest \
-         construction, before compile_bundle even runs), got errors: {errors:?}"
+         SSR-x-Vapor refusal (caught at CompileRequest construction, before \
+         compile_bundle even runs), got errors: {errors:?}"
     );
 }
 

@@ -2,7 +2,7 @@
 
 - Status: proposed — awaiting operator/architect ratification
 - Date: 2026-09-04
-- Disposition: `ADOPT-NOW` for the two crates and one package beyond CCA1O2J's
+- Disposition: `ADOPT-NOW` for the crates and packages beyond CCA1O2J's
   named surfaces, recorded here because the review rounds found the expansion
   undispositioned, not because a fix owner may ratify their own rescope.
 - Amends: nothing. No charter budget, no DAG edge, no other node's ledger row.
@@ -20,12 +20,13 @@ candidate needs an operator to accept it.
 
 ## Measured footprint
 
-Against merge base `f4d755241`, the candidate is +4104/−170 across 23 files.
-Production (crate `src/`, published TypeScript) is +2394/−148 across 14 files
-in 5 crates and 2 packages. The charter's guidance is ~500 LOC / 5 files / 2
-related crates-or-packages; its mandatory rescope thresholds are 1500 LOC /
-12 files / 3 unrelated packages. Production LOC and the unrelated-package
-count both breach; the file count does not.
+Against merge base `f4d755241`, production (crate `src/`, published
+TypeScript) is +3383/−351 across 23 files in 6 crates and 2 packages:
+`verter_compiler`, `verter_ffi`, `verter_napi`, `verter_protocol`,
+`verter_session`, `verter_wasm`, `packages/native`, `packages/wasm`. The
+charter's guidance is ~500 LOC / 5 files / 2 related crates-or-packages; its
+mandatory rescope thresholds are 1500 LOC / 12 files / 3 unrelated packages.
+Production LOC, the file count and the unrelated-package count all breach.
 
 The charter's own budget line already anticipates part of this: "rescope only
 under the program's mandatory thresholds **or when a consumer migration or
@@ -99,6 +100,18 @@ The charter names `crates/verter_napi/src/lib.rs`,
    browser binding still printing `{error:?}` — is precisely the fork the
    Shared Optimized Codebase rule forbids, and it is what this candidate
    originally landed.
+
+4. `crates/verter_session/src/host_resolve/compile_request_build.rs` — one
+   line, for the same reason as item 3.
+
+   `request_construction_refused_diagnostics` rendered the same refusal
+   with `{:?}`, publishing the Rust variant spelling into a user-visible
+   host diagnostic (`MalformedOptionValue { option:
+   Svelte(CompileOptionsCss), .. }`). It is the third render of that one
+   refusal; leaving it would have kept a fork alive after removing two.
+   The change is `{error:?}` to `{error}` plus the two assertions that
+   quoted the variant spelling, which now quote the caller-facing sentence
+   and additionally forbid the variant spelling.
 
 None of these is a legacy deletion, a second decode path, a profile
 reconstruction, or a hand-written duplicate of a generated declaration — the
