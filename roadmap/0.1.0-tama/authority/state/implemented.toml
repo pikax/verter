@@ -95,7 +95,7 @@ schema = 2
 "CCA1O2A" = { status = "implemented", commit_message = "feat(bench): drive native benchmark compiles through the typed host request", commit_date = "2026-09-04T18:00:00+01:00" }
 "CCA1O2B" = { status = "implemented", commit_message = "refactor(compiler-execution): native comparison-tool host-request migration", commit_date = "2026-09-04T21:50:00+01:00" }
 "CCA1O2C" = { status = "implemented", commit_message = "refactor(ssr-baseline): drive SSR casing and attribute probes through the typed host request", commit_date = "2026-09-04T22:30:00+01:00" }
-"CCA1O2D" = { status = "pending" }
+"CCA1O2D" = { status = "implemented", commit_message = "refactor(ssr-baseline): drive SSR helper and model probes through the typed host request", commit_date = "2026-09-04T23:10:00+01:00" }
 "CCA1O2E" = { status = "pending" }
 "CCA1O2F" = { status = "implemented", commit_message = "docs(session): name the framework-tagged host request in compile-lane comments", commit_date = "2026-09-02T01:28:36+01:00", pull_request = 466 }
 "CCA1O2G" = { status = "pending" }
