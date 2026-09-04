@@ -893,6 +893,13 @@ fn the_legacy_cached_read_stays_pure_and_the_typed_route_warms_no_slot() {
 /// One entry per input, in ORIGINAL input order, each holding its own
 /// response. Two inputs naming one canonical with different requests are
 /// one registration and two executions.
+///
+/// Discrimination: collapse a shared canonical onto the FIRST request
+/// seen for it — rewrite each input's request to that one before the
+/// executions fan out in `compile_request_many` — and the third entry
+/// answers the first entry's runtime product instead of its own IDE
+/// demand, which the last assertion here names. A caller that batches two
+/// demands for one file would silently receive the same output twice.
 #[test]
 fn the_batch_returns_one_entry_per_input_in_input_order() {
     let host = new_host();

@@ -74,6 +74,14 @@
 //!   `typed-batch-accepts-a-registered-alias` still passes — which is why
 //!   the alias case exists: it is the batch input whose id needs TWO
 //!   agreeing resolutions, and nothing in the type system holds that.
+//! - Stop consulting the alias map in
+//!   `VerterHost::resolve_alias_or_canonical` (answer the normalized id)
+//!   and `typed-batch-accepts-a-registered-alias` goes red: a registered
+//!   alias stops resolving to the canonical it was registered against, so
+//!   the batch input spelled as an alias no longer names a registered
+//!   source at all. That function is the one identity both this binding
+//!   and the executor ask, so an alias is exactly the input that proves
+//!   the two are asking it rather than normalizing separately.
 //! - Drop the `resolve_alias_or_canonical` call at the top of
 //!   `compile_request` and
 //!   `typed-single-reports-one-id-spelling-for-a-non-canonical-id` sees the
