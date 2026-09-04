@@ -1,0 +1,1371 @@
+# Closure register — INPUT ONLY.
+#
+# This file carries claims, atoms, proof references, findings, residues, and
+# rows. It carries NO lifecycle status and NO disclosed limits:
+# `closure-register.schema.json` sets additionalProperties=false on every table
+# and declares neither property anywhere, so an author-written status or an
+# author-written limit is a schema error rather than a convention. OPEN /
+# REFUSED / PROVEN-BOUNDED / PROVEN and every limit are DERIVED by
+# `tools/closure-register.mjs`, which also generates the human view at
+# `closure.md`. Editing that view by hand fails the freshness check.
+
+schema = 1
+instrument = "typescript-mapper-closure"
+
+[ratification]
+owner = "rev11.typescript-mapper:ratified dual-plane mapper/snapshot/oracle identity contract"
+displaced_owner = "rejected TCM0 closure package and string mapper plane"
+contract = "contracts/typescript-mapper-dual-plane.md"
+instrument_authority = "charters/rev11-typescript-mapper/TCM0R.md"
+decision = "decisions/2026-09-02-typescript-mapper-rescope.md"
+
+# ---------------------------------------------------------------------------
+# Allowlisted adapters.
+#
+# A proof record names an adapter id; the adapter owns `runner` and
+# `argv_prefix`, and the record supplies only a tail. `runner` is a closed
+# two-value enum of portable toolchain entry points, so a shell, batch, or
+# interpreter control is not expressible in this register at all — the
+# displaced package's tracked POSIX controls are structurally rejected rather
+# than removed by inspection.
+#
+# `summary_grammar` is the terminal-summary shape the runner emits, and it is
+# what makes a transcription checkable: the validator re-derives selected,
+# executed, passed, failed, and skipped OUT of the recorded text and refuses the
+# record unless its own counters equal them. A plausible sentence with
+# self-consistent numbers beside it is no longer evidence of anything.
+#
+# `reexecution` says who re-derives the record, and the two arms are both
+# resolved rather than trusted. An `instrument` record is re-run by the control
+# suite against the live register and compared against its transcription; a node
+# runner may not declare anything else. An `external` record names the lane that
+# re-runs its work — `refresh_job`, `refresh_command`, `refresh_filter` — and
+# the validator resolves that the job exists, issues that command, and is gated
+# on that filter, then measures the record's cited artifacts against the
+# filter's own patterns. That is also how the SELECTED PACKAGES' DEPENDENCY
+# CLOSURE gets covered: a Rust lane's filter is the whole crate tree, not a
+# hand-listed subset, so a change to a transitive dependency re-runs the work
+# rather than slipping past a narrower list.
+#
+# A named job issuing a named command is not yet a statement that the job runs
+# THIS record's work, so the lane's SELECTION is resolved too — and `refresh_command`
+# is therefore the job's COMPLETE command line, not a prefix of it. A prefix
+# would satisfy a containment check while hiding every flag that decides what
+# the lane actually selects, so the validator requires the declaration to equal
+# the line the job issues and derives the selection from that. Three shapes
+# resolve: the command selects the whole workspace outright; it consumes a
+# whole-workspace archive that a job in the same workflow builds in one command
+# and that this job declares among its `needs`; or it is not a cargo selector
+# and carries no selection argument at all, so it re-runs its own runner's whole
+# universe. A record's `count_source` is NOT one of them: re-deriving a selected
+# count from a fixture directory is a property of the record, and answering a
+# question about the lane with it would be an answer about the register.
+#
+# What the external arm does NOT establish is derived and published rather than
+# left to the reader, in two parts. This instrument cannot invoke `cargo`, so it
+# re-runs that work through nobody and compares no counts against the
+# transcription. And where the lane narrows its own universe at run time — a
+# filter expression, a shard partition — that narrowing is derived from the same
+# command line and published verbatim, because the lane executing work drawn
+# from a record's packages is not the lane executing that record's selection.
+# The generated view states both per record, beside the job and filter, so the
+# weaker guarantee is never printed as the stronger one. The evidence model this
+# register implements binds a record to no repository SHA, tree, or digest, so
+# the residual is a scope statement rather than a defect — but an unstated scope
+# reads as full strength, which is the reading this removes.
+#
+# `count_source` adds a second, independent derivation of the selected count for
+# a runner that computes its own selection from a directory. The compile-fail
+# runner enumerates its fixture directory, so the count is re-derived from that
+# directory rather than trusted: adding or removing a case there invalidates the
+# transcription instead of passing.
+# ---------------------------------------------------------------------------
+
+[[adapter]]
+id = "node-tool"
+runner = "node"
+argv_prefix = []
+summary_shape = "one terminal line beginning with the tool name and PASS, carrying its own counts"
+summary_grammar = "tool-line"
+reexecution = "instrument"
+
+[[adapter]]
+id = "node-test"
+runner = "node"
+argv_prefix = ["--test"]
+summary_shape = "node:test terminal block with tests/pass/fail/skipped counts"
+summary_grammar = "node-test"
+reexecution = "instrument"
+
+[[adapter]]
+id = "cargo-contract"
+runner = "cargo"
+argv_prefix = ["run", "--locked", "-p", "verter_compile_contracts", "--no-default-features", "--features"]
+summary_shape = "a fixture-count banner printed BEFORE the run, then one `... ok` line per compile-fail case that cleared; nonzero exit on any mismatch"
+summary_grammar = "compile-contracts"
+reexecution = "external"
+refresh_job = "compiler-contracts"
+refresh_filter = "rust"
+refresh_command = "node scripts/compile-contracts.mjs"
+refresh_selection_enumerator = "node scripts/compile-contracts.mjs --list-owners"
+refresh_selection_flag = "--features"
+count_source = "fixture-directory"
+
+[[adapter]]
+id = "cargo-test"
+runner = "cargo"
+argv_prefix = ["test", "--locked"]
+summary_shape = "one libtest `test result:` line per test binary"
+summary_grammar = "libtest"
+reexecution = "external"
+refresh_job = "rust-test"
+refresh_filter = "rust"
+refresh_command = "cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition \"hash:${{ matrix.shard }}/4\" -E \"$VERTER_NEXTEST_FILTER\""
+refresh_selection_producer = "node scripts/provider-ci.mjs filter core"
+
+[[adapter]]
+id = "cargo-nextest"
+runner = "cargo"
+argv_prefix = ["nextest", "run", "--locked"]
+summary_shape = "nextest `Summary [t] R/S tests run: P passed, F failed, K skipped`"
+summary_grammar = "nextest"
+reexecution = "external"
+refresh_job = "rust-test"
+refresh_filter = "rust"
+refresh_command = "cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition \"hash:${{ matrix.shard }}/4\" -E \"$VERTER_NEXTEST_FILTER\""
+refresh_selection_producer = "node scripts/provider-ci.mjs filter core"
+
+# ---------------------------------------------------------------------------
+# Claims — the atomized charter obligations.
+#
+# `subject` names the artifacts the claim is ABOUT. It is not decoration: the
+# acyclicity rule is derived from it. A proof record whose own recorded command
+# RUNS one of a claim's subjects is that subject's verdict, so it may not also
+# be the evidence that the subject behaves correctly, and the validator refuses
+# the claim rather than logging beside it. Nothing about that binding is
+# volunteered by a proof, so a record cannot exempt itself by omission.
+#
+# The instrument's own claim is the case that matters. `CLM-INSTRUMENT`'s
+# subjects are the validator and its schema — the artifacts that derive status —
+# so `P-instrument-check`, which IS a run of the validator, is structurally
+# barred from covering any of its atoms. `P-instrument-controls` is admissible
+# for them because it is not the validator: it is the adversarial control suite,
+# and each of its cases passes only when the validator REFUSES a mutation. A
+# broken, permissive validator fails that suite rather than passing it, which is
+# the opposite of the self-certification this rescope displaced.
+# ---------------------------------------------------------------------------
+
+[[claim]]
+id = "CLM-PLANE"
+statement = "The mapping plane and the semantic plane are separate, the dependency direction is one-way, the correspondence is total over a closed projection partition of both surfaces, and the string mapper plane is displaced."
+subject = ["roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"]
+
+[[claim]]
+id = "CLM-IDENTITY"
+statement = "Observation identity is correctly scoped, stated component by component rather than summarised: the in-flight basis never keys a cache, the query identity is snapshot-independent and profile-bearing, the flight key is strictly larger, and unit lineage survives edits. The observed-profile component is a set in the shipped composition as well as in the contract — a profile observed twice composes the same identity as one observed once, because the shared canonical encoder deduplicates a set-shaped field rather than only sorting it. That is asserted separately from order independence, which a sorted bag would satisfy too."
+subject = ["roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"]
+
+[[claim]]
+id = "CLM-BINDING"
+statement = "A certified engine binding is the sole route by which an engine answer enters the semantic plane, and it is a witness rather than a handle."
+subject = ["roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"]
+
+[[claim]]
+id = "CLM-LIFECYCLE"
+statement = "Publication requires a live basis, degraded outcomes never warm, cache slots key on query identity alone, and incremental equals fresh."
+subject = ["roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"]
+
+[[claim]]
+id = "CLM-OWNERSHIP"
+statement = "One capability has one owner, the ratified owner has reached the downstream charters, deletion and survivor rows are concrete and received, residue owners are authorized and non-circular, and no dual-running window exists."
+subject = ["roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md", "roadmap/0.1.0-tama/closure/typescript-mapper/register.toml"]
+
+[[claim]]
+id = "CLM-EVIDENCE"
+statement = "Every retained evidence row names fixture inputs that resolve and an exactly reconstructible command, and proves a terminal summary, nonzero selected work, no undeclared skips, and internally consistent counters; a row the control suite can re-execute is re-executed against its own transcription, and a row it cannot is bound to the resolved CI lane that re-runs the work instead."
+subject = ["roadmap/0.1.0-tama/closure/typescript-mapper/register.toml"]
+
+[[claim]]
+id = "CLM-INSTRUMENT"
+statement = "The instrument derives status rather than accepting it, admits only allowlisted portable adapters, generates its human view, refuses to certify a state that is not reviewable, keeps its claim universe complete, binds each proof to the artifact its atoms require, refuses bounded-to-proven laundering, stays acyclic, and controls every mandatory failure class."
+subject = ["roadmap/0.1.0-tama/tools/closure-register.mjs", "roadmap/0.1.0-tama/schemas/closure-register.schema.json"]
+
+# ---------------------------------------------------------------------------
+# Atoms.
+#
+# `contract_section` binds an atom to the ratified contract section that states
+# it, and `contract_anchor` quotes the sentence it relies on. The section must
+# exist AND still state the quotation: a heading that survives while its body is
+# replaced by a placeholder would otherwise keep the atom proven, which makes
+# the derived status a report about titles.
+#
+# `evidence_anchor` is the artifact a proof of this atom must actually exercise.
+# `covers` is a list an author writes, so on its own it would let any green
+# record be credited with any obligation; the validator derives each record's
+# surface from its OWN fixtures, path arguments, and selected package roots, and
+# requires that surface to reach this anchor.
+#
+# `received_by` names the acceptance criterion that ENFORCES the obligation and
+# `received_by_role` names the role that criterion bears. The identifier alone
+# is not evidence: every charter in this program declares the same four
+# boilerplate ordinals, so `<any descendant>-AC<1..4>` would resolve. The
+# validator therefore reads the role out of the owner charter's own criterion
+# line, requires an exact match, and requires the owner to sit inside this
+# node's train. A transferred atom carries no `received_by` — its ordered
+# receiving rows do that job.
+# ---------------------------------------------------------------------------
+
+[[atom]]
+id = "A-plane-boundary"
+claim = "CLM-PLANE"
+statement = "The contract admits exactly two planes and states each one's inputs and outputs, so a third plane or an unstated input is a contract violation rather than an implementation choice."
+contract_section = "1. Two planes, one direction"
+contract_anchor = "There are exactly two planes."
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM4-AC1"
+received_by_role = "sole-owner outcome"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-no-oracle-callback"
+claim = "CLM-PLANE"
+statement = "The contract forbids the mapping plane from exposing any route — callback, closure, trait object, or handle — through which an oracle query could be issued, and requires the prohibition to hold by dependency direction rather than by name inspection."
+contract_section = "1. Two planes, one direction"
+contract_anchor = "the mapping product type must expose no callback, closure parameter, trait object, or handle through which an oracle query could be issued"
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM2-AC1"
+received_by_role = "sole-owner outcome"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-mapper-total"
+claim = "CLM-PLANE"
+statement = "The contract requires correspondence to be derived from the emission record and forbids recovering it by searching or slicing generated text."
+contract_section = "1. Two planes, one direction"
+contract_anchor = "Geometry comes from the emission record that produced the text, never from re-reading the text."
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM1-AC1"
+received_by_role = "sole-owner outcome"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-projection-classes-closed"
+claim = "CLM-PLANE"
+statement = "The contract partitions BOTH surfaces into the five projection classes — every projected byte into one of the four with a projected side, every carrier byte into one of the four with a carrier side — makes the two one-sided classes fail closed, and defines a region matching none as a lowering defect rather than a sixth class. Stating totality over the projected surface alone would let an implementation drop elided carrier regions and still satisfy the partition. The contract also states the correspondence's MULTIPLICITY, which totality does not decide: one carrier region corresponds to one or more projected regions, the correspondence is complete in the carrier-to-projected direction, and an operation anchored at a carrier region that reaches fewer than all of its projected regions fails closed. Without that, a mapping product typed as a function satisfies the partition while a rename rewrites one of several emissions of the same carrier expression, and no fail-closed class sees it."
+contract_section = "2. The five projection classes"
+contract_anchor = "Every byte of the projected TypeScript surface belongs to exactly one of Identity, Relocated, Rewritten, or Synthesized; every byte of the carrier source belongs to exactly one of Identity, Relocated, Rewritten, or Elided."
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM2-AC2"
+received_by_role = "positive contract"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-topology-selected"
+claim = "CLM-PLANE"
+statement = "The projection and semantic topologies are selected against a ratified criterion rather than left to the implementer."
+contract_section = "8. What this contract does not settle"
+contract_anchor = "the selection of the projection and semantic topologies"
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+shipped_obligation = "carried"
+
+[[atom]]
+id = "A-basis-not-a-cache-key"
+claim = "CLM-IDENTITY"
+statement = "The in-flight observation basis never participates in a cache-candidate key: the query-identity constructor takes no basis, and the executed identity contract shows two flight keys over one query identity differing only by basis."
+contract_section = "3. Observation identity"
+contract_anchor = "It is *not* a cache-candidate key and must never enter one"
+evidence_anchor = "crates/verter_identity/src/identity.rs"
+received_by = "TCM0R-AC2"
+received_by_role = "positive contract"
+shipped_obligation = "met"
+
+[[atom]]
+id = "A-query-identity-snapshot-independent"
+claim = "CLM-IDENTITY"
+statement = "The query identity carries no basis and is therefore valid across snapshots."
+contract_section = "3. Observation identity"
+contract_anchor = "It carries no `InputBasisId`, which is exactly what makes it a valid cross-snapshot cache-candidate key."
+evidence_anchor = "crates/verter_identity/src/identity.rs"
+received_by = "TCM0R-AC2"
+received_by_role = "positive contract"
+shipped_obligation = "met"
+
+[[atom]]
+id = "A-flight-key-strictly-larger"
+claim = "CLM-IDENTITY"
+statement = "The flight key is strictly larger than the query identity and the two cannot coerce in either direction."
+contract_section = "3. Observation identity"
+contract_anchor = "Strictly larger than `QueryIdentity<Q>`, so the two cannot coerce in either direction."
+evidence_anchor = "crates/verter_identity"
+received_by = "TCM0R-AC2"
+received_by_role = "positive contract"
+shipped_obligation = "met"
+
+[[atom]]
+id = "A-profiles-in-query-identity"
+claim = "CLM-IDENTITY"
+statement = "The observed profiles are part of the query identity — a profile present in one composition and absent from another composes a different identity — and the order they were observed in is not part of it."
+contract_section = "3. Observation identity"
+contract_anchor = "The observed profile set is part of the identity, not context"
+evidence_anchor = "crates/verter_identity/src/identity.rs"
+received_by = "TCM0R-AC2"
+received_by_role = "positive contract"
+shipped_obligation = "met"
+
+[[atom]]
+id = "A-profile-multiplicity-is-one-question"
+claim = "CLM-IDENTITY"
+statement = "The observed-profile component of the query identity behaves as a set in the shipped composition: one profile observed twice composes the same identity as the same profile observed once. Sorting alone does not establish that — a sorted list of digests is order independent and still encodes a repeat as a second slot for one question — so the shared canonical encoder deduplicates a set-shaped field as well as sorting it, and every composition describing a set of observed things inherits the semantics from the encoder instead of restating them. The crate's own coverage asserts the repeat case separately from the order case, because the order case passes under either encoding."
+contract_section = "3. Observation identity"
+contract_anchor = "Observing a profile twice is the same question as observing it once, so it must compose the same identity"
+evidence_anchor = "crates/verter_identity/src/identity.rs"
+received_by = "TCM0R-AC2"
+received_by_role = "positive contract"
+shipped_obligation = "met"
+
+[[atom]]
+id = "A-unit-lineage-stable"
+claim = "CLM-IDENTITY"
+statement = "A carrier unit's identity is lineage plus role; an edit or reparse does not mint a new unit."
+contract_section = "3. Observation identity"
+contract_anchor = "An edit or a reparse changes the unit's content and revision; it must not mint a new unit."
+evidence_anchor = "crates/verter_identity/src/identity.rs"
+received_by = "TCM0R-AC2"
+received_by_role = "positive contract"
+shipped_obligation = "met"
+
+[[atom]]
+id = "A-identity-alias-is-compile-error"
+claim = "CLM-IDENTITY"
+statement = "Passing one observation identity where another is required fails to compile, so aliasing is rejected by the type system rather than by convention."
+contract_section = "3. Observation identity"
+contract_anchor = "These are separate nominal types with no conversion between them"
+evidence_anchor = "crates/verter_identity/tests/compile-fail"
+received_by = "TCM0R-AC1"
+received_by_role = "sole-owner outcome"
+shipped_obligation = "met"
+
+[[atom]]
+id = "A-binding-is-a-witness"
+claim = "CLM-BINDING"
+statement = "The contract defines the certified binding as a witness of a resolved project, a recorded capability interpretation, and a live basis, rather than as a transport handle."
+contract_section = "4. The certified engine binding"
+contract_anchor = "It is a witness, not a handle"
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM3-AC2"
+received_by_role = "positive contract"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-no-unbound-semantic-result"
+claim = "CLM-BINDING"
+statement = "The contract forbids any production path from producing a semantic result from an inferred project, an unbound engine, or a fallback route."
+contract_section = "4. The certified engine binding"
+contract_anchor = "No production path may produce a semantic result from an inferred project, an unbound engine, a path-shaped notification, or a fallback route."
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM3-AC1"
+received_by_role = "sole-owner outcome"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-publication-requires-live-basis"
+claim = "CLM-LIFECYCLE"
+statement = "The contract requires a result whose basis was superseded before publication to be returned and discarded, never warmed."
+contract_section = "5. Lifecycle: what may be published, and what may be kept"
+contract_anchor = "If the basis it was produced under is superseded before publication, the result is returned to its caller and discarded, never warmed."
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM3-AC3"
+received_by_role = "incremental equivalence"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-degraded-never-warms"
+claim = "CLM-LIFECYCLE"
+statement = "The contract makes cancellation, budget exhaustion, engine unavailability, partial completion, and supersession all return-only."
+contract_section = "5. Lifecycle: what may be published, and what may be kept"
+contract_anchor = "Degraded outcomes never warm: cancellation, budget exhaustion, engine unavailability, partial completion, and supersession are all return-only."
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM3-AC3"
+received_by_role = "incremental equivalence"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-slot-keyed-by-query-identity"
+claim = "CLM-LIFECYCLE"
+statement = "The contract keys a cache slot on query identity alone and decides validity by re-validated observation rather than entry age."
+contract_section = "5. Lifecycle: what may be published, and what may be kept"
+contract_anchor = "A cache slot is keyed by `QueryIdentity`, never by `SemanticFlightKey` and never by `InputBasisId`."
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM3-AC3"
+received_by_role = "incremental equivalence"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-incremental-equals-fresh"
+claim = "CLM-LIFECYCLE"
+statement = "The contract classifies a warm answer that differs from the cold answer as a correctness defect, not a performance trade."
+contract_section = "5. Lifecycle: what may be published, and what may be kept"
+contract_anchor = "A warm answer that differs from the answer a cold run would give is a correctness defect, not a performance trade."
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM4-AC3"
+received_by_role = "incremental equivalence"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-hang-topology-characterised"
+claim = "CLM-LIFECYCLE"
+statement = "The semantic plane's behaviour under concurrent flights is characterized rather than asserted."
+contract_section = "8. What this contract does not settle"
+contract_anchor = "the hang topology of the semantic plane under concurrent flights"
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+shipped_obligation = "carried"
+
+[[atom]]
+id = "A-single-owner-per-capability"
+claim = "CLM-OWNERSHIP"
+statement = "The contract's ownership table names exactly one owner per capability and requires a competing candidate owner to be deleted rather than demoted."
+contract_section = "6. Ownership"
+contract_anchor = "Where two candidate owners could answer the same question, the contract names one and the other is deleted, not demoted."
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM0R-AC1"
+received_by_role = "sole-owner outcome"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-no-dual-running-window"
+claim = "CLM-OWNERSHIP"
+statement = "The contract makes activation atomic with deletion, so no interval exists in which both routes can answer."
+contract_section = "6. Ownership"
+contract_anchor = "A period during which both the old and the new route can answer is forbidden"
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM4-AC1"
+received_by_role = "sole-owner outcome"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-deletion-rows-concrete"
+claim = "CLM-OWNERSHIP"
+statement = "Every displaced route has a concrete row naming its subject and how it is deleted or structurally rejected."
+contract_section = "7. Deletion and survivor rows"
+contract_anchor = "Each displaced route is deleted or structurally rejected"
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM0R-AC2"
+received_by_role = "positive contract"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-survivor-rows-received"
+claim = "CLM-OWNERSHIP"
+statement = "Every preserved artifact has a concrete row naming the criterion that receives its obligation."
+contract_section = "7. Deletion and survivor rows"
+contract_anchor = "each preserved artifact is carried forward as a stated obligation on a named receiving criterion"
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM0R-AC2"
+received_by_role = "positive contract"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-residue-owner-non-circular"
+claim = "CLM-OWNERSHIP"
+statement = "Every residue owner is a strict DAG descendant of the block that raised it, so no remainder is owned by its own producer. Authorization is not the whole shape: which atom leaves through which remainder, and which blocks receive that remainder in which order, are both pinned beside the validator and matched exactly, so an atom re-routed to a different admissible remainder or a required owner dropped from a remainder's ordered sequence is refused rather than accepted as another authorized arrangement."
+contract_section = "8. What this contract does not settle"
+contract_anchor = "transferred, with owners, to the implementing blocks"
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM0R-AC1"
+received_by_role = "sole-owner outcome"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-receiving-criterion-direct"
+claim = "CLM-OWNERSHIP"
+statement = "Every residue binds a direct acceptance criterion that exists in the owner's charter, not a train or a milestone."
+contract_section = "8. What this contract does not settle"
+contract_anchor = "recorded as residues in the closure register with a direct receiving criterion"
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM0R-AC1"
+received_by_role = "sole-owner outcome"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-resolution-gate-named"
+claim = "CLM-OWNERSHIP"
+statement = "Every residue names the gate at which it resolves, no later than plan close."
+contract_section = "8. What this contract does not settle"
+contract_anchor = "a direct receiving criterion and a resolution gate"
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+received_by = "TCM0R-AC1"
+received_by_role = "sole-owner outcome"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-authority-consistent"
+claim = "CLM-OWNERSHIP"
+statement = "The program authority the ownership rows reference — DAG structure, charter parity, catalog and ledger membership — validates without error."
+evidence_anchor = "roadmap/0.1.0-tama/authority"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-downstream-owner-restated"
+claim = "CLM-OWNERSHIP"
+statement = "Every charter in this node's train declares the RATIFIED owner in its own generated header, and every charter that DELIVERS an outcome also narrates the migration pair — the owner being displaced and the one that ends up sole — with the ratified owner as final. Both statements are resolved against the charter's own bytes, because they are written by different hands and can disagree: a regenerated header standing over untouched prose still hands the capability to the displaced owner everywhere a reader actually looks. The narrative half is resolved inside the section that OWNS it rather than anywhere in the document, and a section stating more than one pair — or a charter declaring that section twice — is refused rather than resolved by position, because a compliant sentence written above a stale one leaves the reader meeting both while a first-match reader sees one. A missing header, a missing sentence on a delivery charter, a final owner that is not the ratified one, or a displaced owner that is not the one this register displaces fails here instead of being closed by assertion. A historical identity wrapper delivers no outcome and narrates no pair; that is the one exempt shape, and it is exercised by a control rather than assumed."
+evidence_anchor = "roadmap/0.1.0-tama/charters/rev11-typescript-mapper"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-fixtures-named"
+claim = "CLM-EVIDENCE"
+statement = "Every proof record names at least one fixture input path."
+evidence_anchor = "roadmap/0.1.0-tama/closure/typescript-mapper/register.toml"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-command-exact"
+claim = "CLM-EVIDENCE"
+statement = "Every proof record's command is reconstructible exactly from its allowlisted adapter plus its own tail, and every package that command selects resolves to a crate of this workspace."
+evidence_anchor = "roadmap/0.1.0-tama/closure/typescript-mapper/register.toml"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-terminal-summary-present"
+claim = "CLM-EVIDENCE"
+statement = "Every proof record carries a terminal summary of the shape its adapter's runner emits, and a placeholder is refused. The record's counters are re-derived from that transcript under the declared grammar and must equal the record's own numbers, so a summary that is not a real terminal line, one that transcribes a failing run, or one whose counts have drifted from the numbers beside it, refuses the record. A runner that announces its selection BEFORE doing the work does not get to have that announcement counted as passes: the compile-fail grammar counts the per-case lines the runner emits as each case clears, so a run that printed its banner and then failed is refused rather than read as complete."
+evidence_anchor = "roadmap/0.1.0-tama/closure/typescript-mapper/register.toml"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-node-evidence-re-executed"
+claim = "CLM-EVIDENCE"
+statement = "Every proof record whose adapter declares instrument re-execution is re-run by the control suite against the live register, and the record is refused unless the counters derived from the live run's own terminal summary equal the ones derived from what the record transcribes. Exactly one such record is exempt and named as such: the control suite's own record, which cannot re-enter itself without diverging. It is bound instead by the suite's declared-case comparison, which requires the register's transcribed selected, executed, and passed counts to equal the number of cases the suite registers — so adding or removing a case there invalidates the transcription just as a drifted count would. A node runner may not opt out of re-execution. A record whose adapter declares EXTERNAL re-execution is re-derived too whenever it binds a negative control, because the lane that re-applies that control runs the record's own command against a clean mirror before planting anything: that clean run's terminal summary is compared against the record's transcription by the same derivation, so the only records whose counters are transcribed rather than re-derived are the ones that bind no control at all."
+evidence_anchor = "roadmap/0.1.0-tama/closure/typescript-mapper/register.toml"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-external-refresh-lane-bound"
+claim = "CLM-EVIDENCE"
+statement = "A record this instrument cannot re-run declares the CI lane that does, and the validator RESOLVES that declaration against the workflow: the named job must exist, must issue the named command as its COMPLETE command line rather than a prefix of it, and must be gated on the named path filter. The lane's selection is then resolved in two stages against the record's own. Narrowing this check can relate to the record decides the result: a lane that names packages must name every package the record selects, and a lane that excludes one of them or narrows to a single build target does not run this record's work. The lane's universe must then reach the record, from that command selecting the whole workspace, from a whole-workspace archive that some job in the same workflow BUILDS with its archive subcommand — not merely mentions — and that this job declares among its needs, or from a non-cargo command with no selection argument and no operand beyond the program it runs whose own declared enumeration this check RUNS, so the record's selection is matched against the list that script prints rather than credited to the phrase \"its default universe\". A record's own re-derived selected count is NOT one of those arms: it is a property of the record, not of the lane. Every artifact the record cites — its fixtures, its control's subject, the crate root of every package it selects, the anchor of every atom it covers, and any script the lane's own selection is read out of or enumerated by — must be covered by that filter's patterns, and for an executed script that means the script AND every first-party module it transitively imports, because a lane selector is routinely a thin entry whose real selection data is declared one import away; such a script must also reach no installed package, since the job that runs this instrument installs none, and a pattern shape this check cannot read is reported there as it is in the instrument's own filter; because a Rust lane's filter is the crate tree rather than a hand-listed subset, the selected packages' transitive dependency closure is covered too. WITHIN-universe narrowing is resolved rather than published as a name: a variable spelling is resolved to the assignment the job makes — with or without an `export` keyword, and across a shell line continuation — that command must be the producer the register declares, and this check executes it and decomposes the expression it prints. A package the predicate excludes outright that this record selects is a limit; the name-scoped exclusions it leaves inside a package the lane still runs are published by package and explicitly NOT evaluated, because whether those names reach this record's own cases is a property of the test binaries rather than of the expression. The generated view also publishes, per record, whether this instrument re-derives its counts or only names the lane that re-runs the work. An unresolved binding, an unresolved lane universe, a variable no step assigns, a producer that is not the declared one, an expression this reader cannot decompose, a lane narrowed away from the record's packages, or an uncovered input is a DERIVED limit on the record, and a limited claim is bounded and inadmissible."
+evidence_anchor = ".github/workflows/ci.yml"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-counters-consistent"
+claim = "CLM-EVIDENCE"
+statement = "Executed equals passed plus failed, selected equals executed plus skipped, failures are zero, and all five counts equal the ones the record's own transcript states."
+evidence_anchor = "roadmap/0.1.0-tama/closure/typescript-mapper/register.toml"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-zero-unexpected-skips"
+claim = "CLM-EVIDENCE"
+statement = "A proof record whose observed skip count differs from the count it declared in advance is refused, and a declared skip count must state what it covers."
+evidence_anchor = "roadmap/0.1.0-tama/closure/typescript-mapper/register.toml"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-nonzero-selected-work"
+claim = "CLM-EVIDENCE"
+statement = "A proof record whose selector matched no work is refused."
+evidence_anchor = "roadmap/0.1.0-tama/closure/typescript-mapper/register.toml"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-targeted-domain-green"
+claim = "CLM-EVIDENCE"
+statement = "The charter's targeted verification command runs to a terminal summary with zero failures over the three named packages."
+evidence_anchor = "crates/verter_session"
+shipped_obligation = "met"
+
+[[atom]]
+id = "A-implementation-baseline"
+claim = "CLM-EVIDENCE"
+statement = "A pre-change implementation baseline exists for the comparisons the successors need."
+contract_section = "8. What this contract does not settle"
+contract_anchor = "the pre-change implementation baseline the successors compare against"
+evidence_anchor = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+shipped_obligation = "carried"
+
+[[atom]]
+id = "A-status-derived-not-authored"
+claim = "CLM-INSTRUMENT"
+statement = "Lifecycle status is derived by the validator; an author-set status in the input register is a schema error. The same holds for a limit: the input register has no `limits` property, so a limit is derived from an unresolved refresh binding rather than volunteered, and declaring one cannot be made optional."
+evidence_anchor = "roadmap/0.1.0-tama/schemas/closure-register.schema.json"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-adapter-allowlisted"
+claim = "CLM-INSTRUMENT"
+statement = "A proof may only name an adapter present in the allowlist."
+evidence_anchor = "roadmap/0.1.0-tama/schemas/closure-register.schema.json"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-portable-controls-only"
+claim = "CLM-INSTRUMENT"
+statement = "The runner vocabulary is a closed two-value enum of portable toolchain entry points, so no shell or interpreter control is expressible."
+evidence_anchor = "roadmap/0.1.0-tama/schemas/closure-register.schema.json"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-human-view-generated"
+claim = "CLM-INSTRUMENT"
+statement = "The human view is generated from the register and a hand-edited view fails the freshness check."
+evidence_anchor = "roadmap/0.1.0-tama/tools/closure-register.mjs"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-check-refuses-unreviewable"
+claim = "CLM-INSTRUMENT"
+statement = "The command that derives the state also refuses to certify one that is not reviewable: it prints no pass line and exits nonzero unless the derived state is READY_FOR_REVIEW. Dropping a single atom id from a proof's coverage derives OPEN without producing an error, so a tool that gated only on its error list would print a pass for a register with an unmet obligation — and that pass line is itself transcribable as evidence."
+evidence_anchor = "roadmap/0.1.0-tama/tools/closure-register.mjs"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-claim-universe-complete"
+claim = "CLM-INSTRUMENT"
+statement = "The claim, atom, finding, residue, and deletion/survivor row universes are closed expected sets pinned beside the validator; an omitted, added, or misrouted entry fails in either direction. Identity is only half of what a register asserts, so every proposition it carries is pinned by digest as well — claim, atom and finding statements; a deletion or survivor row's disposition and a remainder's own statement; a negative control's mutation and the transcript of the refusal it observed; a receiving row's gate sentence; and a record's skip basis. Each of those was rewritable while no id, count, or derived status moved, and for the control fields that is the one place a hollowing would be invisible to the hollowed-statement control itself. Where an atom POINTS is pinned separately from what it says: its evidence artifact, its contract section, the sentence it quotes, and the surface any owed obligation is unmet at are digested together, so an atom cannot be aimed at whatever a green record happens to touch, or left resting on a contract sentence the contract no longer states, under words that never changed."
+evidence_anchor = "roadmap/0.1.0-tama/tools/closure-register.mjs"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-bounded-needs-transfer"
+claim = "CLM-INSTRUMENT"
+statement = "A bounded claim is inadmissible without an approved transfer of each uncovered atom to an allowed residue, and a derived limit is not a transfer."
+evidence_anchor = "roadmap/0.1.0-tama/tools/closure-register.mjs"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-acyclic-proof-dependency"
+claim = "CLM-INSTRUMENT"
+statement = "A proof may not cover atoms of a claim when the artifacts its own recorded command runs are that claim's declared subject. The binding is derived from the claim's subject and the proof's adapter plus command tail, never volunteered by the proof, so an omission cannot exempt a record; a cycle refuses the claim rather than being logged beside it. The derivation is per RUNNER, not per argument shape: a command selects work either by path or by package, so a selected crate root is a verdict-producing artifact exactly as a path argument is, and containment decides — a run of a tree is the verdict for a subject inside it. A module a node record's entry file IMPORTS is not a verdict-producing artifact, because the transcript reports the harness's verdict on that file's assertions rather than on the module. It is still executed by them, so that edge is derived too, over the TRANSITIVE first-party import graph rather than one level of it — a chain through a re-export is the same execution as a direct import, and reading one level would let a forwarding module hide the cycle — and it is refused by default: a record whose entry file reaches its claim's subject through that graph is admissible only through an exemption pinned beside the validator, published in the generated view beside that record, and stale-failing when the record stops exercising the subject. Exactly one is pinned — the adversarial control suite, whose controls pass only when the validator REFUSES a planted mutation, so a permissive validator fails them rather than passing. That is a property of those cases and not of every case in the suite, which also holds a baseline and registration/pin checks asserting over its own declarations, so the suite enforces it PER CASE instead of claiming it of the file: planting passes through one helper, a case registered as a control that plants nothing fails there, and the non-planting cases are registered through a separate wrapper whose names the suite pins — a case that stops planting cannot migrate into the exempted set unnoticed. A run of this validator certifying itself stays barred, because its transcript would then be the subject's own output."
+evidence_anchor = "roadmap/0.1.0-tama/tools/closure-register.mjs"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-proof-relevance-bound"
+claim = "CLM-INSTRUMENT"
+statement = "A proof may only cover an atom whose declared evidence anchor its own run reaches. The record's surface is DERIVED — the fixtures it names, the path-shaped arguments of its command, and the crate root of every package its selector names — so appending an unrelated atom id to a green record's coverage list is refused rather than accepted. Without this, relevance would be the one edge left volunteered, and any green command could be credited with any obligation."
+evidence_anchor = "roadmap/0.1.0-tama/tools/closure-register.mjs"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-stated-obligation-is-enforced"
+claim = "CLM-INSTRUMENT"
+statement = "An atom whose subject is contract text must quote the sentence the contract states and name both the acceptance criterion that enforces it and the role that criterion bears. The validator requires the quotation to still be in the bound section, resolves the criterion against the owner charter's own declared criterion line, requires the declared role to match, and requires the owner to be this node or a strict descendant inside this node's train — so a citation is not satisfied by an interchangeable ordinal on an unrelated block. The binding is pinned as well as resolved: the section and the quotation are digested beside the atom's statement, so an atom cannot be moved onto a different sentence of a still-valid contract while the words it asserts stay where they are. An obligation the shipped code does not yet meet is not enforced by that citation alone: it names the production surface it is unmet at, that path must sit inside the production surfaces the receiving criterion's owner charter declares, and the claim summary counts it as owed rather than letting it read as settled."
+evidence_anchor = "roadmap/0.1.0-tama/tools/closure-register.mjs"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-finding-closed-by-atom"
+claim = "CLM-INSTRUMENT"
+statement = "A finding that closes against a claim names the atom that discriminates it, and the validator requires that atom to belong to that claim. Routing alone is an assignment: without this a finding could be filed under a claim none of whose obligations speak to it, and the register would still read as complete."
+evidence_anchor = "roadmap/0.1.0-tama/tools/closure-register.mjs"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-control-mutation-locatable"
+claim = "CLM-INSTRUMENT"
+statement = "A negative control names the artifact it mutated and both halves of the edit, and `unique-new-occurrence` is VERIFIED rather than asserted: the replaced text must occur in the subject exactly once, and the introduced text must be absent. A mutation that could never have applied fails, and so does one still sitting in the tree under review. A command-shaped control instead names the arguments it added, none of which may already be part of the recorded command. A control whose observed outcome parses as a transcript this validator would admit records no refusal and is refused. Every control is RE-APPLIED rather than believed, command-shaped ones included: the mutation goes into a mirror of the tree — or, for a command control, onto the argument vector — the record's own command runs against it, and the refusal must be the runner's own, in its adapter's grammar, carrying the counts the control transcribes — with a clean run of the same mirror beforehand, so a refusal is attributable to the mutation rather than to a tree that was already red. Re-application is not sampled. It is split across two lanes on a TOOLCHAIN boundary — the instrument suite drives the controls whose records run under `node`, and a second lane drives the rest, the records that run under `cargo` and the one whose command is the instrument suite itself, which cannot be driven by the suite it would re-enter. The partition over the register's whole control universe is resolved rather than declared: every control lands in exactly one lane, no control is exempt from re-application for mutating no artifact — a command-shaped control is re-applied by the lane its record's runner decides, so the counters its record transcribes and the refusal its delta produces are re-derived live rather than trusted — and the delegated lane is resolved against the workflow — one job issuing its complete command line, installing the runner and the cargo subcommands its controls need, gated on a filter covering that lane's own sources and every subject it mutates. A delegated lane no job runs is a transcript with extra steps."
+evidence_anchor = "roadmap/0.1.0-tama/tools/closure-register.mjs"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-controls-cover-every-class"
+claim = "CLM-INSTRUMENT"
+statement = "The control suite covers exactly the closed set of mandatory failure classes."
+evidence_anchor = "roadmap/0.1.0-tama/tools/closure-register.test.mjs"
+shipped_obligation = "authority-only"
+
+[[atom]]
+id = "A-ledger-model-intact"
+claim = "CLM-INSTRUMENT"
+statement = "The implementation-ledger model this instrument's readiness rests on validates without error."
+evidence_anchor = "roadmap/0.1.0-tama/authority/state/implemented.toml"
+shipped_obligation = "authority-only"
+
+# ---------------------------------------------------------------------------
+# Proof records. Counters and terminal summaries are transcribed from runs of
+# the reconstructed command in this worktree.
+#
+# A compile-fail transcript is recorded with `/` separators: the runner prints
+# the fixture path with the host's separator, which is a property of the machine
+# rather than of the run. Terminal styling is stripped for the same reason.
+# ---------------------------------------------------------------------------
+
+[[proof]]
+id = "P-identity-nonalias"
+adapter = "cargo-contract"
+argv_tail = ["identity"]
+fixtures = ["crates/verter_identity/tests/compile-fail/input_basis_id_is_not_query_identity.rs", "crates/verter_identity/tests/compile-fail/query_identity_is_not_semantic_flight_key.rs", "crates/verter_identity/tests/compile-fail/source_unit_id_has_no_from_canonical.rs"]
+covers = ["A-identity-alias-is-compile-error", "A-flight-key-strictly-larger"]
+selected = 7
+executed = 7
+passed = 7
+failed = 0
+skipped = 0
+terminal_summary = "compile contracts: owner=identity, fixtures=7\ntest tests/compile-fail/direct_batch_id_is_not_direct_invocation_id.rs ... ok\ntest tests/compile-fail/input_basis_id_is_not_query_identity.rs ... ok\ntest tests/compile-fail/query_identity_is_not_semantic_flight_key.rs ... ok\ntest tests/compile-fail/raw_u64_is_not_parse_instance_generation.rs ... ok\ntest tests/compile-fail/session_handle_is_not_stable_entity_id.rs ... ok\ntest tests/compile-fail/source_unit_id_has_no_from_canonical.rs ... ok\ntest tests/compile-fail/stable_entity_id_is_not_session_handle.rs ... ok"
+control = "CTL-identity-alias"
+
+[[proof]]
+id = "P-identity-semantics"
+adapter = "cargo-test"
+argv_tail = ["-p", "verter_identity", "--tests"]
+fixtures = ["crates/verter_identity/src/identity.rs","crates/verter_identity/tests/cases/workspace_dependency_layers.rs"]
+covers = ["A-unit-lineage-stable"]
+selected = 34
+executed = 34
+passed = 34
+failed = 0
+skipped = 0
+terminal_summary = "test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out | test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+control = "CTL-lineage-content"
+
+[[proof]]
+id = "P-identity-observation"
+adapter = "cargo-test"
+argv_tail = ["-p", "verter_identity", "--tests", "--", "--exact", "identity::tests::query_identity_excludes_basis_but_flight_key_includes_it", "identity::tests::query_identity_is_a_profile_set_not_a_profile_list"]
+fixtures = ["crates/verter_identity/src/identity.rs"]
+covers = ["A-basis-not-a-cache-key", "A-query-identity-snapshot-independent", "A-profiles-in-query-identity", "A-flight-key-strictly-larger"]
+selected = 2
+executed = 2
+passed = 2
+failed = 0
+skipped = 0
+terminal_summary = "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out | test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out"
+control = "CTL-profile-set"
+
+[[proof]]
+id = "P-identity-multiplicity"
+adapter = "cargo-test"
+argv_tail = ["-p", "verter_identity", "--tests", "--", "--exact", "identity::tests::query_identity_is_a_profile_set_not_a_profile_list", "encoding::tests::sorted_set_is_construction_order_independent", "encoding::tests::sorted_set_collapses_repeats_without_collapsing_distinct_elements"]
+fixtures = ["crates/verter_identity/src/encoding.rs", "crates/verter_identity/src/identity.rs"]
+covers = ["A-profile-multiplicity-is-one-question"]
+selected = 3
+executed = 3
+passed = 3
+failed = 0
+skipped = 0
+terminal_summary = "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out | test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out"
+control = "CTL-profile-multiplicity"
+
+[[proof]]
+id = "P-authority-shape"
+adapter = "node-tool"
+argv_tail = ["roadmap/0.1.0-tama/tools/validate-program-dag.mjs", "--strict"]
+fixtures = ["roadmap/0.1.0-tama/authority/dag/rev11-typescript-mapper.toml", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM0R.md"]
+covers = ["A-authority-consistent"]
+selected = 402
+executed = 402
+passed = 402
+failed = 0
+skipped = 0
+terminal_summary = "validate-program-dag: PASS nodes=402 edges=1007 modules=51 charters=402 critical_path=112 max_width=36"
+count_key = "nodes"
+control = "CTL-authority-edge"
+
+[[proof]]
+id = "P-ledger-model"
+adapter = "node-test"
+argv_tail = ["roadmap/0.1.0-tama/tools/implementation-ledger.test.mjs"]
+fixtures = ["roadmap/0.1.0-tama/authority/state/implemented.toml", "roadmap/0.1.0-tama/schemas/implementation-ledger.schema.json"]
+covers = ["A-ledger-model-intact"]
+selected = 26
+executed = 26
+passed = 26
+failed = 0
+skipped = 0
+terminal_summary = "tests 26 | pass 26 | fail 0 | cancelled 0 | skipped 0 | todo 0"
+control = "CTL-ledger-row"
+
+[[proof]]
+id = "P-instrument-controls"
+adapter = "node-test"
+argv_tail = ["roadmap/0.1.0-tama/tools/closure-register.test.mjs"]
+fixtures = ["roadmap/0.1.0-tama/closure/typescript-mapper/register.toml", "roadmap/0.1.0-tama/schemas/closure-register.schema.json", "roadmap/0.1.0-tama/tools/closure-register.mjs", ".github/workflows/ci.yml"]
+covers = ["A-fixtures-named", "A-command-exact", "A-terminal-summary-present", "A-node-evidence-re-executed", "A-external-refresh-lane-bound", "A-counters-consistent", "A-zero-unexpected-skips", "A-nonzero-selected-work", "A-status-derived-not-authored", "A-adapter-allowlisted", "A-portable-controls-only", "A-human-view-generated", "A-check-refuses-unreviewable", "A-claim-universe-complete", "A-bounded-needs-transfer", "A-acyclic-proof-dependency", "A-proof-relevance-bound", "A-stated-obligation-is-enforced", "A-finding-closed-by-atom", "A-control-mutation-locatable", "A-controls-cover-every-class"]
+selected = 38
+executed = 38
+passed = 38
+failed = 0
+skipped = 0
+terminal_summary = "tests 38 | pass 38 | fail 0 | cancelled 0 | skipped 0 | todo 0"
+control = "CTL-register-status"
+
+[[proof]]
+id = "P-instrument-check"
+adapter = "node-tool"
+argv_tail = ["roadmap/0.1.0-tama/tools/closure-register.mjs", "--check"]
+fixtures = ["roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM0.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM1.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM2.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM3.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM4.md"]
+covers = ["A-plane-boundary", "A-no-oracle-callback", "A-mapper-total", "A-projection-classes-closed", "A-binding-is-a-witness", "A-no-unbound-semantic-result", "A-publication-requires-live-basis", "A-degraded-never-warms", "A-slot-keyed-by-query-identity", "A-incremental-equals-fresh", "A-single-owner-per-capability", "A-no-dual-running-window", "A-deletion-rows-concrete", "A-survivor-rows-received", "A-residue-owner-non-circular", "A-receiving-criterion-direct", "A-resolution-gate-named", "A-downstream-owner-restated"]
+selected = 545
+executed = 545
+passed = 545
+failed = 0
+skipped = 0
+terminal_summary = "closure-register: PASS instrument=typescript-mapper-closure claims=7 atoms=52 proofs=9 controls=9 findings=36 residues=3 obligations=545 state=READY_FOR_REVIEW"
+count_key = "obligations"
+control = "CTL-contract-section"
+
+[[proof]]
+id = "P-targeted-domain"
+adapter = "cargo-nextest"
+argv_tail = ["-p", "verter_type_runtime", "-p", "verter_session", "-p", "verter_protocol"]
+fixtures = ["crates/verter_type_runtime/tests/main.rs", "crates/verter_session/tests/cases/mod.rs", "crates/verter_protocol/tests/cases/typeinfo_proto_roundtrip.rs"]
+covers = ["A-targeted-domain-green"]
+selected = 9438
+executed = 8891
+passed = 8891
+failed = 0
+skipped = 547
+expected_skips = 547
+skip_basis = "the command applies no filter expression, so nextest counts a test as skipped only for being marked #[ignore]: the 547 are the three packages' opt-in real-provider, corpus, and soak cases, and the clean half of the control lane's re-application re-derives executed and skipped live against this transcript. The selection is shaped by the lane's CI platform — unix-gated and windows-gated cases compile on different hosts, so the five counts are the linux selection's, and a lane run on a platform that compiles a different cfg set fails the clean-run comparison by exactly those cases rather than being tolerated"
+terminal_summary = "Summary [ 120.590s] 8891 tests run: 8891 passed, 547 skipped"
+control = "CTL-targeted-selector"
+
+# ---------------------------------------------------------------------------
+# Canonical negative controls.
+#
+# Each mutation was applied to a working tree, executed, and reverted. What
+# makes "unique" and "new" checkable rather than assertable is that the record
+# carries both halves of the edit: the validator requires the replaced text to
+# be present in the subject EXACTLY ONCE and the introduced text to be ABSENT.
+# A mutation that could never have applied fails, and so does one still sitting
+# in the tree under review. A command mutation instead names the arguments it
+# added, none of which may already be part of the recorded command.
+#
+# A control that mutates an ARTIFACT is not left at its transcript. The lane
+# that owns it copies the tree into a mirror, runs the record command there
+# clean, applies the mutation to the mirror, and requires the refusal below to
+# be what that command still produces. The mirror is the point: a mutation in
+# the tree under review is an edit somebody can commit.
+#
+# Re-application is not sampled. The instrument suite drives the controls whose
+# records run under `node`; a second lane drives the rest — the records that run
+# under `cargo`, and the one whose command IS the instrument suite, which cannot
+# be driven by the suite it would re-enter. The suite resolves that partition
+# over this whole control universe and resolves the delegated lane against the
+# workflow, so a control owned by neither lane fails rather than passing quietly.
+# No control is transcribed, command-shaped ones included: a command control's
+# mutation is an argument added to the recorded command, and both halves of what
+# it records — the counters its record transcribes, and the refusal its delta
+# produces against the tree's current test inventory — are re-derived by the
+# same clean-run-then-mutated-run re-application on the lane its record's
+# runner decides, beside the controls that edit files.
+#
+# Both halves of a source mutation span a line boundary on purpose. Two of these
+# subjects are files this register itself owns, and a single-line fragment of
+# such a file would match its own record — the control would then be proving
+# something about its own text rather than about the tree.
+# ---------------------------------------------------------------------------
+
+[[control]]
+id = "CTL-identity-alias"
+kind = "source"
+mutation = "Widen the receiving parameter in query_identity_is_not_semantic_flight_key.rs from SemanticFlightKey to QueryIdentity so the call type-checks and the case no longer fails to compile."
+subject = "crates/verter_identity/tests/compile-fail/query_identity_is_not_semantic_flight_key.rs"
+reverted = "fn expects_flight_key(_: SemanticFlightKey<FakeQuery>) {}\n\nfn main() {"
+applied = "fn expects_flight_key(_: QueryIdentity<FakeQuery>) {}\n\nfn main() {"
+uniqueness = "unique-new-occurrence"
+observed = "compile-contract runner exit 101\ncompile contracts: owner=identity, fixtures=7\ntest tests/compile-fail/direct_batch_id_is_not_direct_invocation_id.rs ... ok\ntest tests/compile-fail/input_basis_id_is_not_query_identity.rs ... ok\ntest tests/compile-fail/query_identity_is_not_semantic_flight_key.rs ... error\nExpected test case to fail to compile, but it succeeded.\ntest tests/compile-fail/raw_u64_is_not_parse_instance_generation.rs ... ok\ntest tests/compile-fail/session_handle_is_not_stable_entity_id.rs ... ok\ntest tests/compile-fail/source_unit_id_has_no_from_canonical.rs ... ok\ntest tests/compile-fail/stable_entity_id_is_not_session_handle.rs ... ok\ntrybuild panicked with `1 of 7 tests failed` — the case no longer proved the two identities cannot coerce"
+
+[[control]]
+id = "CTL-lineage-content"
+kind = "source"
+mutation = "Drop the logical role from SourceUnitId::from_lineage canonical bytes so two units of one source alias."
+subject = "crates/verter_identity/src/identity.rs"
+reverted = "        encoder.field_bytes(1, source_id.digest().as_bytes());\n        encoder.field_str(2, logical_role);\n        Self(Canonical::from_encoder(&encoder))"
+applied = "        encoder.field_bytes(1, source_id.digest().as_bytes());\n        Self(Canonical::from_encoder(&encoder))"
+uniqueness = "unique-new-occurrence"
+observed = "cargo exit 101; test result: FAILED. 25 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out — identity::tests::source_unit_lineage_is_stable_across_revision_and_content panicked on `assertion `left != right` failed: logical role is part of lineage`, with both sides printing the same canonical digest; the crate's second test binary never ran, because cargo stops at the first binary that fails"
+
+[[control]]
+id = "CTL-profile-set"
+kind = "source"
+mutation = "Drop the observed-profile set from QueryIdentity::compose canonical bytes so two capability interpretations of one question share an identity."
+subject = "crates/verter_identity/src/identity.rs"
+reverted = "        encoder.field_bytes(1, semantic_arguments.as_bytes());\n        encoder.field_sorted_set(2, observed_profiles.iter().map(|d| *d.as_bytes()));\n        encoder.field_bytes(3, result_contract.digest().as_bytes());"
+applied = "        encoder.field_bytes(1, semantic_arguments.as_bytes());\n        encoder.field_bytes(3, result_contract.digest().as_bytes());"
+uniqueness = "unique-new-occurrence"
+observed = "cargo exit 101; test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out — identity::tests::query_identity_is_a_profile_set_not_a_profile_list panicked on `assertion `left != right` failed: an observed profile must change the identity`, with both sides printing the same canonical digest"
+
+[[control]]
+id = "CTL-profile-multiplicity"
+kind = "source"
+mutation = "Remove the deduplication step from the shared canonical encoder's set field, leaving it sorted, so one element observed twice encodes differently from the same element observed once."
+subject = "crates/verter_identity/src/encoding.rs"
+reverted = "        sorted.sort();\n        sorted.dedup();\n        let mut payload = Vec::new();"
+applied = "        sorted.sort();\n        let mut payload = Vec::new();"
+uniqueness = "unique-new-occurrence"
+observed = "cargo exit 101; test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 23 filtered out — encoding::tests::sorted_set_collapses_repeats_without_collapsing_distinct_elements panicked on `assertion `left == right` failed`, printing a 52-byte encoding for [a, a] beside a 17-byte-payload encoding for [a], and identity::tests::query_identity_is_a_profile_set_not_a_profile_list panicked on `assertion `left == right` failed: observing a profile twice is the same question as observing it once`, printing a 212-byte canonical against a 172-byte one; the order-independence case still passed, which is what makes the repeat case the discriminating half"
+
+[[control]]
+id = "CTL-authority-edge"
+kind = "source"
+mutation = "Point one predecessor edge in the typescript-mapper DAG module at a node id that does not exist."
+subject = "roadmap/0.1.0-tama/authority/dag/rev11-typescript-mapper.toml"
+reverted = "id = \"TCM1\"\nname = \"Compact mapping products inside CodeTransform\"\npredecessors = [\"TCM0R\"]"
+applied = "id = \"TCM1\"\nname = \"Compact mapping products inside CodeTransform\"\npredecessors = [\"TCM0R_ABSENT_EDGE\"]"
+uniqueness = "unique-new-occurrence"
+observed = "node exit 1, three errors and no PASS line:\nERROR: authority.dag/rev11-typescript-mapper.toml.node[2].predecessors[0]: string does not match ^[A-Z][A-Z0-9-]*$\nERROR: TCM1: missing predecessor TCM0R_ABSENT_EDGE\nERROR: TCM1: charter header predecessors differs from DAG (TCM0R != TCM0R_ABSENT_EDGE)"
+
+[[control]]
+id = "CTL-ledger-row"
+kind = "source"
+mutation = "Set one implementation-ledger row to a status outside the declared pending/implemented pair."
+subject = "roadmap/0.1.0-tama/authority/state/implemented.toml"
+reverted = "\"TCM1\" = { status = \"pending\" }\n\"TCM2\" = { status = \"pending\" }"
+applied = "\"TCM1\" = { status = \"landed\" }\n\"TCM2\" = { status = \"pending\" }"
+uniqueness = "unique-new-occurrence"
+observed = "node exit 1\ntests 26 | pass 19 | fail 7 | cancelled 0 | skipped 0 | todo 0\nseven cases reported `implementation ledger: TCM1: status must be pending or implemented` beside the schema error `authority.implementation-ledger.implementation.TCM1.status: expected one of pending, implemented`"
+
+[[control]]
+id = "CTL-register-status"
+kind = "source"
+mutation = "Add an author-set status property to a claim row in the input register."
+subject = "roadmap/0.1.0-tama/closure/typescript-mapper/register.toml"
+reverted = "[[claim]]\nid = \"CLM-PLANE\"\n"
+applied = "[[claim]]\nid = \"CLM-PLANE\"\nstatus = \"PROVEN\"\n"
+uniqueness = "unique-new-occurrence"
+observed = "node exit 1\ntests 38 | pass 32 | fail 6 | cancelled 0 | skipped 0 | todo 0\nsix cases reported `closure register.claim[0]: additional property status`, so an author-set status never reaches the derivation at all"
+
+[[control]]
+id = "CTL-contract-section"
+kind = "source"
+mutation = "Leave the contract section an atom binds to in place, heading and all, and replace the one sentence that atom quotes with a placeholder, so a binding that only checks the heading still exists would report the atom proven."
+subject = "roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md"
+reverted = "**`InputBasisId` — the in-flight observation basis.** It names the committed\ninput state a result is being produced against. It is *not* a cache-candidate\nkey and must never enter one: a basis-keyed cache answers a question about a\nsnapshot that has already been superseded."
+applied = "**`InputBasisId` — the in-flight observation basis.**\nTBD."
+uniqueness = "unique-new-occurrence"
+observed = "node exit 1, no PASS line, and the atom whose quoted sentence was replaced is the one that fails:\nERROR: atom A-basis-not-a-cache-key: contract section \"3. Observation identity\" no longer states \"It is *not* a cache-candidate key and must never enter one\"\nERROR: control CTL-contract-section: the text this mutation replaced occurs 0 times in roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md, so the mutation was not a unique application\nERROR: control CTL-contract-section: the mutation is still present in roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md, so it was never reverted and the tree under review is the mutated one"
+
+[[control]]
+id = "CTL-targeted-selector"
+kind = "command"
+mutation = "Re-run the recorded command with an added filter expression that matches no test in the three packages."
+argv_delta = ["-E", "test(zzz_selector_matches_nothing)"]
+uniqueness = "unique-new-occurrence"
+observed = "nextest exit 4, error: no tests to run; Summary [ 0.018s] 0 tests run: 0 passed, 9438 skipped — a record transcribed from that run is refused twice over, for zero selected work and for 9438 skips against 547 declared"
+
+# ---------------------------------------------------------------------------
+# Findings. Every entry is routed to exactly one claim or one residue; the
+# validator holds the closed expected partition and fails on an omission, an
+# addition, or a misroute. No entry is a non-finding.
+#
+# A claim-routed entry also names the ATOM that discriminates it. Routing alone
+# would be an assignment: it would let a finding be filed under a claim none of
+# whose obligations speak to it, and the register would still read as complete.
+# ---------------------------------------------------------------------------
+
+[[finding]]
+id = "C1"
+statement = "Closure status was declared by the author in the register input instead of derived from evidence, so the package certified itself."
+claim = "CLM-INSTRUMENT"
+atom = "A-status-derived-not-authored"
+
+[[finding]]
+id = "C2"
+statement = "The semantic plane's behaviour under concurrent flights was asserted rather than characterized; no topology evidence existed."
+residue = "TCM0-R-HANG-TOPOLOGY"
+
+[[finding]]
+id = "C3"
+statement = "Package and binary provenance rows named artifacts that the recorded commands did not produce."
+claim = "CLM-EVIDENCE"
+atom = "A-command-exact"
+
+[[finding]]
+id = "C4"
+statement = "Mapper captures were summarized in prose instead of bound to fixture inputs and an exact command."
+claim = "CLM-EVIDENCE"
+atom = "A-fixtures-named"
+
+[[finding]]
+id = "C5"
+statement = "Semantic probes reported outcomes without selected-work counters, so a probe that selected nothing read as a pass."
+claim = "CLM-EVIDENCE"
+atom = "A-nonzero-selected-work"
+
+[[finding]]
+id = "C6"
+statement = "Stale-snapshot characterization did not state the basis under which a produced result may not be published."
+claim = "CLM-LIFECYCLE"
+atom = "A-publication-requires-live-basis"
+
+[[finding]]
+id = "C7"
+statement = "Projection and semantic topology selection was left to the implementer with no ratified selection criterion."
+residue = "TCM0-R-TOPOLOGY-SELECTION"
+
+[[finding]]
+id = "C8"
+statement = "The cache and lifecycle contract did not forbid warming a slot from a degraded outcome."
+claim = "CLM-LIFECYCLE"
+atom = "A-degraded-never-warms"
+
+[[finding]]
+id = "C9"
+statement = "No pre-change implementation baseline existed for the comparisons the successor blocks must make."
+residue = "TCM0-R-IMPLEMENTATION-BASELINE"
+
+[[finding]]
+id = "AR1"
+statement = "The two planes were not separated, and the mapping plane was defined in string terms — correspondence recovered by reading generated text."
+claim = "CLM-PLANE"
+atom = "A-plane-boundary"
+
+[[finding]]
+id = "AR2"
+statement = "The mapper called back into the semantic oracle, making geometry depend on type-checking availability."
+claim = "CLM-PLANE"
+atom = "A-no-oracle-callback"
+
+[[finding]]
+id = "AR3"
+statement = "The certified engine binding was named but carried no certification predicate, so it was a handle rather than a witness."
+claim = "CLM-BINDING"
+atom = "A-binding-is-a-witness"
+
+[[finding]]
+id = "AR4"
+statement = "The in-flight observation basis was used as a cross-snapshot cache key, aliasing a superseded snapshot with a live question."
+claim = "CLM-IDENTITY"
+atom = "A-basis-not-a-cache-key"
+
+[[finding]]
+id = "AR5"
+statement = "The query identity omitted the observed profile set, so two different capability interpretations shared one slot."
+claim = "CLM-IDENTITY"
+atom = "A-profiles-in-query-identity"
+
+[[finding]]
+id = "AR6"
+statement = "The flight key was not strictly larger than the query identity, so the two could coerce."
+claim = "CLM-IDENTITY"
+atom = "A-flight-key-strictly-larger"
+
+[[finding]]
+id = "AR7"
+statement = "The content mapper had no total-function contract; an unmapped region had no fail-closed disposition."
+claim = "CLM-PLANE"
+atom = "A-mapper-total"
+
+[[finding]]
+id = "AR8"
+statement = "The projection classes were listed but not closed, so a region matching none of them was undefined rather than a defect."
+claim = "CLM-PLANE"
+atom = "A-projection-classes-closed"
+
+[[finding]]
+id = "AR9"
+statement = "Ownership was stated per artifact rather than one method and one capability, leaving two owners able to answer the same question."
+claim = "CLM-OWNERSHIP"
+atom = "A-single-owner-per-capability"
+
+[[finding]]
+id = "AR10"
+statement = "Deletion and survivor decisions were narrative instead of concrete rows naming subject and disposition."
+claim = "CLM-OWNERSHIP"
+atom = "A-deletion-rows-concrete"
+
+[[finding]]
+id = "AR11"
+statement = "The ownership ledger had no non-circular-owner rule, so a remainder could be owned by the block that produced it."
+claim = "CLM-OWNERSHIP"
+atom = "A-residue-owner-non-circular"
+
+[[finding]]
+id = "AR12"
+statement = "No acyclic test specification existed, so a proof could depend on the artifact it was proving."
+claim = "CLM-INSTRUMENT"
+atom = "A-acyclic-proof-dependency"
+
+[[finding]]
+id = "AR13"
+statement = "The downstream narratives restated the displaced owner rather than the ratified one."
+claim = "CLM-OWNERSHIP"
+atom = "A-downstream-owner-restated"
+
+[[finding]]
+id = "AR14"
+statement = "Receiving coverage bound remainders to a train rather than to a direct acceptance-criterion identifier."
+claim = "CLM-OWNERSHIP"
+atom = "A-receiving-criterion-direct"
+
+[[finding]]
+id = "AR15"
+statement = "No resolution gate was stated for a remainder, so one could survive past plan close unnoticed."
+claim = "CLM-OWNERSHIP"
+atom = "A-resolution-gate-named"
+
+[[finding]]
+id = "AD1"
+statement = "Omitted claims: the claim universe was hand-listed, so an obligation could be silently absent without any check failing."
+claim = "CLM-INSTRUMENT"
+atom = "A-claim-universe-complete"
+
+[[finding]]
+id = "AD2"
+statement = "Forbidden input status: the input register carried a status field the author could set directly."
+claim = "CLM-INSTRUMENT"
+atom = "A-status-derived-not-authored"
+
+[[finding]]
+id = "AD3"
+statement = "Removed residue or owner: deleting a remainder row quietly shrank the remainder set instead of failing."
+claim = "CLM-INSTRUMENT"
+atom = "A-claim-universe-complete"
+
+[[finding]]
+id = "AD4"
+statement = "Missing dependency: a proof named a dependency the run did not have, and the concurrency characterization in particular had no available dependency at all."
+residue = "TCM0-R-HANG-TOPOLOGY"
+
+[[finding]]
+id = "AD5"
+statement = "Stale or inapplicable evidence: evidence produced before the subject changed was accepted as current."
+claim = "CLM-EVIDENCE"
+atom = "A-node-evidence-re-executed"
+
+[[finding]]
+id = "AD6"
+statement = "Irrelevant existing proof: an unrelated green suite was cited as coverage for an uncovered atom."
+claim = "CLM-INSTRUMENT"
+atom = "A-proof-relevance-bound"
+
+[[finding]]
+id = "AD7"
+statement = "Zero selected work: a selector that matched nothing exited successfully and was recorded as a pass."
+claim = "CLM-EVIDENCE"
+atom = "A-nonzero-selected-work"
+
+[[finding]]
+id = "AD8"
+statement = "Skipped work: unexpected skips were not distinguished from executed passes."
+claim = "CLM-EVIDENCE"
+atom = "A-zero-unexpected-skips"
+
+[[finding]]
+id = "AD9"
+statement = "Inconsistent counters: reported executed, passed, and failed counts did not reconcile with each other."
+claim = "CLM-EVIDENCE"
+atom = "A-counters-consistent"
+
+[[finding]]
+id = "AD10"
+statement = "Unapplied mutation: a negative control whose mutation never landed reported a pass, and nothing proved the mutation was unique and new."
+claim = "CLM-INSTRUMENT"
+atom = "A-control-mutation-locatable"
+
+[[finding]]
+id = "AD11"
+statement = "Disclosed limit: a disclosed limit did not force bounded status, and disclosing one was an author's choice rather than a derived consequence."
+claim = "CLM-INSTRUMENT"
+atom = "A-bounded-needs-transfer"
+
+[[finding]]
+id = "AD12"
+statement = "Bounded-to-proven laundering: a bounded claim was re-recorded as proven without an approved transfer."
+claim = "CLM-INSTRUMENT"
+atom = "A-bounded-needs-transfer"
+
+# ---------------------------------------------------------------------------
+# Residues. Exactly three are admissible; the validator holds that closed set.
+# ---------------------------------------------------------------------------
+
+[[residue]]
+id = "TCM0-R-HANG-TOPOLOGY"
+statement = "How the semantic plane behaves under concurrent flights — which waits are cooperative, where supersession cancels, and what the worst-case topology is — is not characterized by this rescope."
+
+[[residue]]
+id = "TCM0-R-TOPOLOGY-SELECTION"
+statement = "Which projection topology and which semantic topology are selected is not decided by this rescope; the contract states the constraints the selection must satisfy."
+
+[[residue]]
+id = "TCM0-R-IMPLEMENTATION-BASELINE"
+statement = "What the successors need from the pre-change implementation cannot be produced by an authority-only change: the recorded baseline they compare against does not exist yet."
+
+[[receiving]]
+residue = "TCM0-R-HANG-TOPOLOGY"
+order = 1
+owner_node = "TCM3"
+criterion = "TCM3-AC3"
+criterion_role = "incremental equivalence"
+gate = "TCM3 acceptance: the semantic capability closure lands with concurrent-flight behaviour characterized, not asserted."
+
+[[receiving]]
+residue = "TCM0-R-HANG-TOPOLOGY"
+order = 2
+owner_node = "TCM4"
+criterion = "TCM4-AC3"
+criterion_role = "incremental equivalence"
+gate = "TCM4 acceptance: activation is refused unless the characterization holds on the activated path."
+
+[[receiving]]
+residue = "TCM0-R-TOPOLOGY-SELECTION"
+order = 1
+owner_node = "TCM2"
+criterion = "TCM2-AC1"
+criterion_role = "sole-owner outcome"
+gate = "TCM2 acceptance: the projection topology is selected and the alternative is deleted, not retained."
+
+[[receiving]]
+residue = "TCM0-R-TOPOLOGY-SELECTION"
+order = 2
+owner_node = "TCM3"
+criterion = "TCM3-AC1"
+criterion_role = "sole-owner outcome"
+gate = "TCM3 acceptance: the semantic topology is selected and the alternative is deleted, not retained."
+
+[[receiving]]
+residue = "TCM0-R-IMPLEMENTATION-BASELINE"
+order = 1
+owner_node = "TCM1"
+criterion = "TCM1-AC2"
+criterion_role = "positive contract"
+gate = "TCM1 acceptance: the mapping products must preserve exact identities and provenance against a recorded pre-change comparison, which cannot be demonstrated without producing that baseline first."
+
+[[receiving]]
+residue = "TCM0-R-IMPLEMENTATION-BASELINE"
+order = 2
+owner_node = "TCM2"
+criterion = "TCM2-AC2"
+criterion_role = "positive contract"
+gate = "TCM2 acceptance: the projection plane's correspondence must be complete and deterministically ordered against the recorded pre-change comparison, so the baseline is a precondition of the criterion rather than an optional note."
+
+[[receiving]]
+residue = "TCM0-R-IMPLEMENTATION-BASELINE"
+order = 3
+owner_node = "TCM3"
+criterion = "TCM3-AC2"
+criterion_role = "positive contract"
+gate = "TCM3 acceptance: the capability closure must preserve exact identities and provenance against the recorded pre-change comparison, which the criterion cannot waive."
+
+[[receiving]]
+residue = "TCM0-R-IMPLEMENTATION-BASELINE"
+order = 4
+owner_node = "TCM4"
+criterion = "TCM4-AC2"
+criterion_role = "positive contract"
+gate = "TCM4 acceptance: the activated path must preserve the exact identities and provenance the recorded baseline captured before the displaced route is deleted."
+
+[[transfer]]
+atom = "A-hang-topology-characterised"
+residue = "TCM0-R-HANG-TOPOLOGY"
+approved_by = "charters/rev11-typescript-mapper/TCM0R.md"
+
+[[transfer]]
+atom = "A-topology-selected"
+residue = "TCM0-R-TOPOLOGY-SELECTION"
+approved_by = "charters/rev11-typescript-mapper/TCM0R.md"
+
+[[transfer]]
+atom = "A-implementation-baseline"
+residue = "TCM0-R-IMPLEMENTATION-BASELINE"
+approved_by = "charters/rev11-typescript-mapper/TCM0R.md"
+
+# ---------------------------------------------------------------------------
+# Deletion and survivor rows.
+# ---------------------------------------------------------------------------
+
+[[row]]
+kind = "deletion"
+subject = "Self-certified closure status"
+disposition = "Structurally rejected: the register schema declares no status property and no limits property, and sets additionalProperties=false on every table, so neither an author-set status nor an author-set limit can parse. The validator is the only producer of both."
+receiving_criterion = "TCM0R-AC1"
+receiving_criterion_role = "sole-owner outcome"
+
+[[row]]
+kind = "deletion"
+subject = "Tracked Python or POSIX control"
+disposition = "Structurally rejected: the adapter runner vocabulary is the closed enum node|cargo, and the register supplies only an argument tail, so a shell, batch, or interpreter control is not expressible."
+receiving_criterion = "TCM0R-AC1"
+receiving_criterion_role = "sole-owner outcome"
+
+[[row]]
+kind = "deletion"
+subject = "Name-keyed scanner guard"
+disposition = "Deleted: no check walks a directory looking for files that mention a name. Every check reads a declared artifact at a path the register or the program authority names — the register, the schema, the DAG, the charters, the ratified contract, the compile-fail fixture directory a cited record's own runner enumerates, and the CI workflow. Reading the workflow does match literal configuration identifiers — the filter names, the job gating expression, and the command lines the lanes issue — because those identifiers ARE the configuration's declared interface, named by the register and resolved against the file rather than searched for across a tree. Two lane commands are RUN rather than read, for the same reason and under the same discipline: a lane whose selection is a run-time predicate, and a lane whose runner iterates its own declared list, are only resolvable by asking them, so the register declares the exact command, the workflow must agree that this is the command the job computes its selection from or the script that job runs, and only the allowlisted node runner is executable. Nothing there is searched for; the command is handed to the check. One residual coupling is disclosed rather than argued away: a source-mutation control asserts a verbatim spelling of a named production file, so a behaviour-preserving rename or reflow of that region breaks the control without changing anything the register cares about. That is the price of proving a reverted mutation was unique and new against the tree under review, which nothing weaker establishes. It is bounded to a control's own named subject and is not a licence to multiply: a successor adding controls over churning source should prefer the narrowest binding that still proves uniqueness — anchoring to the test the mutation broke, which the observed outcome already quotes — and should not introduce a check that searches for a spelling it was not handed."
+receiving_criterion = "TCM0R-AC1"
+receiving_criterion_role = "sole-owner outcome"
+
+[[row]]
+kind = "deletion"
+subject = "String mapper plane"
+disposition = "Deleted by the ratified contract: correspondence comes from the emission record, never from reading generated text. The implementing block lands the typed mapping products and no text-recovery path beside them."
+receiving_criterion = "TCM1-AC1"
+receiving_criterion_role = "sole-owner outcome"
+
+[[row]]
+kind = "deletion"
+subject = "Mapper callback into the semantic oracle"
+disposition = "Structurally rejected by the ratified one-way dependency direction: the mapping-product owner must not reach the oracle owner, and the mapping product exposes no route through which a query could be issued."
+receiving_criterion = "TCM2-AC1"
+receiving_criterion_role = "sole-owner outcome"
+
+[[row]]
+kind = "survivor"
+subject = "Repaired package and binary provenance"
+disposition = "Retained as an obligation: every retained evidence row names its fixture inputs and the exact reconstructible command that produced the artifact it cites."
+receiving_criterion = "TCM0R-AC2"
+receiving_criterion_role = "positive contract"
+
+[[row]]
+kind = "survivor"
+subject = "Mapper captures"
+disposition = "Retained as an obligation on the mapping-product block: a capture is admissible only as a proof record with fixtures, exact command, terminal summary, and consistent counters."
+receiving_criterion = "TCM1-AC2"
+receiving_criterion_role = "positive contract"
+
+[[row]]
+kind = "survivor"
+subject = "Semantic probes"
+disposition = "Retained as an obligation on the capability-closure block, with nonzero selected work and no undeclared skips required before a probe counts."
+receiving_criterion = "TCM3-AC2"
+receiving_criterion_role = "positive contract"
+
+[[row]]
+kind = "survivor"
+subject = "Stale-snapshot characterization"
+disposition = "Retained and strengthened in the ratified lifecycle section: a superseded basis makes a result return-only."
+receiving_criterion = "TCM3-AC3"
+receiving_criterion_role = "incremental equivalence"
+
+[[row]]
+kind = "survivor"
+subject = "Cache and lifecycle contract"
+disposition = "Retained and strengthened: degraded outcomes never warm, slots key on query identity alone, and incremental must equal fresh."
+receiving_criterion = "TCM3-AC3"
+receiving_criterion_role = "incremental equivalence"
+
+[[row]]
+kind = "survivor"
+subject = "Acyclic test specification"
+disposition = "Retained as a validator rule: a proof may not cover atoms of the claim whose subject its own recorded command runs."
+receiving_criterion = "TCM0R-AC1"
+receiving_criterion_role = "sole-owner outcome"
+
+[[row]]
+kind = "survivor"
+subject = "Five projection classes"
+disposition = "Retained as a closed exhaustive partition of both surfaces in the ratified contract, with the two one-sided classes carrying the fail-closed IDE disposition."
+receiving_criterion = "TCM2-AC2"
+receiving_criterion_role = "positive contract"
+
+[[row]]
+kind = "survivor"
+subject = "Ratified ownership decisions"
+disposition = "Retained as the ownership table in the ratified contract: one capability, one owner, competing owners deleted rather than demoted."
+receiving_criterion = "TCM0R-AC1"
+receiving_criterion_role = "sole-owner outcome"
+
+[[row]]
+kind = "survivor"
+subject = "Concrete deletion and survivor rows"
+disposition = "Retained as these rows, each naming a subject, a disposition, and the criterion that receives it."
+receiving_criterion = "TCM0R-AC2"
+receiving_criterion_role = "positive contract"
+
+[[row]]
+kind = "survivor"
+subject = "Consolidated ordering and aliasing probe"
+disposition = "Retained as an obligation on the activation block: the consolidated probe is re-run against the activated path before the displaced route is deleted, and its result is a proof record like any other."
+receiving_criterion = "TCM4-AC2"
+receiving_criterion_role = "positive contract"

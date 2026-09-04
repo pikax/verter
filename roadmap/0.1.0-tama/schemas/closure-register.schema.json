@@ -1,0 +1,348 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Closure register input",
+  "description": "Input register for a closure instrument. Claim, finding, and residue lifecycle status is DERIVED by the validator and has no representation here: no table in this schema accepts a `status` property, and every table sets additionalProperties=false, so an author-set status is a schema error rather than a convention.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "instrument",
+    "ratification",
+    "adapter",
+    "claim",
+    "atom",
+    "proof",
+    "control",
+    "finding",
+    "residue",
+    "receiving",
+    "transfer",
+    "row"
+  ],
+  "properties": {
+    "schema": { "const": 1 },
+    "instrument": { "type": "string", "minLength": 1 },
+    "ratification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "displaced_owner", "contract", "instrument_authority", "decision"],
+      "properties": {
+        "owner": { "type": "string", "minLength": 1 },
+        "displaced_owner": { "type": "string", "minLength": 1 },
+        "contract": { "type": "string", "minLength": 1 },
+        "instrument_authority": { "type": "string", "minLength": 1 },
+        "decision": { "type": "string", "minLength": 1 }
+      }
+    },
+    "adapter": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "runner",
+          "argv_prefix",
+          "summary_shape",
+          "summary_grammar",
+          "reexecution"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+          "runner": { "enum": ["node", "cargo"] },
+          "argv_prefix": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "summary_shape": { "type": "string", "minLength": 1 },
+          "summary_grammar": {
+            "description": "The terminal-summary shape this runner emits. The validator re-derives a record's five counters from its transcript under this grammar and requires the record's own numbers to equal them, so a summary that is not a real terminal line of this shape refuses the record.",
+            "enum": ["libtest", "nextest", "node-test", "tool-line", "compile-contracts"]
+          },
+          "reexecution": {
+            "description": "Who re-derives a record. An instrument record is re-run by the control suite and compared against its transcription; a node runner may not declare anything else.",
+            "enum": ["instrument", "external"]
+          },
+          "refresh_job": {
+            "description": "For an external record only: the workflow job that re-runs this runner's work. Required there and forbidden on an instrument record; the validator resolves it against the workflow rather than trusting it.",
+            "type": "string",
+            "minLength": 1
+          },
+          "refresh_filter": {
+            "description": "For an external record only: the path filter that gates the refresh job. Every artifact such a record cites must be covered by this filter's patterns.",
+            "type": "string",
+            "minLength": 1
+          },
+          "refresh_command": {
+            "description": "For an external record only: the COMPLETE command line the refresh job issues. The validator requires the named job to issue exactly this line, not merely to contain it: a declaration that stops before the lane's own selection arguments would satisfy a containment check while hiding the flags that decide what the lane runs.",
+            "type": "string",
+            "minLength": 1
+          },
+          "refresh_selection_producer": {
+            "description": "For a lane that narrows at run time by a shell variable: the command the job computes that variable from. The validator requires the job's own assignment to be exactly this command and then RUNS it, so the predicate is decomposed into what it excludes rather than published as a name.",
+            "type": "string",
+            "minLength": 1
+          },
+          "refresh_selection_enumerator": {
+            "description": "For a lane whose runner iterates its own declared list: a run of that same script which prints the list, one entry per line. The validator runs it and requires the record's own selection to be one of the entries; without it, 'the runner's default universe' is a phrase about a list nothing read.",
+            "type": "string",
+            "minLength": 1
+          },
+          "refresh_selection_flag": {
+            "description": "The flag of a record's own command whose value must appear in the enumerated lane universe.",
+            "type": "string",
+            "minLength": 1
+          },
+          "count_source": {
+            "description": "An additional, independent source for the selected count. `fixture-directory` re-derives it from the directory the record's fixtures live in, so a case added or removed there invalidates the transcription instead of passing.",
+            "enum": ["fixture-directory"]
+          }
+        }
+      }
+    },
+    "claim": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "statement", "subject"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^CLM-[A-Z0-9-]+$" },
+          "statement": { "type": "string", "minLength": 1 },
+          "subject": {
+            "description": "Repository-relative artifacts this claim is about. A proof whose recorded command runs one of them may not cover this claim.",
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "atom": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "claim", "statement", "evidence_anchor", "shipped_obligation"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^A-[a-z0-9-]+$" },
+          "claim": { "type": "string", "pattern": "^CLM-[A-Z0-9-]+$" },
+          "statement": { "type": "string", "minLength": 1 },
+          "evidence_anchor": {
+            "description": "The repository artifact a proof of this atom must exercise. `covers` is an author's list, so without this any green record could be credited with any obligation; the validator derives each record's surface from its own fixtures, command, and selected packages and requires that surface to reach this path.",
+            "type": "string",
+            "minLength": 1
+          },
+          "contract_section": { "type": "string", "minLength": 1 },
+          "contract_anchor": {
+            "description": "Verbatim text the bound contract section must still state. A section heading that exists but whose body was gutted must not keep an atom proven.",
+            "type": "string",
+            "minLength": 16
+          },
+          "shipped_obligation": {
+            "description": "What the shipped code owes this obligation, from a closed vocabulary plus one open arm: `met` (the shipped code meets it), `authority-only` (the obligation's subject is the ratified artifact the atom is anchored at rather than shipped code, so the question has no answer), `carried` (an open question this block hands to a successor), or the production path at which the obligation is currently UNMET. The three named values are each refused against a contradiction the register already carries: `met` on a transferred atom or on an atom no record covers, `authority-only` on a transferred atom or on one anchored inside a production surface this node declares, and `carried` on an atom no approved transfer carries. Required on every atom, because the previous optional spelling made owedness an author's silence — an atom that disclosed an unmet composition in its own statement and simply omitted the field kept quotation coverage and derived PROVEN, which is the routing this field exists to force. Declaring an unmet path is a claim about bytes a reviewer can check; declaring nothing is no longer available. An atom naming a path must be TRANSFERRED to an admissible residue — an obligation known not to hold is a remainder and leaves through the same approved route as every other one, never through a status column beside a covered atom — and the validator requires some owner in that remainder's ordered receiving sequence to declare a production surface containing this path, because a carry to blocks that may not change the code is a carry to nobody.",
+            "type": "string",
+            "minLength": 1
+          },
+          "received_by": { "type": "string", "pattern": "^[A-Z][A-Z0-9]*-AC[0-9]+$" },
+          "received_by_role": {
+            "description": "The role the owner charter must declare for the cited criterion. The bare ordinal is boilerplate across every charter; the role is what discriminates.",
+            "enum": [
+              "sole-owner outcome",
+              "positive contract",
+              "incremental equivalence",
+              "bounded work"
+            ]
+          }
+        }
+      }
+    },
+    "proof": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "adapter",
+          "argv_tail",
+          "fixtures",
+          "covers",
+          "selected",
+          "executed",
+          "passed",
+          "failed",
+          "skipped",
+          "terminal_summary",
+          "control"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^P-[a-z0-9-]+$" },
+          "adapter": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+          "argv_tail": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "fixtures": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "covers": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "selected": { "type": "integer", "minimum": 0 },
+          "executed": { "type": "integer", "minimum": 0 },
+          "passed": { "type": "integer", "minimum": 0 },
+          "failed": { "type": "integer", "minimum": 0 },
+          "skipped": { "type": "integer", "minimum": 0 },
+          "expected_skips": { "type": "integer", "minimum": 0 },
+          "skip_basis": { "type": "string", "minLength": 1 },
+          "terminal_summary": { "type": "string", "minLength": 1 },
+          "count_key": {
+            "description": "For a tool-line summary only: the key=value field of the tool's own terminal line that carries the count of work it selected.",
+            "type": "string",
+            "pattern": "^[a-z][a-z_]*$"
+          },
+          "control": { "type": "string", "pattern": "^CTL-[a-z0-9-]+$" }
+        }
+      }
+    },
+    "control": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "mutation", "uniqueness", "observed"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^CTL-[a-z0-9-]+$" },
+          "kind": {
+            "description": "What the mutation edited. A `source` mutation names a file and both halves of the edit; a `command` mutation names the arguments it added to the recorded command.",
+            "enum": ["source", "command"]
+          },
+          "mutation": { "type": "string", "minLength": 1 },
+          "subject": {
+            "description": "For a source mutation: the repository file the mutation was applied to.",
+            "type": "string",
+            "minLength": 1
+          },
+          "reverted": {
+            "description": "For a source mutation: the exact text the mutation replaced. The validator requires it to be present in the subject exactly once, which is what makes `unique-new-occurrence` a verified property rather than an assertion. It must span a line boundary so it cannot match its own record.",
+            "type": "string",
+            "minLength": 1
+          },
+          "applied": {
+            "description": "For a source mutation: the exact text the mutation introduced. The validator requires it to be ABSENT from the subject, so a mutation still sitting in the tree, or one that could never have applied, fails.",
+            "type": "string",
+            "minLength": 1
+          },
+          "argv_delta": {
+            "description": "For a command mutation: the arguments the mutation added. None of them may already be part of the recorded command, which is how newness is verified.",
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "uniqueness": { "enum": ["unique-new-occurrence"] },
+          "observed": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "finding": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "statement"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^(C|AR|AD)[0-9]+$" },
+          "statement": { "type": "string", "minLength": 1 },
+          "claim": { "type": "string", "pattern": "^CLM-[A-Z0-9-]+$" },
+          "atom": {
+            "description": "The atom that discriminates this finding. Required when the finding closes against a claim and forbidden on a remainder entry: routing to a claim is an assignment, naming the obligation that would fail if the finding were still live is a closure.",
+            "type": "string",
+            "pattern": "^A-[a-z0-9-]+$"
+          },
+          "residue": { "type": "string", "pattern": "^[A-Z0-9-]+$" }
+        }
+      }
+    },
+    "residue": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "statement"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Z0-9-]+$" },
+          "statement": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "receiving": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["residue", "order", "owner_node", "criterion", "criterion_role", "gate"],
+        "properties": {
+          "residue": { "type": "string", "pattern": "^[A-Z0-9-]+$" },
+          "order": { "type": "integer", "minimum": 1 },
+          "owner_node": { "type": "string", "pattern": "^[A-Z][A-Z0-9-]*$" },
+          "criterion": { "type": "string", "pattern": "^[A-Z][A-Z0-9]*-AC[0-9]+$" },
+          "criterion_role": {
+            "enum": [
+              "sole-owner outcome",
+              "positive contract",
+              "incremental equivalence",
+              "bounded work"
+            ]
+          },
+          "gate": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "transfer": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["atom", "residue", "approved_by"],
+        "properties": {
+          "atom": { "type": "string", "pattern": "^A-[a-z0-9-]+$" },
+          "residue": { "type": "string", "pattern": "^[A-Z0-9-]+$" },
+          "approved_by": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "row": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "subject",
+          "disposition",
+          "receiving_criterion",
+          "receiving_criterion_role"
+        ],
+        "properties": {
+          "kind": { "enum": ["deletion", "survivor"] },
+          "subject": { "type": "string", "minLength": 1 },
+          "disposition": { "type": "string", "minLength": 1 },
+          "receiving_criterion": { "type": "string", "minLength": 1 },
+          "receiving_criterion_role": {
+            "enum": [
+              "sole-owner outcome",
+              "positive contract",
+              "incremental equivalence",
+              "bounded work"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
