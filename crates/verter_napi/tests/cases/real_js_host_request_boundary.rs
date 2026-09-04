@@ -65,6 +65,15 @@
 //! `typed-batch-isolates-public-api-and-declarations-refusals`), the batch
 //! refusal isolated to its own entry beside compiling siblings.
 //!
+//! `ideCompanion` is where that zip matters most, because it is the only
+//! product whose payload is computed FROM the paired source: its
+//! destructured-binding offsets are re-encoded to UTF-16 against it, so a
+//! mispairing publishes offsets into the wrong file rather than failing.
+//! `typed-single-vue-preserves-ide-utf16-offsets` proves the singular
+//! route; `typed-batch-preserves-ide-utf16-offsets-per-entry` proves the
+//! batch route, with two entries whose multi-byte prefixes differ so each
+//! entry's offset is wrong against the other's source.
+//!
 //! # Where the addon comes from
 //!
 //! This suite builds nothing. The addon is its own `cdylib` package that
@@ -114,6 +123,7 @@ const EXPECTED_CASES: &[&str] = &[
     "typed-batch-refuses-a-non-array-input",
     "typed-batch-refuses-unknown-options",
     "typed-batch-runs-analysis-and-runtime-server-products",
+    "typed-batch-preserves-ide-utf16-offsets-per-entry",
     "typed-batch-isolates-public-api-and-declarations-refusals",
     "valid-request-accepted",
     "unknown-top-level-key-stated-as-undefined-refused",
@@ -1229,6 +1239,91 @@ check("typed-batch-runs-analysis-and-runtime-server-products", () => {
   const serverNodes = runtimeNodes(entries[1].response, "runtimeServer");
   if (!serverNodes || serverNodes.length === 0) {
     return `batch runtimeServer nodes were absent: ${JSON.stringify(entries[1].response)}`;
+  }
+  return undefined;
+});
+
+// `ideCompanion` is the one product whose payload is computed FROM the
+// entry's own source: the destructured-binding offsets are re-encoded to
+// UTF-16 against it. The batch route zips each response back onto its
+// input's source, so a zip that paired entry N's response with entry M's
+// source would publish offsets that index the wrong file — silently, and
+// only for this product. Two entries whose multi-byte prefixes have
+// DIFFERENT byte lengths make that mispairing observable: each entry's
+// binding offset can only be right against its own source.
+//
+// Mutation recipes:
+// - Reverse `sources` before the zip in `compile_requests`
+//   (`.zip(sources.into_iter().rev())`): both entries publish the other's
+//   UTF-16 offsets and this case goes red on the first entry.
+// - Convert the offsets as UTF-8 bytes (pass `OffsetEncoding::Utf8` to
+//   `convert_destructured_block_meta` in `host_ide_to_napi`): both entries
+//   report their byte offsets, which the assertions distinguish from the
+//   UTF-16 ones by construction.
+check("typed-batch-preserves-ide-utf16-offsets-per-entry", () => {
+  // Different prefixes, so entry 0's UTF-16 offset for `greeting` is not
+  // entry 1's, and neither equals its own byte offset.
+  const entries = [
+    { id: "/typed/BatchIdeA.vue", prefix: "// é" },
+    { id: "/typed/BatchIdeB.vue", prefix: "// 😀😀😀 héllo —" },
+  ].map(({ id, prefix }) => {
+    const source = `<script setup lang="ts">
+${prefix}
+const greeting = "x"
+const { title = greeting } = defineProps<{ title?: string }>()
+</script>
+<template><div>{{ title }}</div></template>`;
+    return { id, source };
+  });
+
+  const utf16Of = (source) => source.indexOf("greeting");
+  const byteOf = (source) => Buffer.byteLength(source.slice(0, utf16Of(source)));
+  for (const { id, source } of entries) {
+    if (byteOf(source) === utf16Of(source)) {
+      return `${id} did not distinguish UTF-8 bytes from UTF-16 units`;
+    }
+  }
+  if (utf16Of(entries[0].source) === utf16Of(entries[1].source)) {
+    return "both entries share one UTF-16 offset, so a mispaired source would be invisible";
+  }
+
+  const host = new addon.VerterHost();
+  const responses = host.compileRequests(
+    entries.map(({ id, source }) => ({
+      canonicalId: id,
+      source: Buffer.from(source),
+      request: vueProducts(id, [ideProduct()]),
+    })),
+  );
+  host.close();
+
+  if (responses.length !== entries.length) {
+    return `batch returned ${responses.length} entries for ${entries.length} inputs`;
+  }
+  for (const [index, { id, source }] of entries.entries()) {
+    const entry = responses[index];
+    if (entry.failure || !entry.response) {
+      return `${id} did not compile: ${JSON.stringify(entry)}`;
+    }
+    if (entry.canonicalId !== id) {
+      return `entry ${index} named ${entry.canonicalId}, expected ${id}`;
+    }
+    const product = entry.response.products[0];
+    const ide = product && product.kind === "ideCompanion" && product.ide;
+    const published = ide && ide.destructuredBlock;
+    const binding = published && published.bindings.find((row) => row.name === "greeting");
+    if (!binding) return `${id} published no destructured binding: ${JSON.stringify(entry)}`;
+    if (binding.sourceStart !== utf16Of(source)) {
+      const other = entries[1 - index];
+      const blamed =
+        binding.sourceStart === utf16Of(other.source)
+          ? ` (that is ${other.id}'s offset — the batch paired the wrong source)`
+          : ` (byte offset is ${byteOf(source)})`;
+      return `${id} binding sourceStart was ${binding.sourceStart}, expected ${utf16Of(source)}${blamed}`;
+    }
+    if (!(published.blockStart > source.length && published.blockStart <= ide.code.length)) {
+      return `${id} generated blockStart ${published.blockStart} did not index IDE code of length ${ide.code.length}`;
+    }
   }
   return undefined;
 });

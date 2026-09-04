@@ -42,37 +42,63 @@ The charter names `crates/verter_napi/src/lib.rs`,
 1. `crates/verter_protocol/src/types.rs` and
    `crates/verter_ffi/src/convert/output.rs` — the diagnostic argument list.
 
-   The charter requires the new routes' returned value to preserve
-   "diagnostics ... and public span and offset encoding". A diagnostic's
-   `arguments` are the values its message is rendered from, and the FFI
-   diagnostic DTO did not carry them, so the typed route could not preserve
-   them. The in-charter alternative — projecting the arguments privately
-   inside `verter_napi` — is forbidden by the Shared Optimized Codebase rule
-   in `CLAUDE.md`: a reusable projection lands in the lowest owner crate that
-   serves every consumer, and a consumer-local wrapper does not fork it. So
-   the conversion is `verter_ffi::convert::host_diagnostic_arg_to_ffi` over a
-   `verter_protocol` DTO, and the browser binding gets the same list from the
-   same code. Complying with the charter's diagnostic-preservation
-   requirement and with the shared-codebase rule at the same time requires
-   exactly these two files.
+   **The charter-acceptance argument for this item does not hold, and the
+   operator should accept it on other grounds or refuse it.** An earlier
+   draft of this record argued that the charter's "preserve diagnostics"
+   acceptance could not be met without carrying `arguments` through the FFI
+   DTO. That is not true today: `verter_parser::Diagnostic::with_argument`
+   (`crates/verter_parser/src/diagnostics.rs`) has no production call site,
+   every `Diagnostic::error`/`warning`/`info` constructor initialises
+   `arguments` empty, and `HostDiagnostic.arguments` is a straight clone of
+   that. Every production diagnostic on every route — legacy and typed,
+   native and browser — publishes an empty list. The typed route could
+   therefore have satisfied the charter's diagnostic-preservation acceptance
+   without this DTO change, and every value-bearing assertion in the
+   candidate constructs its argument by hand because no producer makes one.
+
+   What the work IS: a forward-looking wire shape landed ahead of its
+   producer, plus the exactness repair that goes with it (`Unsigned` /
+   `Signed` arguments crossed both bindings as `f64`, silently rounding any
+   value above 2^53; they now cross as exact decimal digits). Landing it
+   here rather than in `verter_napi` follows the Shared Optimized Codebase
+   rule in `CLAUDE.md` — a reusable projection belongs in the lowest owner
+   crate that serves every consumer — so given that the shape lands at all,
+   these are the right two files. Whether it should land in THIS node is the
+   operator's call, and it is a wire-shape decision, not a charter
+   requirement.
 
 2. `crates/verter_wasm/` and `packages/wasm/src/compile-request-types.ts` —
    the browser binding's share of that projection, and the test that proves
    its serde wire actually carries the field. This is the charter's named
    "browser binding enters" trigger.
 
-3. `crates/verter_compiler/src/compile_request/{mod,vue,svelte}.rs` — the
-   option path a request-construction refusal names.
+3. `crates/verter_compiler/src/compile_request/{mod,vue,svelte,product,capability}.rs`
+   — the option path a request-construction refusal names, and the refusal
+   vocabulary itself.
 
    The charter's acceptance requires the refusal to "name the offending
    property where the schema names it". The refusal message is minted on the
-   new routes; the option identity it needs is owned by the compiler's option
-   inventory. `FrameworkOption` now reads the committed
-   `vue-options.tsv`/`svelte-options.tsv` row for its path instead of
-   case-lowering a Rust variant spelling, which named request fields that do
-   not exist (`vue:transformOptionsHoistStatic` for the field `hoistStatic`).
-   The inventory is the schema; naming the property "where the schema names
-   it" cannot be done from `verter_napi`.
+   new routes; the property identity it needs is owned by the compiler.
+   `FrameworkOption` now renders the HOST REQUEST's own field path
+   (`VueOption::request_field` / `SvelteOption::request_field`), not the
+   Rust variant spelling (`vue:transformOptionsHoistStatic` for the field
+   `hoistStatic`) and not the official framework's option surface from
+   `vue-options.tsv` / `svelte-options.tsv` (`vue:compatConfig.MODE` for
+   the field `compatConfigMode`; and that inventory records `compatConfig`
+   on two surfaces, which the request carries as the two distinct fields
+   `compatConfig` and `transformCompatConfig`). The inventory remains the
+   exhaustiveness proof it always was; it is simply a different namespace
+   from the request object a caller writes.
+
+   The same owner rule puts the refusal SENTENCE in `verter_compiler`
+   (`Display for CompileRequestError`), with `ProductKind::wire_tag`,
+   `CapabilityCell::cell_id` and `RuntimeStyleProcessing::wire_name` beside
+   it. Both bindings render that one vocabulary, so a refused request reads
+   the same way natively and in the browser; the alternative — the native
+   binding's own 11-arm renderer and 34-arm capability-cell table, with the
+   browser binding still printing `{error:?}` — is precisely the fork the
+   Shared Optimized Codebase rule forbids, and it is what this candidate
+   originally landed.
 
 None of these is a legacy deletion, a second decode path, a profile
 reconstruction, or a hand-written duplicate of a generated declaration — the
@@ -83,10 +109,42 @@ charter's four abort conditions all hold.
 No consumer migration entered. The legacy profile-bearing methods, their
 declarations, and their tests are untouched, as the charter requires.
 
+## Open items carried out of review
+
+The earlier round recorded a five-item debt list. Four of those items are
+closed by the landed candidate and are not carried forward: the public
+declaration and `docs/api/native.md` describe both routes and their budgets;
+a serde assertion proves the argument list reaches the browser wire; the
+64-bit argument values cross as exact decimal digits; and the batch route
+carries its own `publicApi`/`declarations` refusal-isolation case rather
+than inheriting the singular route's.
+
+One item remains, now narrowed: the batch route's `ideCompanion` product.
+It is the only product whose payload is computed FROM the paired source, so
+a zip that paired one entry's response with another's source would publish
+UTF-16 offsets into the wrong file — silently. This round closes it with
+`typed-batch-preserves-ide-utf16-offsets-per-entry`, two entries whose
+multi-byte prefixes differ so each entry's offset is wrong against the
+other's source. No debt is carried past this candidate.
+
+## Operator decisions this record asks for
+
+1. **The expansion itself.** `ADOPT-NOW` for the crates and package beyond
+   the charter's named surfaces, on the merits above — noting that item 1's
+   charter-acceptance argument does not hold and it should be accepted (or
+   refused) as a forward-looking wire-shape decision.
+2. **The typed batch route's fixed 64 MiB aggregate retained-byte
+   ceiling.** Exceeding it aborts the WHOLE call, with no per-entry
+   attribution and no runtime override; a whole-project batch of
+   average-sized SFCs reaches it well before the 65 536-entry outer cap.
+   The behaviour is documented in `docs/api/native.md` and beside the
+   constant, so callers can chunk. Making the ceiling a `HostConfig` field
+   is a `verter_session` change this node does not make.
+
 ## If ratification is refused
 
 The separable piece is the diagnostic argument list plus its browser half
-(items 1 and 2): moving it to its own node leaves the typed routes callable
-but publishing diagnostics without their arguments, which fails the
-charter's diagnostic-preservation acceptance until that node lands. Item 3
-is not separable from the charter's refusal-naming acceptance.
+(items 1 and 2): it is the one whose charter-acceptance argument does not
+hold, so moving it to its own node costs the typed routes nothing today —
+every production diagnostic publishes an empty argument list either way.
+Item 3 is not separable from the charter's refusal-naming acceptance.

@@ -271,8 +271,20 @@ result preserves input order and contains either `response` or a typed
 refusals, and canonical request construction refusals fail only their own entry
 as `binding`; valid siblings still execute. Invalid batch-level options
 (including unknown keys) or a non-array/oversized outer input throw before
-execution, as does a batch above the aggregate 64 MiB decoded-payload budget.
-Each request graph is also bounded by a per-request decoded-value cap.
+execution.
+
+**Two budgets, two failure modes.** The decoded-value cap is per entry — the
+counter resets between entries, so a request graph that exhausts it fails only
+that entry, as a `binding` failure. The retained-byte budget is per CALL and
+fixed at 64 MiB across every entry's `canonicalId`, `source` bytes and request
+graph; exhausting it throws for the WHOLE batch. That abort has no per-entry
+attribution and no runtime override: the ceiling is a compile-time constant.
+A whole-project batch of average-sized SFCs can reach 64 MiB well before the
+65 536-entry outer cap, so chunk large batches rather than relying on the entry
+cap alone. The asymmetry is deliberate — byte exhaustion is a whole-call
+condition every later entry would also hit, while value exhaustion is a
+property of the one graph that hit it — but the aborted-batch failure mode is
+an operational property to plan around.
 
 `compileRequest()` shares the typed request schema with `@verter/wasm`, but the
 JavaScript envelopes diverge and are not interchangeable:

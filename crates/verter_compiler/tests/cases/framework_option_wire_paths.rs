@@ -50,9 +50,9 @@
 //!   `every_request_field_resolves_against_the_generated_declaration`
 //!   reports `compatConfig.MODE`, `customElement.tag` and
 //!   `customElement.props.*.type` as paths the declaration has no key for,
-//!   `refusal_paths_leak_neither_variant_spelling_nor_inventory_surface`
-//!   reports the leaked `customElement` segment, and the refusable table
-//!   goes red on fourteen rows.
+//!   `refusal_paths_are_request_fields_not_inventory_rows` reports zero
+//!   divergence where seventeen is required, and the refusable table goes
+//!   red on those seventeen rows.
 //! - Case-lower `format!("{option:?}")` in `Display`: every rendered path
 //!   names a field the declaration does not have, and the walk case goes
 //!   red on all of them.
@@ -552,26 +552,50 @@ fn distinct_refusable_options_never_collapse_onto_one_path() {
     );
 }
 
+/// The inventory-derived path this rendering must NOT be: the row's
+/// `option` column, prefixed by whatever option-path segments its
+/// `surface` column carries beyond the surface type itself.
+///
+/// A local copy of the algorithm being ruled out, so the ruling-out is a
+/// comparison against it rather than a description of it.
+fn inventory_derived_path(option: FrameworkOption) -> String {
+    let (surface, name) = option.tsv_row();
+    let local_surface = surface.rsplit_once(':').map_or(surface, |(_, tail)| tail);
+    match local_surface.split_once('.') {
+        Some((_, nested)) => format!("{nested}.{name}"),
+        None => name.to_string(),
+    }
+}
+
 /// The two names a refusal must never leak: the Rust variant spelling, and
 /// the official framework's own option surface.
+///
+/// The surface half is checked by comparison against the inventory-derived
+/// algorithm itself, not by banning segment spellings: `props` is both an
+/// inventory surface segment AND a genuine own key of the Svelte
+/// custom-element descriptor, so a spelling ban would reject the correct
+/// path. The count is exact — a rendering that agreed with the inventory
+/// everywhere would make the table above satisfiable from the wrong
+/// source, so this states how far the two genuinely diverge.
 #[test]
-fn refusal_paths_leak_neither_variant_spelling_nor_inventory_surface() {
+fn refusal_paths_are_request_fields_not_inventory_rows() {
+    let mut diverging = 0usize;
     for option in refusable_options() {
         let tail = rendered_path(option);
         assert!(
             !tail.chars().next().is_some_and(char::is_uppercase),
             "{tail} leads with an upper-case segment, which is a leaked Rust variant spelling"
         );
-        let (surface, _) = option.tsv_row();
-        let local_surface = surface.rsplit_once(':').map_or(surface, |(_, tail)| tail);
-        for part in local_surface.split('.') {
-            assert!(
-                !tail.split('.').any(|segment| segment == part),
-                "{tail} carries the inventory surface segment `{part}`, which the request \
-                 object does not have"
-            );
+        if tail != inventory_derived_path(option) {
+            diverging += 1;
         }
     }
+    assert_eq!(
+        diverging,
+        17,
+        "17 of the {} refusable options name a request field the inventory spells differently",
+        refusable_options().len()
+    );
 }
 
 /// Two inventory rows folding onto one request field is CORRECT, and must

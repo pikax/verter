@@ -70,7 +70,20 @@ pub use js_value_graph::{
 };
 
 /// Maximum native payload bytes retained while decoding one typed batch,
-/// covering every entry's source bytes and request graph.
+/// covering every entry's canonical id, source bytes and request graph.
+///
+/// Aggregate over the whole call, and exhausting it aborts the WHOLE call
+/// rather than failing the offending entry. That is deliberate — running
+/// out of retained bytes is a condition every later entry would also hit,
+/// so isolating it to one entry would report a per-entry refusal for a
+/// call-wide state — but it is also a real operational property: the batch
+/// loses every sibling's work, the failure names no entry, and the ceiling
+/// is fixed here with no runtime override. `docs/api/native.md` states it
+/// so callers chunk large batches rather than discovering it.
+///
+/// Contrast [`MAX_DECODED_VALUES_PER_REQUEST`], which is per ENTRY (the
+/// batch resets the counter between entries) and therefore fails only the
+/// entry that exhausted it.
 const MAX_COMPILE_REQUEST_BATCH_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 
 // Re-imports for code actions and diagnostics (parity with verter_wasm)
