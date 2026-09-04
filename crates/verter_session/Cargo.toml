@@ -82,10 +82,13 @@ external-corpus = []
 # `cargo test -p verter_session --lib --features bf2-authoritative authoritative_seed_matrix_contracts_share_one_verified_run`.
 bf2-authoritative = []
 # Opt-in: transport route-equivalence suite
-# (`src/transport_route_equivalence_tests.rs`). Drives built `@verter/native`
-# and wasm-bindgen through Node probes vs the in-process host. Artifacts
-# come from commands outside cargo; the default hermetic gate must not
-# enable this. A missing artifact fails loudly. Run:
+# (`src/framework/transport_route_equivalence_tests.rs`). Drives built
+# `@verter/native`, wasm-bindgen, and `@verter/unplugin` through Node
+# probes vs the in-process host. Artifacts come from commands outside
+# cargo; the default hermetic gate must not enable this. A missing
+# artifact fails loudly. The bundler lane additionally requires a
+# matching `packages/unplugin/scripts/probe-bundler-route.freshness.json`
+# pin. Run:
 # `cargo test -p verter_session --lib --features transport-authoritative
 # transport_route_equivalence`.
 transport-authoritative = []

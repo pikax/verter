@@ -69,3 +69,18 @@ Move the direct WASM transport-surface probe to CCA1O3's typed request while the
 ## Verification and review
 
 Run `node --check`, WASM request-conversion tests, the hermetic transport comparison, and `targeted-domain`. Add only CCA1O3B's ledger row and apply `public-3`.
+
+## Recorded deviation (awaiting ratification)
+
+The complete-only typed route this charter mandates admits no `missing`
+classification for two of the cases it also directs to preserve, so the
+implementation changed `svelteServerStyle` (`missing` → `error`) and
+`getIdeWithoutMap` (`missing` → `published`) on the WASM transport only. That
+is a deliberate departure from this charter's "missing-versus-refused
+classification … remain unchanged" surface line, its "classification …
+equivalent" acceptance line, and its "transport divergence" abort clause.
+
+The conflict, why no third answer exists, what the implementation did instead,
+the disclosed residual, and the three ratification options are recorded in
+`decisions/2026-09-03-complete-only-transport-probe-classification-deviation.md`.
+Nothing in this charter is amended by that record until a maintainer rules.
