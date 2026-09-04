@@ -527,39 +527,37 @@ function compileWithVerter(host, source, filename, mode) {
       }
     }
 
-    // Get the main virtual file (script + template combined)
-    const profile = {
-      filename,
-      isProduction: isProd,
-      ssr: isSsr,
-      hmrStrategy: 'none',
-      sourceMap: false,
-      forceJs: false,
-    };
+    // One typed compile request against the already-registered source. The
+    // legacy profile's hmrStrategy 'none' is the typed route's own fixed
+    // shape, and its unset axes are that route's defaults, so only the axes
+    // the old profile stated carry over.
+    const runtimeKind = isSsr ? 'runtimeServer' : 'runtimeClient';
+    const compiled = host.compileRequest(upsertResult.canonicalId, {
+      framework: 'vue',
+      identity: { filename, isProduction: isProd, forceJs: false },
+      products: [{ kind: runtimeKind, runtimeSourceMap: false }],
+      options: {
+        backend: 'inferred',
+        ssr: isSsr,
+        isCustomElement: [],
+        babelParserPlugins: [],
+      },
+    });
+    const runtime = compiled.products.find((product) => product.kind === runtimeKind);
+    const nodeByKind = (kind) =>
+      runtime?.nodes.find((node) => node.node.kind === kind);
 
     // Try getting separate script + template blocks
     let code = '';
-    const scriptFile = host.getVirtualFile({
-      canonicalId: upsertResult.canonicalId,
-      nodeKind: { kind: 'script' },
-      compileProfile: profile,
-    });
+    const scriptFile = nodeByKind('script');
     if (scriptFile) code += scriptFile.code;
 
-    const templateFile = host.getVirtualFile({
-      canonicalId: upsertResult.canonicalId,
-      nodeKind: { kind: 'template' },
-      compileProfile: profile,
-    });
+    const templateFile = nodeByKind('template');
     if (templateFile) code += (code ? '\\n\\n' : '') + templateFile.code;
 
     // If no script or template, try 'main'
     if (!code) {
-      const mainFile = host.getVirtualFile({
-        canonicalId: upsertResult.canonicalId,
-        nodeKind: { kind: 'main' },
-        compileProfile: profile,
-      });
+      const mainFile = nodeByKind('main');
       if (mainFile) code = mainFile.code;
     }
 

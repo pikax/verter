@@ -318,21 +318,28 @@ function verterCompile(source, filePath, { ssr, vapor }) {
       source,
       fileKind: "vue",
     });
-    const profile = {
-      filename,
-      ssr: !!ssr,
-      forceJs: true,
-      forceVapor: !!vapor,
-      sourceMap: false,
-    };
-    const result = host.getVirtualFile({
-      canonicalId: upsert.canonicalId,
-      nodeKind: { kind: "main" },
-      compileProfile: profile,
+    // One typed compile request against the already-registered source. The
+    // legacy profile's unset axes (isProduction, hmrStrategy, runtime module
+    // name) are the typed route's own defaults, so only the axes the old
+    // profile stated carry over.
+    const ssrOn = !!ssr;
+    const runtimeKind = ssrOn ? "runtimeServer" : "runtimeClient";
+    const compiled = host.compileRequest(upsert.canonicalId, {
+      framework: "vue",
+      identity: { filename, isProduction: false, forceJs: true },
+      products: [{ kind: runtimeKind, runtimeSourceMap: false }],
+      options: {
+        backend: vapor ? "vapor" : "inferred",
+        ssr: ssrOn,
+        isCustomElement: [],
+        babelParserPlugins: [],
+      },
     });
+    const runtime = compiled.products.find((product) => product.kind === runtimeKind);
+    const result = runtime?.nodes.find((node) => node.node.kind === "main");
     if (!result?.code) return { error: "empty verter output" };
-    if (result.diagnostics?.hasErrors) {
-      const msgs = (result.diagnostics.diagnostics || [])
+    if (compiled.diagnostics?.hasErrors) {
+      const msgs = (compiled.diagnostics.diagnostics || [])
         .filter((d) => d.severity === "error")
         .map((d) => d.message)
         .join("; ");
