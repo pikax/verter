@@ -56,10 +56,24 @@
 //!   `decode_compile_requests_priority` and
 //!   `typed-batch-bounds-a-hostile-options-key` sees a megabyte key quoted
 //!   back verbatim.
-//! - Read the batch options' priority with `Object::get` instead of
-//!   `NapiValueGraph::property_at` over the own-key list and
-//!   `typed-batch-ignores-an-inherited-priority` honours a priority the
-//!   caller never wrote on that object.
+//! - Drop the own-key gate before the batch options' priority value read
+//!   (read `priority` off the object whether or not an own key states it)
+//!   and `typed-batch-ignores-an-inherited-priority` honours a priority the
+//!   caller never wrote on that object. The gate is the protection, not the
+//!   reader: `property_at` and `Object::get` are both `napi_get_property`.
+//! - Read a batch entry's fields with `input.get::<Unknown>("canonicalId")`
+//!   instead of `read_batch_entry_fields` and
+//!   `typed-batch-refuses-an-inherited-entry-wrapper` accepts an entry whose
+//!   every field lives on the prototype.
+//! - Abort the whole call on aggregate byte exhaustion (restore `return
+//!   Err(error)` where `batch_retained_bytes_refusal` is minted) and
+//!   `typed-batch-attributes-the-aggregate-source-ceiling-per-entry` loses
+//!   the sibling that decoded before the ceiling was reached.
+//! - Fail the whole call on a position mismatch (return `Err` instead of
+//!   filling that entry's `failure` slot) and
+//!   `typed-batch-accepts-a-registered-alias` still passes — which is why
+//!   the alias case exists: it is the batch input whose id needs TWO
+//!   agreeing resolutions, and nothing in the type system holds that.
 //! - Drop the `resolve_alias_or_canonical` call at the top of
 //!   `compile_request` and
 //!   `typed-single-reports-one-id-spelling-for-a-non-canonical-id` sees the
@@ -143,6 +157,9 @@ const EXPECTED_CASES: &[&str] = &[
     "typed-batch-refuses-unknown-options",
     "typed-batch-bounds-a-hostile-options-key",
     "typed-batch-accepts-non-canonical-ids",
+    "typed-batch-accepts-a-registered-alias",
+    "typed-batch-refuses-an-inherited-entry-wrapper",
+    "typed-batch-repeats-a-shared-canonical-under-concurrency",
     "typed-batch-refuses-binary-options-before-enumerating-them",
     "typed-batch-clears-a-throwing-options-trap-and-still-serves",
     "typed-batch-runs-analysis-and-runtime-server-products",
@@ -161,7 +178,7 @@ const EXPECTED_CASES: &[&str] = &[
     "array-declaring-more-elements-than-a-request-may-carry-refused",
     "self-referential-graph-refused",
     "typed-batch-refuses-an-oversized-outer-array",
-    "typed-batch-refuses-an-aggregate-source-payload",
+    "typed-batch-attributes-the-aggregate-source-ceiling-per-entry",
     "typed-batch-refuses-an-aggregate-decoded-value-payload",
     "typed-batch-refuses-an-invalid-priority",
     "typed-batch-ignores-an-inherited-priority",
@@ -598,10 +615,6 @@ check("typed-single-vue-preserves-diagnostic-utf16-spans", () => {
   const legacy = legacyRuntimeProduct("/typed/Warn.vue", multibyte, "vue", false);
   if (!legacy || JSON.stringify(response.diagnostics) !== JSON.stringify(legacy.diagnostics)) {
     return `typed diagnostics diverged from the profile route: ${JSON.stringify({ typed: response.diagnostics, legacy: legacy && legacy.diagnostics })}`;
-  }
-  const diagnostic = response.diagnostics.diagnostics[0];
-  if (!Array.isArray(diagnostic.arguments)) {
-    return `typed diagnostics dropped arguments: ${JSON.stringify(diagnostic)}`;
   }
   return undefined;
 });
@@ -1175,6 +1188,169 @@ check("typed-batch-accepts-non-canonical-ids", () => {
   return undefined;
 });
 
+// A registered ALIAS is the batch input whose id genuinely needs two
+// resolutions to agree: the binding resolves it once to correlate its
+// output slots, and `compile_request_many` resolves what it is handed
+// again. That agrees today only because a registered canonical is inserted
+// into its own alias set, so resolving a resolved id is a fixpoint —
+// nothing in the type system holds that, which is why the position check
+// fails one entry rather than the call. Path normalization
+// (`typed-batch-accepts-non-canonical-ids`) does not exercise the alias map
+// at all.
+check("typed-batch-accepts-a-registered-alias", () => {
+  const canonicalId = "/typed/Aliased.vue";
+  const alias = "/typed/alias-for-aliased.vue";
+  const source = `<template><p>aliased</p></template>`;
+  const host = new addon.VerterHost();
+  host.upsert({
+    canonicalId,
+    inputId: canonicalId,
+    source: Buffer.from(source),
+    fileKind: "vue",
+    aliases: [alias],
+  });
+  if (host.resolve(alias)?.canonicalId !== canonicalId) {
+    return "the fixture failed to register the alias";
+  }
+  const siblingId = "/typed/AliasSibling.vue";
+  const entries = host.compileRequests([
+    { canonicalId: alias, source: Buffer.from(source), request: vueRuntime(alias) },
+    { canonicalId: siblingId, source: Buffer.from(source), request: vueRuntime(siblingId) },
+  ]);
+  host.close();
+  const ids = entries.map((entry) => entry.canonicalId);
+  if (JSON.stringify(ids) !== JSON.stringify([canonicalId, siblingId])) {
+    return `an aliased input did not report its canonical id in order: ${JSON.stringify(ids)}`;
+  }
+  const failed = entries.filter((entry) => entry.failure || !entry.response);
+  if (failed.length > 0) {
+    return `an aliased batch lost an entry: ${JSON.stringify(failed)}`;
+  }
+  if (entries.some((entry) => !runtimeMain(entry.response))) {
+    return "an aliased batch compiled to no main node";
+  }
+  return undefined;
+});
+
+// A payload is its own properties — for the entry WRAPPER as well as for
+// the request graph and the batch options it carries. An entry whose
+// `canonicalId` / `source` / `request` all live on the prototype states
+// none of them, so it fails as a missing field rather than compiling
+// something the caller never wrote on the object they handed over.
+check("typed-batch-refuses-an-inherited-entry-wrapper", () => {
+  const canonicalId = "/typed/Inherited-entry.vue";
+  const siblingId = "/typed/OwnEntry.vue";
+  const source = `<template><p>inherited-entry</p></template>`;
+  const inherited = Object.create({
+    canonicalId,
+    source: Buffer.from(source),
+    request: vueRuntime(canonicalId),
+  });
+  if (inherited.canonicalId !== canonicalId) {
+    return "the fixture failed to put the entry fields on the prototype";
+  }
+  if (Object.keys(inherited).length !== 0) {
+    return "the fixture entry was expected to have no own keys";
+  }
+  const host = new addon.VerterHost();
+  const entries = host.compileRequests([
+    inherited,
+    { canonicalId: siblingId, source: Buffer.from(source), request: vueRuntime(siblingId) },
+  ]);
+  host.close();
+  if (entries.length !== 2) return `the batch dropped an entry: ${entries.length}`;
+  if (entries[0].response || !entries[0].failure) {
+    return `an entirely inherited entry was accepted: ${JSON.stringify(entries[0])}`;
+  }
+  if (!entries[0].failure.message.includes("missing")) {
+    return `the inherited entry did not read as a missing field: ${entries[0].failure.message}`;
+  }
+  if (!entries[1].response || entries[1].failure) {
+    return `the own-property sibling did not compile: ${JSON.stringify(entries[1])}`;
+  }
+  return undefined;
+});
+
+// Two entries naming ONE canonical with DIFFERENT requests is a shape the
+// profile-bearing batch route cannot produce (it deduplicates to one
+// compile per canonical + mode + component id) and this one explicitly
+// supports. Executing on the host's CPU pool makes those two compiles
+// concurrent, so the case is repeated: a single green run of a racy path
+// is indistinguishable from a correct one.
+check("typed-batch-repeats-a-shared-canonical-under-concurrency", () => {
+  const sharedId = "/typed/Shared.vue";
+  const source = `<script setup lang="ts">
+const greeting = "shared"
+</script>
+<template><div>{{ greeting }}</div></template>`;
+  const inputs = [
+    { canonicalId: sharedId, source: Buffer.from(source), request: vueRuntime(sharedId) },
+    {
+      canonicalId: sharedId,
+      source: Buffer.from(source),
+      request: vueProducts(sharedId, [ideProduct()]),
+    },
+    { canonicalId: sharedId, source: Buffer.from(source), request: vueRuntime(sharedId) },
+    {
+      canonicalId: sharedId,
+      source: Buffer.from(source),
+      request: vueProducts(sharedId, [ideProduct()]),
+    },
+  ];
+  const host = new addon.VerterHost();
+  let firstRuntime = null;
+  let firstIde = null;
+  for (let run = 0; run < 12; run += 1) {
+    const entries = host.compileRequests(inputs, { priority: "interactive" });
+    if (entries.length !== inputs.length) {
+      host.close();
+      return `run ${run} returned ${entries.length} entries for ${inputs.length} inputs`;
+    }
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      if (entry.failure || !entry.response) {
+        host.close();
+        return `run ${run} entry ${index} failed: ${JSON.stringify(entry.failure)}`;
+      }
+      if (entry.canonicalId !== sharedId) {
+        host.close();
+        return `run ${run} entry ${index} answered ${entry.canonicalId}`;
+      }
+      const product = entry.response.products[0];
+      const wantIde = index % 2 === 1;
+      if (!product || product.kind !== (wantIde ? "ideCompanion" : "runtimeClient")) {
+        host.close();
+        return `run ${run} entry ${index} answered the sibling's product: ${product && product.kind}`;
+      }
+      if (wantIde) {
+        const code = product.ide && product.ide.code;
+        if (typeof code !== "string" || code.length === 0) {
+          host.close();
+          return `run ${run} entry ${index} published no IDE code`;
+        }
+        if (firstIde === null) firstIde = code;
+        else if (firstIde !== code) {
+          host.close();
+          return `run ${run} entry ${index} produced unstable IDE output`;
+        }
+      } else {
+        const main = runtimeMain(entry.response);
+        if (!main) {
+          host.close();
+          return `run ${run} entry ${index} published no main node`;
+        }
+        if (firstRuntime === null) firstRuntime = main.code;
+        else if (firstRuntime !== main.code) {
+          host.close();
+          return `run ${run} entry ${index} produced unstable runtime output`;
+        }
+      }
+    }
+  }
+  host.close();
+  return undefined;
+});
+
 check("valid-request-accepted", () => {
   const rendered = decode(vue());
   if (typeof rendered !== "string" || !rendered.includes("Vue")) {
@@ -1284,19 +1460,84 @@ check("typed-batch-refuses-an-oversized-outer-array", () => {
   return undefined;
 });
 
-// @ai-generated - Reusing one Buffer must still charge every retained native source copy.
-check("typed-batch-refuses-an-aggregate-source-payload", () => {
-  const sharedSource = Buffer.alloc(8 * 1024 * 1024, 0x20);
-  const inputs = Array.from({ length: 9 }, (_, index) => {
-    const canonicalId = `/typed/Large-${index}.svelte`;
-    return { canonicalId, source: sharedSource, request: svelteRuntime(canonicalId) };
-  });
+// Reusing one Buffer must still charge every retained native source copy,
+// and running out of the CALL's retained bytes must not cost the entries
+// that decoded before it ran out. The ceiling is aggregate, so it is the
+// entry that crossed it and every entry after that refuse — each naming its
+// own index and saying so — while everything decoded first still answers.
+//
+// The three sharing entries carry a request the decoder refuses, so their
+// 25 MiB source copies are charged (which is what makes the third one
+// cross) without three 25 MiB compiles riding along. Their refusals are
+// their OWN, which is what distinguishes "charged but not yet exhausted"
+// from "exhausted".
+check("typed-batch-attributes-the-aggregate-source-ceiling-per-entry", () => {
+  const compiledId = "/typed/BeforeCeiling.vue";
+  const compiledSource = `<template><p>before-ceiling</p></template>`;
+  // 3 x 25 MiB crosses the 64 MiB call ceiling; 2 x 25 MiB does not.
+  const sharedSource = Buffer.alloc(25 * 1024 * 1024, 0x20);
+  const refusedRequest = (id) => {
+    const request = vueRuntime(id);
+    request.options.runes = undefined;
+    return request;
+  };
+  const afterId = "/typed/AfterCeiling.vue";
+  const inputs = [
+    {
+      canonicalId: compiledId,
+      source: Buffer.from(compiledSource),
+      request: vueRuntime(compiledId),
+    },
+    ...[0, 1, 2].map((index) => {
+      const canonicalId = `/typed/Large-${index}.vue`;
+      return { canonicalId, source: sharedSource, request: refusedRequest(canonicalId) };
+    }),
+    { canonicalId: afterId, source: Buffer.from(compiledSource), request: vueRuntime(afterId) },
+  ];
   const host = new addon.VerterHost();
-  const refusal = refusalOfRoute(() => host.compileRequests(inputs));
+  let entries;
+  const refusal = refusalOfRoute(() => {
+    entries = host.compileRequests(inputs);
+  });
   host.close();
-  if (refusal === null) return "accepted an aggregate source payload above the batch budget";
-  if (!refusal.includes("retains more than") || !refusal.includes("bytes")) {
-    return `aggregate source refusal was ${refusal}`;
+  if (refusal !== null) {
+    return `an aggregate ceiling threw for the whole call: ${refusal}`;
+  }
+  if (entries.length !== inputs.length) {
+    return `the batch dropped entries: ${entries.length} for ${inputs.length} inputs`;
+  }
+  const ceilingSaid = "aggregate over the whole call";
+  if (!entries[0].response || entries[0].failure) {
+    return `the entry decoded before the ceiling lost its response: ${JSON.stringify(entries[0])}`;
+  }
+  if (!runtimeMain(entries[0].response)) {
+    return "the entry decoded before the ceiling published no main node";
+  }
+  // Charged, not yet exhausted: their own decode refusal, not the ceiling's.
+  for (const index of [1, 2]) {
+    const failure = entries[index].failure;
+    if (!failure || entries[index].response) {
+      return `entry ${index} below the ceiling was not its own refusal`;
+    }
+    if (failure.message.includes(ceilingSaid)) {
+      return `entry ${index} reported the ceiling before it was reached: ${failure.message}`;
+    }
+  }
+  // Exhausted: the entry that crossed it, and the entry after it.
+  for (const index of [3, 4]) {
+    const failure = entries[index].failure;
+    if (!failure || entries[index].response) {
+      return `entry ${index} at or after the ceiling was not refused`;
+    }
+    if (failure.kind !== "binding") {
+      return `the ceiling refusal was not a binding failure: ${failure.kind}`;
+    }
+    if (!failure.message.includes(`index ${index}`)) {
+      return `the ceiling refusal did not name its entry: ${failure.message}`;
+    }
+    if (!failure.message.includes(ceilingSaid)) {
+      return `the ceiling refusal did not say it is aggregate: ${failure.message}`;
+    }
   }
   return undefined;
 });

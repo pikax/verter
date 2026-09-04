@@ -217,15 +217,6 @@ That payload is the **template** analysis snapshot — the value `getAnalysis()`
 publishes under its `template` field — not the whole-file snapshot
 `getAnalysis()` returns.
 
-Each diagnostic carries `arguments` — the values substituted into its
-`message`, always present and `[]` when it has none, and the same list
-`@verter/native` publishes for the same compile. A `kind: "unsigned"` /
-`"signed"` argument reports its value as its exact decimal **digits**
-(`BigInt(arg.unsigned)` for the value), because a 64-bit integer above
-`Number.MAX_SAFE_INTEGER` cannot cross into a JavaScript double without
-rounding. A `kind: "span"` argument's offsets are UTF-16 code units, like
-every other span below.
-
 **Offset encodings and coordinate spaces differ by field.**
 `diagnostics[].spanStart` / `spanEnd` and
 `destructuredBlock.bindings[].sourceStart` / `sourceEnd` are **UTF-16 code

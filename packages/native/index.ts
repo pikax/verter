@@ -473,7 +473,6 @@ export type {
   HostVirtualNodeKind,
   HostSliceChanges,
   HostDiagnostic,
-  HostDiagnosticArg,
   HostDiagnosticsSnapshot,
   HostExternalSourceRequest,
   HostScriptImportInfo,

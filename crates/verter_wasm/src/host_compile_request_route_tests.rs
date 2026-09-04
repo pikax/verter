@@ -885,58 +885,6 @@ fn published_diagnostic_spans_are_utf16_and_match_the_legacy_route() {
     );
 }
 
-/// The published diagnostic's argument list survives `serde_wasm_bindgen`.
-///
-/// The argument list is what a caller re-renders a diagnostic message from,
-/// and it reaches this route through serde, not through the NAPI struct
-/// mirror the native binding uses — so the native binding's own coverage
-/// proves nothing about this wire. A serialiser that dropped the field, or
-/// a producer that stopped filling it, would leave every browser consumer
-/// silently unable to tell an argument-less diagnostic from a diagnostic
-/// whose arguments were lost.
-///
-/// Mutation recipe: add `#[serde(skip)]` to `FfiDiagnostic::arguments` (or
-/// drop the field from `host_diagnostic_to_ffi`'s literal and the struct).
-/// The key stops reaching the browser wire and `is_array` goes false, while
-/// the native binding's own struct-mirror coverage stays green.
-#[wasm_bindgen_test]
-fn published_diagnostics_carry_their_argument_list_through_serde() {
-    let host = js_host();
-    register(
-        &host,
-        "/src/Warn.vue",
-        &diagnostic_carrier(ASCII_PREFIX),
-        "vue",
-    );
-
-    let response = compile_request(
-        &host,
-        "/src/Warn.vue",
-        vue_route_request(json!([runtime_client_product(false)])),
-    );
-
-    let diagnostics = response["diagnostics"]["diagnostics"]
-        .as_array()
-        .expect("the response carries a diagnostic list");
-    assert!(
-        !diagnostics.is_empty(),
-        "fixture drift: the duplicate directive must publish a diagnostic, got {:?}",
-        response["diagnostics"]
-    );
-    for diagnostic in diagnostics {
-        assert!(
-            diagnostic["arguments"].is_array(),
-            "every published diagnostic carries its argument list: {diagnostic:?}"
-        );
-    }
-
-    let legacy_main = legacy_virtual_file(&host, "/src/Warn.vue", "main", None);
-    assert_eq!(
-        response["diagnostics"], legacy_main["diagnostics"],
-        "the typed route publishes the legacy route's own diagnostics, arguments included"
-    );
-}
-
 // ── refusals throw ───────────────────────────────────────────────────────
 
 /// The decode boundary's refusals reach this route unchanged: an unknown key

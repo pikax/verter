@@ -72,18 +72,20 @@ pub use js_value_graph::{
 /// Maximum native payload bytes retained while decoding one typed batch,
 /// covering every entry's canonical id, source bytes and request graph.
 ///
-/// Aggregate over the whole call, and exhausting it aborts the WHOLE call
-/// rather than failing the offending entry. That is deliberate — running
-/// out of retained bytes is a condition every later entry would also hit,
-/// so isolating it to one entry would report a per-entry refusal for a
-/// call-wide state — but it is also a real operational property: the batch
-/// loses every sibling's work, the failure names no entry, and the ceiling
-/// is fixed here with no runtime override. `docs/api/native.md` states it
-/// so callers chunk large batches rather than discovering it.
+/// Aggregate over the whole call: the counter never resets between
+/// entries, so once it is exhausted every LATER entry is refused too. It
+/// is reported per ENTRY all the same — at the position that crossed it
+/// and at each one after — because the alternative loses every earlier
+/// sibling's already-decoded work and names no input, leaving a caller
+/// with no way to tell which entry pushed the batch over. Entries that
+/// decoded before the ceiling was reached still compile and still answer.
+///
+/// The ceiling is fixed here, with no runtime override; `docs/api/native.md`
+/// states it so callers size their batches rather than discovering it.
 ///
 /// Contrast [`MAX_DECODED_VALUES_PER_REQUEST`], which is per ENTRY (the
-/// batch resets the counter between entries) and therefore fails only the
-/// entry that exhausted it.
+/// batch resets the counter between entries) and therefore refuses only
+/// the entry that exhausted it, leaving every later entry free to decode.
 const MAX_COMPILE_REQUEST_BATCH_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 
 // Re-imports for code actions and diagnostics (parity with verter_wasm)
@@ -285,11 +287,11 @@ fn recover_pending_exception(env: &Env, fallback: Error) -> Result<Error> {
 }
 
 /// Measure a JavaScript string before converting it into an owned Rust value.
-fn js_string_utf8_len(env: &Env, value: &Unknown<'_>) -> Result<usize> {
-    if value.get_type()? != ValueType::String {
+fn js_string_utf8_len(env: &Env, value: napi::sys::napi_value) -> Result<usize> {
+    if napi::type_of!(env.raw(), value)? != ValueType::String {
         return Err(Error::new(Status::StringExpected, "expected a string"));
     }
-    js_value_graph::napi_utf8_string_len(env.raw(), value.raw())
+    js_value_graph::napi_utf8_string_len(env.raw(), value)
 }
 
 fn napi_value_is_array(env: &Env, value: napi::sys::napi_value) -> Result<bool> {
@@ -386,14 +388,20 @@ fn decode_compile_requests_priority(
         }
         stated = Some(index);
     }
-    // Read through the OWN-key list, never `Object::get`. Closedness above
-    // is decided from own enumerable keys, and napi-rs's `Object::get` is
-    // `napi_get_property` — a full `[[Get]]` that walks the prototype
-    // chain and also sees non-enumerable own properties. Reading the value
-    // that way would let `Object.create({ priority: "interactive" })` pass
-    // the unknown-key check with zero own keys and then silently select a
-    // priority the caller never wrote on this object, which is the exact
-    // payload the request graph's own rule calls not-what-a-caller-wrote.
+    // The OWN-key gate is what makes an inherited `priority` inert: the
+    // value is read only when an own enumerable key states it, so
+    // `Object.create({ priority: "interactive" })` — zero own keys — takes
+    // the default and never consults the prototype. Removing this gate is
+    // what would let a caller select a priority they never wrote on this
+    // object; the reader below cannot restore it, because every property
+    // read at this boundary (`property_at` and `Object::get` alike) is
+    // `napi_get_property`, a full `[[Get]]`, and an own property shadows
+    // its prototype's anyway.
+    //
+    // `property_at` is chosen on its own merit: the key list already holds
+    // a handle to the name, so looking the property up through it costs no
+    // second engine-side string.
+    //
     // One rule at one boundary: a payload is its own properties, for the
     // key list AND for the value behind it.
     let Some(index) = stated else {
@@ -430,53 +438,150 @@ fn decode_compile_requests_priority(
 
 /// Answers a diagnostic message when `entries` (as returned by
 /// [`verter_session::VerterHost::compile_request_many`], one per input in
-/// original order) is not exactly `expected_canonical_ids` — same count,
-/// same names, same positions. `None` when it is.
+/// original order) does not hold one entry per input. `None` when it does.
 ///
-/// `expected_canonical_ids` must already be HOST-canonical — resolved
-/// through `VerterHost::resolve_alias_or_canonical`, exactly as the
-/// executor resolves its own inputs. Comparing a caller's raw spelling
-/// here would make every non-canonical id (a Windows path, an alias, a
-/// `?`-suffixed id) read as a transposition and discard a whole batch of
-/// valid work.
+/// A count mismatch is the one shape that cannot be attributed to a
+/// position: the zip that fills the caller's output slots truncates to the
+/// shorter side, so a dropped or duplicated entry would leave a slot
+/// silently unfilled and every later entry paired with the wrong input's
+/// source. There is no entry to blame, so the whole call fails loudly.
 ///
-/// The batch executor's own contract already guarantees one entry per
-/// input in order; this is the binding's own check that the guarantee
-/// actually held. Both halves matter and neither implies the other: a
-/// reordered batch would pair a diagnostic with the wrong entry's source
-/// text, and a batch that dropped or duplicated an entry would leave the
-/// caller's output slots silently unfilled, because the zip that fills
-/// them truncates to the shorter side. Either way the whole batch fails
-/// loudly instead.
-fn batch_entry_order_mismatch(
+/// A per-POSITION mismatch is attributable and is handled where the
+/// pairing happens, by [`batch_entry_position_mismatch`] — it fails that
+/// entry rather than discarding every sibling's compiled output.
+fn batch_entry_count_mismatch(
     entries: &[host_compile::CompileRequestBatchEntry],
     expected_canonical_ids: &[String],
 ) -> Option<String> {
-    if entries.len() != expected_canonical_ids.len() {
-        return Some(format!(
+    (entries.len() != expected_canonical_ids.len()).then(|| {
+        format!(
             "typed compile batch returned {} entries for {} inputs",
             entries.len(),
             expected_canonical_ids.len()
-        ));
+        )
+    })
+}
+
+/// The refusal one entry carries when the executor answered a different
+/// canonical id at its position than the input there asked for.
+///
+/// `expected` is HOST-canonical — resolved through
+/// `VerterHost::resolve_alias_or_canonical`, exactly as the executor
+/// resolves its own inputs — so a non-canonical input (a Windows path, a
+/// registered alias, a `?`-suffixed id) is not read as a transposition.
+///
+/// The executor's own contract already guarantees one entry per input in
+/// order; this is the binding's check that the guarantee held, because a
+/// reordered batch would otherwise pair a response and its diagnostics
+/// with the WRONG entry's source text — and the `ideCompanion` product's
+/// offsets are computed from that text, so the mispairing would publish
+/// silently rather than fail. Failing the affected position keeps that
+/// impossible without discarding the batch: a sibling whose id did land
+/// where its input asked is still paired with its own source.
+fn batch_entry_position_mismatch(answered: &str, expected: &str) -> String {
+    format!(
+        "typed compile batch returned entry '{answered}' at the position expected for '{expected}'"
+    )
+}
+
+/// The longest name a batch entry declares (`canonicalId`).
+///
+/// An own key longer than this cannot be one of the three, so it is
+/// skipped by its MEASURED size and never copied into Rust — the same
+/// treatment the batch options give a hostile key.
+const MAX_BATCH_ENTRY_FIELD_NAME_BYTES: usize = "canonicalId".len();
+
+/// One batch entry's three declared fields, as OWN enumerable properties.
+///
+/// A field whose value is STATED as `undefined` reads as absent, exactly
+/// as it does through `Object::get`, so an entry that spells a field
+/// `undefined` is missing it rather than holding an invalid value.
+struct BatchEntryFields {
+    canonical_id: Option<napi::sys::napi_value>,
+    source: Option<napi::sys::napi_value>,
+    request: Option<napi::sys::napi_value>,
+}
+
+/// Reads one batch entry's three fields from its OWN enumerable
+/// properties.
+///
+/// A payload is its own properties — the rule the request graph and the
+/// batch options already hold, applied to the wrapper that carries them.
+/// `Object::get` is `napi_get_property`, a full `[[Get]]`, so reading the
+/// wrapper that way would accept
+/// `compileRequests([Object.create({ canonicalId, source, request })])`:
+/// an entry whose every field the caller never wrote on the object they
+/// handed over. Enumerating the own keys instead makes an inherited field
+/// absent, which the caller sees as the missing-field refusal.
+///
+/// The entry is CLASSIFIED before its keys are enumerated, for the reason
+/// the batch options are: a Buffer, typed array or DataView exposes every
+/// byte index as an enumerable own key, so enumerating one would
+/// materialise a V8 key string per byte before any count could refuse
+/// them.
+fn read_batch_entry_fields(
+    env: &Env,
+    graph: &js_value_graph::NapiValueGraph,
+    input: &Object<'_>,
+) -> Result<BatchEntryFields> {
+    use js_value_graph::{JsObjectKeys, JsValueClass, JsValueGraph};
+
+    if graph.classify(&input.raw())? != JsValueClass::Object {
+        return Err(ffi_err("compile request batch input must be an object"));
     }
-    entries
-        .iter()
-        .zip(expected_canonical_ids)
-        .find(|(entry, expected)| entry.canonical_id != **expected)
-        .map(|(entry, expected)| {
-            format!(
-                "typed compile batch returned entry '{}' at the position expected for '{expected}'",
-                entry.canonical_id
-            )
-        })
+    let keys = graph.own_enumerable_keys(&input.raw())?;
+    let count = keys.count()?;
+    if count > MAX_ARRAY_ELEMENTS {
+        return Err(ffi_err(format!(
+            "A compile request batch input exposes {count} keys, above the \
+             {MAX_ARRAY_ELEMENTS} a request may carry"
+        )));
+    }
+    let mut fields = BatchEntryFields {
+        canonical_id: None,
+        source: None,
+        request: None,
+    };
+    for index in 0..count {
+        if keys.retained_bytes(index)? > MAX_BATCH_ENTRY_FIELD_NAME_BYTES {
+            continue;
+        }
+        let slot = match keys.at(index)?.as_str() {
+            "canonicalId" => &mut fields.canonical_id,
+            "source" => &mut fields.source,
+            "request" => &mut fields.request,
+            _ => continue,
+        };
+        let raw = graph.property_at(&input.raw(), &keys, index)?;
+        if napi::type_of!(env.raw(), raw)? != ValueType::Undefined {
+            *slot = Some(raw);
+        }
+    }
+    Ok(fields)
+}
+
+/// The refusal every entry from `position` onwards carries once the
+/// call's AGGREGATE retained-byte ceiling is exhausted.
+///
+/// Exhaustion is a call-wide state — the counter never resets, so every
+/// later entry hits it too — but it is reported per ENTRY, at the position
+/// that crossed it and at each one after. Aborting the call instead would
+/// discard every sibling's already-decoded work and name no input, leaving
+/// a caller with no way to tell which entry pushed the batch over.
+fn batch_retained_bytes_refusal(position: usize, reason: &str) -> String {
+    format!(
+        "compile request batch input at index {position}: {reason}. That ceiling \
+         is aggregate over the whole call, so every later entry refuses too; \
+         compile fewer inputs per call."
+    )
 }
 
 fn read_batch_source_buffer(
     env: &Env,
-    raw: &Unknown<'_>,
+    raw: napi::sys::napi_value,
     budget: &mut JsValueMaterializationBudget,
 ) -> Result<std::sync::Arc<str>> {
-    if !napi_value_is_buffer(env, raw.raw())? {
+    if !napi_value_is_buffer(env, raw)? {
         return Err(Error::new(
             Status::InvalidArg,
             "compile request batch `source` must be a Buffer",
@@ -485,7 +590,7 @@ fn read_batch_source_buffer(
     let mut data = std::ptr::null_mut();
     let mut len = 0usize;
     napi::check_status!(
-        unsafe { napi::sys::napi_get_buffer_info(env.raw(), raw.raw(), &mut data, &mut len) },
+        unsafe { napi::sys::napi_get_buffer_info(env.raw(), raw, &mut data, &mut len) },
         "Failed to read compile request batch source length"
     )?;
     budget.retain_bytes(len)?;
@@ -1189,28 +1294,12 @@ pub struct NapiSliceChanges {
 }
 
 #[napi(object)]
-pub struct NapiDiagnosticArg {
-    pub kind: String,
-    pub boolean: Option<bool>,
-    /// The exact decimal digits of an `unsigned`/`signed` argument, not a
-    /// `number`: a 64-bit integer above 2^53 cannot round-trip through
-    /// JavaScript's double without rounding, and rounding silently is the
-    /// one outcome a diagnostic argument may not do.
-    pub unsigned: Option<String>,
-    pub signed: Option<String>,
-    pub text: Option<String>,
-    pub spanStart: Option<u32>,
-    pub spanEnd: Option<u32>,
-}
-
-#[napi(object)]
 pub struct NapiDiagnostic {
     pub severity: String,
     pub code: String,
     pub message: String,
     pub spanStart: u32,
     pub spanEnd: u32,
-    pub arguments: Vec<NapiDiagnosticArg>,
 }
 
 #[napi(object)]
@@ -2570,8 +2659,28 @@ impl NapiVerterHost {
             MAX_DECODED_VALUES_PER_REQUEST,
             MAX_COMPILE_REQUEST_BATCH_RETAINED_BYTES,
         );
+        // SAFETY: every value read through this graph comes from `inputs`,
+        // which napi-rs extracted from this live env.
+        let graph = unsafe { js_value_graph::NapiValueGraph::new(env.raw()) };
         for array_index in 0..declared {
             let position = array_index as usize;
+            if payload_budget.bytes_exhausted() {
+                // Nothing further can be decoded, so nothing further is
+                // read: the remaining entries answer the ceiling directly
+                // rather than each re-discovering it.
+                output[position] = Some(binding_failure_entry(
+                    String::new(),
+                    batch_retained_bytes_refusal(
+                        position,
+                        &format!(
+                            "the batch already retains \
+                             {MAX_COMPILE_REQUEST_BATCH_RETAINED_BYTES} bytes \
+                             of decoded payload"
+                        ),
+                    ),
+                ));
+                continue;
+            }
             // One nested handle scope per entry. Every engine-side handle
             // this iteration creates — the input object, its property
             // values, and every key name and property the request decode
@@ -2594,9 +2703,23 @@ impl NapiVerterHost {
                     continue;
                 }
             };
-            let canonical_id = match input.get::<Unknown<'_>>("canonicalId") {
-                Ok(Some(raw_canonical_id)) => {
-                    let length = match js_string_utf8_len(&env, &raw_canonical_id) {
+            let fields = match read_batch_entry_fields(&env, &graph, &input) {
+                Ok(fields) => fields,
+                Err(error) => {
+                    let error = recover_pending_exception(&env, error)?;
+                    output[position] = Some(binding_failure_entry(
+                        String::new(),
+                        format!(
+                            "invalid compile request batch input at index {array_index}: {}",
+                            error.reason
+                        ),
+                    ));
+                    continue;
+                }
+            };
+            let canonical_id = match fields.canonical_id {
+                Some(raw_canonical_id) => {
+                    let length = match js_string_utf8_len(&env, raw_canonical_id) {
                         Ok(length) => length,
                         Err(error) => {
                             let error = recover_pending_exception(&env, error)?;
@@ -2607,10 +2730,16 @@ impl NapiVerterHost {
                             continue;
                         }
                     };
-                    payload_budget.retain_bytes(length)?;
+                    if let Err(error) = payload_budget.retain_bytes(length) {
+                        output[position] = Some(binding_failure_entry(
+                            String::new(),
+                            batch_retained_bytes_refusal(position, &error.reason),
+                        ));
+                        continue;
+                    }
                     // SAFETY: the value was read from this env and validated
                     // as a string immediately above.
-                    match unsafe { String::from_napi_value(env.raw(), raw_canonical_id.raw()) } {
+                    match unsafe { String::from_napi_value(env.raw(), raw_canonical_id) } {
                         // Canonicalized HERE, once, through the host's own
                         // identity resolver — not left as the caller's raw
                         // spelling. `compile_request_many` canonicalizes
@@ -2620,11 +2749,14 @@ impl NapiVerterHost {
                         // stripped, a registered alias resolves), so a
                         // binding that kept the raw spelling would report
                         // one id on a locally-refused entry and a different
-                        // id on its compiling sibling, and the order guard
-                        // below would read every non-canonical input as a
-                        // transposition and fail the whole batch. The
-                        // resolver is idempotent, so passing the resolved id
-                        // back in is the same demand.
+                        // id on its compiling sibling, and the position
+                        // check below would read every non-canonical input
+                        // as a transposition. A registered canonical is its
+                        // own alias, so resolving the resolved id again is
+                        // the same demand; that check is per-entry
+                        // precisely so a resolver that ever stopped being
+                        // idempotent costs the affected entry rather than
+                        // every sibling's compiled output.
                         Ok(canonical_id) => self.inner.resolve_alias_or_canonical(&canonical_id),
                         Err(error) => {
                             let error = recover_pending_exception(&env, error)?;
@@ -2636,56 +2768,50 @@ impl NapiVerterHost {
                         }
                     }
                 }
-                Ok(None) => {
+                None => {
                     output[position] = Some(binding_failure_entry(
                         String::new(),
                         "compile request batch input is missing `canonicalId`".to_string(),
                     ));
                     continue;
                 }
-                Err(error) => {
-                    let error = recover_pending_exception(&env, error)?;
-                    output[position] = Some(binding_failure_entry(
-                        String::new(),
-                        format!("invalid `canonicalId`: {}", error.reason),
-                    ));
-                    continue;
-                }
             };
-            let source = match input.get::<Unknown<'_>>("source") {
-                Ok(Some(raw_source)) => {
-                    match read_batch_source_buffer(&env, &raw_source, &mut payload_budget) {
+            let source = match fields.source {
+                Some(raw_source) => {
+                    match read_batch_source_buffer(&env, raw_source, &mut payload_budget) {
                         Ok(source) => source,
                         Err(error) => {
                             let error = recover_pending_exception(&env, error)?;
-                            if payload_budget.bytes_exhausted() {
-                                return Err(error);
-                            }
-                            output[position] =
-                                Some(binding_failure_entry(canonical_id, error.reason.clone()));
+                            let reason = if payload_budget.bytes_exhausted() {
+                                batch_retained_bytes_refusal(position, &error.reason)
+                            } else {
+                                error.reason.clone()
+                            };
+                            output[position] = Some(binding_failure_entry(canonical_id, reason));
                             continue;
                         }
                     }
                 }
-                Ok(None) => {
+                None => {
                     output[position] = Some(binding_failure_entry(
                         canonical_id,
                         "compile request batch input is missing `source`".to_string(),
                     ));
                     continue;
                 }
-                Err(error) => {
-                    let error = recover_pending_exception(&env, error)?;
-                    output[position] =
-                        Some(binding_failure_entry(canonical_id, error.reason.clone()));
-                    continue;
-                }
             };
             payload_budget.reset_decoded_values();
-            let request = match input
-                .get::<host_compile_request::RawNapiHostCompileRequest>("request")
-            {
-                Ok(Some(raw_request)) => {
+            let request = match fields.request {
+                Some(raw_request) => {
+                    // SAFETY: the value was read from this env; the raw
+                    // request retains the env/value pair rather than
+                    // interpreting it, and the decode below is what reads it.
+                    let raw_request = unsafe {
+                        host_compile_request::RawNapiHostCompileRequest::from_napi_value(
+                            env.raw(),
+                            raw_request,
+                        )
+                    }?;
                     match host_compile_request::decode_host_compile_request_with_budget(
                         raw_request,
                         &mut payload_budget,
@@ -2706,29 +2832,23 @@ impl NapiVerterHost {
                         }
                         Err(error) => {
                             let error = recover_pending_exception(&env, error)?;
-                            if payload_budget.bytes_exhausted() {
-                                return Err(error);
-                            }
-                            payload_budget.reset_decoded_values();
-                            output[position] = Some(binding_failure_entry(
-                                canonical_id.clone(),
-                                error.reason.clone(),
-                            ));
+                            let reason = if payload_budget.bytes_exhausted() {
+                                batch_retained_bytes_refusal(position, &error.reason)
+                            } else {
+                                payload_budget.reset_decoded_values();
+                                error.reason.clone()
+                            };
+                            output[position] =
+                                Some(binding_failure_entry(canonical_id.clone(), reason));
                             continue;
                         }
                     }
                 }
-                Ok(None) => {
+                None => {
                     output[position] = Some(binding_failure_entry(
                         canonical_id,
                         "compile request batch input is missing `request`".to_string(),
                     ));
-                    continue;
-                }
-                Err(error) => {
-                    let error = recover_pending_exception(&env, error)?;
-                    output[position] =
-                        Some(binding_failure_entry(canonical_id, error.reason.clone()));
                     continue;
                 }
             };
@@ -2752,13 +2872,29 @@ impl NapiVerterHost {
         // order, but a silent-corruption regression there — a dropped,
         // duplicated, or transposed entry — must not silently pair a
         // diagnostic with the wrong file's source text or leave an output
-        // slot unfilled. Fail the whole batch loudly instead of trusting
-        // position alone.
-        if let Some(mismatch) = batch_entry_order_mismatch(&entries, &expected_canonical_ids) {
+        // slot unfilled. A dropped or duplicated entry cannot be attributed
+        // to a position at all, so it fails the call.
+        if let Some(mismatch) = batch_entry_count_mismatch(&entries, &expected_canonical_ids) {
             return Err(Error::new(Status::GenericFailure, mismatch));
         }
 
-        for ((entry, source), position) in entries.into_iter().zip(sources).zip(positions) {
+        for (((entry, source), position), expected) in entries
+            .into_iter()
+            .zip(sources)
+            .zip(positions)
+            .zip(expected_canonical_ids)
+        {
+            // A transposition IS attributable: fail the position it landed
+            // on rather than every sibling that did land where its input
+            // asked. The response is dropped rather than paired with the
+            // wrong input's source.
+            if entry.canonical_id != expected {
+                output[position] = Some(binding_failure_entry(
+                    entry.canonical_id.clone(),
+                    batch_entry_position_mismatch(&entry.canonical_id, &expected),
+                ));
+                continue;
+            }
             output[position] = Some(match entry.outcome {
                 Ok(response) => match compile_request_response_to_napi(response, source.as_ref()) {
                     Ok(response) => NapiCompileRequestsEntry {
@@ -4498,12 +4634,12 @@ mod tests {
         }
     }
 
-    // Mutation recipe: delete the `entries.len() != expected.len()` guard in
-    // `batch_entry_order_mismatch`. `zip` truncates to the shorter side, so
-    // the dropped and duplicated cases below both report "no mismatch" while
-    // the caller's output slots go unfilled.
+    // Mutation recipe: replace the count comparison in
+    // `batch_entry_count_mismatch` with `false`. `zip` truncates to the
+    // shorter side, so the dropped and duplicated cases below both report
+    // "no mismatch" while the caller's output slots go unfilled.
     #[test]
-    fn batch_order_check_catches_a_lost_or_duplicated_entry_not_just_a_transposition() {
+    fn batch_count_check_catches_a_lost_or_duplicated_entry() {
         let expected = vec![
             "/a.vue".to_string(),
             "/b.vue".to_string(),
@@ -4511,7 +4647,7 @@ mod tests {
         ];
 
         assert_eq!(
-            batch_entry_order_mismatch(
+            batch_entry_count_mismatch(
                 &[
                     batch_entry("/a.vue"),
                     batch_entry("/b.vue"),
@@ -4523,14 +4659,29 @@ mod tests {
             "the executor's own contract must not be reported as a mismatch"
         );
 
+        // A transposition has the right count: it is attributable to the
+        // position it landed on, so it is NOT a whole-call failure.
+        assert_eq!(
+            batch_entry_count_mismatch(
+                &[
+                    batch_entry("/a.vue"),
+                    batch_entry("/c.vue"),
+                    batch_entry("/b.vue")
+                ],
+                &expected,
+            ),
+            None,
+            "a same-count transposition is failed per entry, not per call"
+        );
+
         // Dropped: the prefix still matches at every overlapping position.
         let dropped =
-            batch_entry_order_mismatch(&[batch_entry("/a.vue"), batch_entry("/b.vue")], &expected)
+            batch_entry_count_mismatch(&[batch_entry("/a.vue"), batch_entry("/b.vue")], &expected)
                 .expect("a batch short one entry is a mismatch");
         assert!(dropped.contains("2 entries for 3 inputs"), "{dropped}");
 
         // Duplicated: likewise, the expected side is what runs out first.
-        let duplicated = batch_entry_order_mismatch(
+        let duplicated = batch_entry_count_mismatch(
             &[
                 batch_entry("/a.vue"),
                 batch_entry("/b.vue"),
@@ -4544,20 +4695,21 @@ mod tests {
             duplicated.contains("4 entries for 3 inputs"),
             "{duplicated}"
         );
+    }
 
-        // Transposed: same count, wrong position.
-        let transposed = batch_entry_order_mismatch(
-            &[
-                batch_entry("/a.vue"),
-                batch_entry("/c.vue"),
-                batch_entry("/b.vue"),
-            ],
-            &expected,
-        )
-        .expect("a transposed batch is a mismatch");
+    /// A transposed position names both ids, so a caller can tell a
+    /// mispairing from a compile failure.
+    ///
+    /// Mutation recipe: swap the two arguments at the
+    /// `batch_entry_position_mismatch` call site in `compile_requests`.
+    /// The message then blames the input for the executor's answer and
+    /// this case goes red.
+    #[test]
+    fn a_transposed_position_names_the_answered_and_the_expected_id() {
+        let message = batch_entry_position_mismatch("/c.vue", "/b.vue");
         assert!(
-            transposed.contains("'/c.vue' at the position expected for '/b.vue'"),
-            "{transposed}"
+            message.contains("'/c.vue' at the position expected for '/b.vue'"),
+            "{message}"
         );
     }
 
@@ -4668,21 +4820,23 @@ mod tests {
         }
     }
 
-    // Mutation recipe: reuse `host_diagnostics_to_ffi` and drop `arguments`.
-    // The span argument then stays UTF-8 bytes (1, 5) instead of UTF-16 (1, 3).
+    /// The typed FAILURE projection maps its diagnostic spans to UTF-16
+    /// against the paired source, as the success projection does — a
+    /// separate call path, so a separate proof.
+    ///
+    /// Mutation recipe: pass `None` instead of `Some("a😀b")` as the
+    /// source below. The span stays at its UTF-8 byte offsets (1, 5) and
+    /// this case goes red.
     #[test]
-    fn typed_diagnostics_preserve_utf16_span_arguments() {
+    fn a_typed_failure_maps_its_diagnostic_spans_to_utf16() {
         let failure = host::CompileRequestFailure::Host(host::HostError::CompileError(
             host::CompileFailure {
                 diagnostics: host::DiagnosticsSnapshot {
                     diagnostics: vec![host::HostDiagnostic {
                         severity: host::HostSeverity::Error,
-                        code: "E_ARG".to_string(),
-                        message: "has args".to_string(),
-                        arguments: vec![
-                            verter_language::DiagnosticArg::Text("name".into()),
-                            verter_language::DiagnosticArg::Span { start: 1, end: 5 },
-                        ],
+                        code: "E_SPAN".to_string(),
+                        message: "spans a surrogate pair".to_string(),
+                        arguments: Vec::new(),
                         span: verter_span::Span::new(1, 5),
                     }],
                     has_errors: true,
@@ -4696,12 +4850,6 @@ mod tests {
             compile_request_failure_to_napi(failure, "/src/A.vue".to_string(), Some("a😀b"));
         let diagnostic = &projected.diagnostics.diagnostics[0];
         assert_eq!((diagnostic.spanStart, diagnostic.spanEnd), (1, 3));
-        assert_eq!(diagnostic.arguments.len(), 2);
-        assert_eq!(diagnostic.arguments[0].kind, "text");
-        assert_eq!(diagnostic.arguments[0].text.as_deref(), Some("name"));
-        assert_eq!(diagnostic.arguments[1].kind, "span");
-        assert_eq!(diagnostic.arguments[1].spanStart, Some(1));
-        assert_eq!(diagnostic.arguments[1].spanEnd, Some(3));
     }
 
     #[test]

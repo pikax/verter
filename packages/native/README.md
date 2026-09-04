@@ -174,13 +174,16 @@ does not suppress valid siblings. Per-entry shape, UTF-8, request decoding, and
 canonical construction refusals use the `binding` failure arm. Per-input panic
 isolation holds here as it does on `compileMany()`: entries execute on the
 host's CPU pool through the same batch coordinator, so a compiler panic becomes
-that entry's `host` failure and its siblings keep their responses. Batch options
-are read as own enumerable properties only — an inherited `priority` is ignored.
-Invalid batch-level options or a non-array/oversized outer input throw before
-execution, as does a batch above the aggregate 64 MiB decoded-payload budget.
-Each entry's own request graph is separately bounded by a per-request 131,072
-decoded-value cap, reset between entries — there is no separate aggregate
-decoded-value budget across the batch. Each `canonicalId` is normalized on the
+that entry's `host` failure and its siblings keep their responses. An entry's
+own `canonicalId` / `source` / `request` fields and the batch options alike are
+read as own enumerable properties only — an inherited field or `priority` is
+not part of the payload. Invalid batch-level options or a non-array/oversized
+outer input throw before execution. The aggregate 64 MiB decoded-payload budget
+does not: its counter never resets, so the entry that exhausts it and every
+entry after it fail as `binding`, naming the index and the ceiling, while the
+entries decoded before it keep their responses. Each entry's own request graph
+is separately bounded by a per-request 131,072 decoded-value cap, reset between
+entries — there is no separate aggregate decoded-value budget across the batch. Each `canonicalId` is normalized on the
 way in (drive-letter case, backslashes, a `?…` query tail, an extended-length
 prefix, surrounding whitespace, registered aliases), so an entry's reported
 `canonicalId` may differ from the string you passed; correlate by position or

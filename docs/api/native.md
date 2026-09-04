@@ -277,9 +277,13 @@ The isolation covers a compiler panic too: entries are executed on the host's
 own CPU pool through the same batch coordinator the profile-bearing
 `compileMany()` route uses, so a panic while compiling one input becomes that
 entry's `host` failure (diagnostic code `HOST_COMPILE_REQUEST_PANIC`) and every
-sibling keeps its response. Options are read as OWN enumerable properties only —
-an inherited `priority` is ignored rather than honoured, matching how the
-request graph itself treats a prototype key.
+sibling keeps its response. Every own-property rule this route states applies
+to the entry wrapper as well as to what it wraps: `canonicalId`, `source` and `request`
+are read as OWN enumerable properties, so
+`Object.create({ canonicalId, source, request })` is an entry that states
+none of them and fails as a missing field. Batch options behave the same
+way — an inherited `priority` is ignored rather than honoured, matching how
+the request graph itself treats a prototype key.
 
 Each input's `canonicalId` is normalized the same way every other host route
 normalizes an id — a Windows drive letter lowercases, backslashes become
@@ -291,18 +295,22 @@ each entry reports the NORMALIZED id in its `canonicalId`. Correlate results by
 position, or by the id the entry reports — not by string-comparing the id you
 passed in.
 
-**Two budgets, two failure modes.** The decoded-value cap is per entry — the
-counter resets between entries, so a request graph that exhausts it fails only
-that entry, as a `binding` failure. The retained-byte budget is per CALL and
-fixed at 64 MiB across every entry's `canonicalId`, `source` bytes and request
-graph; exhausting it throws for the WHOLE batch. That abort has no per-entry
-attribution and no runtime override: the ceiling is a compile-time constant.
-A whole-project batch of average-sized SFCs can reach 64 MiB well before the
-65 536-entry outer cap, so chunk large batches rather than relying on the entry
-cap alone. The asymmetry is deliberate — byte exhaustion is a whole-call
-condition every later entry would also hit, while value exhaustion is a
-property of the one graph that hit it — but the aborted-batch failure mode is
-an operational property to plan around.
+**Two budgets, two scopes.** The decoded-value cap is per entry — the counter
+resets between entries, so a request graph that exhausts it fails only that
+entry, as a `binding` failure, and every later entry decodes normally. The
+retained-byte budget is per CALL and fixed at 64 MiB across every entry's
+`canonicalId`, `source` bytes and request graph. Its counter never resets, so
+once it is exhausted every REMAINING entry is refused too — but each refusal is
+still that entry's own `binding` failure, naming its index and saying the
+ceiling is aggregate, and the entries that decoded before it was reached still
+compile and still answer. The call never throws for a full budget, and it never
+discards a sibling's work.
+
+The ceiling has no runtime override: it is a compile-time constant. A
+whole-project batch of average-sized SFCs can reach 64 MiB well before the
+65 536-entry outer cap, so size batches for it rather than relying on the entry
+cap alone; the trailing refusals name the index where the budget ran out, which
+is where a follow-up call should resume.
 
 `compileRequest()` shares the typed request schema with `@verter/wasm`, but the
 JavaScript envelopes diverge and are not interchangeable:
@@ -700,32 +708,13 @@ interface HostDiagnostic {
   message: string;
   spanStart: number;
   spanEnd: number;
-  /** The values substituted into `message`. Always present; `[]` when the diagnostic has none. */
-  arguments: HostDiagnosticArg[];
-}
-
-interface HostDiagnosticArg {
-  kind: "bool" | "unsigned" | "signed" | "text" | "span";
-  boolean?: boolean;
-  /**
-   * A 64-bit integer argument as its exact decimal digits, not a `number`:
-   * a value above `Number.MAX_SAFE_INTEGER` cannot cross into a JavaScript
-   * double without rounding. Use `BigInt(arg.unsigned)` for the exact
-   * value.
-   */
-  unsigned?: string;
-  /** A signed 64-bit integer argument, as decimal digits -- see `unsigned`. */
-  signed?: string;
-  text?: string;
-  /** UTF-16 code-unit offsets, like every other span this API publishes. */
-  spanStart?: number;
-  spanEnd?: number;
 }
 ```
 
-`arguments` is published on every diagnostic, on the legacy per-node reads
-and on the typed `compileRequest`/`compileRequests` routes alike, and it is
-the same list `@verter/wasm` publishes for the same compile.
+`spanStart` / `spanEnd` are UTF-16 code units into the registered source,
+on the legacy per-node reads and on the typed
+`compileRequest`/`compileRequests` routes alike, and they are the same
+offsets `@verter/wasm` publishes for the same compile.
 
 ## Input Encoding
 

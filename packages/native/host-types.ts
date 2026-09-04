@@ -213,31 +213,12 @@ export interface HostSliceChanges {
   descriptorChanged: boolean;
 }
 
-export interface HostDiagnosticArg {
-  kind: "bool" | "unsigned" | "signed" | "text" | "span";
-  boolean?: boolean;
-  /**
-   * The exact decimal digits of a 64-bit unsigned argument, not a
-   * `number`: a value above `Number.MAX_SAFE_INTEGER` cannot cross into a
-   * JavaScript double without rounding. Use `BigInt(arg.unsigned)` for the
-   * exact value, or `Number(arg.unsigned)` when the magnitude is known to
-   * be safe.
-   */
-  unsigned?: string;
-  /** The exact decimal digits of a 64-bit signed argument -- see `unsigned`. */
-  signed?: string;
-  text?: string;
-  spanStart?: number;
-  spanEnd?: number;
-}
-
 export interface HostDiagnostic {
   severity: "error" | "warning" | "info";
   code: string;
   message: string;
   spanStart: number;
   spanEnd: number;
-  arguments: HostDiagnosticArg[];
 }
 
 export interface HostDiagnosticsSnapshot {

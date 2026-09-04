@@ -139,67 +139,11 @@ pub fn host_node_kind_to_ffi(input: &host::VirtualNodeKind) -> FfiVirtualNodeKin
     }
 }
 
-/// Converts one diagnostic argument, translating its `Span` variant's
-/// offsets to UTF-16. Shared by every FFI diagnostic producer — NAPI's
-/// [`host_diagnostic_to_ffi`] projection included — so a diagnostic's
-/// argument encoding cannot diverge between the two bindings.
-pub fn host_diagnostic_arg_to_ffi(
-    argument: &verter_language::DiagnosticArg,
-    source: Option<&str>,
-) -> FfiDiagnosticArg {
-    use verter_language::DiagnosticArg;
-    match argument {
-        DiagnosticArg::Bool(value) => FfiDiagnosticArg {
-            kind: "bool".to_string(),
-            boolean: Some(*value),
-            unsigned: None,
-            signed: None,
-            text: None,
-            span_start: None,
-            span_end: None,
-        },
-        DiagnosticArg::Unsigned(value) => FfiDiagnosticArg {
-            kind: "unsigned".to_string(),
-            boolean: None,
-            unsigned: Some(value.to_string()),
-            signed: None,
-            text: None,
-            span_start: None,
-            span_end: None,
-        },
-        DiagnosticArg::Signed(value) => FfiDiagnosticArg {
-            kind: "signed".to_string(),
-            boolean: None,
-            unsigned: None,
-            signed: Some(value.to_string()),
-            text: None,
-            span_start: None,
-            span_end: None,
-        },
-        DiagnosticArg::Text(value) => FfiDiagnosticArg {
-            kind: "text".to_string(),
-            boolean: None,
-            unsigned: None,
-            signed: None,
-            text: Some(value.clone()),
-            span_start: None,
-            span_end: None,
-        },
-        DiagnosticArg::Span { start, end } => FfiDiagnosticArg {
-            kind: "span".to_string(),
-            boolean: None,
-            unsigned: None,
-            signed: None,
-            text: None,
-            span_start: Some(mandatory_utf16_offset(*start, source)),
-            span_end: Some(mandatory_utf16_offset(*end, source)),
-        },
-    }
-}
-
-/// Converts one host diagnostic, UTF-16-mapped span included. The sole
-/// diagnostic projection every FFI consumer (NAPI and WASM alike) uses —
-/// see [`host_diagnostic_arg_to_ffi`] for why the arguments cannot fork.
+/// Converts one host diagnostic, UTF-16-mapped span included.
+///
+/// The sole per-diagnostic projection every FFI consumer (NAPI and WASM
+/// alike) uses, so severity spelling and UTF-16 span mapping cannot
+/// diverge between the two bindings.
 pub fn host_diagnostic_to_ffi(
     diagnostic: &host::HostDiagnostic,
     source: Option<&str>,
@@ -214,11 +158,6 @@ pub fn host_diagnostic_to_ffi(
         message: diagnostic.message.clone(),
         span_start: mandatory_utf16_offset(diagnostic.span.start, source),
         span_end: mandatory_utf16_offset(diagnostic.span.end, source),
-        arguments: diagnostic
-            .arguments
-            .iter()
-            .map(|argument| host_diagnostic_arg_to_ffi(argument, source))
-            .collect(),
     }
 }
 
@@ -586,92 +525,5 @@ mod public_api_tests {
             Some("malformed-or-recovered-type-syntax")
         );
         assert_eq!(error.outcome_diagnostic, None);
-    }
-}
-
-#[cfg(test)]
-mod diagnostic_argument_tests {
-    use super::*;
-
-    fn diagnostic(arguments: Vec<verter_language::DiagnosticArg>) -> host::HostDiagnostic {
-        host::HostDiagnostic {
-            severity: host::HostSeverity::Warning,
-            code: "E_ARGS".to_string(),
-            message: "carries arguments".to_string(),
-            arguments,
-            span: verter_span::Span::new(0, 1),
-        }
-    }
-
-    /// Mutation recipe: restore `Some(*value as f64)` in
-    /// `host_diagnostic_arg_to_ffi` and change the two fields back to
-    /// `Option<f64>`. The two boundary values below round to
-    /// `9007199254740994` / `-9007199254740994` and this case goes red.
-    #[test]
-    fn integer_arguments_cross_the_boundary_at_their_exact_value() {
-        // One above 2^53: the first pair of consecutive integers an IEEE-754
-        // double cannot both represent.
-        const ABOVE_SAFE: u64 = 9_007_199_254_740_993;
-        let ffi = host_diagnostic_to_ffi(
-            &diagnostic(vec![
-                verter_language::DiagnosticArg::Unsigned(ABOVE_SAFE),
-                verter_language::DiagnosticArg::Signed(-(ABOVE_SAFE as i64)),
-                verter_language::DiagnosticArg::Unsigned(u64::MAX),
-            ]),
-            Some("ab"),
-        );
-
-        assert_eq!(
-            ffi.arguments
-                .iter()
-                .map(|argument| (
-                    argument.kind.as_str(),
-                    argument.unsigned.clone(),
-                    argument.signed.clone()
-                ))
-                .collect::<Vec<_>>(),
-            vec![
-                ("unsigned", Some("9007199254740993".to_string()), None),
-                ("signed", None, Some("-9007199254740993".to_string())),
-                ("unsigned", Some("18446744073709551615".to_string()), None),
-            ]
-        );
-    }
-
-    /// Mutation recipe: drop `arguments` from `host_diagnostic_to_ffi`'s
-    /// `FfiDiagnostic` literal (and the field from the struct). Every
-    /// serde-backed consumer — `serde_wasm_bindgen` on the browser route
-    /// included — then publishes a diagnostic with no argument list, and
-    /// this case goes red on the missing key rather than silently.
-    #[test]
-    fn the_serialized_diagnostic_always_carries_its_argument_list() {
-        let empty = serde_json::to_value(host_diagnostic_to_ffi(&diagnostic(Vec::new()), None))
-            .expect("an FFI diagnostic serializes");
-        assert_eq!(
-            empty["arguments"],
-            serde_json::json!([]),
-            "a diagnostic with no arguments still publishes the key, so a consumer \
-             never has to distinguish absent from empty"
-        );
-
-        // `é` is two UTF-8 bytes and one UTF-16 unit, so a span argument
-        // reported in bytes and one reported in UTF-16 units differ here.
-        let mapped = serde_json::to_value(host_diagnostic_to_ffi(
-            &diagnostic(vec![
-                verter_language::DiagnosticArg::Span { start: 2, end: 5 },
-                verter_language::DiagnosticArg::Text("name".to_string()),
-                verter_language::DiagnosticArg::Bool(true),
-            ]),
-            Some("\u{e9}\u{e9}abc"),
-        ))
-        .expect("an FFI diagnostic serializes");
-        assert_eq!(
-            mapped["arguments"],
-            serde_json::json!([
-                { "kind": "span", "spanStart": 1, "spanEnd": 3 },
-                { "kind": "text", "text": "name" },
-                { "kind": "bool", "boolean": true },
-            ])
-        );
     }
 }

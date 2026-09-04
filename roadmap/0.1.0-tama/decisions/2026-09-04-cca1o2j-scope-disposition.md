@@ -1,4 +1,4 @@
-# CCA1O2J scope disposition: shared diagnostic projection and the browser binding (compiler.compiler-bridge)
+# CCA1O2J scope disposition: the shared refusal vocabulary and the browser binding (compiler.compiler-bridge)
 
 - Status: proposed — awaiting operator/architect ratification
 - Date: 2026-09-04
@@ -6,10 +6,15 @@
   named surfaces, recorded here because the review rounds found the expansion
   undispositioned, not because a fix owner may ratify their own rescope.
 - Amends: nothing. No charter budget, no DAG edge, no other node's ledger row.
-- Asks for: two operator decisions (see the last section). The third
-  question a review round raised — whether this branch also lands `CCA1O3A`
-  — is not one of them: that work has been reverted off the branch, so the
-  candidate carries exactly one ledger transition, its own.
+- Asks for: two operator decisions and one `DEFER` ruling (see the last two
+  sections). The question a review round raised — whether this branch also
+  lands `CCA1O3A` — is not one of them: that work has been reverted off the
+  branch, so the candidate carries exactly one ledger transition, its own.
+- Withdrawn: the diagnostic argument list and its browser half. That was the
+  one item whose charter-acceptance argument this record itself refuted, and
+  a later fix round REMOVED it from the branch rather than leaving an
+  operator to ratify a wire expansion nothing produces. See "What was
+  withdrawn".
 
 ## Why this record exists
 
@@ -33,16 +38,17 @@ published TypeScript. An earlier revision of this record measured against
 It is corrected here, and the work it contained no longer rides on this
 branch (see "What was NOT adopted").
 
-Production is +3978/−440 across 29 files in 6 crates and 2 packages:
-`verter_compiler`, `verter_ffi`, `verter_napi`, `verter_protocol`,
-`verter_session`, `verter_wasm`, `packages/native`, `packages/wasm`. Eight
-of the 29 are test artifacts the glob reaches — `*_tests.rs` modules that
-live under `src/`, the fixture addon's `src/lib.rs`, `index.spec.ts` and
-`host-types.test-d.ts`; counting only non-test files gives 21, +3703/−431.
+Production is +3863/−439 across 27 files in 5 crates and 2 packages:
+`verter_compiler`, `verter_ffi`, `verter_napi`, `verter_session`,
+`verter_wasm`, `packages/native`, `packages/wasm`. Seven of the 27 are test
+artifacts the glob reaches — `*_tests.rs` modules that live under `src/`,
+the fixture addon's `src/lib.rs`, `index.spec.ts` and
+`host-types.test-d.ts`; counting only non-test files gives 20, +3640/−430.
 The charter's guidance is ~500 LOC / 5 files /
 2 related crates-or-packages; its mandatory rescope thresholds are 1500 LOC
-/ 12 files / 3 unrelated packages. Production LOC, the file count and the
-unrelated-package count all breach.
+/ 12 files / 3 unrelated packages. Production LOC and the file count still
+breach; the unrelated-package count no longer does, because withdrawing the
+diagnostic argument list took `verter_protocol` out of the diff entirely.
 
 The charter's own budget line already anticipates part of this: "rescope only
 under the program's mandatory thresholds **or when a consumer migration or
@@ -56,40 +62,17 @@ The charter names `crates/verter_napi/src/lib.rs`,
 `crates/verter_napi/src/host_compile_request.rs`, and
 `packages/native/index.ts`.
 
-1. `crates/verter_protocol/src/types.rs` and
-   `crates/verter_ffi/src/convert/output.rs` — the diagnostic argument list.
+1. `crates/verter_wasm/` and `packages/wasm/src/compile-request-types.ts`
+   — the browser binding's share of the shared refusal vocabulary below,
+   and the published note that the two bindings' response envelopes are not
+   interchangeable. This is the charter's named "browser binding enters"
+   trigger.
 
-   **The charter-acceptance argument for this item does not hold, and the
-   operator should accept it on other grounds or refuse it.** An earlier
-   draft of this record argued that the charter's "preserve diagnostics"
-   acceptance could not be met without carrying `arguments` through the FFI
-   DTO. That is not true today: `verter_parser::Diagnostic::with_argument`
-   (`crates/verter_parser/src/diagnostics.rs`) has no production call site,
-   every `Diagnostic::error`/`warning`/`info` constructor initialises
-   `arguments` empty, and `HostDiagnostic.arguments` is a straight clone of
-   that. Every production diagnostic on every route — legacy and typed,
-   native and browser — publishes an empty list. The typed route could
-   therefore have satisfied the charter's diagnostic-preservation acceptance
-   without this DTO change, and every value-bearing assertion in the
-   candidate constructs its argument by hand because no producer makes one.
+   (The diagnostic argument list that used to head this list, and the
+   browser serde assertion that came with it, are no longer on the branch —
+   see "What was withdrawn".)
 
-   What the work IS: a forward-looking wire shape landed ahead of its
-   producer, plus the exactness repair that goes with it (`Unsigned` /
-   `Signed` arguments crossed both bindings as `f64`, silently rounding any
-   value above 2^53; they now cross as exact decimal digits). Landing it
-   here rather than in `verter_napi` follows the Shared Optimized Codebase
-   rule in `CLAUDE.md` — a reusable projection belongs in the lowest owner
-   crate that serves every consumer — so given that the shape lands at all,
-   these are the right two files. Whether it should land in THIS node is the
-   operator's call, and it is a wire-shape decision, not a charter
-   requirement.
-
-2. `crates/verter_wasm/` and `packages/wasm/src/compile-request-types.ts` —
-   the browser binding's share of that projection, and the test that proves
-   its serde wire actually carries the field. This is the charter's named
-   "browser binding enters" trigger.
-
-3. `crates/verter_compiler/src/compile_request/{mod,vue,svelte,product,capability}.rs`
+2. `crates/verter_compiler/src/compile_request/{mod,vue,svelte,product,capability}.rs`
    — the option path a request-construction refusal names, and the refusal
    vocabulary itself.
 
@@ -120,8 +103,8 @@ The charter names `crates/verter_napi/src/lib.rs`,
    Shared Optimized Codebase rule forbids, and it is what this candidate
    originally landed.
 
-4. `crates/verter_session/src/host_resolve/compile_request_build.rs` — one
-   line, for the same reason as item 3.
+3. `crates/verter_session/src/host_resolve/compile_request_build.rs` — one
+   line, for the same reason as item 2.
 
    `request_construction_refused_diagnostics` rendered the same refusal
    with `{:?}`, publishing the Rust variant spelling into a user-visible
@@ -132,7 +115,7 @@ The charter names `crates/verter_napi/src/lib.rs`,
    quoted the variant spelling, which now quote the caller-facing sentence
    and additionally forbid the variant spelling.
 
-5. `crates/verter_session/src/host_compile.rs` — the typed batch route's
+4. `crates/verter_session/src/host_compile.rs` — the typed batch route's
    execution stage, moved onto the host batch coordinator.
 
    The charter's acceptance requires the batch route to "isolate a
@@ -160,6 +143,40 @@ None of these is a legacy deletion, a second decode path, a profile
 reconstruction, or a hand-written duplicate of a generated declaration — the
 charter's four abort conditions all hold.
 
+## What was withdrawn
+
+The diagnostic argument list — `FfiDiagnosticArg` in
+`crates/verter_protocol/src/types.rs`, its projection in
+`crates/verter_ffi/src/convert/output.rs`, `NapiDiagnosticArg`,
+`HostDiagnosticArg`, the `arguments` field on every published diagnostic,
+and the browser serde assertion that proved it reached the wasm wire — is
+no longer on this branch. A later fix round removed it.
+
+Three things decided that, and none of them is that the work was wrong:
+
+- Its charter-acceptance argument does not hold, as this record already
+  said. `verter_parser::Diagnostic::with_argument` has no production call
+  site, so every published diagnostic carried an empty list on every route.
+- It changed the payload of the LEGACY profile-bearing routes too, because
+  the per-diagnostic projection is shared. The charter says those routes
+  "keep their existing declarations and behavior", so a field added to
+  their published shape is a deviation from the charter's own text rather
+  than only from its budget.
+- A fix owner may not ratify their own rescope, and this was the one item
+  that could be removed at no cost to the routes the node exists to add.
+  Asking an operator to ratify a wire expansion for a capability nothing
+  produces is a worse use of the ask than simply not making it.
+
+What was withdrawn is a SHAPE, not a repair. The exactness half of it —
+that a `u64` above 2^53 must not cross to JavaScript as a rounded double —
+was correct and remains correct; it has nothing to round, because there is
+no field. When a producer for diagnostic arguments lands, the field and its
+decimal-digit encoding come back with it, in the node that owns the
+producer. The retained part of the change is
+`verter_ffi::convert::host_diagnostic_to_ffi`: one per-diagnostic
+projection both bindings call, so severity spelling and UTF-16 span mapping
+cannot fork between them. That is not a wire change.
+
 ## What was NOT adopted
 
 No consumer migration rides on this branch, and the legacy profile-bearing
@@ -179,49 +196,72 @@ so the claim and the tree now agree: this candidate carries exactly one
 ledger transition, its own. The migration itself is not rejected on its
 merits; it belongs to its own node and its own review.
 
-## Debt carried out of review: all closed, none deferred
+## Debt carried out of review
 
-Every row the review rounds carried is closed by the landed candidate, with
-its evidence named. None is deferred, so no `DEFER` ruling and no debt row
-is owed, and nothing here needs an owner block or a resolution gate.
+Every row the review rounds carried is closed by the landed candidate or
+withdrawn with it, with its evidence named — except ONE, the two bindings'
+divergent response envelopes, which is proposed as a `DEFER` and needs a
+ruling. It is the last row of the table and it is restated as an operator
+ask below.
 
-An earlier revision of this section tabulated six of the eight tracked rows
-and stated the same conclusion, which left the two below invisible to the
-operator reading it. They are listed with the rest now; both were narrowed
-rather than closed when they were first carried, and both are closed here.
+An earlier revision of this section tabulated six of the eight rows then
+tracked and declared them all closed; it also declared, wrongly, that
+nothing was deferred. Both are corrected here.
 
 | Row | Closed by |
 | --- | --- |
 | Batch `ideCompanion` responses must stay paired with their own entry's source — it is the only product whose payload (destructured-binding UTF-16 offsets) is computed FROM the source, so a mispairing publishes offsets into the wrong file silently rather than failing | `typed-batch-preserves-ide-utf16-offsets-per-entry`: two entries whose multi-byte prefixes differ, so each entry's offsets are wrong against the other's source |
-| Published diagnostics must carry their argument list through serde, not just through the Rust DTO | `published_diagnostics_carry_their_argument_list_through_serde`, plus the browser-side serde assertion proving the field reaches the wasm wire |
-| `docs/api/native.md` and `docs/api/wasm.md` must describe the published `arguments` field | Both documents describe it, alongside both routes and their budgets |
+| Published diagnostics must carry their argument list through serde, not just through the Rust DTO | Moot — the field is withdrawn (see "What was withdrawn"). It returns with the node that lands a producer for it |
+| `docs/api/native.md` and `docs/api/wasm.md` must describe the published `arguments` field | Moot — withdrawn with the field; neither document describes a field the bindings do not publish |
 | `publicApi` / `declarations` must refuse on the BATCH route too, isolated to its own entry beside a compiling sibling — not inherited from the singular route | `typed-batch-isolates-public-api-and-declarations-refusals` and `typed-single-refuses-public-api-and-declarations` |
 | `runtimeServer` and `analysis` products must publish their payloads on BOTH routes | `typed-single-runtime-server-publishes-its-nodes`, `typed-single-vue-analysis-is-a-json-string`, `typed-batch-runs-analysis-and-runtime-server-products` |
-| `Unsigned` / `Signed` diagnostic arguments must not silently round above 2^53 when crossing to JavaScript | They cross as exact decimal STRINGS on both bindings, asserted on both |
+| `Unsigned` / `Signed` diagnostic arguments must not silently round above 2^53 when crossing to JavaScript | Moot — withdrawn with the field. The requirement stands for whichever node lands the producer, and the decimal-digit encoding is the answer to it |
 | Per-call budgets bound what a traversal retains NATIVELY, not the V8 handle scope it fills, and only the batch route opens a per-entry scope | `REJECT` — not a defect on the singular route. Within ONE graph the pinned set is bounded transitively: `materialize_nested` reserves an object's whole key count against `MAX_DECODED_VALUES_PER_REQUEST` BEFORE reading any of its keys, so a traversal cannot pin more than one key-list handle per visited object plus one property handle per reserved value, and a graph that would pin more is refused before it does. The bound does not compose ACROSS graphs, because the batch resets the decoded-value counter per entry — which is exactly what the per-entry scope is for. The module doc now states both halves rather than only that handles are "a separate resource with a separate bound" |
 | `VALUE_REFUSED_*` option lists are hand-maintained mirrors whose only rail is a `verter_debug_assert!` inside `CompileRequestError::malformed_option_value`, which a direct struct literal bypasses entirely | `ADOPT-NOW`, closed structurally for the cross-crate half: `CompileRequestError::MalformedOptionValue` is `#[non_exhaustive]`, so outside `verter_compiler` the variant has no struct literal at all (E0639) and the constructor is the only way to produce one — sealed by the compile-fail contract `malformed_option_value_not_forgeable`. Inside the owning crate the assertion remains the rail; every current producer, in this crate and out of it, already routes through the constructor |
+| The typed batch's aggregate retained-byte ceiling aborted the WHOLE call, discarding every sibling's decoded work and naming no input | `ADOPT-NOW`, closed: the ceiling now refuses PER ENTRY — the entry that crosses it and every entry after say so, naming their index and stating the ceiling is aggregate, while everything decoded before it still compiles and still answers. `typed-batch-attributes-the-aggregate-source-ceiling-per-entry`. What remains is the absence of a runtime override, which is operator decision 2 |
+| A batch entry's own `canonicalId` / `source` / `request` were read with `Object::get`, a full `[[Get]]`, while the options object and the request graph were own-property-only | `ADOPT-NOW`, closed: `read_batch_entry_fields` enumerates the entry's own keys and reads each value through that list, so an entirely inherited entry states no field and fails as a missing one. `typed-batch-refuses-an-inherited-entry-wrapper` |
+| The batch's id-position check failed the WHOLE call on any mismatch, resting on `resolve_alias_or_canonical` being idempotent — a property argued in prose and pinned by nothing | `ADOPT-NOW`, closed: a count mismatch still fails the call (it cannot be attributed to a position), but a position mismatch now fails only the entry it lands on. `typed-batch-accepts-a-registered-alias` exercises the alias map, which is the input whose id genuinely needs two resolutions to agree |
+| Same-canonical concurrent compiles became newly reachable when the typed batch moved onto the CPU pool, on one non-repeated case | `ADOPT-NOW`, closed: `typed-batch-repeats-a-shared-canonical-under-concurrency` runs four entries over ONE canonical with two different requests, twelve times, and pins each entry to its own requested product and to byte-stable output |
+| `compileRequest` exists on both bindings for one request schema, but their JavaScript response envelopes are not interchangeable: native nests the IDE payload under `ide`, stringifies `analysis` and throws a structured `Error`; the browser binding flattens the IDE DTO, returns `analysis` as an object and throws a string | Proposed `DEFER` — awaiting a ruling; see operator ask 3. The divergence PREDATES this node (the browser envelope is unchanged here) and converging it changes a published response shape, which is a consumer migration this charter excludes outright. It is documented on both sides (`docs/api/native.md`, `docs/api/wasm.md`, `packages/wasm/src/compile-request-types.ts`) so no consumer meets it unwarned |
 
 ## Operator decisions this record asks for
 
-1. **The expansion itself.** `ADOPT-NOW` for the crates and package beyond
-   the charter's named surfaces, on the merits above — noting that item 1's
-   charter-acceptance argument does not hold and it should be accepted (or
-   refused) as a forward-looking wire-shape decision. Item 5 entered in a
-   later fix round and is the one item of the five the charter's own
-   acceptance requires outright.
-2. **The typed batch route's fixed 64 MiB aggregate retained-byte
-   ceiling.** Exceeding it aborts the WHOLE call, with no per-entry
-   attribution and no runtime override; a whole-project batch of
-   average-sized SFCs reaches it well before the 65 536-entry outer cap.
-   The behaviour is documented in `docs/api/native.md` and beside the
-   constant, so callers can chunk. Making the ceiling a `HostConfig` field
-   is a `verter_session` change this node does not make.
+1. **The expansion itself.** `ADOPT-NOW` for the crates beyond the
+   charter's named surfaces, on the merits above. Every one of the four
+   remaining items is required by an acceptance line of this charter: item
+   1 by its named "browser binding enters" trigger, items 2 and 3 by
+   "the refusal names the offending property where the schema names it",
+   item 4 by "isolates a per-entry failure to that entry". The one item
+   that was NOT so required has been withdrawn rather than put to this
+   decision. The ask is therefore whether the charter's own acceptance
+   lines justify exceeding its LOC and file guidance — not whether to
+   admit unrelated work.
+2. **The typed batch route's fixed 64 MiB aggregate retained-byte ceiling
+   has no runtime override.** The ceiling itself no longer aborts the call
+   or hides which input crossed it: the entry that exhausts it and every
+   entry after it fail as `binding`, naming their index and stating the
+   ceiling is aggregate, while everything decoded before it still compiles.
+   What is left to accept is that the ceiling is a compile-time constant —
+   a whole-project batch of average-sized SFCs reaches it well before the
+   65 536-entry outer cap, and the caller's recourse is to resume from the
+   index the refusals name. Making it a `HostConfig` field is a
+   `verter_session` change this node does not make.
+3. **A `DEFER` ruling for the two bindings' divergent response
+   envelopes** (last row of the debt table). `CLAUDE.md` requires a
+   codex-`DEFER` ruling plus a debt row naming the durable owner, the
+   resolution gate, and the acceptance ID; a fix owner can propose the row
+   but cannot issue the ruling. Proposed owner: whichever node first
+   migrates a consumer onto BOTH bindings' `compileRequest` — that is the
+   consumer whose code the divergence actually costs, and the node that
+   can converge the envelope and migrate its caller in one change.
+   Proposed resolution gate: no later than the close of this plan.
+   `REJECT` is also available and is a defensible answer: the divergence is
+   documented on both sides and no consumer targets both today.
 
 ## If ratification is refused
 
-The separable piece is the diagnostic argument list plus its browser half
-(items 1 and 2): it is the one whose charter-acceptance argument does not
-hold, so moving it to its own node costs the typed routes nothing today —
-every production diagnostic publishes an empty argument list either way.
-Item 3 is not separable from the charter's refusal-naming acceptance, and
-item 5 is not separable from its per-entry isolation acceptance.
+Nothing separable is left to remove. The one item whose charter-acceptance
+argument did not hold is already withdrawn. Items 1 through 4 each answer a
+named acceptance line of this charter, so refusing them means the routes
+this node exists to add cannot meet their own acceptance in this node —
+which is a re-scope of CCA1O2J itself, not a trim of this candidate.

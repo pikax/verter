@@ -9,14 +9,14 @@ use napi::bindgen_prelude::*;
 use napi::{Env, Error, Result, Status};
 use verter_compiler::compile_request::{CompileRequestError, ProductKind};
 use verter_ffi::convert::{host_diagnostics_to_ffi, host_error_to_string};
-use verter_protocol::types::{FfiDiagnostic, FfiDiagnosticArg};
+use verter_protocol::types::FfiDiagnostic;
 use verter_session as host;
 
 use crate::{
     ffi_err, host_node_kind_to_napi, NapiCompileRequestFailure, NapiCompileRequestProduct,
     NapiCompileRequestResponse, NapiCompileRequestVirtualNode, NapiCompileRequestsEntry,
-    NapiDestructuredBinding, NapiDestructuredBlockMeta, NapiDiagnostic, NapiDiagnosticArg,
-    NapiDiagnosticsSnapshot, NapiIdeResponse, NapiVirtualMeta,
+    NapiDestructuredBinding, NapiDestructuredBlockMeta, NapiDiagnostic, NapiDiagnosticsSnapshot,
+    NapiIdeResponse, NapiVirtualMeta,
 };
 
 /// The native framing of a canonical request-construction refusal.
@@ -30,25 +30,11 @@ pub(crate) fn compile_request_construction_refused(error: &CompileRequestError) 
     format!("compile request construction refused: {error}")
 }
 
-// A diagnostic and its arguments project through the shared FFI converter
-// (`verter_ffi::convert::host_diagnostics_to_ffi`) so NAPI and WASM cannot
-// diverge on severity spelling, UTF-16 span mapping, or argument shape —
-// this crate only re-shapes the FFI struct into its `#[napi(object)]`
-// mirror, never re-derives the conversion.
-
-impl From<FfiDiagnosticArg> for NapiDiagnosticArg {
-    fn from(argument: FfiDiagnosticArg) -> Self {
-        NapiDiagnosticArg {
-            kind: argument.kind,
-            boolean: argument.boolean,
-            unsigned: argument.unsigned,
-            signed: argument.signed,
-            text: argument.text,
-            spanStart: argument.span_start,
-            spanEnd: argument.span_end,
-        }
-    }
-}
+// A diagnostic projects through the shared FFI converter
+// (`verter_ffi::convert::host_diagnostic_to_ffi`) so NAPI and WASM cannot
+// diverge on severity spelling or UTF-16 span mapping — this crate only
+// re-shapes the FFI struct into its `#[napi(object)]` mirror, never
+// re-derives the conversion.
 
 impl From<FfiDiagnostic> for NapiDiagnostic {
     fn from(diagnostic: FfiDiagnostic) -> Self {
@@ -58,7 +44,6 @@ impl From<FfiDiagnostic> for NapiDiagnostic {
             message: diagnostic.message,
             spanStart: diagnostic.span_start,
             spanEnd: diagnostic.span_end,
-            arguments: diagnostic.arguments.into_iter().map(Into::into).collect(),
         }
     }
 }

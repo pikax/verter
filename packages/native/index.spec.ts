@@ -966,9 +966,6 @@ describe("VerterHost type declarations in sync with native binary", () => {
     expect(interfaceFields(declarations, "NapiDiagnostic").sort()).toEqual(
       interfaceFields(hostTypes, "HostDiagnostic").sort(),
     );
-    expect(interfaceFields(declarations, "NapiDiagnosticArg").sort()).toEqual(
-      interfaceFields(hostTypes, "HostDiagnosticArg").sort(),
-    );
     expect(interfaceFields(published, "HostRuntimeCompiledProduct")).toEqual(
       expect.arrayContaining(["kind", "nodes"]),
     );

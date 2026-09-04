@@ -568,35 +568,6 @@ pub struct FfiSliceChanges {
     pub descriptor_changed: bool,
 }
 
-/// One canonically comparable value substituted into a diagnostic's
-/// rendered message. Mirrors `verter_language::DiagnosticArg`, with its
-/// `Span` variant's offsets already converted to UTF-16.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiDiagnosticArg {
-    pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub boolean: Option<bool>,
-    /// A `DiagnosticArg::Unsigned`'s exact value, as its decimal digits.
-    /// JavaScript's only numeric primitive is an IEEE-754 double, so a
-    /// `u64` above 2^53 does not survive the crossing as a number: it
-    /// arrives rounded, silently, with nothing on the wire recording that
-    /// it was. The digits do survive, and a caller that wants a number has
-    /// `Number(...)`/`BigInt(...)` to say so explicitly.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unsigned: Option<String>,
-    /// A `DiagnosticArg::Signed`'s exact value, as its decimal digits —
-    /// see [`Self::unsigned`] for why the digits and not a number.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signed: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub span_start: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub span_end: Option<u32>,
-}
-
 /// A single diagnostic (error, warning, or info).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -606,7 +577,6 @@ pub struct FfiDiagnostic {
     pub message: String,
     pub span_start: u32,
     pub span_end: u32,
-    pub arguments: Vec<FfiDiagnosticArg>,
 }
 
 /// Collection of diagnostics with a precomputed `hasErrors` flag.

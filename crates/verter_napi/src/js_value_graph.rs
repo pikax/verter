@@ -158,7 +158,8 @@ pub const MIN_VALUE_RETAINED_BYTES: usize = std::mem::size_of::<Value>();
 /// Decoded-value accounting is per request graph: a batch resets it
 /// between entries so a few thousand small requests are admitted by the
 /// retained-byte and entry-count bounds. Retained bytes accumulate across
-/// the whole call and abort it when exhausted.
+/// the whole call, so once they are exhausted every remaining entry is
+/// refused.
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct JsValueMaterializationBudget {
@@ -168,12 +169,13 @@ pub struct JsValueMaterializationBudget {
     max_retained_bytes: usize,
     /// Set once the AGGREGATE retained-byte ceiling is hit.
     ///
-    /// Read by the batch route: byte exhaustion is a whole-call ceiling
-    /// that every later entry would also hit, so it aborts the call
-    /// instead of failing one entry. There is deliberately no counterpart
-    /// for the decoded-value ceiling — that one is PER entry, reset by
-    /// [`Self::reset_decoded_values`] between entries, so exhausting it
-    /// fails only the entry that did.
+    /// Read by the batch route to tell the two ceilings apart in a
+    /// refusal: byte exhaustion is a whole-call state every later entry
+    /// hits too, so the entry that crossed it and every entry after say
+    /// so, while the entries that decoded first still compile. There is
+    /// deliberately no counterpart for the decoded-value ceiling — that
+    /// one is PER entry, reset by [`Self::reset_decoded_values`] between
+    /// entries, so exhausting it costs only the entry that did.
     bytes_exhausted: bool,
 }
 
