@@ -4700,10 +4700,9 @@ mod tests {
     /// A transposed position names both ids, so a caller can tell a
     /// mispairing from a compile failure.
     ///
-    /// Mutation recipe: swap the two arguments at the
-    /// `batch_entry_position_mismatch` call site in `compile_requests`.
-    /// The message then blames the input for the executor's answer and
-    /// this case goes red.
+    /// Mutation recipe: swap `{answered}` and `{expected}` inside
+    /// `batch_entry_position_mismatch`'s format string. The message then
+    /// blames the input for the executor's answer and this case goes red.
     #[test]
     fn a_transposed_position_names_the_answered_and_the_expected_id() {
         let message = batch_entry_position_mismatch("/c.vue", "/b.vue");
@@ -4824,9 +4823,10 @@ mod tests {
     /// against the paired source, as the success projection does — a
     /// separate call path, so a separate proof.
     ///
-    /// Mutation recipe: pass `None` instead of `Some("a😀b")` as the
-    /// source below. The span stays at its UTF-8 byte offsets (1, 5) and
-    /// this case goes red.
+    /// Mutation recipe: pass `None` for `source` at the
+    /// `host_diagnostics_to_napi(&failure.diagnostics, source)` call in
+    /// `compile_request_response::compile_request_failure_to_napi`. The
+    /// span stays at its UTF-8 byte offsets (1, 5) and this case goes red.
     #[test]
     fn a_typed_failure_maps_its_diagnostic_spans_to_utf16() {
         let failure = host::CompileRequestFailure::Host(host::HostError::CompileError(
