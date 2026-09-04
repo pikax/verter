@@ -173,8 +173,10 @@ ordered entry containing either `response` or a typed `failure`; one refusal
 does not suppress valid siblings. Per-entry shape, UTF-8, request decoding, and
 canonical construction refusals use the `binding` failure arm. Invalid
 batch-level options or a non-array/oversized outer input throw before execution,
-as does a batch above the aggregate 64 MiB decoded-payload or 262,144
-decoded-value budget.
+as does a batch above the aggregate 64 MiB decoded-payload budget. Each entry's
+own request graph is separately bounded by a per-request 131,072 decoded-value
+cap, reset between entries — there is no separate aggregate decoded-value
+budget across the batch.
 
 `compileRequest()` is also available in `@verter/wasm`. The source-registering
 `compileRequests()` batch route is native-only and is not exposed by the browser

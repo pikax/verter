@@ -376,7 +376,14 @@ export interface HostIdeCompiledProduct {
   ide: import("./host-types").HostIdeResponse;
 }
 
-/** `analysis` is the JSON rendering used by the existing analysis route. */
+/**
+ * `analysis` is a JSON-stringified `TemplateAnalysisSnapshot` (template
+ * components, binding occurrences, unresolved bindings, defined slots,
+ * template refs). It is a different, narrower payload than `getAnalysis()`,
+ * which returns a JSON-stringified `FileAnalysisSnapshot` (script-level
+ * imports, bindings, macros, and macro type dependencies) — the two share
+ * their JSON-string transport, not their shape.
+ */
 export interface HostAnalysisCompiledProduct {
   kind: "analysis";
   analysis: string;

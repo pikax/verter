@@ -45,6 +45,20 @@
 //!   `typed-batch-isolates-a-canonical-request-refusal` matches
 //!   `DuplicateProduct(RuntimeClient)` again.
 //!
+//! # Coverage disposition: batch-route product-kind coverage
+//!
+//! `compile_request_response_to_napi` is the one conversion function both
+//! `compileRequest` and `compileRequests` share, and every product kind
+//! (`analysis`, `runtimeServer`, the `publicApi`/`declarations` refusal) is
+//! already exercised end to end through the singular route
+//! (`typed-single-vue-analysis-is-a-json-string`,
+//! `typed-single-runtime-server-publishes-its-nodes`,
+//! `typed-single-refuses-public-api-and-declarations`). `ADOPT-NOW`: the
+//! batch route's own zip/wrap path was, until `typed-batch-runs-analysis-and-runtime-server-products`
+//! below, exercised only with `runtimeClient` — a real (low-risk, since the
+//! wrap logic is product-kind-agnostic) gap, now closed directly rather
+//! than left open.
+//!
 //! # Where the addon comes from
 //!
 //! This suite builds nothing. The addon is its own `cdylib` package that
@@ -93,6 +107,7 @@ const EXPECTED_CASES: &[&str] = &[
     "typed-batch-preserves-order-isolates-failure-and-registers-once",
     "typed-batch-refuses-a-non-array-input",
     "typed-batch-refuses-unknown-options",
+    "typed-batch-runs-analysis-and-runtime-server-products",
     "valid-request-accepted",
     "unknown-top-level-key-stated-as-undefined-refused",
     "unknown-option-key-stated-as-undefined-refused",
@@ -1166,6 +1181,48 @@ check("typed-batch-refuses-a-non-array-input", () => {
   if (refusal === null) return "accepted a non-array batch input";
   if (!refusal.includes("must be an array")) {
     return `non-array batch refusal was ${refusal}`;
+  }
+  return undefined;
+});
+
+// `compile_request_response_to_napi` is the one conversion function shared
+// by `compileRequest` and `compileRequests`, and every product kind is
+// already exercised end to end through the singular route above — but the
+// batch route's own zip/wrap logic (`typed-batch-*` above) is exercised
+// only with `runtimeClient`. This closes that gap directly, rather than
+// leaving it as an open, unruled claim.
+check("typed-batch-runs-analysis-and-runtime-server-products", () => {
+  const analysisId = "/typed/BatchAnalysis.vue";
+  const serverId = "/typed/BatchServer.vue";
+  const source = `<script setup>const n = 1</script><template><p>{{ n }}</p></template>`;
+  const serverRequest = vueProducts(serverId, [{ kind: "runtimeServer", runtimeSourceMap: true }]);
+  serverRequest.options.ssr = true;
+  const host = new addon.VerterHost();
+  const entries = host.compileRequests([
+    {
+      canonicalId: analysisId,
+      source: Buffer.from(source),
+      request: vueProducts(analysisId, [
+        { kind: "analysis", wantScriptBindings: false, wantTemplateData: true },
+      ]),
+    },
+    {
+      canonicalId: serverId,
+      source: Buffer.from(source),
+      request: serverRequest,
+    },
+  ]);
+  host.close();
+  if (entries.length !== 2 || entries[0].failure || entries[1].failure) {
+    return `batch analysis/runtimeServer products did not both compile: ${JSON.stringify(entries)}`;
+  }
+  const analysisProduct = entries[0].response.products[0];
+  if (!analysisProduct || analysisProduct.kind !== "analysis" || typeof analysisProduct.analysis !== "string") {
+    return `batch analysis row was not a JSON string: ${JSON.stringify(analysisProduct)}`;
+  }
+  const serverNodes = runtimeNodes(entries[1].response, "runtimeServer");
+  if (!serverNodes || serverNodes.length === 0) {
+    return `batch runtimeServer nodes were absent: ${JSON.stringify(entries[1].response)}`;
   }
   return undefined;
 });

@@ -467,15 +467,27 @@ impl NapiValueGraph {
 pub(crate) struct NapiObjectKeys {
     env: sys::napi_env,
     names: sys::napi_value,
+    /// The last `(index, name)` fetched by [`Self::name_at`]. The
+    /// materialisation loop always calls [`JsObjectKeys::retained_bytes`]
+    /// then [`JsObjectKeys::at`] for the SAME index back to back, so this
+    /// single-entry cache turns that pair into one `napi_get_element` call
+    /// instead of two.
+    last: std::cell::Cell<Option<(u32, sys::napi_value)>>,
 }
 
 impl NapiObjectKeys {
     fn name_at(&self, index: u32) -> Result<sys::napi_value> {
+        if let Some((cached_index, cached_name)) = self.last.get() {
+            if cached_index == index {
+                return Ok(cached_name);
+            }
+        }
         let mut name = ptr::null_mut();
         napi::check_status!(
             unsafe { sys::napi_get_element(self.env, self.names, index, &mut name) },
             "Failed to read own enumerable key {index} of a request object"
         )?;
+        self.last.set(Some((index, name)));
         Ok(name)
     }
 }
@@ -563,6 +575,7 @@ impl JsValueGraph for NapiValueGraph {
         Ok(NapiObjectKeys {
             env: self.env,
             names,
+            last: std::cell::Cell::new(None),
         })
     }
 
