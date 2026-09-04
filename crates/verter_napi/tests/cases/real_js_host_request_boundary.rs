@@ -122,8 +122,11 @@ const EXPECTED_CASES: &[&str] = &[
     "typed-batch-preserves-order-isolates-failure-and-registers-once",
     "typed-batch-refuses-a-non-array-input",
     "typed-batch-refuses-unknown-options",
+    "typed-batch-refuses-binary-options-before-enumerating-them",
+    "typed-batch-clears-a-throwing-options-trap-and-still-serves",
     "typed-batch-runs-analysis-and-runtime-server-products",
     "typed-batch-preserves-ide-utf16-offsets-per-entry",
+    "typed-batch-answers-an-empty-source-buffer-beside-a-sibling",
     "typed-batch-isolates-public-api-and-declarations-refusals",
     "valid-request-accepted",
     "unknown-top-level-key-stated-as-undefined-refused",
@@ -1191,6 +1194,106 @@ check("typed-batch-refuses-unknown-options", () => {
   return undefined;
 });
 
+// `options` is the one enumerated argument on this route that is not
+// already an array, so `napi_is_array` does not protect it. A Buffer,
+// typed array or DataView exposes every byte index as an enumerable own
+// key, so enumerating one materialises a V8 key string per byte before any
+// count can refuse them — which is why the options value is classified,
+// not merely array-checked.
+//
+// Mutation recipe: replace the `classify` call in
+// `decode_compile_requests_priority` with the old
+// `ty != ValueType::Object || napi_value_is_array(...)` check. Both
+// payloads below are then enumerated and refused as `unknown field `0``,
+// so both assertions go red — and at a caller's chosen size, enumerating
+// is what the refusal costs.
+check("typed-batch-refuses-binary-options-before-enumerating-them", () => {
+  const host = new addon.VerterHost();
+  const refusals = [new Uint8Array(1024), Buffer.alloc(1024), new DataView(new ArrayBuffer(1024))]
+    .map((payload) => refusalOfRoute(() => host.compileRequests([], payload)));
+  host.close();
+  for (const [index, refusal] of refusals.entries()) {
+    if (refusal === null) return `accepted binary batch options at index ${index}`;
+    if (!refusal.includes("binary or typed-array")) {
+      return `binary batch options at index ${index} were refused with ${refusal}`;
+    }
+  }
+  return undefined;
+});
+
+// A throwing accessor on the options argument has to become a THROWN
+// refusal, and must not poison the next call.
+//
+// Two things have to hold, and neither implies the other. The exception
+// has to be captured and cleared, or every later N-API call on this env
+// fails. And the recovered error has to stop claiming `PendingException`:
+// `JsError::throw_into` drops an error carrying that status instead of
+// throwing it, so a route that RETURNS the recovered error resolves to
+// `undefined` with no error at all — a refusal a caller cannot see is
+// worse than a confusing one. Batch ENTRY accessors never showed this,
+// because their recovered error is folded into the entry's own `failure`
+// slot rather than thrown.
+//
+// Mutation recipes:
+// - Restore the bare `?` on `own_enumerable_keys` in
+//   `decode_compile_requests_priority`: the `ownKeys` leg stops carrying
+//   the thrown message and the following batch runs with an exception
+//   already pending.
+// - Drop the `throwable_status` re-tag in `recover_pending_exception`
+//   (return `fallback.status`): BOTH legs resolve to `undefined`, so
+//   `refusalOfRoute` answers null and both `accepted …` messages fire.
+check("typed-batch-clears-a-throwing-options-trap-and-still-serves", () => {
+  const canonicalId = "/typed/OptionsTrap.vue";
+  const source = `<template><p>x</p></template>`;
+  const host = new addon.VerterHost();
+  const hostile = [
+    [
+      "ownKeys",
+      new Proxy(
+        {},
+        {
+          ownKeys() {
+            throw new Error("options ownKeys trap");
+          },
+        },
+      ),
+      "options ownKeys trap",
+    ],
+    [
+      "priority getter",
+      {
+        get priority() {
+          throw new Error("options priority trap");
+        },
+      },
+      "options priority trap",
+    ],
+  ];
+
+  for (const [label, options, expected] of hostile) {
+    const refusal = refusalOfRoute(() => host.compileRequests([], options));
+    if (refusal === null) {
+      host.close();
+      return `accepted options whose ${label} throws, with no error at all`;
+    }
+    if (!refusal.includes(expected)) {
+      host.close();
+      return `throwing ${label} was refused with ${refusal}`;
+    }
+    // The next call runs on the same env: a still-pending exception would
+    // fail it whatever it asked for.
+    const entries = host.compileRequests([
+      { canonicalId, source: Buffer.from(source), request: vueRuntime(canonicalId) },
+    ]);
+    if (entries.length !== 1 || entries[0].failure || !runtimeMain(entries[0].response)) {
+      host.close();
+      return `a later batch was poisoned by the throwing ${label}: ${JSON.stringify(entries)}`;
+    }
+  }
+  host.close();
+  return undefined;
+});
+
 check("typed-batch-refuses-a-non-array-input", () => {
   const host = new addon.VerterHost();
   const refusal = refusalOfRoute(() => host.compileRequests({ length: 1 }));
@@ -1239,6 +1342,53 @@ check("typed-batch-runs-analysis-and-runtime-server-products", () => {
   const serverNodes = runtimeNodes(entries[1].response, "runtimeServer");
   if (!serverNodes || serverNodes.length === 0) {
     return `batch runtimeServer nodes were absent: ${JSON.stringify(entries[1].response)}`;
+  }
+  return undefined;
+});
+
+// An empty `source` Buffer takes the one branch that cannot build a slice:
+// `slice::from_raw_parts` requires a non-null aligned pointer even at
+// length zero, and V8 is free to hand back a null data pointer for a
+// zero-length backing store. Whether it does so on any given engine build
+// is not something a test can pin, so this case exists to make the
+// zero-length path EXECUTED rather than merely reasoned about — under a
+// sanitizer or a debug allocator it is where the null slice would be
+// caught, and in every build it proves an empty entry is answered rather
+// than aborting the batch.
+//
+// Mutation recipe: register the empty entry alone (drop the sibling) and
+// the case stops proving the batch survives it; restore the unconditional
+// `from_raw_parts` and the branch is exercised with whatever pointer V8
+// supplies.
+check("typed-batch-answers-an-empty-source-buffer-beside-a-sibling", () => {
+  const emptyId = "/typed/BatchEmpty.vue";
+  const siblingId = "/typed/BatchAfterEmpty.vue";
+  const host = new addon.VerterHost();
+  const entries = host.compileRequests([
+    {
+      canonicalId: emptyId,
+      source: Buffer.alloc(0),
+      request: vueRuntime(emptyId),
+    },
+    {
+      canonicalId: siblingId,
+      source: Buffer.from(`<template><p>after-empty</p></template>`),
+      request: vueRuntime(siblingId),
+    },
+  ]);
+  host.close();
+  if (entries.length !== 2) {
+    return `an empty source changed the entry count: ${JSON.stringify(entries)}`;
+  }
+  const empty = entries[0];
+  if (empty.canonicalId !== emptyId) {
+    return `the empty entry named ${empty.canonicalId}`;
+  }
+  if (Boolean(empty.response) === Boolean(empty.failure)) {
+    return `the empty entry carried neither or both of response/failure: ${JSON.stringify(empty)}`;
+  }
+  if (entries[1].failure || !runtimeMain(entries[1].response)) {
+    return `the sibling after an empty source did not compile: ${JSON.stringify(entries[1])}`;
   }
   return undefined;
 });

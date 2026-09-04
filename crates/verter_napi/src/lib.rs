@@ -193,7 +193,19 @@ fn exception_message_without_coercion(
 /// Capture and clear a JavaScript exception left pending by a recoverable
 /// accessor failure. Continuing with it pending makes every later N-API call
 /// fail, defeating per-entry batch isolation.
+///
+/// The recovered error is re-tagged off [`Status::PendingException`]. The
+/// exception is no longer pending — this function just cleared it — and an
+/// error still CLAIMING to be one is dropped rather than thrown:
+/// `JsError::throw_into` returns early on that status, so a route that
+/// returns the recovered error to JavaScript would resolve to `undefined`
+/// with no error at all. A batch entry that folds the error into its own
+/// `failure` slot never noticed; a route that throws does.
 fn recover_pending_exception(env: &Env, fallback: Error) -> Result<Error> {
+    let throwable_status = |status: Status| match status {
+        Status::PendingException => Status::GenericFailure,
+        other => other,
+    };
     let mut pending = false;
     let status = unsafe { napi::sys::napi_is_exception_pending(env.raw(), &mut pending) };
     if status != napi::sys::Status::napi_ok {
@@ -203,7 +215,10 @@ fn recover_pending_exception(env: &Env, fallback: Error) -> Result<Error> {
         ));
     }
     if !pending {
-        return Ok(fallback);
+        return Ok(Error::new(
+            throwable_status(fallback.status),
+            fallback.reason.clone(),
+        ));
     }
 
     let mut exception = std::ptr::null_mut();
@@ -221,7 +236,7 @@ fn recover_pending_exception(env: &Env, fallback: Error) -> Result<Error> {
             fallback.reason.clone()
         }
     };
-    Ok(Error::new(fallback.status, message))
+    Ok(Error::new(throwable_status(fallback.status), message))
 }
 
 /// Measure a JavaScript string before converting it into an owned Rust value.
