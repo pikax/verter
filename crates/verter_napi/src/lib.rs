@@ -160,8 +160,7 @@ fn exception_message_without_coercion(
         // Measured before it is copied, and the measurement is a BOUND:
         // discarding it would leave a probe that reads like a guard and
         // enforces nothing.
-        if js_value_graph::napi_utf8_string_len(env.raw(), exception)?
-            > MAX_EXCEPTION_MESSAGE_BYTES
+        if js_value_graph::napi_utf8_string_len(env.raw(), exception)? > MAX_EXCEPTION_MESSAGE_BYTES
         {
             return Ok("JavaScript exception".to_string());
         }
@@ -4527,9 +4526,7 @@ mod tests {
     ///   goes red.
     #[test]
     fn unsupported_option_refusal_names_the_request_field() {
-        use verter_compiler::compile_request::{
-            CompileRequestError, FrameworkOption, VueOption,
-        };
+        use verter_compiler::compile_request::{CompileRequestError, FrameworkOption, VueOption};
         let refusal = |option| {
             compile_request_construction_refused(&CompileRequestError::UnsupportedOption {
                 option: FrameworkOption::Vue(option),

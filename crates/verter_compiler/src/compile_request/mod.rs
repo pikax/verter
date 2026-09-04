@@ -277,12 +277,14 @@ impl std::fmt::Display for CompileRequestError {
             CompileRequestError::DuplicateProduct(kind) => {
                 write!(f, "duplicate product '{}'", kind.wire_tag())
             }
-            CompileRequestError::ConflictingRuntimeStyleProcessing { first, conflicting } => write!(
-                f,
-                "conflicting runtime styleProcessing values '{}' and '{}'",
-                first.wire_name(),
-                conflicting.wire_name()
-            ),
+            CompileRequestError::ConflictingRuntimeStyleProcessing { first, conflicting } => {
+                write!(
+                    f,
+                    "conflicting runtime styleProcessing values '{}' and '{}'",
+                    first.wire_name(),
+                    conflicting.wire_name()
+                )
+            }
             CompileRequestError::RuntimeStyleProcessingUnsupported {
                 framework,
                 requested,

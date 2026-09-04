@@ -119,6 +119,7 @@ const EXPECTED_CASES: &[&str] = &[
     "typed-batch-isolates-a-wrong-typed-source",
     "typed-batch-clears-throwing-accessors-and-preserves-siblings",
     "typed-batch-clears-hostile-thrown-values-and-preserves-siblings",
+    "typed-batch-bounds-a-hostile-thrown-string",
     "typed-batch-preserves-order-isolates-failure-and-registers-once",
     "typed-batch-refuses-a-non-array-input",
     "typed-batch-refuses-unknown-options",
@@ -921,6 +922,58 @@ check("typed-batch-clears-hostile-thrown-values-and-preserves-siblings", () => {
   }
   if (!entries[1].response || entries[1].failure || !runtimeMain(entries[1].response)) {
     return `valid sibling after a hostile throw did not compile: ${JSON.stringify(entries[1])}`;
+  }
+  return undefined;
+});
+
+// A thrown string is caller-controlled and unbounded, and it is copied
+// into a Rust error message. The length probe in front of that copy is a
+// BOUND, not a formality: above it the generic label is answered instead,
+// so a hostile multi-megabyte throw cannot make the binding retain it.
+//
+// Mutation recipe: discard the probe (`…and_then(|_| String::from_napi_
+// value(...))`, or drop the `> MAX_EXCEPTION_MESSAGE_BYTES` branch). The
+// huge string is then copied verbatim and this case reports a message
+// megabytes long instead of the label.
+check("typed-batch-bounds-a-hostile-thrown-string", () => {
+  const goodId = "/typed/AfterHugeThrow.svelte";
+  const huge = "x".repeat(1 << 20);
+  const inputs = [
+    {
+      canonicalId: "/typed/HugeThrow.vue",
+      source: Buffer.from(`<template><p>huge</p></template>`),
+      request: vueRuntime("/typed/HugeThrow.vue"),
+    },
+    {
+      canonicalId: goodId,
+      source: Buffer.from(`<p>still compiled</p>`),
+      request: svelteRuntime(goodId),
+    },
+  ];
+  Object.defineProperty(inputs, 0, {
+    enumerable: true,
+    get() {
+      throw huge;
+    },
+  });
+  const host = new addon.VerterHost();
+  const entries = host.compileRequests(inputs);
+  host.close();
+  if (entries.length !== 2 || entries[1].canonicalId !== goodId) {
+    return `a huge thrown string changed entry count or order: ${JSON.stringify(entries)}`;
+  }
+  const message = entries[0].failure && entries[0].failure.message;
+  if (typeof message !== "string") {
+    return `the huge throw was not an isolated failure: ${JSON.stringify(entries[0])}`;
+  }
+  if (message.includes(huge) || message.length > 4096) {
+    return `the huge thrown string was retained verbatim (${message.length} chars)`;
+  }
+  if (!message.includes("JavaScript exception")) {
+    return `an over-long throw must answer the generic label, got ${message}`;
+  }
+  if (!entries[1].response || entries[1].failure || !runtimeMain(entries[1].response)) {
+    return `valid sibling after a huge throw did not compile: ${JSON.stringify(entries[1])}`;
   }
   return undefined;
 });

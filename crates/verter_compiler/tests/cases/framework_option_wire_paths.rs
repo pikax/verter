@@ -286,7 +286,11 @@ impl RequestDeclaration {
     }
 
     fn map_value_type(&self, ty: &str) -> Option<String> {
-        let body = self.aliases.get(ty).cloned().unwrap_or_else(|| ty.to_string());
+        let body = self
+            .aliases
+            .get(ty)
+            .cloned()
+            .unwrap_or_else(|| ty.to_string());
         let start = body.find("]:")? + 2;
         let end = body.rfind('}')?;
         Some(body[start..end].trim().to_string())
