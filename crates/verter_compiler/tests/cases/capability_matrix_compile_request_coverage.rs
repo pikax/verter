@@ -690,3 +690,59 @@ fn every_tsv_row_has_a_registered_verification() {
         }
     }
 }
+
+/// The `cell_id` a refusal quotes is the committed matrix's own
+/// identifier, in both directions: a variant naming a row the matrix does
+/// not have fails, and a matrix row no variant names fails too.
+///
+/// `CapabilityCell::cell_id` is the SINGLE owner of that mapping — a
+/// refusal naming an unsupported capability quotes the matrix row a caller
+/// can go read, and every transport renders it from there rather than
+/// keeping its own copy. This is the pin that keeps the two in step; the
+/// exhaustiveness itself is the `match`'s.
+///
+/// Mutation recipes:
+/// - Change one `cell_id` arm (`SvelteHmr` to `"SVELTE-HOT-MODULE"`): this
+///   reports the invented id and the unnamed row.
+/// - Delete one entry from `ALL_CAPABILITY_CELLS`: the count assertion
+///   fails before the set comparison can hide the gap.
+/// - Point two variants at one id (`SvelteHmr` to `"SVELTE-MODULE"`): the
+///   duplicate assertion reports it, and the unnamed row does too.
+#[test]
+fn cell_ids_match_the_committed_matrix() {
+    use std::collections::BTreeSet;
+    use verter_compiler::compile_request::ALL_CAPABILITY_CELLS;
+
+    let committed: BTreeSet<String> = read_matrix_rows()
+        .into_iter()
+        .map(|row| row.cell_id)
+        .collect();
+    assert_eq!(
+        committed.len(),
+        ALL_CAPABILITY_CELLS.len(),
+        "the matrix commits {} rows, {} variants are listed",
+        committed.len(),
+        ALL_CAPABILITY_CELLS.len()
+    );
+
+    let named: BTreeSet<String> = ALL_CAPABILITY_CELLS
+        .iter()
+        .map(|cell| cell.cell_id().to_string())
+        .collect();
+    assert_eq!(
+        named.len(),
+        ALL_CAPABILITY_CELLS.len(),
+        "two variants name the same matrix cell id"
+    );
+
+    let invented: Vec<_> = named.difference(&committed).collect();
+    assert!(
+        invented.is_empty(),
+        "variants name cell ids the matrix does not have: {invented:?}"
+    );
+    let unnamed: Vec<_> = committed.difference(&named).collect();
+    assert!(
+        unnamed.is_empty(),
+        "matrix rows no variant names: {unnamed:?}"
+    );
+}
