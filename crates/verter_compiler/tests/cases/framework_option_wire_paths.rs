@@ -24,9 +24,13 @@
 //!   reports the wrong path.
 //! - Drop the surface-derived prefix from `FrameworkOption`'s `Display`
 //!   (`write!(f, "{framework}:{option}")` unconditionally): the two
-//!   `customElement` assertions go red, and
-//!   `no_two_distinct_options_collapse_onto_one_refusal_path` reports
-//!   `svelte:tag`/`svelte:*.type` colliding with unrelated rows.
+//!   `customElement` assertions in
+//!   `refusal_paths_name_the_field_a_caller_wrote` go red. The nested rows
+//!   would then read `svelte:tag` and `svelte:*.type`, which no caller
+//!   writes. (`no_two_distinct_options_collapse_onto_one_refusal_path` does
+//!   NOT catch this one: today those leaf names happen not to collide with
+//!   another row, which is why the positive assertions carry the contract
+//!   and the collapse check is only its companion.)
 //! - Restore the case-lowered `format!("{option:?}")` rendering: every
 //!   assertion in `refusal_paths_name_the_field_a_caller_wrote` goes red,
 //!   and the upper-case-leading-segment check does not save it — the
