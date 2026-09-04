@@ -758,6 +758,11 @@ fn an_inadmissible_product_set_is_refused_by_the_canonical_request() {
 
 // ── the two arms stay distinguishable to the caller ──────────────────────
 
+/// Mutation recipes:
+/// - Render the request arm with `{error:?}`: the rule-naming assertion
+///   goes red on the missing sentence, and the variant-spelling assertion
+///   goes red on `EmptyProductSet`.
+/// - Give the decode arm the request arm's framing: `assert_ne!` fires.
 #[test]
 fn each_arm_renders_a_message_that_names_which_authority_refused() {
     let schema = HostCompileRequestError::Decode(

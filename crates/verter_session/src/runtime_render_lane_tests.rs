@@ -600,6 +600,11 @@ $pad: 1rem;
 /// that construction-time refusal the combination would have produced
 /// whatever the Vapor and SSR codegen paths happen to interact to on an
 /// unvalidated input, not a clean refusal.
+///
+/// Mutation recipe: admit the pair at construction (drop the `ssr` x
+/// `Vapor` arm from `CompileRequest::new`). The render then reaches codegen
+/// and publishes no error at all, so the assertion below finds no matching
+/// message.
 #[test]
 fn runtime_render_refuses_ssr_and_force_vapor() {
     let src = "<template><div>{{ a }}</div></template>\n";
