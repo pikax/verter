@@ -69,6 +69,16 @@
 //!   Err(error)` where `batch_retained_bytes_refusal` is minted) and
 //!   `typed-batch-attributes-the-aggregate-source-ceiling-per-entry` loses
 //!   the sibling that decoded before the ceiling was reached.
+//! - Drop the `additional > self.max_retained_bytes` arm from
+//!   `JsValueMaterializationBudget::retain_bytes` (latch `bytes_exhausted`
+//!   for every over-cap charge) and
+//!   `typed-batch-isolates-a-single-source-above-the-whole-ceiling` refuses
+//!   the sibling after one oversized input with an aggregate ceiling the
+//!   call never reached.
+//! - Skip an unrecognised own key in `read_batch_entry_fields` (`other =>
+//!   continue`) and `typed-batch-refuses-an-unknown-own-key-on-an-entry`
+//!   reports a typo as a missing field, and compiles an entry that spells
+//!   both the field and the typo.
 //! - Fail the whole call on a position mismatch (return `Err` instead of
 //!   filling that entry's `failure` slot) and
 //!   `typed-batch-accepts-a-registered-alias` still passes — which is why
@@ -187,6 +197,8 @@ const EXPECTED_CASES: &[&str] = &[
     "self-referential-graph-refused",
     "typed-batch-refuses-an-oversized-outer-array",
     "typed-batch-attributes-the-aggregate-source-ceiling-per-entry",
+    "typed-batch-isolates-a-single-source-above-the-whole-ceiling",
+    "typed-batch-refuses-an-unknown-own-key-on-an-entry",
     "typed-batch-refuses-an-aggregate-decoded-value-payload",
     "typed-batch-refuses-an-invalid-priority",
     "typed-batch-ignores-an-inherited-priority",
@@ -1550,6 +1562,110 @@ check("typed-batch-attributes-the-aggregate-source-ceiling-per-entry", () => {
   return undefined;
 });
 
+// A single payload larger than the WHOLE ceiling is not the aggregate
+// state: it could not fit an empty budget either, and the failed charge is
+// never committed, so the call still holds every byte it held before. It is
+// refused by its own size, and every sibling — the ones before it and the
+// ones after — still decodes and compiles. Latching the aggregate flag here
+// instead refuses every later entry with a ceiling the call never reached,
+// and advises compiling fewer inputs per call: the one remedy that cannot
+// help a caller whose problem is one large file.
+check("typed-batch-isolates-a-single-source-above-the-whole-ceiling", () => {
+  const oversizeId = "/typed/Oversize.vue";
+  const afterId = "/typed/AfterOversize.vue";
+  const smallSource = `<template><p>after-oversize</p></template>`;
+  // One entry above the 64 MiB call ceiling on its own.
+  const oversize = Buffer.alloc(65 * 1024 * 1024, 0x20);
+  const inputs = [
+    { canonicalId: oversizeId, source: oversize, request: vueRuntime(oversizeId) },
+    { canonicalId: afterId, source: Buffer.from(smallSource), request: vueRuntime(afterId) },
+  ];
+  const host = new addon.VerterHost();
+  let entries;
+  const refusal = refusalOfRoute(() => {
+    entries = host.compileRequests(inputs);
+  });
+  host.close();
+  if (refusal !== null) {
+    return `one oversized entry threw for the whole call: ${refusal}`;
+  }
+  if (entries.length !== inputs.length) {
+    return `the batch dropped entries: ${entries.length} for ${inputs.length} inputs`;
+  }
+  const failure = entries[0].failure;
+  if (!failure || entries[0].response) {
+    return `the oversized entry was accepted: ${JSON.stringify(entries[0])}`;
+  }
+  if (failure.kind !== "binding") {
+    return `the oversized refusal was not a binding failure: ${failure.kind}`;
+  }
+  if (!failure.message.includes("is itself above")) {
+    return `the oversized refusal did not name its own size: ${failure.message}`;
+  }
+  if (failure.message.includes("aggregate over the whole call")) {
+    return `one oversized entry reported the aggregate ceiling: ${failure.message}`;
+  }
+  if (!entries[1].response || entries[1].failure) {
+    return `the sibling after an oversized entry was refused: ${JSON.stringify(entries[1])}`;
+  }
+  if (!runtimeMain(entries[1].response)) {
+    return "the sibling after an oversized entry published no main node";
+  }
+  return undefined;
+});
+
+// The entry wrapper is CLOSED, exactly as the options object and the request
+// graph are. A one-character typo on the longest field name is 6 bytes, so it
+// is read; skipping it silently reports the entry as missing `request`, and
+// an entry that spells BOTH compiles as though the stray key were absent.
+// Naming the key is what tells the caller which one they wrote.
+check("typed-batch-refuses-an-unknown-own-key-on-an-entry", () => {
+  const typoId = "/typed/TypoKey.vue";
+  const strayId = "/typed/StrayKey.vue";
+  const siblingId = "/typed/ClosedSibling.vue";
+  const source = `<template><p>closed-wrapper</p></template>`;
+  const inputs = [
+    // The typo alone: `request` is absent, but the refusal must name the
+    // key the caller actually wrote rather than the field it displaced.
+    { canonicalId: typoId, source: Buffer.from(source), requst: vueRuntime(typoId) },
+    // Every declared field present, plus one stray own key.
+    {
+      canonicalId: strayId,
+      source: Buffer.from(source),
+      request: vueRuntime(strayId),
+      requst: vueRuntime(strayId),
+    },
+    { canonicalId: siblingId, source: Buffer.from(source), request: vueRuntime(siblingId) },
+  ];
+  const host = new addon.VerterHost();
+  let entries;
+  const refusal = refusalOfRoute(() => {
+    entries = host.compileRequests(inputs);
+  });
+  host.close();
+  if (refusal !== null) {
+    return `an unknown entry key threw for the whole call: ${refusal}`;
+  }
+  if (entries.length !== inputs.length) {
+    return `the batch dropped entries: ${entries.length} for ${inputs.length} inputs`;
+  }
+  for (const index of [0, 1]) {
+    const failure = entries[index].failure;
+    if (!failure || entries[index].response) {
+      return `entry ${index} with an unknown own key was accepted: ${JSON.stringify(entries[index])}`;
+    }
+    if (failure.kind !== "binding") {
+      return `the unknown-key refusal was not a binding failure: ${failure.kind}`;
+    }
+    if (!failure.message.includes("unknown field `requst`")) {
+      return `entry ${index} did not name the unknown key: ${failure.message}`;
+    }
+  }
+  if (!entries[2].response || entries[2].failure) {
+    return `the closed-wrapper sibling did not compile: ${JSON.stringify(entries[2])}`;
+  }
+  return undefined;
+});
 // @ai-generated - Reusing one nested request array must consume one shared decode budget.
 check("typed-batch-refuses-an-aggregate-decoded-value-payload", () => {
   const canonicalId = "/typed/Values.vue";

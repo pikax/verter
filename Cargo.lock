@@ -3500,7 +3500,6 @@ dependencies = [
  "verter_css_syntax",
  "verter_diagnostics",
  "verter_ffi",
- "verter_language",
  "verter_napi_request_fixture",
  "verter_protocol",
  "verter_scheduler",

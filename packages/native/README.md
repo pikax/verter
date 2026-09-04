@@ -177,11 +177,16 @@ host's CPU pool through the same batch coordinator, so a compiler panic becomes
 that entry's `host` failure and its siblings keep their responses. An entry's
 own `canonicalId` / `source` / `request` fields and the batch options alike are
 read as own enumerable properties only — an inherited field or `priority` is
-not part of the payload. Invalid batch-level options or a non-array/oversized
+not part of the payload — and both are CLOSED: an own key that is not one of the
+three entry fields is refused by name (``unknown field `requst```) rather than
+read as an absent `request`. Invalid batch-level options or a non-array/oversized
 outer input throw before execution. The aggregate 64 MiB decoded-payload budget
 does not: its counter never resets, so the entry that exhausts it and every
-entry after it fail as `binding`, naming the index and the ceiling, while the
-entries decoded before it keep their responses. Each entry's own request graph
+entry after it fail as `binding`, naming the index and the bytes the call
+actually holds, while the entries decoded before it keep their responses. A
+single payload larger than the whole ceiling is refused by its OWN size instead,
+costs only its own entry, and leaves every sibling — before and after — decoding
+normally. Each entry's own request graph
 is separately bounded by a per-request 131,072 decoded-value cap, reset between
 entries — there is no separate aggregate decoded-value budget across the batch. Each `canonicalId` is normalized on the
 way in (drive-letter case, backslashes, a `?…` query tail, an extended-length

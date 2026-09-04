@@ -696,15 +696,13 @@ routes above, and the two differ in WHO owns the demand:
     `CompileRequestError::malformed_option_value`, which asserts its option
     against the declared `VALUE_REFUSED_VUE_OPTIONS` /
     `VALUE_REFUSED_SVELTE_OPTIONS` set.
-- **Diagnostics publish their arguments.** Every FFI diagnostic carries
-  `arguments` — the values its message is rendered from — through the ONE
-  shared projection `verter_ffi::convert::host_diagnostic_to_ffi` /
-  `host_diagnostic_arg_to_ffi`, so the native and browser bindings cannot
-  fork on argument shape, severity spelling, or UTF-16 span mapping. A
-  `Span` argument's offsets are UTF-16 code units like every other
-  published span; `Unsigned`/`Signed` cross as exact decimal STRINGS,
-  because a 64-bit integer above 2^53 cannot reach a JavaScript double
-  without rounding and a diagnostic argument may not round silently.
+- **One shared per-diagnostic projection.** Every FFI diagnostic is
+  projected by `verter_ffi::convert::host_diagnostic_to_ffi`, the sole
+  per-diagnostic hop both bindings take, so severity spelling and UTF-16
+  span mapping cannot fork between the native and browser surfaces.
+  `FfiDiagnostic` carries exactly `severity`, `code`, `message`,
+  `span_start` and `span_end`: a diagnostic publishes no argument list,
+  so a consumer that needs a rendered value reads it out of `message`.
 
 `compile_request` is available on native and `wasm32`; the browser binding
 calls it synchronously after decoding one typed request. `compile_request_many`

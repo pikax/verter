@@ -487,8 +487,9 @@ fn batch_entry_position_mismatch(answered: &str, expected: &str) -> String {
 /// The longest name a batch entry declares (`canonicalId`).
 ///
 /// An own key longer than this cannot be one of the three, so it is
-/// skipped by its MEASURED size and never copied into Rust — the same
-/// treatment the batch options give a hostile key.
+/// refused by its MEASURED size — quoted only while it is short enough
+/// for a refusal to carry, exactly as the batch options bound a hostile
+/// key.
 const MAX_BATCH_ENTRY_FIELD_NAME_BYTES: usize = "canonicalId".len();
 
 /// One batch entry's three declared fields, as OWN enumerable properties.
@@ -543,14 +544,31 @@ fn read_batch_entry_fields(
         request: None,
     };
     for index in 0..count {
-        if keys.retained_bytes(index)? > MAX_BATCH_ENTRY_FIELD_NAME_BYTES {
-            continue;
+        // A key too long to be one of the three is unknown without
+        // reading it. It is still refused — silently dropping it is what
+        // lets `{ canonicalId, source, requestt: {...} }` compile as
+        // though the stray key were absent — but a caller-controlled key
+        // is unbounded, so above the quoting bound it is named by its
+        // size rather than copied into a thrown Error, the same treatment
+        // the batch options give one.
+        let key_bytes = keys.retained_bytes(index)?;
+        if key_bytes > MAX_BATCH_ENTRY_FIELD_NAME_BYTES {
+            if key_bytes > MAX_EXCEPTION_MESSAGE_BYTES {
+                return Err(ffi_err(format!(
+                    "unknown field, named by {key_bytes} bytes above the \
+                     {MAX_EXCEPTION_MESSAGE_BYTES} a refusal quotes"
+                )));
+            }
+            return Err(ffi_err(format!("unknown field `{}`", keys.at(index)?)));
         }
         let slot = match keys.at(index)?.as_str() {
             "canonicalId" => &mut fields.canonical_id,
             "source" => &mut fields.source,
             "request" => &mut fields.request,
-            _ => continue,
+            // Closed as the options object and the request graph are:
+            // one rule at three adjacent surfaces, so a typo is named
+            // rather than read as an absent field.
+            other => return Err(ffi_err(format!("unknown field `{other}`"))),
         };
         let raw = graph.property_at(&input.raw(), &keys, index)?;
         if napi::type_of!(env.raw(), raw)? != ValueType::Undefined {
@@ -2667,15 +2685,19 @@ impl NapiVerterHost {
             if payload_budget.bytes_exhausted() {
                 // Nothing further can be decoded, so nothing further is
                 // read: the remaining entries answer the ceiling directly
-                // rather than each re-discovering it.
+                // rather than each re-discovering it. The refusal names
+                // what the call actually holds, not the ceiling — the
+                // charge that exhausted the budget was never committed,
+                // so the committed total is below it.
+                let retained = payload_budget.retained_bytes();
                 output[position] = Some(binding_failure_entry(
                     String::new(),
                     batch_retained_bytes_refusal(
                         position,
                         &format!(
-                            "the batch already retains \
+                            "the batch already retains {retained} of the \
                              {MAX_COMPILE_REQUEST_BATCH_RETAINED_BYTES} bytes \
-                             of decoded payload"
+                             of decoded payload a call may hold"
                         ),
                     ),
                 ));
@@ -2731,10 +2753,16 @@ impl NapiVerterHost {
                         }
                     };
                     if let Err(error) = payload_budget.retain_bytes(length) {
-                        output[position] = Some(binding_failure_entry(
-                            String::new(),
-                            batch_retained_bytes_refusal(position, &error.reason),
-                        ));
+                        // Only the AGGREGATE ceiling is a whole-call state;
+                        // a single charge above the ceiling on its own is
+                        // this entry's own refusal, and every sibling still
+                        // decodes.
+                        let reason = if payload_budget.bytes_exhausted() {
+                            batch_retained_bytes_refusal(position, &error.reason)
+                        } else {
+                            error.reason.clone()
+                        };
+                        output[position] = Some(binding_failure_entry(String::new(), reason));
                         continue;
                     }
                     // SAFETY: the value was read from this env and validated

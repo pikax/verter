@@ -167,15 +167,20 @@ pub struct JsValueMaterializationBudget {
     retained_bytes: usize,
     max_decoded_values: usize,
     max_retained_bytes: usize,
-    /// Set once the AGGREGATE retained-byte ceiling is hit.
+    /// Set once the call has genuinely run OUT of retained bytes: a
+    /// charge that would have fit an empty budget no longer fits this
+    /// one.
     ///
     /// Read by the batch route to tell the two ceilings apart in a
     /// refusal: byte exhaustion is a whole-call state every later entry
     /// hits too, so the entry that crossed it and every entry after say
-    /// so, while the entries that decoded first still compile. There is
-    /// deliberately no counterpart for the decoded-value ceiling — that
-    /// one is PER entry, reset by [`Self::reset_decoded_values`] between
-    /// entries, so exhausting it costs only the entry that did.
+    /// so, while the entries that decoded first still compile. A single
+    /// payload larger than the whole ceiling is NOT that state — it is
+    /// refused by its own size, costs only its own entry, and leaves this
+    /// flag clear. There is deliberately no counterpart for the
+    /// decoded-value ceiling — that one is PER entry, reset by
+    /// [`Self::reset_decoded_values`] between entries, so exhausting it
+    /// costs only the entry that did.
     bytes_exhausted: bool,
 }
 
@@ -230,6 +235,24 @@ impl JsValueMaterializationBudget {
     pub(crate) fn retain_bytes(&mut self, additional: usize) -> Result<()> {
         let total = self.retained_bytes.checked_add(additional);
         if total.is_none_or(|total| total > self.max_retained_bytes) {
+            // A single charge above the WHOLE ceiling would not fit an
+            // empty budget either, so it is refused by its OWN size and
+            // the aggregate flag stays clear. Latching it here would
+            // refuse every later sibling with a ceiling the call has not
+            // reached — the failed charge is never committed, so a batch
+            // whose first entry is one oversized payload retains nothing
+            // — and would tell the caller to compile fewer inputs per
+            // call, the one remedy that cannot help a single large input.
+            if additional > self.max_retained_bytes {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!(
+                        "A compile request payload of {additional} bytes is itself \
+                         above the {} bytes of decoded payload a call may retain",
+                        self.max_retained_bytes
+                    ),
+                ));
+            }
             self.bytes_exhausted = true;
             return Err(Error::new(
                 Status::InvalidArg,
@@ -249,6 +272,12 @@ impl JsValueMaterializationBudget {
 
     pub(crate) fn bytes_exhausted(&self) -> bool {
         self.bytes_exhausted
+    }
+
+    /// Bytes committed so far, so a refusal can name what the call
+    /// actually holds rather than the ceiling it did not reach.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
     }
 }
 

@@ -281,9 +281,13 @@ sibling keeps its response. Every own-property rule this route states applies
 to the entry wrapper as well as to what it wraps: `canonicalId`, `source` and `request`
 are read as OWN enumerable properties, so
 `Object.create({ canonicalId, source, request })` is an entry that states
-none of them and fails as a missing field. Batch options behave the same
-way — an inherited `priority` is ignored rather than honoured, matching how
-the request graph itself treats a prototype key.
+none of them and fails as a missing field. The wrapper is CLOSED for the same
+reason the batch options and the request graph are: an own key that is not one
+of the three is refused by name, so `{ canonicalId, source, requst }` reports
+``unknown field `requst``` rather than silently reading as a missing
+`request`. Batch options behave the same way — an inherited `priority` is
+ignored rather than honoured, matching how the request graph itself treats a
+prototype key.
 
 Each input's `canonicalId` is normalized the same way every other host route
 normalizes an id — a Windows drive letter lowercases, backslashes become
@@ -305,6 +309,13 @@ still that entry's own `binding` failure, naming its index and saying the
 ceiling is aggregate, and the entries that decoded before it was reached still
 compile and still answer. The call never throws for a full budget, and it never
 discards a sibling's work.
+
+A SINGLE payload larger than the whole 64 MiB ceiling is a different failure and
+is reported as one: it could not fit an empty budget either, so it is refused by
+its own size, the aggregate counter is untouched, and every sibling — before and
+after — still decodes and compiles. Only a call that genuinely ran out of room
+refuses its remaining entries, and that refusal names the bytes the call is
+actually holding.
 
 The ceiling has no runtime override: it is a compile-time constant. A
 whole-project batch of average-sized SFCs can reach 64 MiB well before the
@@ -714,7 +725,10 @@ interface HostDiagnostic {
 `spanStart` / `spanEnd` are UTF-16 code units into the registered source,
 on the legacy per-node reads and on the typed
 `compileRequest`/`compileRequests` routes alike, and they are the same
-offsets `@verter/wasm` publishes for the same compile.
+offsets `@verter/wasm` publishes for the same compile. The one exception is
+`compileMany()`: its per-entry `diagnostics` are published with UTF-8 BYTE
+offsets, unchanged, so a consumer that reads both routes must not treat the
+two as one coordinate space.
 
 ## Input Encoding
 

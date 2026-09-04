@@ -77,11 +77,6 @@ tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "r
 # addon is never used from Rust; `exclude` above keeps it out of this
 # package, and a dev-dependency is dropped from a published manifest.
 verter_napi_request_fixture = { path = "tests/fixture_addon" }
-# Named only by this crate's own `#[cfg(test)]` code, which builds a
-# `HostDiagnostic` carrying typed diagnostic arguments. Nothing in the
-# shipped addon names the crate, so the edge belongs here — a published
-# manifest drops a dev-dependency.
-verter_language = { path = "../verter_language" }
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
 verter_semantic = { path = "../verter_semantic", features = ["test-support"] }
 verter_session = { path = "../verter_session", features = ["test-support"] }

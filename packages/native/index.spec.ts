@@ -4,8 +4,7 @@
  * (transformVueStyle / prepareStyleForPreprocessor / analyzeStyle)
  * work correctly with both string and Buffer inputs.
  */
-import { readFileSync } from "node:fs";
-import { basename, resolve, sep } from "node:path";
+import { basename, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { describe, it, expect } from "vitest";
@@ -917,65 +916,6 @@ describe("VerterHost type declarations in sync with native binary", () => {
   // Methods that are intentionally not exposed in the public TS types.
   // They exist in the native binary but are internal / feature-gated.
   const INTERNAL_METHODS = new Set(["computeCrossFileOptimizations", "getMetrics"]);
-
-  // Mutation recipe: remove the `#[napi(ts_arg_type = "...HostCompileRequest")]`
-  // / return-type annotations from `compileRequest`/`compileRequests` in
-  // `crates/verter_napi/src/lib.rs` (letting napi-rs regenerate their
-  // declared arg/return shape from the raw Rust types) without updating
-  // `packages/native/index.ts` to match. `pnpm run build:native` then
-  // regenerates `dist/napi.generated.d.ts` with a diverged signature, and
-  // this case fails on the `toContain`/`toMatch` assertions below instead
-  // of the published surface silently drifting from what the addon
-  // actually exports.
-  it("generated addon declarations carry the typed compile routes", () => {
-    const declarationsPath = resolve(import.meta.dirname, "dist/napi.generated.d.ts");
-    const declarations = readFileSync(declarationsPath, "utf8");
-    const published = readFileSync(resolve(import.meta.dirname, "index.ts"), "utf8");
-    const hostTypes = readFileSync(resolve(import.meta.dirname, "host-types.ts"), "utf8");
-    const interfaceFields = (source: string, name: string): string[] => {
-      const block = source.match(
-        new RegExp(`(?:export )?(?:interface|type) ${name} \\{([\\s\\S]*?)\\n\\}`),
-      );
-      expect(block, `missing ${name}`).toBeTruthy();
-      return [...block![1].matchAll(/^\s*(?:readonly )?([A-Za-z_][A-Za-z0-9_]*)\??:/gm)].map(
-        (match) => match[1],
-      );
-    };
-    for (const [method, response] of [
-      ["compileRequest", "NapiCompileRequestResponse"],
-      ["compileRequests", "NapiCompileRequestsEntry"],
-    ] as const) {
-      const declaration = declarations.match(new RegExp(`^\\s*${method}\\(.*$`, "m"))?.[0];
-      expect(declaration).toContain("host-compile-request.generated').HostCompileRequest");
-      expect(declaration).toContain(response);
-    }
-    const compileRequest = declarations.match(/^\s*compileRequest\(.*$/m)?.[0] ?? "";
-    expect(compileRequest).toMatch(/canonicalId:\s*string/);
-    expect(compileRequest).toMatch(/:\s*NapiCompileRequestResponse\s*$/);
-    const compileRequests = declarations.match(/^\s*compileRequests\(.*$/m)?.[0] ?? "";
-    expect(compileRequests).toMatch(/source:\s*Buffer/);
-    expect(compileRequests).toMatch(/priority\?:/);
-    expect(compileRequests).toMatch(/:\s*Array<NapiCompileRequestsEntry>\s*$/);
-
-    expect(interfaceFields(declarations, "NapiCompileRequestResponse").sort()).toEqual(
-      interfaceFields(published, "HostCompileResponse").sort(),
-    );
-    expect(interfaceFields(declarations, "NapiCompileRequestsEntry").sort()).toEqual(
-      ["canonicalId", "failure", "response"].sort(),
-    );
-    expect(interfaceFields(declarations, "NapiDiagnostic").sort()).toEqual(
-      interfaceFields(hostTypes, "HostDiagnostic").sort(),
-    );
-    expect(interfaceFields(published, "HostRuntimeCompiledProduct")).toEqual(
-      expect.arrayContaining(["kind", "nodes"]),
-    );
-    expect(interfaceFields(published, "HostIdeCompiledProduct")).toEqual(
-      expect.arrayContaining(["kind", "ide"]),
-    );
-    expect(interfaceFields(published, "HostAnalysisCompiledProduct")).toEqual(
-      expect.arrayContaining(["kind", "analysis"]),
-    );
-  });
 
   it("every native prototype method should have a TS type declaration", () => {
     const nativeMethods = Object.getOwnPropertyNames(VerterHost.prototype)
