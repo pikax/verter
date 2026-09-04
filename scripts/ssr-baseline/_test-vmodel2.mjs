@@ -33,16 +33,24 @@ function compileVue(source, filename) {
 
 function compileVerter(source, filePath) {
   const upsertResult = host.upsert({ inputId: filePath, source, fileKind: "vue" });
-  return host.getVirtualFile({
-    canonicalId: upsertResult.canonicalId,
-    nodeKind: { kind: "main" },
-    compileProfile: {
+  const response = host.compileRequest(upsertResult.canonicalId, {
+    framework: "vue",
+    identity: {
       filename: path.basename(filePath),
-      ssr: true,
+      isProduction: false,
       forceJs: true,
-      sourceMap: false,
+    },
+    products: [{ kind: "runtimeServer", runtimeSourceMap: false }],
+    options: {
+      backend: "inferred",
+      ssr: true,
+      isCustomElement: [],
+      babelParserPlugins: [],
     },
   });
+  return response.products
+    .find((p) => p.kind === "runtimeServer")
+    ?.nodes.find((n) => n.node.kind === "main");
 }
 
 // v-model + explicit @update:model-value handler

@@ -54,11 +54,15 @@ const vueNorm = normalizeForComparison(vueBody);
 
 // Compile with Verter
 const upsertResult = host.upsert({ inputId: file, source: content, fileKind: "vue" });
-const verterResult = host.getVirtualFile({
-  canonicalId: upsertResult.canonicalId,
-  nodeKind: { kind: "main" },
-  compileProfile: { filename, ssr: true, forceJs: true, sourceMap: false },
+const response = host.compileRequest(upsertResult.canonicalId, {
+  framework: "vue",
+  identity: { filename, isProduction: false, forceJs: true },
+  products: [{ kind: "runtimeServer", runtimeSourceMap: false }],
+  options: { backend: "inferred", ssr: true, isCustomElement: [], babelParserPlugins: [] },
 });
+const verterResult = response.products
+  .find((p) => p.kind === "runtimeServer")
+  ?.nodes.find((n) => n.node.kind === "main");
 const verterBody = extractSsrRenderBody(verterResult.code);
 const verterNorm = normalizeForComparison(verterBody);
 
