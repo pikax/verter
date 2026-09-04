@@ -159,20 +159,6 @@ function compile(host, canonicalId, request) {
 }
 
 /**
- * Whether a completed compile's response carries a row for the named
- * product — the producibility question, read straight off the response.
- *
- * Deliberately NOT routed through `soleProductRow`: this answers `false`
- * for a response that carried no such row instead of aborting the record,
- * so it is a question the route can fail. `soleProductRow` stays the strict
- * reader for cases that go on to take BYTES out of a row.
- */
-function carriesProductRow(response, tag) {
-  const products = Array.isArray(response?.products) ? response.products : [];
-  return products.some((product) => product?.kind === tag);
-}
-
-/**
  * The single product row of a completed compile, taken by tag — never by
  * position.
  *
@@ -341,8 +327,12 @@ const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
 // There is no ensure-then-read pair here and no ordering for a caller to
 // get right: one typed call states the IDE demand and answers with the
 // projection. `ensureIdeCompiled` is that same call's producibility answer
-// — the demanded IDE product came back — read off the one response rather
-// than compiled a second time.
+// — the demanded IDE product came back. On this complete-only route that
+// answer is the error arm: a completed `compileRequest` response cannot
+// lack the `ideCompanion` row (`compile_request_response_to_wasm` maps
+// products 1:1 or errors), so no live boolean exists to report on the ok
+// arm and none is invented. `outcome: "ok"` plus the published
+// `getIdeWithMap` case below are the producibility proof.
 //
 // The map axis is a second demand, so it is a second call. It is no longer
 // a never-compiled slot that answers absent: a complete compile publishes
@@ -357,16 +347,10 @@ const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
   });
   const mappedIde = compile(host, "/probe/Ide.svelte", ideRequest("svelte", true));
   const unmappedIde = compile(host, "/probe/Ide.svelte", ideRequest("svelte", false));
-  // Producibility on this complete-only route is the error arm: if the IDE
-  // product is admitted and publishes nothing, `compileRequest` throws and
-  // this case is `{outcome: "error"}`. A completed response cannot lack the
-  // row (`compile_request_response_to_wasm` maps 1:1 or errors), so `value`
-  // on the ok arm is not independently falsifiable here. The host comparison
-  // still pins `true` against `ensure_ide_compiled`.
   results.cases.ensureIdeCompiled =
     mappedIde.refusal !== null
       ? { outcome: "error", message: mappedIde.refusal }
-      : { outcome: "ok", value: carriesProductRow(mappedIde.response, "ideCompanion") };
+      : { outcome: "ok" };
   results.cases.getIdeWithMap = ideCase(mappedIde);
   results.cases.getIdeWithoutMap = ideCase(unmappedIde);
 }

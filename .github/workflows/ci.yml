@@ -1345,10 +1345,11 @@ jobs:
 
   # Native + WASM transport-route comparison, executed. Clippy in
   # rust-build-configs only compiles the feature; this job builds the two
-  # artifacts the comparison drives, runs the suite, and fails unless the
+  # artifacts the comparison drives, runs the suite on an exact allowlist
+  # of the native/WASM/census names, and fails unless the
   # `running N tests` line proves the named comparisons ran. The bundler
-  # lane is skipped: it needs a matching unplugin freshness pin owned
-  # elsewhere.
+  # lane is not on that list: it needs a matching unplugin freshness pin
+  # owned elsewhere.
   transport-route-equivalence:
     name: Transport route equivalence
     needs: [detect-changes, wasm-build, build-native-node]
@@ -1387,10 +1388,26 @@ jobs:
         run: |
           set -euo pipefail
           out="$(mktemp)"
+          # Exact allowlist of the executed names, not substring skips over
+          # the bundler lane: a later test whose name merely contains a
+          # skipped token (or a bundler-lane test without "bundler" in its
+          # name) must never be silently dropped or need extra skip patches.
+          # A listed name that stops matching fails the floor check below
+          # rather than quietly not running.
+          executed=(
+            "framework::suite_census::the_transport_route_equivalence_suite_is_present_and_non_vacuous"
+            "framework::transport_route_equivalence_tests::this_suite_is_registered_with_the_census"
+            "framework::transport_route_equivalence_tests::the_napi_transport_matches_the_in_process_host_route"
+            "framework::transport_route_equivalence_tests::the_napi_batch_route_matches_the_in_process_batch_route_item_for_item"
+            "framework::transport_route_equivalence_tests::every_exported_napi_spelling_is_executed_or_classified_out_of_scope"
+            "framework::transport_route_equivalence_tests::the_wasm_transport_matches_the_in_process_host_route"
+            "framework::transport_route_equivalence_tests::every_exported_wasm_spelling_is_executed_or_classified_out_of_scope"
+            "framework::transport_route_equivalence_tests::the_audited_compile_spelling_captures_for_vue_and_not_for_svelte_on_both_transports"
+            "framework::transport_route_equivalence_tests::the_transports_report_a_missing_node_the_same_way"
+          )
           set +e
           cargo test -p verter_session --lib --features transport-authoritative \
-            transport_route_equivalence -- --test-threads=1 \
-            --skip bundler --skip the_non_vite --skip both_published_virtual_script \
+            -- --exact "${executed[@]}" --test-threads=1 \
             >"$out" 2>&1
           rc=$?
           set -e

@@ -1,6 +1,7 @@
 # Recorded deviation: complete-only route classification on the WASM transport probe
 
-- Status: **recorded, awaiting maintainer ratification**
+- Status: **ratified 2026-09-04 — architect ruling, option (b), charter
+  amended to the two-route contract**
 - Date: 2026-09-03
 - Node: `CCA1O3B` — "WASM transport-probe host-request migration"
   (`charters/compiler-compiler-bridge/CCA1O3B.md`)
@@ -102,8 +103,15 @@ Ratify ONE of:
   rescope — the complete-only route admits no other classification for these
   two cases.
 
-Until ratified, this record stands as the disclosure; it is not itself an
+Until the ruling, this record stood as the disclosure; it was not itself an
 approval.
+
+**Ruling, 2026-09-04 (architect): option (b).** The charter's "classification …
+equivalent" acceptance line and "transport divergence" abort clause are
+replaced by the explicit two-route contract, so future work on this file
+reads the real invariant. The charter's deviation section now records the
+ruling; the implementation as scoped under "What the implementation did"
+is the shape the amended charter mandates.
 
 ## Known residual, disclosed
 
@@ -139,9 +147,11 @@ this node's work and is not repaired here.
   Clippy compile of the feature (signature drift) and adds
   `transport-route-equivalence`, which downloads the `wasm-build` and
   `build-native-node` artifacts, runs
-  `cargo test -p verter_session --lib --features transport-authoritative
-  transport_route_equivalence` with the bundler tests skipped, and fails
-  unless the `running N tests` line is present, at least 9, and names
+  `cargo test -p verter_session --lib --features transport-authoritative`
+  on an exact allowlist of the nine native/WASM/census test names (no
+  substring skips, so a later test cannot be silently dropped for its
+  name's tokens), and fails unless the `running N tests` line is present,
+  at least 9, and names
   `the_wasm_transport_matches_the_in_process_host_route` and
   `the_napi_transport_matches_the_in_process_host_route`.
 - **Scope:** one extra workflow file. Related packages stay at one
