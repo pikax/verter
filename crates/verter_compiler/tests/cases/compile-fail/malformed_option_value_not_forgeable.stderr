@@ -1,0 +1,8 @@
+error[E0639]: cannot create non-exhaustive variant using struct expression
+  --> tests/cases/compile-fail/malformed_option_value_not_forgeable.rs:13:5
+   |
+13 | /     CompileRequestError::MalformedOptionValue {
+14 | |         option: FrameworkOption::Vue(VueOption::ParserOptionsOnWarn),
+15 | |         value: "anything".to_string(),
+16 | |     }
+   | |_____^

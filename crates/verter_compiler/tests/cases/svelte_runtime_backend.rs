@@ -883,6 +883,7 @@ fn assert_malformed_custom_element(err: SvelteRuntimeError, option: SvelteOption
             CompileRequestError::MalformedOptionValue {
                 option: FrameworkOption::Svelte(got_option),
                 value: got_value,
+                ..
             },
         )) => {
             assert_eq!(got_option, option);
@@ -1014,6 +1015,7 @@ fn invalid_custom_element_tag_refuses_before_emission() {
         Err(DirectCompileError::SvelteOption(CompileRequestError::MalformedOptionValue {
             option: FrameworkOption::Svelte(SvelteOption::CustomElementTag),
             value,
+            ..
         })) => assert_eq!(value, "Div"),
         other => panic!("parsed-core must refuse the same malformed tag, got {other:?}"),
     }
@@ -1031,6 +1033,7 @@ fn invalid_custom_element_prop_type_refuses_at_request_construction() {
         CompileRequestError::MalformedOptionValue {
             option: FrameworkOption::Svelte(option),
             value,
+            ..
         } => {
             assert_eq!(option, SvelteOption::CustomElementPropsType);
             assert_eq!(value, "Nope");
@@ -1054,6 +1057,7 @@ fn custom_element_prop_type_casing_outside_the_admitted_set_refuses() {
             CompileRequestError::MalformedOptionValue {
                 option: FrameworkOption::Svelte(option),
                 value,
+                ..
             } => {
                 assert_eq!(option, SvelteOption::CustomElementPropsType);
                 assert_eq!(value, spelling);

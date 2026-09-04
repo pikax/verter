@@ -77,9 +77,19 @@
 //! property, and they live until the enclosing handle scope closes, not
 //! until the budget refuses. [`JsValueGraph::property_at`] halves the
 //! per-key cost by reusing the key list's own name handle instead of
-//! minting a second engine string, and a caller that walks many graphs in
-//! one native call — the batch compile route — opens a nested handle
-//! scope per entry so the pinned set stays one entry deep.
+//! minting a second engine string.
+//!
+//! WITHIN one graph the pinned set is nonetheless bounded transitively:
+//! every object reserves its whole key count against
+//! [`MAX_DECODED_VALUES_PER_REQUEST`] BEFORE any of its keys is read, so
+//! a traversal cannot pin more than one key-list handle per visited
+//! object plus one property handle per reserved value, and a graph that
+//! would pin more is refused before it does.
+//!
+//! ACROSS graphs that bound does not compose, and that is why the batch
+//! compile route opens a nested handle scope per entry: it resets the
+//! decoded-value counter between entries, so without the scope the pinned
+//! set would grow with the batch rather than staying one entry deep.
 //!
 //! ## What this layer does not own
 //!

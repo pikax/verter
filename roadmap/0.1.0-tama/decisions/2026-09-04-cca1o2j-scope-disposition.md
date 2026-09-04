@@ -25,18 +25,21 @@ candidate needs an operator to accept it.
 ## Measured footprint
 
 Measured against the branch's merge base with `main` (`353a8ca04`) —
-`git diff --numstat main`, restricted to crate `src/` and published
-TypeScript. An earlier revision of this record measured against
+`git diff --numstat 353a8ca04 -- 'crates/*/src/*' 'packages/*/src/*'
+'packages/native/*.ts' 'packages/wasm/*.ts'`, i.e. crate `src/` and
+published TypeScript. An earlier revision of this record measured against
 `f4d755241`, which is a commit ON this branch and not an ancestor of
 `main`; that baseline hid `f4d755241`'s own contents from the measurement.
 It is corrected here, and the work it contained no longer rides on this
 branch (see "What was NOT adopted").
 
-Production is +3547/−402 across 23 files in 6 crates and 2 packages:
+Production is +3978/−440 across 29 files in 6 crates and 2 packages:
 `verter_compiler`, `verter_ffi`, `verter_napi`, `verter_protocol`,
-`verter_session`, `verter_wasm`, `packages/native`, `packages/wasm`. (Three
-of the 23 are `*_tests.rs` modules that live under `src/`; counting only
-non-test files gives 20.) The charter's guidance is ~500 LOC / 5 files /
+`verter_session`, `verter_wasm`, `packages/native`, `packages/wasm`. Eight
+of the 29 are test artifacts the glob reaches — `*_tests.rs` modules that
+live under `src/`, the fixture addon's `src/lib.rs`, `index.spec.ts` and
+`host-types.test-d.ts`; counting only non-test files gives 21, +3703/−431.
+The charter's guidance is ~500 LOC / 5 files /
 2 related crates-or-packages; its mandatory rescope thresholds are 1500 LOC
 / 12 files / 3 unrelated packages. Production LOC, the file count and the
 unrelated-package count all breach.
@@ -129,6 +132,30 @@ The charter names `crates/verter_napi/src/lib.rs`,
    quoted the variant spelling, which now quote the caller-facing sentence
    and additionally forbid the variant spelling.
 
+5. `crates/verter_session/src/host_compile.rs` — the typed batch route's
+   execution stage, moved onto the host batch coordinator.
+
+   The charter's acceptance requires the batch route to "isolate a
+   per-entry failure to that entry". The typed failure taxonomy already
+   did; a per-entry PANIC did not. `compile_request_many` executed its
+   inputs with a plain sequential iterator on the caller's thread and
+   installed no catch boundary, so one input's codegen panic threw the
+   whole call away — every sibling's compiled output, and every per-entry
+   failure the binding had already recorded, with nothing naming which
+   input did it. The profile-bearing `compile_many` route has isolated
+   panics from the beginning and its README says so, so a caller moving
+   onto the typed route silently lost the property.
+
+   The fix routes the execution stage through the SAME
+   `HostBatchCoordinator::run_batch` + `BatchPolicy::on_item_panic` seam
+   `compile_many` uses, rather than adding a second bespoke
+   `catch_unwind`: that file's own worker comment already states the catch
+   is centralised at the coordinator so every batch client shares one
+   coordination rule. It also puts the typed batch on the host-owned CPU
+   pool, where the sequential map had made an N-file call cost the sum of
+   N compiles on the calling thread — the JavaScript thread, on the native
+   binding.
+
 None of these is a legacy deletion, a second decode path, a profile
 reconstruction, or a hand-written duplicate of a generated declaration — the
 charter's four abort conditions all hold.
@@ -158,6 +185,11 @@ Every row the review rounds carried is closed by the landed candidate, with
 its evidence named. None is deferred, so no `DEFER` ruling and no debt row
 is owed, and nothing here needs an owner block or a resolution gate.
 
+An earlier revision of this section tabulated six of the eight tracked rows
+and stated the same conclusion, which left the two below invisible to the
+operator reading it. They are listed with the rest now; both were narrowed
+rather than closed when they were first carried, and both are closed here.
+
 | Row | Closed by |
 | --- | --- |
 | Batch `ideCompanion` responses must stay paired with their own entry's source — it is the only product whose payload (destructured-binding UTF-16 offsets) is computed FROM the source, so a mispairing publishes offsets into the wrong file silently rather than failing | `typed-batch-preserves-ide-utf16-offsets-per-entry`: two entries whose multi-byte prefixes differ, so each entry's offsets are wrong against the other's source |
@@ -166,13 +198,17 @@ is owed, and nothing here needs an owner block or a resolution gate.
 | `publicApi` / `declarations` must refuse on the BATCH route too, isolated to its own entry beside a compiling sibling — not inherited from the singular route | `typed-batch-isolates-public-api-and-declarations-refusals` and `typed-single-refuses-public-api-and-declarations` |
 | `runtimeServer` and `analysis` products must publish their payloads on BOTH routes | `typed-single-runtime-server-publishes-its-nodes`, `typed-single-vue-analysis-is-a-json-string`, `typed-batch-runs-analysis-and-runtime-server-products` |
 | `Unsigned` / `Signed` diagnostic arguments must not silently round above 2^53 when crossing to JavaScript | They cross as exact decimal STRINGS on both bindings, asserted on both |
+| Per-call budgets bound what a traversal retains NATIVELY, not the V8 handle scope it fills, and only the batch route opens a per-entry scope | `REJECT` — not a defect on the singular route. Within ONE graph the pinned set is bounded transitively: `materialize_nested` reserves an object's whole key count against `MAX_DECODED_VALUES_PER_REQUEST` BEFORE reading any of its keys, so a traversal cannot pin more than one key-list handle per visited object plus one property handle per reserved value, and a graph that would pin more is refused before it does. The bound does not compose ACROSS graphs, because the batch resets the decoded-value counter per entry — which is exactly what the per-entry scope is for. The module doc now states both halves rather than only that handles are "a separate resource with a separate bound" |
+| `VALUE_REFUSED_*` option lists are hand-maintained mirrors whose only rail is a `verter_debug_assert!` inside `CompileRequestError::malformed_option_value`, which a direct struct literal bypasses entirely | `ADOPT-NOW`, closed structurally for the cross-crate half: `CompileRequestError::MalformedOptionValue` is `#[non_exhaustive]`, so outside `verter_compiler` the variant has no struct literal at all (E0639) and the constructor is the only way to produce one — sealed by the compile-fail contract `malformed_option_value_not_forgeable`. Inside the owning crate the assertion remains the rail; every current producer, in this crate and out of it, already routes through the constructor |
 
 ## Operator decisions this record asks for
 
 1. **The expansion itself.** `ADOPT-NOW` for the crates and package beyond
    the charter's named surfaces, on the merits above — noting that item 1's
    charter-acceptance argument does not hold and it should be accepted (or
-   refused) as a forward-looking wire-shape decision.
+   refused) as a forward-looking wire-shape decision. Item 5 entered in a
+   later fix round and is the one item of the five the charter's own
+   acceptance requires outright.
 2. **The typed batch route's fixed 64 MiB aggregate retained-byte
    ceiling.** Exceeding it aborts the WHOLE call, with no per-entry
    attribution and no runtime override; a whole-project batch of
@@ -187,4 +223,5 @@ The separable piece is the diagnostic argument list plus its browser half
 (items 1 and 2): it is the one whose charter-acceptance argument does not
 hold, so moving it to its own node costs the typed routes nothing today —
 every production diagnostic publishes an empty argument list either way.
-Item 3 is not separable from the charter's refusal-naming acceptance.
+Item 3 is not separable from the charter's refusal-naming acceptance, and
+item 5 is not separable from its per-entry isolation acceptance.

@@ -537,7 +537,7 @@ fn a_value_outside_a_closed_vocabulary_is_refused_at_decode() {
             "props": { "label": { "propType": "Symbol" } },
         }}),
     )) {
-        CompileRequestError::MalformedOptionValue { option, value } => {
+        CompileRequestError::MalformedOptionValue { option, value, .. } => {
             assert_eq!(
                 option,
                 FrameworkOption::Svelte(SvelteOption::CustomElementPropsType)

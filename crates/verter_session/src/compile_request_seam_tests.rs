@@ -981,6 +981,92 @@ fn a_per_input_batch_failure_isolates_to_that_entry() {
     assert!(entries[2].outcome.is_ok(), "sibling compiles");
 }
 
+/// A per-input PANIC isolates the same way a typed failure does: the
+/// panicking entry carries it, every sibling keeps its response, and the
+/// call still answers one entry per input.
+///
+/// Without the coordinator's catch boundary a single panicking input
+/// unwinds the whole call, so a caller loses every sibling's compiled
+/// output and every per-entry failure recorded beside it — a batch of
+/// 500 files discarded for one bad file, with nothing naming which one.
+#[test]
+fn a_per_input_panic_isolates_to_that_entry() {
+    let host = new_host();
+    let entries = host.compile_request_many(
+        vec![
+            CompileRequestBatchInput {
+                canonical_id: "/src/Before.vue".to_string(),
+                source: Arc::from(VUE_SFC),
+                request: vue_request(vec![runtime_client(false)]),
+            },
+            CompileRequestBatchInput {
+                // The worker body panics for this canonical, so the panic
+                // unwinds through the production catch boundary exactly
+                // like a codegen panic would.
+                canonical_id: crate::host_compile::PANIC_INJECT_SENTINEL.to_string(),
+                source: Arc::from(VUE_SFC),
+                request: vue_request(vec![runtime_client(false)]),
+            },
+            CompileRequestBatchInput {
+                canonical_id: "/src/After.svelte".to_string(),
+                source: Arc::from(SVELTE_SFC),
+                request: svelte_request(vec![runtime_client(false)]),
+            },
+        ],
+        CompileRequestBatchOptions::default(),
+    );
+
+    assert_eq!(entries.len(), 3, "one entry per input");
+    assert!(
+        entries[0].outcome.is_ok(),
+        "a sibling before the panicking input keeps its response: {:?}",
+        entries[0].outcome.as_ref().err()
+    );
+    assert!(
+        entries[2].outcome.is_ok(),
+        "a sibling after the panicking input keeps its response: {:?}",
+        entries[2].outcome.as_ref().err()
+    );
+
+    assert_eq!(
+        entries[1].canonical_id,
+        crate::host_compile::PANIC_INJECT_SENTINEL
+    );
+    let Err(CompileRequestFailure::Host(HostError::CompileError(failure))) = &entries[1].outcome
+    else {
+        panic!(
+            "the panicking input carries its own compile failure, got {:?}",
+            entries[1]
+                .outcome
+                .as_ref()
+                .map(|response| &response.products)
+        );
+    };
+    assert_eq!(
+        failure.diagnostics.diagnostics.len(),
+        1,
+        "a panic renders exactly one diagnostic: {:?}",
+        failure.diagnostics.diagnostics
+    );
+    let diagnostic = &failure.diagnostics.diagnostics[0];
+    assert_eq!(diagnostic.code, "HOST_COMPILE_REQUEST_PANIC");
+    assert!(
+        diagnostic.message.starts_with(&format!(
+            "[{}] compiler panic: ",
+            crate::host_compile::PANIC_INJECT_SENTINEL
+        )),
+        "the message names the input and the panic: {}",
+        diagnostic.message
+    );
+    assert!(
+        diagnostic
+            .message
+            .contains("synthetic panic for a_per_input_panic_isolates_to_that_entry test"),
+        "the panic's own payload survives into the entry: {}",
+        diagnostic.message
+    );
+}
+
 /// Two inputs naming one canonical with DIFFERENT bytes is a conflict:
 /// the batch reports it on both entries and never picks a winner.
 #[test]

@@ -1177,7 +1177,7 @@ fn a_custom_element_prop_type_outside_the_admitted_vocabulary_is_refused_at_admi
     match ffi_host_compile_request_to_compile_request(decoded, &no_profiles())
         .expect_err("an unrecognised prop type is refused at canonical admission")
     {
-        CompileRequestError::MalformedOptionValue { option, value } => {
+        CompileRequestError::MalformedOptionValue { option, value, .. } => {
             assert_eq!(
                 option,
                 FrameworkOption::Svelte(SvelteOption::CustomElementPropsType),
@@ -1204,7 +1204,7 @@ fn wire_casing_outside_the_admitted_vocabulary_is_refused() {
             .err()
             .unwrap_or_else(|| panic!("`{spelling}` is not an admitted spelling"));
         match err {
-            CompileRequestError::MalformedOptionValue { option, value } => {
+            CompileRequestError::MalformedOptionValue { option, value, .. } => {
                 assert_eq!(
                     option,
                     FrameworkOption::Svelte(SvelteOption::CustomElementPropsType)

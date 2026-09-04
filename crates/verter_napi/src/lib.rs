@@ -357,6 +357,9 @@ fn decode_compile_requests_priority(
              {MAX_ARRAY_ELEMENTS} a request may carry"
         )));
     }
+    // Which own key states `priority`, if any. Absence is the default,
+    // never a prototype lookup.
+    let mut stated: Option<u32> = None;
     for index in 0..count {
         // Measured before it is copied, the same bound
         // `exception_message_without_coercion` applies to a thrown string:
@@ -381,40 +384,47 @@ fn decode_compile_requests_priority(
         if key != "priority" {
             return Err(ffi_err(format!("unknown field `{key}`")));
         }
+        stated = Some(index);
     }
-    // SAFETY: classified as a plain object of this env above.
-    let object = match unsafe { Object::from_napi_value(env.raw(), value.raw()) } {
-        Ok(object) => object,
+    // Read through the OWN-key list, never `Object::get`. Closedness above
+    // is decided from own enumerable keys, and napi-rs's `Object::get` is
+    // `napi_get_property` — a full `[[Get]]` that walks the prototype
+    // chain and also sees non-enumerable own properties. Reading the value
+    // that way would let `Object.create({ priority: "interactive" })` pass
+    // the unknown-key check with zero own keys and then silently select a
+    // priority the caller never wrote on this object, which is the exact
+    // payload the request graph's own rule calls not-what-a-caller-wrote.
+    // One rule at one boundary: a payload is its own properties, for the
+    // key list AND for the value behind it.
+    let Some(index) = stated else {
+        return Ok(Some(Priority::Background));
+    };
+    let raw = match graph.property_at(&value.raw(), &keys, index) {
+        Ok(raw) => raw,
         Err(error) => return Err(recover_pending_exception(env, error)?),
     };
-    match object.get::<Unknown<'_>>("priority") {
-        Ok(None) => Ok(Some(Priority::Background)),
-        Ok(Some(raw)) => {
-            let ty = match raw.get_type() {
-                Ok(ty) => ty,
-                Err(error) => return Err(recover_pending_exception(env, error)?),
-            };
-            if ty == ValueType::Undefined {
-                return Ok(Some(Priority::Background));
-            }
-            if ty != ValueType::String {
-                return Err(ffi_err(
-                    "invalid priority, expected 'interactive' or 'background'",
-                ));
-            }
-            let priority = match unsafe { String::from_napi_value(env.raw(), raw.raw()) } {
-                Ok(priority) => priority,
-                Err(error) => return Err(recover_pending_exception(env, error)?),
-            };
-            match priority.as_str() {
-                "background" => Ok(Some(Priority::Background)),
-                "interactive" => Ok(Some(Priority::Interactive)),
-                other => Err(ffi_err(format!(
-                    "invalid priority '{other}', expected 'interactive' or 'background'"
-                ))),
-            }
-        }
-        Err(error) => Err(recover_pending_exception(env, error)?),
+    let ty = match napi::type_of!(env.raw(), raw) {
+        Ok(ty) => ty,
+        Err(error) => return Err(recover_pending_exception(env, error)?),
+    };
+    if ty == ValueType::Undefined {
+        return Ok(Some(Priority::Background));
+    }
+    if ty != ValueType::String {
+        return Err(ffi_err(
+            "invalid priority, expected 'interactive' or 'background'",
+        ));
+    }
+    let priority = match unsafe { String::from_napi_value(env.raw(), raw) } {
+        Ok(priority) => priority,
+        Err(error) => return Err(recover_pending_exception(env, error)?),
+    };
+    match priority.as_str() {
+        "background" => Ok(Some(Priority::Background)),
+        "interactive" => Ok(Some(Priority::Interactive)),
+        other => Err(ffi_err(format!(
+            "invalid priority '{other}', expected 'interactive' or 'background'"
+        ))),
     }
 }
 

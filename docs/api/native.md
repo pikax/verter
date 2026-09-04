@@ -273,6 +273,14 @@ as `binding`; valid siblings still execute. Invalid batch-level options
 (including unknown keys) or a non-array/oversized outer input throw before
 execution.
 
+The isolation covers a compiler panic too: entries are executed on the host's
+own CPU pool through the same batch coordinator the profile-bearing
+`compileMany()` route uses, so a panic while compiling one input becomes that
+entry's `host` failure (diagnostic code `HOST_COMPILE_REQUEST_PANIC`) and every
+sibling keeps its response. Options are read as OWN enumerable properties only —
+an inherited `priority` is ignored rather than honoured, matching how the
+request graph itself treats a prototype key.
+
 Each input's `canonicalId` is normalized the same way every other host route
 normalizes an id — a Windows drive letter lowercases, backslashes become
 slashes, a bundler query tail (`?vue&type=script`) and a `\?\`

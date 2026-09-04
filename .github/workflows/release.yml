@@ -368,9 +368,9 @@ jobs:
         working-directory: packages/native
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
-            npx napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml --target ${{ matrix.target }} --cross-compile
+            npx napi build -o dist --dts napi.generated.d.ts --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml --target ${{ matrix.target }} --cross-compile
           else
-            npx napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml --target ${{ matrix.target }}
+            npx napi build -o dist --dts napi.generated.d.ts --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml --target ${{ matrix.target }}
           fi
         shell: bash
         env:

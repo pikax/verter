@@ -179,6 +179,15 @@ pub enum CompileRequestError {
     /// [`Self::UnsupportedOption`]: the option itself is fine, only this
     /// particular value is not a decode-boundary concern the request can
     /// silently guess at.
+    ///
+    /// `#[non_exhaustive]` so the declared-option rule below cannot be
+    /// bypassed by construction: outside this crate the variant has no
+    /// struct literal at all (E0639), leaving
+    /// [`Self::malformed_option_value`] as the only way any other crate
+    /// can produce one. Every current producer — the two bindings' decode
+    /// boundaries and the host's request builder — already goes through
+    /// it.
+    #[non_exhaustive]
     MalformedOptionValue {
         option: FrameworkOption,
         value: String,
@@ -270,6 +279,11 @@ impl CompileRequestError {
     /// a site naming an option outside the declared set fails loudly in
     /// every debug build and test run rather than shipping a caller a path
     /// their request object has no field for.
+    ///
+    /// "Every construction" is structural across the crate boundary, not a
+    /// convention: the variant is `#[non_exhaustive]`, so no other crate
+    /// can write its struct literal and reach the refusal around this
+    /// check. Inside this crate the assertion is the rail.
     #[track_caller]
     pub fn malformed_option_value(option: FrameworkOption, value: impl Into<String>) -> Self {
         verter_debug_assert!(

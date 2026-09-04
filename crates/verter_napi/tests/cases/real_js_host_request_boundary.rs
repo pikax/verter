@@ -56,6 +56,10 @@
 //!   `decode_compile_requests_priority` and
 //!   `typed-batch-bounds-a-hostile-options-key` sees a megabyte key quoted
 //!   back verbatim.
+//! - Read the batch options' priority with `Object::get` instead of
+//!   `NapiValueGraph::property_at` over the own-key list and
+//!   `typed-batch-ignores-an-inherited-priority` honours a priority the
+//!   caller never wrote on that object.
 //! - Drop the `resolve_alias_or_canonical` call at the top of
 //!   `compile_request` and
 //!   `typed-single-reports-one-id-spelling-for-a-non-canonical-id` sees the
@@ -160,6 +164,7 @@ const EXPECTED_CASES: &[&str] = &[
     "typed-batch-refuses-an-aggregate-source-payload",
     "typed-batch-refuses-an-aggregate-decoded-value-payload",
     "typed-batch-refuses-an-invalid-priority",
+    "typed-batch-ignores-an-inherited-priority",
 ];
 
 /// The fixture addon's shared library, as its platform names it.
@@ -1329,6 +1334,48 @@ check("typed-batch-refuses-an-invalid-priority", () => {
   if (refusal === null) return "accepted an invalid batch priority";
   if (!refusal.includes("invalid priority 'urgent'")) {
     return `invalid priority refusal was ${refusal}`;
+  }
+  return undefined;
+});
+
+// A payload is its own properties — for the value behind a key as well as
+// for the key list. An INHERITED `priority` is not part of what the caller
+// wrote on this options object, so it neither refuses nor selects: it is
+// ignored, exactly as an inherited request option is. Reading the value
+// with `Object::get` (a full `[[Get]]`) instead accepts the object as
+// having zero own keys and then silently honours the prototype's value.
+check("typed-batch-ignores-an-inherited-priority", () => {
+  const canonicalId = "/typed/Inherited.vue";
+  const inputs = [
+    {
+      canonicalId,
+      source: Buffer.from(`<template><p>inherited</p></template>`),
+      request: vueRuntime(canonicalId),
+    },
+  ];
+  // An OWN key with this value refuses (`typed-batch-refuses-an-invalid-priority`),
+  // so honouring the inherited one is observable as that same refusal.
+  const options = Object.create({ priority: "urgent" });
+  if (options.priority !== "urgent") {
+    return "the fixture failed to put `priority` on the prototype";
+  }
+  if (Object.keys(options).length !== 0) {
+    return "the fixture options object was expected to have no own keys";
+  }
+  const host = new addon.VerterHost();
+  let entries;
+  let refusal = null;
+  try {
+    entries = host.compileRequests(inputs, options);
+  } catch (error) {
+    refusal = String(error && error.message ? error.message : error);
+  }
+  host.close();
+  if (refusal !== null) {
+    return `an inherited priority was read as the caller's: ${refusal}`;
+  }
+  if (entries.length !== 1 || !entries[0].response) {
+    return `the batch did not compile: ${JSON.stringify(entries)}`;
   }
   return undefined;
 });
