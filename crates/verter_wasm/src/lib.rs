@@ -315,12 +315,12 @@ impl<DecodeError: std::fmt::Display> std::fmt::Display for HostCompileRequestErr
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Decode(error) => write!(formatter, "invalid host compile request: {error}"),
-            // `CompileRequestError` has no `Display`, so its `Debug` form
-            // is what there is; it carries the refusing rule and the option
-            // row it names. Rendered verbatim rather than re-worded, because
-            // a prose sentence here would be a second refusal vocabulary to
-            // keep in sync with the canonical one.
-            Self::Request(error) => write!(formatter, "refused host compile request: {error:?}"),
+            // The refusal's own words come from `CompileRequestError`'s
+            // `Display` in `verter_compiler` — the one vocabulary both
+            // bindings render, so the same refused request reads the same
+            // way in the browser and in the native addon. Only the framing
+            // clause is this binding's.
+            Self::Request(error) => write!(formatter, "refused host compile request: {error}"),
         }
     }
 }

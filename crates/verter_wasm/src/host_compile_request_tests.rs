@@ -537,7 +537,7 @@ fn a_value_outside_a_closed_vocabulary_is_refused_at_decode() {
             "props": { "label": { "propType": "Symbol" } },
         }}),
     )) {
-        CompileRequestError::MalformedOptionValue { option, value } => {
+        CompileRequestError::MalformedOptionValue { option, value, .. } => {
             assert_eq!(
                 option,
                 FrameworkOption::Svelte(SvelteOption::CustomElementPropsType)
@@ -758,6 +758,11 @@ fn an_inadmissible_product_set_is_refused_by_the_canonical_request() {
 
 // ── the two arms stay distinguishable to the caller ──────────────────────
 
+/// Mutation recipes:
+/// - Render the request arm with `{error:?}`: the rule-naming assertion
+///   goes red on the missing sentence, and the variant-spelling assertion
+///   goes red on `EmptyProductSet`.
+/// - Give the decode arm the request arm's framing: `assert_ne!` fires.
 #[test]
 fn each_arm_renders_a_message_that_names_which_authority_refused() {
     let schema = HostCompileRequestError::Decode(
@@ -774,8 +779,14 @@ fn each_arm_renders_a_message_that_names_which_authority_refused() {
             .to_string();
     assert!(
         canonical.starts_with("refused host compile request:")
-            && canonical.contains("EmptyProductSet"),
+            && canonical.contains("product set is empty"),
         "a canonical refusal must read as one and name its rule: {canonical}"
+    );
+    // The rule's own words come from the compiler's shared refusal
+    // vocabulary, not from a Rust variant spelling this binding printed.
+    assert!(
+        !canonical.contains("EmptyProductSet"),
+        "a browser caller must not be shown the Rust variant name: {canonical}"
     );
     assert_ne!(
         schema, canonical,

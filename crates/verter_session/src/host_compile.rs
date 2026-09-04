@@ -48,12 +48,12 @@ use crate::types::{
 use crate::VerterHost;
 
 /// Test-only sentinel: any input with this canonical id panics inside
-/// [`VerterHost::compile_one_in_batch`]'s worker body, so the panic
-/// unwinds through the host batch coordinator's generic catch boundary
-/// exactly like a real codegen panic. Used by the
-/// `compile_many_isolates_panics` test to verify the production catch
-/// path (the coordinator boundary + `compile_panic_entry` conversion),
-/// not just the test scaffolding.
+/// the batch worker body of BOTH batch routes, so the panic unwinds
+/// through the host batch coordinator's generic catch boundary exactly
+/// like a real codegen panic. Used by the `compile_many_isolates_panics`
+/// and `a_per_input_panic_isolates_to_that_entry` tests to verify the
+/// production catch path (the coordinator boundary + the route's own
+/// panic-entry conversion), not just the test scaffolding.
 #[cfg(test)]
 pub(crate) const PANIC_INJECT_SENTINEL: &str = "/__compile_panic_inject__.vue";
 
@@ -1089,6 +1089,47 @@ pub struct CompileRequestBatchEntry {
     pub outcome: Result<CompileRequestResponse, CompileRequestFailure>,
 }
 
+/// Render a caught per-input typed-request panic into that entry's own
+/// failure.
+///
+/// The host batch coordinator owns the generic `catch_unwind`; this is
+/// the domain conversion the typed batch supplies through
+/// [`BatchPolicy::on_item_panic`](crate::host_batch_coordinator::BatchPolicy),
+/// so a panicking input produces its own failed entry without aborting
+/// the batch, discarding a sibling's response, or dropping a per-entry
+/// failure already recorded.
+///
+/// The failure is the compile arm rather than a refusal arm: the request
+/// itself was admitted and its execution died, which is not a verdict on
+/// what the caller wrote. The mode fields report
+/// [`CompileCacheMode::Stateless`] because that is what this route is —
+/// it consults and publishes no compile cache slot — and the message
+/// keeps the same `"[id] compiler panic: ..."` vocabulary the
+/// profile-bearing batch route already publishes, so one panic reads the
+/// same way on both.
+fn compile_request_panic_entry(
+    input: &CompileRequestBatchInput,
+    message: &str,
+) -> CompileRequestBatchEntry {
+    CompileRequestBatchEntry {
+        canonical_id: input.canonical_id.clone(),
+        outcome: Err(CompileRequestFailure::Host(HostError::CompileError(
+            crate::types::CompileFailure {
+                diagnostics: DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                    severity: HostSeverity::Error,
+                    code: "HOST_COMPILE_REQUEST_PANIC".to_string(),
+                    message: format!("[{}] compiler panic: {message}", input.canonical_id),
+                    arguments: Vec::new(),
+                    span: verter_span::Span::new(0, input.source.len() as u32),
+                }]),
+                requested_mode: CompileCacheMode::Stateless,
+                actual_mode: CompileCacheMode::Stateless,
+                downgrade_reason: None,
+            },
+        ))),
+    }
+}
+
 impl VerterHost {
     /// Execute one canonical compile request per input, over sources this
     /// call registers.
@@ -1096,7 +1137,11 @@ impl VerterHost {
     /// Returns one entry per input, in the ORIGINAL input order. Each
     /// canonical's source is registered exactly ONCE for the whole batch,
     /// and a per-input failure isolates to that input's entry — a sibling
-    /// input compiles normally.
+    /// input compiles normally. That isolation covers a per-input PANIC
+    /// too: the executions fan out through the host batch coordinator, so
+    /// a codegen panic in one input becomes that entry's own failure
+    /// instead of throwing the whole call and every sibling result with
+    /// it.
     ///
     /// Two inputs may name the same canonical with different requests:
     /// that is one registration and two executions, not two registrations.
@@ -1185,30 +1230,65 @@ impl VerterHost {
         // Distinct requests for one canonical are distinct compiles; this
         // route consults and publishes no compile cache slot, so there is
         // no result to share between them.
-        inputs
-            .into_iter()
-            .map(|input| {
-                let outcome = match group_errors.get(&input.canonical_id) {
-                    Some(error) => Err(CompileRequestFailure::Refused {
-                        canonical_id: input.canonical_id.clone(),
-                        diagnostics: DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
-                            severity: HostSeverity::Error,
-                            code: "HOST_BATCH_SOURCE_REGISTRATION_FAILED".to_string(),
-                            message: format!(
-                                "source registration failed for '{}': {error}",
-                                input.canonical_id
-                            ),
-                            arguments: Vec::new(),
-                            span: verter_span::Span::new(0, input.source.len() as u32),
-                        }]),
-                    }),
-                    None => self.compile_request(&input.canonical_id, input.request),
-                };
-                CompileRequestBatchEntry {
-                    canonical_id: input.canonical_id,
-                    outcome,
-                }
-            })
-            .collect()
+        //
+        // Fanned out through the SAME host batch coordinator `compile_many`
+        // uses, for the two properties that coordinator owns and a plain
+        // sequential map cannot have:
+        //
+        // - per-input panic isolation. A codegen panic in one input is
+        //   caught at the coordinator's generic boundary and handed to
+        //   `on_item_panic`, which renders it into THAT entry's failure.
+        //   Sibling entries keep their responses and the call still answers
+        //   one entry per input. Without it a single panicking input throws
+        //   the whole call away, including every sibling already compiled
+        //   and every per-entry failure already recorded.
+        // - the host-owned CPU pool. An N-input batch is N compiles; run
+        //   sequentially on the caller's thread it costs their sum, and on
+        //   the native binding that thread is the JavaScript one.
+        //
+        // The closure borrows its input, so each execution clones its own
+        // request — refcount-and-scalar work, next to nothing beside the
+        // compile it hands the request to.
+        let coordinator = self.batch_coordinator();
+        let policy = crate::host_batch_coordinator::BatchPolicy {
+            scheduler: None,
+            label: "compile_request_many",
+            on_item_panic: &|panic: crate::host_batch_coordinator::BatchItemPanic<
+                '_,
+                CompileRequestBatchInput,
+            >| {
+                compile_request_panic_entry(panic.item, &panic.message())
+            },
+        };
+        coordinator.run_batch(&inputs, &policy, |input| {
+            // Test-only panic injection — fired in the worker so it unwinds
+            // through the coordinator's catch exactly like a real codegen
+            // panic. Production builds compile this branch out completely.
+            #[cfg(test)]
+            if input.canonical_id == PANIC_INJECT_SENTINEL {
+                panic!("synthetic panic for a_per_input_panic_isolates_to_that_entry test");
+            }
+
+            let outcome = match group_errors.get(&input.canonical_id) {
+                Some(error) => Err(CompileRequestFailure::Refused {
+                    canonical_id: input.canonical_id.clone(),
+                    diagnostics: DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                        severity: HostSeverity::Error,
+                        code: "HOST_BATCH_SOURCE_REGISTRATION_FAILED".to_string(),
+                        message: format!(
+                            "source registration failed for '{}': {error}",
+                            input.canonical_id
+                        ),
+                        arguments: Vec::new(),
+                        span: verter_span::Span::new(0, input.source.len() as u32),
+                    }]),
+                }),
+                None => self.compile_request(&input.canonical_id, input.request.clone()),
+            };
+            CompileRequestBatchEntry {
+                canonical_id: input.canonical_id.clone(),
+                outcome,
+            }
+        })
     }
 }

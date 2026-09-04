@@ -45,7 +45,9 @@ in place. Compile through [`Host` / `VerterHost`](#host--verterhost).
 
 ### `Host` / `VerterHost`
 
-In-memory host facade exposed by the WASM runtime. Provides the same multi-file compilation API as `@verter/native`'s `VerterHost`, but running in the browser via WebAssembly.
+In-memory host facade exposed by the WASM runtime. It shares the typed
+`compileRequest()` and profile-bearing read methods with `@verter/native`, but
+the native-only source-registering `compileRequests()` batch route is absent.
 
 ```ts
 import { createHost } from "@verter/wasm";
@@ -79,8 +81,8 @@ const host = await createHost();
 
 #### Host Methods
 
-The `Host` class exposes the shared host methods below plus the WASM-only
-`compileRequest()` route:
+The `Host` class exposes the shared host methods below, including
+`compileRequest()`:
 
 | Method                                                                                      | Returns                           | Description                                                     |
 | ------------------------------------------------------------------------------------------- | --------------------------------- | --------------------------------------------------------------- |
@@ -307,9 +309,13 @@ sets, the arm payloads, and their mutual exclusivity to it:
 - `HostCompileIdentity`, `HostVueCompileOptions`, `HostSvelteCompileOptions`
 - `HostRuntimeProductOptions`, `HostIdeProductOptions`, `HostAnalysisProductOptions`
 
-The response has no `@verter/native` counterpart, so its types are unprefixed
-and this binding's own. They reuse the re-exported shared shapes wherever the
-route serialises one (`HostDiagnosticsSnapshot`, `HostVirtualNodeKind`,
+The response types are unprefixed. Native now has a counterpart
+(`HostCompileResponse` / `HostCompiledProduct` on `@verter/native`), but the
+JavaScript envelopes are not the same object: native nests the IDE payload
+under `ide`, stringifies `analysis`, and throws a structured `Error`; this
+binding flattens the IDE DTO, returns `analysis` as an object, and throws a
+string. The types here reuse the re-exported shared shapes wherever the route
+serialises one (`HostDiagnosticsSnapshot`, `HostVirtualNodeKind`,
 `HostVirtualMeta`, `HostIdeResponse`) rather than restating them:
 
 - `HostCompileRequestResponse`
@@ -345,5 +351,7 @@ re-exported types.
 | `analyzeStyle()`                | Available                        | Not available                    |
 | `VerterHost`                    | Synchronous constructor          | Async via `createHost()`         |
 | `getAnalysis()` return          | JSON `string`                    | Native JS `object`               |
-| `compileRequest()`              | Not available yet                | Available                        |
+| `compileRequest()`              | Available                        | Available                        |
+| `compileRequest()` envelope     | Nested `ide`; `analysis` JSON string; structured `Error` | Flattened IDE DTO; `analysis` object; string throw |
+| `compileRequests()`             | Available                        | Not available                    |
 | `source` accepts                | `string \| Buffer`               | `string`                         |

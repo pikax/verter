@@ -12,7 +12,9 @@ Native Node.js bindings for Verter's framework-carrier compiler host. This packa
 
 `@verter/native` is the bridge between the Rust compiler core and the Node.js ecosystem. It ships pre-built platform-specific `.node` binaries for all major operating systems and architectures, with a JavaScript loader that automatically detects the current platform and loads the correct binary at runtime.
 
-The package provides three compilation functions: a general-purpose async `compile`, its synchronous counterpart `compileSync`, and a Vite-optimized `compileForVite` that returns split blocks (script, template, styles) for virtual module serving.
+The package exposes compilation through `VerterHost`: typed `compileRequest()`
+and `compileRequests()` routes plus the legacy profile-bearing `compileMany()`
+route. There are no standalone compile functions.
 
 ## Architecture
 
@@ -43,7 +45,7 @@ flowchart TD
 
     WinArch -->|x64| WinX64["verter-native.win32-x64-msvc.node"]
 
-    DarwinUniversal -->|found| Done["Export compile, compileSync, compileForVite"]
+    DarwinUniversal -->|found| Done["Export Workspace and VerterHost"]
     DarwinUniversal -->|not found| DarwinArch{arch?}
     DarwinArch -->|x64| DarwinX64["verter-native.darwin-x64.node"]
     DarwinArch -->|arm64| DarwinArm64["verter-native.darwin-arm64.node"]
@@ -139,11 +141,69 @@ ws.configureProjects([
 const host = VerterHost.withWorkspace({ devMode: true }, ws);
 ```
 
+### `host.compileRequest(canonicalId, request): HostCompileResponse`
+
+Executes a typed request against a source already registered with `upsert()`.
+The requested products are returned in request order; any refusal throws and
+no partial response is published.
+
+```typescript
+const source = `<template><h1>Hello</h1></template>`;
+const { canonicalId } = host.upsert({
+  inputId: "/project/src/App.vue",
+  source: Buffer.from(source),
+});
+
+const result = host.compileRequest(canonicalId, {
+  framework: "vue",
+  identity: { filename: canonicalId, isProduction: false, forceJs: false },
+  products: [{ kind: "runtimeClient", runtimeSourceMap: true }],
+  options: {
+    backend: "inferred",
+    ssr: false,
+    isCustomElement: [],
+    babelParserPlugins: [],
+  },
+});
+```
+
+`host.compileRequests(inputs, options?)` is the source-registering batch form.
+Each input carries one `Buffer` source beside its typed request. It returns one
+ordered entry containing either `response` or a typed `failure`; one refusal
+does not suppress valid siblings. Per-entry shape, UTF-8, request decoding, and
+canonical construction refusals use the `binding` failure arm. Per-input panic
+isolation holds here as it does on `compileMany()`: entries execute on the
+host's CPU pool through the same batch coordinator, so a compiler panic becomes
+that entry's `host` failure and its siblings keep their responses. An entry's
+own `canonicalId` / `source` / `request` fields and the batch options alike are
+read as own enumerable properties only — an inherited field or `priority` is
+not part of the payload — and both are CLOSED: an own key that is not one of the
+three entry fields is refused by name (``unknown field `requst```) rather than
+read as an absent `request`. Invalid batch-level options or a non-array/oversized
+outer input throw before execution. The aggregate 64 MiB decoded-payload budget
+does not: its counter never resets, so the entry that exhausts it and every
+entry after it fail as `binding`, naming the index and the bytes the call
+actually holds, while the entries decoded before it keep their responses. A
+single payload larger than the whole ceiling is refused by its OWN size instead,
+costs only its own entry, and leaves every sibling — before and after — decoding
+normally. Each entry's own request graph
+is separately bounded by a per-request 131,072 decoded-value cap, reset between
+entries — there is no separate aggregate decoded-value budget across the batch. Each `canonicalId` is normalized on the
+way in (drive-letter case, backslashes, a `?…` query tail, an extended-length
+prefix, surrounding whitespace, registered aliases), so an entry's reported
+`canonicalId` may differ from the string you passed; correlate by position or
+by the reported id.
+
+`compileRequest()` is also available in `@verter/wasm`. The source-registering
+`compileRequests()` batch route is native-only and is not exposed by the browser
+binding.
+
 ### `host.compileMany(files, options?): CompileBatchEntry[]`
 
 Compiles a batch of Vue SFC inputs through the host's shared compile path
-(scheduler + dispatch + compile cache). This is the single compile entry point —
-there are no standalone `compile` / `compileSync` / `compileForVite` exports.
+(scheduler + dispatch + compile cache). This is the legacy profile-bearing
+batch route; there are no standalone `compile` / `compileSync` /
+`compileForVite` exports.
 
 Returns one entry per input, **in input order**. Per-input panic isolation: if
 codegen fails for one input, only that input's entry carries the error; the rest

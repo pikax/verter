@@ -188,7 +188,7 @@ fn compiled_product_to_wasm(
                     return Err(format!(
                         "refused host compile request for {canonical_id}: the {} product \
                          published a runtime output row, which has no runtime wire tag",
-                        requested_product_wire_name(kind)
+                        kind.wire_tag()
                     ));
                 }
             }
@@ -200,28 +200,6 @@ fn compiled_product_to_wasm(
             WasmCompiledProduct::Analysis { analysis: snapshot }
         }
     })
-}
-
-/// A product kind in the vocabulary the REQUEST spells it with.
-///
-/// A refusal names the offending product the way the caller wrote it, not
-/// the way Rust spells the variant — the schema's arm is `publicApi`, so
-/// that is what the message says. Exhaustive by name on purpose: a product
-/// kind added upstream is a compile error here rather than a message that
-/// silently drifts out of the wire's vocabulary.
-fn requested_product_wire_name(
-    kind: verter_compiler::compile_request::ProductKind,
-) -> &'static str {
-    use verter_compiler::compile_request::ProductKind;
-
-    match kind {
-        ProductKind::RuntimeClient => "runtimeClient",
-        ProductKind::RuntimeServer => "runtimeServer",
-        ProductKind::IdeCompanion => "ideCompanion",
-        ProductKind::PublicApi => "publicApi",
-        ProductKind::Declarations => "declarations",
-        ProductKind::Analysis => "analysis",
-    }
 }
 
 fn compiled_node_to_wasm(node: host::CompiledVirtualNode) -> WasmCompiledVirtualNode {
@@ -262,7 +240,7 @@ pub(crate) fn compile_request_failure_to_string(failure: &host::CompileRequestFa
         } => format!(
             "refused host compile request for {canonical_id}: no host production route for the \
              {} product{}",
-            requested_product_wire_name(*kind),
+            kind.wire_tag(),
             rendered_diagnostics(diagnostics)
         ),
         Failure::ProductNotProduced {
@@ -272,7 +250,7 @@ pub(crate) fn compile_request_failure_to_string(failure: &host::CompileRequestFa
         } => format!(
             "refused host compile request for {canonical_id}: the {} product was admitted and \
              published no payload{}",
-            requested_product_wire_name(*kind),
+            kind.wire_tag(),
             rendered_diagnostics(diagnostics)
         ),
         Failure::RuntimeSurfaceRefused {

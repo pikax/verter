@@ -139,6 +139,28 @@ pub fn host_node_kind_to_ffi(input: &host::VirtualNodeKind) -> FfiVirtualNodeKin
     }
 }
 
+/// Converts one host diagnostic, UTF-16-mapped span included.
+///
+/// The sole per-diagnostic projection every FFI consumer (NAPI and WASM
+/// alike) uses, so severity spelling and UTF-16 span mapping cannot
+/// diverge between the two bindings.
+pub fn host_diagnostic_to_ffi(
+    diagnostic: &host::HostDiagnostic,
+    source: Option<&str>,
+) -> FfiDiagnostic {
+    FfiDiagnostic {
+        severity: match diagnostic.severity {
+            host::HostSeverity::Error => "error".to_string(),
+            host::HostSeverity::Warning => "warning".to_string(),
+            host::HostSeverity::Info => "info".to_string(),
+        },
+        code: diagnostic.code.clone(),
+        message: diagnostic.message.clone(),
+        span_start: mandatory_utf16_offset(diagnostic.span.start, source),
+        span_end: mandatory_utf16_offset(diagnostic.span.end, source),
+    }
+}
+
 pub fn host_diagnostics_to_ffi(
     input: &host::DiagnosticsSnapshot,
     source: Option<&str>,
@@ -147,17 +169,7 @@ pub fn host_diagnostics_to_ffi(
         diagnostics: input
             .diagnostics
             .iter()
-            .map(|d| FfiDiagnostic {
-                severity: match d.severity {
-                    host::HostSeverity::Error => "error".to_string(),
-                    host::HostSeverity::Warning => "warning".to_string(),
-                    host::HostSeverity::Info => "info".to_string(),
-                },
-                code: d.code.clone(),
-                message: d.message.clone(),
-                span_start: mandatory_utf16_offset(d.span.start, source),
-                span_end: mandatory_utf16_offset(d.span.end, source),
-            })
+            .map(|d| host_diagnostic_to_ffi(d, source))
             .collect(),
         has_errors: input.has_errors,
     }

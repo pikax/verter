@@ -810,13 +810,33 @@ fn session_profile_malformed_svelte_css_token_refuses_at_decode() {
     let HostError::CompileError(failure) = err else {
         panic!("expected the typed compile-error refusal, got another host error");
     };
+    // The message names the offending VALUE and the request field a caller
+    // writes it on — the compiler's own refusal vocabulary, not the Rust
+    // variant spelling. A diagnostic reading `MalformedOptionValue {
+    // option: Svelte(CompileOptionsCss), .. }` tells a caller nothing they
+    // can act on.
+    //
+    // Mutation recipe: render the error with `{:?}` in
+    // `request_construction_refused_diagnostics`. The value and field
+    // assertions go red, and the variant-spelling assertion does too.
     assert!(
         failure.diagnostics.diagnostics.iter().any(|d| {
             d.code == "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"
-                && d.message.contains("MalformedOptionValue")
+                && d.message
+                    .contains("malformed value 'not-a-real-mode' for option 'svelte:css'")
         }),
         "the refusal must carry the request-construction code for a malformed token, \
          got {:?}",
+        failure.diagnostics.diagnostics
+    );
+    assert!(
+        !failure
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("MalformedOptionValue")
+                || d.message.contains("CompileOptionsCss")),
+        "a user-visible refusal must not publish the Rust variant spelling, got {:?}",
         failure.diagnostics.diagnostics
     );
 }

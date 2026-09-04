@@ -237,6 +237,104 @@ const result = host.upsert({
 
 Only the exact and finite-set cases should feed dependency resolution. Unknown dynamic imports are intentionally left unresolved.
 
+#### `host.compileRequest(canonicalId, request)`
+
+Executes a typed request against a source already registered by `upsert()`.
+Returns one complete product row per requested kind, in request order. A
+decode, admission, or compile refusal throws; no partial response is returned.
+
+```ts
+const source = `<template><h1>Hello</h1></template>`;
+const { canonicalId } = host.upsert({
+  inputId: "/src/App.vue",
+  source: Buffer.from(source),
+});
+
+const response = host.compileRequest(canonicalId, {
+  framework: "vue",
+  identity: { filename: canonicalId, isProduction: false, forceJs: false },
+  products: [{ kind: "runtimeClient", runtimeSourceMap: true }],
+  options: {
+    backend: "inferred",
+    ssr: false,
+    isCustomElement: [],
+    babelParserPlugins: [],
+  },
+});
+```
+
+#### `host.compileRequests(inputs, options?)`
+
+Registers each input's `Buffer` source and executes its typed request. The
+result preserves input order and contains either `response` or a typed
+`failure` per entry. Missing/wrong fields, invalid UTF-8, request decode
+refusals, and canonical request construction refusals fail only their own entry
+as `binding`; valid siblings still execute. Invalid batch-level options
+(including unknown keys) or a non-array/oversized outer input throw before
+execution.
+
+The isolation covers a compiler panic too: entries are executed on the host's
+own CPU pool through the same batch coordinator the profile-bearing
+`compileMany()` route uses, so a panic while compiling one input becomes that
+entry's `host` failure (diagnostic code `HOST_COMPILE_REQUEST_PANIC`) and every
+sibling keeps its response. Every own-property rule this route states applies
+to the entry wrapper as well as to what it wraps: `canonicalId`, `source` and `request`
+are read as OWN enumerable properties, so
+`Object.create({ canonicalId, source, request })` is an entry that states
+none of them and fails as a missing field. The wrapper is CLOSED for the same
+reason the batch options and the request graph are: an own key that is not one
+of the three is refused by name, so `{ canonicalId, source, requst }` reports
+``unknown field `requst``` rather than silently reading as a missing
+`request`. Batch options behave the same way — an inherited `priority` is
+ignored rather than honoured, matching how the request graph itself treats a
+prototype key.
+
+Each input's `canonicalId` is normalized the same way every other host route
+normalizes an id — a Windows drive letter lowercases, backslashes become
+slashes, a bundler query tail (`?vue&type=script`) and a `\?\`
+extended-length prefix are stripped, surrounding whitespace is trimmed, and a
+registered alias resolves to its canonical. So `D:\src\App.vue`,
+`/src/App.vue?vue&type=style` and `/src/App.vue` are accepted as written, and
+each entry reports the NORMALIZED id in its `canonicalId`. Correlate results by
+position, or by the id the entry reports — not by string-comparing the id you
+passed in.
+
+**Two budgets, two scopes.** The decoded-value cap is per entry — the counter
+resets between entries, so a request graph that exhausts it fails only that
+entry, as a `binding` failure, and every later entry decodes normally. The
+retained-byte budget is per CALL and fixed at 64 MiB across every entry's
+`canonicalId`, `source` bytes and request graph. Its counter never resets, so
+once it is exhausted every REMAINING entry is refused too — but each refusal is
+still that entry's own `binding` failure, naming its index and saying the
+ceiling is aggregate, and the entries that decoded before it was reached still
+compile and still answer. The call never throws for a full budget, and it never
+discards a sibling's work.
+
+A SINGLE payload larger than the whole 64 MiB ceiling is a different failure and
+is reported as one: it could not fit an empty budget either, so it is refused by
+its own size, the aggregate counter is untouched, and every sibling — before and
+after — still decodes and compiles. Only a call that genuinely ran out of room
+refuses its remaining entries, and that refusal names the bytes the call is
+actually holding.
+
+The ceiling has no runtime override: it is a compile-time constant. A
+whole-project batch of average-sized SFCs can reach 64 MiB well before the
+65 536-entry outer cap, so size batches for it rather than relying on the entry
+cap alone; the trailing refusals name the index where the budget ran out, which
+is where a follow-up call should resume.
+
+`compileRequest()` shares the typed request schema with `@verter/wasm`, but the
+JavaScript envelopes diverge and are not interchangeable:
+
+- Native nests the IDE payload under `ide`, stringifies `analysis` as JSON, and
+  throws a structured `Error` whose `kind` / `canonicalId` / `diagnostics`
+  fields carry the typed failure.
+- WASM flattens the IDE DTO beside `kind`, returns `analysis` as an object, and
+  throws the refusal as a string.
+
+`compileRequests()` is native-only because the browser binding has no
+source-registering batch route.
+
 #### `host.getVirtualFile(query)`
 
 Get a compiled virtual file from the host. Triggers compilation if needed.
@@ -619,10 +717,18 @@ interface HostDiagnostic {
   severity: "error" | "warning" | "info";
   code: string;
   message: string;
-  spanStart?: number;
-  spanEnd?: number;
+  spanStart: number;
+  spanEnd: number;
 }
 ```
+
+`spanStart` / `spanEnd` are UTF-16 code units into the registered source,
+on the legacy per-node reads and on the typed
+`compileRequest`/`compileRequests` routes alike, and they are the same
+offsets `@verter/wasm` publishes for the same compile. The one exception is
+`compileMany()`: its per-entry `diagnostics` are published with UTF-8 BYTE
+offsets, unchanged, so a consumer that reads both routes must not treat the
+two as one coordinate space.
 
 ## Input Encoding
 

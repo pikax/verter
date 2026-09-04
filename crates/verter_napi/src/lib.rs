@@ -6,10 +6,10 @@
 //! NAPI-RS binding layer that exposes [`verter_session::VerterHost`] and
 //! the standalone CSS style-processing entry points to Node.js.
 //!
-//! ## API parity
+//! ## Host API
 //!
-//! This crate exposes the same `VerterHost` API as [`verter_wasm`] with
-//! CSS entry points that require a Node.js runtime:
+//! This crate shares the core `VerterHost` API with [`verter_wasm`] and adds
+//! native-only batch and CSS entry points. The CSS routes require Node.js:
 //!
 //! - **`prepareStyleForPreprocessor`** — rewrites `v-bind()` in AUTHORED
 //!   style content before it is handed to an external SCSS/Less/Stylus
@@ -40,6 +40,7 @@ use verter_session as host;
 use verter_type_expr::TypeExpr;
 
 mod audit;
+mod compile_request_response;
 mod host_compile_request;
 #[cfg(test)]
 mod host_compile_request_tests;
@@ -55,10 +56,37 @@ pub use host_compile_request::{
 };
 // Reachable so the boundary suites can drive materialisation over a
 // modelled graph. Not part of the addon's JS surface.
+pub use compile_request_response::compile_request_failure_to_napi;
+use compile_request_response::{
+    binding_failure_entry, binding_failure_to_napi, compile_request_construction_refused,
+    compile_request_error, compile_request_failure_status, compile_request_response_to_napi,
+    failure_canonical_id, host_diagnostic_to_napi, host_diagnostics_to_napi, host_ide_to_napi,
+};
 #[doc(hidden)]
 pub use js_value_graph::{
-    materialize_js_value, JsValueClass, JsValueGraph, MAX_ARRAY_ELEMENTS, MAX_NESTING_DEPTH,
+    materialize_js_value, materialize_js_value_with_budget, JsObjectKeys, JsValueClass,
+    JsValueGraph, JsValueMaterializationBudget, MAX_ARRAY_ELEMENTS, MAX_DECODED_VALUES_PER_REQUEST,
+    MAX_NESTING_DEPTH, MAX_RETAINED_BYTES_PER_REQUEST, MIN_VALUE_RETAINED_BYTES,
 };
+
+/// Maximum native payload bytes retained while decoding one typed batch,
+/// covering every entry's canonical id, source bytes and request graph.
+///
+/// Aggregate over the whole call: the counter never resets between
+/// entries, so once it is exhausted every LATER entry is refused too. It
+/// is reported per ENTRY all the same — at the position that crossed it
+/// and at each one after — because the alternative loses every earlier
+/// sibling's already-decoded work and names no input, leaving a caller
+/// with no way to tell which entry pushed the batch over. Entries that
+/// decoded before the ceiling was reached still compile and still answer.
+///
+/// The ceiling is fixed here, with no runtime override; `docs/api/native.md`
+/// states it so callers size their batches rather than discovering it.
+///
+/// Contrast [`MAX_DECODED_VALUES_PER_REQUEST`], which is per ENTRY (the
+/// batch resets the counter between entries) and therefore refuses only
+/// the entry that exhausted it, leaving every later entry free to decode.
+const MAX_COMPILE_REQUEST_BATCH_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 
 // Re-imports for code actions and diagnostics (parity with verter_wasm)
 use verter_actions::{ActionContext, ActionEngine};
@@ -86,8 +114,528 @@ fn catch_panic<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Result<T> {
     })
 }
 
-fn ffi_err(msg: impl std::fmt::Display) -> Error {
+pub(crate) fn ffi_err(msg: impl std::fmt::Display) -> Error {
     Error::new(Status::InvalidArg, msg.to_string())
+}
+
+fn clear_pending_exception(env: &Env) -> Result<()> {
+    let mut pending = false;
+    let status = unsafe { napi::sys::napi_is_exception_pending(env.raw(), &mut pending) };
+    if status != napi::sys::Status::napi_ok {
+        return Err(Error::new(
+            Status::GenericFailure,
+            "failed to inspect a pending JavaScript exception",
+        ));
+    }
+    if !pending {
+        return Ok(());
+    }
+    let mut exception = std::ptr::null_mut();
+    let status = unsafe { napi::sys::napi_get_and_clear_last_exception(env.raw(), &mut exception) };
+    if status != napi::sys::Status::napi_ok {
+        return Err(Error::new(
+            Status::GenericFailure,
+            "failed to clear a pending JavaScript exception",
+        ));
+    }
+    Ok(())
+}
+
+/// Bytes of a thrown value this binding is willing to copy into a Rust
+/// error message.
+///
+/// A thrown string is caller-controlled and unbounded; the message only
+/// has to be readable, so a hostile multi-megabyte throw is answered by
+/// the generic label rather than retained.
+const MAX_EXCEPTION_MESSAGE_BYTES: usize = 8 * 1024;
+
+/// Read an exception's message without invoking user-controlled string
+/// coercion. `Error::from(Unknown)` would run `toString` / `toPrimitive`,
+/// and a throw there would leave a new pending exception that poisons the
+/// next sibling's N-API call.
+fn exception_message_without_coercion(
+    env: &Env,
+    exception: napi::sys::napi_value,
+) -> Result<String> {
+    let ty = napi::type_of!(env.raw(), exception)?;
+    if ty == ValueType::String {
+        // Measured before it is copied, and the measurement is a BOUND:
+        // discarding it would leave a probe that reads like a guard and
+        // enforces nothing.
+        if js_value_graph::napi_utf8_string_len(env.raw(), exception)? > MAX_EXCEPTION_MESSAGE_BYTES
+        {
+            return Ok("JavaScript exception".to_string());
+        }
+        return unsafe { String::from_napi_value(env.raw(), exception) };
+    }
+    if ty != ValueType::Object {
+        return Ok("JavaScript exception".to_string());
+    }
+
+    let mut message = std::ptr::null_mut();
+    let status = unsafe {
+        napi::sys::napi_get_named_property(env.raw(), exception, c"message".as_ptr(), &mut message)
+    };
+    if status != napi::sys::Status::napi_ok {
+        clear_pending_exception(env)?;
+        return Ok("JavaScript exception".to_string());
+    }
+    if napi::type_of!(env.raw(), message)? != ValueType::String {
+        return Ok("JavaScript exception".to_string());
+    }
+    // Same bound as the thrown-string path: `error.message` is equally
+    // caller-controlled and equally unbounded.
+    if js_value_graph::napi_utf8_string_len(env.raw(), message)? > MAX_EXCEPTION_MESSAGE_BYTES {
+        return Ok("JavaScript exception".to_string());
+    }
+    unsafe { String::from_napi_value(env.raw(), message) }
+}
+
+/// One engine-side handle scope, closed when it drops.
+///
+/// A native call runs in ONE scope, so every handle a batch's traversal
+/// creates — a key name, a looked-up property, a decoded element — stays
+/// pinned until the whole call returns. The per-call byte and value
+/// budgets bound what the traversal RETAINS natively; they say nothing
+/// about the engine-side handles it pins, and a batch admitted by those
+/// budgets can still pin millions of them at once. Opening a nested scope
+/// per batch entry bounds that to one entry's worth: the entry's handles
+/// are released as soon as its own decode has produced owned Rust values.
+///
+/// Nothing engine-side may outlive the guard. Every value a batch entry's
+/// decode produces — the source `Arc<str>`, the canonical id, the decoded
+/// request, a failure's message — is owned Rust, so the whole entry is
+/// self-contained by construction. Dropping (rather than closing
+/// explicitly) is what makes the early-`continue` and early-`return` paths
+/// safe, and closing on drop keeps the required LIFO nesting.
+struct JsHandleScope {
+    env: napi::sys::napi_env,
+    scope: napi::sys::napi_handle_scope,
+}
+
+impl JsHandleScope {
+    fn open(env: &Env) -> Result<Self> {
+        let mut scope = std::ptr::null_mut();
+        napi::check_status!(
+            unsafe { napi::sys::napi_open_handle_scope(env.raw(), &mut scope) },
+            "Failed to open a handle scope for a compile request batch entry"
+        )?;
+        Ok(Self {
+            env: env.raw(),
+            scope,
+        })
+    }
+}
+
+impl Drop for JsHandleScope {
+    fn drop(&mut self) {
+        // SAFETY: opened on this env by `open`, and closed exactly once —
+        // guards are held in nested lexical scopes, so closes are LIFO.
+        unsafe {
+            napi::sys::napi_close_handle_scope(self.env, self.scope);
+        }
+    }
+}
+
+/// Capture and clear a JavaScript exception left pending by a recoverable
+/// accessor failure. Continuing with it pending makes every later N-API call
+/// fail, defeating per-entry batch isolation.
+///
+/// The recovered error is re-tagged off [`Status::PendingException`]. The
+/// exception is no longer pending — this function just cleared it — and an
+/// error still CLAIMING to be one is dropped rather than thrown:
+/// `JsError::throw_into` returns early on that status, so a route that
+/// returns the recovered error to JavaScript would resolve to `undefined`
+/// with no error at all. A batch entry that folds the error into its own
+/// `failure` slot never noticed; a route that throws does.
+fn recover_pending_exception(env: &Env, fallback: Error) -> Result<Error> {
+    let throwable_status = |status: Status| match status {
+        Status::PendingException => Status::GenericFailure,
+        other => other,
+    };
+    let mut pending = false;
+    let status = unsafe { napi::sys::napi_is_exception_pending(env.raw(), &mut pending) };
+    if status != napi::sys::Status::napi_ok {
+        return Err(Error::new(
+            Status::GenericFailure,
+            "failed to inspect a pending JavaScript exception",
+        ));
+    }
+    if !pending {
+        return Ok(Error::new(
+            throwable_status(fallback.status),
+            fallback.reason.clone(),
+        ));
+    }
+
+    let mut exception = std::ptr::null_mut();
+    let status = unsafe { napi::sys::napi_get_and_clear_last_exception(env.raw(), &mut exception) };
+    if status != napi::sys::Status::napi_ok {
+        return Err(Error::new(
+            Status::GenericFailure,
+            "failed to clear a pending JavaScript exception",
+        ));
+    }
+    let message = match exception_message_without_coercion(env, exception) {
+        Ok(message) if !message.is_empty() => message,
+        _ => {
+            clear_pending_exception(env)?;
+            fallback.reason.clone()
+        }
+    };
+    Ok(Error::new(throwable_status(fallback.status), message))
+}
+
+/// Measure a JavaScript string before converting it into an owned Rust value.
+fn js_string_utf8_len(env: &Env, value: napi::sys::napi_value) -> Result<usize> {
+    if napi::type_of!(env.raw(), value)? != ValueType::String {
+        return Err(Error::new(Status::StringExpected, "expected a string"));
+    }
+    js_value_graph::napi_utf8_string_len(env.raw(), value)
+}
+
+fn napi_value_is_array(env: &Env, value: napi::sys::napi_value) -> Result<bool> {
+    let mut is_array = false;
+    napi::check_status!(
+        unsafe { napi::sys::napi_is_array(env.raw(), value, &mut is_array) },
+        "Failed to detect whether a value is an array"
+    )?;
+    Ok(is_array)
+}
+
+fn napi_value_is_buffer(env: &Env, value: napi::sys::napi_value) -> Result<bool> {
+    let mut is_buffer = false;
+    napi::check_status!(
+        unsafe { napi::sys::napi_is_buffer(env.raw(), value, &mut is_buffer) },
+        "Failed to detect whether a value is a Buffer"
+    )?;
+    Ok(is_buffer)
+}
+
+fn decode_compile_requests_priority(
+    env: &Env,
+    options: Option<Unknown<'_>>,
+) -> Result<Option<verter_scheduler::stage::Priority>> {
+    use js_value_graph::{JsObjectKeys, JsValueClass, JsValueGraph, NapiValueGraph};
+    use verter_scheduler::stage::Priority;
+
+    let Some(value) = options else {
+        return Ok(Some(Priority::Background));
+    };
+    let ty = match value.get_type() {
+        Ok(ty) => ty,
+        Err(error) => return Err(recover_pending_exception(env, error)?),
+    };
+    if ty == ValueType::Undefined || ty == ValueType::Null {
+        return Ok(Some(Priority::Background));
+    }
+    // SAFETY: the options value belongs to this live env.
+    let graph = unsafe { NapiValueGraph::new(env.raw()) };
+    // The same classification the request graph uses, for the same
+    // reason: a Buffer, typed array or DataView exposes every byte index
+    // as an enumerable own key, so enumerating one would materialise
+    // millions of V8 key strings before any count could refuse them.
+    // `napi_is_array` alone does not see those, and this argument is the
+    // only enumerated one on the route that is not already an array.
+    match graph.classify(&value.raw()) {
+        Ok(JsValueClass::Object) => {}
+        Ok(_) => return Err(ffi_err("compile request batch options must be an object")),
+        Err(error) => {
+            let error = recover_pending_exception(env, error)?;
+            return Err(error);
+        }
+    }
+    let keys = match graph.own_enumerable_keys(&value.raw()) {
+        Ok(keys) => keys,
+        Err(error) => return Err(recover_pending_exception(env, error)?),
+    };
+    let count = match keys.count() {
+        Ok(count) => count,
+        Err(error) => return Err(recover_pending_exception(env, error)?),
+    };
+    if count > MAX_ARRAY_ELEMENTS {
+        return Err(ffi_err(format!(
+            "A request object exposes {count} keys, above the \
+             {MAX_ARRAY_ELEMENTS} a request may carry"
+        )));
+    }
+    // Which own key states `priority`, if any. Absence is the default,
+    // never a prototype lookup.
+    let mut stated: Option<u32> = None;
+    for index in 0..count {
+        // Measured before it is copied, the same bound
+        // `exception_message_without_coercion` applies to a thrown string:
+        // an own key is caller-controlled and unbounded, and a refusal
+        // only has to be readable. Above the bound the key is named by its
+        // size rather than quoted, so a hostile multi-megabyte key cannot
+        // ride into a thrown Error's message.
+        let key_bytes = match keys.retained_bytes(index) {
+            Ok(bytes) => bytes,
+            Err(error) => return Err(recover_pending_exception(env, error)?),
+        };
+        if key_bytes > MAX_EXCEPTION_MESSAGE_BYTES {
+            return Err(ffi_err(format!(
+                "unknown field, named by {key_bytes} bytes above the \
+                 {MAX_EXCEPTION_MESSAGE_BYTES} a refusal quotes"
+            )));
+        }
+        let key = match keys.at(index) {
+            Ok(key) => key,
+            Err(error) => return Err(recover_pending_exception(env, error)?),
+        };
+        if key != "priority" {
+            return Err(ffi_err(format!("unknown field `{key}`")));
+        }
+        stated = Some(index);
+    }
+    // The OWN-key gate is what makes an inherited `priority` inert: the
+    // value is read only when an own enumerable key states it, so
+    // `Object.create({ priority: "interactive" })` — zero own keys — takes
+    // the default and never consults the prototype. Removing this gate is
+    // what would let a caller select a priority they never wrote on this
+    // object; the reader below cannot restore it, because every property
+    // read at this boundary (`property_at` and `Object::get` alike) is
+    // `napi_get_property`, a full `[[Get]]`, and an own property shadows
+    // its prototype's anyway.
+    //
+    // `property_at` is chosen on its own merit: the key list already holds
+    // a handle to the name, so looking the property up through it costs no
+    // second engine-side string.
+    //
+    // One rule at one boundary: a payload is its own properties, for the
+    // key list AND for the value behind it.
+    let Some(index) = stated else {
+        return Ok(Some(Priority::Background));
+    };
+    let raw = match graph.property_at(&value.raw(), &keys, index) {
+        Ok(raw) => raw,
+        Err(error) => return Err(recover_pending_exception(env, error)?),
+    };
+    let ty = match napi::type_of!(env.raw(), raw) {
+        Ok(ty) => ty,
+        Err(error) => return Err(recover_pending_exception(env, error)?),
+    };
+    if ty == ValueType::Undefined {
+        return Ok(Some(Priority::Background));
+    }
+    if ty != ValueType::String {
+        return Err(ffi_err(
+            "invalid priority, expected 'interactive' or 'background'",
+        ));
+    }
+    let priority = match unsafe { String::from_napi_value(env.raw(), raw) } {
+        Ok(priority) => priority,
+        Err(error) => return Err(recover_pending_exception(env, error)?),
+    };
+    match priority.as_str() {
+        "background" => Ok(Some(Priority::Background)),
+        "interactive" => Ok(Some(Priority::Interactive)),
+        other => Err(ffi_err(format!(
+            "invalid priority '{other}', expected 'interactive' or 'background'"
+        ))),
+    }
+}
+
+/// Answers a diagnostic message when `entries` (as returned by
+/// [`verter_session::VerterHost::compile_request_many`], one per input in
+/// original order) does not hold one entry per input. `None` when it does.
+///
+/// A count mismatch is the one shape that cannot be attributed to a
+/// position: the zip that fills the caller's output slots truncates to the
+/// shorter side, so a dropped or duplicated entry would leave a slot
+/// silently unfilled and every later entry paired with the wrong input's
+/// source. There is no entry to blame, so the whole call fails loudly.
+///
+/// A per-POSITION mismatch is attributable and is handled where the
+/// pairing happens, by [`batch_entry_position_mismatch`] — it fails that
+/// entry rather than discarding every sibling's compiled output.
+fn batch_entry_count_mismatch(
+    entries: &[host_compile::CompileRequestBatchEntry],
+    expected_canonical_ids: &[String],
+) -> Option<String> {
+    (entries.len() != expected_canonical_ids.len()).then(|| {
+        format!(
+            "typed compile batch returned {} entries for {} inputs",
+            entries.len(),
+            expected_canonical_ids.len()
+        )
+    })
+}
+
+/// The refusal one entry carries when the executor answered a different
+/// canonical id at its position than the input there asked for.
+///
+/// `expected` is HOST-canonical — resolved through
+/// `VerterHost::resolve_alias_or_canonical`, exactly as the executor
+/// resolves its own inputs — so a non-canonical input (a Windows path, a
+/// registered alias, a `?`-suffixed id) is not read as a transposition.
+///
+/// The executor's own contract already guarantees one entry per input in
+/// order; this is the binding's check that the guarantee held, because a
+/// reordered batch would otherwise pair a response and its diagnostics
+/// with the WRONG entry's source text — and the `ideCompanion` product's
+/// offsets are computed from that text, so the mispairing would publish
+/// silently rather than fail. Failing the affected position keeps that
+/// impossible without discarding the batch: a sibling whose id did land
+/// where its input asked is still paired with its own source.
+fn batch_entry_position_mismatch(answered: &str, expected: &str) -> String {
+    format!(
+        "typed compile batch returned entry '{answered}' at the position expected for '{expected}'"
+    )
+}
+
+/// The longest name a batch entry declares (`canonicalId`).
+///
+/// An own key longer than this cannot be one of the three, so it is
+/// refused by its MEASURED size — quoted only while it is short enough
+/// for a refusal to carry, exactly as the batch options bound a hostile
+/// key.
+const MAX_BATCH_ENTRY_FIELD_NAME_BYTES: usize = "canonicalId".len();
+
+/// One batch entry's three declared fields, as OWN enumerable properties.
+///
+/// A field whose value is STATED as `undefined` reads as absent, exactly
+/// as it does through `Object::get`, so an entry that spells a field
+/// `undefined` is missing it rather than holding an invalid value.
+struct BatchEntryFields {
+    canonical_id: Option<napi::sys::napi_value>,
+    source: Option<napi::sys::napi_value>,
+    request: Option<napi::sys::napi_value>,
+}
+
+/// Reads one batch entry's three fields from its OWN enumerable
+/// properties.
+///
+/// A payload is its own properties — the rule the request graph and the
+/// batch options already hold, applied to the wrapper that carries them.
+/// `Object::get` is `napi_get_property`, a full `[[Get]]`, so reading the
+/// wrapper that way would accept
+/// `compileRequests([Object.create({ canonicalId, source, request })])`:
+/// an entry whose every field the caller never wrote on the object they
+/// handed over. Enumerating the own keys instead makes an inherited field
+/// absent, which the caller sees as the missing-field refusal.
+///
+/// The entry is CLASSIFIED before its keys are enumerated, for the reason
+/// the batch options are: a Buffer, typed array or DataView exposes every
+/// byte index as an enumerable own key, so enumerating one would
+/// materialise a V8 key string per byte before any count could refuse
+/// them.
+fn read_batch_entry_fields(
+    env: &Env,
+    graph: &js_value_graph::NapiValueGraph,
+    input: &Object<'_>,
+) -> Result<BatchEntryFields> {
+    use js_value_graph::{JsObjectKeys, JsValueClass, JsValueGraph};
+
+    if graph.classify(&input.raw())? != JsValueClass::Object {
+        return Err(ffi_err("compile request batch input must be an object"));
+    }
+    let keys = graph.own_enumerable_keys(&input.raw())?;
+    let count = keys.count()?;
+    if count > MAX_ARRAY_ELEMENTS {
+        return Err(ffi_err(format!(
+            "A compile request batch input exposes {count} keys, above the \
+             {MAX_ARRAY_ELEMENTS} a request may carry"
+        )));
+    }
+    let mut fields = BatchEntryFields {
+        canonical_id: None,
+        source: None,
+        request: None,
+    };
+    for index in 0..count {
+        // A key too long to be one of the three is unknown without
+        // reading it. It is still refused — silently dropping it is what
+        // lets `{ canonicalId, source, requestt: {...} }` compile as
+        // though the stray key were absent — but a caller-controlled key
+        // is unbounded, so above the quoting bound it is named by its
+        // size rather than copied into a thrown Error, the same treatment
+        // the batch options give one.
+        let key_bytes = keys.retained_bytes(index)?;
+        if key_bytes > MAX_BATCH_ENTRY_FIELD_NAME_BYTES {
+            if key_bytes > MAX_EXCEPTION_MESSAGE_BYTES {
+                return Err(ffi_err(format!(
+                    "unknown field, named by {key_bytes} bytes above the \
+                     {MAX_EXCEPTION_MESSAGE_BYTES} a refusal quotes"
+                )));
+            }
+            return Err(ffi_err(format!("unknown field `{}`", keys.at(index)?)));
+        }
+        let slot = match keys.at(index)?.as_str() {
+            "canonicalId" => &mut fields.canonical_id,
+            "source" => &mut fields.source,
+            "request" => &mut fields.request,
+            // Closed as the options object and the request graph are:
+            // one rule at three adjacent surfaces, so a typo is named
+            // rather than read as an absent field.
+            other => return Err(ffi_err(format!("unknown field `{other}`"))),
+        };
+        let raw = graph.property_at(&input.raw(), &keys, index)?;
+        if napi::type_of!(env.raw(), raw)? != ValueType::Undefined {
+            *slot = Some(raw);
+        }
+    }
+    Ok(fields)
+}
+
+/// The refusal every entry from `position` onwards carries once the
+/// call's AGGREGATE retained-byte ceiling is exhausted.
+///
+/// Exhaustion is a call-wide state — the counter never resets, so every
+/// later entry hits it too — but it is reported per ENTRY, at the position
+/// that crossed it and at each one after. Aborting the call instead would
+/// discard every sibling's already-decoded work and name no input, leaving
+/// a caller with no way to tell which entry pushed the batch over.
+fn batch_retained_bytes_refusal(position: usize, reason: &str) -> String {
+    format!(
+        "compile request batch input at index {position}: {reason}. That ceiling \
+         is aggregate over the whole call, so every later entry refuses too; \
+         compile fewer inputs per call."
+    )
+}
+
+fn read_batch_source_buffer(
+    env: &Env,
+    raw: napi::sys::napi_value,
+    budget: &mut JsValueMaterializationBudget,
+) -> Result<std::sync::Arc<str>> {
+    if !napi_value_is_buffer(env, raw)? {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "compile request batch `source` must be a Buffer",
+        ));
+    }
+    let mut data = std::ptr::null_mut();
+    let mut len = 0usize;
+    napi::check_status!(
+        unsafe { napi::sys::napi_get_buffer_info(env.raw(), raw, &mut data, &mut len) },
+        "Failed to read compile request batch source length"
+    )?;
+    budget.retain_bytes(len)?;
+    // A zero-length Buffer may report a NULL data pointer, and
+    // `slice::from_raw_parts` requires a non-null aligned pointer even for
+    // a zero length — so the empty case never builds a slice at all.
+    let bytes: &[u8] = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: `napi_is_buffer` succeeded and `napi_get_buffer_info`
+        // filled a live pointer/length pair for this env; the copy below is
+        // retained before the JS value can be collected.
+        unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) }
+    };
+    // One copy, not two: validating into `&str` and then interning the
+    // `Arc<str>` from that borrow copies the payload once, where
+    // `String::from_utf8(bytes.to_vec())` followed by `Arc::from(String)`
+    // copies it twice — a whole extra batch-sized transient allocation on
+    // the JS thread.
+    std::str::from_utf8(bytes)
+        .map(std::sync::Arc::<str>::from)
+        .map_err(|error| {
+            Error::new(
+                Status::InvalidArg,
+                format!("Buffer is not valid UTF-8: {error}"),
+            )
+        })
 }
 
 /// Convert a `Buffer` (raw bytes) to a `String`, validating UTF-8.
@@ -100,8 +648,8 @@ fn buffer_to_string(buf: Buffer) -> Result<String> {
     })
 }
 
-fn host_error(err: host::HostError) -> Error {
-    let status = match &err {
+pub(crate) fn host_error_status(err: &host::HostError) -> Status {
+    match err {
         host::HostError::InvalidQuery
         | host::HostError::MissingSource { .. }
         | host::HostError::MissingVirtualNode { .. } => Status::InvalidArg,
@@ -116,8 +664,11 @@ fn host_error(err: host::HostError) -> Error {
         host::HostError::CompileError(_) => Status::GenericFailure,
         #[allow(unreachable_patterns)]
         _ => Status::GenericFailure,
-    };
-    Error::new(status, host_error_to_string(&err))
+    }
+}
+
+fn host_error(err: host::HostError) -> Error {
+    Error::new(host_error_status(&err), host_error_to_string(&err))
 }
 
 // =============================================================================
@@ -972,6 +1523,57 @@ pub struct NapiIdeResponse {
     pub destructuredBlock: Option<NapiDestructuredBlockMeta>,
 }
 
+/// One separately-addressed output of a typed runtime compile product.
+#[napi(object)]
+pub struct NapiCompileRequestVirtualNode {
+    pub node: NapiVirtualNodeKind,
+    pub code: String,
+    pub sourceMap: Option<String>,
+    pub lang: Option<String>,
+    pub meta: NapiVirtualMeta,
+}
+
+/// One product row in a typed compile response.
+///
+/// Exactly one payload field is present, selected by `kind`.
+#[napi(object)]
+pub struct NapiCompileRequestProduct {
+    pub kind: String,
+    pub nodes: Option<Vec<NapiCompileRequestVirtualNode>>,
+    pub ide: Option<NapiIdeResponse>,
+    /// JSON rendering of the host analysis payload.
+    pub analysis: Option<String>,
+}
+
+/// Complete typed compile response.
+#[napi(object)]
+pub struct NapiCompileRequestResponse {
+    pub canonicalId: String,
+    pub diagnostics: NapiDiagnosticsSnapshot,
+    pub products: Vec<NapiCompileRequestProduct>,
+}
+
+/// Typed terminal failure for one batch entry.
+#[napi(object)]
+pub struct NapiCompileRequestFailure {
+    pub kind: String,
+    pub canonicalId: String,
+    pub message: String,
+    pub diagnostics: NapiDiagnosticsSnapshot,
+    pub requestedFramework: Option<String>,
+    pub registeredFramework: Option<String>,
+    pub productKind: Option<String>,
+    pub diagnosticCode: Option<String>,
+}
+
+/// One batch result at its original input position.
+#[napi(object, use_nullable = true)]
+pub struct NapiCompileRequestsEntry {
+    pub canonicalId: String,
+    pub response: Option<NapiCompileRequestResponse>,
+    pub failure: Option<NapiCompileRequestFailure>,
+}
+
 /// TSC output for TypeScript declaration generation (macro-extraction only).
 ///
 /// `code` is the TYPESCRIPT-LABELED rendering of the public-API surface: every
@@ -1246,11 +1848,7 @@ pub struct NapiHostMetrics {
     pub compileTimeUsTotal: f64,
 }
 
-// =============================================================================
-// Direct Host → NAPI conversion (bypasses FFI intermediate types)
-// =============================================================================
-
-fn host_node_kind_to_napi(input: &host::VirtualNodeKind) -> NapiVirtualNodeKind {
+pub(crate) fn host_node_kind_to_napi(input: &host::VirtualNodeKind) -> NapiVirtualNodeKind {
     match input {
         host::VirtualNodeKind::Main => NapiVirtualNodeKind {
             kind: "main".to_string(),
@@ -1272,27 +1870,6 @@ fn host_node_kind_to_napi(input: &host::VirtualNodeKind) -> NapiVirtualNodeKind 
             kind: "custom".to_string(),
             index: Some(*index as u32),
         },
-    }
-}
-
-fn host_diagnostics_to_napi(
-    input: &host::DiagnosticsSnapshot,
-    source: Option<&str>,
-) -> NapiDiagnosticsSnapshot {
-    let ffi = host_diagnostics_to_ffi(input, source);
-    NapiDiagnosticsSnapshot {
-        diagnostics: ffi
-            .diagnostics
-            .into_iter()
-            .map(|d| NapiDiagnostic {
-                severity: d.severity,
-                code: d.code,
-                message: d.message,
-                spanStart: d.span_start,
-                spanEnd: d.span_end,
-            })
-            .collect(),
-        hasErrors: ffi.has_errors,
     }
 }
 
@@ -1318,17 +1895,7 @@ fn ffi_hmr_strategy_to_host(s: &str) -> std::result::Result<host::HmrStrategy, S
 /// shape. Used to surface the private Vue render worker's soft-macro warnings
 /// on [`NapiCompileBatchEntry::diagnostics`].
 fn napi_diagnostic_from_host(d: &host::HostDiagnostic) -> NapiDiagnostic {
-    NapiDiagnostic {
-        severity: match d.severity {
-            host::HostSeverity::Error => "error".to_string(),
-            host::HostSeverity::Warning => "warning".to_string(),
-            host::HostSeverity::Info => "info".to_string(),
-        },
-        code: d.code.clone(),
-        message: d.message.clone(),
-        spanStart: d.span.start,
-        spanEnd: d.span.end,
-    }
+    host_diagnostic_to_napi(d, None)
 }
 
 fn host_block_kind_to_str(kind: &host::ExternalBlockKind) -> &'static str {
@@ -1646,13 +2213,14 @@ fn host_resolved_id_to_napi(input: host::ResolvedId) -> NapiResolvedId {
 // =============================================================================
 // VerterHost (in-memory virtual file host)
 //
-// API parity with WASM (crates/verter_wasm):
+// Shared with WASM (crates/verter_wasm):
 // - Both: new, resolve, upsert, applyBlockOverrides,
 //         getVirtualFile, listVirtualFiles, remove, setImportDependencies,
 //         getAnalysis, getTsx, lint, getCodeActions, getLintRuleMetadata,
-//         getDocumentSymbols, matchCssSelectors, computeCrossFileOptimizations
+//         getDocumentSymbols, matchCssSelectors, computeCrossFileOptimizations,
+//         compileRequest
 // - NAPI-only: prepareStyleForPreprocessor / transformVueStyle / analyzeStyle
-//   (CSS entry points), getTsc, compileMany, getMetrics
+//   (CSS entry points), getTsc, compileMany, compileRequests, getMetrics
 // =============================================================================
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2000,6 +2568,401 @@ impl NapiVerterHost {
             .map_err(host_error)
     }
 
+    /// Execute one typed compile request against an already-registered source.
+    #[napi(js_name = "compileRequest")]
+    pub fn compile_request(
+        &self,
+        env: Env,
+        canonical_id: String,
+        #[napi(ts_arg_type = "import('./host-compile-request.generated').HostCompileRequest")]
+        request: NapiHostCompileRequest,
+    ) -> Result<NapiCompileRequestResponse> {
+        // Resolved to the host's identity once, up front, so this route
+        // reports ONE id spelling whatever the outcome. A success already
+        // answers `response.canonical_id`, which is canonical; without
+        // this, a construction refusal would answer the caller's raw
+        // spelling instead, and the same route would name the same file
+        // two different ways depending on whether it compiled.
+        let canonical_id = self.inner.resolve_alias_or_canonical(&canonical_id);
+        let request =
+            match host_compile_request::napi_host_compile_request_to_compile_request(request) {
+                Ok(request) => request,
+                Err(error) => {
+                    let failure = binding_failure_to_napi(
+                        canonical_id,
+                        compile_request_construction_refused(&error),
+                    );
+                    return Err(compile_request_error(&env, Status::InvalidArg, failure)?);
+                }
+            };
+        let response = catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.compile_request(&canonical_id, request)
+        }))?;
+        match response {
+            Ok(response) => {
+                let source = self
+                    .inner
+                    .get_source(&response.canonical_id)
+                    .ok_or_else(|| {
+                        Error::new(
+                            Status::GenericFailure,
+                            "typed compile succeeded without a registered source",
+                        )
+                    })?;
+                compile_request_response_to_napi(response, &source)
+            }
+            Err(failure) => {
+                let source_id = failure_canonical_id(&failure, &canonical_id).to_string();
+                let source = self.inner.get_source(&source_id);
+                let status = compile_request_failure_status(&failure);
+                let failure =
+                    compile_request_failure_to_napi(failure, canonical_id, source.as_deref());
+                Err(compile_request_error(&env, status, failure)?)
+            }
+        }
+    }
+
+    /// Register and execute one typed request per batch entry.
+    #[napi(js_name = "compileRequests")]
+    pub fn compile_requests(
+        &self,
+        env: Env,
+        #[napi(
+            ts_arg_type = "Array<{ canonicalId: string; source: Buffer; request: import('./host-compile-request.generated').HostCompileRequest }>"
+        )]
+        inputs: Object<'_>,
+        #[napi(ts_arg_type = "{ priority?: 'interactive' | 'background' }")] options: Option<
+            Unknown<'_>,
+        >,
+    ) -> Result<Vec<NapiCompileRequestsEntry>> {
+        let priority = decode_compile_requests_priority(&env, options)?;
+        // `Vec<Object>` is unsafe at this boundary: napi-rs reserves the JS
+        // array's declared length before entering this method. A sparse array
+        // can declare billions of elements without owning them, so classify
+        // the value as an array, recover any pending exception, then enforce
+        // MAX_ARRAY_ELEMENTS before any allocation proportional to length.
+        if !match napi_value_is_array(&env, inputs.raw()) {
+            Ok(is_array) => is_array,
+            Err(error) => {
+                let error = recover_pending_exception(&env, error)?;
+                return Err(error);
+            }
+        } {
+            let _ = recover_pending_exception(
+                &env,
+                ffi_err("compile request batch input must be an array"),
+            );
+            return Err(ffi_err("compile request batch input must be an array"));
+        }
+        let declared = match inputs.get_array_length() {
+            Ok(declared) => declared,
+            Err(error) => {
+                return Err(recover_pending_exception(&env, error)?);
+            }
+        };
+        if declared > MAX_ARRAY_ELEMENTS {
+            return Err(ffi_err(format!(
+                "A request array declares {declared} elements, above the \
+                 {MAX_ARRAY_ELEMENTS} a request may carry"
+            )));
+        }
+        let len = declared as usize;
+        let mut output: Vec<Option<NapiCompileRequestsEntry>> =
+            std::iter::repeat_with(|| None).take(len).collect();
+        let mut positions = Vec::with_capacity(len);
+        let mut sources = Vec::with_capacity(len);
+        let mut expected_canonical_ids = Vec::with_capacity(len);
+        let mut converted = Vec::with_capacity(len);
+        let mut payload_budget = JsValueMaterializationBudget::new(
+            MAX_DECODED_VALUES_PER_REQUEST,
+            MAX_COMPILE_REQUEST_BATCH_RETAINED_BYTES,
+        );
+        // SAFETY: every value read through this graph comes from `inputs`,
+        // which napi-rs extracted from this live env.
+        let graph = unsafe { js_value_graph::NapiValueGraph::new(env.raw()) };
+        for array_index in 0..declared {
+            let position = array_index as usize;
+            if payload_budget.bytes_exhausted() {
+                // Nothing further can be decoded, so nothing further is
+                // read: the remaining entries answer the ceiling directly
+                // rather than each re-discovering it. The refusal names
+                // what the call actually holds, not the ceiling — the
+                // charge that exhausted the budget was never committed,
+                // so the committed total is below it.
+                let retained = payload_budget.retained_bytes();
+                output[position] = Some(binding_failure_entry(
+                    String::new(),
+                    batch_retained_bytes_refusal(
+                        position,
+                        &format!(
+                            "the batch already retains {retained} of the \
+                             {MAX_COMPILE_REQUEST_BATCH_RETAINED_BYTES} bytes \
+                             of decoded payload a call may hold"
+                        ),
+                    ),
+                ));
+                continue;
+            }
+            // One nested handle scope per entry. Every engine-side handle
+            // this iteration creates — the input object, its property
+            // values, and every key name and property the request decode
+            // walks — is released when the guard drops at the end of the
+            // iteration, instead of staying pinned in the call's single
+            // outer scope until the whole batch returns. Everything that
+            // escapes the iteration is owned Rust.
+            let _entry_scope = JsHandleScope::open(&env)?;
+            let input = match inputs.get_element::<Object<'_>>(array_index) {
+                Ok(input) => input,
+                Err(error) => {
+                    let error = recover_pending_exception(&env, error)?;
+                    output[position] = Some(binding_failure_entry(
+                        String::new(),
+                        format!(
+                            "invalid compile request batch input at index {array_index}: {}",
+                            error.reason
+                        ),
+                    ));
+                    continue;
+                }
+            };
+            let fields = match read_batch_entry_fields(&env, &graph, &input) {
+                Ok(fields) => fields,
+                Err(error) => {
+                    let error = recover_pending_exception(&env, error)?;
+                    output[position] = Some(binding_failure_entry(
+                        String::new(),
+                        format!(
+                            "invalid compile request batch input at index {array_index}: {}",
+                            error.reason
+                        ),
+                    ));
+                    continue;
+                }
+            };
+            let canonical_id = match fields.canonical_id {
+                Some(raw_canonical_id) => {
+                    let length = match js_string_utf8_len(&env, raw_canonical_id) {
+                        Ok(length) => length,
+                        Err(error) => {
+                            let error = recover_pending_exception(&env, error)?;
+                            output[position] = Some(binding_failure_entry(
+                                String::new(),
+                                format!("invalid `canonicalId`: {}", error.reason),
+                            ));
+                            continue;
+                        }
+                    };
+                    if let Err(error) = payload_budget.retain_bytes(length) {
+                        // Only the AGGREGATE ceiling is a whole-call state;
+                        // a single charge above the ceiling on its own is
+                        // this entry's own refusal, and every sibling still
+                        // decodes.
+                        let reason = if payload_budget.bytes_exhausted() {
+                            batch_retained_bytes_refusal(position, &error.reason)
+                        } else {
+                            error.reason.clone()
+                        };
+                        output[position] = Some(binding_failure_entry(String::new(), reason));
+                        continue;
+                    }
+                    // SAFETY: the value was read from this env and validated
+                    // as a string immediately above.
+                    match unsafe { String::from_napi_value(env.raw(), raw_canonical_id) } {
+                        // Canonicalized HERE, once, through the host's own
+                        // identity resolver — not left as the caller's raw
+                        // spelling. `compile_request_many` canonicalizes
+                        // every input it is handed (a Windows drive letter
+                        // lowercases, a backslash becomes a slash, a `?`
+                        // query tail and an extended-length prefix are
+                        // stripped, a registered alias resolves), so a
+                        // binding that kept the raw spelling would report
+                        // one id on a locally-refused entry and a different
+                        // id on its compiling sibling, and the position
+                        // check below would read every non-canonical input
+                        // as a transposition. A registered canonical is its
+                        // own alias, so resolving the resolved id again is
+                        // the same demand; that check is per-entry
+                        // precisely so a resolver that ever stopped being
+                        // idempotent costs the affected entry rather than
+                        // every sibling's compiled output.
+                        Ok(canonical_id) => self.inner.resolve_alias_or_canonical(&canonical_id),
+                        Err(error) => {
+                            let error = recover_pending_exception(&env, error)?;
+                            output[position] = Some(binding_failure_entry(
+                                String::new(),
+                                format!("invalid `canonicalId`: {}", error.reason),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    output[position] = Some(binding_failure_entry(
+                        String::new(),
+                        "compile request batch input is missing `canonicalId`".to_string(),
+                    ));
+                    continue;
+                }
+            };
+            let source = match fields.source {
+                Some(raw_source) => {
+                    match read_batch_source_buffer(&env, raw_source, &mut payload_budget) {
+                        Ok(source) => source,
+                        Err(error) => {
+                            let error = recover_pending_exception(&env, error)?;
+                            let reason = if payload_budget.bytes_exhausted() {
+                                batch_retained_bytes_refusal(position, &error.reason)
+                            } else {
+                                error.reason.clone()
+                            };
+                            output[position] = Some(binding_failure_entry(canonical_id, reason));
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    output[position] = Some(binding_failure_entry(
+                        canonical_id,
+                        "compile request batch input is missing `source`".to_string(),
+                    ));
+                    continue;
+                }
+            };
+            payload_budget.reset_decoded_values();
+            let request = match fields.request {
+                Some(raw_request) => {
+                    // SAFETY: the value was read from this env; the raw
+                    // request retains the env/value pair rather than
+                    // interpreting it, and the decode below is what reads it.
+                    let raw_request = unsafe {
+                        host_compile_request::RawNapiHostCompileRequest::from_napi_value(
+                            env.raw(),
+                            raw_request,
+                        )
+                    }?;
+                    match host_compile_request::decode_host_compile_request_with_budget(
+                        raw_request,
+                        &mut payload_budget,
+                    ) {
+                        Ok(request) => {
+                            match host_compile_request::napi_host_compile_request_to_compile_request(
+                                request,
+                            ) {
+                                Ok(request) => request,
+                                Err(error) => {
+                                    output[position] = Some(binding_failure_entry(
+                                        canonical_id.clone(),
+                                        compile_request_construction_refused(&error),
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            let error = recover_pending_exception(&env, error)?;
+                            let reason = if payload_budget.bytes_exhausted() {
+                                batch_retained_bytes_refusal(position, &error.reason)
+                            } else {
+                                payload_budget.reset_decoded_values();
+                                error.reason.clone()
+                            };
+                            output[position] =
+                                Some(binding_failure_entry(canonical_id.clone(), reason));
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    output[position] = Some(binding_failure_entry(
+                        canonical_id,
+                        "compile request batch input is missing `request`".to_string(),
+                    ));
+                    continue;
+                }
+            };
+            positions.push(position);
+            sources.push(std::sync::Arc::clone(&source));
+            expected_canonical_ids.push(canonical_id.clone());
+            converted.push(host_compile::CompileRequestBatchInput {
+                canonical_id,
+                source,
+                request,
+            });
+        }
+
+        let entries = catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.compile_request_many(
+                converted,
+                host_compile::CompileRequestBatchOptions { priority },
+            )
+        }))?;
+        // The batch executor is trusted to answer one entry per input in
+        // order, but a silent-corruption regression there — a dropped,
+        // duplicated, or transposed entry — must not silently pair a
+        // diagnostic with the wrong file's source text or leave an output
+        // slot unfilled. A dropped or duplicated entry cannot be attributed
+        // to a position at all, so it fails the call.
+        if let Some(mismatch) = batch_entry_count_mismatch(&entries, &expected_canonical_ids) {
+            return Err(Error::new(Status::GenericFailure, mismatch));
+        }
+
+        for (((entry, source), position), expected) in entries
+            .into_iter()
+            .zip(sources)
+            .zip(positions)
+            .zip(expected_canonical_ids)
+        {
+            // A transposition IS attributable: fail the position it landed
+            // on rather than every sibling that did land where its input
+            // asked. The response is dropped rather than paired with the
+            // wrong input's source.
+            if entry.canonical_id != expected {
+                output[position] = Some(binding_failure_entry(
+                    entry.canonical_id.clone(),
+                    batch_entry_position_mismatch(&entry.canonical_id, &expected),
+                ));
+                continue;
+            }
+            output[position] = Some(match entry.outcome {
+                Ok(response) => match compile_request_response_to_napi(response, source.as_ref()) {
+                    Ok(response) => NapiCompileRequestsEntry {
+                        canonicalId: entry.canonical_id,
+                        response: Some(response),
+                        failure: None,
+                    },
+                    Err(error) => NapiCompileRequestsEntry {
+                        canonicalId: entry.canonical_id.clone(),
+                        response: None,
+                        failure: Some(binding_failure_to_napi(
+                            entry.canonical_id,
+                            error.reason.clone(),
+                        )),
+                    },
+                },
+                Err(failure) => NapiCompileRequestsEntry {
+                    canonicalId: entry.canonical_id.clone(),
+                    response: None,
+                    failure: Some(compile_request_failure_to_napi(
+                        failure,
+                        entry.canonical_id,
+                        Some(source.as_ref()),
+                    )),
+                },
+            });
+        }
+        output
+            .into_iter()
+            .map(|entry| {
+                entry.ok_or_else(|| {
+                    Error::new(
+                        Status::GenericFailure,
+                        "typed compile batch did not produce an entry for every input",
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Replaces one or more blocks with preprocessed content (e.g. the output
     /// of Pug, CoffeeScript, SCSS, or custom block preprocessors) and
     /// recompiles affected virtual nodes.
@@ -2251,47 +3214,7 @@ impl NapiVerterHost {
             self.inner.get_ide(&canonical_id, &host_profile)
         }))?;
         let sfc_source = self.inner.get_source(&canonical_id);
-        Ok(result.map(|r| {
-            let destructured_block = r.destructured_block.as_ref().map(|meta| {
-                let sfc = sfc_source.as_deref().unwrap_or("");
-                let bindings: Vec<verter_ffi::convert::DestructuredBindingInput<'_>> = meta
-                    .bindings
-                    .iter()
-                    .map(|b| verter_ffi::convert::DestructuredBindingInput {
-                        name: &b.name,
-                        source_start: b.source_span.start,
-                        source_end: b.source_span.end,
-                    })
-                    .collect();
-                let ffi = verter_ffi::convert::convert_destructured_block_meta(
-                    &bindings,
-                    meta.block_start,
-                    meta.block_end,
-                    sfc,
-                    &r.code,
-                    verter_ffi::convert::OffsetEncoding::Utf16,
-                );
-                NapiDestructuredBlockMeta {
-                    bindings: ffi
-                        .bindings
-                        .into_iter()
-                        .map(|b| NapiDestructuredBinding {
-                            name: b.name,
-                            sourceStart: b.source_start,
-                            sourceEnd: b.source_end,
-                        })
-                        .collect(),
-                    blockStart: ffi.block_start,
-                    blockEnd: ffi.block_end,
-                }
-            });
-            NapiIdeResponse {
-                code: r.code.to_string(),
-                sourceMap: r.source_map.map(|s| s.to_string()),
-                isJsx: r.is_jsx,
-                destructuredBlock: destructured_block,
-            }
-        }))
+        Ok(result.map(|response| host_ide_to_napi(response, sfc_source.as_deref().unwrap_or(""))))
     }
 
     /// Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
@@ -3727,6 +4650,243 @@ pub struct NapiCompileBatchEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn batch_entry(canonical_id: &str) -> host_compile::CompileRequestBatchEntry {
+        host_compile::CompileRequestBatchEntry {
+            canonical_id: canonical_id.to_string(),
+            outcome: Ok(host::CompileRequestResponse {
+                canonical_id: canonical_id.to_string(),
+                diagnostics: host::DiagnosticsSnapshot::default(),
+                products: Vec::new(),
+            }),
+        }
+    }
+
+    // Mutation recipes, one per direction this check is bounded in:
+    // - Too narrow: `and` the count comparison in
+    //   `batch_entry_count_mismatch` with `false`. `zip` truncates to the
+    //   shorter side, so the dropped and duplicated cases below both
+    //   report "no mismatch" while the caller's output slots go unfilled.
+    // - Too wide: `or` it with a per-position id comparison over
+    //   `entries.iter().zip(expected_canonical_ids)`. The transposition
+    //   case below then fails the WHOLE call, discarding every sibling
+    //   that did land where its input asked, for a mismatch that is
+    //   attributable to one position and is failed there.
+    #[test]
+    fn batch_count_check_catches_a_lost_or_duplicated_entry() {
+        let expected = vec![
+            "/a.vue".to_string(),
+            "/b.vue".to_string(),
+            "/c.vue".to_string(),
+        ];
+
+        assert_eq!(
+            batch_entry_count_mismatch(
+                &[
+                    batch_entry("/a.vue"),
+                    batch_entry("/b.vue"),
+                    batch_entry("/c.vue")
+                ],
+                &expected,
+            ),
+            None,
+            "the executor's own contract must not be reported as a mismatch"
+        );
+
+        // A transposition has the right count: it is attributable to the
+        // position it landed on, so it is NOT a whole-call failure.
+        assert_eq!(
+            batch_entry_count_mismatch(
+                &[
+                    batch_entry("/a.vue"),
+                    batch_entry("/c.vue"),
+                    batch_entry("/b.vue")
+                ],
+                &expected,
+            ),
+            None,
+            "a same-count transposition is failed per entry, not per call"
+        );
+
+        // Dropped: the prefix still matches at every overlapping position.
+        let dropped =
+            batch_entry_count_mismatch(&[batch_entry("/a.vue"), batch_entry("/b.vue")], &expected)
+                .expect("a batch short one entry is a mismatch");
+        assert!(dropped.contains("2 entries for 3 inputs"), "{dropped}");
+
+        // Duplicated: likewise, the expected side is what runs out first.
+        let duplicated = batch_entry_count_mismatch(
+            &[
+                batch_entry("/a.vue"),
+                batch_entry("/b.vue"),
+                batch_entry("/c.vue"),
+                batch_entry("/c.vue"),
+            ],
+            &expected,
+        )
+        .expect("a batch with an extra entry is a mismatch");
+        assert!(
+            duplicated.contains("4 entries for 3 inputs"),
+            "{duplicated}"
+        );
+    }
+
+    /// A transposed position names both ids, so a caller can tell a
+    /// mispairing from a compile failure.
+    ///
+    /// Mutation recipe: swap `{answered}` and `{expected}` inside
+    /// `batch_entry_position_mismatch`'s format string. The message then
+    /// blames the input for the executor's answer and this case goes red.
+    #[test]
+    fn a_transposed_position_names_the_answered_and_the_expected_id() {
+        let message = batch_entry_position_mismatch("/c.vue", "/b.vue");
+        assert!(
+            message.contains("'/c.vue' at the position expected for '/b.vue'"),
+            "{message}"
+        );
+    }
+
+    // @ai-generated - A runtime envelope carrying a non-runtime kind must fail closed.
+    #[test]
+    fn runtime_product_refuses_a_kind_without_a_runtime_wire_arm() {
+        let response = host::CompileRequestResponse {
+            canonical_id: "/src/App.vue".to_string(),
+            diagnostics: host::DiagnosticsSnapshot::default(),
+            products: vec![host::CompiledProduct::Runtime {
+                kind: verter_compiler::compile_request::ProductKind::Analysis,
+                nodes: Vec::new(),
+            }],
+        };
+
+        let error = match compile_request_response_to_napi(response, "") {
+            Ok(_) => panic!("a non-runtime kind cannot be published as a runtime product"),
+            Err(error) => error,
+        };
+        assert!(error.reason.contains("analysis"), "{}", error.reason);
+    }
+
+    // Mutation recipe: set `hasErrors: true` on `empty_diagnostics_snapshot`.
+    // This case then fails because a framework mismatch carries no diagnostics.
+    #[test]
+    fn empty_terminal_failure_snapshot_does_not_claim_errors() {
+        let failure = host::CompileRequestFailure::FrameworkMismatch {
+            canonical_id: "/src/App.vue".to_string(),
+            requested: "svelte",
+            registered: "vue".to_string(),
+        };
+        let projected = compile_request_failure_to_napi(failure, "/src/App.vue".to_string(), None);
+        assert!(!projected.diagnostics.hasErrors);
+        assert!(projected.diagnostics.diagnostics.is_empty());
+    }
+
+    // Mutation recipe: format construction refusals with `{error:?}`.
+    // The public message then contains `DuplicateProduct(RuntimeClient)`.
+    #[test]
+    fn construction_refusal_uses_the_wire_product_name() {
+        let message = compile_request_construction_refused(
+            &verter_compiler::compile_request::CompileRequestError::DuplicateProduct(
+                verter_compiler::compile_request::ProductKind::RuntimeClient,
+            ),
+        );
+        assert!(
+            message.contains("duplicate product 'runtimeClient'"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("DuplicateProduct") && !message.contains("RuntimeClient"),
+            "{message}"
+        );
+    }
+
+    /// The refusal a real caller can actually provoke names the field
+    /// they wrote on the request object.
+    ///
+    /// Both options here are genuinely reachable: they are the two
+    /// `compatConfig` rows the request carries as the two DISTINCT slots
+    /// `compatConfig` and `transformCompatConfig`, and both are refused
+    /// on presence by `VueOptionAttempt::into_request`. A case built on an
+    /// option no refusal can name would assert nothing about what a caller
+    /// is ever shown.
+    ///
+    /// Mutation recipes:
+    /// - Derive the path from the option INVENTORY row (strip the
+    ///   surface, keep any dotted tail): `transformCompatConfig` renders
+    ///   as `vue:compatConfig`, so the second assertion pair goes red and
+    ///   the two options stop being distinguishable.
+    /// - Case-lower `format!("{option:?}")` in `FrameworkOption`'s
+    ///   `Display`: the message reads `vue:parserOptionsCompatConfig`,
+    ///   naming a field no request object has, and every assertion here
+    ///   goes red.
+    #[test]
+    fn unsupported_option_refusal_names_the_request_field() {
+        use verter_compiler::compile_request::{CompileRequestError, FrameworkOption, VueOption};
+        let refusal = |option| {
+            compile_request_construction_refused(&CompileRequestError::UnsupportedOption {
+                option: FrameworkOption::Vue(option),
+                capability: None,
+            })
+        };
+
+        let parser = refusal(VueOption::ParserOptionsCompatConfig);
+        assert!(
+            parser.contains("unsupported option 'vue:compatConfig'"),
+            "{parser}"
+        );
+
+        // The other inventory surface's `compatConfig` is a DIFFERENT
+        // request field; telling a caller to remove `compatConfig` when
+        // they wrote `transformCompatConfig` names a field they never set.
+        let transform = refusal(VueOption::TransformOptionsCompatConfig);
+        assert!(
+            transform.contains("unsupported option 'vue:transformCompatConfig'"),
+            "{transform}"
+        );
+        assert_ne!(parser, transform);
+
+        for message in [&parser, &transform] {
+            assert!(
+                !message.contains("ParserOptions")
+                    && !message.contains("TransformOptions")
+                    && !message.contains("compiler-core"),
+                "{message}"
+            );
+        }
+    }
+
+    /// The typed FAILURE projection maps its diagnostic spans to UTF-16
+    /// against the paired source, as the success projection does — a
+    /// separate call path, so a separate proof.
+    ///
+    /// Mutation recipe: pass `None` for `source` at the
+    /// `host_diagnostics_to_napi(&failure.diagnostics, source)` call in
+    /// `compile_request_failure_to_napi`'s `HostError::CompileError` arm —
+    /// the one arm carrying the diagnostics a host compile failure
+    /// publishes. The span stays at its UTF-8 byte offsets (1, 5) and this
+    /// case goes red.
+    #[test]
+    fn a_typed_failure_maps_its_diagnostic_spans_to_utf16() {
+        let failure = host::CompileRequestFailure::Host(host::HostError::CompileError(
+            host::CompileFailure {
+                diagnostics: host::DiagnosticsSnapshot {
+                    diagnostics: vec![host::HostDiagnostic {
+                        severity: host::HostSeverity::Error,
+                        code: "E_SPAN".to_string(),
+                        message: "spans a surrogate pair".to_string(),
+                        arguments: Vec::new(),
+                        span: verter_span::Span::new(1, 5),
+                    }],
+                    has_errors: true,
+                },
+                requested_mode: host::CompileCacheMode::Stateless,
+                actual_mode: host::CompileCacheMode::Stateless,
+                downgrade_reason: None,
+            },
+        ));
+        let projected =
+            compile_request_failure_to_napi(failure, "/src/A.vue".to_string(), Some("a😀b"));
+        let diagnostic = &projected.diagnostics.diagnostics[0];
+        assert_eq!((diagnostic.spanStart, diagnostic.spanEnd), (1, 3));
+    }
 
     #[test]
     fn compile_many_boundary_delegates_directly_without_linting() {

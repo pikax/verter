@@ -1103,7 +1103,23 @@ impl VerterHost {
 
     /// Resolve an alias to its canonical ID, or normalize the ID if no
     /// alias exists.
-    pub(crate) fn resolve_alias_or_canonical(&self, id: &str) -> String {
+    ///
+    /// Public because this is the SINGLE identity every host route keys
+    /// on, and a caller that has to correlate its own inputs against a
+    /// route's answers — the native batch binding pairing its output slots
+    /// against `compile_request_many`'s entries — must ask the same
+    /// question the host asks rather than re-deriving a normalization of
+    /// its own.
+    ///
+    /// The answer is a fixpoint today because [`Self::upsert`] inserts
+    /// each canonical id into its OWN alias set, so a registered canonical
+    /// resolves to itself: canonicalizing at a boundary and passing the
+    /// result in is the same demand as passing the raw id in. A caller
+    /// that depends on more than one resolution agreeing should still fail
+    /// SOFTLY if they ever disagree — the native batch binding fails the
+    /// affected entry rather than the call — because nothing in the type
+    /// system holds that fixpoint.
+    pub fn resolve_alias_or_canonical(&self, id: &str) -> String {
         let normalized = canonicalize_id(id);
         let alias_map = read_lock(&self.alias_to_canonical);
         alias_map

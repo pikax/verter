@@ -23,6 +23,34 @@ pub enum ProductKind {
     Analysis,
 }
 
+impl ProductKind {
+    /// The product's tag in the vocabulary the REQUEST spells it with —
+    /// the `kind` a caller writes and a response row answers with.
+    ///
+    /// The single owner of that mapping. A refusal names the offending
+    /// product the way the caller wrote it, not the way Rust spells the
+    /// variant, and every transport reads the tag from here so two
+    /// bindings cannot answer different tags for one product. Exhaustive:
+    /// a product kind added here is a compile error until it has a tag,
+    /// never a message that drifts out of the wire's vocabulary.
+    pub const fn wire_tag(self) -> &'static str {
+        match self {
+            ProductKind::RuntimeClient => "runtimeClient",
+            ProductKind::RuntimeServer => "runtimeServer",
+            ProductKind::IdeCompanion => "ideCompanion",
+            ProductKind::PublicApi => "publicApi",
+            ProductKind::Declarations => "declarations",
+            ProductKind::Analysis => "analysis",
+        }
+    }
+}
+
+impl std::fmt::Display for ProductKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.wire_tag())
+    }
+}
+
 /// Which part of Vue's style cascade a runtime product owns.
 ///
 /// Bundlers such as Vite preprocess and publish styles through a separate
@@ -38,6 +66,23 @@ pub enum RuntimeStyleProcessing {
     /// Run only the authored-dialect stage. A separate bundler style lane owns
     /// preprocessing followed by CSS modules/scoping publication.
     AuthoredOnly,
+}
+
+impl RuntimeStyleProcessing {
+    /// The `styleProcessing` spelling a caller writes, and the one a
+    /// refusal quotes back. One owner for every transport.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            RuntimeStyleProcessing::Complete => "complete",
+            RuntimeStyleProcessing::AuthoredOnly => "authored-only",
+        }
+    }
+}
+
+impl std::fmt::Display for RuntimeStyleProcessing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.wire_name())
+    }
 }
 
 /// Runtime (client or server) product options. `inline` is meaningful only

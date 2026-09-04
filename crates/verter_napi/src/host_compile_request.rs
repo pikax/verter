@@ -51,8 +51,13 @@ use napi::{Error, Result, Status, ValueType};
 use serde_json::Value;
 
 use crate::host_compile_request_ts::tagged_js_union;
-use crate::js_value_graph::{materialize_js_value, NapiValueGraph};
+use crate::js_value_graph::{
+    materialize_js_value_with_budget, JsValueMaterializationBudget, NapiValueGraph,
+};
 
+use verter_ffi::convert::{
+    ffi_host_compile_request_to_compile_request, HostResolvedCompileProfiles,
+};
 use verter_ffi::types::{
     FfiAnalysisProductRequest, FfiHostCompileIdentity, FfiHostCompileRequest, FfiIdeProductRequest,
     FfiRequestedProduct, FfiRuntimeProductRequest, FfiSvelteCompileOptions,
@@ -124,6 +129,45 @@ pub fn decode_host_compile_request(value: Value) -> Result<NapiHostCompileReques
     serde_json::from_value(value).map_err(|error| Error::new(Status::InvalidArg, error.to_string()))
 }
 
+/// A request value retained as its raw N-API pair so a batch can apply one
+/// shared materialisation budget before decoding it.
+pub(crate) struct RawNapiHostCompileRequest {
+    env: napi::sys::napi_env,
+    value: napi::sys::napi_value,
+}
+
+impl FromNapiValue for RawNapiHostCompileRequest {
+    unsafe fn from_napi_value(
+        env: napi::sys::napi_env,
+        value: napi::sys::napi_value,
+    ) -> Result<Self> {
+        Ok(Self { env, value })
+    }
+}
+
+impl TypeName for RawNapiHostCompileRequest {
+    fn type_name() -> &'static str {
+        "HostCompileRequest"
+    }
+
+    fn value_type() -> ValueType {
+        ValueType::Object
+    }
+}
+
+impl ValidateNapiValue for RawNapiHostCompileRequest {}
+
+pub(crate) fn decode_host_compile_request_with_budget(
+    raw: RawNapiHostCompileRequest,
+    budget: &mut JsValueMaterializationBudget,
+) -> Result<NapiHostCompileRequest> {
+    // SAFETY: `RawNapiHostCompileRequest` can only be constructed through
+    // napi-rs argument extraction, which supplies a live env/value pair.
+    let graph = unsafe { NapiValueGraph::new(raw.env) };
+    let value = materialize_js_value_with_budget(&graph, &raw.value, budget)?;
+    decode_host_compile_request(value)
+}
+
 impl FromNapiValue for NapiHostCompileRequest {
     unsafe fn from_napi_value(
         env: napi::sys::napi_env,
@@ -133,7 +177,8 @@ impl FromNapiValue for NapiHostCompileRequest {
         // own argument extraction, which is the contract `NapiValueGraph`
         // requires of the environment it reads.
         let graph = unsafe { NapiValueGraph::new(env) };
-        let value = materialize_js_value(&graph, &napi_val)?;
+        let mut budget = JsValueMaterializationBudget::per_request();
+        let value = materialize_js_value_with_budget(&graph, &napi_val, &mut budget)?;
         decode_host_compile_request(value)
     }
 }
@@ -183,6 +228,28 @@ pub fn napi_host_compile_request_to_ffi(request: NapiHostCompileRequest) -> FfiH
             options,
         }),
     }
+}
+
+/// Converts one decoded native request into the canonical compiler request.
+///
+/// The native request carries no host-resolved profile identities. State that
+/// absence explicitly at this boundary; the conversion never derives a
+/// compile profile or substitutes profile-backed demand.
+pub(crate) fn napi_host_compile_request_to_compile_request(
+    request: NapiHostCompileRequest,
+) -> std::result::Result<
+    verter_compiler::compile_request::CompileRequest,
+    verter_compiler::compile_request::CompileRequestError,
+> {
+    ffi_host_compile_request_to_compile_request(
+        napi_host_compile_request_to_ffi(request),
+        &HostResolvedCompileProfiles {
+            semantic: None,
+            output: None,
+            presentation: None,
+            serialization: None,
+        },
+    )
 }
 
 /// Requested products keep their request order: the product set is the

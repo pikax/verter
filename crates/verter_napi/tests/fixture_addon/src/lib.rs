@@ -11,6 +11,24 @@
 //! returning a deterministic rendering of the result. A caller therefore
 //! observes both halves: which payloads are refused, and that two
 //! accepted payloads decoded to the same request.
+//!
+//! ## Why `addon.VerterHost` works without being named here
+//!
+//! `real_js_host_request_boundary`'s driver also constructs
+//! `addon.VerterHost` and calls `compileRequest`/`compileRequests` on it —
+//! the real callable routes under test, not this crate's own
+//! [`decode_host_compile_request`]. Nothing in this crate names
+//! `NapiVerterHost`. That class still reaches JS because this package's
+//! `crate-type = ["cdylib", "rlib"]` links `verter_napi` as a normal Rust
+//! dependency into a `cdylib`: `rustc` statically links a `cdylib`'s whole
+//! Rust dependency closure, not just the symbols this crate's own code
+//! references, so `verter_napi`'s `#[napi]` class registrations for
+//! `VerterHost` survive into this addon's `.node` unreferenced. The driver
+//! asserts `typeof addon.VerterHost === "function"` before relying on it,
+//! so a future build/link configuration that stops preserving this
+//! (aggressive `--gc-sections`/LTO/strip, for example) fails loudly by
+//! name instead of producing a confusing "not a constructor" error deep
+//! into the suite.
 
 use napi_derive::napi;
 

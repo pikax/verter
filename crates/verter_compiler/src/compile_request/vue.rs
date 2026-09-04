@@ -318,6 +318,373 @@ impl VueOption {
             CssModulesOptionsGlobalModulePaths => HostResolved,
         }
     }
+
+    /// The exact (`surface`, `option`) column pair of this row in
+    /// `packages/framework-conformance-harness/evidence/vue-options.tsv` —
+    /// the schema identity a refusal names, never a spelling derived from
+    /// the Rust variant. Exhaustive for the same reason [`Self::class`] is: a
+    /// new TSV row without an arm here is a compile error.
+    pub const fn tsv_row(self) -> (&'static str, &'static str) {
+        use VueOption::*;
+        match self {
+            ParserOptionsOnWarn => ("compiler-core:ParserOptions", "onWarn"),
+            ParserOptionsOnError => ("compiler-core:ParserOptions", "onError"),
+            ParserOptionsCompatConfig => ("compiler-core:ParserOptions", "compatConfig"),
+            ParserOptionsCompatConfigMode => ("compiler-core:ParserOptions", "compatConfig.MODE"),
+            ParserOptionsCompatConfigCompilerIsOnElement => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_IS_ON_ELEMENT",
+            ),
+            ParserOptionsCompatConfigCompilerVBindSync => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_V_BIND_SYNC",
+            ),
+            ParserOptionsCompatConfigCompilerVIfVForPrecedence => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_V_IF_V_FOR_PRECEDENCE",
+            ),
+            ParserOptionsCompatConfigCompilerVBindObjectOrder => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_V_BIND_OBJECT_ORDER",
+            ),
+            ParserOptionsCompatConfigCompilerVOnNative => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_V_ON_NATIVE",
+            ),
+            ParserOptionsCompatConfigCompilerNativeTemplate => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_NATIVE_TEMPLATE",
+            ),
+            ParserOptionsCompatConfigCompilerInlineTemplate => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_INLINE_TEMPLATE",
+            ),
+            ParserOptionsCompatConfigCompilerFilters => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_FILTERS",
+            ),
+            ParserOptionsParseMode => ("compiler-core:ParserOptions", "parseMode"),
+            ParserOptionsNs => ("compiler-core:ParserOptions", "ns"),
+            ParserOptionsIsNativeTag => ("compiler-core:ParserOptions", "isNativeTag"),
+            ParserOptionsIsVoidTag => ("compiler-core:ParserOptions", "isVoidTag"),
+            ParserOptionsIsPreTag => ("compiler-core:ParserOptions", "isPreTag"),
+            ParserOptionsIsIgnoreNewlineTag => {
+                ("compiler-core:ParserOptions", "isIgnoreNewlineTag")
+            }
+            ParserOptionsIsBuiltInComponent => {
+                ("compiler-core:ParserOptions", "isBuiltInComponent")
+            }
+            ParserOptionsIsCustomElement => ("compiler-core:ParserOptions", "isCustomElement"),
+            ParserOptionsGetNamespace => ("compiler-core:ParserOptions", "getNamespace"),
+            ParserOptionsDelimiters => ("compiler-core:ParserOptions", "delimiters"),
+            ParserOptionsWhitespace => ("compiler-core:ParserOptions", "whitespace"),
+            ParserOptionsDecodeEntities => ("compiler-core:ParserOptions", "decodeEntities"),
+            ParserOptionsComments => ("compiler-core:ParserOptions", "comments"),
+            ParserOptionsPrefixIdentifiers => ("compiler-core:ParserOptions", "prefixIdentifiers"),
+            ParserOptionsExpressionPlugins => ("compiler-core:ParserOptions", "expressionPlugins"),
+            TransformOptionsNodeTransforms => ("compiler-core:TransformOptions", "nodeTransforms"),
+            TransformOptionsDirectiveTransforms => {
+                ("compiler-core:TransformOptions", "directiveTransforms")
+            }
+            TransformOptionsTransformHoist => ("compiler-core:TransformOptions", "transformHoist"),
+            TransformOptionsOnWarn => ("compiler-core:TransformOptions", "onWarn"),
+            TransformOptionsOnError => ("compiler-core:TransformOptions", "onError"),
+            TransformOptionsCompatConfig => ("compiler-core:TransformOptions", "compatConfig"),
+            TransformOptionsIsBuiltInComponent => {
+                ("compiler-core:TransformOptions", "isBuiltInComponent")
+            }
+            TransformOptionsIsCustomElement => {
+                ("compiler-core:TransformOptions", "isCustomElement")
+            }
+            TransformOptionsHoistStatic => ("compiler-core:TransformOptions", "hoistStatic"),
+            TransformOptionsCacheHandlers => ("compiler-core:TransformOptions", "cacheHandlers"),
+            TransformOptionsScopeId => ("compiler-core:TransformOptions", "scopeId"),
+            TransformOptionsSlotted => ("compiler-core:TransformOptions", "slotted"),
+            TransformOptionsSsrCssVars => ("compiler-core:TransformOptions", "ssrCssVars"),
+            TransformOptionsHmr => ("compiler-core:TransformOptions", "hmr"),
+            SharedTransformCodegenOptionsPrefixIdentifiers => (
+                "compiler-core:SharedTransformCodegenOptions",
+                "prefixIdentifiers",
+            ),
+            SharedTransformCodegenOptionsExpressionPlugins => (
+                "compiler-core:SharedTransformCodegenOptions",
+                "expressionPlugins",
+            ),
+            SharedTransformCodegenOptionsSsr => {
+                ("compiler-core:SharedTransformCodegenOptions", "ssr")
+            }
+            SharedTransformCodegenOptionsInSsr => {
+                ("compiler-core:SharedTransformCodegenOptions", "inSSR")
+            }
+            SharedTransformCodegenOptionsBindingMetadata => (
+                "compiler-core:SharedTransformCodegenOptions",
+                "bindingMetadata",
+            ),
+            SharedTransformCodegenOptionsInline => {
+                ("compiler-core:SharedTransformCodegenOptions", "inline")
+            }
+            SharedTransformCodegenOptionsIsTs => {
+                ("compiler-core:SharedTransformCodegenOptions", "isTS")
+            }
+            SharedTransformCodegenOptionsFilename => {
+                ("compiler-core:SharedTransformCodegenOptions", "filename")
+            }
+            CodegenOptionsMode => ("compiler-core:CodegenOptions", "mode"),
+            CodegenOptionsSourceMap => ("compiler-core:CodegenOptions", "sourceMap"),
+            CodegenOptionsScopeId => ("compiler-core:CodegenOptions", "scopeId"),
+            CodegenOptionsOptimizeImports => ("compiler-core:CodegenOptions", "optimizeImports"),
+            CodegenOptionsRuntimeModuleName => {
+                ("compiler-core:CodegenOptions", "runtimeModuleName")
+            }
+            CodegenOptionsSsrRuntimeModuleName => {
+                ("compiler-core:CodegenOptions", "ssrRuntimeModuleName")
+            }
+            CodegenOptionsRuntimeGlobalName => {
+                ("compiler-core:CodegenOptions", "runtimeGlobalName")
+            }
+            ParseFilename => ("compiler-sfc:parse", "filename"),
+            ParseSourceMap => ("compiler-sfc:parse", "sourceMap"),
+            ParseSourceRoot => ("compiler-sfc:parse", "sourceRoot"),
+            ParsePad => ("compiler-sfc:parse", "pad"),
+            ParseIgnoreEmpty => ("compiler-sfc:parse", "ignoreEmpty"),
+            ParseCompiler => ("compiler-sfc:parse", "compiler"),
+            ParseTemplateParseOptions => ("compiler-sfc:parse", "templateParseOptions"),
+            CompileScriptId => ("compiler-sfc:compileScript", "id"),
+            CompileScriptIsProd => ("compiler-sfc:compileScript", "isProd"),
+            CompileScriptSourceMap => ("compiler-sfc:compileScript", "sourceMap"),
+            CompileScriptBabelParserPlugins => ("compiler-sfc:compileScript", "babelParserPlugins"),
+            CompileScriptGlobalTypeFiles => ("compiler-sfc:compileScript", "globalTypeFiles"),
+            CompileScriptInlineTemplate => ("compiler-sfc:compileScript", "inlineTemplate"),
+            CompileScriptGenDefaultAs => ("compiler-sfc:compileScript", "genDefaultAs"),
+            CompileScriptTemplateOptions => ("compiler-sfc:compileScript", "templateOptions"),
+            CompileScriptHoistStatic => ("compiler-sfc:compileScript", "hoistStatic"),
+            CompileScriptPropsDestructure => ("compiler-sfc:compileScript", "propsDestructure"),
+            CompileScriptFs => ("compiler-sfc:compileScript", "fs"),
+            CompileScriptCustomElement => ("compiler-sfc:compileScript", "customElement"),
+            CompileScriptVapor => ("compiler-sfc:compileScript", "vapor"),
+            CompileTemplateSource => ("compiler-sfc:compileTemplate", "source"),
+            CompileTemplateAst => ("compiler-sfc:compileTemplate", "ast"),
+            CompileTemplateFilename => ("compiler-sfc:compileTemplate", "filename"),
+            CompileTemplateId => ("compiler-sfc:compileTemplate", "id"),
+            CompileTemplateScoped => ("compiler-sfc:compileTemplate", "scoped"),
+            CompileTemplateSlotted => ("compiler-sfc:compileTemplate", "slotted"),
+            CompileTemplateIsProd => ("compiler-sfc:compileTemplate", "isProd"),
+            CompileTemplateVapor => ("compiler-sfc:compileTemplate", "vapor"),
+            CompileTemplateSsr => ("compiler-sfc:compileTemplate", "ssr"),
+            CompileTemplateSsrCssVars => ("compiler-sfc:compileTemplate", "ssrCssVars"),
+            CompileTemplateInMap => ("compiler-sfc:compileTemplate", "inMap"),
+            CompileTemplateCompiler => ("compiler-sfc:compileTemplate", "compiler"),
+            CompileTemplateCompilerOptions => ("compiler-sfc:compileTemplate", "compilerOptions"),
+            CompileTemplatePreprocessLang => ("compiler-sfc:compileTemplate", "preprocessLang"),
+            CompileTemplatePreprocessOptions => {
+                ("compiler-sfc:compileTemplate", "preprocessOptions")
+            }
+            CompileTemplatePreprocessCustomRequire => {
+                ("compiler-sfc:compileTemplate", "preprocessCustomRequire")
+            }
+            CompileTemplateTransformAssetUrls => {
+                ("compiler-sfc:compileTemplate", "transformAssetUrls")
+            }
+            AssetUrlOptionsBase => ("compiler-sfc:AssetURLOptions", "base"),
+            AssetUrlOptionsIncludeAbsolute => ("compiler-sfc:AssetURLOptions", "includeAbsolute"),
+            AssetUrlOptionsTags => ("compiler-sfc:AssetURLOptions", "tags"),
+            CompileStyleSource => ("compiler-sfc:compileStyle", "source"),
+            CompileStyleFilename => ("compiler-sfc:compileStyle", "filename"),
+            CompileStyleId => ("compiler-sfc:compileStyle", "id"),
+            CompileStyleScoped => ("compiler-sfc:compileStyle", "scoped"),
+            CompileStyleTrim => ("compiler-sfc:compileStyle", "trim"),
+            CompileStyleIsProd => ("compiler-sfc:compileStyle", "isProd"),
+            CompileStyleInMap => ("compiler-sfc:compileStyle", "inMap"),
+            CompileStylePreprocessLang => ("compiler-sfc:compileStyle", "preprocessLang"),
+            CompileStylePreprocessOptions => ("compiler-sfc:compileStyle", "preprocessOptions"),
+            CompileStylePreprocessCustomRequire => {
+                ("compiler-sfc:compileStyle", "preprocessCustomRequire")
+            }
+            CompileStylePostcssOptions => ("compiler-sfc:compileStyle", "postcssOptions"),
+            CompileStylePostcssPlugins => ("compiler-sfc:compileStyle", "postcssPlugins"),
+            CompileStyleMap => ("compiler-sfc:compileStyle", "map"),
+            CompileStyleIsAsync => ("compiler-sfc:compileStyle", "isAsync"),
+            CompileStyleModules => ("compiler-sfc:compileStyle", "modules"),
+            CompileStyleModulesOptions => ("compiler-sfc:compileStyle", "modulesOptions"),
+            CssModulesOptionsScopeBehaviour => ("compiler-sfc:CSSModulesOptions", "scopeBehaviour"),
+            CssModulesOptionsGenerateScopedName => {
+                ("compiler-sfc:CSSModulesOptions", "generateScopedName")
+            }
+            CssModulesOptionsHashPrefix => ("compiler-sfc:CSSModulesOptions", "hashPrefix"),
+            CssModulesOptionsLocalsConvention => {
+                ("compiler-sfc:CSSModulesOptions", "localsConvention")
+            }
+            CssModulesOptionsExportGlobals => ("compiler-sfc:CSSModulesOptions", "exportGlobals"),
+            CssModulesOptionsGlobalModulePaths => {
+                ("compiler-sfc:CSSModulesOptions", "globalModulePaths")
+            }
+        }
+    }
+
+    /// The host compile request's own slot for this option, as
+    /// `packages/native/host-compile-request.generated.ts` declares it —
+    /// the field path a caller actually writes, and the path a refusal
+    /// names.
+    ///
+    /// `None` means the request carries no slot for the row at all: the
+    /// option is derived, host-resolved, preprocessor-external,
+    /// oracle-only, or not applicable to any published product, so no
+    /// caller can have written it. Every option a
+    /// [`crate::compile_request::CompileRequestError`] names answers
+    /// `Some`.
+    ///
+    /// This is deliberately NOT [`Self::tsv_row`]. The inventory describes
+    /// the OFFICIAL framework's option surfaces
+    /// (`compiler-core:ParserOptions` + `compatConfig.MODE`); the host
+    /// request is a FLAT camelCase object with one slot per admitted or
+    /// explicitly refused row (`compatConfigMode`). Naming the offending
+    /// property from the inventory would name a field the caller's request
+    /// object does not have, and would collapse the two distinct
+    /// `compatConfig` slots — `compatConfig` and `transformCompatConfig` —
+    /// onto one path.
+    ///
+    /// Two rows may legitimately share a slot: `isCustomElement` and
+    /// `hoistStatic` are each inventoried on two surfaces and fold onto
+    /// one canonical field, which is the exactly-once-per-ROW rule
+    /// [`Self::class`] documents.
+    ///
+    /// Exhaustive for the same reason [`Self::class`] is: a new
+    /// `vue-options.tsv` row without an arm here is a compile error, not a
+    /// silently pathless refusal.
+    pub const fn request_field(self) -> Option<&'static str> {
+        use VueOption::*;
+        match self {
+            ParserOptionsIsCustomElement | TransformOptionsIsCustomElement => {
+                Some("isCustomElement")
+            }
+            ParserOptionsDelimiters => Some("delimiters"),
+            ParserOptionsWhitespace => Some("whitespace"),
+            ParserOptionsComments => Some("comments"),
+            ParserOptionsCompatConfig => Some("compatConfig"),
+            ParserOptionsCompatConfigMode => Some("compatConfigMode"),
+            ParserOptionsCompatConfigCompilerIsOnElement => Some("compatConfigCompilerIsOnElement"),
+            ParserOptionsCompatConfigCompilerVBindSync => Some("compatConfigCompilerVBindSync"),
+            ParserOptionsCompatConfigCompilerVIfVForPrecedence => {
+                Some("compatConfigCompilerVIfVForPrecedence")
+            }
+            ParserOptionsCompatConfigCompilerVBindObjectOrder => {
+                Some("compatConfigCompilerVBindObjectOrder")
+            }
+            ParserOptionsCompatConfigCompilerVOnNative => Some("compatConfigCompilerVOnNative"),
+            ParserOptionsCompatConfigCompilerNativeTemplate => {
+                Some("compatConfigCompilerNativeTemplate")
+            }
+            ParserOptionsCompatConfigCompilerInlineTemplate => {
+                Some("compatConfigCompilerInlineTemplate")
+            }
+            ParserOptionsCompatConfigCompilerFilters => Some("compatConfigCompilerFilters"),
+            TransformOptionsCompatConfig => Some("transformCompatConfig"),
+            TransformOptionsHoistStatic | CompileScriptHoistStatic => Some("hoistStatic"),
+            TransformOptionsCacheHandlers => Some("cacheHandlers"),
+            TransformOptionsHmr => Some("hmr"),
+            SharedTransformCodegenOptionsSsr => Some("ssr"),
+            CodegenOptionsMode => Some("codegenMode"),
+            CodegenOptionsOptimizeImports => Some("optimizeImports"),
+            CodegenOptionsRuntimeModuleName => Some("runtimeModuleName"),
+            CodegenOptionsSsrRuntimeModuleName => Some("ssrRuntimeModuleName"),
+            ParsePad => Some("parsePad"),
+            ParseIgnoreEmpty => Some("ignoreEmpty"),
+            CompileScriptBabelParserPlugins => Some("babelParserPlugins"),
+            CompileScriptGenDefaultAs => Some("genDefaultAs"),
+            CompileScriptPropsDestructure => Some("propsDestructure"),
+            CompileScriptCustomElement => Some("scriptCustomElement"),
+            CompileTemplateTransformAssetUrls => Some("transformAssetUrls"),
+            AssetUrlOptionsBase => Some("transformAssetUrls.enabled.base"),
+            AssetUrlOptionsIncludeAbsolute => Some("transformAssetUrls.enabled.includeAbsolute"),
+            AssetUrlOptionsTags => Some("transformAssetUrls.enabled.tags"),
+            CompileStyleTrim => Some("styleTrim"),
+            CompileStyleModules | CompileStyleModulesOptions => Some("cssModules"),
+            CssModulesOptionsScopeBehaviour => Some("cssModules.scopeBehaviour"),
+            CssModulesOptionsHashPrefix => Some("cssModules.hashPrefix"),
+            CssModulesOptionsLocalsConvention => Some("cssModules.localsConvention"),
+            CssModulesOptionsExportGlobals => Some("cssModules.exportGlobals"),
+
+            // No slot: the request derives these, resolves them from the
+            // host, forwards them to an external preprocessor, or does not
+            // publish the output shape they apply to.
+            ParserOptionsOnWarn
+            | ParserOptionsOnError
+            | ParserOptionsParseMode
+            | ParserOptionsNs
+            | ParserOptionsIsNativeTag
+            | ParserOptionsIsVoidTag
+            | ParserOptionsIsPreTag
+            | ParserOptionsIsIgnoreNewlineTag
+            | ParserOptionsIsBuiltInComponent
+            | ParserOptionsGetNamespace
+            | ParserOptionsDecodeEntities
+            | ParserOptionsPrefixIdentifiers
+            | ParserOptionsExpressionPlugins
+            | TransformOptionsNodeTransforms
+            | TransformOptionsDirectiveTransforms
+            | TransformOptionsTransformHoist
+            | TransformOptionsOnWarn
+            | TransformOptionsOnError
+            | TransformOptionsIsBuiltInComponent
+            | TransformOptionsScopeId
+            | TransformOptionsSlotted
+            | TransformOptionsSsrCssVars
+            | SharedTransformCodegenOptionsPrefixIdentifiers
+            | SharedTransformCodegenOptionsExpressionPlugins
+            | SharedTransformCodegenOptionsInSsr
+            | SharedTransformCodegenOptionsBindingMetadata
+            | SharedTransformCodegenOptionsInline
+            | SharedTransformCodegenOptionsIsTs
+            | SharedTransformCodegenOptionsFilename
+            | CodegenOptionsSourceMap
+            | CodegenOptionsScopeId
+            | CodegenOptionsRuntimeGlobalName
+            | ParseFilename
+            | ParseSourceMap
+            | ParseSourceRoot
+            | ParseCompiler
+            | ParseTemplateParseOptions
+            | CompileScriptId
+            | CompileScriptIsProd
+            | CompileScriptSourceMap
+            | CompileScriptGlobalTypeFiles
+            | CompileScriptInlineTemplate
+            | CompileScriptTemplateOptions
+            | CompileScriptFs
+            | CompileScriptVapor
+            | CompileTemplateSource
+            | CompileTemplateAst
+            | CompileTemplateFilename
+            | CompileTemplateId
+            | CompileTemplateScoped
+            | CompileTemplateSlotted
+            | CompileTemplateIsProd
+            | CompileTemplateVapor
+            | CompileTemplateSsr
+            | CompileTemplateSsrCssVars
+            | CompileTemplateInMap
+            | CompileTemplateCompiler
+            | CompileTemplateCompilerOptions
+            | CompileTemplatePreprocessLang
+            | CompileTemplatePreprocessOptions
+            | CompileTemplatePreprocessCustomRequire
+            | CompileStyleSource
+            | CompileStyleFilename
+            | CompileStyleId
+            | CompileStyleScoped
+            | CompileStyleIsProd
+            | CompileStyleInMap
+            | CompileStylePreprocessLang
+            | CompileStylePreprocessOptions
+            | CompileStylePreprocessCustomRequire
+            | CompileStylePostcssOptions
+            | CompileStylePostcssPlugins
+            | CompileStyleMap
+            | CompileStyleIsAsync
+            | CssModulesOptionsGenerateScopedName
+            | CssModulesOptionsGlobalModulePaths => None,
+        }
+    }
 }
 
 /// The 118 rows, for exhaustiveness/count tests. Kept as a `const` array
@@ -447,6 +814,96 @@ pub const ALL_VUE_OPTIONS: [VueOption; 118] = {
         CssModulesOptionsGlobalModulePaths,
     ]
 };
+
+/// Whether one [`VueOptionAttempt`] field was supplied at all.
+type VuePresenceProbe = fn(&VueOptionAttempt) -> bool;
+
+/// Every Vue option [`VueOptionAttempt::into_request`] refuses on
+/// PRESENCE, in the deterministic order it checks them — each paired ON
+/// ITS OWN LINE with the probe that decides it.
+///
+/// Identity and probe are one row rather than two lists read by a shared
+/// index, so a slot inserted, removed or reordered moves both halves at
+/// once. The failure this arrangement makes unrepresentable is a refusal
+/// telling a caller to remove a field they never wrote, which is what a
+/// desynced pair would produce.
+const PRESENCE_REFUSED_VUE_SLOTS: [(VueOption, VuePresenceProbe); 12] = {
+    use VueOption::*;
+    [
+        (ParserOptionsCompatConfig, |attempt| {
+            attempt.compat_config.is_some()
+        }),
+        (ParserOptionsCompatConfigMode, |attempt| {
+            attempt.compat_config_mode.is_some()
+        }),
+        (ParserOptionsCompatConfigCompilerIsOnElement, |attempt| {
+            attempt.compat_config_compiler_is_on_element.is_some()
+        }),
+        (ParserOptionsCompatConfigCompilerVBindSync, |attempt| {
+            attempt.compat_config_compiler_v_bind_sync.is_some()
+        }),
+        (
+            ParserOptionsCompatConfigCompilerVIfVForPrecedence,
+            |attempt| {
+                attempt
+                    .compat_config_compiler_v_if_v_for_precedence
+                    .is_some()
+            },
+        ),
+        (
+            ParserOptionsCompatConfigCompilerVBindObjectOrder,
+            |attempt| attempt.compat_config_compiler_v_bind_object_order.is_some(),
+        ),
+        (ParserOptionsCompatConfigCompilerVOnNative, |attempt| {
+            attempt.compat_config_compiler_v_on_native.is_some()
+        }),
+        (ParserOptionsCompatConfigCompilerNativeTemplate, |attempt| {
+            attempt.compat_config_compiler_native_template.is_some()
+        }),
+        (ParserOptionsCompatConfigCompilerInlineTemplate, |attempt| {
+            attempt.compat_config_compiler_inline_template.is_some()
+        }),
+        (ParserOptionsCompatConfigCompilerFilters, |attempt| {
+            attempt.compat_config_compiler_filters.is_some()
+        }),
+        (TransformOptionsCompatConfig, |attempt| {
+            attempt.transform_compat_config.is_some()
+        }),
+        (CodegenOptionsMode, |attempt| attempt.codegen_mode.is_some()),
+    ]
+};
+
+/// The option identities of [`PRESENCE_REFUSED_VUE_SLOTS`], projected for
+/// consumers that need the refusable SET without the probes.
+///
+/// Derived, not restated: a test iterating this const iterates exactly the
+/// options a presence refusal can name, and adding a slot cannot leave it
+/// behind.
+pub const PRESENCE_REFUSED_VUE_OPTIONS: [VueOption; PRESENCE_REFUSED_VUE_SLOTS.len()] = {
+    let mut options = [VueOption::ParserOptionsCompatConfig; PRESENCE_REFUSED_VUE_SLOTS.len()];
+    let mut index = 0;
+    while index < PRESENCE_REFUSED_VUE_SLOTS.len() {
+        options[index] = PRESENCE_REFUSED_VUE_SLOTS[index].0;
+        index += 1;
+    }
+    options
+};
+
+/// Every Vue option a [`crate::compile_request::CompileRequestError`] can
+/// name for a caller's VALUE rather than for the option's presence.
+///
+/// The DECLARED set, enforced rather than described:
+/// [`crate::compile_request::CompileRequestError::malformed_option_value`]
+/// is the one constructor for a value refusal and asserts its option
+/// against this list, so a refusal site naming an option absent from here
+/// fails in every debug build instead of quoting a path the caller's
+/// request object has no field for.
+///
+/// One row today: a `delimiters` array whose arity is not exactly two is
+/// refused at the FFI decode boundary
+/// (`verter_ffi::convert::input::vue_delimiter_pair`) rather than falling
+/// back to the framework's own delimiters.
+pub const VALUE_REFUSED_VUE_OPTIONS: [VueOption; 1] = [VueOption::ParserOptionsDelimiters];
 
 // ───────────────────────────── canonical request ─────────────────────────
 
@@ -615,59 +1072,6 @@ pub struct VueOptionAttempt {
 }
 
 impl VueOptionAttempt {
-    /// Every unsupported-fail-closed field, paired with the exact
-    /// `VueOption` row it refuses — iterated by
-    /// [`Self::into_request`] so a refusal always names the precise row.
-    fn unsupported_slots(&self) -> [(bool, VueOption); 12] {
-        [
-            (
-                self.compat_config.is_some(),
-                VueOption::ParserOptionsCompatConfig,
-            ),
-            (
-                self.compat_config_mode.is_some(),
-                VueOption::ParserOptionsCompatConfigMode,
-            ),
-            (
-                self.compat_config_compiler_is_on_element.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerIsOnElement,
-            ),
-            (
-                self.compat_config_compiler_v_bind_sync.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerVBindSync,
-            ),
-            (
-                self.compat_config_compiler_v_if_v_for_precedence.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerVIfVForPrecedence,
-            ),
-            (
-                self.compat_config_compiler_v_bind_object_order.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerVBindObjectOrder,
-            ),
-            (
-                self.compat_config_compiler_v_on_native.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerVOnNative,
-            ),
-            (
-                self.compat_config_compiler_native_template.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerNativeTemplate,
-            ),
-            (
-                self.compat_config_compiler_inline_template.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerInlineTemplate,
-            ),
-            (
-                self.compat_config_compiler_filters.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerFilters,
-            ),
-            (
-                self.transform_compat_config.is_some(),
-                VueOption::TransformOptionsCompatConfig,
-            ),
-            (self.codegen_mode.is_some(), VueOption::CodegenOptionsMode),
-        ]
-    }
-
     /// Converts this attempt into the canonical [`VueCompileRequest`],
     /// refusing on the first unsupported field present (deterministic
     /// declaration order) via
@@ -675,8 +1079,8 @@ impl VueOptionAttempt {
     pub fn into_request(
         self,
     ) -> Result<VueCompileRequest, crate::compile_request::CompileRequestError> {
-        for (present, option) in self.unsupported_slots() {
-            if present {
+        for (option, is_present) in PRESENCE_REFUSED_VUE_SLOTS {
+            if is_present(&self) {
                 return Err(
                     crate::compile_request::CompileRequestError::UnsupportedOption {
                         option: crate::compile_request::FrameworkOption::Vue(option),
@@ -878,34 +1282,54 @@ mod tests {
         assert_eq!(request.hoist_static, Some(false));
     }
 
+    /// Each presence-refused field refuses, AND names its own option.
+    ///
+    /// Naming matters as much as refusing: a refusal that reported a
+    /// neighbour's option would tell a caller to remove a field they never
+    /// wrote. `PRESENCE_REFUSED_VUE_SLOTS` pairs each option with its own
+    /// probe on one row, so the two cannot desync silently; this states
+    /// what each row's probe must actually READ, which the row itself
+    /// cannot.
+    ///
+    /// Mutation recipes:
+    /// - Point one row's probe at a neighbour's field (e.g. give
+    ///   `ParserOptionsCompatConfigMode` the `compat_config` probe): the
+    ///   moved-from slot admits and its `unwrap_err` panics.
+    /// - Swap two rows of `PRESENCE_REFUSED_VUE_SLOTS`: both swapped slots
+    ///   report the other's option here.
+    /// - Return `Ok` from `into_request` for one slot: that slot's
+    ///   `unwrap_err` panics.
     #[test]
-    fn each_of_the_twelve_unsupported_slots_refuses_independently() {
-        let base = VueOptionAttempt::default();
-        let mut variants: Vec<VueOptionAttempt> = Vec::new();
-        for i in 0..12u8 {
-            let mut a = base.clone();
-            match i {
-                0 => a.compat_config = Some(true),
-                1 => a.compat_config_mode = Some(true),
-                2 => a.compat_config_compiler_is_on_element = Some(true),
-                3 => a.compat_config_compiler_v_bind_sync = Some(true),
-                4 => a.compat_config_compiler_v_if_v_for_precedence = Some(true),
-                5 => a.compat_config_compiler_v_bind_object_order = Some(true),
-                6 => a.compat_config_compiler_v_on_native = Some(true),
-                7 => a.compat_config_compiler_native_template = Some(true),
-                8 => a.compat_config_compiler_inline_template = Some(true),
-                9 => a.compat_config_compiler_filters = Some(true),
-                10 => a.transform_compat_config = Some(true),
-                11 => a.codegen_mode = Some(true),
-                _ => unreachable!(),
+    fn each_unsupported_slot_refuses_by_its_own_identity() {
+        let setters: [fn(&mut VueOptionAttempt); 12] = [
+            |a| a.compat_config = Some(true),
+            |a| a.compat_config_mode = Some(true),
+            |a| a.compat_config_compiler_is_on_element = Some(true),
+            |a| a.compat_config_compiler_v_bind_sync = Some(true),
+            |a| a.compat_config_compiler_v_if_v_for_precedence = Some(true),
+            |a| a.compat_config_compiler_v_bind_object_order = Some(true),
+            |a| a.compat_config_compiler_v_on_native = Some(true),
+            |a| a.compat_config_compiler_native_template = Some(true),
+            |a| a.compat_config_compiler_inline_template = Some(true),
+            |a| a.compat_config_compiler_filters = Some(true),
+            |a| a.transform_compat_config = Some(true),
+            |a| a.codegen_mode = Some(true),
+        ];
+        assert_eq!(setters.len(), PRESENCE_REFUSED_VUE_OPTIONS.len());
+        for (index, set) in setters.into_iter().enumerate() {
+            let mut attempt = VueOptionAttempt::default();
+            set(&mut attempt);
+            let expected = PRESENCE_REFUSED_VUE_OPTIONS[index];
+            match attempt.into_request().unwrap_err() {
+                crate::compile_request::CompileRequestError::UnsupportedOption {
+                    option, ..
+                } => assert_eq!(
+                    option,
+                    crate::compile_request::FrameworkOption::Vue(expected),
+                    "slot {index} refused under another slot's identity"
+                ),
+                other => panic!("slot {index}: expected UnsupportedOption, got {other:?}"),
             }
-            variants.push(a);
-        }
-        for (i, attempt) in variants.into_iter().enumerate() {
-            assert!(
-                attempt.into_request().is_err(),
-                "slot {i} must refuse construction"
-            );
         }
     }
 }

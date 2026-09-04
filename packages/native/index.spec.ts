@@ -936,6 +936,8 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "close",
       "collectResolvableModuleReferenceSpecifiers",
       "compileMany",
+      "compileRequest",
+      "compileRequests",
       "compileWithAudit",
       "configureProjects",
       "ensureIdeCompiled",

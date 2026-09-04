@@ -784,10 +784,10 @@ fn svelte_option_attempt_from_profile(
                 "html" => Ok(SvelteNamespaceRequest::Html),
                 "svg" => Ok(SvelteNamespaceRequest::Svg),
                 "mathml" => Ok(SvelteNamespaceRequest::MathMl),
-                other => Err(CompileRequestError::MalformedOptionValue {
-                    option: FrameworkOption::Svelte(SvelteOption::CompileOptionsNamespace),
-                    value: other.to_string(),
-                }),
+                other => Err(CompileRequestError::malformed_option_value(
+                    FrameworkOption::Svelte(SvelteOption::CompileOptionsNamespace),
+                    other,
+                )),
             })
             .transpose()?;
         let fragments = profile
@@ -796,10 +796,10 @@ fn svelte_option_attempt_from_profile(
             .map(|token| match token {
                 "html" => Ok(SvelteFragmentsRequest::Html),
                 "tree" => Ok(SvelteFragmentsRequest::Tree),
-                other => Err(CompileRequestError::MalformedOptionValue {
-                    option: FrameworkOption::Svelte(SvelteOption::CompileOptionsFragments),
-                    value: other.to_string(),
-                }),
+                other => Err(CompileRequestError::malformed_option_value(
+                    FrameworkOption::Svelte(SvelteOption::CompileOptionsFragments),
+                    other,
+                )),
             })
             .transpose()?;
         // Same decode-boundary rationale as `namespace`/`fragments` above.
@@ -809,10 +809,10 @@ fn svelte_option_attempt_from_profile(
             .map(|token| match token {
                 "injected" => Ok(SvelteCssRequest::Injected),
                 "external" => Ok(SvelteCssRequest::External),
-                other => Err(CompileRequestError::MalformedOptionValue {
-                    option: FrameworkOption::Svelte(SvelteOption::CompileOptionsCss),
-                    value: other.to_string(),
-                }),
+                other => Err(CompileRequestError::malformed_option_value(
+                    FrameworkOption::Svelte(SvelteOption::CompileOptionsCss),
+                    other,
+                )),
             })
             .transpose()?;
         // A descriptor is constructed only when the caller actually set
@@ -864,6 +864,13 @@ fn svelte_option_attempt_from_profile(
 /// `CompileUnsupported::RequestExecutionRefused` arm already reports — the
 /// request-construction refusal and the post-parse resolution refusal both
 /// name the same host-facing code, only the message differs.
+///
+/// The message's words are the compiler's own — `CompileRequestError`'s
+/// `Display`, the one refusal vocabulary every transport renders. `{:?}`
+/// would publish the Rust variant spelling into a user-visible diagnostic
+/// (`MalformedOptionValue { option: Svelte(CompileOptionsCss), value:
+/// "not-a-real-mode" }`) and would name the option by a spelling no
+/// caller's request object has.
 pub(crate) fn request_construction_refused_diagnostics(
     canonical_id: &str,
     source_len: u32,
@@ -872,7 +879,7 @@ pub(crate) fn request_construction_refused_diagnostics(
     DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
         severity: HostSeverity::Error,
         code: "HOST_COMPILE_REQUEST_EXECUTION_REFUSED".to_string(),
-        message: format!("compile request construction refused for '{canonical_id}': {error:?}"),
+        message: format!("compile request construction refused for '{canonical_id}': {error}"),
         arguments: Vec::new(),
         span: verter_span::Span::new(0, source_len),
     }])

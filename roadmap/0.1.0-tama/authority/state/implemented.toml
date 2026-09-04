@@ -101,9 +101,9 @@ schema = 2
 "CCA1O2G" = { status = "pending" }
 "CCA1O2H" = { status = "implemented", commit_message = "fix(napi): refuse a request key stated as undefined", commit_date = "2026-09-01T00:56:27+01:00" }
 "CCA1O2I" = { status = "implemented", commit_message = "refactor(napi): generate the published host compile-request declaration", commit_date = "2026-09-01T14:00:00+01:00" }
-"CCA1O2J" = { status = "pending" }
+"CCA1O2J" = { status = "implemented", commit_message = "feat(napi): expose typed compile request routes", commit_date = "2026-09-03T01:15:00+01:00", pull_request = 471 }
 "CCA1O3" = { status = "implemented", commit_message = "feat(wasm): add a typed host compile-request adapter and local request DTOs", commit_date = "2026-08-31T22:30:00+01:00" }
-"CCA1O3A" = { status = "implemented", commit_message = "feat(play): migrate WASM fixture capture to typed compile request", commit_date = "2026-09-03T09:30:00+01:00" }
+"CCA1O3A" = { status = "pending" }
 "CCA1O3B" = { status = "pending" }
 "CCA1O3C" = { status = "implemented", commit_message = "feat(ci): execute the wasm JavaScript-boundary tests in the canonical gate", commit_date = "2026-09-01T02:10:00+01:00" }
 "CCA1O3D" = { status = "implemented", commit_message = "feat(wasm): expose a callable typed compile request on the browser host", commit_date = "2026-09-02T12:00:00+01:00", pull_request = 469 }

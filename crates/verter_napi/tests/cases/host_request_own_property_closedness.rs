@@ -24,8 +24,10 @@ use napi::{Result, Status};
 use serde_json::{json, Number, Value};
 
 use verter_napi::{
-    decode_host_compile_request, materialize_js_value, napi_host_compile_request_to_ffi,
-    JsValueClass, JsValueGraph, NapiHostCompileRequest, MAX_ARRAY_ELEMENTS, MAX_NESTING_DEPTH,
+    decode_host_compile_request, materialize_js_value, materialize_js_value_with_budget,
+    napi_host_compile_request_to_ffi, JsObjectKeys, JsValueClass, JsValueGraph,
+    JsValueMaterializationBudget, NapiHostCompileRequest, MAX_ARRAY_ELEMENTS,
+    MAX_DECODED_VALUES_PER_REQUEST, MAX_NESTING_DEPTH, MIN_VALUE_RETAINED_BYTES,
 };
 
 // ── a JS object graph, `undefined` included ──────────────────────────────
@@ -49,6 +51,9 @@ enum Js {
     /// `new Array(2 ** 32 - 1)`, whose length costs nothing and whose
     /// every read answers `undefined`.
     DeclaredArray(u32),
+    /// An object that DECLARES an own-key count without holding any key —
+    /// used to prove the count is refused before any key string is copied.
+    DeclaredObject(u32),
     /// An object whose one own property, `self`, is the object itself —
     /// `const a = {}; a.self = a`. A tree cannot hold a real cycle, so
     /// every read answers the same node, which is what a cyclic graph
@@ -122,22 +127,62 @@ fn omit(root: &mut Js, path: &[&str], key: &str) {
 /// Reads the modelled graph the way the native boundary reads a live one.
 struct Graph;
 
+struct MockKeys {
+    count: u32,
+    keys: Option<Vec<String>>,
+}
+
+impl JsObjectKeys for MockKeys {
+    fn count(&self) -> Result<u32> {
+        Ok(self.count)
+    }
+
+    fn retained_bytes(&self, index: u32) -> Result<usize> {
+        Ok(self
+            .keys
+            .as_ref()
+            .unwrap_or_else(|| panic!("key {index} was converted before the count was charged"))
+            [index as usize]
+            .len())
+    }
+
+    fn at(&self, index: u32) -> Result<String> {
+        Ok(self
+            .keys
+            .as_ref()
+            .unwrap_or_else(|| panic!("key {index} was converted before the count was charged"))
+            [index as usize]
+            .clone())
+    }
+}
+
 impl JsValueGraph for Graph {
     type Value = Js;
+    type Keys = MockKeys;
 
     fn classify(&self, value: &Js) -> Result<JsValueClass> {
         Ok(match value {
             Js::Undefined => JsValueClass::Undefined,
             Js::Array(_) | Js::DeclaredArray(_) => JsValueClass::Array,
-            Js::Object(_) | Js::SelfReferential => JsValueClass::Object,
+            Js::Object(_) | Js::DeclaredObject(_) | Js::SelfReferential => JsValueClass::Object,
             Js::Null | Js::Bool(_) | Js::Num(_) | Js::Str(_) => JsValueClass::Leaf,
         })
     }
 
-    fn own_enumerable_keys(&self, object: &Js) -> Result<Vec<String>> {
+    fn own_enumerable_keys(&self, object: &Js) -> Result<MockKeys> {
         match object {
-            Js::Object(entries) => Ok(entries.iter().map(|(key, _)| key.clone()).collect()),
-            Js::SelfReferential => Ok(vec!["self".to_string()]),
+            Js::Object(entries) => Ok(MockKeys {
+                count: entries.len() as u32,
+                keys: Some(entries.iter().map(|(key, _)| key.clone()).collect()),
+            }),
+            Js::DeclaredObject(count) => Ok(MockKeys {
+                count: *count,
+                keys: None,
+            }),
+            Js::SelfReferential => Ok(MockKeys {
+                count: 1,
+                keys: Some(vec!["self".to_string()]),
+            }),
             other => panic!("only an object is enumerated, got {other:?}"),
         }
     }
@@ -183,6 +228,13 @@ impl JsValueGraph for Graph {
             Js::Num(number) => Value::Number(number.clone()),
             Js::Str(text) => Value::String(text.clone()),
             other => panic!("not a leaf: {other:?}"),
+        })
+    }
+
+    fn leaf_retained_bytes(&self, value: &Js) -> Result<usize> {
+        Ok(match value {
+            Js::Str(text) => text.len(),
+            _ => 0,
         })
     }
 }
@@ -498,6 +550,127 @@ fn a_graph_that_refers_back_to_itself_is_refused_rather_than_followed() {
         nested = Js::Object(vec![("inner".to_string(), nested)]);
     }
     materialize_js_value(&Graph, &nested).expect("a graph within the depth budget materialises");
+}
+
+// @ai-generated - A batch-wide budget must count repeated shared payloads, not only each graph.
+//
+// Mutation recipe: construct `JsValueMaterializationBudget` fresh per
+// `materialize_js_value_with_budget` call instead of threading the caller's
+// `&mut budget` through (e.g. shadow the parameter with
+// `Self::per_request()` at the top of `materialize_js_value_with_budget`).
+// Both `expect_err` calls below then observe a budget that was never
+// charged by the first payload, and the case fails on the first assertion.
+#[test]
+fn one_materialization_budget_bounds_values_and_bytes_across_payloads() {
+    let mut value_budget = JsValueMaterializationBudget::new(3, usize::MAX);
+    materialize_js_value_with_budget(
+        &Graph,
+        &Js::Array(vec![Js::Null, Js::Null]),
+        &mut value_budget,
+    )
+    .expect("the first payload fits the shared value budget");
+    let error =
+        materialize_js_value_with_budget(&Graph, &Js::Array(vec![Js::Null]), &mut value_budget)
+            .expect_err("the second payload exceeds the shared value budget");
+    assert!(
+        error.reason.contains("3 decoded values"),
+        "{}",
+        error.reason
+    );
+
+    let mut byte_budget = JsValueMaterializationBudget::new(usize::MAX, 5);
+    materialize_js_value_with_budget(&Graph, &Js::Str("abc".to_string()), &mut byte_budget)
+        .expect("the first payload fits the shared byte budget");
+    let error =
+        materialize_js_value_with_budget(&Graph, &Js::Str("def".to_string()), &mut byte_budget)
+            .expect_err("the second payload exceeds the shared byte budget");
+    assert!(error.reason.contains("5 bytes"), "{}", error.reason);
+}
+
+// Mutation recipe: restore `ensure_decoded_values` as a check-only probe
+// (no increment) before `Vec::with_capacity`. Nested declared arrays then
+// reserve many full capacities while the counter is still near zero, and
+// this case no longer refuses at the decoded-value bound.
+#[test]
+fn nested_declared_arrays_reserve_slots_before_allocation() {
+    let nested = Js::Array(vec![
+        Js::DeclaredArray(MAX_ARRAY_ELEMENTS),
+        Js::DeclaredArray(MAX_ARRAY_ELEMENTS),
+        Js::DeclaredArray(MAX_ARRAY_ELEMENTS),
+    ]);
+    let mut budget = JsValueMaterializationBudget::new(MAX_DECODED_VALUES_PER_REQUEST, usize::MAX);
+    let error = materialize_js_value_with_budget(&Graph, &nested, &mut budget)
+        .expect_err("nested max-length arrays must trip the reserved value budget");
+    assert!(error.reason.contains("decoded values"), "{}", error.reason);
+}
+
+// Mutation recipe: convert every own key into Vec<String> before counting
+// or charging. `DeclaredObject` holds no keys, so that plant panics here
+// instead of refusing the count.
+#[test]
+fn an_object_declaring_more_keys_than_a_request_may_carry_is_refused_before_keys_are_copied() {
+    let message = materialisation_refusal(&Js::DeclaredObject(MAX_ARRAY_ELEMENTS + 1));
+    assert!(
+        message.contains("exposes") && message.contains(&(MAX_ARRAY_ELEMENTS + 1).to_string()),
+        "expected a refusal naming the key count, got: {message}"
+    );
+}
+
+// Mutation recipe: charge key bytes after `keys.at`. Given the object's
+// one reserved value slot exactly fills the budget, copying "abcd" before
+// charging its bytes would succeed instead of refusing.
+#[test]
+fn object_key_bytes_are_charged_before_the_key_is_copied() {
+    let object = Js::Object(vec![("abcd".to_string(), Js::Null)]);
+    // Exactly enough for the one reserved value slot's floor charge and
+    // nothing more, so the key's own 4 bytes is what must trip the cap.
+    let max_bytes = MIN_VALUE_RETAINED_BYTES;
+    let mut budget = JsValueMaterializationBudget::new(usize::MAX, max_bytes);
+    let error = materialize_js_value_with_budget(&Graph, &object, &mut budget)
+        .expect_err("key bytes must be charged before the property is walked");
+    assert!(
+        error.reason.contains(&format!("{max_bytes} bytes")),
+        "{}",
+        error.reason
+    );
+}
+
+// Mutation recipe: drop the `MIN_VALUE_RETAINED_BYTES` floor charge added
+// to the array/object arms of `materialize_nested`. A shared budget then
+// admits an unbounded number of boolean-only-leaf payloads for zero
+// retained bytes, which is exactly the aggregate-batch-cost gap this floor
+// closes: a caller could otherwise submit unboundedly many entries whose
+// request graphs are wide arrays of booleans/numbers and pay nothing
+// against the retained-byte budget that is supposed to bound the whole
+// call's cumulative traversal cost.
+#[test]
+fn boolean_only_payloads_still_charge_retained_bytes_across_a_shared_budget() {
+    let two_leaf_array = Js::Array(vec![Js::Bool(true), Js::Bool(false)]);
+    let mut budget =
+        JsValueMaterializationBudget::new(usize::MAX, MIN_VALUE_RETAINED_BYTES * 2 + 1);
+    materialize_js_value_with_budget(&Graph, &two_leaf_array, &mut budget)
+        .expect("the first boolean-only array fits the shared byte budget");
+    let error = materialize_js_value_with_budget(&Graph, &two_leaf_array, &mut budget)
+        .expect_err("a second boolean-only array must still charge retained bytes");
+    assert!(error.reason.contains("bytes"), "{}", error.reason);
+}
+
+// Mutation recipe: restore `materialize_js_value`'s unlimited
+// `usize::MAX` budgets. A graph of MAX_DECODED_VALUES_PER_REQUEST + 1
+// leaves then succeeds.
+#[test]
+fn materialize_js_value_uses_the_per_request_value_budget() {
+    let values = vec![
+        Js::Object(vec![
+            ("a".to_string(), Js::Null),
+            ("b".to_string(), Js::Null),
+            ("c".to_string(), Js::Null),
+        ]);
+        40_000
+    ];
+    let error = materialize_js_value(&Graph, &Js::Array(values))
+        .expect_err("the unbounded helper must still apply the per-request value cap");
+    assert!(error.reason.contains("decoded values"), "{}", error.reason);
 }
 
 // ── the control: a known optional slot stated as `undefined` ─────────────

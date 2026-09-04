@@ -115,6 +115,116 @@ impl SvelteOption {
             OptimizeOptionsHydrate => TestOnly,
         }
     }
+
+    /// The exact (`surface`, `option`) column pair of this row in
+    /// `packages/framework-conformance-harness/evidence/svelte-options.tsv` —
+    /// the schema identity a refusal names, never a spelling derived from
+    /// the Rust variant. Exhaustive for the same reason [`Self::class`] is: a
+    /// new TSV row without an arm here is a compile error.
+    pub const fn tsv_row(self) -> (&'static str, &'static str) {
+        use SvelteOption::*;
+        match self {
+            ParseFilename => ("svelte:parse", "filename"),
+            ParseModern => ("svelte:parse", "modern"),
+            ParseLoose => ("svelte:parse", "loose"),
+            ModuleDev => ("svelte:ModuleCompileOptions", "dev"),
+            ModuleGenerate => ("svelte:ModuleCompileOptions", "generate"),
+            ModuleFilename => ("svelte:ModuleCompileOptions", "filename"),
+            ModuleRootDir => ("svelte:ModuleCompileOptions", "rootDir"),
+            ModuleWarningFilter => ("svelte:ModuleCompileOptions", "warningFilter"),
+            ModuleExperimentalAsync => ("svelte:ModuleCompileOptions", "experimental.async"),
+            CompileOptionsName => ("svelte:CompileOptions", "name"),
+            CompileOptionsCustomElement => ("svelte:CompileOptions", "customElement"),
+            CompileOptionsAccessors => ("svelte:CompileOptions", "accessors"),
+            CompileOptionsNamespace => ("svelte:CompileOptions", "namespace"),
+            CompileOptionsImmutable => ("svelte:CompileOptions", "immutable"),
+            CompileOptionsCss => ("svelte:CompileOptions", "css"),
+            CompileOptionsCssHash => ("svelte:CompileOptions", "cssHash"),
+            CompileOptionsPreserveComments => ("svelte:CompileOptions", "preserveComments"),
+            CompileOptionsPreserveWhitespace => ("svelte:CompileOptions", "preserveWhitespace"),
+            CompileOptionsFragments => ("svelte:CompileOptions", "fragments"),
+            CompileOptionsRunes => ("svelte:CompileOptions", "runes"),
+            CompileOptionsDiscloseVersion => ("svelte:CompileOptions", "discloseVersion"),
+            CompileOptionsCompatibility => ("svelte:CompileOptions", "compatibility"),
+            CompileOptionsCompatibilityComponentApi => {
+                ("svelte:CompileOptions", "compatibility.componentApi")
+            }
+            CompileOptionsSourcemap => ("svelte:CompileOptions", "sourcemap"),
+            CompileOptionsOutputFilename => ("svelte:CompileOptions", "outputFilename"),
+            CompileOptionsCssOutputFilename => ("svelte:CompileOptions", "cssOutputFilename"),
+            CompileOptionsHmr => ("svelte:CompileOptions", "hmr"),
+            CompileOptionsModernAst => ("svelte:CompileOptions", "modernAst"),
+            CustomElementTag => ("svelte:SvelteOptions.customElement", "tag"),
+            CustomElementShadow => ("svelte:SvelteOptions.customElement", "shadow"),
+            CustomElementExtend => ("svelte:SvelteOptions.customElement", "extend"),
+            CustomElementPropsAttribute => {
+                ("svelte:SvelteOptions.customElement.props", "*.attribute")
+            }
+            CustomElementPropsReflect => ("svelte:SvelteOptions.customElement.props", "*.reflect"),
+            CustomElementPropsType => ("svelte:SvelteOptions.customElement.props", "*.type"),
+            OptimizeOptionsHydrate => ("svelte:OptimizeOptions", "hydrate"),
+        }
+    }
+
+    /// The host compile request's own slot for this option, as
+    /// `packages/native/host-compile-request.generated.ts` declares it.
+    ///
+    /// Same contract as
+    /// [`crate::compile_request::VueOption::request_field`]: the field
+    /// path a caller writes, not the official option surface
+    /// [`Self::tsv_row`] quotes. `svelte:ModuleCompileOptions` +
+    /// `experimental.async` is the request's flat `experimentalAsync`
+    /// slot, `SvelteOptions.customElement.props` + `*.type` is
+    /// `customElementDescriptor.props.*.propType`, and the request's
+    /// `customElement` is a sibling boolean of the descriptor rather than
+    /// its parent object.
+    ///
+    /// `None` means the request carries no slot for the row, so no caller
+    /// can have written it. Exhaustive: a new `svelte-options.tsv` row
+    /// without an arm here is a compile error.
+    pub const fn request_field(self) -> Option<&'static str> {
+        use SvelteOption::*;
+        match self {
+            ParseLoose => Some("loose"),
+            ModuleDev => Some("dev"),
+            ModuleGenerate => Some("generateModule"),
+            ModuleExperimentalAsync => Some("experimentalAsync"),
+            CompileOptionsCustomElement => Some("customElement"),
+            CompileOptionsAccessors => Some("accessors"),
+            CompileOptionsNamespace => Some("namespace"),
+            CompileOptionsImmutable => Some("immutable"),
+            CompileOptionsCss => Some("css"),
+            CompileOptionsPreserveComments => Some("preserveComments"),
+            CompileOptionsPreserveWhitespace => Some("preserveWhitespace"),
+            CompileOptionsFragments => Some("fragments"),
+            CompileOptionsRunes => Some("runes"),
+            CompileOptionsDiscloseVersion => Some("discloseVersion"),
+            CompileOptionsCompatibility => Some("compatibility"),
+            CompileOptionsCompatibilityComponentApi => Some("compatibilityComponentApi"),
+            CompileOptionsHmr => Some("hmr"),
+            CustomElementTag => Some("customElementDescriptor.tag"),
+            CustomElementShadow => Some("customElementDescriptor.shadow"),
+            CustomElementExtend => Some("customElementExtend"),
+            CustomElementPropsAttribute => Some("customElementDescriptor.props.*.attribute"),
+            CustomElementPropsReflect => Some("customElementDescriptor.props.*.reflect"),
+            CustomElementPropsType => Some("customElementDescriptor.props.*.propType"),
+
+            // No slot: derived, host-resolved, oracle-only, or an output
+            // shape this compiler does not publish.
+            ParseFilename
+            | ParseModern
+            | ModuleFilename
+            | ModuleRootDir
+            | ModuleWarningFilter
+            | CompileOptionsName
+            | CompileOptionsCssHash
+            | CompileOptionsSourcemap
+            | CompileOptionsOutputFilename
+            | CompileOptionsCssOutputFilename
+            | CompileOptionsModernAst
+            | OptimizeOptionsHydrate => None,
+        }
+    }
 }
 
 pub const ALL_SVELTE_OPTIONS: [SvelteOption; 35] = {
@@ -155,6 +265,98 @@ pub const ALL_SVELTE_OPTIONS: [SvelteOption; 35] = {
         CustomElementPropsReflect,
         CustomElementPropsType,
         OptimizeOptionsHydrate,
+    ]
+};
+
+/// Whether one [`SvelteOptionAttempt`] field was supplied at all.
+type SveltePresenceProbe = fn(&SvelteOptionAttempt) -> bool;
+
+/// Every Svelte option [`SvelteOptionAttempt::into_request`] refuses on
+/// PRESENCE, in the deterministic order it checks them: the option, the
+/// capability cell (if any) that refuses it, and the probe that decides
+/// it, all on ONE row.
+///
+/// Same arrangement and same reason as
+/// [`crate::compile_request::vue::PRESENCE_REFUSED_VUE_SLOTS`] — a slot's
+/// identity and the field it reads move together, so a refusal cannot name
+/// a neighbour's option. `each_unsupported_slot_refuses_by_its_own_identity`
+/// proves the pairing slot by slot.
+const PRESENCE_REFUSED_SVELTE_SLOTS: [(
+    SvelteOption,
+    Option<crate::compile_request::CapabilityCell>,
+    SveltePresenceProbe,
+); 8] = {
+    use crate::compile_request::CapabilityCell;
+    use SvelteOption::*;
+    [
+        (ParseLoose, None, |attempt| attempt.loose.is_some()),
+        (CompileOptionsAccessors, None, |attempt| {
+            attempt.accessors.is_some()
+        }),
+        (CompileOptionsImmutable, None, |attempt| {
+            attempt.immutable.is_some()
+        }),
+        (CompileOptionsCompatibilityComponentApi, None, |attempt| {
+            attempt.compatibility_component_api.is_some()
+        }),
+        (CompileOptionsHmr, None, |attempt| attempt.hmr.is_some()),
+        (CustomElementExtend, None, |attempt| {
+            attempt.custom_element_extend.is_some()
+        }),
+        (
+            ModuleGenerate,
+            Some(CapabilityCell::SvelteModule),
+            |attempt| attempt.generate_module.is_some(),
+        ),
+        (
+            ModuleExperimentalAsync,
+            Some(CapabilityCell::SvelteModule),
+            |attempt| attempt.experimental_async.is_some(),
+        ),
+    ]
+};
+
+/// The `(option, capability)` identities of
+/// [`PRESENCE_REFUSED_SVELTE_SLOTS`], projected for consumers that need
+/// the refusable SET without the probes. Derived, not restated.
+pub const PRESENCE_REFUSED_SVELTE_OPTIONS: [(
+    SvelteOption,
+    Option<crate::compile_request::CapabilityCell>,
+); PRESENCE_REFUSED_SVELTE_SLOTS.len()] = {
+    let mut rows = [(SvelteOption::ParseLoose, None); PRESENCE_REFUSED_SVELTE_SLOTS.len()];
+    let mut index = 0;
+    while index < PRESENCE_REFUSED_SVELTE_SLOTS.len() {
+        rows[index] = (
+            PRESENCE_REFUSED_SVELTE_SLOTS[index].0,
+            PRESENCE_REFUSED_SVELTE_SLOTS[index].1,
+        );
+        index += 1;
+    }
+    rows
+};
+
+/// Every Svelte option a [`crate::compile_request::CompileRequestError`]
+/// can name for a caller's VALUE rather than for the option's presence.
+///
+/// The DECLARED set, enforced by
+/// [`crate::compile_request::CompileRequestError::malformed_option_value`]
+/// — see [`crate::compile_request::vue::VALUE_REFUSED_VUE_OPTIONS`].
+///
+/// The refusal sites, in this order: the custom-element prop-type
+/// vocabulary ([`admit_custom_element_descriptor`], the sole membership
+/// decision over that vocabulary); the custom-element tag
+/// (`crate::standalone`'s admitted-descriptor rendering); and the
+/// `namespace` / `fragments` / `css` tokens, whose recognized spellings
+/// are decided at request construction rather than defaulted by the Svelte
+/// carrier's own parsers.
+pub const VALUE_REFUSED_SVELTE_OPTIONS: [SvelteOption; 5] = {
+    use SvelteOption::*;
+    [
+        CustomElementPropsType,
+        CustomElementTag,
+        CompileOptionsNamespace,
+        CompileOptionsFragments,
+        CompileOptionsCss,
     ]
 };
 
@@ -355,63 +557,20 @@ pub struct SvelteOptionAttempt {
 }
 
 impl SvelteOptionAttempt {
-    /// The 6 unconditionally-unsupported option rows, plus `generate_module`
-    /// / `experimental_async` — `ModuleGenerate`/`ModuleExperimentalAsync`
-    /// are themselves classified `SupportedCanonical` as OPTIONS (see
-    /// [`SvelteOption::class`]), but the `SVELTE-MODULE` module-compilation
-    /// CAPABILITY they gate is `unsupported fail-closed` per
-    /// `capability-matrix.tsv`, so they carry `Some(SvelteModule)` here
+    /// Refuses the 6 unconditionally-unsupported option rows, plus
+    /// `generate_module` / `experimental_async` —
+    /// `ModuleGenerate`/`ModuleExperimentalAsync` are themselves classified
+    /// `SupportedCanonical` as OPTIONS (see [`SvelteOption::class`]), but
+    /// the `SVELTE-MODULE` module-compilation CAPABILITY they gate is
+    /// `unsupported fail-closed` per `capability-matrix.tsv`, so their rows
+    /// in [`PRESENCE_REFUSED_SVELTE_SLOTS`] carry `Some(SvelteModule)`
     /// rather than `None` — the option admits fine in isolation, the
     /// capability it depends on does not.
-    fn unsupported_slots(
-        &self,
-    ) -> [(
-        bool,
-        SvelteOption,
-        Option<crate::compile_request::CapabilityCell>,
-    ); 8] {
-        use crate::compile_request::CapabilityCell;
-        [
-            (self.loose.is_some(), SvelteOption::ParseLoose, None),
-            (
-                self.accessors.is_some(),
-                SvelteOption::CompileOptionsAccessors,
-                None,
-            ),
-            (
-                self.immutable.is_some(),
-                SvelteOption::CompileOptionsImmutable,
-                None,
-            ),
-            (
-                self.compatibility_component_api.is_some(),
-                SvelteOption::CompileOptionsCompatibilityComponentApi,
-                None,
-            ),
-            (self.hmr.is_some(), SvelteOption::CompileOptionsHmr, None),
-            (
-                self.custom_element_extend.is_some(),
-                SvelteOption::CustomElementExtend,
-                None,
-            ),
-            (
-                self.generate_module.is_some(),
-                SvelteOption::ModuleGenerate,
-                Some(CapabilityCell::SvelteModule),
-            ),
-            (
-                self.experimental_async.is_some(),
-                SvelteOption::ModuleExperimentalAsync,
-                Some(CapabilityCell::SvelteModule),
-            ),
-        ]
-    }
-
     pub fn into_request(
         self,
     ) -> Result<SvelteCompileRequest, crate::compile_request::CompileRequestError> {
-        for (present, option, capability) in self.unsupported_slots() {
-            if present {
+        for (option, capability, is_present) in PRESENCE_REFUSED_SVELTE_SLOTS {
+            if is_present(&self) {
                 return Err(
                     crate::compile_request::CompileRequestError::UnsupportedOption {
                         option: crate::compile_request::FrameworkOption::Svelte(option),
@@ -461,14 +620,16 @@ fn admit_custom_element_descriptor(
         } = prop;
         let prop_type = match prop_type {
             None => None,
-            Some(spelling) => Some(SvelteCustomElementPropType::from_spelling(&spelling).ok_or(
-                crate::compile_request::CompileRequestError::MalformedOptionValue {
-                    option: crate::compile_request::FrameworkOption::Svelte(
-                        SvelteOption::CustomElementPropsType,
-                    ),
-                    value: spelling,
-                },
-            )?),
+            Some(spelling) => Some(
+                SvelteCustomElementPropType::from_spelling(&spelling).ok_or_else(|| {
+                    crate::compile_request::CompileRequestError::malformed_option_value(
+                        crate::compile_request::FrameworkOption::Svelte(
+                            SvelteOption::CustomElementPropsType,
+                        ),
+                        spelling,
+                    )
+                })?,
+            ),
         };
         admitted.insert(
             name,
@@ -565,26 +726,58 @@ mod tests {
         assert_eq!(request.dev, Some(true));
     }
 
+    /// Each presence-refused field refuses, AND names its own option and
+    /// capability cell — the same pairing proof as the Vue half, for the
+    /// same reason: `PRESENCE_REFUSED_SVELTE_SLOTS` pairs identity,
+    /// capability and probe on one row, and this states which field each
+    /// row's probe must actually read.
+    ///
+    /// Mutation recipes:
+    /// - Point one row's probe at a neighbour's field: the moved-from slot
+    ///   admits and its `unwrap_err` panics.
+    /// - Swap two rows of `PRESENCE_REFUSED_SVELTE_SLOTS`: both swapped
+    ///   slots report the other's option here.
+    /// - Drop `Some(CapabilityCell::SvelteModule)` from the
+    ///   `ModuleGenerate` entry: that slot's capability assertion fails,
+    ///   which is the difference between "this option is never admitted"
+    ///   and "the capability that would serve it is unsupported".
     #[test]
-    fn each_of_the_six_unsupported_slots_refuses_independently() {
-        let base = SvelteOptionAttempt::default();
-        for i in 0..6u8 {
-            let mut a = base.clone();
-            match i {
-                0 => a.loose = Some(true),
-                1 => a.accessors = Some(true),
-                2 => a.immutable = Some(true),
-                3 => a.compatibility_component_api = Some(true),
-                4 => a.hmr = Some(true),
-                5 => a.custom_element_extend = Some(true),
-                _ => unreachable!(),
+    fn each_unsupported_slot_refuses_by_its_own_identity() {
+        let setters: [fn(&mut SvelteOptionAttempt); 8] = [
+            |a| a.loose = Some(true),
+            |a| a.accessors = Some(true),
+            |a| a.immutable = Some(true),
+            |a| a.compatibility_component_api = Some(true),
+            |a| a.hmr = Some(true),
+            |a| a.custom_element_extend = Some(true),
+            |a| a.generate_module = Some(true),
+            |a| a.experimental_async = Some(true),
+        ];
+        assert_eq!(setters.len(), PRESENCE_REFUSED_SVELTE_OPTIONS.len());
+        for (index, set) in setters.into_iter().enumerate() {
+            let mut attempt = SvelteOptionAttempt::default();
+            set(&mut attempt);
+            let (expected_option, expected_capability) = PRESENCE_REFUSED_SVELTE_OPTIONS[index];
+            match attempt.into_request().unwrap_err() {
+                crate::compile_request::CompileRequestError::UnsupportedOption {
+                    option,
+                    capability,
+                } => {
+                    assert_eq!(
+                        option,
+                        crate::compile_request::FrameworkOption::Svelte(expected_option),
+                        "slot {index} refused under another slot's identity"
+                    );
+                    assert_eq!(
+                        capability, expected_capability,
+                        "slot {index} named the wrong capability cell"
+                    );
+                }
+                other => panic!("slot {index}: expected UnsupportedOption, got {other:?}"),
             }
-            assert!(
-                a.into_request().is_err(),
-                "slot {i} must refuse construction"
-            );
         }
     }
+
     fn attempt_with_prop_type(spelling: &str) -> SvelteOptionAttempt {
         let mut props = std::collections::BTreeMap::new();
         props.insert(
