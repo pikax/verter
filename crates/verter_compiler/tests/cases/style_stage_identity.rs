@@ -13,25 +13,13 @@ use verter_compiler::compile::style_usage::extract_style_v_bind_usage_for_langua
 use verter_compiler::parser::types::StyleLang;
 use verter_compiler::style_planner::{
     prepare_supplied_style, run_vue_style_authored_only, run_vue_style_cascade,
-    transform_vue_css_modules, transform_vue_scoped_css, transform_vue_style, transform_vue_v_bind,
-    AuthoredStyleInput, CascadeInput, PlainCssInput, StyleRewriteOutcome, VerifiedPlainCss,
-    VueStyleCascadeOutcome,
+    transform_vue_style, transform_vue_v_bind, AuthoredStyleInput, CascadeInput,
+    StyleRewriteOutcome, VerifiedPlainCss, VueStyleCascadeOutcome,
 };
 use verter_css_syntax::{
     parse_style_ir, CssDialect, CssParseMode, CssSource, ExternalStyleProducer,
     PreprocessorIdentity, QualifiedStyleResult, StyleProducer, StyleStage,
 };
-
-fn plain(code: &str) -> PlainCssInput<'_> {
-    PlainCssInput::try_new(
-        code,
-        CssDialect::Css,
-        "probe.style",
-        "space:probe",
-        "artifact:probe",
-    )
-    .expect("plain css")
-}
 
 fn sass_producer() -> PreprocessorIdentity {
     PreprocessorIdentity::Named(
@@ -115,19 +103,15 @@ fn a_rewrite_refusal_reaches_consumers_as_a_stage_qualified_diagnostic() {
     );
 }
 
-/// When an earlier stage rewrote the bytes, a later stage's refusal is
-/// reported against the rewritten ones, and the diagnostic says so.
+/// Shared planning keeps later refusals in authored coordinates even when an
+/// earlier stage has edits waiting for terminal materialization.
 ///
-/// This is the branch a consumer's mapping choice turns on. A `v-bind()`
-/// rewrite changes the length of the block, so the same offset means different
-/// things before and after it: a consumer that runs the refusal's span through
-/// the authored block's arithmetic lands past the construct the message names.
-/// Nothing about the refusal itself distinguishes the two cases — only the
-/// stage does.
+/// Mutation recipe: project the diagnostic with `StyleStage::FrameworkRewritten`
+/// in `finish_vue_style_cascade` — the stage assertion fails; materialize the
+/// v-bind edits before the modules planner reads the sheet and the span slides
+/// off the `}` by the rewrite's length delta.
 #[test]
-fn a_refusal_after_a_rewrite_addresses_the_rewritten_space() {
-    // The stray `}` is refused by the CSS-Modules stage; it sits after the
-    // `v-bind()` the authored stage rewrites into a longer `var()` call.
+fn a_refusal_planned_beside_a_v_bind_edit_addresses_the_authored_space() {
     let source = ".a { color: v-bind(tone); }\n}\n";
     let outcome =
         run_vue_style_cascade(authored(source, CssDialect::Css), "sc1", true, false, false);
@@ -137,25 +121,15 @@ fn a_refusal_after_a_rewrite_addresses_the_rewritten_space() {
     };
     assert_eq!(
         diagnostic.stage(),
-        StyleStage::FrameworkRewritten,
-        "the v-bind stage moved these bytes before the refusing stage saw them"
+        StyleStage::Authored,
+        "the refusing planner inspected the shared authored IR"
     );
 
-    // The refusing stage clears the output, so the bytes the span addresses
-    // are not on this outcome — they are what the v-bind stage alone produced.
-    // That is precisely why the stage has to travel with the span: the
-    // reported position outlives the text it addresses.
-    let rewritten = run_vue_style_authored_only(authored(source, CssDialect::Css), "sc1", false);
     let span = diagnostic.span().expect("this refusal carries a position");
     assert_eq!(
-        &rewritten.code()[span.start as usize..span.end as usize],
+        &source[span.start as usize..span.end as usize],
         "}",
-        "the span addresses the rewritten bytes it was reported against"
-    );
-    assert_ne!(
-        source.get(span.start as usize..span.end as usize),
-        Some("}"),
-        "and reading it out of the authored bytes lands somewhere else"
+        "the span addresses the authored bytes the shared planner inspected"
     );
 }
 
@@ -377,9 +351,9 @@ fn every_cascade_entry_reports_the_same_inclusion_inventory() {
         "and so did the verified entry's — the route must not change the answer"
     );
 
-    // The remaining entries parse the same bytes and must publish the same
-    // inventory. Any one of them reporting "no inclusions", or reporting the
-    // inclusion but not that it brings in unparsed bytes, is the
+    // The remaining production entries parse the same bytes and must publish
+    // the same inventory. Any one of them reporting "no inclusions", or
+    // reporting the inclusion but not that it brings in unparsed bytes, is the
     // route-dependent answer this contract exists to close.
     assert_eq!(
         cascade_inventory(&run_vue_style_authored_only(
@@ -390,20 +364,8 @@ fn every_cascade_entry_reports_the_same_inclusion_inventory() {
         expected,
         "the authored-only entry parsed the sheet, so it reports what its parse saw"
     );
-    let modules_only = transform_vue_css_modules(plain(source), "sc1").expect("modules stage");
-    let scoped_only = transform_vue_scoped_css(plain(source), "sc1").expect("scoped stage");
     let v_bind_only =
         transform_vue_v_bind(authored(source, CssDialect::Css), "sc1").expect("v-bind stage");
-    assert_eq!(
-        single_stage_inventory(&modules_only),
-        expected,
-        "the CSS-Modules entry parsed the sheet, so it reports what its parse saw"
-    );
-    assert_eq!(
-        single_stage_inventory(&scoped_only),
-        expected,
-        "and so does the scoped-selector entry"
-    );
     assert_eq!(
         single_stage_inventory(&v_bind_only),
         expected,
@@ -425,66 +387,132 @@ fn every_cascade_entry_reports_the_same_inclusion_inventory() {
     );
 }
 
+/// A stylesheet nested past the parser's depth limit: `parse_style_ir` returns
+/// an error rather than a recovered IR, so the cascade holds no parse at all.
+fn nesting_overflow_sheet() -> String {
+    const DEPTH: usize = 130;
+    let mut source = String::with_capacity(DEPTH * 3);
+    for _ in 0..DEPTH {
+        source.push_str("a{");
+    }
+    for _ in 0..DEPTH {
+        source.push('}');
+    }
+    source
+}
+
 /// The unsurveyed state answers "this block may pull in bytes nothing here
 /// parsed", never "its surface is exhaustive".
 ///
-/// The reachable state: a cascade whose only parsing stage is the authored
-/// `v-bind()` one, and that stage refuses. `module` and `scoped` are both
-/// false, so no later stage parses either, and NOTHING ever surveys the
-/// block's inclusions. A fail-open answer there is the wrong-complete
-/// direction the correctness budget puts at zero — it publishes "this block
-/// declares its whole surface" for a block no parse ever read, and a consumer
-/// that trusts it reports a binding used only from an imported sheet as
-/// unused.
+/// The reachable state: the cascade's parse of the input never completed.
+/// `module` and `scoped` are both false, so the output is not cleared either
+/// and the block is still published — with no parse behind it. A fail-open
+/// answer there is the wrong-complete direction the correctness budget puts at
+/// zero: it publishes "this block declares its whole surface" for a block no
+/// parse ever read, and a consumer that trusts it reports a binding used only
+/// from an imported sheet as unused.
 ///
 /// Discriminates a derived `Default` on the published answer: `false` is the
 /// STRONG claim, and it is exactly what a plain `bool` field hands out for
 /// free.
 #[test]
 fn a_cascade_that_surveyed_nothing_never_claims_an_exhaustive_surface() {
-    // A Sass `v-bind()` spanning a line break is an indented-layout mutation:
-    // the authored stage refuses it before recording anything. With neither
-    // modules nor scoping requested, no later stage parses the block either.
-    //
-    // The sheet has NO inclusions, which is what makes this discriminating —
-    // a surveyed parse of it answers `false`, so `true` here can only come
-    // from the unsurveyed state and never from the sheet's own content.
-    let unsurveyable = ".a\n  color: v-bind(\n    tone)\n";
-    let outcome = run_vue_style_cascade(
-        authored(unsurveyable, CssDialect::Sass),
-        "sc1",
-        false,
-        false,
-        false,
-    );
-    assert!(
-        !outcome.stage_failures.is_empty(),
-        "the fixture must actually refuse, or it surveys after all"
-    );
-    assert!(
-        outcome.facts.pulls_in_unparsed_bytes(),
-        "a block nothing surveyed cannot claim its surface is exhaustive"
-    );
+    // Both entry points, on the plain-CSS dialect the shared plan owns: a
+    // v-bind-only request is the same request either way, so a block neither
+    // could read must read the same from both. A second answer here is the
+    // route-dependent fact this contract exists to close.
+    type Entry = fn(&str) -> VueStyleCascadeOutcome;
+    let entries: [(&str, Entry); 2] = [
+        ("cascade", |code| {
+            run_vue_style_cascade(authored(code, CssDialect::Css), "sc1", false, false, false)
+        }),
+        ("authored-only", |code| {
+            run_vue_style_authored_only(authored(code, CssDialect::Css), "sc1", false)
+        }),
+    ];
 
-    // Control: the same sheet with a single-line `v-bind()` IS surveyed, and
-    // then answers `false`. Without this leg the assertion above would also
-    // pass for a sheet that simply has an inclusion.
-    let surveyed = ".a\n  color: v-bind(tone)\n";
-    let control = run_vue_style_cascade(
-        authored(surveyed, CssDialect::Sass),
-        "sc1",
-        false,
-        false,
-        false,
-    );
-    assert!(
-        control.stage_failures.is_empty(),
-        "the control must not refuse"
-    );
-    assert!(
-        !control.facts.pulls_in_unparsed_bytes(),
-        "a surveyed inclusion-free sheet declares its whole surface"
-    );
+    let unsurveyable = nesting_overflow_sheet();
+    for (name, entry) in entries {
+        let outcome = entry(&unsurveyable);
+        assert!(
+            !outcome.stage_failures.is_empty(),
+            "{name}: the fixture must actually miss its parse, or it surveys \
+             after all"
+        );
+        assert!(
+            outcome.facts.pulls_in_unparsed_bytes(),
+            "{name}: a block nothing surveyed cannot claim its surface is \
+             exhaustive"
+        );
+
+        // Control: an inclusion-free sheet the same route DID parse answers
+        // `false`. Without this leg the assertion above would also pass for a
+        // published answer that is simply always `true`.
+        let control = entry(".a { color: red; }\n");
+        assert!(
+            control.stage_failures.is_empty(),
+            "{name}: the control must not refuse"
+        );
+        assert!(
+            !control.facts.pulls_in_unparsed_bytes(),
+            "{name}: a surveyed inclusion-free sheet declares its whole surface"
+        );
+    }
+}
+
+/// A stage that REFUSES TO PLAN does not un-survey a parse that completed, and
+/// every entry point says so identically.
+///
+/// The divergence this closes: a v-bind-only request answered through a second,
+/// authored-dialect-only route recorded the inclusion survey inside its
+/// success arm, so a block whose parse completed but whose `v-bind()` planning
+/// refused was published as unsurveyed on that route and as surveyed on the
+/// shared one. Nothing in either signature says which; only the published fact
+/// differs, and a consumer branching on it reports a binding used from an
+/// imported sheet as unused on one route and not the other.
+///
+/// Each leg pairs a refusing sheet with a clean control on the SAME route, so
+/// the assertion cannot be satisfied by an answer that is constant.
+#[test]
+fn a_refusing_stage_does_not_un_survey_a_completed_parse() {
+    // Sass, refusing: a `v-bind()` spanning a line break is an indented-layout
+    // mutation the authored stage refuses to rewrite. The parse itself
+    // completed, and the sheet has NO inclusions.
+    let sass = ".a\n  color: v-bind(\n    tone)\n";
+    // CSS, refusing: `v-bind()` inside an unterminated nested block is not a
+    // trusted rewrite target. The parse recovers, so this leg additionally
+    // pins that a RECOVERED parse still fails closed through the owner's own
+    // discarded-input check rather than through an absent recording.
+    let css = ".a { .b { color: v-bind(tone); }\n";
+
+    for (dialect, refusing, surveyed_answer) in [
+        (CssDialect::Sass, sass, false),
+        (CssDialect::Css, css, true),
+    ] {
+        let cascaded =
+            run_vue_style_cascade(authored(refusing, dialect), "sc1", false, false, false);
+        let authored_only = run_vue_style_authored_only(authored(refusing, dialect), "sc1", false);
+
+        assert!(
+            !cascaded.stage_failures.is_empty(),
+            "{dialect:?}: the fixture must actually refuse to plan"
+        );
+        assert_eq!(
+            cascaded.facts.pulls_in_unparsed_bytes(),
+            surveyed_answer,
+            "{dialect:?}: the completed parse's own answer is what is published"
+        );
+        assert_eq!(
+            authored_only.facts.pulls_in_unparsed_bytes(),
+            cascaded.facts.pulls_in_unparsed_bytes(),
+            "{dialect:?}: the same request must not answer differently by entry point"
+        );
+        assert_eq!(
+            authored_only.stage_failures.len(),
+            cascaded.stage_failures.len(),
+            "{dialect:?}: and must not record a different number of refusals"
+        );
+    }
 }
 
 /// A Sass built-in module is not another stylesheet, and a block that only
@@ -518,20 +546,14 @@ fn a_sass_builtin_module_does_not_make_the_v_bind_inventory_incomplete() {
     );
 }
 
-/// A refusal from the scoped-selector stage, after the CSS-Modules stage
-/// rewrote the bytes, addresses the REWRITTEN bytes.
+/// A scoped-selector refusal and CSS-Modules edits share authored coordinates
+/// until the one terminal transform.
 ///
-/// The CSS-Modules stage rewrites on its own — no v-bind() need be involved —
-/// and the scoped-selector stage below it then parses that output. Deciding a
-/// later stage's coordinate space from "did v-bind() rewrite" therefore answers
-/// for the wrong stage: it stamps this refusal as authored, and the one
-/// consumer that trusts that label shifts the span by the authored block's
-/// start offset. Class hashing changes byte lengths, so the reported range
-/// lands past the construct the message names.
+/// Mutation recipe: run the scoping planner over the module stage's
+/// materialized bytes — the class hash lengthens the prefix and the anchor no
+/// longer sits immediately after the authored `:global(`.
 #[test]
-fn a_refusal_after_a_modules_rewrite_addresses_the_rewritten_space() {
-    // The module stage hashes .card, which lengthens every offset after it;
-    // the scoped stage then refuses the empty :global() argument that follows.
+fn a_scoping_refusal_planned_beside_module_edits_addresses_the_authored_space() {
     let source = ".card { color: red; }\n:global() { color: blue; }\n";
     let outcome =
         run_vue_style_cascade(authored(source, CssDialect::Css), "sc1", true, true, false);
@@ -545,26 +567,14 @@ fn a_refusal_after_a_modules_rewrite_addresses_the_rewritten_space() {
     };
     assert_eq!(
         diagnostic.stage(),
-        StyleStage::FrameworkRewritten,
-        "the modules stage moved these bytes before the scoping stage saw them"
+        StyleStage::Authored,
+        "the scoping planner inspected the shared authored IR"
     );
 
-    // And the span really does address the modules output. The refused
-    // construct is an empty argument list, so the span is empty and what it
-    // points AT is what identifies it: in the modules output those offsets sit
-    // inside the refused ":global()", and in the authored bytes they do not.
-    let modules_only =
-        run_vue_style_cascade(authored(source, CssDialect::Css), "sc1", true, false, false);
     let span = diagnostic.span().expect("this refusal carries a position");
-    let rewritten = modules_only.code();
     assert!(
-        rewritten[..span.start as usize].ends_with(":global("),
-        "the span addresses the rewritten bytes it was reported against: {:?}",
-        &rewritten[..span.start as usize]
-    );
-    assert!(
-        !source[..span.start as usize].ends_with(":global("),
-        "and running the same offset through the authored block's arithmetic lands somewhere the refused construct is not"
+        source[..span.start as usize].ends_with(":global("),
+        "the empty refused argument is anchored in authored bytes"
     );
 }
 

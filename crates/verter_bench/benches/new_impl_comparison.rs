@@ -20,10 +20,7 @@ use verter_compiler::parser::types::StyleLang;
 use verter_compiler::parser::Syntax as NewSyntax;
 use verter_compiler::script::prepared::PreparedScript;
 use verter_compiler::script::{generate_script, ScriptCodeGenOptions};
-use verter_compiler::style_planner::{
-    transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput, PlainCssInput,
-    StyleRewriteOutcome,
-};
+use verter_compiler::style_planner::{run_vue_style_cascade, AuthoredStyleInput};
 use verter_compiler::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
 use verter_compiler::template::oxc::parse_template_expressions;
 use verter_compiler::tokenizer::byte::tokenize;
@@ -70,33 +67,15 @@ fn compile_full(source: &str) -> String {
                 Some(StyleLang::Stylus) => CssDialect::Stylus,
                 Some(StyleLang::PostCss | StyleLang::Unknown) => continue,
             };
-            if let Ok(stage_one) = transform_vue_v_bind(
+            let outcome = run_vue_style_cascade(
                 AuthoredStyleInput::new(css_source, dialect, "bench.vue", "bench", "bench")
                     .without_source_map(),
                 scope_id,
-            ) {
-                let mut code = match stage_one {
-                    StyleRewriteOutcome::Unchanged { .. } => css_source.to_string(),
-                    StyleRewriteOutcome::Rewritten { code, .. } => code,
-                };
-                if style_node.scoped && !dialect.requires_external_preprocessing() {
-                    let input = PlainCssInput::try_new(
-                        &code,
-                        CssDialect::Css,
-                        "bench.vue",
-                        "bench",
-                        "bench",
-                    )
-                    .expect("CSS selected")
-                    .without_source_map();
-                    if let Ok(StyleRewriteOutcome::Rewritten { code: scoped, .. }) =
-                        transform_vue_scoped_css(input, scope_id)
-                    {
-                        code = scoped;
-                    }
-                }
-                style_outputs.push(code);
-            }
+                false,
+                style_node.scoped && !dialect.requires_external_preprocessing(),
+                false,
+            );
+            style_outputs.push(outcome.code().to_string());
         }
     }
     black_box(&style_outputs);

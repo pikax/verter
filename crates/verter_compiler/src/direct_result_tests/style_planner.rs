@@ -9,11 +9,11 @@ use crate::style_planner::{
     cascade_output_is_publishable, cascade_requested_source_map, last_parse_ir_dialect,
     parse_ir_invocation_count, parse_plain_css_for_verification,
     reset_build_string_invocation_count, reset_last_parse_ir_dialect,
-    reset_parse_ir_invocation_count, reset_style_ir_stage_observations, run_vue_style_cascade,
-    style_ir_stage_observations, transform_vue_css_modules, transform_vue_scoped_css,
-    transform_vue_style, transform_vue_v_bind, AuthoredStyleInput, CascadeInput, PlainCssInput,
-    StyleRewriteFailure, StyleRewriteFailureClass, StyleRewriteOutcome, StyleRewriteStage,
-    VerifiedPlainCss, VueStyleCascadeOutcome,
+    reset_parse_ir_invocation_count, reset_style_ir_stage_observations,
+    run_vue_style_authored_only, run_vue_style_cascade, style_ir_stage_observations,
+    transform_vue_css_modules, transform_vue_scoped_css, transform_vue_style, transform_vue_v_bind,
+    AuthoredStyleInput, CascadeInput, PlainCssInput, StyleRewriteFailure, StyleRewriteFailureClass,
+    StyleRewriteOutcome, StyleRewriteStage, VerifiedPlainCss, VueStyleCascadeOutcome,
 };
 use crate::{
     compile::{types::VueExecutionInputs, VueMacroSemanticInput},
@@ -30,6 +30,9 @@ use crate::svelte::{
 };
 use oxc_allocator::Allocator;
 
+#[path = "../../tests/support/style_planner_gen.rs"]
+mod style_planner_gen;
+
 fn rewritten(outcome: StyleRewriteOutcome) -> (String, String) {
     match outcome {
         StyleRewriteOutcome::Rewritten {
@@ -37,6 +40,18 @@ fn rewritten(outcome: StyleRewriteOutcome) -> (String, String) {
         } => (code, source_map),
         StyleRewriteOutcome::Unchanged { .. } => panic!("expected a rewrite"),
     }
+}
+
+fn nesting_overflow_css() -> String {
+    const DEPTH: usize = 130;
+    let mut source = String::with_capacity(DEPTH * 3);
+    for _ in 0..DEPTH {
+        source.push_str("a{");
+    }
+    for _ in 0..DEPTH {
+        source.push('}');
+    }
+    source
 }
 
 fn scoped(source: &str, scope_id: &str) -> String {
@@ -239,8 +254,47 @@ fn vue_unknown_style_lang_does_not_produce_a_css_cascade_rewrite() {
 }
 
 // @ai-generated - R2-6 refuses scoped authored dialects until plain CSS is supplied.
+//
+// Mutation recipe: in `CssStageRequest::gated`, drop the refusal from the
+// `Err` arm (`Self { module: false, scoped: false, refusal: None }`) — the
+// CSS-only stages are still dropped, so every non-CSS dialect publishes its
+// authored bytes with neither a rewrite nor a recorded refusal, which is the
+// silent unscoped-publication outcome the sweep exists to name.
 #[test]
 fn vue_scoped_non_css_never_publishes_unscoped_css() {
+    // Every dialect answers a `<style scoped>` request one of exactly two
+    // ways: it rewrites the bytes, or it records a refusal. Publishing the
+    // authored bytes unscoped with neither is the wrong-complete outcome —
+    // selectors that apply to the whole document — and it is what a dialect
+    // that is neither plain CSS nor externally preprocessed would get if the
+    // cascade's entry gate were not the exact complement of the non-CSS
+    // branch's refusal predicate. Swept over the dialect owner's own variant
+    // list, and asserted before the Less case below, so a dialect added there
+    // has to answer this question on its own rather than behind a refusal one
+    // named dialect already proves.
+    const AUTHORED: &str = ".a { color: red }";
+    for dialect in CssDialect::ALL {
+        let outcome = run_vue_style_cascade(
+            AuthoredStyleInput::new(
+                AUTHORED,
+                dialect,
+                "probe.style",
+                "space:probe",
+                "artifact:probe",
+            ),
+            "sc1",
+            false,
+            true,
+            false,
+        );
+        assert!(
+            !outcome.stage_failures.is_empty() || outcome.code() != AUTHORED,
+            "{dialect:?} published authored bytes unscoped without recording a refusal"
+        );
+    }
+
+    // And the refusal reaches a real consumer through the public compile
+    // boundary, cleared rather than published.
     let less = compile_style("<style lang=\"less\" scoped>.a { color: red }</style>");
     assert!(less.styles[0].code.is_empty(), "{}", less.styles[0].code);
     assert!(
@@ -635,24 +689,19 @@ fn vue_compile_routes_authored_styles_through_the_ir_planner() {
     assert_eq!(result.styles[0].code, ".bad { color: v-bind(tone; }");
 }
 
-/// A refusal reported against bytes an earlier stage rewrote must not be
-/// placed by the authored block's own offset arithmetic.
+/// A refusal planned beside an earlier edit still addresses authored bytes.
+/// The shared plan never materializes the v-bind rewrite before CSS Modules
+/// inspects the stylesheet, so the refusal keeps its exact authored anchor.
 ///
-/// `v-bind(tone)` → `var(--sc1-tone)` grows the block by three bytes, so every
-/// offset the CSS-Modules stage reports after it is three past the construct it
-/// names in the source the user is looking at. Adding the block start to it
-/// underlines the wrong text — silently, and only for blocks where an earlier
-/// stage happened to edit. The diagnostic carries the space its span addresses,
-/// and there is no rewritten → SFC map at this boundary, so the refusal anchors
-/// on the block instead of pointing three bytes into the wrong token.
+/// Mutation recipe: make `finish_vue_style_cascade` project diagnostics with
+/// `StyleStage::FrameworkRewritten` instead of `input_stage` — the carrier
+/// then anchors on the whole block and the exact `}` span assertion fails.
 #[test]
-fn a_refusal_against_rewritten_bytes_is_not_placed_by_authored_arithmetic() {
-    // The stray `}` is what the CSS-Modules stage refuses; it sits AFTER the
-    // `v-bind()` the earlier stage rewrites, so the two spaces disagree.
+fn shared_plan_refusal_keeps_its_authored_anchor_after_prior_edits() {
     let style = "<style module>.a { color: v-bind(tone); }\n}\n</style>";
     let source = format!("<template/>{style}");
-    let content_start = u32::try_from(source.find(".a {").expect("style content")).unwrap();
-    let content_end = u32::try_from(source.find("</style>").expect("close tag")).unwrap();
+    let refusal_start = u32::try_from(source.rfind("}\n</style>").expect("stray close brace"))
+        .expect("fixture offset fits u32");
 
     let request = CompileRequest::new(
         vec![CompileProduct::RuntimeClient(
@@ -687,14 +736,13 @@ fn a_refusal_against_rewritten_bytes_is_not_placed_by_authored_arithmetic() {
 
     assert_eq!(
         (span.start, span.end),
-        (content_start, content_end),
-        "a refusal in the rewritten space anchors on its block, not on an offset \
-         inside it that the block's own arithmetic cannot address"
+        (refusal_start, refusal_start + 1),
+        "the refusal must retain its authored byte anchor"
     );
     assert_eq!(
         &source[span.start as usize..span.end as usize],
-        ".a { color: v-bind(tone); }\n}\n",
-        "the anchor is the authored block content"
+        "}",
+        "the anchor is the unsupported authored token"
     );
 }
 
@@ -1220,8 +1268,15 @@ fn zero_edit_routes_construct_no_code_transform() {
     }
 }
 
-// @ai-generated - Edit topology bound: `build_string()` runs exactly once per
-// rewrite that produces output. `:slotted()` argument scoping contributes
+// @ai-generated - Edit topology bound: compatible cascade stages contribute
+// one shared edit plan and terminal `build_string()`.
+//
+// Mutation recipe: give `shared_vue_style_plan` a per-stage `apply_cascade_stage`
+// (materialize after each plan instead of merging into one terminal edit
+// vector) — every `build_string_invocation_count()` assertion below reads the
+// stage count instead of 1.
+//
+// `:slotted()` argument scoping contributes
 // absolute-span edits directly to the outer emit's edit vector, so N
 // `:slotted()` occurrences still cost one outer emit build — whether an
 // occurrence contributes one argument edit (`.a`) or several
@@ -1271,8 +1326,102 @@ fn build_string_call_count_matches_edit_composition_depth() {
     assert!(!cascaded.code().contains(".a {"), "{}", cascaded.code());
     assert_eq!(
         build_string_invocation_count(),
-        3,
-        "v-bind, module, and scoped categories each build exactly once"
+        1,
+        "compatible v-bind, module, and scoped edits share one terminal build"
+    );
+
+    // A request the plain-CSS gate refused publishes nothing, so the plan must
+    // not materialize bytes first. The v-bind edits are still planned (the
+    // facts feed `_useCssVars`), which is exactly what makes 0 the answer under
+    // test rather than a consequence of there being nothing to emit: a route
+    // that ran the authored transform and then discarded its output reads 1.
+    reset_build_string_invocation_count();
+    let gate_refused = run_vue_style_cascade(
+        AuthoredStyleInput::new(
+            ".a { color: v-bind(tone); }",
+            CssDialect::Scss,
+            "probe.scss",
+            "space:probe",
+            "artifact:probe",
+        ),
+        "sc1",
+        true,
+        false,
+        true,
+    );
+    assert!(
+        gate_refused.result.is_refused(),
+        "an SCSS <style module> request refuses at the plain-CSS gate"
+    );
+    assert_eq!(
+        gate_refused.facts.v_bind_vars.len(),
+        1,
+        "the v-bind plan still ran, so the emit count is not vacuously zero"
+    );
+    assert_eq!(
+        build_string_invocation_count(),
+        0,
+        "a cleared output must never be materialized first"
+    );
+
+    reset_build_string_invocation_count();
+    let source = ".outer :global(.inner) { color: red; }";
+    let input = AuthoredStyleInput::new(
+        source,
+        CssDialect::Css,
+        "probe.css",
+        "space:probe",
+        "artifact:probe",
+    );
+    let global = run_vue_style_cascade(input, "sc1", true, true, true);
+    let shared_builds = build_string_invocation_count();
+    let modules = rewritten(
+        transform_vue_css_modules(
+            PlainCssInput::try_new(
+                source,
+                CssDialect::Css,
+                "probe.css",
+                "space:probe",
+                "artifact:probe",
+            )
+            .unwrap(),
+            "sc1",
+        )
+        .expect("module rewrite"),
+    )
+    .0;
+    let staged = rewritten(
+        transform_vue_scoped_css(
+            PlainCssInput::try_new(
+                &modules,
+                CssDialect::Css,
+                "probe.css",
+                "space:probe",
+                "artifact:probe",
+            )
+            .unwrap(),
+            "sc1",
+        )
+        .expect("scoped rewrite"),
+    )
+    .0;
+    let inner = global
+        .facts
+        .module_classes
+        .iter()
+        .find(|(name, _)| name == "inner")
+        .map(|(_, hashed)| hashed)
+        .expect("module plan must retain the global argument class");
+    assert!(global.code().contains(inner), "{}", global.code());
+    assert!(!global.code().contains(":global("), "{}", global.code());
+    assert_eq!(
+        global.code(),
+        staged,
+        "shared and staged semantics diverged"
+    );
+    assert_eq!(
+        shared_builds, 1,
+        "a containing global rewrite must absorb the earlier module edit"
     );
 
     reset_build_string_invocation_count();
@@ -1312,6 +1461,80 @@ fn build_string_call_count_matches_edit_composition_depth() {
         "a three-edit :slotted() argument still rides the one outer transform — \
          a regression gated on more than two argument edits is caught here while \
          the one- and two-edit cases above stay green"
+    );
+}
+
+// @ai-generated - A later stage must ignore source bytes replaced by an
+// earlier rewrite while preserving staged output and one terminal build.
+//
+// Mutation recipe: make `merge_shared_stage_edits` return `None` for a later
+// edit strictly inside an earlier overwrite (instead of discarding it) — the
+// cascade records a stage failure and `shared.code()` no longer equals the
+// staged output.
+#[test]
+fn later_rewrite_inside_v_bind_replacement_matches_staged_semantics() {
+    let source = "@keyframes pulse { to { opacity: 0; } }\n\
+                  .item { animation-name: v-bind(pulse); }";
+
+    reset_build_string_invocation_count();
+    let shared = run_vue_style_cascade(
+        AuthoredStyleInput::new(
+            source,
+            CssDialect::Css,
+            "overlap.css",
+            "space:overlap",
+            "artifact:overlap",
+        ),
+        "sc1",
+        false,
+        true,
+        true,
+    );
+    let shared_builds = build_string_invocation_count();
+
+    let v_bind = rewritten(
+        transform_vue_v_bind(
+            AuthoredStyleInput::new(
+                source,
+                CssDialect::Css,
+                "overlap.css",
+                "space:overlap",
+                "artifact:overlap",
+            ),
+            "sc1",
+        )
+        .expect("v-bind rewrite"),
+    )
+    .0;
+    let staged = rewritten(
+        transform_vue_scoped_css(
+            PlainCssInput::try_new(
+                &v_bind,
+                CssDialect::Css,
+                "overlap.css",
+                "space:overlap",
+                "artifact:overlap",
+            )
+            .unwrap(),
+            "sc1",
+        )
+        .expect("scoped rewrite"),
+    )
+    .0;
+
+    assert!(
+        shared.stage_failures.is_empty(),
+        "shared plan refused a later edit whose source bytes no longer survive: {:?}",
+        shared.stage_failures
+    );
+    assert_eq!(
+        shared.code(),
+        staged,
+        "shared and staged semantics diverged"
+    );
+    assert_eq!(
+        shared_builds, 1,
+        "overlap resolution must retain one terminal materialization"
     );
 }
 
@@ -1569,14 +1792,14 @@ fn slotted_argument_edit_count_sweep_never_mints_a_nested_build() {
 
 // ─── The Vue-owned cascade parses each content identity once ──────────────
 
-// @ai-generated - an `Unchanged` stage hands its already-parsed
-// `StyleSyntaxIr` to the next stage instead of causing a re-parse. Every
-// scenario below is a genuine, verified count for the exact scenario
-// described — never the pre-fix baseline's unconditional per-stage re-parse
-// (which would cost 3 calls whenever module+scoping are both requested,
-// regardless of what actually changed).
+// @ai-generated - compatible stages consume one `StyleSyntaxIr`; unchanged
+// stages and authored-coordinate edit plans never force a second parse.
+//
+// Mutation recipe: re-parse the materialized bytes between the v-bind and
+// scoping plans in `shared_vue_style_plan` — `parse_ir_invocation_count()`
+// rises above 1 and the shared IR-identity assertions stop matching.
 #[test]
-fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
+fn style_pipeline_shares_parsed_ir_across_compatible_plans() {
     // 0 stages change (empty style block): a single initial parse, retained
     // through modules and scoping untouched.
     reset_parse_ir_invocation_count();
@@ -1654,12 +1877,8 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
         "only the last applicable stage changing costs exactly 1 parse"
     );
 
-    // v-bind changes, modules does not (an element selector has no class to
-    // hash), scoping inevitably changes too (any selector gets scoped) but
-    // as the last stage its own change costs nothing further: v-bind's
-    // change forces exactly one re-parse before modules can see the
-    // rewritten bytes — 1 (initial) + 1 (re-parse for modules, which then
-    // hands its own retained IR straight through to scoping) = 2, never 3.
+    // v-bind and scoping edit disjoint regions, so both plans retain authored
+    // coordinates and consume one shared IR.
     reset_parse_ir_invocation_count();
     reset_style_ir_stage_observations();
     let input = AuthoredStyleInput::new(
@@ -1675,33 +1894,21 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
     assert!(outcome.facts.rewrites.scoped_selector);
     assert_eq!(
         parse_ir_invocation_count(),
-        2,
-        "one stage (v-bind) forcing a successor re-parse must cost exactly 2, \
-         never the pre-fix baseline's 3"
+        1,
+        "compatible v-bind and scoping plans must cost one parse"
     );
     let observations = style_ir_stage_observations();
     assert_eq!(observations.len(), 3, "{observations:?}");
-    assert_ne!(
+    assert_eq!(
         observations[0].1, observations[1].1,
-        "a byte-changing stage must invalidate its IR: {observations:?}"
+        "shared plans must consume the same parsed IR: {observations:?}"
     );
     assert_eq!(
         observations[1].1, observations[2].1,
-        "unchanged modules must hand the same reparsed IR to scoping: {observations:?}"
+        "all shared plans must consume the same parsed IR: {observations:?}"
     );
-    assert!(
-        !(observations[1].1 != observations[2].1),
-        "no replacement IR may appear after an unchanged module stage: {observations:?}"
-    );
-
-    // Worst case within this cascade: v-bind AND modules both change (a)
-    // class selector), each forcing the immediate next stage to re-parse —
-    // scoping (last) inevitably changes too but costs nothing further:
-    // 1 (initial) + 1 (re-parse for modules) + 1 (re-parse for scoping) = 3.
-    // This is the one scenario where the fixed cascade costs the same as
-    // the pre-fix baseline's unconditional per-stage re-parse — every
-    // applicable stage's own change genuinely invalidates the next stage's
-    // retained IR here, so 3 is the correct (not merely tolerated) count.
+    // All three stages edit disjoint regions in this fixture and therefore
+    // share one parsed identity and one terminal materialization.
     reset_parse_ir_invocation_count();
     let input = AuthoredStyleInput::new(
         ".a { color: v-bind(c); }",
@@ -1716,8 +1923,8 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
     assert!(outcome.facts.rewrites.scoped_selector);
     assert_eq!(
         parse_ir_invocation_count(),
-        3,
-        "every applicable stage genuinely changing costs exactly 3, matching S"
+        1,
+        "compatible three-stage planning must cost one parse"
     );
 }
 
@@ -1727,8 +1934,14 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
 // v-bind's rewritten bytes, and a hard modules-stage failure clears the
 // final output and skips the scoped-selector stage entirely rather than
 // running it against unsafe, already-cleared bytes.
+//
+// Mutation recipe: let the scoping plan run after the modules plan pushed a
+// hard failure — a third `style_ir_stage_observations()` entry appears and the
+// cleared-output assertion fails.
 #[test]
 fn style_pipeline_module_stage_failure_clears_output_and_skips_scoping() {
+    reset_parse_ir_invocation_count();
+    reset_style_ir_stage_observations();
     let input = AuthoredStyleInput::new(
         ".good { color: v-bind(c); } .bad { color red; }",
         CssDialect::Css,
@@ -1766,6 +1979,61 @@ fn style_pipeline_module_stage_failure_clears_output_and_skips_scoping() {
         !outcome.facts.rewrites.scoped_selector,
         "the scoped-selector stage must be skipped once the output is \
          cleared by the modules stage's failure"
+    );
+    assert_eq!(
+        parse_ir_invocation_count(),
+        1,
+        "a failed shared plan must not enter a staged fallback"
+    );
+    assert_eq!(
+        style_ir_stage_observations(),
+        vec![
+            (StyleRewriteStage::AuthoredVBind, 1),
+            (StyleRewriteStage::PostPreprocessModules, 1),
+        ],
+        "each attempted stage must plan once over the shared IR"
+    );
+}
+
+/// A soft (per-selector) refusal in the scoping plan is reported against the
+/// shared authored IR. It never restages the cascade over materialized bytes,
+/// so neither planner runs twice and no second parse happens.
+///
+/// Mutation recipe: re-enter `shared_vue_style_plan` (or re-parse) once a
+/// refusal is recorded — `parse_ir_invocation_count()` becomes 2 and the
+/// stage-observation vector repeats a planner.
+#[test]
+fn scoped_soft_refusal_with_prior_edits_does_not_enter_a_staged_fallback() {
+    reset_parse_ir_invocation_count();
+    reset_style_ir_stage_observations();
+    let source = ".good { color: v-bind(c); } .bad { color red; }";
+    let outcome = run_vue_style_cascade(
+        AuthoredStyleInput::new(source, CssDialect::Css, "p.css", "space:p", "artifact:p"),
+        "sc1",
+        false,
+        true,
+        true,
+    );
+
+    assert!(outcome.facts.rewrites.v_bind);
+    assert_eq!(
+        outcome.facts.refusals.len(),
+        1,
+        "{:?}",
+        outcome.facts.refusals
+    );
+    assert_eq!(
+        parse_ir_invocation_count(),
+        1,
+        "a soft refusal must remain in the shared authored-coordinate plan"
+    );
+    assert_eq!(
+        style_ir_stage_observations(),
+        vec![
+            (StyleRewriteStage::AuthoredVBind, 1),
+            (StyleRewriteStage::PostPreprocessScoping, 1),
+        ],
+        "a soft refusal must not repeat either planner"
     );
 }
 
@@ -1916,8 +2184,13 @@ fn cascade_requested_map_returns_the_single_rewrite_map() {
     );
 }
 
+/// One terminal transform yields one exact authored-to-final map, so the
+/// requested map is the outcome's own map and still names the authored source.
+///
+/// Mutation recipe: have `cascade_requested_source_map` return `None` for a
+/// multi-stage rewrite (the pre-shared-planning behaviour) — `expect` panics.
 #[test]
-fn cascade_requested_map_refuses_uncomposable_multi_stage_rewrite() {
+fn cascade_requested_map_covers_shared_multi_stage_rewrite() {
     let source = ".a { color: v-bind(theme); }";
     let outcome = run_vue_style_cascade(
         AuthoredStyleInput::new(
@@ -1940,14 +2213,67 @@ fn cascade_requested_map_refuses_uncomposable_multi_stage_rewrite() {
         "{}",
         outcome.code()
     );
+    let requested = cascade_requested_source_map(&outcome, source, "multi.css")
+        .expect("one terminal transform has an exact authored-to-final map");
+    assert_eq!(requested, outcome.source_map);
     assert!(
-        cascade_requested_source_map(&outcome, source, "multi.css").is_none(),
-        "a later stage's local map must not be presented as the whole cascade map"
+        outcome.source_map.contains("multi.css"),
+        "the terminal map must retain authored source provenance"
     );
-    assert!(
-        !outcome.source_map.contains("multi.css"),
-        "an abandoned composition must not retain a partial stage map"
-    );
+}
+
+/// Unwrapping `:global(...)` / `:deep(...)` moves the argument's bytes, and the
+/// module-class rewrite inside that argument must travel with them: the
+/// rewritten class still maps back to the authored `inner` column.
+///
+/// Mutation recipe: emit the unwrap as one whole-selector overwrite instead of
+/// `collect_unwrapped_argument_edits`' per-region edits — the nested class
+/// loses its own mapping and `lookup_token` lands on the selector start.
+#[test]
+fn shared_special_selector_rewrites_preserve_nested_class_anchors() {
+    for source in [
+        ".outer :global(.inner) { color: red; }",
+        ".outer :deep(.inner) { color: red; }",
+    ] {
+        let outcome = run_vue_style_cascade(
+            AuthoredStyleInput::new(
+                source,
+                CssDialect::Css,
+                "special.css",
+                "space:special",
+                "artifact:special",
+            ),
+            "sc1",
+            true,
+            true,
+            true,
+        );
+        let inner = outcome
+            .facts
+            .module_classes
+            .iter()
+            .find(|(name, _)| name == "inner")
+            .map(|(_, hashed)| hashed)
+            .expect("module plan retains the nested class");
+        let generated_column = outcome
+            .code()
+            .find(inner)
+            .expect("rewritten output retains the nested class")
+            as u32;
+        let authored_column = source.find("inner").expect("fixture has inner") as u32;
+        let map = oxc_sourcemap::OwnedSourceMap::from_json_string(&outcome.source_map)
+            .expect("valid shared cascade map");
+        let lookup = map.generate_lookup_table();
+        let token = map
+            .lookup_token(&lookup, 0, generated_column)
+            .expect("nested class has an authored anchor");
+
+        assert_eq!(
+            (token.get_src_line(), token.get_src_col()),
+            (0, authored_column),
+            "nested class mapped to the containing selector for {source}"
+        );
+    }
 }
 
 #[test]
@@ -2140,8 +2466,15 @@ fn cascade_output_is_publishable_refuses_a_hard_failure_that_wiped_non_empty_con
     );
 }
 
+/// A non-CSS `<style module>`/`<style scoped>` request refuses at
+/// `PlainCssInput` — it never reparses the authored dialect's bytes as CSS.
+///
+/// Mutation recipe: drop the `PlainCssInput` dialect gate in the shared plan —
+/// `last_parse_ir_dialect()` becomes `Css` and the parse count rises to 2.
 #[test]
 fn cascade_output_is_publishable_refuses_stage_requires_plain_css() {
+    reset_parse_ir_invocation_count();
+    reset_last_parse_ir_dialect();
     let source = ".a { color: red; }";
     let input =
         AuthoredStyleInput::new(source, CssDialect::Scss, "p.scss", "space:p", "artifact:p");
@@ -2156,6 +2489,16 @@ fn cascade_output_is_publishable_refuses_stage_requires_plain_css() {
     );
     assert_eq!(outcome.code(), "");
     assert!(!cascade_output_is_publishable(&outcome, source));
+    assert_eq!(
+        last_parse_ir_dialect(),
+        Some(CssDialect::Scss),
+        "non-CSS module/scoped must refuse at PlainCssInput without a CSS parse"
+    );
+    assert_eq!(
+        parse_ir_invocation_count(),
+        1,
+        "the authored dialect parse is the only parse"
+    );
 }
 
 #[test]
@@ -2180,12 +2523,18 @@ fn cascade_output_is_publishable_accepts_an_indented_layout_mutation_refusal() {
     assert!(cascade_output_is_publishable(&outcome, source));
 }
 
+/// Publication reads the refusal, not the failing stage's identity: a parse
+/// miss recorded as `AuthoredVBind` still blocks publication of wiped bytes.
+///
+/// Mutation recipe: make `cascade_output_is_publishable` ignore
+/// `AuthoredVBind` stage failures (or read `code().is_empty()` instead of
+/// `is_refused()`) — the wiped output becomes publishable.
 #[test]
 fn cascade_output_is_publishable_refuses_a_parse_failure_that_wiped_non_empty_content() {
     let source = ".a { color: red; }";
     let outcome = VueStyleCascadeOutcome {
-        // The shape the runner really produces when a stage wipes the output:
-        // a refusal, not a rewrite that happened to emit nothing.
+        // The shape the runner really produces when a parse miss wipes the
+        // output: a refusal whose only identity is the parse that ran.
         result: verter_css_syntax::QualifiedStyleResult::refused(
             verter_css_syntax::StyleStage::Authored,
             CssDialect::Css,
@@ -2195,16 +2544,144 @@ fn cascade_output_is_publishable_refuses_a_parse_failure_that_wiped_non_empty_co
         facts: crate::style_planner::VueStyleFacts::default(),
         stage_failures: vec![StyleRewriteFailure {
             class: StyleRewriteFailureClass::ParseFailure,
-            stage: StyleRewriteStage::PostPreprocessModules,
+            stage: StyleRewriteStage::AuthoredVBind,
             dialect: CssDialect::Css,
             span: None,
         }],
     };
     assert!(
         !cascade_output_is_publishable(&outcome, source),
-        "a post-preprocess ParseFailure that wiped non-empty authored content \
-         must not be publishable"
+        "a parse miss that wiped non-empty authored content must not be \
+         publishable, even when the only recorded identity is AuthoredVBind"
     );
+}
+
+/// A parse miss is recorded once, by the parse that ran, whichever stages
+/// were requested — consumers see one diagnostic, never a per-stage clone.
+///
+/// What it does to the OUTPUT depends on the request. `module`/`scoped` change
+/// what the block means — unhashed class names, or selectors that would apply
+/// document-wide instead of to this component — so unrewritten authored bytes
+/// are actively wrong and the output is cleared. With neither attribute the
+/// only work was `v-bind()` lowering, nothing was rewritten, and deleting the
+/// author's CSS buys nothing: the bytes publish beside the diagnostic.
+///
+/// Mutation recipe: have each requested stage push its own `ParseFailure`
+/// (the per-stage-parse shape) — `stage_failures.len()` becomes 2 or 3 and the
+/// diagnostic count follows. Return `ClearedByRefusal` unconditionally from
+/// the parse-miss arm and the plain-`<style>` leg loses the authored bytes.
+#[test]
+fn cascade_parse_failure_is_recorded_once_and_clears_only_a_rewritten_request() {
+    let source = nesting_overflow_css();
+    for (module, scoped) in [(true, true), (true, false), (false, true), (false, false)] {
+        let outcome = run_vue_style_cascade(
+            AuthoredStyleInput::new(&source, CssDialect::Css, "p.css", "space:p", "artifact:p"),
+            "sc1",
+            module,
+            scoped,
+            true,
+        );
+        assert_eq!(
+            outcome.stage_failures.len(),
+            1,
+            "module={module} scoped={scoped}: {:?}",
+            outcome.stage_failures
+        );
+        assert_eq!(
+            outcome.stage_failures[0].class,
+            StyleRewriteFailureClass::ParseFailure
+        );
+        assert_eq!(
+            outcome.stage_failures[0].stage,
+            StyleRewriteStage::AuthoredVBind,
+            "a parse miss must keep the identity of the parse that ran"
+        );
+        assert_eq!(
+            outcome.result.diagnostics().len(),
+            1,
+            "consumers must see one parse diagnostic, not a restaged clone"
+        );
+
+        if module || scoped {
+            assert!(
+                outcome.result.is_refused(),
+                "module={module} scoped={scoped}"
+            );
+            assert_eq!(outcome.code(), "");
+            assert!(!cascade_output_is_publishable(&outcome, &source));
+        } else {
+            assert!(
+                !outcome.result.is_refused(),
+                "a plain <style> block has no rewrite to be unsafe about"
+            );
+            assert_eq!(
+                outcome.code(),
+                source,
+                "unparseable plain CSS publishes verbatim beside its diagnostic"
+            );
+            assert!(cascade_output_is_publishable(&outcome, &source));
+        }
+    }
+}
+
+/// `RuntimeStyleProcessing::AuthoredOnly` and a `Complete` request with
+/// neither `module` nor `scoped` are the same request — `v-bind()` lowering
+/// and nothing else — so the bundler entry point owes a plain block's parse
+/// miss the plain block's answer: one recorded miss, no refusal, and the
+/// authored bytes published beside the diagnostic.
+///
+/// Asserted as ABSOLUTE outcomes, not against what `run_vue_style_cascade`
+/// answers for the same input. `run_vue_style_authored_only` delegates to it,
+/// so an equality between the two compares one function's output to itself and
+/// holds under every mutation — including the one that breaks both routes at
+/// once. The cascade's own leg of this contract is
+/// `cascade_parse_failure_is_recorded_once_and_clears_only_a_rewritten_request`;
+/// what is left to pin here is that the second entry point still reaches it.
+///
+/// Mutation recipe: give `run_vue_style_authored_only` a route of its own that
+/// clears the output on a parse miss (return
+/// `VueStyleCascadeOutcome` from `run_vue_style_cascade(input, scope_id, false, true, want_source_map)`,
+/// which is the `<style scoped>` answer) — the bundler entry point loses the
+/// author's CSS and every assertion below reports it.
+#[test]
+fn the_authored_only_entry_point_publishes_a_plain_blocks_parse_miss() {
+    let source = nesting_overflow_css();
+    let outcome = run_vue_style_authored_only(
+        AuthoredStyleInput::new(&source, CssDialect::Css, "p.css", "space:p", "artifact:p"),
+        "sc1",
+        false,
+    );
+
+    assert_eq!(
+        outcome.stage_failures.len(),
+        1,
+        "{:?}",
+        outcome.stage_failures
+    );
+    assert_eq!(
+        outcome.stage_failures[0].class,
+        StyleRewriteFailureClass::ParseFailure
+    );
+    assert_eq!(
+        outcome.stage_failures[0].stage,
+        StyleRewriteStage::AuthoredVBind,
+        "a parse miss must keep the identity of the parse that ran"
+    );
+    assert_eq!(
+        outcome.result.diagnostics().len(),
+        1,
+        "consumers must see one parse diagnostic, not a restaged clone"
+    );
+    assert!(
+        !outcome.result.is_refused(),
+        "a v-bind-only request has no rewrite to be unsafe about"
+    );
+    assert_eq!(
+        outcome.code(),
+        source,
+        "unparseable bytes publish verbatim beside the diagnostic"
+    );
+    assert!(cascade_output_is_publishable(&outcome, &source));
 }
 
 #[test]
@@ -2277,13 +2754,14 @@ fn cascade_output_is_publishable_accepts_a_clean_outcome() {
 }
 
 // @ai-generated - one parse per content identity must hold through the REAL
-// production compile()
-// entry point, not just the standalone `run_vue_style_cascade` orchestrator:
-// a `<style scoped module>` block where only the LAST stage (scoped) rewrites
-// anything must cost exactly 1 parse end-to-end. Before production routed
-// through the cascade, `compile()` called `transform_vue_v_bind`/
-// `transform_vue_css_modules`/`transform_vue_scoped_css` independently, each
-// re-parsing the same content identity — 3 parses for this fixture, not 1.
+// production compile() entry point, not just the standalone
+// `run_vue_style_cascade` orchestrator: a `<style scoped module>` block costs
+// exactly 1 parse end-to-end, unconditionally — not "when only the last stage
+// rewrites". Every compatible stage plans over the same IR in authored
+// coordinates, so how many of them rewrite bytes cannot change the count.
+// Calling `transform_vue_v_bind`/`transform_vue_css_modules`/
+// `transform_vue_scoped_css` independently re-parses the same content identity
+// per stage — 3 parses for this fixture, not 1.
 #[test]
 fn production_compile_reuses_parsed_style_ir_across_cascade_stages() {
     reset_parse_ir_invocation_count();
@@ -2292,9 +2770,22 @@ fn production_compile_reuses_parsed_style_ir_across_cascade_stages() {
     assert_eq!(
         parse_ir_invocation_count(),
         1,
-        "the real compile() entry point must hand its retained IR across the \
-         v-bind/module/scoped stages when only the last stage rewrites \
-         anything, not re-parse independently per stage"
+        "the real compile() entry point must plan the v-bind/module/scoped \
+         stages over one parse of the block, not re-parse per stage"
+    );
+
+    // The same fixture with every stage rewriting: still one parse. A count
+    // that tracked "stages that changed bytes" would read 2 or 3 here.
+    reset_parse_ir_invocation_count();
+    let rewriting = compile_style(
+        "<style scoped module>\n.card { color: v-bind(tone); }\n:deep(.child) { color: red; }\n</style>",
+    );
+    assert!(rewriting.errors.is_empty(), "{:?}", rewriting.errors);
+    assert_eq!(
+        parse_ir_invocation_count(),
+        1,
+        "a block where every requested stage rewrites bytes must still cost \
+         one parse"
     );
 }
 
@@ -2325,5 +2816,223 @@ fn production_compile_analyzes_module_classes_for_scss_dialect() {
         "the byte-level rewrite stays CSS-only; SCSS output is left for \
          external preprocessing: {}",
         style.code
+    );
+}
+
+/// Every construct family the shared generator corpus produces, plus the
+/// overlap-prone and nested shapes it does not, run through the shared plan and
+/// through the stages one after the other, must land on the same bytes and the
+/// same refusal answer.
+///
+/// One terminal transform is equivalent to a staged pipeline only while no
+/// stage's REPLACEMENT bytes contain something a later stage would have acted
+/// on — and nothing structurally enforces that. It holds today because
+/// `v-bind(x)` becomes a `var()` function token the animation scanner ignores,
+/// and because the CSS-Modules planner never enters a `@keyframes` prelude or
+/// body the scoping planner owns. Change either replacement and the two models
+/// diverge on a construct that may have no point fixture. The merge answers
+/// only the SAME-SPAN half of that divergence: two stages emitting coincident
+/// non-empty overwrites refuse, so the shared plan reports a refusal where the
+/// staged pipeline produced valid output. The DIFFERENT-SPAN half is likelier
+/// and worse — rename an `@keyframes` name in one stage and the
+/// `animation-name:` rewrite that answers it sits in another span entirely, so
+/// the merge sees no intersection, refuses nothing, and the shared plan emits
+/// an animation reference to a name that no longer exists. That is
+/// wrong-complete output, not a refusal, and no merge rule can see it.
+/// Comparing the models across the corpus is what makes either half a test
+/// failure instead of a production report. Any change to a stage's replacement
+/// vocabulary must extend this test in the same change: the `shared_families
+/// == 11` pin detects a corpus-size change, not new planner behavior omitted
+/// from that corpus.
+///
+/// The construct families come from the shared generator corpus the allocation
+/// canaries measure, not a second hand-written list, so a family added on one
+/// side cannot go unswept on the other. Read what that corpus actually
+/// enumerates: TOP-LEVEL rules only — classes, descendants, pseudos, selector
+/// lists, `v-bind()` plain and dotted, `:deep`, `:slotted`, `:global`, the mixed
+/// set, and repeated classes. It carries no nested-rule family, and it cannot
+/// grow one cheaply: its category list is also the allocation ceiling's
+/// universe, whose per-category counts are recaptured legacy measurements. The
+/// fixtures below it therefore carry the shapes those generators do not
+/// produce — an earlier stage's replacement bytes that a later stage would
+/// otherwise have targeted, and a class rule nested inside a directive body,
+/// which is where both planners recurse and where the corpus never goes.
+///
+/// Mutation recipe: in `merge_shared_stage_edits`, drop the
+/// `keep_later[later_index] = false` assignment in the strictly-contained
+/// overwrite arm (so a later edit inside an earlier overwrite is retained
+/// rather than discarded) — the v-bind-bearing categories stop matching the
+/// staged chain. For the non-vacuity legs, make `parse_ir` hand the CSS parser
+/// an empty source: both models then plan nothing and answer passthrough on
+/// every fixture, so the equality legs still agree and only the non-vacuity
+/// legs report it.
+#[test]
+fn a_shared_plan_matches_running_the_stages_one_after_the_other() {
+    const SCOPE: &str = "a4f2eed6";
+
+    fn authored(code: &str) -> AuthoredStyleInput<'_> {
+        AuthoredStyleInput::new(
+            code,
+            CssDialect::Css,
+            "probe.style",
+            "space:probe",
+            "artifact:probe",
+        )
+    }
+
+    fn plain(code: &str) -> PlainCssInput<'_> {
+        PlainCssInput::try_new(
+            code,
+            CssDialect::Css,
+            "probe.style",
+            "space:probe",
+            "artifact:probe",
+        )
+        .expect("plain css")
+    }
+
+    fn shared(code: &str, module: bool, scoped: bool) -> Option<String> {
+        let outcome = run_vue_style_cascade(authored(code), SCOPE, module, scoped, false);
+        (!outcome.result.is_refused()).then(|| outcome.code().to_string())
+    }
+
+    fn apply_stage(
+        code: &str,
+        run: impl FnOnce(&str) -> Result<StyleRewriteOutcome, StyleRewriteFailure>,
+    ) -> Option<String> {
+        match run(code).ok()? {
+            StyleRewriteOutcome::Rewritten { code, .. } => Some(code),
+            StyleRewriteOutcome::Unchanged { .. } => Some(code.to_string()),
+        }
+    }
+
+    fn staged(code: &str, module: bool, scoped: bool) -> Option<String> {
+        let mut current = apply_stage(code, |code| transform_vue_v_bind(authored(code), SCOPE))?;
+        if module {
+            current = apply_stage(&current, |code| {
+                transform_vue_css_modules(plain(code), SCOPE)
+            })?;
+        }
+        if scoped {
+            current = apply_stage(&current, |code| {
+                transform_vue_scoped_css(plain(code), SCOPE)
+            })?;
+        }
+        Some(current)
+    }
+
+    // The construct families the allocation canaries already generate, read
+    // from the one shared corpus so a family added there cannot silently go
+    // unswept here.
+    let mut corpus: Vec<(String, String)> = style_planner_gen::all_categories()
+        .into_iter()
+        .map(|(name, css)| (name.to_string(), css))
+        .collect();
+    let shared_families = corpus.len();
+    let mut push = |name: &str, css: String| corpus.push((name.to_string(), css));
+
+    // The overlap-prone shapes: a class whose animation name the scoping stage
+    // renames while the modules stage hashes the class beside it, and a
+    // `v-bind()` whose replacement sits in the same declaration block as an
+    // animation reference.
+    push(
+        "keyframes_and_animation",
+        "@keyframes spin { from { transform: rotate(0); } to { transform: rotate(1turn); } }\n\
+         .spinner { animation: spin 1s linear infinite; }\n"
+            .to_string(),
+    );
+    push(
+        "v_bind_beside_animation",
+        "@keyframes fade { from { opacity: 0; } to { opacity: 1; } }\n\
+         .card { color: v-bind(tone); animation: fade 1s; }\n"
+            .to_string(),
+    );
+    // The one shape where a later stage genuinely targets bytes an earlier
+    // stage replaced: the scoping planner renames `pulse` in
+    // `animation-name: pulse`, and that ident sits inside the span the v-bind
+    // planner overwrites with a `var()` call.
+    push(
+        "later_rewrite_inside_a_v_bind_replacement",
+        "@keyframes pulse { to { opacity: 0; } }\n\
+         .item { animation-name: v-bind(pulse); }\n"
+            .to_string(),
+    );
+    push(
+        "later_rewrite_inside_an_animation_shorthand_v_bind",
+        "@keyframes pulse { to { opacity: 0; } }\n\
+         .item { animation: v-bind(pulse) 1s linear; }\n"
+            .to_string(),
+    );
+    // Both planners recurse through directive bodies — `collect_module_statements`
+    // to hash a nested class, `VueScopePlanner::plan_statements` to scope the
+    // selector beside it — and the shared corpus generates only top-level rules,
+    // so nesting is swept here or nowhere.
+    push(
+        "at_rule_nested_class_and_v_bind",
+        "@media (min-width: 40rem) {\n\
+         .card { color: v-bind(tone); }\n\
+         .card .title { padding: 1px; }\n\
+         }\n"
+        .to_string(),
+    );
+    push(
+        "deep_with_v_bind_body",
+        ":deep(.inner) { color: v-bind(tone); }\n.outer { padding: 1px; }\n".to_string(),
+    );
+    push(
+        "global_with_v_bind_body",
+        ":global(.reset) { color: v-bind(tone); }\n".to_string(),
+    );
+
+    for (name, css) in &corpus {
+        for (module, scoped) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(
+                shared(css, module, scoped),
+                staged(css, module, scoped),
+                "{name} (module={module} scoped={scoped}): the shared plan and \
+                 the staged pipeline must answer identically"
+            );
+        }
+    }
+
+    // An equality over two `Option<String>`s passes vacuously when both models
+    // refuse, and the overlap-prone fixtures are exactly the shapes this sweep
+    // exists for — a vacuous leg there would retire the evidence without
+    // retiring the test. Each is valid CSS carrying a class selector or a
+    // `v-bind()`, so the full request must resolve AND rewrite.
+    for (name, css) in &corpus[shared_families..] {
+        let rewritten = shared(css, true, true)
+            .unwrap_or_else(|| panic!("{name}: the overlap-prone fixture must not refuse"));
+        assert_ne!(
+            &rewritten, css,
+            "{name}: the overlap-prone fixture must exercise a real rewrite, \
+             not compare two passthroughs"
+        );
+    }
+
+    // The sweep is only evidence if the two models can actually disagree, so
+    // pin that at least one family exercises a real multi-stage rewrite rather
+    // than passing through unchanged on every leg.
+    let (_, v_bind_css) = corpus
+        .iter()
+        .find(|(name, _)| name == "v_bind_rules")
+        .expect("the shared corpus must still name the v-bind family");
+    let rewritten = shared(v_bind_css, true, true).expect("v_bind_rules must not refuse");
+    assert_ne!(
+        &rewritten, v_bind_css,
+        "sanity: the corpus must contain a case both models actually rewrite"
+    );
+    // The count is pinned to a literal rather than re-read from
+    // `all_categories`, which would compare the corpus against itself and hold
+    // however many families were dropped. Resizing the shared corpus must be
+    // looked at here, because this sweep is what makes "every construct family
+    // the planners rewrite" a checked claim rather than a comment.
+    assert_eq!(
+        shared_families, 11,
+        "the shared construct-family corpus changed size; re-read what this equivalence sweep now claims to cover"
+    );
+    assert!(
+        corpus.len() > shared_families,
+        "the overlap-prone fixtures must be swept beside the shared families"
     );
 }

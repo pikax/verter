@@ -1,6 +1,5 @@
-//! A34: a byte-changing preprocessor result adds exactly one parse.
-//! Worst-case Vue path (native non-CSS dialect, all three stages rewriting)
-//! totals four.
+//! A byte-changing preprocessor result adds exactly one parse. The worst-case
+//! Vue path parses the authored dialect once and the supplied CSS once.
 
 use std::sync::Arc;
 
@@ -168,7 +167,8 @@ fn preprocessed_result_adds_exactly_one_parse() {
 
     // Worst-case Vue: native non-CSS dialect whose authored parse runs, plus a
     // byte-changing supplied CSS result, with v-bind, CSS-modules, and scoped
-    // all rewriting. Mutation that reddens: add a fifth parse.
+    // all rewriting through one shared plan. Mutation that reddens: add a
+    // third parse.
     {
         // Upsert skips style analysis so the authored SCSS parse is charged
         // on this thread by get_analysis, not a scheduler worker.
@@ -239,8 +239,8 @@ fn preprocessed_result_adds_exactly_one_parse() {
         );
         let worst = parse_count() - before;
         assert_eq!(
-            worst, 4,
-            "worst-case native SCSS + admitted CSS + two successor parses totals four, got {worst}"
+            worst, 2,
+            "worst-case native SCSS + admitted CSS must parse each content identity once, got {worst}"
         );
     }
 }

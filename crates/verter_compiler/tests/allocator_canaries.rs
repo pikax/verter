@@ -83,119 +83,8 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 /// `verter_compiler` tests cannot depend on `verter_bench`; byte-identity of
 /// the generated CSS is the contract recorded in
 /// `test-corpora/style-ir/generator-mirror-equivalence.md`.
-mod style_planner_gen {
-    pub fn generate_class_rules(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(".class-{i} {{ color: red; padding: {i}px; }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub fn generate_descendant_selectors(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(".parent-{i} .child-{i} {{ color: blue; }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub fn generate_pseudo_selectors(n: usize) -> String {
-        let pseudos = [":hover", ":focus", ":active", ":first-child", ":last-child"];
-        (0..n)
-            .map(|i| {
-                let pseudo = pseudos[i % pseudos.len()];
-                format!(".btn-{i}{pseudo} {{ color: red; }}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub fn generate_selector_lists(n: usize) -> String {
-        (0..n)
-            .map(|i| {
-                let selectors = (0..3)
-                    .map(|j| format!(".sel-{i}-{j}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{selectors} {{ margin: {i}px; }}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub fn generate_v_bind_rules(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(".item-{i} {{ color: v-bind(color{i}); }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub fn generate_v_bind_dotted(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(".item-{i} {{ color: v-bind('theme.colors.primary{i}'); }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub fn generate_deep_rules(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(":deep(.inner-{i}) {{ color: red; }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub fn generate_slotted_rules(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(":slotted(.slot-{i}) {{ color: red; }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub fn generate_mixed_vue(n: usize) -> String {
-        (0..n)
-            .map(|i| match i % 3 {
-                0 => format!(".item-{i} {{ color: v-bind(color{i}); }}"),
-                1 => format!(":deep(.inner-{i}) {{ padding: {i}px; }}"),
-                _ => format!(":slotted(.slot-{i}) {{ margin: {i}px; }}"),
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub fn generate_global_rules(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(":global(.reset-{i}) {{ margin: 0; }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub fn generate_repeated_classes(unique: usize, repeats: usize) -> String {
-        let mut rules = Vec::new();
-        for r in 0..repeats {
-            for i in 0..unique {
-                rules.push(format!(".btn-{i} {{ padding: {r}px; }}"));
-            }
-        }
-        rules.join("\n")
-    }
-
-    pub const N: usize = 50;
-
-    pub fn all_categories() -> [(&'static str, String); 11] {
-        [
-            ("class_rules", generate_class_rules(N)),
-            ("descendant_selectors", generate_descendant_selectors(N)),
-            ("pseudo_selectors", generate_pseudo_selectors(N)),
-            ("selector_lists", generate_selector_lists(N)),
-            ("v_bind_rules", generate_v_bind_rules(N)),
-            ("v_bind_dotted", generate_v_bind_dotted(N)),
-            ("deep_rules", generate_deep_rules(N)),
-            ("slotted_rules", generate_slotted_rules(N)),
-            ("mixed_vue", generate_mixed_vue(N)),
-            ("global_rules", generate_global_rules(N)),
-            ("repeated_classes", generate_repeated_classes(5, 10)),
-        ]
-    }
-}
+#[path = "support/style_planner_gen.rs"]
+mod style_planner_gen;
 
 mod style_planner_allocation_baseline {
     //! Live allocation canaries for the converged style pipeline.
@@ -207,12 +96,14 @@ mod style_planner_allocation_baseline {
     //!
     //! Calling the cascade entry (rather than `transform_vue_v_bind` then
     //! `transform_vue_scoped_css` as two independent calls) matters for
-    //! allocation-count fidelity: `run_vue_style_cascade` hands the same
-    //! already-parsed `StyleSyntaxIr` forward when a stage returns
-    //! `Unchanged`, so a real invocation pays `1 + K` `parse_style_ir` calls
-    //! (K = stages that actually change bytes), never a flat 2 regardless of
-    //! whether v-bind touched anything. `module: false, scoped: true` mirrors
-    //! the lightningcss canary's fixed `is_module: false, scoped: true`.
+    //! allocation-count fidelity: `run_vue_style_cascade` plans every
+    //! compatible stage over one `StyleSyntaxIr` in authored coordinates and
+    //! materializes them through one terminal transform, so a CSS invocation
+    //! pays exactly 1 `parse_style_ir` call and 1 `build_string`, however many
+    //! stages were requested and however many of them rewrote bytes. Chaining
+    //! the per-stage transforms by hand pays one of each per rewriting stage.
+    //! `module: false, scoped: true` mirrors the lightningcss canary's fixed
+    //! `is_module: false, scoped: true`.
     //!
     //! Per-category non-zero sanity. The 1.2x ratio is
     //! `converged_style_pipeline_allocation_within_ratified_ceiling`.

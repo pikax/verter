@@ -1,15 +1,15 @@
-// @ai-generated - J1-A12: stage-local `CodeTransform` map-coverage proof for the Vue
+// Stage-local `CodeTransform` map-coverage proof for the Vue
 // (`style_planner.rs`) `CodeTransform` route — exact coordinate mapping across
 // byte-length-changing edits, unmapped synthetic regions, UTF-16/non-ASCII positions,
-// multiline transforms, and option-off/no-map behavior, for EVERY Vue stage:
-// `transform_vue_v_bind`, `transform_vue_scoped_css`, `transform_vue_css_modules`.
+// multiline transforms, and option-off/no-map behavior. Modules and scoped maps
+// are taken from `run_vue_style_cascade` with the unused stage flags off;
+// `transform_vue_v_bind` remains the production v-bind-only entry.
 //
-// The Svelte half of A12 lives IN-CRATE (`svelte/runtime/css/render_tests.rs`), not here:
+// The Svelte half lives IN-CRATE (`svelte/runtime/css/render_tests.rs`), not here:
 // `render_stylesheet` is `pub(crate)` and the whole `css` module tree under
-// `svelte/runtime/` is crate-private (`mod css;`, not `pub mod css;`) per this charter's own
-// A11d acceptance ID — an external `tests/cases` file (a separate compiled crate that only
-// sees `verter_compiler`'s PUBLIC API) cannot name it. This split is deliberate, not an
-// oversight: making the module `pub` to route around the boundary would violate A11d.
+// `svelte/runtime/` is crate-private (`mod css;`, not `pub mod css;`) — an
+// external `tests/cases` file (a separate compiled crate that only sees
+// `verter_compiler`'s PUBLIC API) cannot name it.
 //
 // Every assertion below decodes the REAL source-map JSON `style_planner.rs` emits (via
 // `oxc_sourcemap::OwnedSourceMap`, a normal `verter_compiler` dependency, not test-gated) and
@@ -30,8 +30,7 @@ use verter_compiler::framework_common::carrier_compiler::{
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
 use verter_compiler::framework_common::{CarrierCompilerRegistry, FrameworkParseArtifact};
 use verter_compiler::style_planner::{
-    run_vue_style_cascade, transform_vue_css_modules, transform_vue_scoped_css,
-    transform_vue_v_bind, AuthoredStyleInput, PlainCssInput, StyleRewriteOutcome,
+    run_vue_style_cascade, transform_vue_v_bind, AuthoredStyleInput, StyleRewriteOutcome,
 };
 use verter_css_syntax::CssDialect;
 use verter_language::carrier_grammar::{
@@ -49,6 +48,37 @@ fn rewritten(outcome: StyleRewriteOutcome) -> (String, String) {
         } => (code, source_map),
         StyleRewriteOutcome::Unchanged { .. } => panic!("expected a rewrite"),
     }
+}
+
+fn authored_css<'a>(source: &'a str, source_name: &'a str) -> AuthoredStyleInput<'a> {
+    AuthoredStyleInput::new(
+        source,
+        CssDialect::Css,
+        source_name,
+        "space:map",
+        "artifact:map",
+    )
+}
+
+fn cascade_rewritten(
+    input: AuthoredStyleInput<'_>,
+    source: &str,
+    scope_id: &str,
+    module: bool,
+    scoped: bool,
+) -> (String, String) {
+    let outcome = run_vue_style_cascade(input, scope_id, module, scoped, true);
+    assert!(
+        !outcome.result.is_refused(),
+        "expected a rewrite, got a refusal: {:?}",
+        outcome.stage_failures
+    );
+    assert_ne!(
+        outcome.code(),
+        source,
+        "expected a rewrite, got passthrough"
+    );
+    (outcome.code().to_string(), outcome.source_map)
 }
 
 fn decode(map_json: &str) -> oxc_sourcemap::OwnedSourceMap {
@@ -213,16 +243,13 @@ fn vue_css_modules_growing_overwrite_trailing_text_maps_to_correct_shifted_posit
     // from v-bind's function-call overwrite and scoped-css's pure insertion). The trailing,
     // UNCHANGED declaration text must still map to its correct ORIGINAL position.
     let source = ".active { color: red; width: 1px; }";
-    let input = PlainCssInput::try_new(
+    let (code, map_json) = cascade_rewritten(
+        authored_css(source, "modules.css"),
         source,
-        CssDialect::Css,
-        "modules.css",
-        "space:modules",
-        "artifact:modules",
-    )
-    .expect("plain CSS stage input");
-    let (code, map_json) =
-        rewritten(transform_vue_css_modules(input, "sc1").expect("css modules rewrite"));
+        "sc1",
+        true,
+        false,
+    );
     assert_ne!(
         code.len(),
         source.len(),
@@ -267,16 +294,13 @@ fn vue_scoped_selector_inserted_attribute_stays_unmapped_across_its_entire_span(
     // insertion incorrectly resolving to a mapped source position is a real, distinct bug a
     // first-column-only check cannot see).
     let source = ".foo { color: red; }";
-    let input = PlainCssInput::try_new(
+    let (code, map_json) = cascade_rewritten(
+        authored_css(source, "scoped.css"),
         source,
-        CssDialect::Css,
-        "scoped.css",
-        "space:scoped",
-        "artifact:scoped",
-    )
-    .expect("plain CSS stage input");
-    let (code, map_json) =
-        rewritten(transform_vue_scoped_css(input, "test1234").expect("scoped rewrite"));
+        "test1234",
+        false,
+        true,
+    );
     let attr = "[data-v-test1234]";
     assert_eq!(code, format!(".foo{attr} {{ color: red; }}"));
     let insert_pos = code.find(attr).expect("scope attribute inserted");
@@ -374,16 +398,13 @@ fn vue_css_modules_overwrite_anchor_uses_utf16_columns_not_byte_offsets() {
     // reconstructed/parsed text), so this discriminates the SAME byte-vs-UTF-16 regression class
     // for the CSS-Modules stage's own overwrite anchor.
     let source = "/* h\u{e9}llo\u{2192}\u{1f600} */ .active { color: red; width: 1px; }";
-    let input = PlainCssInput::try_new(
+    let (code, map_json) = cascade_rewritten(
+        authored_css(source, "modules-utf16.css"),
         source,
-        CssDialect::Css,
-        "modules-utf16.css",
-        "space:modules-utf16",
-        "artifact:modules-utf16",
-    )
-    .expect("plain CSS stage input");
-    let (code, map_json) =
-        rewritten(transform_vue_css_modules(input, "sc1").expect("css modules rewrite"));
+        "sc1",
+        true,
+        false,
+    );
     let map = decode(&map_json);
 
     let class_byte_offset = source.find(".active").expect("class selector present") + 1;
@@ -638,35 +659,25 @@ fn vue_isolated_style_source_map_toggle_is_a_genuine_ab_option() {
         "the returned map must carry real mappings"
     );
 
-    let scoped_source = ".box { color: red; }";
-    let scoped_on = PlainCssInput::try_new(
-        scoped_source,
-        CssDialect::Css,
-        "isolated.css",
-        "space:isolated",
-        "artifact:isolated",
-    )
-    .expect("plain css");
-    let scoped_off = scoped_on.without_source_map();
-    let on = rewritten(transform_vue_scoped_css(scoped_on, "scope123").expect("scoped rewrite"));
-    let off = rewritten(transform_vue_scoped_css(scoped_off, "scope123").expect("scoped rewrite"));
-    assert_eq!(on.0, off.0);
+    let modules_source = ".box { color: red; }";
+    let on = cascade_rewritten(
+        authored_css(modules_source, "isolated.css"),
+        modules_source,
+        "scope123",
+        true,
+        false,
+    );
+    let off = run_vue_style_cascade(
+        authored_css(modules_source, "isolated.css"),
+        "scope123",
+        true,
+        false,
+        false,
+    );
+    assert_eq!(on.0, off.code());
     assert!(!on.1.is_empty());
-    assert!(off.1.is_empty(), "scoped without_source_map leaked a map");
-
-    let modules_on = PlainCssInput::try_new(
-        scoped_source,
-        CssDialect::Css,
-        "isolated.css",
-        "space:isolated",
-        "artifact:isolated",
-    )
-    .expect("plain css");
-    let modules_off = modules_on.without_source_map();
-    let on = rewritten(transform_vue_css_modules(modules_on, "scope123").expect("modules rewrite"));
-    let off =
-        rewritten(transform_vue_css_modules(modules_off, "scope123").expect("modules rewrite"));
-    assert_eq!(on.0, off.0);
-    assert!(!on.1.is_empty());
-    assert!(off.1.is_empty(), "modules without_source_map leaked a map");
+    assert!(
+        off.source_map.is_empty(),
+        "modules without_source_map leaked a map"
+    );
 }
