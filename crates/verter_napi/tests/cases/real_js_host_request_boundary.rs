@@ -56,6 +56,11 @@
 //!   `decode_compile_requests_priority` and
 //!   `typed-batch-bounds-a-hostile-options-key` sees a megabyte key quoted
 //!   back verbatim.
+//! - Drop the `resolve_alias_or_canonical` call at the top of
+//!   `compile_request` and
+//!   `typed-single-reports-one-id-spelling-for-a-non-canonical-id` sees the
+//!   refusal answer the caller's raw spelling while the compile answers the
+//!   canonical id.
 //!
 //! # Product-kind coverage on both routes
 //!
@@ -109,6 +114,7 @@ use std::process::Command;
 /// quietly stops running a case, fails instead of passing on the cases it
 /// did reach.
 const EXPECTED_CASES: &[&str] = &[
+    "typed-single-reports-one-id-spelling-for-a-non-canonical-id",
     "typed-single-vue-produces-runtime-output",
     "typed-single-svelte-produces-runtime-output",
     "typed-single-vue-preserves-ide-utf16-offsets",
@@ -420,6 +426,41 @@ function legacyIde(canonicalId, source) {
   host.close();
   return response;
 }
+
+// The singular route reports ONE id spelling whatever the outcome: a
+// compile answers the host's canonical id, and so does a refusal that
+// never reached the host. A route that echoed the caller's raw spelling on
+// one path and the canonical id on the other would name the same file two
+// ways depending on whether it compiled.
+check("typed-single-reports-one-id-spelling-for-a-non-canonical-id", () => {
+  const backslash = String.fromCharCode(92);
+  const rawId = `D:${backslash}typed${backslash}SingleWindows.vue`;
+  const canonicalId = "d:/typed/SingleWindows.vue";
+  const source = `<template><p>single-non-canonical</p></template>`;
+  const host = new addon.VerterHost();
+  upsertSource(host, rawId, source, "vue");
+  const response = host.compileRequest(rawId, vueRuntime(rawId));
+  if (response.canonicalId !== canonicalId) {
+    return `a compile reported ${JSON.stringify(response.canonicalId)}`;
+  }
+  if (!runtimeMain(response)) {
+    return `a non-canonical id compiled to no main node: ${JSON.stringify(response)}`;
+  }
+  // A construction refusal: two runtime-client products in one request.
+  const duplicated = vueRuntime(rawId);
+  duplicated.products = [runtimeProduct(), runtimeProduct()];
+  let refusedId;
+  try {
+    host.compileRequest(rawId, duplicated);
+  } catch (error) {
+    refusedId = error && error.canonicalId;
+  }
+  host.close();
+  if (refusedId !== canonicalId) {
+    return `a construction refusal reported ${JSON.stringify(refusedId)}`;
+  }
+  return undefined;
+});
 
 check("typed-single-vue-produces-runtime-output", () => {
   const canonicalId = "/typed/Single.vue";
@@ -1095,8 +1136,14 @@ check("typed-batch-preserves-order-isolates-failure-and-registers-once", () => {
 // raw-spelling comparison fails this route BY DEFAULT there while passing
 // on POSIX.
 check("typed-batch-accepts-non-canonical-ids", () => {
-  const windowsId = "D:\typed\Windows.vue";
+  // Spelled without a JS escape so no layer between this source and V8 can
+  // quietly halve it: this program is embedded in a Rust raw string.
+  const backslash = String.fromCharCode(92);
+  const windowsId = `D:${backslash}typed${backslash}Windows.vue`;
   const windowsCanonical = "d:/typed/Windows.vue";
+  if (windowsId.length !== "D:/typed/Windows.vue".length) {
+    return `the Windows id lost a separator: ${JSON.stringify(windowsId)}`;
+  }
   const queryId = "/typed/Query.vue?vue&type=script";
   const queryCanonical = "/typed/Query.vue";
   const plainId = "/typed/Plain.vue";

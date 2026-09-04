@@ -273,6 +273,16 @@ as `binding`; valid siblings still execute. Invalid batch-level options
 (including unknown keys) or a non-array/oversized outer input throw before
 execution.
 
+Each input's `canonicalId` is normalized the same way every other host route
+normalizes an id — a Windows drive letter lowercases, backslashes become
+slashes, a bundler query tail (`?vue&type=script`) and a `\?\`
+extended-length prefix are stripped, surrounding whitespace is trimmed, and a
+registered alias resolves to its canonical. So `D:\src\App.vue`,
+`/src/App.vue?vue&type=style` and `/src/App.vue` are accepted as written, and
+each entry reports the NORMALIZED id in its `canonicalId`. Correlate results by
+position, or by the id the entry reports — not by string-comparing the id you
+passed in.
+
 **Two budgets, two failure modes.** The decoded-value cap is per entry — the
 counter resets between entries, so a request graph that exhausts it fails only
 that entry, as a `binding` failure. The retained-byte budget is per CALL and

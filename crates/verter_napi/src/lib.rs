@@ -2460,6 +2460,13 @@ impl NapiVerterHost {
         #[napi(ts_arg_type = "import('./host-compile-request.generated').HostCompileRequest")]
         request: NapiHostCompileRequest,
     ) -> Result<NapiCompileRequestResponse> {
+        // Resolved to the host's identity once, up front, so this route
+        // reports ONE id spelling whatever the outcome. A success already
+        // answers `response.canonical_id`, which is canonical; without
+        // this, a construction refusal would answer the caller's raw
+        // spelling instead, and the same route would name the same file
+        // two different ways depending on whether it compiled.
+        let canonical_id = self.inner.resolve_alias_or_canonical(&canonical_id);
         let request =
             match host_compile_request::napi_host_compile_request_to_compile_request(request) {
                 Ok(request) => request,

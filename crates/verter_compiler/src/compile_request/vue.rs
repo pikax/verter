@@ -850,9 +850,10 @@ const PRESENCE_REFUSED_VUE_SLOTS: [(VueOption, VuePresenceProbe); 12] = {
                     .is_some()
             },
         ),
-        (ParserOptionsCompatConfigCompilerVBindObjectOrder, |attempt| {
-            attempt.compat_config_compiler_v_bind_object_order.is_some()
-        }),
+        (
+            ParserOptionsCompatConfigCompilerVBindObjectOrder,
+            |attempt| attempt.compat_config_compiler_v_bind_object_order.is_some(),
+        ),
         (ParserOptionsCompatConfigCompilerVOnNative, |attempt| {
             attempt.compat_config_compiler_v_on_native.is_some()
         }),

@@ -272,7 +272,7 @@ impl CompileRequestError {
     /// their request object has no field for.
     #[track_caller]
     pub fn malformed_option_value(option: FrameworkOption, value: impl Into<String>) -> Self {
-        debug_assert!(
+        verter_debug_assert!(
             Self::is_value_refusable(option),
             "a value refusal named {option:?}, which is absent from \
              VALUE_REFUSED_VUE_OPTIONS / VALUE_REFUSED_SVELTE_OPTIONS; add \
