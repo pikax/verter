@@ -656,20 +656,46 @@ routes above, and the two differ in WHO owns the demand:
   Two inputs may name one canonical with different requests (one
   registration, two executions); two inputs naming one canonical with
   different BYTES is a conflict reported on both entries — the batch never
-  picks a winner. A per-input failure isolates to that entry.
+  picks a winner. A per-input failure isolates to that entry. Every input
+  id is canonicalized at the boundary
+  (`VerterHost::resolve_alias_or_canonical`) before it becomes a
+  registration key, an execution key or an entry's reported id, so a
+  binding that correlates its own inputs against the returned entries must
+  canonicalize through that same resolver rather than compare the caller's
+  raw spelling — a Windows path, an alias or a `?`-suffixed id is not the
+  id the entries carry.
 - **No compile cache slot.** This route consults and publishes none, so
   distinct requests for one canonical are distinct compiles.
-- **Refusals name the caller's field, not a Rust spelling.** A
+- **Refusals name the caller's field, not a Rust spelling and not the
+  official framework's own option surface.** A
   `CompileRequestError::UnsupportedOption` / `MalformedOptionValue` renders
-  its option through `FrameworkOption`'s `Display`, which reads the row's
-  `(surface, option)` columns from the committed option inventories
-  (`packages/framework-conformance-harness/evidence/{vue,svelte}-options.tsv`,
-  via the exhaustive `VueOption::tsv_row` / `SvelteOption::tsv_row`) and
-  emits `vue:hoistStatic`, `svelte:accessors`,
-  `svelte:customElement.props.*.type`. Never derive that path from the
-  variant's `Debug` spelling: the variants are `Surface_option`, so a
-  case-lowered `Debug` names a field (`vue:transformOptionsHoistStatic`)
-  that no schema and no caller has.
+  its option through `FrameworkOption`'s `Display`, which emits
+  `{framework}:{request_field}` — the REQUEST SCHEMA's own flat, camelCase
+  field path (`VueOption::request_field` / `SvelteOption::request_field`,
+  resolved against `packages/native/host-compile-request.generated.ts`).
+  So `vue:hoistStatic`, `svelte:accessors`,
+  `svelte:customElementDescriptor.props.*.propType`. Two wrong sources are
+  ruled out by `crates/verter_compiler/tests/cases/framework_option_wire_paths.rs`:
+  - the variant's `Debug` spelling — the variants are `Surface_option`, so
+    a case-lowered `Debug` names a field (`vue:transformOptionsHoistStatic`)
+    that no schema and no caller has;
+  - the committed option inventories
+    (`packages/framework-conformance-harness/evidence/{vue,svelte}-options.tsv`,
+    read by `VueOption::tsv_row` / `SvelteOption::tsv_row`). Those rows are
+    faithful to the OFFICIAL frameworks' surfaces, which is a different
+    namespace: `compatConfig.MODE` is the request's `compatConfigMode`, and
+    the inventory records `compatConfig` on two surfaces where the request
+    carries the two distinct fields `compatConfig` and
+    `transformCompatConfig` — reading from there tells one of those two
+    callers to remove a field they never wrote. `tsv_row` survives only as
+    the `Display` fallback for an option the request carries no slot for,
+    and no refusal may name one: a presence refusal can only name a row of
+    `PRESENCE_REFUSED_VUE_SLOTS` / `PRESENCE_REFUSED_SVELTE_SLOTS` (the
+    refusing loop IS that table, each option paired in place with the field
+    probe that decides it), and a value refusal is constructed only through
+    `CompileRequestError::malformed_option_value`, which asserts its option
+    against the declared `VALUE_REFUSED_VUE_OPTIONS` /
+    `VALUE_REFUSED_SVELTE_OPTIONS` set.
 - **Diagnostics publish their arguments.** Every FFI diagnostic carries
   `arguments` — the values its message is rendered from — through the ONE
   shared projection `verter_ffi::convert::host_diagnostic_to_ffi` /

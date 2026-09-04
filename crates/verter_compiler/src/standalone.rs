@@ -3107,10 +3107,10 @@ fn direct_svelte_runtime_options(
 }
 
 fn svelte_malformed_option(option: SvelteOption, value: impl Into<String>) -> DirectCompileError {
-    DirectCompileError::SvelteOption(CompileRequestError::MalformedOptionValue {
-        option: FrameworkOption::Svelte(option),
-        value: value.into(),
-    })
+    DirectCompileError::SvelteOption(CompileRequestError::malformed_option_value(
+        FrameworkOption::Svelte(option),
+        value,
+    ))
 }
 
 /// Renders an ALREADY-ADMITTED canonical descriptor into the parser-side

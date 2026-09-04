@@ -754,11 +754,12 @@ fn vue_options_to_attempt(
 /// A delimiter pair is exactly two strings. Any other arity is a typed
 /// malformed-value refusal — never a fall back to the framework default.
 fn vue_delimiter_pair(raw: Vec<String>) -> Result<(String, String), CompileRequestError> {
-    let [open, close] =
-        <[String; 2]>::try_from(raw).map_err(|raw| CompileRequestError::MalformedOptionValue {
-            option: FrameworkOption::Vue(VueOption::ParserOptionsDelimiters),
-            value: raw.join(","),
-        })?;
+    let [open, close] = <[String; 2]>::try_from(raw).map_err(|raw| {
+        CompileRequestError::malformed_option_value(
+            FrameworkOption::Vue(VueOption::ParserOptionsDelimiters),
+            raw.join(","),
+        )
+    })?;
     Ok((open, close))
 }
 

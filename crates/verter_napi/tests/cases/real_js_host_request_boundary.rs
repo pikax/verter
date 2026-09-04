@@ -48,6 +48,14 @@
 //!   failure (rather than filling that entry's `failure` slot) and
 //!   `typed-batch-isolates-public-api-and-declarations-refusals` loses its
 //!   compiling sibling.
+//! - Push the caller's raw `canonicalId` into `expected_canonical_ids`
+//!   (drop the `resolve_alias_or_canonical` call in `compile_requests`) and
+//!   `typed-batch-accepts-non-canonical-ids` fails the whole batch with a
+//!   false transposition, discarding its valid sibling too.
+//! - Drop the `retained_bytes` bound before `keys.at` in
+//!   `decode_compile_requests_priority` and
+//!   `typed-batch-bounds-a-hostile-options-key` sees a megabyte key quoted
+//!   back verbatim.
 //!
 //! # Product-kind coverage on both routes
 //!
@@ -123,6 +131,8 @@ const EXPECTED_CASES: &[&str] = &[
     "typed-batch-preserves-order-isolates-failure-and-registers-once",
     "typed-batch-refuses-a-non-array-input",
     "typed-batch-refuses-unknown-options",
+    "typed-batch-bounds-a-hostile-options-key",
+    "typed-batch-accepts-non-canonical-ids",
     "typed-batch-refuses-binary-options-before-enumerating-them",
     "typed-batch-clears-a-throwing-options-trap-and-still-serves",
     "typed-batch-runs-analysis-and-runtime-server-products",
@@ -1071,6 +1081,48 @@ check("typed-batch-preserves-order-isolates-failure-and-registers-once", () => {
   return undefined;
 });
 
+// A caller's id is not the host's id. The host resolves every id it is
+// handed through one identity function — a drive letter lowercases,
+// backslashes become slashes, a bundler query tail and an extended-length
+// prefix are stripped, whitespace is trimmed, a registered alias resolves —
+// and it does that to the batch's inputs before registering or compiling
+// them. So the ids the entries report are canonical, and a binding that
+// correlated its output slots by comparing the CALLER's spelling against
+// them would read every one of these as a transposed batch.
+//
+// The Windows row is the load-bearing one: on Windows the id a Node tool
+// naturally holds is a drive-letter path with backslashes, so a
+// raw-spelling comparison fails this route BY DEFAULT there while passing
+// on POSIX.
+check("typed-batch-accepts-non-canonical-ids", () => {
+  const windowsId = "D:\typed\Windows.vue";
+  const windowsCanonical = "d:/typed/Windows.vue";
+  const queryId = "/typed/Query.vue?vue&type=script";
+  const queryCanonical = "/typed/Query.vue";
+  const plainId = "/typed/Plain.vue";
+  const source = `<template><p>non-canonical</p></template>`;
+  const host = new addon.VerterHost();
+  const entries = host.compileRequests([
+    { canonicalId: windowsId, source: Buffer.from(source), request: vueRuntime(windowsId) },
+    { canonicalId: queryId, source: Buffer.from(source), request: vueRuntime(queryId) },
+    { canonicalId: plainId, source: Buffer.from(source), request: vueRuntime(plainId) },
+  ]);
+  host.close();
+  const ids = entries.map((entry) => entry.canonicalId);
+  const expected = [windowsCanonical, queryCanonical, plainId];
+  if (JSON.stringify(ids) !== JSON.stringify(expected)) {
+    return `entries did not report canonical ids in input order: ${JSON.stringify(ids)}`;
+  }
+  const failed = entries.filter((entry) => entry.failure || !entry.response);
+  if (failed.length > 0) {
+    return `a non-canonical id lost its entry: ${JSON.stringify(failed)}`;
+  }
+  if (entries.some((entry) => !runtimeMain(entry.response))) {
+    return `a non-canonical id compiled to no main node: ${JSON.stringify(ids)}`;
+  }
+  return undefined;
+});
+
 check("valid-request-accepted", () => {
   const rendered = decode(vue());
   if (typeof rendered !== "string" || !rendered.includes("Vue")) {
@@ -1243,6 +1295,25 @@ check("typed-batch-refuses-unknown-options", () => {
   if (refusal === null) return "accepted an unknown batch option";
   if (!refusal.includes("unknown field `prioirty`")) {
     return `unknown option refusal was ${refusal}`;
+  }
+  return undefined;
+});
+
+// An own key is as caller-controlled and as unbounded as a thrown string,
+// and the refusal that names it is a thrown Error message. The key is
+// therefore MEASURED before it is copied, exactly as a thrown string is,
+// and above the bound it is named by its size rather than quoted.
+check("typed-batch-bounds-a-hostile-options-key", () => {
+  const huge = "x".repeat(1 << 20);
+  const host = new addon.VerterHost();
+  const refusal = refusalOfRoute(() => host.compileRequests([], { [huge]: "background" }));
+  host.close();
+  if (refusal === null) return "accepted an unbounded unknown batch option key";
+  if (refusal.includes(huge) || refusal.length > 4096) {
+    return `the huge option key was quoted verbatim (${refusal.length} chars)`;
+  }
+  if (!refusal.includes("unknown field")) {
+    return `an over-long option key must still refuse as an unknown field, got ${refusal}`;
   }
   return undefined;
 });

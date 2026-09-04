@@ -268,34 +268,79 @@ pub const ALL_SVELTE_OPTIONS: [SvelteOption; 35] = {
     ]
 };
 
+/// Whether one [`SvelteOptionAttempt`] field was supplied at all.
+type SveltePresenceProbe = fn(&SvelteOptionAttempt) -> bool;
+
 /// Every Svelte option [`SvelteOptionAttempt::into_request`] refuses on
-/// PRESENCE, in the deterministic order it checks them, beside the
-/// capability cell (if any) that refuses it.
+/// PRESENCE, in the deterministic order it checks them: the option, the
+/// capability cell (if any) that refuses it, and the probe that decides
+/// it, all on ONE row.
 ///
-/// This is the list that method reads, not a mirror of it — see
-/// [`crate::compile_request::vue::PRESENCE_REFUSED_VUE_OPTIONS`] for the
-/// same arrangement, and `each_unsupported_slot_refuses_by_its_own_identity`
-/// for the slot-by-slot pairing proof.
-pub const PRESENCE_REFUSED_SVELTE_OPTIONS: [(
+/// Same arrangement and same reason as
+/// [`crate::compile_request::vue::PRESENCE_REFUSED_VUE_SLOTS`] — a slot's
+/// identity and the field it reads move together, so a refusal cannot name
+/// a neighbour's option. `each_unsupported_slot_refuses_by_its_own_identity`
+/// proves the pairing slot by slot.
+const PRESENCE_REFUSED_SVELTE_SLOTS: [(
     SvelteOption,
     Option<crate::compile_request::CapabilityCell>,
+    SveltePresenceProbe,
 ); 8] = {
     use crate::compile_request::CapabilityCell;
     use SvelteOption::*;
     [
-        (ParseLoose, None),
-        (CompileOptionsAccessors, None),
-        (CompileOptionsImmutable, None),
-        (CompileOptionsCompatibilityComponentApi, None),
-        (CompileOptionsHmr, None),
-        (CustomElementExtend, None),
-        (ModuleGenerate, Some(CapabilityCell::SvelteModule)),
-        (ModuleExperimentalAsync, Some(CapabilityCell::SvelteModule)),
+        (ParseLoose, None, |attempt| attempt.loose.is_some()),
+        (CompileOptionsAccessors, None, |attempt| {
+            attempt.accessors.is_some()
+        }),
+        (CompileOptionsImmutable, None, |attempt| {
+            attempt.immutable.is_some()
+        }),
+        (CompileOptionsCompatibilityComponentApi, None, |attempt| {
+            attempt.compatibility_component_api.is_some()
+        }),
+        (CompileOptionsHmr, None, |attempt| attempt.hmr.is_some()),
+        (CustomElementExtend, None, |attempt| {
+            attempt.custom_element_extend.is_some()
+        }),
+        (
+            ModuleGenerate,
+            Some(CapabilityCell::SvelteModule),
+            |attempt| attempt.generate_module.is_some(),
+        ),
+        (
+            ModuleExperimentalAsync,
+            Some(CapabilityCell::SvelteModule),
+            |attempt| attempt.experimental_async.is_some(),
+        ),
     ]
+};
+
+/// The `(option, capability)` identities of
+/// [`PRESENCE_REFUSED_SVELTE_SLOTS`], projected for consumers that need
+/// the refusable SET without the probes. Derived, not restated.
+pub const PRESENCE_REFUSED_SVELTE_OPTIONS: [(
+    SvelteOption,
+    Option<crate::compile_request::CapabilityCell>,
+); PRESENCE_REFUSED_SVELTE_SLOTS.len()] = {
+    let mut rows = [(SvelteOption::ParseLoose, None); PRESENCE_REFUSED_SVELTE_SLOTS.len()];
+    let mut index = 0;
+    while index < PRESENCE_REFUSED_SVELTE_SLOTS.len() {
+        rows[index] = (
+            PRESENCE_REFUSED_SVELTE_SLOTS[index].0,
+            PRESENCE_REFUSED_SVELTE_SLOTS[index].1,
+        );
+        index += 1;
+    }
+    rows
 };
 
 /// Every Svelte option a [`crate::compile_request::CompileRequestError`]
 /// can name for a caller's VALUE rather than for the option's presence.
+///
+/// The DECLARED set, enforced by
+/// [`crate::compile_request::CompileRequestError::malformed_option_value`]
+/// — see [`crate::compile_request::vue::VALUE_REFUSED_VUE_OPTIONS`].
 ///
 /// The refusal sites, in this order: the custom-element prop-type
 /// vocabulary ([`admit_custom_element_descriptor`], the sole membership
@@ -512,42 +557,20 @@ pub struct SvelteOptionAttempt {
 }
 
 impl SvelteOptionAttempt {
-    /// The 6 unconditionally-unsupported option rows, plus `generate_module`
-    /// / `experimental_async` — `ModuleGenerate`/`ModuleExperimentalAsync`
-    /// are themselves classified `SupportedCanonical` as OPTIONS (see
-    /// [`SvelteOption::class`]), but the `SVELTE-MODULE` module-compilation
-    /// CAPABILITY they gate is `unsupported fail-closed` per
-    /// `capability-matrix.tsv`, so they carry `Some(SvelteModule)` here
+    /// Refuses the 6 unconditionally-unsupported option rows, plus
+    /// `generate_module` / `experimental_async` —
+    /// `ModuleGenerate`/`ModuleExperimentalAsync` are themselves classified
+    /// `SupportedCanonical` as OPTIONS (see [`SvelteOption::class`]), but
+    /// the `SVELTE-MODULE` module-compilation CAPABILITY they gate is
+    /// `unsupported fail-closed` per `capability-matrix.tsv`, so their rows
+    /// in [`PRESENCE_REFUSED_SVELTE_SLOTS`] carry `Some(SvelteModule)`
     /// rather than `None` — the option admits fine in isolation, the
     /// capability it depends on does not.
-    fn unsupported_slots(
-        &self,
-    ) -> [(
-        bool,
-        SvelteOption,
-        Option<crate::compile_request::CapabilityCell>,
-    ); PRESENCE_REFUSED_SVELTE_OPTIONS.len()] {
-        let present = [
-            self.loose.is_some(),
-            self.accessors.is_some(),
-            self.immutable.is_some(),
-            self.compatibility_component_api.is_some(),
-            self.hmr.is_some(),
-            self.custom_element_extend.is_some(),
-            self.generate_module.is_some(),
-            self.experimental_async.is_some(),
-        ];
-        std::array::from_fn(|index| {
-            let (option, capability) = PRESENCE_REFUSED_SVELTE_OPTIONS[index];
-            (present[index], option, capability)
-        })
-    }
-
     pub fn into_request(
         self,
     ) -> Result<SvelteCompileRequest, crate::compile_request::CompileRequestError> {
-        for (present, option, capability) in self.unsupported_slots() {
-            if present {
+        for (option, capability, is_present) in PRESENCE_REFUSED_SVELTE_SLOTS {
+            if is_present(&self) {
                 return Err(
                     crate::compile_request::CompileRequestError::UnsupportedOption {
                         option: crate::compile_request::FrameworkOption::Svelte(option),
@@ -597,14 +620,16 @@ fn admit_custom_element_descriptor(
         } = prop;
         let prop_type = match prop_type {
             None => None,
-            Some(spelling) => Some(SvelteCustomElementPropType::from_spelling(&spelling).ok_or(
-                crate::compile_request::CompileRequestError::MalformedOptionValue {
-                    option: crate::compile_request::FrameworkOption::Svelte(
-                        SvelteOption::CustomElementPropsType,
-                    ),
-                    value: spelling,
-                },
-            )?),
+            Some(spelling) => Some(
+                SvelteCustomElementPropType::from_spelling(&spelling).ok_or_else(|| {
+                    crate::compile_request::CompileRequestError::malformed_option_value(
+                        crate::compile_request::FrameworkOption::Svelte(
+                            SvelteOption::CustomElementPropsType,
+                        ),
+                        spelling,
+                    )
+                })?,
+            ),
         };
         admitted.insert(
             name,
@@ -703,13 +728,15 @@ mod tests {
 
     /// Each presence-refused field refuses, AND names its own option and
     /// capability cell — the same pairing proof as the Vue half, for the
-    /// same reason: `unsupported_slots` reads its identities out of
-    /// `PRESENCE_REFUSED_SVELTE_OPTIONS` positionally beside the presence
-    /// flags.
+    /// same reason: `PRESENCE_REFUSED_SVELTE_SLOTS` pairs identity,
+    /// capability and probe on one row, and this states which field each
+    /// row's probe must actually read.
     ///
     /// Mutation recipes:
-    /// - Swap two entries in `PRESENCE_REFUSED_SVELTE_OPTIONS`: both
-    ///   swapped slots report the other's option here.
+    /// - Point one row's probe at a neighbour's field: the moved-from slot
+    ///   admits and its `unwrap_err` panics.
+    /// - Swap two rows of `PRESENCE_REFUSED_SVELTE_SLOTS`: both swapped
+    ///   slots report the other's option here.
     /// - Drop `Some(CapabilityCell::SvelteModule)` from the
     ///   `ModuleGenerate` entry: that slot's capability assertion fails,
     ///   which is the difference between "this option is never admitted"

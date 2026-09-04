@@ -891,6 +891,13 @@ pub const PRESENCE_REFUSED_VUE_OPTIONS: [VueOption; PRESENCE_REFUSED_VUE_SLOTS.l
 /// Every Vue option a [`crate::compile_request::CompileRequestError`] can
 /// name for a caller's VALUE rather than for the option's presence.
 ///
+/// The DECLARED set, enforced rather than described:
+/// [`crate::compile_request::CompileRequestError::malformed_option_value`]
+/// is the one constructor for a value refusal and asserts its option
+/// against this list, so a refusal site naming an option absent from here
+/// fails in every debug build instead of quoting a path the caller's
+/// request object has no field for.
+///
 /// One row today: a `delimiters` array whose arity is not exactly two is
 /// refused at the FFI decode boundary
 /// (`verter_ffi::convert::input::vue_delimiter_pair`) rather than falling
@@ -1276,15 +1283,18 @@ mod tests {
 
     /// Each presence-refused field refuses, AND names its own option.
     ///
-    /// Naming matters as much as refusing: `unsupported_slots` reads its
-    /// option identities out of `PRESENCE_REFUSED_VUE_OPTIONS` positionally
-    /// beside the per-field presence flags, so a slot inserted, removed, or
-    /// reordered on one side and not the other would report a neighbour's
-    /// option and tell a caller to remove a field they never wrote.
+    /// Naming matters as much as refusing: a refusal that reported a
+    /// neighbour's option would tell a caller to remove a field they never
+    /// wrote. `PRESENCE_REFUSED_VUE_SLOTS` pairs each option with its own
+    /// probe on one row, so the two cannot desync silently; this states
+    /// what each row's probe must actually READ, which the row itself
+    /// cannot.
     ///
     /// Mutation recipes:
-    /// - Swap two entries in `PRESENCE_REFUSED_VUE_OPTIONS` (or two lines
-    ///   of `unsupported_slots`' `present` array): both swapped slots
+    /// - Point one row's probe at a neighbour's field (e.g. give
+    ///   `ParserOptionsCompatConfigMode` the `compat_config` probe): the
+    ///   moved-from slot admits and its `unwrap_err` panics.
+    /// - Swap two rows of `PRESENCE_REFUSED_VUE_SLOTS`: both swapped slots
     ///   report the other's option here.
     /// - Return `Ok` from `into_request` for one slot: that slot's
     ///   `unwrap_err` panics.

@@ -6,6 +6,10 @@
   named surfaces, recorded here because the review rounds found the expansion
   undispositioned, not because a fix owner may ratify their own rescope.
 - Amends: nothing. No charter budget, no DAG edge, no other node's ledger row.
+- Asks for: two operator decisions (see the last section). The third
+  question a review round raised — whether this branch also lands `CCA1O3A`
+  — is not one of them: that work has been reverted off the branch, so the
+  candidate carries exactly one ledger transition, its own.
 
 ## Why this record exists
 
@@ -20,13 +24,22 @@ candidate needs an operator to accept it.
 
 ## Measured footprint
 
-Against merge base `f4d755241`, production (crate `src/`, published
-TypeScript) is +3383/−351 across 23 files in 6 crates and 2 packages:
+Measured against the branch's merge base with `main` (`353a8ca04`) —
+`git diff --numstat main`, restricted to crate `src/` and published
+TypeScript. An earlier revision of this record measured against
+`f4d755241`, which is a commit ON this branch and not an ancestor of
+`main`; that baseline hid `f4d755241`'s own contents from the measurement.
+It is corrected here, and the work it contained no longer rides on this
+branch (see "What was NOT adopted").
+
+Production is +3547/−402 across 23 files in 6 crates and 2 packages:
 `verter_compiler`, `verter_ffi`, `verter_napi`, `verter_protocol`,
-`verter_session`, `verter_wasm`, `packages/native`, `packages/wasm`. The
-charter's guidance is ~500 LOC / 5 files / 2 related crates-or-packages; its
-mandatory rescope thresholds are 1500 LOC / 12 files / 3 unrelated packages.
-Production LOC, the file count and the unrelated-package count all breach.
+`verter_session`, `verter_wasm`, `packages/native`, `packages/wasm`. (Three
+of the 23 are `*_tests.rs` modules that live under `src/`; counting only
+non-test files gives 20.) The charter's guidance is ~500 LOC / 5 files /
+2 related crates-or-packages; its mandatory rescope thresholds are 1500 LOC
+/ 12 files / 3 unrelated packages. Production LOC, the file count and the
+unrelated-package count all breach.
 
 The charter's own budget line already anticipates part of this: "rescope only
 under the program's mandatory thresholds **or when a consumer migration or
@@ -92,9 +105,12 @@ The charter names `crates/verter_napi/src/lib.rs`,
    from the request object a caller writes.
 
    The same owner rule puts the refusal SENTENCE in `verter_compiler`
-   (`Display for CompileRequestError`), with `ProductKind::wire_tag`,
-   `CapabilityCell::cell_id` and `RuntimeStyleProcessing::wire_name` beside
-   it. Both bindings render that one vocabulary, so a refused request reads
+   (`Display for CompileRequestError`), with the wire spelling of every
+   value it embeds owned by that value's own `Display`
+   (`FrameworkOption`, `VueOnlyAxis`, `CapabilityCell`, `ProductKind`,
+   `RuntimeStyleProcessing`), each backed by a single spelling accessor
+   (`cell_id`, `wire_tag`, `wire_name`). Both bindings render that one
+   vocabulary, so a refused request reads
    the same way natively and in the browser; the alternative — the native
    binding's own 11-arm renderer and 34-arm capability-cell table, with the
    browser binding still printing `{error:?}` — is precisely the fork the
@@ -119,26 +135,37 @@ charter's four abort conditions all hold.
 
 ## What was NOT adopted
 
-No consumer migration entered. The legacy profile-bearing methods, their
-declarations, and their tests are untouched, as the charter requires.
+No consumer migration rides on this branch, and the legacy profile-bearing
+methods, their declarations, and their tests are untouched, as the charter
+requires.
 
-## Open items carried out of review
+One did ride here and no longer does. `f4d755241` migrated
+`packages/playground/scripts/capture-wasm-carrier-fixtures.mjs` off
+`ensureIdeCompiled`/`getIde` onto the browser binding's `compileRequest`,
+and flipped a SECOND node's ledger row (`CCA1O3A`) to implemented. Both are
+excluded by this charter twice over — "Consumer migrations and every
+legacy-profile deletion are excluded", and "add only CCA1O2J's ledger row" —
+and the earlier revision of this record contradicted the tree by asserting
+that no consumer migration had entered. A later commit on this branch
+reverts the script to its `main` state and returns `CCA1O3A` to `pending`,
+so the claim and the tree now agree: this candidate carries exactly one
+ledger transition, its own. The migration itself is not rejected on its
+merits; it belongs to its own node and its own review.
 
-The earlier round recorded a five-item debt list. Four of those items are
-closed by the landed candidate and are not carried forward: the public
-declaration and `docs/api/native.md` describe both routes and their budgets;
-a serde assertion proves the argument list reaches the browser wire; the
-64-bit argument values cross as exact decimal digits; and the batch route
-carries its own `publicApi`/`declarations` refusal-isolation case rather
-than inheriting the singular route's.
+## Debt carried out of review: all closed, none deferred
 
-One item remains, now narrowed: the batch route's `ideCompanion` product.
-It is the only product whose payload is computed FROM the paired source, so
-a zip that paired one entry's response with another's source would publish
-UTF-16 offsets into the wrong file — silently. This round closes it with
-`typed-batch-preserves-ide-utf16-offsets-per-entry`, two entries whose
-multi-byte prefixes differ so each entry's offset is wrong against the
-other's source. No debt is carried past this candidate.
+Every row the review rounds carried is closed by the landed candidate, with
+its evidence named. None is deferred, so no `DEFER` ruling and no debt row
+is owed, and nothing here needs an owner block or a resolution gate.
+
+| Row | Closed by |
+| --- | --- |
+| Batch `ideCompanion` responses must stay paired with their own entry's source — it is the only product whose payload (destructured-binding UTF-16 offsets) is computed FROM the source, so a mispairing publishes offsets into the wrong file silently rather than failing | `typed-batch-preserves-ide-utf16-offsets-per-entry`: two entries whose multi-byte prefixes differ, so each entry's offsets are wrong against the other's source |
+| Published diagnostics must carry their argument list through serde, not just through the Rust DTO | `published_diagnostics_carry_their_argument_list_through_serde`, plus the browser-side serde assertion proving the field reaches the wasm wire |
+| `docs/api/native.md` and `docs/api/wasm.md` must describe the published `arguments` field | Both documents describe it, alongside both routes and their budgets |
+| `publicApi` / `declarations` must refuse on the BATCH route too, isolated to its own entry beside a compiling sibling — not inherited from the singular route | `typed-batch-isolates-public-api-and-declarations-refusals` and `typed-single-refuses-public-api-and-declarations` |
+| `runtimeServer` and `analysis` products must publish their payloads on BOTH routes | `typed-single-runtime-server-publishes-its-nodes`, `typed-single-vue-analysis-is-a-json-string`, `typed-batch-runs-analysis-and-runtime-server-products` |
+| `Unsigned` / `Signed` diagnostic arguments must not silently round above 2^53 when crossing to JavaScript | They cross as exact decimal STRINGS on both bindings, asserted on both |
 
 ## Operator decisions this record asks for
 

@@ -784,10 +784,10 @@ fn svelte_option_attempt_from_profile(
                 "html" => Ok(SvelteNamespaceRequest::Html),
                 "svg" => Ok(SvelteNamespaceRequest::Svg),
                 "mathml" => Ok(SvelteNamespaceRequest::MathMl),
-                other => Err(CompileRequestError::MalformedOptionValue {
-                    option: FrameworkOption::Svelte(SvelteOption::CompileOptionsNamespace),
-                    value: other.to_string(),
-                }),
+                other => Err(CompileRequestError::malformed_option_value(
+                    FrameworkOption::Svelte(SvelteOption::CompileOptionsNamespace),
+                    other,
+                )),
             })
             .transpose()?;
         let fragments = profile
@@ -796,10 +796,10 @@ fn svelte_option_attempt_from_profile(
             .map(|token| match token {
                 "html" => Ok(SvelteFragmentsRequest::Html),
                 "tree" => Ok(SvelteFragmentsRequest::Tree),
-                other => Err(CompileRequestError::MalformedOptionValue {
-                    option: FrameworkOption::Svelte(SvelteOption::CompileOptionsFragments),
-                    value: other.to_string(),
-                }),
+                other => Err(CompileRequestError::malformed_option_value(
+                    FrameworkOption::Svelte(SvelteOption::CompileOptionsFragments),
+                    other,
+                )),
             })
             .transpose()?;
         // Same decode-boundary rationale as `namespace`/`fragments` above.
@@ -809,10 +809,10 @@ fn svelte_option_attempt_from_profile(
             .map(|token| match token {
                 "injected" => Ok(SvelteCssRequest::Injected),
                 "external" => Ok(SvelteCssRequest::External),
-                other => Err(CompileRequestError::MalformedOptionValue {
-                    option: FrameworkOption::Svelte(SvelteOption::CompileOptionsCss),
-                    value: other.to_string(),
-                }),
+                other => Err(CompileRequestError::malformed_option_value(
+                    FrameworkOption::Svelte(SvelteOption::CompileOptionsCss),
+                    other,
+                )),
             })
             .transpose()?;
         // A descriptor is constructed only when the caller actually set

@@ -97,8 +97,19 @@ impl std::fmt::Display for FrameworkOption {
     /// field is `hoistStatic`.
     ///
     /// An option the request carries NO slot for cannot have been written
-    /// by a caller, and no [`CompileRequestError`] names one. Should one
-    /// ever reach here, it renders as its full inventory identity
+    /// by a caller. A refusal must therefore not name one, and the two
+    /// refusal families keep that true structurally rather than by
+    /// convention: a presence refusal can only name a row of
+    /// `PRESENCE_REFUSED_VUE_SLOTS` / `PRESENCE_REFUSED_SVELTE_SLOTS`
+    /// (the loop that refuses IS that table), and a value refusal is
+    /// constructed only through
+    /// [`CompileRequestError::malformed_option_value`], which asserts its
+    /// option against the declared `VALUE_REFUSED_*` set. Every option in
+    /// either set has a request field
+    /// (`every_refusable_option_names_its_own_request_field`).
+    ///
+    /// Should an option outside both sets ever reach here anyway, it
+    /// renders as its full inventory identity
     /// (`vue:compiler-core:ParserOptions.onWarn`) — the only name that
     /// option has anywhere — rather than as a bare leaf that would read
     /// like a request field.
@@ -230,6 +241,49 @@ pub enum CompileRequestError {
         expected: &'static str,
         actual: &'static str,
     },
+}
+
+impl CompileRequestError {
+    /// Whether a value refusal is allowed to name `option`.
+    ///
+    /// The declared set is [`VALUE_REFUSED_VUE_OPTIONS`] /
+    /// [`VALUE_REFUSED_SVELTE_OPTIONS`], and every member of it has a
+    /// request field. An option OUTSIDE it renders as its inventory
+    /// identity (`vue:compiler-core:ParserOptions.onWarn`) — the option's
+    /// only name anywhere, but a path no caller's request object has and
+    /// so a path no caller can act on.
+    pub fn is_value_refusable(option: FrameworkOption) -> bool {
+        match option {
+            FrameworkOption::Vue(option) => VALUE_REFUSED_VUE_OPTIONS.contains(&option),
+            FrameworkOption::Svelte(option) => VALUE_REFUSED_SVELTE_OPTIONS.contains(&option),
+        }
+    }
+
+    /// The ONE constructor for [`Self::MalformedOptionValue`].
+    ///
+    /// Presence refusals cannot drift from their declared option set,
+    /// because the refusing loop IS that set
+    /// (`PRESENCE_REFUSED_VUE_SLOTS` / `PRESENCE_REFUSED_SVELTE_SLOTS`).
+    /// Value refusals cannot be arranged that way — each site knows its
+    /// own option and its own vocabulary — so the declared set is held
+    /// here instead: every construction goes through this constructor, and
+    /// a site naming an option outside the declared set fails loudly in
+    /// every debug build and test run rather than shipping a caller a path
+    /// their request object has no field for.
+    #[track_caller]
+    pub fn malformed_option_value(option: FrameworkOption, value: impl Into<String>) -> Self {
+        debug_assert!(
+            Self::is_value_refusable(option),
+            "a value refusal named {option:?}, which is absent from \
+             VALUE_REFUSED_VUE_OPTIONS / VALUE_REFUSED_SVELTE_OPTIONS; add \
+             its row there (and confirm it has a request_field) so the \
+             refusal names a field the caller actually wrote"
+        );
+        Self::MalformedOptionValue {
+            option,
+            value: value.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for CompileRequestError {
@@ -1167,5 +1221,82 @@ mod tests {
         assert!(req.wants_tsx());
         assert!(!req.wants_script_output());
         assert!(req.wants_runtime_macro_semantics());
+    }
+
+    /// The declared value-refusable set is exactly the options a value
+    /// refusal may name, and nothing else is admitted through the one
+    /// constructor.
+    ///
+    /// The distinction it protects: an option in the set renders as the
+    /// caller's own request field, and an option outside it renders as its
+    /// OFFICIAL-inventory identity — a path the caller's request object has
+    /// no field for, so a path they cannot act on.
+    ///
+    /// Mutation recipes:
+    /// - Delete a row from `VALUE_REFUSED_SVELTE_OPTIONS`: that row's
+    ///   membership assertion fails, and every site constructing it trips
+    ///   the constructor's own assertion.
+    /// - Make `is_value_refusable` answer `true` unconditionally: the
+    ///   negative half fails, and the constructor stops discriminating a
+    ///   refusal site that names a slot-less option.
+    #[test]
+    fn only_declared_options_are_value_refusable() {
+        for option in VALUE_REFUSED_VUE_OPTIONS {
+            let option = FrameworkOption::Vue(option);
+            assert!(
+                CompileRequestError::is_value_refusable(option),
+                "{option:?} is declared value-refusable but the predicate denies it"
+            );
+            assert!(
+                option.request_field().is_some(),
+                "{option:?} may be named by a value refusal but has no request field, \
+                 so the refusal would quote an inventory path no caller wrote"
+            );
+        }
+        for option in VALUE_REFUSED_SVELTE_OPTIONS {
+            let option = FrameworkOption::Svelte(option);
+            assert!(
+                CompileRequestError::is_value_refusable(option),
+                "{option:?} is declared value-refusable but the predicate denies it"
+            );
+            assert!(
+                option.request_field().is_some(),
+                "{option:?} may be named by a value refusal but has no request field, \
+                 so the refusal would quote an inventory path no caller wrote"
+            );
+        }
+
+        // An option with no request slot at all: a caller cannot have
+        // written it, so a value refusal must never be constructed for it.
+        let slotless = FrameworkOption::Vue(VueOption::ParserOptionsOnWarn);
+        assert!(
+            slotless.request_field().is_none(),
+            "this case needs an option the request carries no slot for"
+        );
+        assert!(
+            !CompileRequestError::is_value_refusable(slotless),
+            "a slot-less option must not be admitted as value-refusable"
+        );
+    }
+
+    /// The one constructor produces the arm it names, with the caller's
+    /// value intact.
+    #[test]
+    fn the_value_refusal_constructor_carries_option_and_value() {
+        let error = CompileRequestError::malformed_option_value(
+            FrameworkOption::Svelte(SvelteOption::CompileOptionsCss),
+            "purple",
+        );
+        assert_eq!(
+            error,
+            CompileRequestError::MalformedOptionValue {
+                option: FrameworkOption::Svelte(SvelteOption::CompileOptionsCss),
+                value: "purple".to_string(),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "malformed value 'purple' for option 'svelte:css'"
+        );
     }
 }
