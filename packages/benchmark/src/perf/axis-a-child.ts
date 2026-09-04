@@ -38,6 +38,11 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import type {
+  HostCompileRequest,
+  HostCompileResponse,
+  HostIdeCompiledProduct,
+} from "@verter/native";
 import { parseCompileAttribution, aggregateAttribution } from "./audit-attribution.js";
 
 const require = createRequire(import.meta.url);
@@ -217,16 +222,16 @@ export function runAxisA(
 
   const host = hostFactory(args);
 
-  // SERIAL per-file throughput loop: upsert + audited compile each SFC in order
-  // (one at a time, not a whole-corpus/concurrent call). filesPerSec is this serial
-  // wall divided by file count; the candidate-vs-baseline ratio is valid because
-  // both sides run the identical serial orchestration.
+  // SERIAL per-file throughput loop: source-only upsert + audited compile each
+  // SFC in order (one at a time, not a whole-corpus/concurrent call). filesPerSec
+  // is this serial wall divided by file count; the candidate-vs-baseline ratio is
+  // valid because both sides run the identical serial orchestration.
   const t0 = performance.now();
   const attributions = [];
   let carrierCount = 0;
   for (const p of sfcPaths) {
     const src = readFileSync(p);
-    host.upsert({ inputId: p, source: src, compileProfile: { sourceMap: true } });
+    host.upsert({ inputId: p, source: src });
     const buf = host.compileWithAudit(p, CARRIER_TARGET);
     const attr = parseCompileAttribution(buf);
     if (attr) {
@@ -238,22 +243,23 @@ export function runAxisA(
   const agg = attributions.length > 0 ? aggregateAttribution(attributions) : null;
 
   // Content-correctness pass (UNTIMED — never charged to filesPerSec/totalMs):
-  // read each already-compiled IDE carrier's code + source-map and hash them, so a
-  // codegen change that preserves output_bytes + carrierCount but alters the
-  // emitted CONTENT is caught by the gate's carrier-content equality rail. The
-  // carriers are warm from the timed loop above, so this is a cache read.
+  // demand each IDE companion through one typed compile request and hash code +
+  // source-map, so a codegen change that preserves output_bytes + carrierCount
+  // but alters the emitted CONTENT is caught by the gate's carrier-content
+  // equality rail.
   //
   // Every expected carrier MUST yield a non-empty IDE `code` AND a non-empty
   // `sourceMap` (source maps are requested on this path). A MISSING carrier (the
-  // host returned no IDE result, or an absent/empty code or source-map) is MISSING
-  // instrumentation — NEVER hashed from "" (which would let a both-sides-missing
-  // carrier compare as an equal empty-string hash and pass the content-equality
-  // rail). When ANY expected carrier is missing the content hash is UNAVAILABLE
-  // (null), and the gate's content-equality presence rail hard-fails a full run.
+  // host returned no IDE product, or an absent/empty code or source-map) is
+  // MISSING instrumentation — NEVER hashed from "" (which would let a
+  // both-sides-missing carrier compare as an equal empty-string hash and pass the
+  // content-equality rail). When ANY expected carrier is missing the content hash
+  // is UNAVAILABLE (null), and the gate's content-equality presence rail
+  // hard-fails a full run.
   const carrierEntries: CarrierContentEntry[] = [];
   let missingCarrier = false;
   for (const p of sfcPaths) {
-    const ide = host.getIde(p, { sourceMap: true });
+    const ide = ideCompanionFromResponse(host.compileRequest(p, vueIdeCompanionRequest(p)));
     const code = ide?.code;
     const sourceMap = ide?.sourceMap;
     if (!code || !sourceMap) {
@@ -293,12 +299,41 @@ export function runAxisA(
 }
 
 export interface VerterHostApi {
-  upsert(input: { inputId: string; source: Buffer; compileProfile: { sourceMap: boolean } }): void;
+  upsert(input: { inputId: string; source: Buffer }): void;
   compileWithAudit(id: string, target: CompileTargetName): Buffer | null;
-  getIde(
-    id: string,
-    profile?: { sourceMap?: boolean },
-  ): { code: string; sourceMap?: string } | null;
+  compileRequest(canonicalId: string, request: HostCompileRequest): HostCompileResponse;
+}
+
+export function vueIdeCompanionRequest(filename: string): HostCompileRequest {
+  return {
+    framework: "vue",
+    identity: { filename, isProduction: false, forceJs: false },
+    products: [
+      {
+        kind: "ideCompanion",
+        wantSourceMap: true,
+        embedAmbientTypes: false,
+        conditionalRootNarrowing: false,
+        strictSlots: false,
+        ideChunkBoundaries: false,
+      },
+    ],
+    options: {
+      backend: "inferred",
+      ssr: false,
+      isCustomElement: [],
+      babelParserPlugins: [],
+    },
+  };
+}
+
+export function ideCompanionFromResponse(
+  response: HostCompileResponse | null | undefined,
+): { code: string; sourceMap?: string } | null {
+  const product = response?.products.find(
+    (row): row is HostIdeCompiledProduct => row.kind === "ideCompanion",
+  );
+  return product?.ide ?? null;
 }
 
 const invokedDirectly = process.argv[1]?.replace(/\\/g, "/").endsWith("perf/axis-a-child.ts");

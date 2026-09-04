@@ -92,7 +92,7 @@ schema = 2
 "CCA1O1A" = { status = "implemented", commit_message = "refactor(*): decide the Svelte custom-element prop-type vocabulary once", commit_date = "2026-09-01T12:00:00+01:00" }
 "CCA1O1B" = { status = "implemented", commit_message = "feat(*): execute a caller-supplied canonical compile request", commit_date = "2026-09-01T18:00:00+01:00" }
 "CCA1O2" = { status = "implemented", commit_message = "feat(napi): add a tagged native host compile-request adapter", commit_date = "2026-08-31T21:14:14+01:00" }
-"CCA1O2A" = { status = "pending" }
+"CCA1O2A" = { status = "implemented", commit_message = "feat(bench): drive native benchmark compiles through the typed host request", commit_date = "2026-09-04T18:00:00+01:00" }
 "CCA1O2B" = { status = "pending" }
 "CCA1O2C" = { status = "pending" }
 "CCA1O2D" = { status = "pending" }

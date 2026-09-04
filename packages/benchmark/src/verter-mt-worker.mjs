@@ -16,24 +16,28 @@ const _require = createRequire(join(__dirname, "../package.json"));
 const { VerterHost } = _require("@verter/native");
 
 const host = new VerterHost({ devMode: false, analysisLevel: "none" });
-const hostProfile = { sourceMap: false };
 const { files } = workerData;
+
+function vueRuntimeClientRequest(filename) {
+  return {
+    framework: "vue",
+    identity: { filename, isProduction: false, forceJs: false },
+    products: [{ kind: "runtimeClient", runtimeSourceMap: false }],
+    options: {
+      backend: "inferred",
+      ssr: false,
+      isCustomElement: [],
+      babelParserPlugins: [],
+    },
+  };
+}
 
 let compiled = 0;
 for (const { filename, source } of files) {
   try {
     host.remove(filename);
-    const result = host.upsert({ inputId: filename, source, compileProfile: hostProfile });
-    host.getVirtualFile({
-      canonicalId: result.canonicalId,
-      nodeKind: { kind: "script" },
-      compileProfile: hostProfile,
-    });
-    host.getVirtualFile({
-      canonicalId: result.canonicalId,
-      nodeKind: { kind: "template" },
-      compileProfile: hostProfile,
-    });
+    const result = host.upsert({ inputId: filename, source });
+    host.compileRequest(result.canonicalId, vueRuntimeClientRequest(result.canonicalId));
     compiled++;
   } catch {
     // ignore errors

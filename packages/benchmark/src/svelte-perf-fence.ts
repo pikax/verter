@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import type { HostRuntimeCompiledProduct } from "@verter/native";
 import {
   evaluateFixtureFence,
   median,
@@ -268,38 +269,27 @@ async function createCompiler(
       if (!upsert.changed || !upsert.changedVirtualNodes.some((node) => node.kind === "main")) {
         throw new Error(`${fixture.name}/verter benchmark revision did not invalidate Main`);
       }
-      const output = host.getVirtualFile({
-        canonicalId: upsert.canonicalId,
-        nodeKind: { kind: "main" },
-        compileProfile: {
-          target: "bundler",
-          sourceMap: true,
-          requestedMode: "stateless",
-        },
+      // The typed compile request does not consult a compile-cache slot; each
+      // sample is a fresh client compile with source maps, matching the
+      // official Svelte equal-work fence.
+      const compiled = host.compileRequest(upsert.canonicalId, {
+        framework: "svelte",
+        identity: { filename: upsert.canonicalId, isProduction: false, forceJs: false },
+        products: [{ kind: "runtimeClient", runtimeSourceMap: true }],
+        options: {},
       });
+      const runtime = compiled.products.find(
+        (product): product is HostRuntimeCompiledProduct => product.kind === "runtimeClient",
+      );
+      const output = runtime?.nodes.find((node) => node.node.kind === "main");
       if (
         !output ||
         output.code.length === 0 ||
         !output.sourceMap ||
-        output.diagnostics.diagnostics.length > 0
+        compiled.diagnostics.diagnostics.length > 0
       ) {
         throw new Error(
-          `${fixture.name}/verter did not produce clean mapped client output: ${JSON.stringify(output?.diagnostics ?? null)}`,
-        );
-      }
-      if (
-        output.cacheHit ||
-        output.requestedMode !== "stateless" ||
-        output.actualMode !== "stateless" ||
-        output.downgradeReason !== undefined
-      ) {
-        throw new Error(
-          `${fixture.name}/verter cache attestation failed: ${JSON.stringify({
-            cacheHit: output.cacheHit,
-            requestedMode: output.requestedMode,
-            actualMode: output.actualMode,
-            downgradeReason: output.downgradeReason,
-          })}`,
+          `${fixture.name}/verter did not produce clean mapped client output: ${JSON.stringify(compiled.diagnostics)}`,
         );
       }
       const mapWeight = validateMapContent
