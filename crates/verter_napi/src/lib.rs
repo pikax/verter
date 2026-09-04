@@ -4313,7 +4313,11 @@ mod tests {
 
         assert_eq!(
             batch_entry_order_mismatch(
-                &[batch_entry("/a.vue"), batch_entry("/b.vue"), batch_entry("/c.vue")],
+                &[
+                    batch_entry("/a.vue"),
+                    batch_entry("/b.vue"),
+                    batch_entry("/c.vue")
+                ],
                 &expected,
             ),
             None,
@@ -4321,11 +4325,9 @@ mod tests {
         );
 
         // Dropped: the prefix still matches at every overlapping position.
-        let dropped = batch_entry_order_mismatch(
-            &[batch_entry("/a.vue"), batch_entry("/b.vue")],
-            &expected,
-        )
-        .expect("a batch short one entry is a mismatch");
+        let dropped =
+            batch_entry_order_mismatch(&[batch_entry("/a.vue"), batch_entry("/b.vue")], &expected)
+                .expect("a batch short one entry is a mismatch");
         assert!(dropped.contains("2 entries for 3 inputs"), "{dropped}");
 
         // Duplicated: likewise, the expected side is what runs out first.
@@ -4339,11 +4341,18 @@ mod tests {
             &expected,
         )
         .expect("a batch with an extra entry is a mismatch");
-        assert!(duplicated.contains("4 entries for 3 inputs"), "{duplicated}");
+        assert!(
+            duplicated.contains("4 entries for 3 inputs"),
+            "{duplicated}"
+        );
 
         // Transposed: same count, wrong position.
         let transposed = batch_entry_order_mismatch(
-            &[batch_entry("/a.vue"), batch_entry("/c.vue"), batch_entry("/b.vue")],
+            &[
+                batch_entry("/a.vue"),
+                batch_entry("/c.vue"),
+                batch_entry("/b.vue"),
+            ],
             &expected,
         )
         .expect("a transposed batch is a mismatch");

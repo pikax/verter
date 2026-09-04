@@ -15,6 +15,23 @@
 //! Discriminating in both directions: `tsv_rows_match_the_committed_inventory`
 //! compares the full row multiset, so a variant quoting a row the TSV does
 //! not have fails, and a TSV row no variant quotes fails too.
+//!
+//! Mutation recipes:
+//! - Change one `VueOption::tsv_row` arm's option column (e.g.
+//!   `TransformOptionsHoistStatic` to `"hoisted"`):
+//!   `tsv_rows_match_the_committed_inventory` reports the invented row and
+//!   the unquoted one, and `refusal_paths_name_the_field_a_caller_wrote`
+//!   reports the wrong path.
+//! - Drop the surface-derived prefix from `FrameworkOption`'s `Display`
+//!   (`write!(f, "{framework}:{option}")` unconditionally): the two
+//!   `customElement` assertions go red, and
+//!   `no_two_distinct_options_collapse_onto_one_refusal_path` reports
+//!   `svelte:tag`/`svelte:*.type` colliding with unrelated rows.
+//! - Restore the case-lowered `format!("{option:?}")` rendering: every
+//!   assertion in `refusal_paths_name_the_field_a_caller_wrote` goes red,
+//!   and the upper-case-leading-segment check does not save it — the
+//!   lowering hides the leak from a naive check, which is why the
+//!   assertions are against the inventory and not against letter case.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -156,7 +173,11 @@ fn no_two_distinct_options_collapse_onto_one_refusal_path() {
     for option in ALL_VUE_OPTIONS
         .iter()
         .map(|o| FrameworkOption::Vue(*o))
-        .chain(ALL_SVELTE_OPTIONS.iter().map(|o| FrameworkOption::Svelte(*o)))
+        .chain(
+            ALL_SVELTE_OPTIONS
+                .iter()
+                .map(|o| FrameworkOption::Svelte(*o)),
+        )
     {
         let path = option.to_string();
         let (framework, tail) = path
@@ -168,10 +189,7 @@ fn no_two_distinct_options_collapse_onto_one_refusal_path() {
             !tail.chars().next().is_some_and(char::is_uppercase),
             "{path} leads with an upper-case segment, which is a leaked Rust variant spelling"
         );
-        paths
-            .entry(path)
-            .or_default()
-            .insert(option.tsv_row().1);
+        paths.entry(path).or_default().insert(option.tsv_row().1);
     }
 
     let collapsed: Vec<_> = paths

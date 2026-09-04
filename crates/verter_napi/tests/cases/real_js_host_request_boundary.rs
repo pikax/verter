@@ -44,20 +44,26 @@
 //! - Format construction refusals as `{error:?}` and
 //!   `typed-batch-isolates-a-canonical-request-refusal` matches
 //!   `DuplicateProduct(RuntimeClient)` again.
+//! - Return the whole batch as one `Err` when any entry's outcome is a
+//!   failure (rather than filling that entry's `failure` slot) and
+//!   `typed-batch-isolates-public-api-and-declarations-refusals` loses its
+//!   compiling sibling.
 //!
-//! # Coverage disposition: batch-route product-kind coverage
+//! # Product-kind coverage on both routes
 //!
 //! `compile_request_response_to_napi` is the one conversion function both
-//! `compileRequest` and `compileRequests` share, and every product kind
-//! (`analysis`, `runtimeServer`, the `publicApi`/`declarations` refusal) is
-//! already exercised end to end through the singular route
-//! (`typed-single-vue-analysis-is-a-json-string`,
+//! `compileRequest` and `compileRequests` share, but the two routes do not
+//! share the code that reaches it: the batch route zips each response back
+//! onto its input's source and output slot, and the singular route does
+//! not. So each route carries its own product-kind coverage rather than
+//! inheriting the other's — `analysis` and `runtimeServer` publish their
+//! payloads on both (`typed-single-vue-analysis-is-a-json-string`,
 //! `typed-single-runtime-server-publishes-its-nodes`,
-//! `typed-single-refuses-public-api-and-declarations`). `ADOPT-NOW`: the
-//! batch route's own zip/wrap path was, until `typed-batch-runs-analysis-and-runtime-server-products`
-//! below, exercised only with `runtimeClient` — a real (low-risk, since the
-//! wrap logic is product-kind-agnostic) gap, now closed directly rather
-//! than left open.
+//! `typed-batch-runs-analysis-and-runtime-server-products`), and
+//! `publicApi`/`declarations` refuse on both
+//! (`typed-single-refuses-public-api-and-declarations`,
+//! `typed-batch-isolates-public-api-and-declarations-refusals`), the batch
+//! refusal isolated to its own entry beside compiling siblings.
 //!
 //! # Where the addon comes from
 //!
@@ -108,6 +114,7 @@ const EXPECTED_CASES: &[&str] = &[
     "typed-batch-refuses-a-non-array-input",
     "typed-batch-refuses-unknown-options",
     "typed-batch-runs-analysis-and-runtime-server-products",
+    "typed-batch-isolates-public-api-and-declarations-refusals",
     "valid-request-accepted",
     "unknown-top-level-key-stated-as-undefined-refused",
     "unknown-option-key-stated-as-undefined-refused",
@@ -1185,12 +1192,11 @@ check("typed-batch-refuses-a-non-array-input", () => {
   return undefined;
 });
 
-// `compile_request_response_to_napi` is the one conversion function shared
-// by `compileRequest` and `compileRequests`, and every product kind is
-// already exercised end to end through the singular route above — but the
-// batch route's own zip/wrap logic (`typed-batch-*` above) is exercised
-// only with `runtimeClient`. This closes that gap directly, rather than
-// leaving it as an open, unruled claim.
+// The batch route's zip/wrap path pairs each response with its own input's
+// source and output slot, which the singular route does not do, so a
+// product kind proven on that route is not proven here. These two publish
+// payloads the wrap has to carry through: a JSON analysis string and a
+// multi-node server product.
 check("typed-batch-runs-analysis-and-runtime-server-products", () => {
   const analysisId = "/typed/BatchAnalysis.vue";
   const serverId = "/typed/BatchServer.vue";
@@ -1223,6 +1229,46 @@ check("typed-batch-runs-analysis-and-runtime-server-products", () => {
   const serverNodes = runtimeNodes(entries[1].response, "runtimeServer");
   if (!serverNodes || serverNodes.length === 0) {
     return `batch runtimeServer nodes were absent: ${JSON.stringify(entries[1].response)}`;
+  }
+  return undefined;
+});
+
+// The two products the compiler does not produce refuse per entry here, not
+// for the whole batch: a caller that asked for one alongside compilable
+// siblings still receives every sibling's output. The singular route throws
+// for the same demand, so this is the batch route's own half of that contract.
+check("typed-batch-isolates-public-api-and-declarations-refusals", () => {
+  const validId = "/typed/BatchRefusalSibling.vue";
+  const source = `<template><p>x</p></template>`;
+  const host = new addon.VerterHost();
+  const entries = host.compileRequests([
+    {
+      canonicalId: validId,
+      source: Buffer.from(source),
+      request: vueRuntime(validId),
+    },
+    ...["publicApi", "declarations"].map((kind) => ({
+      canonicalId: `/typed/BatchUnsupported-${kind}.vue`,
+      source: Buffer.from(source),
+      request: vueProducts(`/typed/BatchUnsupported-${kind}.vue`, [{ kind }]),
+    })),
+  ]);
+  host.close();
+  if (entries.length !== 3) return `batch refusal changed the entry count: ${JSON.stringify(entries)}`;
+  if (!entries[0].response || entries[0].failure || !runtimeMain(entries[0].response)) {
+    return `sibling before the unsupported products did not compile: ${JSON.stringify(entries[0])}`;
+  }
+  for (const [offset, kind] of ["publicApi", "declarations"].entries()) {
+    const entry = entries[offset + 1];
+    if (entry.response || !entry.failure) {
+      return `${kind} was not isolated as a failure: ${JSON.stringify(entry)}`;
+    }
+    if (entry.failure.kind !== "unsupportedProduct" || entry.failure.productKind !== kind) {
+      return `${kind} failure was ${JSON.stringify({ kind: entry.failure.kind, productKind: entry.failure.productKind })}`;
+    }
+    if (entry.canonicalId !== `/typed/BatchUnsupported-${kind}.vue`) {
+      return `${kind} failure named ${entry.canonicalId}`;
+    }
   }
   return undefined;
 });

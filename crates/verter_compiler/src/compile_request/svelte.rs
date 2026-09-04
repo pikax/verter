@@ -146,7 +146,9 @@ impl SvelteOption {
             CompileOptionsRunes => ("svelte:CompileOptions", "runes"),
             CompileOptionsDiscloseVersion => ("svelte:CompileOptions", "discloseVersion"),
             CompileOptionsCompatibility => ("svelte:CompileOptions", "compatibility"),
-            CompileOptionsCompatibilityComponentApi => ("svelte:CompileOptions", "compatibility.componentApi"),
+            CompileOptionsCompatibilityComponentApi => {
+                ("svelte:CompileOptions", "compatibility.componentApi")
+            }
             CompileOptionsSourcemap => ("svelte:CompileOptions", "sourcemap"),
             CompileOptionsOutputFilename => ("svelte:CompileOptions", "outputFilename"),
             CompileOptionsCssOutputFilename => ("svelte:CompileOptions", "cssOutputFilename"),
@@ -155,7 +157,9 @@ impl SvelteOption {
             CustomElementTag => ("svelte:SvelteOptions.customElement", "tag"),
             CustomElementShadow => ("svelte:SvelteOptions.customElement", "shadow"),
             CustomElementExtend => ("svelte:SvelteOptions.customElement", "extend"),
-            CustomElementPropsAttribute => ("svelte:SvelteOptions.customElement.props", "*.attribute"),
+            CustomElementPropsAttribute => {
+                ("svelte:SvelteOptions.customElement.props", "*.attribute")
+            }
             CustomElementPropsReflect => ("svelte:SvelteOptions.customElement.props", "*.reflect"),
             CustomElementPropsType => ("svelte:SvelteOptions.customElement.props", "*.type"),
             OptimizeOptionsHydrate => ("svelte:OptimizeOptions", "hydrate"),

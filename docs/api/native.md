@@ -670,8 +670,32 @@ interface HostDiagnostic {
   message: string;
   spanStart: number;
   spanEnd: number;
+  /** The values substituted into `message`. Always present; `[]` when the diagnostic has none. */
+  arguments: HostDiagnosticArg[];
+}
+
+interface HostDiagnosticArg {
+  kind: "bool" | "unsigned" | "signed" | "text" | "span";
+  boolean?: boolean;
+  /**
+   * A 64-bit integer argument as its exact decimal digits, not a `number`:
+   * a value above `Number.MAX_SAFE_INTEGER` cannot cross into a JavaScript
+   * double without rounding. Use `BigInt(arg.unsigned)` for the exact
+   * value.
+   */
+  unsigned?: string;
+  /** A signed 64-bit integer argument, as decimal digits -- see `unsigned`. */
+  signed?: string;
+  text?: string;
+  /** UTF-16 code-unit offsets, like every other span this API publishes. */
+  spanStart?: number;
+  spanEnd?: number;
 }
 ```
+
+`arguments` is published on every diagnostic, on the legacy per-node reads
+and on the typed `compileRequest`/`compileRequests` routes alike, and it is
+the same list `@verter/wasm` publishes for the same compile.
 
 ## Input Encoding
 

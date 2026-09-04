@@ -331,21 +331,49 @@ impl VueOption {
             ParserOptionsOnError => ("compiler-core:ParserOptions", "onError"),
             ParserOptionsCompatConfig => ("compiler-core:ParserOptions", "compatConfig"),
             ParserOptionsCompatConfigMode => ("compiler-core:ParserOptions", "compatConfig.MODE"),
-            ParserOptionsCompatConfigCompilerIsOnElement => ("compiler-core:ParserOptions", "compatConfig.COMPILER_IS_ON_ELEMENT"),
-            ParserOptionsCompatConfigCompilerVBindSync => ("compiler-core:ParserOptions", "compatConfig.COMPILER_V_BIND_SYNC"),
-            ParserOptionsCompatConfigCompilerVIfVForPrecedence => ("compiler-core:ParserOptions", "compatConfig.COMPILER_V_IF_V_FOR_PRECEDENCE"),
-            ParserOptionsCompatConfigCompilerVBindObjectOrder => ("compiler-core:ParserOptions", "compatConfig.COMPILER_V_BIND_OBJECT_ORDER"),
-            ParserOptionsCompatConfigCompilerVOnNative => ("compiler-core:ParserOptions", "compatConfig.COMPILER_V_ON_NATIVE"),
-            ParserOptionsCompatConfigCompilerNativeTemplate => ("compiler-core:ParserOptions", "compatConfig.COMPILER_NATIVE_TEMPLATE"),
-            ParserOptionsCompatConfigCompilerInlineTemplate => ("compiler-core:ParserOptions", "compatConfig.COMPILER_INLINE_TEMPLATE"),
-            ParserOptionsCompatConfigCompilerFilters => ("compiler-core:ParserOptions", "compatConfig.COMPILER_FILTERS"),
+            ParserOptionsCompatConfigCompilerIsOnElement => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_IS_ON_ELEMENT",
+            ),
+            ParserOptionsCompatConfigCompilerVBindSync => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_V_BIND_SYNC",
+            ),
+            ParserOptionsCompatConfigCompilerVIfVForPrecedence => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_V_IF_V_FOR_PRECEDENCE",
+            ),
+            ParserOptionsCompatConfigCompilerVBindObjectOrder => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_V_BIND_OBJECT_ORDER",
+            ),
+            ParserOptionsCompatConfigCompilerVOnNative => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_V_ON_NATIVE",
+            ),
+            ParserOptionsCompatConfigCompilerNativeTemplate => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_NATIVE_TEMPLATE",
+            ),
+            ParserOptionsCompatConfigCompilerInlineTemplate => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_INLINE_TEMPLATE",
+            ),
+            ParserOptionsCompatConfigCompilerFilters => (
+                "compiler-core:ParserOptions",
+                "compatConfig.COMPILER_FILTERS",
+            ),
             ParserOptionsParseMode => ("compiler-core:ParserOptions", "parseMode"),
             ParserOptionsNs => ("compiler-core:ParserOptions", "ns"),
             ParserOptionsIsNativeTag => ("compiler-core:ParserOptions", "isNativeTag"),
             ParserOptionsIsVoidTag => ("compiler-core:ParserOptions", "isVoidTag"),
             ParserOptionsIsPreTag => ("compiler-core:ParserOptions", "isPreTag"),
-            ParserOptionsIsIgnoreNewlineTag => ("compiler-core:ParserOptions", "isIgnoreNewlineTag"),
-            ParserOptionsIsBuiltInComponent => ("compiler-core:ParserOptions", "isBuiltInComponent"),
+            ParserOptionsIsIgnoreNewlineTag => {
+                ("compiler-core:ParserOptions", "isIgnoreNewlineTag")
+            }
+            ParserOptionsIsBuiltInComponent => {
+                ("compiler-core:ParserOptions", "isBuiltInComponent")
+            }
             ParserOptionsIsCustomElement => ("compiler-core:ParserOptions", "isCustomElement"),
             ParserOptionsGetNamespace => ("compiler-core:ParserOptions", "getNamespace"),
             ParserOptionsDelimiters => ("compiler-core:ParserOptions", "delimiters"),
@@ -355,34 +383,65 @@ impl VueOption {
             ParserOptionsPrefixIdentifiers => ("compiler-core:ParserOptions", "prefixIdentifiers"),
             ParserOptionsExpressionPlugins => ("compiler-core:ParserOptions", "expressionPlugins"),
             TransformOptionsNodeTransforms => ("compiler-core:TransformOptions", "nodeTransforms"),
-            TransformOptionsDirectiveTransforms => ("compiler-core:TransformOptions", "directiveTransforms"),
+            TransformOptionsDirectiveTransforms => {
+                ("compiler-core:TransformOptions", "directiveTransforms")
+            }
             TransformOptionsTransformHoist => ("compiler-core:TransformOptions", "transformHoist"),
             TransformOptionsOnWarn => ("compiler-core:TransformOptions", "onWarn"),
             TransformOptionsOnError => ("compiler-core:TransformOptions", "onError"),
             TransformOptionsCompatConfig => ("compiler-core:TransformOptions", "compatConfig"),
-            TransformOptionsIsBuiltInComponent => ("compiler-core:TransformOptions", "isBuiltInComponent"),
-            TransformOptionsIsCustomElement => ("compiler-core:TransformOptions", "isCustomElement"),
+            TransformOptionsIsBuiltInComponent => {
+                ("compiler-core:TransformOptions", "isBuiltInComponent")
+            }
+            TransformOptionsIsCustomElement => {
+                ("compiler-core:TransformOptions", "isCustomElement")
+            }
             TransformOptionsHoistStatic => ("compiler-core:TransformOptions", "hoistStatic"),
             TransformOptionsCacheHandlers => ("compiler-core:TransformOptions", "cacheHandlers"),
             TransformOptionsScopeId => ("compiler-core:TransformOptions", "scopeId"),
             TransformOptionsSlotted => ("compiler-core:TransformOptions", "slotted"),
             TransformOptionsSsrCssVars => ("compiler-core:TransformOptions", "ssrCssVars"),
             TransformOptionsHmr => ("compiler-core:TransformOptions", "hmr"),
-            SharedTransformCodegenOptionsPrefixIdentifiers => ("compiler-core:SharedTransformCodegenOptions", "prefixIdentifiers"),
-            SharedTransformCodegenOptionsExpressionPlugins => ("compiler-core:SharedTransformCodegenOptions", "expressionPlugins"),
-            SharedTransformCodegenOptionsSsr => ("compiler-core:SharedTransformCodegenOptions", "ssr"),
-            SharedTransformCodegenOptionsInSsr => ("compiler-core:SharedTransformCodegenOptions", "inSSR"),
-            SharedTransformCodegenOptionsBindingMetadata => ("compiler-core:SharedTransformCodegenOptions", "bindingMetadata"),
-            SharedTransformCodegenOptionsInline => ("compiler-core:SharedTransformCodegenOptions", "inline"),
-            SharedTransformCodegenOptionsIsTs => ("compiler-core:SharedTransformCodegenOptions", "isTS"),
-            SharedTransformCodegenOptionsFilename => ("compiler-core:SharedTransformCodegenOptions", "filename"),
+            SharedTransformCodegenOptionsPrefixIdentifiers => (
+                "compiler-core:SharedTransformCodegenOptions",
+                "prefixIdentifiers",
+            ),
+            SharedTransformCodegenOptionsExpressionPlugins => (
+                "compiler-core:SharedTransformCodegenOptions",
+                "expressionPlugins",
+            ),
+            SharedTransformCodegenOptionsSsr => {
+                ("compiler-core:SharedTransformCodegenOptions", "ssr")
+            }
+            SharedTransformCodegenOptionsInSsr => {
+                ("compiler-core:SharedTransformCodegenOptions", "inSSR")
+            }
+            SharedTransformCodegenOptionsBindingMetadata => (
+                "compiler-core:SharedTransformCodegenOptions",
+                "bindingMetadata",
+            ),
+            SharedTransformCodegenOptionsInline => {
+                ("compiler-core:SharedTransformCodegenOptions", "inline")
+            }
+            SharedTransformCodegenOptionsIsTs => {
+                ("compiler-core:SharedTransformCodegenOptions", "isTS")
+            }
+            SharedTransformCodegenOptionsFilename => {
+                ("compiler-core:SharedTransformCodegenOptions", "filename")
+            }
             CodegenOptionsMode => ("compiler-core:CodegenOptions", "mode"),
             CodegenOptionsSourceMap => ("compiler-core:CodegenOptions", "sourceMap"),
             CodegenOptionsScopeId => ("compiler-core:CodegenOptions", "scopeId"),
             CodegenOptionsOptimizeImports => ("compiler-core:CodegenOptions", "optimizeImports"),
-            CodegenOptionsRuntimeModuleName => ("compiler-core:CodegenOptions", "runtimeModuleName"),
-            CodegenOptionsSsrRuntimeModuleName => ("compiler-core:CodegenOptions", "ssrRuntimeModuleName"),
-            CodegenOptionsRuntimeGlobalName => ("compiler-core:CodegenOptions", "runtimeGlobalName"),
+            CodegenOptionsRuntimeModuleName => {
+                ("compiler-core:CodegenOptions", "runtimeModuleName")
+            }
+            CodegenOptionsSsrRuntimeModuleName => {
+                ("compiler-core:CodegenOptions", "ssrRuntimeModuleName")
+            }
+            CodegenOptionsRuntimeGlobalName => {
+                ("compiler-core:CodegenOptions", "runtimeGlobalName")
+            }
             ParseFilename => ("compiler-sfc:parse", "filename"),
             ParseSourceMap => ("compiler-sfc:parse", "sourceMap"),
             ParseSourceRoot => ("compiler-sfc:parse", "sourceRoot"),
@@ -417,9 +476,15 @@ impl VueOption {
             CompileTemplateCompiler => ("compiler-sfc:compileTemplate", "compiler"),
             CompileTemplateCompilerOptions => ("compiler-sfc:compileTemplate", "compilerOptions"),
             CompileTemplatePreprocessLang => ("compiler-sfc:compileTemplate", "preprocessLang"),
-            CompileTemplatePreprocessOptions => ("compiler-sfc:compileTemplate", "preprocessOptions"),
-            CompileTemplatePreprocessCustomRequire => ("compiler-sfc:compileTemplate", "preprocessCustomRequire"),
-            CompileTemplateTransformAssetUrls => ("compiler-sfc:compileTemplate", "transformAssetUrls"),
+            CompileTemplatePreprocessOptions => {
+                ("compiler-sfc:compileTemplate", "preprocessOptions")
+            }
+            CompileTemplatePreprocessCustomRequire => {
+                ("compiler-sfc:compileTemplate", "preprocessCustomRequire")
+            }
+            CompileTemplateTransformAssetUrls => {
+                ("compiler-sfc:compileTemplate", "transformAssetUrls")
+            }
             AssetUrlOptionsBase => ("compiler-sfc:AssetURLOptions", "base"),
             AssetUrlOptionsIncludeAbsolute => ("compiler-sfc:AssetURLOptions", "includeAbsolute"),
             AssetUrlOptionsTags => ("compiler-sfc:AssetURLOptions", "tags"),
@@ -432,7 +497,9 @@ impl VueOption {
             CompileStyleInMap => ("compiler-sfc:compileStyle", "inMap"),
             CompileStylePreprocessLang => ("compiler-sfc:compileStyle", "preprocessLang"),
             CompileStylePreprocessOptions => ("compiler-sfc:compileStyle", "preprocessOptions"),
-            CompileStylePreprocessCustomRequire => ("compiler-sfc:compileStyle", "preprocessCustomRequire"),
+            CompileStylePreprocessCustomRequire => {
+                ("compiler-sfc:compileStyle", "preprocessCustomRequire")
+            }
             CompileStylePostcssOptions => ("compiler-sfc:compileStyle", "postcssOptions"),
             CompileStylePostcssPlugins => ("compiler-sfc:compileStyle", "postcssPlugins"),
             CompileStyleMap => ("compiler-sfc:compileStyle", "map"),
@@ -440,11 +507,17 @@ impl VueOption {
             CompileStyleModules => ("compiler-sfc:compileStyle", "modules"),
             CompileStyleModulesOptions => ("compiler-sfc:compileStyle", "modulesOptions"),
             CssModulesOptionsScopeBehaviour => ("compiler-sfc:CSSModulesOptions", "scopeBehaviour"),
-            CssModulesOptionsGenerateScopedName => ("compiler-sfc:CSSModulesOptions", "generateScopedName"),
+            CssModulesOptionsGenerateScopedName => {
+                ("compiler-sfc:CSSModulesOptions", "generateScopedName")
+            }
             CssModulesOptionsHashPrefix => ("compiler-sfc:CSSModulesOptions", "hashPrefix"),
-            CssModulesOptionsLocalsConvention => ("compiler-sfc:CSSModulesOptions", "localsConvention"),
+            CssModulesOptionsLocalsConvention => {
+                ("compiler-sfc:CSSModulesOptions", "localsConvention")
+            }
             CssModulesOptionsExportGlobals => ("compiler-sfc:CSSModulesOptions", "exportGlobals"),
-            CssModulesOptionsGlobalModulePaths => ("compiler-sfc:CSSModulesOptions", "globalModulePaths"),
+            CssModulesOptionsGlobalModulePaths => {
+                ("compiler-sfc:CSSModulesOptions", "globalModulePaths")
+            }
         }
     }
 }

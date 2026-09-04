@@ -624,7 +624,11 @@ mod diagnostic_argument_tests {
         assert_eq!(
             ffi.arguments
                 .iter()
-                .map(|argument| (argument.kind.as_str(), argument.unsigned.clone(), argument.signed.clone()))
+                .map(|argument| (
+                    argument.kind.as_str(),
+                    argument.unsigned.clone(),
+                    argument.signed.clone()
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 ("unsigned", Some("9007199254740993".to_string()), None),

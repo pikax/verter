@@ -894,6 +894,11 @@ fn published_diagnostic_spans_are_utf16_and_match_the_legacy_route() {
 /// a producer that stopped filling it, would leave every browser consumer
 /// silently unable to tell an argument-less diagnostic from a diagnostic
 /// whose arguments were lost.
+///
+/// Mutation recipe: add `#[serde(skip)]` to `FfiDiagnostic::arguments` (or
+/// drop the field from `host_diagnostic_to_ffi`'s literal and the struct).
+/// The key stops reaching the browser wire and `is_array` goes false, while
+/// the native binding's own struct-mirror coverage stays green.
 #[wasm_bindgen_test]
 fn published_diagnostics_carry_their_argument_list_through_serde() {
     let host = js_host();
