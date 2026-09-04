@@ -110,7 +110,7 @@ schema = 2
 "CCA1O3E" = { status = "implemented", commit_message = "test(*): check the committed carrier fixtures against the built wasm host", commit_date = "2026-09-01T09:00:00+01:00" }
 "CCA1O4" = { status = "pending" }
 "CCA1O4D" = { status = "pending" }
-"CCA1O5" = { status = "pending" }
+"CCA1O5" = { status = "implemented", commit_message = "feat(play): migrate playground compile onto the typed WASM host request", commit_date = "2026-09-04T02:15:00+01:00", pull_request = 484 }
 "CCA1O5D" = { status = "pending" }
 "CCA1T1" = { status = "pending" }
 "CCA1T2" = { status = "pending" }

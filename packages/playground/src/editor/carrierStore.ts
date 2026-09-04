@@ -3,7 +3,9 @@
  * LanguageService. The browser worker feeds it the WASM host's three
  * generated surfaces per carrier source —
  *
- *   - IDE carrier         `Comp.vue.tsx`        ← `getIde(id, profile)`
+ *   - IDE carrier         `Comp.vue.tsx`        ← compileRequest `ideCompanion`
+ *                                                 via `applyTsxOutput` → `file.compiled.types`
+ *                                                 (consumed by `tsService.syncSource`)
  *   - declaration carrier `Comp.d.vue.ts`       ← `getPublicApi(id, "declaration")`
  *   - API carrier         `Comp.vue.verter.ts`  ← `getPublicApi(id)`
  *

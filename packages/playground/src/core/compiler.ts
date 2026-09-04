@@ -21,8 +21,17 @@ import {
   fileKindForFilename,
   frameworkById,
 } from "./frameworks";
+import type {
+  BrowserHostCompileRequest,
+  BrowserHostRequestedProduct,
+  HostCompileIdentity,
+  HostCompileRequestResponse,
+  HostCompiledVirtualNode,
+} from "@verter/wasm";
 
-// Inline types matching Rust WASM bindings (avoid @verter/wasm import resolution issues).
+// Inline types matching Rust WASM bindings for surfaces the playground still
+// owns locally (lint, public API, document symbols). Compile request/response
+// shapes come from `@verter/wasm` so the tagged wrappers cannot drift.
 // `spanStart`/`spanEnd` are absolute source offsets in UTF-16 unless a field is
 // explicitly documented as generated TSX output metadata.
 export interface HostTextEdit {
@@ -68,23 +77,6 @@ export interface HostSelectorMatchResult {
   selectorStart: number;
   selectorEnd: number;
   matches: HostElementMatch[];
-}
-
-interface HostCompileProfile {
-  filename?: string;
-  isProduction?: boolean;
-  customElement?: boolean;
-  ssr?: boolean;
-  hmrStrategy?: "none" | "vite" | "webpack";
-  forceJs?: boolean;
-  sourceMap?: boolean;
-  target?: "bundler" | "ide" | "analysis" | "full";
-  strictSlots?: boolean;
-}
-
-interface HostVirtualNodeKind {
-  kind: "main" | "script" | "template" | "style" | "custom";
-  index?: number;
 }
 
 interface HostIdeResponse {
@@ -199,12 +191,6 @@ interface HostUpdateResult {
   parseDurationMs?: number;
 }
 
-interface HostVirtualFileResponse {
-  code: string;
-  sourceMap?: string;
-  diagnostics: HostDiagnosticsSnapshot;
-}
-
 interface HostBinding {
   upsert(request: {
     inputId: string;
@@ -214,18 +200,13 @@ interface HostBinding {
     // "file" / a script dialect). Driven by the manifest, never a Vue+Svelte literal.
     fileKind: HostFileKind;
     aliases?: string[];
-    compileProfile?: HostCompileProfile;
   }): HostUpdateResult;
-  getVirtualFile(query: {
-    rawId?: string;
-    canonicalId?: string;
-    nodeKind?: HostVirtualNodeKind;
-    compileProfile?: HostCompileProfile;
-  }): HostVirtualFileResponse;
-  listVirtualFiles(canonicalId: string): HostVirtualNodeKind[];
+  compileRequest(
+    canonicalId: string,
+    request: BrowserHostCompileRequest,
+  ): HostCompileRequestResponse;
   getDocumentStructure?(canonicalId: string): OrderedSfcStructure | null;
   getAnalysis(canonicalOrAlias: string): FileAnalysis | null;
-  getIde(canonicalId: string, profile?: HostCompileProfile): HostIdeResponse | null;
   getPublicApi?(canonicalId: string, mode?: "public" | "declaration"): HostPublicApiResult;
   lint(canonicalOrAlias: string, config?: unknown): LintDiagnostic[];
   getCodeActions?(canonicalOrAlias: string, offset: number): HostCodeAction[];
@@ -258,7 +239,7 @@ let initPromise: Promise<void> | null = null;
 function isHostBinding(value: unknown): value is HostBinding {
   if (value === null || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
-  return ["upsert", "getVirtualFile", "listVirtualFiles", "getAnalysis", "getIde", "lint"].every(
+  return ["upsert", "compileRequest", "getAnalysis", "lint"].every(
     (method) => typeof candidate[method] === "function",
   );
 }
@@ -281,18 +262,300 @@ export function __setHostForTest(host: HostBinding): () => void {
   };
 }
 
-function toHostProfile(file: File, options?: CompilerOptions): HostCompileProfile {
+function compileIdentity(options?: CompilerOptions): HostCompileIdentity {
   return {
-    filename: file.filename,
     isProduction: options?.isProduction ?? false,
-    customElement: false,
-    ssr: options?.ssr ?? false,
-    hmrStrategy: "none",
     forceJs: true,
-    sourceMap: true,
-    target: "full",
-    strictSlots: options?.strictSlots ?? false,
   };
+}
+
+function ideCompanionProduct(
+  frameworkId: string,
+  options?: CompilerOptions,
+): BrowserHostRequestedProduct {
+  const vueOnly = frameworkId === "vue";
+  return {
+    ideCompanion: {
+      wantSourceMap: true,
+      embedAmbientTypes: false,
+      conditionalRootNarrowing: false,
+      // Vue-only IDE axes: a true value is refused on Svelte.
+      strictSlots: vueOnly ? (options?.strictSlots ?? false) : false,
+      ideChunkBoundaries: false,
+    },
+  };
+}
+
+function clientRuntimeProducts(
+  frameworkId: string,
+  options?: CompilerOptions,
+): BrowserHostRequestedProduct[] {
+  return [{ runtimeClient: { runtimeSourceMap: true } }, ideCompanionProduct(frameworkId, options)];
+}
+
+function vueCompileRequest(
+  products: BrowserHostRequestedProduct[],
+  ssr: boolean,
+  options?: CompilerOptions,
+): BrowserHostCompileRequest {
+  return {
+    vue: {
+      identity: compileIdentity(options),
+      products,
+      options: {
+        backend: "inferred",
+        ssr,
+        isCustomElement: [],
+        babelParserPlugins: [],
+      },
+    },
+  };
+}
+
+function svelteCompileRequest(
+  products: BrowserHostRequestedProduct[],
+  options?: CompilerOptions,
+): BrowserHostCompileRequest {
+  return {
+    svelte: {
+      identity: compileIdentity(options),
+      products,
+      options: {},
+    },
+  };
+}
+
+function frameworkCompileRequest(
+  framework: ClientFramework,
+  products: BrowserHostRequestedProduct[],
+  ssr: boolean,
+  options?: CompilerOptions,
+): BrowserHostCompileRequest {
+  if (framework.frameworkId === "vue") {
+    return vueCompileRequest(products, ssr, options);
+  }
+  if (framework.frameworkId === "svelte") {
+    return svelteCompileRequest(products, options);
+  }
+  throw new Error(`typed compile request has no arm for framework '${framework.frameworkId}'`);
+}
+
+function runtimeNodes(
+  products: HostCompileRequestResponse["products"],
+  kind: "runtimeClient" | "runtimeServer",
+): HostCompiledVirtualNode[] {
+  const row = products.find((product) => product.kind === kind);
+  if (!row || !("nodes" in row)) return [];
+  return row.nodes;
+}
+
+function firstNode(
+  nodes: HostCompiledVirtualNode[],
+  kind: HostCompiledVirtualNode["node"]["kind"],
+): HostCompiledVirtualNode | undefined {
+  return nodes.find((node) => node.node.kind === kind);
+}
+
+function styleNodeCodes(nodes: HostCompiledVirtualNode[]): string[] {
+  return nodes
+    .filter((node) => node.node.kind === "style")
+    .sort((a, b) => (a.node.index ?? 0) - (b.node.index ?? 0))
+    .map((node) => node.code);
+}
+
+function hostRefusalMessage(error: unknown): string {
+  if (typeof error === "string" && error.length > 0) return error;
+  if (error instanceof Error && error.message.length > 0) return error.message;
+  return "typed compile request was refused";
+}
+
+function emptyCompileTiming(overrides: Partial<CompileTiming> = {}): CompileTiming {
+  return {
+    verterNewJs: null,
+    parseDurationMs: null,
+    scriptMs: null,
+    templateMs: null,
+    styleMs: null,
+    tsxMs: null,
+    tscMs: null,
+    lintMs: null,
+    ...overrides,
+  };
+}
+
+function wipeCompiledSurfaces(file: File): void {
+  file.compiled.js = "";
+  file.compiled.css = "";
+  file.compiled.templateCode = "";
+  file.compiled.verterSourceMap = "";
+  file.compiled.ssrCode = "";
+  applyTsxOutput(file, null);
+  file.compiled.analysis = null;
+  file.compiled.lintDiagnostics = [];
+  file.compiled.tscCode = "";
+  file.compiled.publicApiOutcome = { kind: "absent" };
+  file.compiled.declCode = "";
+  file.compiled.declarationOutcome = { kind: "absent" };
+  file.compiled.declSourceMap = "";
+}
+
+function recordCompileHalt(
+  file: File,
+  diagnostic: HostDiagnostic,
+  upsertDiagnostics?: HostDiagnosticsSnapshot,
+): void {
+  const allDiagnostics = collectUniqueHostDiagnostics([
+    upsertDiagnostics,
+    { diagnostics: [diagnostic], hasErrors: true },
+  ]);
+  wipeCompiledSurfaces(file);
+  file.compiled.compilerDiagnostics = allDiagnostics;
+  file.compiled.errors = formatDiagnostics(allDiagnostics);
+}
+
+function recordCompileRefusal(
+  file: File,
+  message: string,
+  upsertDiagnostics?: HostDiagnosticsSnapshot,
+): void {
+  recordCompileHalt(
+    file,
+    {
+      severity: "error",
+      code: "compile-request-refused",
+      message,
+    },
+    upsertDiagnostics,
+  );
+}
+
+function recordUnexpectedCompileFailure(file: File, error: unknown): void {
+  recordCompileHalt(file, {
+    severity: "error",
+    code: "compile-unexpected-error",
+    message: hostRefusalMessage(error),
+  });
+}
+
+const MISSING_RUNTIME_PRODUCT: HostDiagnostic = {
+  severity: "error",
+  code: "missing-runtime-product",
+  message: "typed compile request returned no runtimeClient output",
+};
+
+function hasRuntimeJsNodes(nodes: HostCompiledVirtualNode[]): boolean {
+  return nodes.some(
+    (node) =>
+      node.node.kind === "main" || node.node.kind === "script" || node.node.kind === "template",
+  );
+}
+
+function withMissingRuntimeGuard(
+  diagnostics: HostDiagnostic[],
+  nodes: HostCompiledVirtualNode[],
+): HostDiagnostic[] {
+  if (hasRuntimeJsNodes(nodes)) return diagnostics;
+  if (diagnostics.some((diagnostic) => diagnostic.severity === "error")) return diagnostics;
+  return [...diagnostics, MISSING_RUNTIME_PRODUCT];
+}
+
+function requestCompile(
+  canonicalId: string,
+  request: BrowserHostCompileRequest,
+): { ok: true; response: HostCompileRequestResponse } | { ok: false; message: string } {
+  try {
+    return { ok: true, response: wasmHost!.compileRequest(canonicalId, request) };
+  } catch (error) {
+    return { ok: false, message: hostRefusalMessage(error) };
+  }
+}
+
+function ideFromProducts(products: HostCompileRequestResponse["products"]): HostIdeResponse | null {
+  const row = products.find((product) => product.kind === "ideCompanion");
+  if (!row || !("code" in row)) return null;
+  return {
+    code: row.code,
+    sourceMap: row.sourceMap,
+    destructuredBlock: row.destructuredBlock ?? null,
+  };
+}
+
+function assembleVueRuntime(nodes: HostCompiledVirtualNode[]): {
+  assembledJs: string;
+  scriptCode: string;
+  scriptSourceMap: string;
+  templateCode: string;
+  templateSourceMap: string;
+  styleChunks: string[];
+} {
+  const script = firstNode(nodes, "script");
+  const template = firstNode(nodes, "template");
+  const main = firstNode(nodes, "main");
+  let assembledJs = "";
+  let scriptCode = "";
+  let scriptSourceMap = "";
+  let templateCode = "";
+  let templateSourceMap = "";
+  if (script) {
+    scriptCode = script.code;
+    scriptSourceMap = script.sourceMap ?? "";
+    assembledJs += script.code;
+  }
+  if (template) {
+    if (assembledJs) assembledJs += "\n";
+    assembledJs += template.code;
+    templateCode = template.code;
+    templateSourceMap = template.sourceMap ?? "";
+  }
+  if (!assembledJs && main) {
+    assembledJs = main.code;
+  }
+  return {
+    assembledJs,
+    scriptCode,
+    scriptSourceMap,
+    templateCode,
+    templateSourceMap,
+    styleChunks: styleNodeCodes(nodes),
+  };
+}
+
+function applyHostAnalysisLintAndPublicApi(
+  file: File,
+  canonicalId: string,
+  disabledRules?: ReadonlySet<string>,
+): { lintMs: number | null; tscMs: number | null } {
+  let analysis: FileAnalysis | null = null;
+  try {
+    analysis = wasmHost!.getAnalysis(canonicalId) ?? null;
+  } catch {
+    // Analysis is optional.
+  }
+  file.compiled.analysis = analysis;
+
+  let lintMs: number | null = null;
+  try {
+    const t0 = performance.now();
+    file.compiled.lintDiagnostics =
+      wasmHost!.lint(canonicalId, buildLintConfig(disabledRules)) ?? [];
+    lintMs = performance.now() - t0;
+  } catch {
+    file.compiled.lintDiagnostics = [];
+  }
+
+  let tscMs: number | null = null;
+  if (typeof wasmHost!.getPublicApi === "function") {
+    const t0 = performance.now();
+    applyPublicApiOutputs(file, canonicalId, wasmHost!.getPublicApi.bind(wasmHost!));
+    tscMs = performance.now() - t0;
+  } else {
+    file.compiled.tscCode = "";
+    file.compiled.publicApiOutcome = { kind: "absent" };
+    file.compiled.declCode = "";
+    file.compiled.declSourceMap = "";
+    file.compiled.declarationOutcome = { kind: "absent" };
+  }
+  return { lintMs, tscMs };
 }
 
 function configureHost(wasmModule: WasmModule): void {
@@ -637,11 +900,9 @@ export function relintFile(file: File, disabledRules?: ReadonlySet<string>): num
 
 /**
  * Whether a framework's compiled client output is assembled through the Vue
- * VDOM render-function pipeline (script + template + style virtual files merged
- * via {@link mergeRenderIntoComponent}, plus an SSR pass). This is the
- * Vue-runtime assembly convention — the `?vue&type=script|template|style` raw
- * virtual-file query syntax is owned by the Vue adapter. Other frameworks read
- * a single main virtual file and never touch `mergeRenderIntoComponent`.
+ * VDOM render-function pipeline (script + template + style product nodes merged
+ * via {@link mergeRenderIntoComponent}, plus an SSR pass). Other frameworks
+ * read a single main runtime node and never touch `mergeRenderIntoComponent`.
  */
 function usesVueRenderAssembly(framework: ClientFramework): boolean {
   return framework.frameworkId === "vue";
@@ -650,8 +911,9 @@ function usesVueRenderAssembly(framework: ClientFramework): boolean {
 /**
  * Compile a framework carrier file through the host, descriptor-driven: the
  * upsert `fileKind` is the framework adapter id. Vue uses the VDOM render
- * assembly; every other framework reads its main virtual file and the shared
- * IDE-TSX / public-API / analysis / lint surfaces.
+ * assembly; every other framework reads runtimeClient nodes from one typed
+ * compileRequest, plus the shared IDE-TSX / public-API / analysis / lint
+ * surfaces.
  */
 function compileFrameworkWithHost(
   file: File,
@@ -674,16 +936,11 @@ function compileVueRenderAssembly(
   knownFiles?: KnownFiles,
 ): CompileTiming {
   const start = performance.now();
-  // Always compile client output with ssr: false
-  const profile = toHostProfile(file, options);
-  profile.ssr = false;
-
   const upsertResult = wasmHost!.upsert({
     inputId: file.filename,
     source: file.code,
     fileKind: framework.frameworkId,
     aliases: [],
-    compileProfile: profile,
   });
   file.structure = wasmHost!.getDocumentStructure?.(file.filename) ?? null;
 
@@ -691,89 +948,42 @@ function compileVueRenderAssembly(
     syncKnownModuleReferenceDependencies(file.filename, upsertResult.moduleReferences, knownFiles);
   }
 
-  const nodes = wasmHost!.listVirtualFiles(file.filename);
-  const nodeKinds = new Set(nodes.map((node) => node.kind));
-  const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [
-    upsertResult.diagnostics,
-  ];
-
-  let assembledJs = "";
-  let scriptCode = "";
-  let scriptSourceMap = "";
-  let templateCode = "";
-  let templateSourceMap = "";
-
-  let scriptMs: number | null = null;
-  let templateMs: number | null = null;
-  let styleMs: number | null = null;
-
-  if (nodeKinds.has("script")) {
-    const t0 = performance.now();
-    const script = wasmHost!.getVirtualFile({
-      rawId: `${file.filename}?vue&type=script`,
-      compileProfile: profile,
+  const tCompile = performance.now();
+  const compiled = requestCompile(
+    file.filename,
+    vueCompileRequest(clientRuntimeProducts("vue", options), false, options),
+  );
+  const tsxMs = performance.now() - tCompile;
+  if (!compiled.ok) {
+    recordCompileRefusal(file, compiled.message, upsertResult.diagnostics);
+    return emptyCompileTiming({
+      verterNewJs: performance.now() - start,
+      parseDurationMs: upsertResult.parseDurationMs ?? null,
     });
-    scriptMs = performance.now() - t0;
-    diagnosticsSnapshots.push(script.diagnostics);
-    scriptCode = script.code;
-    scriptSourceMap = script.sourceMap ?? "";
-    assembledJs += script.code;
   }
+  const response = compiled.response;
+  const clientNodes = runtimeNodes(response.products, "runtimeClient");
+  const assembled = assembleVueRuntime(clientNodes);
 
-  if (nodeKinds.has("template")) {
-    const t0 = performance.now();
-    const template = wasmHost!.getVirtualFile({
-      rawId: `${file.filename}?vue&type=template`,
-      compileProfile: profile,
-    });
-    templateMs = performance.now() - t0;
-    diagnosticsSnapshots.push(template.diagnostics);
-    if (assembledJs) assembledJs += "\n";
-    assembledJs += template.code;
-    templateCode = template.code;
-    templateSourceMap = template.sourceMap ?? "";
-    file.compiled.templateCode = template.code;
-  }
-
-  if (!assembledJs) {
-    const main = wasmHost!.getVirtualFile({
-      rawId: file.filename,
-      compileProfile: profile,
-    });
-    diagnosticsSnapshots.push(main.diagnostics);
-    assembledJs = main.code;
-  }
-
-  const styleIndices = nodes
-    .filter((node): node is HostVirtualNodeKind => node.kind === "style" && node.index != null)
-    .map((node) => node.index as number)
-    .sort((a, b) => a - b);
-
-  const styleStart = performance.now();
-  const styleChunks: string[] = [];
-  for (const index of styleIndices) {
-    const style = wasmHost!.getVirtualFile({
-      rawId: `${file.filename}?vue&type=style&index=${index}`,
-      compileProfile: profile,
-    });
-    diagnosticsSnapshots.push(style.diagnostics);
-    styleChunks.push(style.code);
-  }
-  styleMs = styleIndices.length > 0 ? performance.now() - styleStart : null;
-
-  const allDiagnostics = collectUniqueHostDiagnostics(diagnosticsSnapshots);
-  file.compiled.js = mergeRenderIntoComponent(assembledJs);
-  file.compiled.css = styleChunks.join("\n");
+  const allDiagnostics = withMissingRuntimeGuard(
+    collectUniqueHostDiagnostics([upsertResult.diagnostics, response.diagnostics]),
+    clientNodes,
+  );
+  file.compiled.js = hasRuntimeJsNodes(clientNodes)
+    ? mergeRenderIntoComponent(assembled.assembledJs)
+    : "";
+  file.compiled.css = assembled.styleChunks.join("\n");
+  file.compiled.templateCode = assembled.templateCode;
   const templateSection = file.structure?.blocks.find(
     (block) => block.kind === "section" && block.section.role.kind === "templateHost",
   );
   // Combine script + template source maps into a single map covering file.compiled.js.
   // This handles all offsets: SFC prefix lines, host import prepend, mergeRenderIntoComponent.
   file.compiled.verterSourceMap = combineSourceMaps({
-    scriptMap: scriptSourceMap,
-    scriptCode,
-    templateMap: templateSourceMap,
-    templateCode,
+    scriptMap: assembled.scriptSourceMap,
+    scriptCode: assembled.scriptCode,
+    templateMap: assembled.templateSourceMap,
+    templateCode: assembled.templateCode,
     vueSource: file.code,
     templateStartUtf8:
       templateSection?.kind === "section" ? templateSection.section.openingRange.start : null,
@@ -781,90 +991,18 @@ function compileVueRenderAssembly(
   });
   file.compiled.errors = formatDiagnostics(allDiagnostics);
   file.compiled.compilerDiagnostics = allDiagnostics;
+  applyTsxOutput(file, ideFromProducts(response.products));
 
-  // Retrieve analysis data.
-  let analysis: FileAnalysis | null = null;
-  try {
-    analysis = wasmHost!.getAnalysis(file.filename) ?? null;
-  } catch {
-    // Silently ignore - analysis is optional
-  }
-  file.compiled.analysis = analysis;
+  const { lintMs, tscMs } = applyHostAnalysisLintAndPublicApi(file, file.filename, disabledRules);
 
-  // Run linter.
-  let lintMs: number | null = null;
-  try {
-    const t0 = performance.now();
-    file.compiled.lintDiagnostics =
-      wasmHost!.lint(file.filename, buildLintConfig(disabledRules)) ?? [];
-    lintMs = performance.now() - t0;
-  } catch {
-    file.compiled.lintDiagnostics = [];
-  }
-
-  // Retrieve TSX types output via dedicated API.
-  let tsxMs: number | null = null;
-  try {
-    const t0 = performance.now();
-    const tsx = wasmHost!.getIde(file.filename, profile);
-    tsxMs = performance.now() - t0;
-    applyTsxOutput(file, tsx);
-  } catch {
-    applyTsxOutput(file, null);
-  }
-
-  // Retrieve public API output (minimal .d.ts declarations) + the
-  // declaration-carrier surface (getPublicApi(id, "declaration")).
-  let tscMs: number | null = null;
-  if (typeof wasmHost!.getPublicApi === "function") {
-    const t0 = performance.now();
-    applyPublicApiOutputs(file, file.filename, wasmHost!.getPublicApi.bind(wasmHost!));
-    tscMs = performance.now() - t0;
-  } else {
-    file.compiled.tscCode = "";
-    file.compiled.publicApiOutcome = { kind: "absent" };
-    file.compiled.declCode = "";
-    file.compiled.declSourceMap = "";
-    file.compiled.declarationOutcome = { kind: "absent" };
-  }
-
-  // SSR compilation pass: when SSR is toggled on, compile again with ssr: true
   if (options?.ssr) {
     try {
-      const ssrProfile = { ...profile, ssr: true };
-      // Upsert with SSR profile (host caches by profile, so this is a separate entry)
-      wasmHost!.upsert({
-        inputId: file.filename,
-        source: file.code,
-        fileKind: framework.frameworkId,
-        aliases: [],
-        compileProfile: ssrProfile,
-      });
-
-      let ssrJs = "";
-      if (nodeKinds.has("script")) {
-        const ssrScript = wasmHost!.getVirtualFile({
-          rawId: `${file.filename}?vue&type=script`,
-          compileProfile: ssrProfile,
-        });
-        ssrJs += ssrScript.code;
-      }
-      if (nodeKinds.has("template")) {
-        const ssrTemplate = wasmHost!.getVirtualFile({
-          rawId: `${file.filename}?vue&type=template`,
-          compileProfile: ssrProfile,
-        });
-        if (ssrJs) ssrJs += "\n";
-        ssrJs += ssrTemplate.code;
-      }
-      if (!ssrJs) {
-        const ssrMain = wasmHost!.getVirtualFile({
-          rawId: file.filename,
-          compileProfile: ssrProfile,
-        });
-        ssrJs = ssrMain.code;
-      }
-      file.compiled.ssrCode = mergeRenderIntoComponent(ssrJs);
+      const ssrResponse = wasmHost!.compileRequest(
+        file.filename,
+        vueCompileRequest([{ runtimeServer: { runtimeSourceMap: true } }], true, options),
+      );
+      const ssrAssembled = assembleVueRuntime(runtimeNodes(ssrResponse.products, "runtimeServer"));
+      file.compiled.ssrCode = mergeRenderIntoComponent(ssrAssembled.assembledJs);
     } catch {
       file.compiled.ssrCode = "// SSR compilation failed";
     }
@@ -875,9 +1013,9 @@ function compileVueRenderAssembly(
   return {
     verterNewJs: performance.now() - start,
     parseDurationMs: upsertResult.parseDurationMs ?? null,
-    scriptMs,
-    templateMs,
-    styleMs,
+    scriptMs: null,
+    templateMs: null,
+    styleMs: null,
     tsxMs,
     tscMs,
     lintMs,
@@ -886,7 +1024,7 @@ function compileVueRenderAssembly(
 
 /**
  * Compile a non-Vue framework carrier through the shared host surfaces: a
- * single main virtual file for the client JS, plus the shared IDE-TSX,
+ * single main runtimeClient node for the client JS, plus the shared IDE-TSX,
  * public-API, analysis, and lint outputs. Never uses the Vue VDOM render
  * assembly or {@link mergeRenderIntoComponent}.
  */
@@ -898,15 +1036,11 @@ function compileGenericFrameworkSurfaces(
   knownFiles?: KnownFiles,
 ): CompileTiming {
   const start = performance.now();
-  const profile = toHostProfile(file, options);
-  profile.ssr = false;
-
   const upsertResult = wasmHost!.upsert({
     inputId: file.filename,
     source: file.code,
     fileKind: framework.frameworkId,
     aliases: [],
-    compileProfile: profile,
   });
   file.structure = wasmHost!.getDocumentStructure?.(file.filename) ?? null;
 
@@ -914,99 +1048,49 @@ function compileGenericFrameworkSurfaces(
     syncKnownModuleReferenceDependencies(file.filename, upsertResult.moduleReferences, knownFiles);
   }
 
-  const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [
-    upsertResult.diagnostics,
-  ];
-
-  // Client JS: the single main virtual file (no render-function merge).
-  const main = wasmHost!.getVirtualFile({
-    rawId: file.filename,
-    compileProfile: profile,
-  });
-  diagnosticsSnapshots.push(main.diagnostics);
-
-  const styleIndices = wasmHost!
-    .listVirtualFiles(file.filename)
-    .filter((node): node is HostVirtualNodeKind => node.kind === "style" && node.index != null)
-    .map((node) => node.index as number)
-    .sort((a, b) => a - b);
-  const styleStart = performance.now();
-  const styleChunks: string[] = [];
-  for (const index of styleIndices) {
-    const style = wasmHost!.getVirtualFile({
-      rawId: `${file.filename}?verter&type=style&index=${index}`,
-      compileProfile: profile,
+  const tCompile = performance.now();
+  const compiled = requestCompile(
+    file.filename,
+    frameworkCompileRequest(
+      framework,
+      clientRuntimeProducts(framework.frameworkId, options),
+      false,
+      options,
+    ),
+  );
+  const tsxMs = performance.now() - tCompile;
+  if (!compiled.ok) {
+    recordCompileRefusal(file, compiled.message, upsertResult.diagnostics);
+    return emptyCompileTiming({
+      verterNewJs: performance.now() - start,
+      parseDurationMs: upsertResult.parseDurationMs ?? null,
     });
-    diagnosticsSnapshots.push(style.diagnostics);
-    styleChunks.push(style.code);
   }
-  const styleMs = styleIndices.length > 0 ? performance.now() - styleStart : null;
+  const response = compiled.response;
+  const clientNodes = runtimeNodes(response.products, "runtimeClient");
+  const main = firstNode(clientNodes, "main");
+  const styleChunks = styleNodeCodes(clientNodes);
 
-  const allDiagnostics = collectUniqueHostDiagnostics(diagnosticsSnapshots);
-  file.compiled.js = main.code;
+  const allDiagnostics = withMissingRuntimeGuard(
+    collectUniqueHostDiagnostics([upsertResult.diagnostics, response.diagnostics]),
+    clientNodes,
+  );
+  file.compiled.js = main?.code ?? "";
   file.compiled.css = styleChunks.join("\n");
   file.compiled.ssrCode = "";
-  file.compiled.verterSourceMap = main.sourceMap ?? "";
+  file.compiled.verterSourceMap = main?.sourceMap ?? "";
   file.compiled.errors = formatDiagnostics(allDiagnostics);
   file.compiled.compilerDiagnostics = allDiagnostics;
+  applyTsxOutput(file, ideFromProducts(response.products));
 
-  let analysis: FileAnalysis | null = null;
-  if (typeof wasmHost!.getAnalysis === "function") {
-    try {
-      analysis = wasmHost!.getAnalysis(file.filename) ?? null;
-    } catch {
-      // Analysis is optional.
-    }
-  }
-  file.compiled.analysis = analysis;
-
-  let lintMs: number | null = null;
-  if (typeof wasmHost!.lint === "function") {
-    try {
-      const t0 = performance.now();
-      file.compiled.lintDiagnostics =
-        wasmHost!.lint(file.filename, buildLintConfig(disabledRules)) ?? [];
-      lintMs = performance.now() - t0;
-    } catch {
-      file.compiled.lintDiagnostics = [];
-    }
-  } else {
-    file.compiled.lintDiagnostics = [];
-  }
-
-  let tsxMs: number | null = null;
-  if (typeof wasmHost!.getIde === "function") {
-    try {
-      const t0 = performance.now();
-      const tsx = wasmHost!.getIde(file.filename, profile);
-      tsxMs = performance.now() - t0;
-      applyTsxOutput(file, tsx);
-    } catch {
-      applyTsxOutput(file, null);
-    }
-  } else {
-    applyTsxOutput(file, null);
-  }
-
-  let tscMs: number | null = null;
-  if (typeof wasmHost!.getPublicApi === "function") {
-    const t0 = performance.now();
-    applyPublicApiOutputs(file, file.filename, wasmHost!.getPublicApi.bind(wasmHost!));
-    tscMs = performance.now() - t0;
-  } else {
-    file.compiled.tscCode = "";
-    file.compiled.publicApiOutcome = { kind: "absent" };
-    file.compiled.declCode = "";
-    file.compiled.declSourceMap = "";
-    file.compiled.declarationOutcome = { kind: "absent" };
-  }
+  const { lintMs, tscMs } = applyHostAnalysisLintAndPublicApi(file, file.filename, disabledRules);
 
   return {
     verterNewJs: performance.now() - start,
     parseDurationMs: upsertResult.parseDurationMs ?? null,
     scriptMs: null,
     templateMs: null,
-    styleMs,
+    styleMs: null,
     tsxMs,
     tscMs,
     lintMs,
@@ -1022,81 +1106,41 @@ function compileTsWithHost(
   const start = performance.now();
   const vueFilename = file.filename.replace(/\.ts$/, ".vue");
   const sfc = `<script setup lang="ts">\n${file.code}\n</script>`;
-  const profile = toHostProfile(file, options);
-  profile.filename = vueFilename;
 
   const upsertResult = wasmHost!.upsert({
     inputId: vueFilename,
     source: sfc,
     fileKind: "vue",
     aliases: [],
-    compileProfile: profile,
   });
 
   if (knownFiles) {
     syncKnownModuleReferenceDependencies(vueFilename, upsertResult.moduleReferences, knownFiles);
   }
 
-  const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [
-    upsertResult.diagnostics,
-  ];
-
-  const script = wasmHost!.getVirtualFile({
-    rawId: `${vueFilename}?vue&type=script`,
-    compileProfile: profile,
-  });
-  diagnosticsSnapshots.push(script.diagnostics);
-
-  const allDiagnostics = collectUniqueHostDiagnostics(diagnosticsSnapshots);
-  file.compiled.js = script.code;
+  const compiled = requestCompile(
+    vueFilename,
+    vueCompileRequest(clientRuntimeProducts("vue", options), false, options),
+  );
+  if (!compiled.ok) {
+    recordCompileRefusal(file, compiled.message, upsertResult.diagnostics);
+    return emptyCompileTiming({
+      verterNewJs: performance.now() - start,
+      parseDurationMs: upsertResult.parseDurationMs ?? null,
+    });
+  }
+  const response = compiled.response;
+  const clientNodes = runtimeNodes(response.products, "runtimeClient");
+  const script = firstNode(clientNodes, "script");
+  const allDiagnostics = withMissingRuntimeGuard(
+    collectUniqueHostDiagnostics([upsertResult.diagnostics, response.diagnostics]),
+    clientNodes,
+  );
+  file.compiled.js = script?.code ?? "";
   file.compiled.errors = formatDiagnostics(allDiagnostics);
   file.compiled.compilerDiagnostics = allDiagnostics;
-
-  // Retrieve analysis data if available
-  let analysis: FileAnalysis | null = null;
-  if (typeof wasmHost!.getAnalysis === "function") {
-    try {
-      analysis = wasmHost!.getAnalysis(vueFilename) ?? null;
-    } catch {
-      // Silently ignore
-    }
-  }
-  file.compiled.analysis = analysis;
-
-  // Run linter
-  if (typeof wasmHost!.lint === "function") {
-    try {
-      file.compiled.lintDiagnostics =
-        wasmHost!.lint(vueFilename, buildLintConfig(disabledRules)) ?? [];
-    } catch {
-      file.compiled.lintDiagnostics = [];
-    }
-  } else {
-    file.compiled.lintDiagnostics = [];
-  }
-
-  // Retrieve TSX types output via dedicated API
-  if (typeof wasmHost!.getIde === "function") {
-    try {
-      const tsx = wasmHost!.getIde(vueFilename, profile);
-      applyTsxOutput(file, tsx);
-    } catch {
-      applyTsxOutput(file, null);
-    }
-  } else {
-    applyTsxOutput(file, null);
-  }
-
-  // Public API output for TS-only mode (+ the declaration surface)
-  if (typeof wasmHost!.getPublicApi === "function") {
-    applyPublicApiOutputs(file, vueFilename, wasmHost!.getPublicApi.bind(wasmHost!));
-  } else {
-    file.compiled.tscCode = "";
-    file.compiled.publicApiOutcome = { kind: "absent" };
-    file.compiled.declCode = "";
-    file.compiled.declSourceMap = "";
-    file.compiled.declarationOutcome = { kind: "absent" };
-  }
+  applyTsxOutput(file, ideFromProducts(response.products));
+  applyHostAnalysisLintAndPublicApi(file, vueFilename, disabledRules);
 
   return {
     verterNewJs: performance.now() - start,
@@ -1136,28 +1180,32 @@ export async function compileFile(
   const detectedFrameworkId = detectFrameworkId(file.filename);
   const framework = detectedFrameworkId ? frameworkById(detectedFrameworkId) : undefined;
 
-  if (framework) {
-    if (!wasmHost) {
-      file.compiled.errors = [HOST_UNAVAILABLE_ERROR];
-      return timing;
+  try {
+    if (framework) {
+      if (!wasmHost) {
+        file.compiled.errors = [HOST_UNAVAILABLE_ERROR];
+        return timing;
+      }
+      return compileFrameworkWithHost(file, framework, options, disabledRules, knownFiles);
+    } else if (file.filename.endsWith(".ts")) {
+      if (!wasmHost) {
+        file.compiled.js = "";
+        file.compiled.errors = [HOST_UNAVAILABLE_ERROR];
+        return timing;
+      }
+      return compileTsWithHost(file, options, disabledRules, knownFiles);
+    } else if (file.filename.endsWith(".js")) {
+      file.compiled.js = file.code;
+      file.compiled.errors = [];
+    } else if (file.filename.endsWith(".css")) {
+      file.compiled.css = file.code;
+      file.compiled.errors = [];
     }
-    return compileFrameworkWithHost(file, framework, options, disabledRules, knownFiles);
-  } else if (file.filename.endsWith(".ts")) {
-    if (!wasmHost) {
-      file.compiled.js = "";
-      file.compiled.errors = [HOST_UNAVAILABLE_ERROR];
-      return timing;
-    }
-    return compileTsWithHost(file, options, disabledRules, knownFiles);
-  } else if (file.filename.endsWith(".js")) {
-    file.compiled.js = file.code;
-    file.compiled.errors = [];
-  } else if (file.filename.endsWith(".css")) {
-    file.compiled.css = file.code;
-    file.compiled.errors = [];
+    return timing;
+  } catch (error) {
+    recordUnexpectedCompileFailure(file, error);
+    return emptyCompileTiming({ verterNewJs: timing.verterNewJs });
   }
-
-  return timing;
 }
 
 // =============================================================================
