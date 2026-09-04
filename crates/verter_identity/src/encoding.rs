@@ -75,8 +75,16 @@ impl CanonicalEncoder {
         }
     }
 
-    /// Set field: elements sorted, then each length-delimited (`u64` LE +
-    /// bytes) so concatenation cannot fuse neighbours.
+    /// Set field: elements sorted, deduplicated, then each length-delimited
+    /// (`u64` LE + bytes) so concatenation cannot fuse neighbours.
+    ///
+    /// Deduplication is what makes this a set rather than a sorted bag, and it
+    /// is load-bearing rather than tidiness. The caller is describing which
+    /// distinct elements were observed, so observing one of them twice is the
+    /// same description as observing it once and has to encode identically. A
+    /// bag encoding instead mints a second identity for one observation that
+    /// happened to be reported with a repeat, which downstream is a second
+    /// cache slot for one question.
     pub fn field_sorted_set<I, B>(&mut self, tag: u16, elements: I) -> &mut Self
     where
         I: IntoIterator<Item = B>,
@@ -84,6 +92,7 @@ impl CanonicalEncoder {
     {
         let mut sorted: Vec<Vec<u8>> = elements.into_iter().map(|b| b.as_ref().to_vec()).collect();
         sorted.sort();
+        sorted.dedup();
         let mut payload = Vec::new();
         payload.extend_from_slice(&(sorted.len() as u64).to_le_bytes());
         for element in sorted {
@@ -291,6 +300,23 @@ mod tests {
         let mut b = CanonicalEncoder::new("set-test");
         b.field_sorted_set(1, ["b", "c", "a"]);
         assert_eq!(a.finish(), b.finish());
+    }
+
+    /// Set semantics, not sorted-bag semantics. Order independence does not
+    /// discriminate this on its own: a sorted bag is order independent too and
+    /// still encodes one element observed twice differently from the same
+    /// element observed once. Presence is what the field carries, so a repeat
+    /// must encode identically while a genuinely additional element must not.
+    #[test]
+    fn sorted_set_collapses_repeats_without_collapsing_distinct_elements() {
+        let encode = |elements: &[&str]| {
+            let mut e = CanonicalEncoder::new("set-test");
+            e.field_sorted_set(1, elements.iter().copied());
+            e.finish()
+        };
+        assert_eq!(encode(&["a", "a"]), encode(&["a"]));
+        assert_eq!(encode(&["b", "a", "b"]), encode(&["a", "b"]));
+        assert_ne!(encode(&["a", "b"]), encode(&["a"]));
     }
 
     #[test]

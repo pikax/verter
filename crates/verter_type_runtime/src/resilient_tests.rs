@@ -719,13 +719,17 @@ pub(crate) async fn build_real_tsserver_plugin(
     // Preserve normal Node package resolution for optional workspace dependencies
     // (notably `@verter/svelte-jsx`) from the unique temporary plugin package.
     let dependency_link = plugin_package.join("node_modules");
-    let workspace_dependencies = std::fs::canonicalize(
-        repo_root
-            .join("packages")
-            .join("typescript-plugin")
-            .join("node_modules"),
-    )
-    .expect("canonical workspace plugin dependencies");
+    let workspace_plugin_modules = repo_root
+        .join("packages")
+        .join("typescript-plugin")
+        .join("node_modules");
+    assert!(
+        workspace_plugin_modules.is_dir(),
+        "real recovery tests require {} (workspace plugin dependencies)",
+        workspace_plugin_modules.display()
+    );
+    let workspace_dependencies = std::fs::canonicalize(&workspace_plugin_modules)
+        .expect("canonical workspace plugin dependencies");
     #[cfg(windows)]
     {
         let output = std::process::Command::new("cmd")

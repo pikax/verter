@@ -319,7 +319,12 @@ pub struct QueryIdentity<Q> {
 
 impl<Q> QueryIdentity<Q> {
     /// Compose the three parts. `observed_profiles` is a canonical sorted
-    /// set — profile order must not affect identity.
+    /// set: neither the order profiles were observed in nor a repeated
+    /// observation of one of them affects the composed identity, because
+    /// multiplicity is not a distinction this identity is permitted to carry.
+    /// The shared encoder sorts and deduplicates the field, so a profile
+    /// reported twice composes the same slot as the same profile reported
+    /// once.
     pub fn compose(
         query_kind_domain_tag: &'static str,
         semantic_arguments: CanonicalDigest,
@@ -544,26 +549,71 @@ mod tests {
         );
     }
 
-    /// Profiles are a sorted set (`field_sorted_set`), not a positional list.
+    /// The observed profiles are part of the composed identity, and the order
+    /// they were observed in is not. Both halves are load-bearing and neither
+    /// discriminates the other: an identity that dropped the profile field
+    /// entirely would still be order independent — and would then let two
+    /// capability interpretations of one question share a cache slot — while a
+    /// positional encoding is presence sensitive and still mints a second
+    /// identity for the same observation reported in a different order.
+    ///
+    /// Duplicate insensitivity is the third half-independent property, and it
+    /// is the one a sorted encoding does not supply for free: sorting makes
+    /// `[p1, p2]` and `[p2, p1]` agree without making `[p1, p1]` and `[p1]`
+    /// agree. Observing a profile twice is the same question as observing it
+    /// once, so it must compose the same identity — otherwise one question
+    /// takes two cache slots depending on how its capability observation was
+    /// reported.
     #[test]
-    fn query_identity_is_profile_order_independent() {
+    fn query_identity_is_a_profile_set_not_a_profile_list() {
         struct FakeQuery;
         let contract = ResultContractId::from_canonical(&Args(9));
         let p1 = CanonicalDigest::of_bytes(b"profile-1");
         let p2 = CanonicalDigest::of_bytes(b"profile-2");
-        let forward = QueryIdentity::<FakeQuery>::compose(
-            "identity-test.query.v1",
-            CanonicalDigest::of_bytes(b"args"),
-            &[p1, p2],
-            &contract,
+        let compose = |profiles: &[CanonicalDigest]| {
+            QueryIdentity::<FakeQuery>::compose(
+                "identity-test.query.v1",
+                CanonicalDigest::of_bytes(b"args"),
+                profiles,
+                &contract,
+            )
+        };
+
+        assert_eq!(
+            compose(&[p1, p2]),
+            compose(&[p2, p1]),
+            "the order profiles were observed in is not part of the identity"
         );
-        let reverse = QueryIdentity::<FakeQuery>::compose(
-            "identity-test.query.v1",
-            CanonicalDigest::of_bytes(b"args"),
-            &[p2, p1],
-            &contract,
+        assert_eq!(
+            compose(&[p1, p1]),
+            compose(&[p1]),
+            "observing a profile twice is the same question as observing it once"
         );
-        assert_eq!(forward, reverse);
+        assert_eq!(
+            compose(&[p1, p2, p1]),
+            compose(&[p1, p2]),
+            "a repeat among distinct profiles collapses without dropping the others"
+        );
+
+        let none = compose(&[]);
+        let one = compose(&[p1]);
+        let other = compose(&[p2]);
+        let both = compose(&[p1, p2]);
+        for (left, right, what) in [
+            (&none, &one, "an observed profile must change the identity"),
+            (
+                &one,
+                &other,
+                "a different observed profile must change the identity",
+            ),
+            (
+                &one,
+                &both,
+                "an additional observed profile must change the identity",
+            ),
+        ] {
+            assert_ne!(left, right, "{what}");
+        }
     }
 
     /// Hand-written `Ord`: `ParseKey` orders by digest, not field content.

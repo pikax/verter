@@ -14,6 +14,15 @@ const OWNERS = Object.freeze([
   "workspace",
 ]);
 
+// The owners this lane covers are declared here and nowhere else, so the list
+// is printable. A checker asking whether this lane still re-runs a given
+// owner's contracts asks the script, rather than restating its contents
+// somewhere the two can drift apart without either side noticing.
+if (process.argv.includes("--list-owners")) {
+  process.stdout.write(`${OWNERS.join("\n")}\n`);
+  process.exit(0);
+}
+
 process.stderr.write("\nCOMPILE CONTRACTS: fetch locked workspace\n");
 const fetch = spawnSync("cargo", ["fetch", "--locked"], {
   stdio: "inherit",

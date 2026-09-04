@@ -53,6 +53,10 @@ jobs:
               - 'scripts/bf2-authoritative.mjs'
               - 'scripts/bf2-ci-lane-selftest.mjs'
               - 'scripts/compiler-ci-lane-selftest.mjs'
+              # The compile-contract lane's own selection: this script is the
+              # only place the owner set it iterates is declared, so dropping an
+              # owner from it silently narrows what that lane runs.
+              - 'scripts/compile-contracts.mjs'
               - 'scripts/provider-ci*.mjs'
               - 'packages/framework-conformance-harness/**'
               - 'packages/language-shared/**'
@@ -271,13 +275,64 @@ jobs:
               - '.claude/skills/multi-agent-orchestration/**'
               - 'CLAUDE.md'
               - '.github/workflows/ci.yml'
+              # The paths below are inputs to the closure-register VALIDATOR,
+              # not only to the Rust lane that re-runs those records' tests.
+              # `--check` reads these bytes directly: a negative control's
+              # replaced text must occur exactly once in its subject, a
+              # directory-counted record's selection is re-derived by reading
+              # its fixture directory, and every cited fixture, evidence anchor,
+              # and package manifest must resolve. An ordinary Rust-only change
+              # can therefore turn `--check` red, so this lane has to be
+              # eligible on it — otherwise the break merges green here and
+              # surfaces later on an unrelated roadmap pull request, attributed
+              # to an author who touched none of it. The validator refuses an
+              # artifact it opens that no pattern here covers, so this list can
+              # never be too narrow; it is kept at file granularity anyway, so
+              # that it is not needlessly too broad either. Two crate trees are
+              # listed whole because the instrument cites the crate ROOT — one
+              # as a fixture directory whose contents are counted, the other as
+              # an evidence anchor for a record covering the crate's whole test
+              # surface — and a root is only covered by its own subtree pattern.
+              - 'crates/verter_identity/**'
+              - 'crates/verter_session/**'
+              - 'crates/verter_compile_contracts/Cargo.toml'
+              - 'crates/verter_type_runtime/Cargo.toml'
+              - 'crates/verter_type_runtime/tests/main.rs'
+              - 'crates/verter_protocol/Cargo.toml'
+              - 'crates/verter_protocol/tests/cases/typeinfo_proto_roundtrip.rs'
+              # The lane that re-runs those crates' tests spells its own selection
+              # `-E "$VERTER_NEXTEST_FILTER"` and computes that value from these
+              # scripts, so the narrowing this instrument publishes resolves
+              # through them. A change to any of them changes what that lane
+              # selects, which is exactly the kind of change this view has to be
+              # re-derived on — a change to the core filter can turn this job red
+              # until the affected record is re-derived, which is the intended
+              # cost of publishing a narrowing nobody re-checks. The entry file
+              # alone is not enough: the excluded package set and the name-scoped
+              # selectors this instrument decomposes are declared in the modules
+              # it imports, so the whole first-party import graph is listed here
+              # exactly as the validator cites it.
+              - 'scripts/provider-ci*.mjs'
+              - 'scripts/gate-internals.mjs'
+              # Same reason for the compile-contract lane: the owner set it
+              # iterates is declared in this script, the instrument resolves a
+              # record's own owner against that list, and dropping an entry
+              # changes which records that lane still refreshes.
+              - 'scripts/compile-contracts.mjs'
 
   tama-roadmap:
     name: Tama Roadmap
     needs: detect-changes
     if: needs.detect-changes.outputs.tama == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The closure instrument suite no longer only asserts over the register: it
+    # mirrors the roadmap tree and re-applies every negative control it owns,
+    # which spawns the validator and the two node-run tools it drives as real
+    # child processes. The five-minute budget this job carried was sized for a
+    # suite that only parsed files. The instrument suite resolves this number
+    # against its own nested deadlines, so it is a declared budget rather than
+    # a guess.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - name: Validate DAG-managed files
@@ -285,10 +340,66 @@ jobs:
           node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict
           node --test roadmap/0.1.0-tama/tools/implementation-ledger.test.mjs
           node --test roadmap/0.1.0-tama/tools/ledger.test.mjs
+          node roadmap/0.1.0-tama/tools/closure-register.mjs --check
+          node --test roadmap/0.1.0-tama/tools/closure-register.test.mjs
       - name: CI aggregate completeness
         run: |
           node scripts/check-ci-aggregate.mjs
           node --test scripts/check-ci-aggregate.test.mjs
+
+  # The negative-control lane. The roadmap job above re-applies the controls
+  # whose records run under `node`; the rest mutate an artifact too and are
+  # re-applied here, where the Rust toolchain their records need exists and
+  # where spawning the roadmap suite does not re-enter it. The partition
+  # between the two lanes is resolved by the roadmap job, which also requires
+  # THIS job to exist and to issue that command, so deleting it turns the
+  # roadmap job red rather than silently retiring half the controls.
+  tama-controls:
+    name: Tama Closure Controls
+    needs: detect-changes
+    if: needs.detect-changes.outputs.tama == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tama-controls
+      # A re-applied record's command can be a `cargo nextest` run, and nextest
+      # is a subcommand installed beside the toolchain rather than with it.
+      # The same install the rust-test lane carries, so this lane fails on the
+      # control rather than on a missing subcommand the clean run would read
+      # as a refused mirror.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      # The charter's targeted-verification record runs its three packages
+      # UNFILTERED, so the clean half of its re-application includes the
+      # tsgo-backed Svelte projection typecheck gate — tests that hard-fail
+      # under CI without the rc typescript launcher, which ships only through
+      # the workspace's node_modules. The same install the core and provider
+      # lanes carry; the gate paths-maps the in-repo `@verter/svelte-jsx`
+      # shims, so no package build is needed beyond it.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # A compile-contract record's runner builds its fixture project through
+      # trybuild, which invokes cargo with `--offline`: every dependency in the
+      # lock has to be in the registry cache before the lane spawns anything, or
+      # that inner build fails on a download it is not allowed to make. The
+      # refresh command those records name establishes this by fetching first;
+      # this lane re-applies the record's own narrower command, so it establishes
+      # the same prerequisite here. Resolved rather than commented — the
+      # instrument suite requires this job to carry it while a cargo-bound
+      # control is delegated to the lane.
+      - name: Fetch the locked workspace
+        run: cargo fetch --locked
+      - name: Re-apply the delegated negative controls
+        run: |
+          node --test roadmap/0.1.0-tama/tools/closure-controls.test.mjs
 
   # ---------------------------------------------------------------------------
   # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in
@@ -1931,6 +2042,7 @@ jobs:
     needs:
       - detect-changes
       - tama-roadmap
+      - tama-controls
       - rust-fmt
       - proto-fmt
       - rust-clippy

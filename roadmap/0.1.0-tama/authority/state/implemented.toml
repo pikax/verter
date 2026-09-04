@@ -381,7 +381,7 @@ schema = 2
 "TA1B" = { status = "implemented", commit_message = "feat(session): flip the composite payload opaque and close every construction site", commit_date = "2026-08-31T23:30:00+01:00" }
 "TA2" = { status = "implemented", commit_message = "feat(session): demand-scoped truthiness domain authority consumed by flow", commit_date = "2026-09-01T04:00:00+01:00" }
 "TCM0" = { status = "pending" }
-"TCM0R" = { status = "pending" }
+"TCM0R" = { status = "implemented", commit_message = "fix(*): deduplicate the canonical set field and ratify the TypeScript dual-plane contract", commit_date = "2026-09-04T18:00:00+01:00", pull_request = 477 }
 "TCM1" = { status = "pending" }
 "TCM2" = { status = "pending" }
 "TCM3" = { status = "pending" }

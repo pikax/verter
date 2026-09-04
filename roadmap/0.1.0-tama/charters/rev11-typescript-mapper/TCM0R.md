@@ -27,9 +27,9 @@ optional=false
 release_gating=none
 external_requirements=maintainer_tcm0_rescope_ratification
 charter=charters/rev11-typescript-mapper/TCM0R.md
-max_production_loc=0
-max_production_files=0
-max_related_packages=0
+max_production_loc=92
+max_production_files=2
+max_related_packages=1
 rescope_loc=1500
 rescope_files=12
 rescope_unrelated_packages=3
@@ -45,9 +45,16 @@ TypeScript dual-plane architecture and observation-identity rescope. The current
 
 ## Concrete surfaces and APIs
 
-- Production surfaces: `crates/verter_type_runtime/src`, `crates/verter_session/src`, `packages/typescript-plugin/src`, `crates/verter_protocol/src`.
+- Production surfaces: `crates/verter_identity/src`, `crates/verter_type_runtime/src`, `crates/verter_session/src`, `packages/typescript-plugin/src`, `crates/verter_protocol/src`.
+- Repository-owned tooling surface: `scripts/compile-contracts.mjs`.
 - Named API/data boundaries: `CertifiedTypeEngineBinding`, `InputBasisId`, `QueryIdentity`, `SemanticFlightKey`, `ContentMapper`.
-- Mutation boundary: authority/evidence bytes only; production LOC is zero.
+- Mutation boundary: authority and evidence bytes, plus the one production repair the ratified contract would otherwise assert falsely.
+
+`crates/verter_identity/src` is listed because `InputBasisId`, `QueryIdentity`, and `SemanticFlightKey` are defined there — three of the five named boundaries. Omitting it would have put a successor obliged to change one of those types outside its own declared surface, which is a scope defect discovered at the worst moment: while implementing. The list now names where the boundaries actually live.
+
+The mutation boundary is amended from "authority/evidence bytes only; production LOC is zero" for one reason. The three machine budget fields above are amended with it, by [`decisions/2026-09-04-typescript-mapper-encoder-budget-amendment.md`](../../decisions/2026-09-04-typescript-mapper-encoder-budget-amendment.md) — a boundary stated in prose while the fields a reader's tooling resolves still read zero is a budget stated twice with two different numbers, which binds nobody. The contract this block ratifies states that the observed-profile component of the query identity is a set — one profile observed twice is the same question as observing it once. The shared canonical encoder sorted and length-prefixed that field without deduplicating it, so the ratified sentence was false about the code it describes on the day it was written. The available shapes were to ratify a false sentence, to disclose the gap beside a claim that still reads proven, to carry it as a fourth remainder the governing ruling closes the set against, or to make the sentence true. Making it true is one line in `CanonicalEncoder::field_sorted_set` plus the coverage that discriminates it, inside a surface this charter declares; the other three all publish a claim slightly stronger than its evidence, which is the exact defect this block exists to refuse. A ratification block that will not repair the one byte its own text depends on is not enforcing a boundary, it is describing one.
+
+`scripts/compile-contracts.mjs` is named because the closure instrument resolves a record's owner against the list that script declares, and it asks the script rather than scraping the list out of its source — the name-keyed scanning this block removes. That required a `--list-owners` flag on the script, which is repository-owned gate-lane tooling and therefore a surface this charter has to declare rather than treat as incidental configuration.
 
 ## Exact predecessor contracts
 
@@ -72,7 +79,9 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - **TCM0R-AC3 — incremental equivalence:** when the changed scope owns or affects incremental, cache, cancellation, stale-publication, or partial-result authority, prove incremental equals fresh and degraded outcomes cannot warm. Otherwise record a terse not-applicable rationale tied to the untouched authority.
 - **TCM0R-AC4 — bounded work:** when the changed scope owns or affects a hot path, prove no hidden duplicate parse, resolve, plan, emit, copy, allocation, or retained candidate using applicable existing counters, inspection, or benchmarks. Otherwise record a terse not-applicable rationale; do not add counters or a soak by default.
 - Every proposed new test must name a plausible regression or contract boundary not already discriminated; prose/format assertions are allowed only when those bytes are the public contract. Do not add implementation mirrors, duplicate permutations, or universal negative/mutation tests.
-- Test homes: `crates/verter_type_runtime/tests`, `crates/verter_session/tests/cases`.
+- Test homes: `crates/verter_identity/src`, `crates/verter_type_runtime/tests`, `crates/verter_session/tests/cases`.
+
+`crates/verter_identity/src` is the home for coverage of the observation identities themselves, and of the shared canonical encoder they compose through. `QueryIdentity`, `SemanticFlightKey`, and `SourceUnitId` are defined there and composed through that crate's own public API, so a case exercising only those types belongs in the crate that owns them rather than in a consumer's integration binary — splitting one type's coverage across two crates leaves a later reader auditing that type with half of it.
 
 ## Deletions and forbidden designs
 
@@ -84,8 +93,8 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 
 ## Budgets and mandatory rescope
 
-- Target ceiling: 0 production LOC, 0 production files, 0 related crates/packages.
-- Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
+- Target ceiling: 92 production LOC, 2 production files, 1 related crate/package — amended from 0/0/0 by [`decisions/2026-09-04-typescript-mapper-encoder-budget-amendment.md`](../../decisions/2026-09-04-typescript-mapper-encoder-budget-amendment.md), which records the measurement and the reason. The header fields above and the matching DAG node carry the same three numbers.
+- Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern. Unchanged by that amendment.
 - Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
 - Performance budget: when preflight identifies touched authority or a hot path, equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance remains 0.0% unless an owning-authority amendment supplies exact replacement thresholds. Otherwise performance evidence is not applicable; do not create counters or a 100-request retention soak solely to satisfy this charter.
 
