@@ -4634,10 +4634,16 @@ mod tests {
         }
     }
 
-    // Mutation recipe: replace the count comparison in
-    // `batch_entry_count_mismatch` with `false`. `zip` truncates to the
-    // shorter side, so the dropped and duplicated cases below both report
-    // "no mismatch" while the caller's output slots go unfilled.
+    // Mutation recipes, one per direction this check is bounded in:
+    // - Too narrow: `and` the count comparison in
+    //   `batch_entry_count_mismatch` with `false`. `zip` truncates to the
+    //   shorter side, so the dropped and duplicated cases below both
+    //   report "no mismatch" while the caller's output slots go unfilled.
+    // - Too wide: `or` it with a per-position id comparison over
+    //   `entries.iter().zip(expected_canonical_ids)`. The transposition
+    //   case below then fails the WHOLE call, discarding every sibling
+    //   that did land where its input asked, for a mismatch that is
+    //   attributable to one position and is failed there.
     #[test]
     fn batch_count_check_catches_a_lost_or_duplicated_entry() {
         let expected = vec![
@@ -4825,8 +4831,10 @@ mod tests {
     ///
     /// Mutation recipe: pass `None` for `source` at the
     /// `host_diagnostics_to_napi(&failure.diagnostics, source)` call in
-    /// `compile_request_response::compile_request_failure_to_napi`. The
-    /// span stays at its UTF-8 byte offsets (1, 5) and this case goes red.
+    /// `compile_request_failure_to_napi`'s `HostError::CompileError` arm —
+    /// the one arm carrying the diagnostics a host compile failure
+    /// publishes. The span stays at its UTF-8 byte offsets (1, 5) and this
+    /// case goes red.
     #[test]
     fn a_typed_failure_maps_its_diagnostic_spans_to_utf16() {
         let failure = host::CompileRequestFailure::Host(host::HostError::CompileError(
