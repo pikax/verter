@@ -774,8 +774,14 @@ fn each_arm_renders_a_message_that_names_which_authority_refused() {
             .to_string();
     assert!(
         canonical.starts_with("refused host compile request:")
-            && canonical.contains("EmptyProductSet"),
+            && canonical.contains("product set is empty"),
         "a canonical refusal must read as one and name its rule: {canonical}"
+    );
+    // The rule's own words come from the compiler's shared refusal
+    // vocabulary, not from a Rust variant spelling this binding printed.
+    assert!(
+        !canonical.contains("EmptyProductSet"),
+        "a browser caller must not be shown the Rust variant name: {canonical}"
     );
     assert_ne!(
         schema, canonical,

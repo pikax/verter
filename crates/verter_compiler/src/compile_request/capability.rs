@@ -243,6 +243,65 @@ mod tests {
 
     use super::ALL_CAPABILITY_CELLS as ALL_CELLS;
 
+    /// The `cell_id` a refusal quotes is the committed matrix's own
+    /// identifier, in both directions: a variant naming a row the matrix
+    /// does not have fails, and a matrix row no variant names fails too.
+    ///
+    /// Mutation recipes:
+    /// - Change one `cell_id` arm (`SvelteHmr` to `"SVELTE-HOT-MODULE"`):
+    ///   this reports the invented id and the unnamed row.
+    /// - Delete one entry from `ALL_CAPABILITY_CELLS`: the count assertion
+    ///   fails before the set comparison can hide the gap.
+    /// - Point two variants at one id (`SvelteHmr` to `"SVELTE-MODULE"`):
+    ///   the duplicate assertion reports it, and the unnamed row does too.
+    #[test]
+    fn cell_ids_match_the_committed_matrix() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("crate is <workspace>/crates/verter_compiler")
+            .join("packages/framework-conformance-harness/evidence/capability-matrix.tsv");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("capability-matrix.tsv must be readable at {path:?}: {e}"));
+        let committed: std::collections::BTreeSet<&str> = raw
+            .lines()
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                line.split('\t')
+                    .next()
+                    .expect("a matrix row has a cell_id column")
+            })
+            .collect();
+
+        assert_eq!(
+            committed.len(),
+            ALL_CELLS.len(),
+            "the matrix commits {} rows, {} variants are listed",
+            committed.len(),
+            ALL_CELLS.len()
+        );
+
+        let named: std::collections::BTreeSet<&str> =
+            ALL_CELLS.iter().map(|cell| cell.cell_id()).collect();
+        assert_eq!(
+            named.len(),
+            ALL_CELLS.len(),
+            "two variants name the same matrix cell id"
+        );
+
+        let invented: Vec<_> = named.difference(&committed).collect();
+        assert!(
+            invented.is_empty(),
+            "variants name cell ids the matrix does not have: {invented:?}"
+        );
+        let unnamed: Vec<_> = committed.difference(&named).collect();
+        assert!(
+            unnamed.is_empty(),
+            "matrix rows no variant names: {unnamed:?}"
+        );
+    }
+
     /// Non-vacuity + exact disposition-count proof against
     /// `capability-matrix.tsv`'s committed 34 rows.
     #[test]

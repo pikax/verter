@@ -146,7 +146,14 @@ pub struct JsValueMaterializationBudget {
     retained_bytes: usize,
     max_decoded_values: usize,
     max_retained_bytes: usize,
-    values_exhausted: bool,
+    /// Set once the AGGREGATE retained-byte ceiling is hit.
+    ///
+    /// Read by the batch route: byte exhaustion is a whole-call ceiling
+    /// that every later entry would also hit, so it aborts the call
+    /// instead of failing one entry. There is deliberately no counterpart
+    /// for the decoded-value ceiling — that one is PER entry, reset by
+    /// [`Self::reset_decoded_values`] between entries, so exhausting it
+    /// fails only the entry that did.
     bytes_exhausted: bool,
 }
 
@@ -158,7 +165,6 @@ impl JsValueMaterializationBudget {
             retained_bytes: 0,
             max_decoded_values,
             max_retained_bytes,
-            values_exhausted: false,
             bytes_exhausted: false,
         }
     }
@@ -175,7 +181,6 @@ impl JsValueMaterializationBudget {
     fn ensure_decoded_values(&mut self, additional: usize) -> Result<()> {
         let total = self.decoded_values.checked_add(additional);
         if total.is_none_or(|total| total > self.max_decoded_values) {
-            self.values_exhausted = true;
             return Err(Error::new(
                 Status::InvalidArg,
                 format!(
@@ -218,7 +223,6 @@ impl JsValueMaterializationBudget {
 
     pub(crate) fn reset_decoded_values(&mut self) {
         self.decoded_values = 0;
-        self.values_exhausted = false;
     }
 
     pub(crate) fn bytes_exhausted(&self) -> bool {

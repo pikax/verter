@@ -126,6 +126,14 @@ fn clear_pending_exception(env: &Env) -> Result<()> {
     Ok(())
 }
 
+/// Bytes of a thrown value this binding is willing to copy into a Rust
+/// error message.
+///
+/// A thrown string is caller-controlled and unbounded; the message only
+/// has to be readable, so a hostile multi-megabyte throw is answered by
+/// the generic label rather than retained.
+const MAX_EXCEPTION_MESSAGE_BYTES: usize = 8 * 1024;
+
 /// Read an exception's message without invoking user-controlled string
 /// coercion. `Error::from(Unknown)` would run `toString` / `toPrimitive`,
 /// and a throw there would leave a new pending exception that poisons the
@@ -136,8 +144,15 @@ fn exception_message_without_coercion(
 ) -> Result<String> {
     let ty = napi::type_of!(env.raw(), exception)?;
     if ty == ValueType::String {
-        return js_value_graph::napi_utf8_string_len(env.raw(), exception)
-            .and_then(|_| unsafe { String::from_napi_value(env.raw(), exception) });
+        // Measured before it is copied, and the measurement is a BOUND:
+        // discarding it would leave a probe that reads like a guard and
+        // enforces nothing.
+        if js_value_graph::napi_utf8_string_len(env.raw(), exception)?
+            > MAX_EXCEPTION_MESSAGE_BYTES
+        {
+            return Ok("JavaScript exception".to_string());
+        }
+        return unsafe { String::from_napi_value(env.raw(), exception) };
     }
     if ty != ValueType::Object {
         return Ok("JavaScript exception".to_string());
@@ -152,6 +167,11 @@ fn exception_message_without_coercion(
         return Ok("JavaScript exception".to_string());
     }
     if napi::type_of!(env.raw(), message)? != ValueType::String {
+        return Ok("JavaScript exception".to_string());
+    }
+    // Same bound as the thrown-string path: `error.message` is equally
+    // caller-controlled and equally unbounded.
+    if js_value_graph::napi_utf8_string_len(env.raw(), message)? > MAX_EXCEPTION_MESSAGE_BYTES {
         return Ok("JavaScript exception".to_string());
     }
     unsafe { String::from_napi_value(env.raw(), message) }
@@ -221,23 +241,43 @@ fn decode_compile_requests_priority(
     env: &Env,
     options: Option<Unknown<'_>>,
 ) -> Result<Option<verter_scheduler::stage::Priority>> {
-    use js_value_graph::{JsObjectKeys, JsValueGraph, NapiValueGraph};
+    use js_value_graph::{JsObjectKeys, JsValueClass, JsValueGraph, NapiValueGraph};
     use verter_scheduler::stage::Priority;
 
     let Some(value) = options else {
         return Ok(Some(Priority::Background));
     };
-    let ty = value.get_type()?;
+    let ty = match value.get_type() {
+        Ok(ty) => ty,
+        Err(error) => return Err(recover_pending_exception(env, error)?),
+    };
     if ty == ValueType::Undefined || ty == ValueType::Null {
         return Ok(Some(Priority::Background));
     }
-    if ty != ValueType::Object || napi_value_is_array(env, value.raw())? {
-        return Err(ffi_err("compile request batch options must be an object"));
-    }
     // SAFETY: the options value belongs to this live env.
     let graph = unsafe { NapiValueGraph::new(env.raw()) };
-    let keys = graph.own_enumerable_keys(&value.raw())?;
-    let count = keys.count()?;
+    // The same classification the request graph uses, for the same
+    // reason: a Buffer, typed array or DataView exposes every byte index
+    // as an enumerable own key, so enumerating one would materialise
+    // millions of V8 key strings before any count could refuse them.
+    // `napi_is_array` alone does not see those, and this argument is the
+    // only enumerated one on the route that is not already an array.
+    match graph.classify(&value.raw()) {
+        Ok(JsValueClass::Object) => {}
+        Ok(_) => return Err(ffi_err("compile request batch options must be an object")),
+        Err(error) => {
+            let error = recover_pending_exception(env, error)?;
+            return Err(error);
+        }
+    }
+    let keys = match graph.own_enumerable_keys(&value.raw()) {
+        Ok(keys) => keys,
+        Err(error) => return Err(recover_pending_exception(env, error)?),
+    };
+    let count = match keys.count() {
+        Ok(count) => count,
+        Err(error) => return Err(recover_pending_exception(env, error)?),
+    };
     if count > MAX_ARRAY_ELEMENTS {
         return Err(ffi_err(format!(
             "A request object exposes {count} keys, above the \
@@ -245,17 +285,26 @@ fn decode_compile_requests_priority(
         )));
     }
     for index in 0..count {
-        let key = keys.at(index)?;
+        let key = match keys.at(index) {
+            Ok(key) => key,
+            Err(error) => return Err(recover_pending_exception(env, error)?),
+        };
         if key != "priority" {
             return Err(ffi_err(format!("unknown field `{key}`")));
         }
     }
-    // SAFETY: classified as a non-array object of this env above.
-    let object = unsafe { Object::from_napi_value(env.raw(), value.raw()) }?;
+    // SAFETY: classified as a plain object of this env above.
+    let object = match unsafe { Object::from_napi_value(env.raw(), value.raw()) } {
+        Ok(object) => object,
+        Err(error) => return Err(recover_pending_exception(env, error)?),
+    };
     match object.get::<Unknown<'_>>("priority") {
         Ok(None) => Ok(Some(Priority::Background)),
         Ok(Some(raw)) => {
-            let ty = raw.get_type()?;
+            let ty = match raw.get_type() {
+                Ok(ty) => ty,
+                Err(error) => return Err(recover_pending_exception(env, error)?),
+            };
             if ty == ValueType::Undefined {
                 return Ok(Some(Priority::Background));
             }
@@ -264,7 +313,10 @@ fn decode_compile_requests_priority(
                     "invalid priority, expected 'interactive' or 'background'",
                 ));
             }
-            let priority = unsafe { String::from_napi_value(env.raw(), raw.raw()) }?;
+            let priority = match unsafe { String::from_napi_value(env.raw(), raw.raw()) } {
+                Ok(priority) => priority,
+                Err(error) => return Err(recover_pending_exception(env, error)?),
+            };
             match priority.as_str() {
                 "background" => Ok(Some(Priority::Background)),
                 "interactive" => Ok(Some(Priority::Interactive)),
@@ -331,11 +383,23 @@ fn read_batch_source_buffer(
         "Failed to read compile request batch source length"
     )?;
     budget.retain_bytes(len)?;
-    // SAFETY: `napi_is_buffer` succeeded and `napi_get_buffer_info` filled a
-    // live pointer/length pair for this env; the copy is retained before the
-    // JS value can be collected.
-    let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) };
-    String::from_utf8(bytes.to_vec())
+    // A zero-length Buffer may report a NULL data pointer, and
+    // `slice::from_raw_parts` requires a non-null aligned pointer even for
+    // a zero length — so the empty case never builds a slice at all.
+    let bytes: &[u8] = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: `napi_is_buffer` succeeded and `napi_get_buffer_info`
+        // filled a live pointer/length pair for this env; the copy below is
+        // retained before the JS value can be collected.
+        unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) }
+    };
+    // One copy, not two: validating into `&str` and then interning the
+    // `Arc<str>` from that borrow copies the payload once, where
+    // `String::from_utf8(bytes.to_vec())` followed by `Arc::from(String)`
+    // copies it twice — a whole extra batch-sized transient allocation on
+    // the JS thread.
+    std::str::from_utf8(bytes)
         .map(std::sync::Arc::<str>::from)
         .map_err(|error| {
             Error::new(
@@ -4414,31 +4478,61 @@ mod tests {
         );
     }
 
-    // Mutation recipe: derive the option path from the Rust variant instead
-    // of the option inventory — case-lower `format!("{option:?}")` in
-    // `FrameworkOption`'s `Display`. The message then reads
-    // `vue:transformOptionsHoistStatic`, naming a request field that does
-    // not exist, and this case goes red on both assertions.
+    /// The refusal a real caller can actually provoke names the field
+    /// they wrote on the request object.
+    ///
+    /// Both options here are genuinely reachable: they are the two
+    /// `compatConfig` rows the request carries as the two DISTINCT slots
+    /// `compatConfig` and `transformCompatConfig`, and both are refused
+    /// on presence by `VueOptionAttempt::into_request`. A case built on an
+    /// option no refusal can name would assert nothing about what a caller
+    /// is ever shown.
+    ///
+    /// Mutation recipes:
+    /// - Derive the path from the option INVENTORY row (strip the
+    ///   surface, keep any dotted tail): `transformCompatConfig` renders
+    ///   as `vue:compatConfig`, so the second assertion pair goes red and
+    ///   the two options stop being distinguishable.
+    /// - Case-lower `format!("{option:?}")` in `FrameworkOption`'s
+    ///   `Display`: the message reads `vue:parserOptionsCompatConfig`,
+    ///   naming a field no request object has, and every assertion here
+    ///   goes red.
     #[test]
     fn unsupported_option_refusal_names_the_request_field() {
-        let message = compile_request_construction_refused(
-            &verter_compiler::compile_request::CompileRequestError::UnsupportedOption {
-                option: verter_compiler::compile_request::FrameworkOption::Vue(
-                    verter_compiler::compile_request::VueOption::TransformOptionsHoistStatic,
-                ),
+        use verter_compiler::compile_request::{
+            CompileRequestError, FrameworkOption, VueOption,
+        };
+        let refusal = |option| {
+            compile_request_construction_refused(&CompileRequestError::UnsupportedOption {
+                option: FrameworkOption::Vue(option),
                 capability: None,
-            },
-        );
-        // `hoistStatic` is the field a caller writes on the Vue options
-        // object; the surface it belongs to is not part of that path.
+            })
+        };
+
+        let parser = refusal(VueOption::ParserOptionsCompatConfig);
         assert!(
-            message.contains("unsupported option 'vue:hoistStatic'"),
-            "{message}"
+            parser.contains("unsupported option 'vue:compatConfig'"),
+            "{parser}"
         );
+
+        // The other inventory surface's `compatConfig` is a DIFFERENT
+        // request field; telling a caller to remove `compatConfig` when
+        // they wrote `transformCompatConfig` names a field they never set.
+        let transform = refusal(VueOption::TransformOptionsCompatConfig);
         assert!(
-            !message.contains("TransformOptions") && !message.contains("transformOptions"),
-            "{message}"
+            transform.contains("unsupported option 'vue:transformCompatConfig'"),
+            "{transform}"
         );
+        assert_ne!(parser, transform);
+
+        for message in [&parser, &transform] {
+            assert!(
+                !message.contains("ParserOptions")
+                    && !message.contains("TransformOptions")
+                    && !message.contains("compiler-core"),
+                "{message}"
+            );
+        }
     }
 
     // Mutation recipe: reuse `host_diagnostics_to_ffi` and drop `arguments`.

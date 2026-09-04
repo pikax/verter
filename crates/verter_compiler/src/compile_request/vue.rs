@@ -815,6 +815,41 @@ pub const ALL_VUE_OPTIONS: [VueOption; 118] = {
     ]
 };
 
+/// Every Vue option [`VueOptionAttempt::into_request`] refuses on
+/// PRESENCE, in the deterministic order it checks them.
+///
+/// This is the list that method reads, not a mirror of it: its option
+/// identities come from here and only the per-field presence flags stay
+/// positional beside them, so a test iterating this const iterates exactly
+/// the set a refusal can name. The pairing is proved slot by slot by
+/// `each_unsupported_slot_refuses_by_its_own_identity`.
+pub const PRESENCE_REFUSED_VUE_OPTIONS: [VueOption; 12] = {
+    use VueOption::*;
+    [
+        ParserOptionsCompatConfig,
+        ParserOptionsCompatConfigMode,
+        ParserOptionsCompatConfigCompilerIsOnElement,
+        ParserOptionsCompatConfigCompilerVBindSync,
+        ParserOptionsCompatConfigCompilerVIfVForPrecedence,
+        ParserOptionsCompatConfigCompilerVBindObjectOrder,
+        ParserOptionsCompatConfigCompilerVOnNative,
+        ParserOptionsCompatConfigCompilerNativeTemplate,
+        ParserOptionsCompatConfigCompilerInlineTemplate,
+        ParserOptionsCompatConfigCompilerFilters,
+        TransformOptionsCompatConfig,
+        CodegenOptionsMode,
+    ]
+};
+
+/// Every Vue option a [`crate::compile_request::CompileRequestError`] can
+/// name for a caller's VALUE rather than for the option's presence.
+///
+/// One row today: a `delimiters` array whose arity is not exactly two is
+/// refused at the FFI decode boundary
+/// (`verter_ffi::convert::input::vue_delimiter_pair`) rather than falling
+/// back to the framework's own delimiters.
+pub const VALUE_REFUSED_VUE_OPTIONS: [VueOption; 1] = [VueOption::ParserOptionsDelimiters];
+
 // ───────────────────────────── canonical request ─────────────────────────
 
 /// Preserve whitespace vs condense it — mirrors the compiler's existing
@@ -985,54 +1020,22 @@ impl VueOptionAttempt {
     /// Every unsupported-fail-closed field, paired with the exact
     /// `VueOption` row it refuses — iterated by
     /// [`Self::into_request`] so a refusal always names the precise row.
-    fn unsupported_slots(&self) -> [(bool, VueOption); 12] {
-        [
-            (
-                self.compat_config.is_some(),
-                VueOption::ParserOptionsCompatConfig,
-            ),
-            (
-                self.compat_config_mode.is_some(),
-                VueOption::ParserOptionsCompatConfigMode,
-            ),
-            (
-                self.compat_config_compiler_is_on_element.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerIsOnElement,
-            ),
-            (
-                self.compat_config_compiler_v_bind_sync.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerVBindSync,
-            ),
-            (
-                self.compat_config_compiler_v_if_v_for_precedence.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerVIfVForPrecedence,
-            ),
-            (
-                self.compat_config_compiler_v_bind_object_order.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerVBindObjectOrder,
-            ),
-            (
-                self.compat_config_compiler_v_on_native.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerVOnNative,
-            ),
-            (
-                self.compat_config_compiler_native_template.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerNativeTemplate,
-            ),
-            (
-                self.compat_config_compiler_inline_template.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerInlineTemplate,
-            ),
-            (
-                self.compat_config_compiler_filters.is_some(),
-                VueOption::ParserOptionsCompatConfigCompilerFilters,
-            ),
-            (
-                self.transform_compat_config.is_some(),
-                VueOption::TransformOptionsCompatConfig,
-            ),
-            (self.codegen_mode.is_some(), VueOption::CodegenOptionsMode),
-        ]
+    fn unsupported_slots(&self) -> [(bool, VueOption); PRESENCE_REFUSED_VUE_OPTIONS.len()] {
+        let present = [
+            self.compat_config.is_some(),
+            self.compat_config_mode.is_some(),
+            self.compat_config_compiler_is_on_element.is_some(),
+            self.compat_config_compiler_v_bind_sync.is_some(),
+            self.compat_config_compiler_v_if_v_for_precedence.is_some(),
+            self.compat_config_compiler_v_bind_object_order.is_some(),
+            self.compat_config_compiler_v_on_native.is_some(),
+            self.compat_config_compiler_native_template.is_some(),
+            self.compat_config_compiler_inline_template.is_some(),
+            self.compat_config_compiler_filters.is_some(),
+            self.transform_compat_config.is_some(),
+            self.codegen_mode.is_some(),
+        ];
+        std::array::from_fn(|index| (present[index], PRESENCE_REFUSED_VUE_OPTIONS[index]))
     }
 
     /// Converts this attempt into the canonical [`VueCompileRequest`],
@@ -1245,34 +1248,51 @@ mod tests {
         assert_eq!(request.hoist_static, Some(false));
     }
 
+    /// Each presence-refused field refuses, AND names its own option.
+    ///
+    /// Naming matters as much as refusing: `unsupported_slots` reads its
+    /// option identities out of `PRESENCE_REFUSED_VUE_OPTIONS` positionally
+    /// beside the per-field presence flags, so a slot inserted, removed, or
+    /// reordered on one side and not the other would report a neighbour's
+    /// option and tell a caller to remove a field they never wrote.
+    ///
+    /// Mutation recipes:
+    /// - Swap two entries in `PRESENCE_REFUSED_VUE_OPTIONS` (or two lines
+    ///   of `unsupported_slots`' `present` array): both swapped slots
+    ///   report the other's option here.
+    /// - Return `Ok` from `into_request` for one slot: that slot's
+    ///   `unwrap_err` panics.
     #[test]
-    fn each_of_the_twelve_unsupported_slots_refuses_independently() {
-        let base = VueOptionAttempt::default();
-        let mut variants: Vec<VueOptionAttempt> = Vec::new();
-        for i in 0..12u8 {
-            let mut a = base.clone();
-            match i {
-                0 => a.compat_config = Some(true),
-                1 => a.compat_config_mode = Some(true),
-                2 => a.compat_config_compiler_is_on_element = Some(true),
-                3 => a.compat_config_compiler_v_bind_sync = Some(true),
-                4 => a.compat_config_compiler_v_if_v_for_precedence = Some(true),
-                5 => a.compat_config_compiler_v_bind_object_order = Some(true),
-                6 => a.compat_config_compiler_v_on_native = Some(true),
-                7 => a.compat_config_compiler_native_template = Some(true),
-                8 => a.compat_config_compiler_inline_template = Some(true),
-                9 => a.compat_config_compiler_filters = Some(true),
-                10 => a.transform_compat_config = Some(true),
-                11 => a.codegen_mode = Some(true),
-                _ => unreachable!(),
+    fn each_unsupported_slot_refuses_by_its_own_identity() {
+        let setters: [fn(&mut VueOptionAttempt); 12] = [
+            |a| a.compat_config = Some(true),
+            |a| a.compat_config_mode = Some(true),
+            |a| a.compat_config_compiler_is_on_element = Some(true),
+            |a| a.compat_config_compiler_v_bind_sync = Some(true),
+            |a| a.compat_config_compiler_v_if_v_for_precedence = Some(true),
+            |a| a.compat_config_compiler_v_bind_object_order = Some(true),
+            |a| a.compat_config_compiler_v_on_native = Some(true),
+            |a| a.compat_config_compiler_native_template = Some(true),
+            |a| a.compat_config_compiler_inline_template = Some(true),
+            |a| a.compat_config_compiler_filters = Some(true),
+            |a| a.transform_compat_config = Some(true),
+            |a| a.codegen_mode = Some(true),
+        ];
+        assert_eq!(setters.len(), PRESENCE_REFUSED_VUE_OPTIONS.len());
+        for (index, set) in setters.into_iter().enumerate() {
+            let mut attempt = VueOptionAttempt::default();
+            set(&mut attempt);
+            let expected = PRESENCE_REFUSED_VUE_OPTIONS[index];
+            match attempt.into_request().unwrap_err() {
+                crate::compile_request::CompileRequestError::UnsupportedOption {
+                    option, ..
+                } => assert_eq!(
+                    option,
+                    crate::compile_request::FrameworkOption::Vue(expected),
+                    "slot {index} refused under another slot's identity"
+                ),
+                other => panic!("slot {index}: expected UnsupportedOption, got {other:?}"),
             }
-            variants.push(a);
-        }
-        for (i, attempt) in variants.into_iter().enumerate() {
-            assert!(
-                attempt.into_request().is_err(),
-                "slot {i} must refuse construction"
-            );
         }
     }
 }

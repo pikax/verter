@@ -7,9 +7,7 @@
 
 use napi::bindgen_prelude::*;
 use napi::{Env, Error, Result, Status};
-use verter_compiler::compile_request::{
-    CapabilityCell, CompileRequestError, ProductKind, RuntimeStyleProcessing, VueOnlyAxis,
-};
+use verter_compiler::compile_request::{CompileRequestError, ProductKind};
 use verter_ffi::convert::{host_diagnostics_to_ffi, host_error_to_string};
 use verter_protocol::types::{FfiDiagnostic, FfiDiagnosticArg};
 use verter_session as host;
@@ -21,120 +19,15 @@ use crate::{
     NapiDiagnosticsSnapshot, NapiIdeResponse, NapiVirtualMeta,
 };
 
-pub(crate) fn compile_product_kind_to_str(kind: ProductKind) -> &'static str {
-    match kind {
-        ProductKind::RuntimeClient => "runtimeClient",
-        ProductKind::RuntimeServer => "runtimeServer",
-        ProductKind::IdeCompanion => "ideCompanion",
-        ProductKind::PublicApi => "publicApi",
-        ProductKind::Declarations => "declarations",
-        ProductKind::Analysis => "analysis",
-    }
-}
-
+/// The native framing of a canonical request-construction refusal.
+///
+/// Only the framing: every word naming the offending option, capability,
+/// product or axis comes from `CompileRequestError`'s own `Display` in
+/// `verter_compiler`, which both bindings render. A refusal vocabulary
+/// kept here would fork from the browser binding's for the same refused
+/// request.
 pub(crate) fn compile_request_construction_refused(error: &CompileRequestError) -> String {
-    let detail = match error {
-        CompileRequestError::UnsupportedOption { option, .. } => {
-            format!("unsupported option '{option}'")
-        }
-        CompileRequestError::MalformedOptionValue { option, value } => {
-            format!("malformed value '{value}' for option '{option}'")
-        }
-        CompileRequestError::SsrVaporBackendUnsupported => {
-            "SSR is unsupported with a Vapor backend".to_string()
-        }
-        CompileRequestError::VueOnlyAxisOnSvelteRequest(axis) => {
-            format!(
-                "Vue-only option '{}' is not admitted on a Svelte request",
-                vue_only_axis_name(*axis)
-            )
-        }
-        CompileRequestError::InlineSsrUnsupported => {
-            "inline assembly is unsupported with SSR".to_string()
-        }
-        CompileRequestError::VaporInlineNotYetImplemented => {
-            "inline assembly is not implemented for Vapor".to_string()
-        }
-        CompileRequestError::CapabilityUnsupported(cell) => {
-            format!("unsupported capability '{}'", capability_cell_name(*cell))
-        }
-        CompileRequestError::EmptyProductSet => "product set is empty".to_string(),
-        CompileRequestError::DuplicateProduct(kind) => {
-            format!("duplicate product '{}'", compile_product_kind_to_str(*kind))
-        }
-        CompileRequestError::ConflictingRuntimeStyleProcessing { first, conflicting } => {
-            format!(
-                "conflicting runtime styleProcessing values '{}' and '{}'",
-                runtime_style_processing_name(*first),
-                runtime_style_processing_name(*conflicting)
-            )
-        }
-        CompileRequestError::RuntimeStyleProcessingUnsupported {
-            framework,
-            requested,
-        } => format!(
-            "runtime styleProcessing '{}' is unsupported for {framework}",
-            runtime_style_processing_name(*requested)
-        ),
-        CompileRequestError::FrameworkMismatch { expected, actual } => {
-            format!("compile request framework '{actual}' does not match '{expected}'")
-        }
-    };
-    format!("compile request construction refused: {detail}")
-}
-
-fn vue_only_axis_name(axis: VueOnlyAxis) -> &'static str {
-    match axis {
-        VueOnlyAxis::TypesModuleName => "typesModuleName",
-        VueOnlyAxis::ConditionalRootNarrowing => "conditionalRootNarrowing",
-        VueOnlyAxis::StrictSlots => "strictSlots",
-    }
-}
-
-fn runtime_style_processing_name(value: RuntimeStyleProcessing) -> &'static str {
-    match value {
-        RuntimeStyleProcessing::Complete => "complete",
-        RuntimeStyleProcessing::AuthoredOnly => "authored-only",
-    }
-}
-
-fn capability_cell_name(cell: CapabilityCell) -> &'static str {
-    match cell {
-        CapabilityCell::VueParseLocal => "VUE-PARSE-LOCAL",
-        CapabilityCell::VueVdomClient => "VUE-VDOM-CLIENT",
-        CapabilityCell::VueVaporClient => "VUE-VAPOR-CLIENT",
-        CapabilityCell::VueSsr => "VUE-SSR",
-        CapabilityCell::VueSsrVaporBackend => "VUE-SSR-VAPOR-BACKEND",
-        CapabilityCell::VueMacroLocal => "VUE-MACRO-LOCAL",
-        CapabilityCell::VueMacroImported => "VUE-MACRO-IMPORTED",
-        CapabilityCell::VueScopedSlotted => "VUE-SCOPED-SLOTTED",
-        CapabilityCell::VueCustomElement => "VUE-CUSTOM-ELEMENT",
-        CapabilityCell::VueTemplateOptions => "VUE-TEMPLATE-OPTIONS",
-        CapabilityCell::VueAsyncSetup => "VUE-ASYNC-SETUP",
-        CapabilityCell::VuePublicApi => "VUE-PUBLIC-API",
-        CapabilityCell::VueTsc => "VUE-TSC",
-        CapabilityCell::VueDeclaration => "VUE-DECLARATION",
-        CapabilityCell::VueCompatV2 => "VUE-COMPAT-V2",
-        CapabilityCell::VueOtherVersion => "VUE-OTHER-VERSION",
-        CapabilityCell::SveltePraseLocal => "SVELTE-PARSE-LOCAL",
-        CapabilityCell::SvelteClientRunes => "SVELTE-CLIENT-RUNES",
-        CapabilityCell::SvelteClientLegacy => "SVELTE-CLIENT-LEGACY",
-        CapabilityCell::SvelteServerRunes => "SVELTE-SERVER-RUNES",
-        CapabilityCell::SvelteServerLegacy => "SVELTE-SERVER-LEGACY",
-        CapabilityCell::SvelteComponent => "SVELTE-COMPONENT",
-        CapabilityCell::SvelteModule => "SVELTE-MODULE",
-        CapabilityCell::SvelteSemanticCore => "SVELTE-SEMANTIC-CORE",
-        CapabilityCell::SvelteCustomElement => "SVELTE-CUSTOM-ELEMENT",
-        CapabilityCell::SvelteAsyncExperimental => "SVELTE-ASYNC-EXPERIMENTAL",
-        CapabilityCell::SvelteHydration => "SVELTE-HYDRATION",
-        CapabilityCell::SveltePublicApi => "SVELTE-PUBLIC-API",
-        CapabilityCell::SvelteTsc => "SVELTE-TSC",
-        CapabilityCell::SvelteDeclaration => "SVELTE-DECLARATION",
-        CapabilityCell::SvelteHmr => "SVELTE-HMR",
-        CapabilityCell::SvelteCompatApi4 => "SVELTE-COMPAT-API4",
-        CapabilityCell::SvelteOfficialAst => "SVELTE-OFFICIAL-AST",
-        CapabilityCell::SvelteOtherVersion => "SVELTE-OTHER-VERSION",
-    }
+    format!("compile request construction refused: {error}")
 }
 
 // A diagnostic and its arguments project through the shared FFI converter
@@ -249,21 +142,20 @@ pub(crate) fn compile_request_response_to_napi(
         .into_iter()
         .map(|product| match product {
             host::CompiledProduct::Runtime { kind, nodes } => {
-                let kind = match kind {
-                    ProductKind::RuntimeClient => "runtimeClient",
-                    ProductKind::RuntimeServer => "runtimeServer",
-                    kind @ (ProductKind::IdeCompanion
+                match kind {
+                    ProductKind::RuntimeClient | ProductKind::RuntimeServer => {}
+                    ProductKind::IdeCompanion
                     | ProductKind::PublicApi
                     | ProductKind::Declarations
-                    | ProductKind::Analysis) => {
+                    | ProductKind::Analysis => {
                         return Err(ffi_err(format!(
                             "refused host compile request for {canonical_id}: the {} product published a runtime output row, which has no runtime wire tag",
-                            compile_product_kind_to_str(kind)
+                            kind.wire_tag()
                         )));
                     }
-                };
+                }
                 Ok(NapiCompileRequestProduct {
-                    kind: kind.to_string(),
+                    kind: kind.wire_tag().to_string(),
                     nodes: Some(
                         nodes
                             .into_iter()
@@ -284,7 +176,7 @@ pub(crate) fn compile_request_response_to_napi(
                 })
             }
             host::CompiledProduct::Ide(ide) => Ok(NapiCompileRequestProduct {
-                kind: "ideCompanion".to_string(),
+                kind: ProductKind::IdeCompanion.wire_tag().to_string(),
                 nodes: None,
                 ide: Some(host_ide_to_napi(ide, source)),
                 analysis: None,
@@ -297,7 +189,7 @@ pub(crate) fn compile_request_response_to_napi(
                     )
                 })?;
                 Ok(NapiCompileRequestProduct {
-                    kind: "analysis".to_string(),
+                    kind: ProductKind::Analysis.wire_tag().to_string(),
                     nodes: None,
                     ide: None,
                     analysis: Some(analysis),
@@ -377,7 +269,7 @@ pub fn compile_request_failure_to_napi(
                 diagnostics: host_diagnostics_to_napi(&diagnostics, source),
                 requestedFramework: None,
                 registeredFramework: None,
-                productKind: Some(compile_product_kind_to_str(kind).to_string()),
+                productKind: Some(kind.wire_tag().to_string()),
                 diagnosticCode: None,
             }
         }
@@ -394,7 +286,7 @@ pub fn compile_request_failure_to_napi(
                 diagnostics: host_diagnostics_to_napi(&diagnostics, source),
                 requestedFramework: None,
                 registeredFramework: None,
-                productKind: Some(compile_product_kind_to_str(kind).to_string()),
+                productKind: Some(kind.wire_tag().to_string()),
                 diagnosticCode: None,
             }
         }

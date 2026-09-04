@@ -17,14 +17,20 @@ pub mod product;
 pub mod svelte;
 pub mod vue;
 
-pub use capability::{CapabilityCell, CapabilityDisposition};
+pub use capability::{CapabilityCell, CapabilityDisposition, ALL_CAPABILITY_CELLS};
 pub use product::{
     unroutable_host_request_axis, AnalysisProductRequest, CompileProduct,
     DeclarationProductRequest, IdeProductRequest, ProductKind, PublicApiProductRequest,
     RuntimeProductRequest, RuntimeStyleProcessing, UnroutableHostRequestAxis,
 };
-pub use svelte::{SvelteCompileRequest, SvelteOption, SvelteOptionAttempt, SvelteOptionClass};
-pub use vue::{VueBackendRequest, VueCompileRequest, VueOption, VueOptionAttempt, VueOptionClass};
+pub use svelte::{
+    SvelteCompileRequest, SvelteOption, SvelteOptionAttempt, SvelteOptionClass,
+    PRESENCE_REFUSED_SVELTE_OPTIONS, VALUE_REFUSED_SVELTE_OPTIONS,
+};
+pub use vue::{
+    VueBackendRequest, VueCompileRequest, VueOption, VueOptionAttempt, VueOptionClass,
+    PRESENCE_REFUSED_VUE_OPTIONS, VALUE_REFUSED_VUE_OPTIONS,
+};
 
 use verter_identity::profile::TypeScriptSemanticProfileId;
 
