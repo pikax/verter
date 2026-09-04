@@ -221,25 +221,30 @@ function compileWithVerter(source, filePath) {
       fileKind: "vue",
     });
 
-    const profile = {
-      filename,
-      ssr: true,
-      forceJs: true,
-      sourceMap: false,
-    };
-
-    const result = host.getVirtualFile({
-      canonicalId: upsertResult.canonicalId,
-      nodeKind: { kind: "main" },
-      compileProfile: profile,
+    // One typed compile request against the already-registered source. The
+    // legacy profile's unset axes (isProduction, hmrStrategy, runtime module
+    // name) are the typed route's own defaults, so only the axes the old
+    // profile stated carry over.
+    const compiled = host.compileRequest(upsertResult.canonicalId, {
+      framework: "vue",
+      identity: { filename, isProduction: false, forceJs: true },
+      products: [{ kind: "runtimeServer", runtimeSourceMap: false }],
+      options: {
+        backend: "inferred",
+        ssr: true,
+        isCustomElement: [],
+        babelParserPlugins: [],
+      },
     });
+    const runtime = compiled.products.find((product) => product.kind === "runtimeServer");
+    const result = runtime?.nodes.find((node) => node.node.kind === "main");
 
     if (!result || !result.code) {
       return { error: "null response from getVirtualFile" };
     }
 
-    if (result.diagnostics?.hasErrors) {
-      const msgs = (result.diagnostics.diagnostics || [])
+    if (compiled.diagnostics?.hasErrors) {
+      const msgs = (compiled.diagnostics.diagnostics || [])
         .filter((d) => d.severity === "error")
         .map((d) => d.message)
         .join("; ");
