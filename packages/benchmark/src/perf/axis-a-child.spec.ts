@@ -7,7 +7,6 @@ import {
   runAxisA,
   nativeEntry,
   carrierContentDigest,
-  vueIdeCompanionRequest,
   type CarrierContentEntry,
   type AxisAChildSample,
   type VerterHostApi,
@@ -414,7 +413,16 @@ describe("axis-A carrier-content rail fails closed on a MISSING IDE carrier", ()
         isCustomElement: [],
         babelParserPlugins: [],
       });
-      expect(request.products).toEqual(vueIdeCompanionRequest("shape.vue").products);
+      expect(request.products).toEqual([
+        {
+          kind: "ideCompanion",
+          wantSourceMap: true,
+          embedAmbientTypes: false,
+          conditionalRootNarrowing: false,
+          strictSlots: false,
+          ideChunkBoundaries: false,
+        },
+      ]);
     }
   });
 
