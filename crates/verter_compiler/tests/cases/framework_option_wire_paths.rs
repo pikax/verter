@@ -16,7 +16,7 @@
 //! compares the full row multiset, so a variant quoting a row the TSV does
 //! not have fails, and a TSV row no variant quotes fails too.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use verter_compiler::compile_request::svelte::ALL_SVELTE_OPTIONS;
@@ -145,8 +145,14 @@ fn refusal_paths_name_the_field_a_caller_wrote() {
 }
 
 #[test]
-fn every_refusal_path_is_framework_tagged_and_non_empty() {
-    let mut seen = BTreeSet::new();
+fn no_two_distinct_options_collapse_onto_one_refusal_path() {
+    // An option name that recurs across inventory surfaces (`filename`,
+    // `sourceMap`, `hoistStatic`, …) is ONE field on the framework's
+    // request object, so sharing a path is correct. Two DIFFERENT option
+    // names sharing one path would not be: the refusal would name a field
+    // the caller did not write. That is what the surface-derived prefix is
+    // for, and what this asserts.
+    let mut paths: BTreeMap<String, BTreeSet<&'static str>> = BTreeMap::new();
     for option in ALL_VUE_OPTIONS
         .iter()
         .map(|o| FrameworkOption::Vue(*o))
@@ -162,14 +168,23 @@ fn every_refusal_path_is_framework_tagged_and_non_empty() {
             !tail.chars().next().is_some_and(char::is_uppercase),
             "{path} leads with an upper-case segment, which is a leaked Rust variant spelling"
         );
-        seen.insert(path);
+        paths
+            .entry(path)
+            .or_default()
+            .insert(option.tsv_row().1);
     }
-    // `hoistStatic` and `isCustomElement` each recur across two Vue
-    // surfaces and legitimately share one caller field, so the path set is
-    // smaller than the row set — but only by those recurrences.
+
+    let collapsed: Vec<_> = paths
+        .iter()
+        .filter(|(_, options)| options.len() > 1)
+        .collect();
+    assert!(
+        collapsed.is_empty(),
+        "distinct inventory options share one refusal path: {collapsed:?}"
+    );
     assert_eq!(
-        seen.len(),
-        ALL_VUE_OPTIONS.len() + ALL_SVELTE_OPTIONS.len() - 2,
-        "exactly the two cross-surface Vue recurrences may share a path: {seen:?}"
+        paths.len(),
+        123,
+        "the 153 inventory rows name 123 distinct caller fields"
     );
 }

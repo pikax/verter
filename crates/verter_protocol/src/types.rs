@@ -577,10 +577,18 @@ pub struct FfiDiagnosticArg {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub boolean: Option<bool>,
+    /// A `DiagnosticArg::Unsigned`'s exact value, as its decimal digits.
+    /// JavaScript's only numeric primitive is an IEEE-754 double, so a
+    /// `u64` above 2^53 does not survive the crossing as a number: it
+    /// arrives rounded, silently, with nothing on the wire recording that
+    /// it was. The digits do survive, and a caller that wants a number has
+    /// `Number(...)`/`BigInt(...)` to say so explicitly.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub unsigned: Option<f64>,
+    pub unsigned: Option<String>,
+    /// A `DiagnosticArg::Signed`'s exact value, as its decimal digits —
+    /// see [`Self::unsigned`] for why the digits and not a number.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub signed: Option<f64>,
+    pub signed: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

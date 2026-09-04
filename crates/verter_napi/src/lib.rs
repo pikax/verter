@@ -279,17 +279,28 @@ fn decode_compile_requests_priority(
 
 /// Answers a diagnostic message when `entries` (as returned by
 /// [`verter_session::VerterHost::compile_request_many`], one per input in
-/// original order) does not name `expected_canonical_ids` at the same
-/// position — `None` when every position matches.
+/// original order) is not exactly `expected_canonical_ids` — same count,
+/// same names, same positions. `None` when it is.
 ///
-/// The batch executor's own contract already guarantees positional order;
-/// this is the binding's own check that the guarantee actually held, so a
-/// future regression there fails the whole batch loudly instead of
-/// silently pairing a diagnostic with the wrong entry's source text.
+/// The batch executor's own contract already guarantees one entry per
+/// input in order; this is the binding's own check that the guarantee
+/// actually held. Both halves matter and neither implies the other: a
+/// reordered batch would pair a diagnostic with the wrong entry's source
+/// text, and a batch that dropped or duplicated an entry would leave the
+/// caller's output slots silently unfilled, because the zip that fills
+/// them truncates to the shorter side. Either way the whole batch fails
+/// loudly instead.
 fn batch_entry_order_mismatch(
     entries: &[host_compile::CompileRequestBatchEntry],
     expected_canonical_ids: &[String],
 ) -> Option<String> {
+    if entries.len() != expected_canonical_ids.len() {
+        return Some(format!(
+            "typed compile batch returned {} entries for {} inputs",
+            entries.len(),
+            expected_canonical_ids.len()
+        ));
+    }
     entries
         .iter()
         .zip(expected_canonical_ids)
@@ -1011,8 +1022,12 @@ pub struct NapiSliceChanges {
 pub struct NapiDiagnosticArg {
     pub kind: String,
     pub boolean: Option<bool>,
-    pub unsigned: Option<f64>,
-    pub signed: Option<f64>,
+    /// The exact decimal digits of an `unsigned`/`signed` argument, not a
+    /// `number`: a 64-bit integer above 2^53 cannot round-trip through
+    /// JavaScript's double without rounding, and rounding silently is the
+    /// one outcome a diagnostic argument may not do.
+    pub unsigned: Option<String>,
+    pub signed: Option<String>,
     pub text: Option<String>,
     pub spanStart: Option<u32>,
     pub spanEnd: Option<u32>,
@@ -2534,18 +2549,12 @@ impl NapiVerterHost {
                 host_compile::CompileRequestBatchOptions { priority },
             )
         }))?;
-        if entries.len() != positions.len() {
-            return Err(Error::new(
-                Status::GenericFailure,
-                "typed compile batch returned a different number of entries than inputs",
-            ));
-        }
-
-        // The batch executor is trusted to preserve input order, but a
-        // silent-corruption regression there — one entry answering for
-        // another canonical id — must not silently pair a diagnostic with
-        // the wrong file's source text. Fail the whole batch loudly
-        // instead of trusting position alone.
+        // The batch executor is trusted to answer one entry per input in
+        // order, but a silent-corruption regression there — a dropped,
+        // duplicated, or transposed entry — must not silently pair a
+        // diagnostic with the wrong file's source text or leave an output
+        // slot unfilled. Fail the whole batch loudly instead of trusting
+        // position alone.
         if let Some(mismatch) = batch_entry_order_mismatch(&entries, &expected_canonical_ids) {
             return Err(Error::new(Status::GenericFailure, mismatch));
         }
@@ -4278,6 +4287,71 @@ pub struct NapiCompileBatchEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn batch_entry(canonical_id: &str) -> host_compile::CompileRequestBatchEntry {
+        host_compile::CompileRequestBatchEntry {
+            canonical_id: canonical_id.to_string(),
+            outcome: Ok(host::CompileRequestResponse {
+                canonical_id: canonical_id.to_string(),
+                diagnostics: host::DiagnosticsSnapshot::default(),
+                products: Vec::new(),
+            }),
+        }
+    }
+
+    // Mutation recipe: delete the `entries.len() != expected.len()` guard in
+    // `batch_entry_order_mismatch`. `zip` truncates to the shorter side, so
+    // the dropped and duplicated cases below both report "no mismatch" while
+    // the caller's output slots go unfilled.
+    #[test]
+    fn batch_order_check_catches_a_lost_or_duplicated_entry_not_just_a_transposition() {
+        let expected = vec![
+            "/a.vue".to_string(),
+            "/b.vue".to_string(),
+            "/c.vue".to_string(),
+        ];
+
+        assert_eq!(
+            batch_entry_order_mismatch(
+                &[batch_entry("/a.vue"), batch_entry("/b.vue"), batch_entry("/c.vue")],
+                &expected,
+            ),
+            None,
+            "the executor's own contract must not be reported as a mismatch"
+        );
+
+        // Dropped: the prefix still matches at every overlapping position.
+        let dropped = batch_entry_order_mismatch(
+            &[batch_entry("/a.vue"), batch_entry("/b.vue")],
+            &expected,
+        )
+        .expect("a batch short one entry is a mismatch");
+        assert!(dropped.contains("2 entries for 3 inputs"), "{dropped}");
+
+        // Duplicated: likewise, the expected side is what runs out first.
+        let duplicated = batch_entry_order_mismatch(
+            &[
+                batch_entry("/a.vue"),
+                batch_entry("/b.vue"),
+                batch_entry("/c.vue"),
+                batch_entry("/c.vue"),
+            ],
+            &expected,
+        )
+        .expect("a batch with an extra entry is a mismatch");
+        assert!(duplicated.contains("4 entries for 3 inputs"), "{duplicated}");
+
+        // Transposed: same count, wrong position.
+        let transposed = batch_entry_order_mismatch(
+            &[batch_entry("/a.vue"), batch_entry("/c.vue"), batch_entry("/b.vue")],
+            &expected,
+        )
+        .expect("a transposed batch is a mismatch");
+        assert!(
+            transposed.contains("'/c.vue' at the position expected for '/b.vue'"),
+            "{transposed}"
+        );
+    }
 
     // @ai-generated - A runtime envelope carrying a non-runtime kind must fail closed.
     #[test]
