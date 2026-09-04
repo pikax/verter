@@ -12,6 +12,7 @@ import {
   type VerterHostApi,
   type VerterHostFactory,
 } from "./axis-a-child.js";
+import type { HostCompileRequest, HostCompileResponse } from "@verter/native";
 import {
   readBaselineManifest,
   evaluateGate,
@@ -258,31 +259,58 @@ describe("axis-A perf-gate metrics are gated ONLY on empirically-present audit s
 });
 
 // ── A MISSING IDE carrier is UNAVAILABLE, never a coerced empty-string hash ──────
-// The content-correctness pass reads each compiled carrier's IDE code + source-map.
-// A missing carrier (the host returns null, or an absent/empty code or source-map)
-// MUST surface carrierContentHash as null — NEVER hashed from "", which would let
-// two both-sides-missing runs compare as an EQUAL empty hash and slip past the
-// content-equality rail. These specs inject a scripted host via the VerterHostFactory
+// The content-correctness pass reads each compiled carrier's IDE code + source-map
+// from the typed compile request. An absent/empty code or source-map MUST surface
+// carrierContentHash as null — NEVER hashed from "", which would let two
+// both-sides-missing runs compare as an EQUAL empty hash and slip past the
+// content-equality rail. The FakeHost `products: []` arm below is a synthetic
+// missing-product shape for this unit rail; the real singular compileRequest
+// route never returns that: an admitted request either publishes every requested
+// product or throws. These specs inject a scripted host via the VerterHostFactory
 // seam, so they need no native build (and run on the unit-spec job).
 describe("axis-A carrier-content rail fails closed on a MISSING IDE carrier", () => {
   class FakeHost implements VerterHostApi {
     constructor(
       private readonly ideFor: (id: string) => { code: string; sourceMap?: string } | null,
+      readonly requests: HostCompileRequest[] = [],
     ) {}
     upsert(): void {
-      /* no-op: the carrier-content rail reads getIde, not upsert */
+      /* no-op: the carrier-content rail reads compileRequest, not upsert */
     }
     compileWithAudit(): Buffer | null {
-      return null; // no audited attribution; the carrier-content rail reads getIde
+      return null; // no audited attribution; the carrier-content rail reads compileRequest
     }
-    getIde(id: string): { code: string; sourceMap?: string } | null {
-      return this.ideFor(id.replace(/\\/g, "/"));
+    compileRequest(id: string, request: HostCompileRequest): HostCompileResponse {
+      this.requests.push(request);
+      const ide = this.ideFor(id.replace(/\\/g, "/"));
+      if (!ide) {
+        // Synthetic missing-product shape for the unit rail. The real
+        // singular compileRequest route never returns this: it throws.
+        return {
+          canonicalId: id,
+          diagnostics: { diagnostics: [], hasErrors: false },
+          products: [],
+        };
+      }
+      return {
+        canonicalId: id,
+        diagnostics: { diagnostics: [], hasErrors: false },
+        products: [
+          {
+            kind: "ideCompanion",
+            ide: { code: ide.code, sourceMap: ide.sourceMap, isJsx: false },
+          },
+        ],
+      };
     }
   }
   const factory =
-    (ideFor: (id: string) => { code: string; sourceMap?: string } | null): VerterHostFactory =>
+    (
+      ideFor: (id: string) => { code: string; sourceMap?: string } | null,
+      requests?: HostCompileRequest[],
+    ): VerterHostFactory =>
     () =>
-      new FakeHost(ideFor);
+      new FakeHost(ideFor, requests);
   const args = (): { nativeRoot: string; corpusDir: string; threads: number } => ({
     nativeRoot: NATIVE_ROOT,
     corpusDir,
@@ -336,7 +364,7 @@ describe("axis-A carrier-content rail fails closed on a MISSING IDE carrier", ()
     };
   }
 
-  it("a NULL getIde for one expected carrier ⇒ carrierContentHash is null (never a coerced empty hash)", () => {
+  it("a missing ideCompanion product for one expected carrier ⇒ carrierContentHash is null (never a coerced empty hash)", () => {
     const missingOne = isFile("tiny-template.vue");
     const s = runAxisA(
       args(),
@@ -370,6 +398,36 @@ describe("axis-A carrier-content rail fails closed on a MISSING IDE carrier", ()
   it("ALL carriers present (non-empty code + source-map) ⇒ a real sha256 content hash (control)", () => {
     const s = runAxisA(args(), factory(present));
     expect(s.carrierContentHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  // @ai-generated - Pins the carrier-content pass to one Vue IDE companion request with source maps.
+  it("the carrier-content pass issues one Vue ideCompanion compileRequest with source maps per SFC", () => {
+    const requests: HostCompileRequest[] = [];
+    const s = runAxisA(args(), factory(present, requests));
+    expect(s.carrierContentHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(requests).toHaveLength(SLICE.length);
+    for (const request of requests) {
+      expect(request.framework).toBe("vue");
+      expect(request.identity.isProduction).toBe(false);
+      expect(request.identity.forceJs).toBe(false);
+      expect(request.identity.filename ?? null).toBeNull();
+      expect(request.options).toEqual({
+        backend: "inferred",
+        ssr: false,
+        isCustomElement: [],
+        babelParserPlugins: [],
+      });
+      expect(request.products).toEqual([
+        {
+          kind: "ideCompanion",
+          wantSourceMap: true,
+          embedAmbientTypes: false,
+          conditionalRootNarrowing: false,
+          strictSlots: false,
+          ideChunkBoundaries: false,
+        },
+      ]);
+    }
   });
 
   it("axisACodegen.runOnce maps a missing (null) hash to an EMPTY content set; a present hash to [hash]", async () => {

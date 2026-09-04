@@ -1,4 +1,5 @@
 import { VerterHost } from "@verter/native";
+import type { HostCompileRequest, HostRuntimeCompiledProduct } from "@verter/native";
 
 export interface VerterCompileResult {
   code: string;
@@ -23,9 +24,23 @@ export function createVerterHost(
   } as any);
 }
 
-const hostProfile = {
-  sourceMap: false,
-};
+export function vueRuntimeClientRequest(filename: string): HostCompileRequest {
+  return {
+    framework: "vue",
+    identity: { filename, isProduction: false, forceJs: false },
+    products: [{ kind: "runtimeClient", runtimeSourceMap: false }],
+    options: {
+      backend: "inferred",
+      ssr: false,
+      isCustomElement: [],
+      babelParserPlugins: [],
+    },
+  };
+}
+
+function runtimeNode(product: HostRuntimeCompiledProduct | undefined, kind: "script" | "template") {
+  return product?.nodes.find((node) => node.node.kind === kind);
+}
 
 /**
  * Compile a Vue SFC using VerterHost (new AST-based pipeline, stateful).
@@ -39,35 +54,33 @@ export function compileVerterHost(
 ): VerterCompileResult {
   try {
     // Remove any cached version to force recompilation
-    (host as any).remove(filename);
+    host.remove(filename);
 
-    const result = (host as any).upsert({
+    const result = host.upsert({
       inputId: filename,
       source,
-      compileProfile: hostProfile,
     });
+
+    const compiled = host.compileRequest(
+      result.canonicalId,
+      vueRuntimeClientRequest(result.canonicalId),
+    );
+    const runtime = compiled.products.find(
+      (product): product is HostRuntimeCompiledProduct => product.kind === "runtimeClient",
+    );
 
     let code = "";
-    const scriptFile = (host as any).getVirtualFile({
-      canonicalId: result.canonicalId,
-      nodeKind: { kind: "script" },
-      compileProfile: hostProfile,
-    });
+    const scriptFile = runtimeNode(runtime, "script");
     if (scriptFile) code += scriptFile.code;
 
-    const templateFile = (host as any).getVirtualFile({
-      canonicalId: result.canonicalId,
-      nodeKind: { kind: "template" },
-      compileProfile: hostProfile,
-    });
+    const templateFile = runtimeNode(runtime, "template");
     if (templateFile) code += "\n\n" + templateFile.code;
 
     return {
       code,
-      errors:
-        result.diagnostics?.diagnostics
-          ?.filter((d: any) => d.severity === "error")
-          .map((d: any) => d.message) || [],
+      errors: compiled.diagnostics.diagnostics
+        .filter((d) => d.severity === "error")
+        .map((d) => d.message),
     };
   } catch (error) {
     return {

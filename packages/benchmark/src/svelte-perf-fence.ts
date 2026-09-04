@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import type { HostRuntimeCompiledProduct } from "@verter/native";
 import {
   evaluateFixtureFence,
   median,
@@ -62,7 +63,7 @@ interface FenceReport {
   officialSvelteExpectedVersion: string;
   analysisLevel: "none";
   sourceMapMode: "enabled-both-backends";
-  cacheMode: "verter-stateless-attested-per-sample";
+  cacheMode: "verter-stateless-by-construction";
   memoryMetric: "isolated-process-peak-rss";
   provenanceMode: "parent-initial-final";
   warmupIterations: number;
@@ -268,38 +269,28 @@ async function createCompiler(
       if (!upsert.changed || !upsert.changedVirtualNodes.some((node) => node.kind === "main")) {
         throw new Error(`${fixture.name}/verter benchmark revision did not invalidate Main`);
       }
-      const output = host.getVirtualFile({
-        canonicalId: upsert.canonicalId,
-        nodeKind: { kind: "main" },
-        compileProfile: {
-          target: "bundler",
-          sourceMap: true,
-          requestedMode: "stateless",
-        },
+      // Stateless by construction: the typed compile request has no
+      // compile-cache slot, so each sample is a fresh client compile with
+      // source maps (equal-work with official Svelte). HostCompileResponse
+      // carries no cacheHit/mode fields to re-attest per sample.
+      const compiled = host.compileRequest(upsert.canonicalId, {
+        framework: "svelte",
+        identity: { filename: upsert.canonicalId, isProduction: false, forceJs: false },
+        products: [{ kind: "runtimeClient", runtimeSourceMap: true }],
+        options: {},
       });
+      const runtime = compiled.products.find(
+        (product): product is HostRuntimeCompiledProduct => product.kind === "runtimeClient",
+      );
+      const output = runtime?.nodes.find((node) => node.node.kind === "main");
       if (
         !output ||
         output.code.length === 0 ||
         !output.sourceMap ||
-        output.diagnostics.diagnostics.length > 0
+        compiled.diagnostics.diagnostics.length > 0
       ) {
         throw new Error(
-          `${fixture.name}/verter did not produce clean mapped client output: ${JSON.stringify(output?.diagnostics ?? null)}`,
-        );
-      }
-      if (
-        output.cacheHit ||
-        output.requestedMode !== "stateless" ||
-        output.actualMode !== "stateless" ||
-        output.downgradeReason !== undefined
-      ) {
-        throw new Error(
-          `${fixture.name}/verter cache attestation failed: ${JSON.stringify({
-            cacheHit: output.cacheHit,
-            requestedMode: output.requestedMode,
-            actualMode: output.actualMode,
-            downgradeReason: output.downgradeReason,
-          })}`,
+          `${fixture.name}/verter did not produce clean mapped client output: ${JSON.stringify(compiled.diagnostics)}`,
         );
       }
       const mapWeight = validateMapContent
@@ -575,7 +566,7 @@ function runParent(): void {
     officialSvelteExpectedVersion: PINNED_OFFICIAL_SVELTE_VERSION,
     analysisLevel: "none",
     sourceMapMode: "enabled-both-backends",
-    cacheMode: "verter-stateless-attested-per-sample",
+    cacheMode: "verter-stateless-by-construction",
     memoryMetric: "isolated-process-peak-rss",
     provenanceMode: "parent-initial-final",
     warmupIterations,
@@ -600,7 +591,7 @@ function runParent(): void {
     process.stdout.write(
       `Verter/official-Svelte ${officialSvelteVersion} equal-work compiler fence ` +
         `(wall <= ${SVELTE_COMPILER_WALL_THRESHOLD.toFixed(2)}x, peak RSS <= ${SVELTE_COMPILER_RSS_THRESHOLD.toFixed(2)}x, ` +
-        `${rounds}x${iterations}, maps enabled, stateless attested)\n`,
+        `${rounds}x${iterations}, maps enabled, stateless by construction)\n`,
     );
     for (const result of results) {
       process.stdout.write(

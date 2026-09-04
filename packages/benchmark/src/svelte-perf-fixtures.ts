@@ -93,8 +93,9 @@ export const SVELTE_COMPILER_FIXTURES: readonly SvelteCompilerFixture[] = manife
 
 /**
  * Cycle semantically inert authored revisions so every sample reparses and
- * recompiles the same component through both backends. Verter additionally
- * attests `cacheHit === false` and `actualMode === "stateless"` per sample.
+ * recompiles the same component through both backends. Verter's typed compile
+ * request is stateless by construction (no compile-cache slot); there is no
+ * per-sample cacheHit/mode attestation.
  */
 export function sourceForBenchmarkSequence(
   fixture: SvelteCompilerFixture,
