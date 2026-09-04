@@ -37,11 +37,15 @@ const rules = [() => true]
 
 const filePath = "d:/test/test.vue";
 const upsertResult = host.upsert({ inputId: filePath, source, fileKind: "vue" });
-const result = host.getVirtualFile({
-  canonicalId: upsertResult.canonicalId,
-  nodeKind: { kind: "main" },
-  compileProfile: { filename: "test.vue", ssr: true, forceJs: true, sourceMap: false },
+const response = host.compileRequest(upsertResult.canonicalId, {
+  framework: "vue",
+  identity: { filename: "test.vue", isProduction: false, forceJs: true },
+  products: [{ kind: "runtimeServer", runtimeSourceMap: false }],
+  options: { backend: "inferred", ssr: true, isCustomElement: [], babelParserPlugins: [] },
 });
+const result = response.products
+  .find((p) => p.kind === "runtimeServer")
+  ?.nodes.find((n) => n.node.kind === "main");
 
 console.log("Verter SSR output:");
 console.log(result.code);
