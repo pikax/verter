@@ -11,8 +11,7 @@
 use std::hint::black_box;
 
 use verter_compiler::style_planner::{
-    run_vue_style_cascade, transform_vue_css_modules, transform_vue_scoped_css,
-    transform_vue_v_bind, AuthoredStyleInput, PlainCssInput, StyleRewriteOutcome,
+    run_vue_style_cascade, transform_vue_v_bind, AuthoredStyleInput, StyleRewriteOutcome,
 };
 use verter_css_syntax::CssDialect;
 
@@ -169,9 +168,9 @@ pub enum CssMeasuredOp {
     ProcessStyle { scoped: bool, is_module: bool },
     /// Isolated authored `v-bind()` rewrite.
     Prepass,
-    /// Isolated scoped-selector rewrite.
+    /// Scoped rewrite through the shared cascade (modules off).
     ApplyScoped,
-    /// Isolated CSS-Modules class rewrite.
+    /// CSS-Modules rewrite through the shared cascade (scoping off).
     ApplyCssModules,
 }
 
@@ -183,18 +182,6 @@ fn authored_input(css: &str) -> AuthoredStyleInput<'_> {
         "standalone:carrier",
         "standalone:carrier-bytes",
     )
-    .without_source_map()
-}
-
-fn plain_input(css: &str) -> PlainCssInput<'_> {
-    PlainCssInput::try_new(
-        css,
-        CssDialect::Css,
-        "<style>",
-        "standalone:carrier",
-        "standalone:carrier-bytes",
-    )
-    .expect("plain CSS input")
     .without_source_map()
 }
 
@@ -248,16 +235,28 @@ impl CssMeasuredOp {
                 observe_rewrite(outcome);
             }
             CssMeasuredOp::ApplyScoped => {
-                let outcome =
-                    transform_vue_scoped_css(plain_input(black_box(css)), black_box(SCOPE_ID))
-                        .expect("scoped rewrite");
-                observe_rewrite(outcome);
+                let outcome = run_vue_style_cascade(
+                    authored_input(black_box(css)),
+                    black_box(SCOPE_ID),
+                    false,
+                    true,
+                    false,
+                );
+                black_box(outcome.code());
+                black_box(&outcome.facts.module_classes);
+                black_box(&outcome.facts.v_bind_vars);
             }
             CssMeasuredOp::ApplyCssModules => {
-                let outcome =
-                    transform_vue_css_modules(plain_input(black_box(css)), black_box(SCOPE_ID))
-                        .expect("modules rewrite");
-                observe_rewrite(outcome);
+                let outcome = run_vue_style_cascade(
+                    authored_input(black_box(css)),
+                    black_box(SCOPE_ID),
+                    true,
+                    false,
+                    false,
+                );
+                black_box(outcome.code());
+                black_box(&outcome.facts.module_classes);
+                black_box(&outcome.facts.v_bind_vars);
             }
         }
     }

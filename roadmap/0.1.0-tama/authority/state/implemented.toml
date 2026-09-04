@@ -258,7 +258,7 @@ schema = 2
 "IDX0" = { status = "pending" }
 "J1" = { status = "implemented", commit_message = "refactor(core): cut CSS public routes over to StyleSyntaxIr", commit_date = "2026-08-28T16:41:34+01:00" }
 "J2" = { status = "implemented", commit_message = "fix(*): qualify style bytes with the stage and producer that made them", commit_date = "2026-09-02T02:00:00+01:00", pull_request = 468 }
-"J3" = { status = "pending" }
+"J3" = { status = "implemented", commit_message = "refactor(core): share CSS plans through terminal materialization", commit_date = "2026-09-03T01:20:39+01:00", pull_request = 478 }
 "J4" = { status = "pending" }
 "K1" = { status = "pending" }
 "K2" = { status = "pending" }

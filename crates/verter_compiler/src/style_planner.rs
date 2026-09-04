@@ -125,11 +125,11 @@ impl StyleRewriteFailure {
 
     /// Project the refusal into the shared style-diagnostic vocabulary.
     ///
-    /// `space` is the stage whose bytes the refused stage was handed, which
-    /// only the cascade driving the stages knows: the authored-`v-bind()`
-    /// stage always sees the cascade's input bytes, while a later stage sees
-    /// whatever an earlier rewrite left behind. Carrying it is what lets a
-    /// consumer decide which map a reported span needs.
+    /// `space` is the cascade input stage the refused span addresses. Shared
+    /// planning hands every compatible stage the same input IR, so a later
+    /// stage's refusal is still in that input space — never a rewritten-byte
+    /// coordinate space. Carrying it is what lets a consumer decide which map
+    /// a reported span needs.
     ///
     /// Crate-private on purpose. A failure is recorded in TWO shapes — as
     /// itself, on the facts and stage-failure lists, and as a diagnostic on
@@ -240,7 +240,11 @@ impl<'a> AuthoredStyleInput<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct PlainCssInput<'a> {
     code: &'a str,
+    /// Threaded into the crate-test isolated materialize entries. Production
+    /// uses this type only as the plain-CSS gate (`try_new`).
+    #[cfg_attr(not(test), allow(dead_code))]
     source: StyleSourceIdentity<'a>,
+    #[cfg_attr(not(test), allow(dead_code))]
     want_source_map: bool,
 }
 
@@ -390,10 +394,9 @@ pub struct VueStyleFacts {
     /// are the ones that matter: "surveyed, nothing foreign" and "never
     /// surveyed" are opposite answers to the question consumers ask, and only
     /// the tri-state distinguishes them. It is also what memoizes the
-    /// recorder — a later stage parses whatever an earlier rewrite left
-    /// behind, and a sheet with no inclusions must not read as "not recorded
-    /// yet" and let that later parse publish its own space's answer as the
-    /// input's.
+    /// recorder — shared planning parses the cascade input once, and a sheet
+    /// with no inclusions must not read as "not recorded yet" and let a later
+    /// observation publish a different space's answer as the input's.
     ///
     /// Read through [`Self::pulls_in_unparsed_bytes`], which fails closed.
     input_pulls_in_unparsed_bytes: Option<bool>,
@@ -410,10 +413,17 @@ impl VueStyleFacts {
     /// **An unsurveyed block answers `true`.** `false` is the STRONG claim —
     /// "nothing outside these bytes can contribute to this block's surface" —
     /// and no parse has earned it until one has run. The reachable state is a
-    /// cascade whose only parsing stage failed (a `v-bind()` stage that hits
-    /// an untrusted rewrite target or a parse error, with neither CSS Modules
-    /// nor scoping requested): nothing surveys the input, and answering
-    /// "exhaustive" there is exactly the wrong-complete direction.
+    /// cascade whose parse of the input never completed, with neither CSS
+    /// Modules nor scoping requested to clear the output: nothing surveys the
+    /// input, and answering "exhaustive" there is exactly the wrong-complete
+    /// direction.
+    ///
+    /// A parse that COMPLETED has surveyed the block, and the answer is
+    /// recorded from it before any stage plans an edit — so a stage that then
+    /// refuses (an untrusted `v-bind()` rewrite target, an indented-layout
+    /// mutation) does not un-survey it. A parse that merely RECOVERED still
+    /// answers `true`, through the owner's own `discarded_input` check rather
+    /// than through the absence of a recording.
     ///
     /// It is deliberately neither `!dependencies.is_empty()` nor a fold over
     /// an inclusion list — the style-syntax owner answers it for the whole
@@ -441,7 +451,7 @@ pub enum StyleRewriteOutcome {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum StyleEdit {
     Overwrite { span: Span, content: String },
     Insert { at: u32, content: String },
@@ -491,12 +501,12 @@ impl StyleEdit {
 
 thread_local! {
     /// Counts every `parse_style_ir` invocation reached through this module's
-    /// shared `parse_ir` wrapper. Every Vue-owned style transform stage — direct
-    /// (`transform_vue_v_bind`/`transform_vue_css_modules`/`transform_vue_scoped_css`)
-    /// or cascaded (`run_vue_style_cascade`) — routes through `parse_ir`, so this
-    /// count is the authoritative, directly-observable proof that an `Unchanged`
-    /// stage hands its parsed `StyleSyntaxIr` forward instead of re-parsing
-    /// (the one-parse-per-content-identity invariant). THREAD-LOCAL, not
+    /// shared `parse_ir` wrapper. Production Vue style transforms
+    /// (`transform_vue_v_bind` / `run_vue_style_cascade`) route through
+    /// `parse_ir`, so this count is the authoritative, directly-observable
+    /// proof that an `Unchanged` stage hands its parsed `StyleSyntaxIr`
+    /// forward instead of re-parsing (the one-parse-per-content-identity
+    /// invariant). THREAD-LOCAL, not
     /// a process-global static: the Rust test harness runs each `#[test]` on its
     /// own thread, and every counted call this module makes stays on the calling
     /// test's thread (no internal spawning) — a thread-local counter is exactly
@@ -563,10 +573,11 @@ fn observe_style_ir(_stage: StyleRewriteStage, _ir: &ParsedStyleIr) {}
 /// route-dependent yes/no about whether a block declares its whole surface.
 ///
 /// It records at most once per cascade, and only from a parse of the input
-/// bytes: a later stage parses whatever an earlier rewrite left behind, and
-/// its answer describes that space instead. A cascade that never reaches this
-/// recorder leaves the answer unrecorded, and
-/// [`VueStyleFacts::pulls_in_unparsed_bytes`] fails closed on it.
+/// bytes: shared planning never re-parses rewritten output, so a later
+/// observation must not overwrite the input parse's answer with a different
+/// space. A cascade that never reaches this recorder leaves the answer
+/// unrecorded, and [`VueStyleFacts::pulls_in_unparsed_bytes`] fails closed on
+/// it.
 fn record_input_dependencies(facts: &mut VueStyleFacts, ir: &ParsedStyleIr) {
     if facts.input_pulls_in_unparsed_bytes.is_some() {
         return;
@@ -732,6 +743,25 @@ fn relocate_v_bind_vars(vars: Vec<VBindVar>, origin: u32) -> Vec<VBindVar> {
         .collect()
 }
 
+/// Plan the authored-`v-bind()` stage's edits and variable inventory from one
+/// parsed IR, in real source coordinates.
+///
+/// Every route that plans v-bind edits calls this — the public authored-only
+/// transform, the cascade's authored-only stage, and the shared multi-stage
+/// plan — rather than each computing them independently, so a fix to v-bind
+/// planning cannot land on one path and silently miss the others.
+fn plan_authored_v_bind_edits(
+    ir: &ParsedStyleIr,
+    dialect: CssDialect,
+    scope_id: &str,
+) -> Result<(Vec<StyleEdit>, Vec<VBindVar>), StyleRewriteFailure> {
+    let origin = ir.source().origin();
+    let (edits, vars) = v_bind_edits_from_ir(ir, dialect, scope_id)?;
+    let edits = relocate_edits(edits, origin, StyleRewriteStage::AuthoredVBind, dialect)?;
+    let vars = relocate_v_bind_vars(vars, origin);
+    Ok((edits, vars))
+}
+
 fn authored_or_parsed_ir(
     input: AuthoredStyleInput<'_>,
     stage: StyleRewriteStage,
@@ -772,7 +802,6 @@ fn build_transform_output(
     stage: StyleRewriteStage,
     mut edits: Vec<StyleEdit>,
     source_name: Option<&str>,
-    accumulated: Option<&SourceMap<'static>>,
     want_source_map: bool,
 ) -> Result<Option<(String, Option<SourceMap<'static>>)>, StyleRewriteFailure> {
     if edits.is_empty() {
@@ -856,20 +885,12 @@ fn build_transform_output(
         }
     }
     let output = transform.build_string();
-    let source_map = if !want_source_map {
-        None
-    } else {
-        match (source_name, accumulated) {
-            (Some(source_name), None) => {
-                Some(transform.generate_map(SourceMapOptions::new().with_source(source_name)))
-            }
-            (None, Some(accumulated)) => transform.chain_source_map(accumulated).ok(),
-            (None, None) => None,
-            (Some(_), Some(_)) => {
-                unreachable!("a transform cannot build a fresh map and compose one simultaneously")
-            }
-        }
-    };
+    let source_map = want_source_map
+        .then_some(source_name)
+        .flatten()
+        .map(|source_name| {
+            transform.generate_map(SourceMapOptions::new().with_source(source_name))
+        });
     Ok(Some((output, source_map)))
 }
 
@@ -894,7 +915,6 @@ fn emit(
         stage,
         edits,
         want_source_map.then_some(source.source_name),
-        None,
         want_source_map,
     )?
     else {
@@ -930,15 +950,7 @@ pub fn transform_vue_v_bind(
     scope_id: &str,
 ) -> Result<StyleRewriteOutcome, StyleRewriteFailure> {
     let ir = authored_or_parsed_ir(input, StyleRewriteStage::AuthoredVBind)?;
-    let origin = ir.source().origin();
-    let (edits, vars) = v_bind_edits_from_ir(&ir, input.dialect, scope_id)?;
-    let edits = relocate_edits(
-        edits,
-        origin,
-        StyleRewriteStage::AuthoredVBind,
-        input.dialect,
-    )?;
-    let vars = relocate_v_bind_vars(vars, origin);
+    let (edits, vars) = plan_authored_v_bind_edits(&ir, input.dialect, scope_id)?;
     let mut facts = VueStyleFacts {
         rewrites: VueStyleRewriteMask {
             v_bind: !edits.is_empty(),
@@ -1372,12 +1384,12 @@ pub fn complete_static_class_names(code: &str, dialect: CssDialect) -> Vec<Strin
 /// Native CSS-Modules class *analysis*: enumerates every class selector an
 /// authored style block declares, plus its would-be hashed name, for any of
 /// the five native dialects (A10a/A10b) — analysis only, never a rewrite.
-/// Runtime class-name rewriting stays `transform_vue_css_modules`'s
-/// plain-CSS-only, post-preprocess job; row 19's ownership question is
+/// Runtime class-name rewriting stays the cascade's CSS-Modules stage
+/// (plain-CSS-only, post-preprocess); row 19's ownership question is
 /// untouched. Class selectors are syntactically identical across all five
 /// dialects (no dialect-specific interpolation form is a bare `.class`), so
-/// the walk that already backs `transform_vue_css_modules` needs no dialect
-/// gate to run here.
+/// the walk that already backs that cascade stage needs no dialect gate to
+/// run here.
 pub fn analyze_css_module_classes(
     input: AuthoredStyleInput<'_>,
     scope_id: &str,
@@ -1412,7 +1424,18 @@ pub fn analyze_style(
     })
 }
 
-pub fn transform_vue_css_modules(
+/// Crate-test instrument: parse a `PlainCssInput` and materialize only the
+/// CSS-Modules stage's edits.
+///
+/// Not a production route. Shipped `<style module>` requests plan this stage
+/// through `run_vue_style_cascade` over the one `StyleSyntaxIr` the run already
+/// parsed. This entry exists so crate tests can compare a merged plan against
+/// applying stages one after another. It is available only under `#[cfg(test)]`,
+/// never through the `test-support` Cargo feature. Compiling it into any
+/// non-test library build, or giving it a production caller, reintroduces the
+/// second CSS parse and the staged coordinate spaces the shared plan removed.
+#[cfg(test)]
+pub(crate) fn transform_vue_css_modules(
     input: PlainCssInput<'_>,
     scope_id: &str,
 ) -> Result<StyleRewriteOutcome, StyleRewriteFailure> {
@@ -1595,9 +1618,9 @@ fn collect_module_selector_list(
 
 /// Collects the scoped-selector/keyframes edits and facts from an
 /// already-parsed IR, without itself calling `parse_ir` — the shared building
-/// block `transform_vue_scoped_css` (parses then delegates here) and
-/// `run_vue_style_cascade` (reuses a retained IR across stages) both route
-/// through.
+/// block `run_vue_style_cascade` (reuses a retained IR across stages) and the
+/// test-only isolated scoped instrument (parses then delegates here) both
+/// route through.
 fn scoped_edits_and_facts_from_ir(
     ir: &StyleSyntaxIr,
     scope_id: &str,
@@ -1616,7 +1639,18 @@ fn scoped_edits_and_facts_from_ir(
     Ok((planner.edits, planner.facts))
 }
 
-pub fn transform_vue_scoped_css(
+/// Crate-test instrument: parse a `PlainCssInput` and materialize only the
+/// scoped-selector stage's edits.
+///
+/// Not a production route. Shipped `<style scoped>` requests plan this stage
+/// through `run_vue_style_cascade` over the one `StyleSyntaxIr` the run already
+/// parsed. This entry exists so crate tests can compare a merged plan against
+/// applying stages one after another. It is available only under `#[cfg(test)]`,
+/// never through the `test-support` Cargo feature. Compiling it into any
+/// non-test library build, or giving it a production caller, reintroduces the
+/// second CSS parse and the staged coordinate spaces the shared plan removed.
+#[cfg(test)]
+pub(crate) fn transform_vue_scoped_css(
     input: PlainCssInput<'_>,
     scope_id: &str,
 ) -> Result<StyleRewriteOutcome, StyleRewriteFailure> {
@@ -1685,44 +1719,21 @@ impl VueStyleCascadeOutcome {
     }
 }
 
-/// Whether a `StyleRewriteFailureClass` participates in the publish gate at
-/// all. Exhaustive over the enum — no wildcard arm — so adding a new class
-/// fails to compile here until its disposition is decided explicitly.
-#[must_use]
-const fn failure_class_gates_publication(class: StyleRewriteFailureClass) -> bool {
-    match class {
-        StyleRewriteFailureClass::StageRequiresPlainCss
-        | StyleRewriteFailureClass::ParseFailure
-        | StyleRewriteFailureClass::UntrustedRewriteTarget
-        | StyleRewriteFailureClass::OverlappingEdits
-        | StyleRewriteFailureClass::IndentedLayoutMutation => true,
-    }
-}
-
 /// Reports whether the cascade result can be published without exposing
-/// output cleared by a failed plain-CSS rewrite. An authored-v-bind failure
-/// does not gate publication because that rewrite precedes caller-supplied
-/// preprocessed bytes and never clears the cascade output.
-///
-/// Every class ultimately reduces to the same rule: a failure whose `stage`
-/// is `AuthoredVBind` never blocks publication; a failure on either
-/// post-preprocess stage blocks publication only when it left the output
-/// wiped to empty for a non-empty authored input.
+/// output a stage wiped. The recorded refusal carrier is the authority:
+/// [`QualifiedStyleResult::is_refused`] is what the runner wrote when it
+/// cleared. An authored-`v-bind()` rewrite failure that left the input
+/// intact is not a refusal and stays publishable. A parse miss that never
+/// entered a later stage is still unpublished once the runner records
+/// [`CascadeOutput::ClearedByRefusal`].
 #[must_use]
 pub fn cascade_output_is_publishable(
     outcome: &VueStyleCascadeOutcome,
     authored_code: &str,
 ) -> bool {
-    let post_preprocess_failure = outcome.stage_failures.iter().any(|failure| {
-        failure_class_gates_publication(failure.class)
-            && !matches!(failure.stage, StyleRewriteStage::AuthoredVBind)
-    });
-    if !post_preprocess_failure {
-        return true;
-    }
-    // The recorded refusal, not `code().is_empty()`. Emptiness is a shape two
-    // different outcomes share — a wiped output and an authored
-    // `<style></style>` — and only the stage that wiped it knows which.
+    // Emptiness is a shape two outcomes share — a wiped output and an
+    // authored `<style></style>` — so publication reads the refusal flag,
+    // never `code().is_empty()` and never the failing stage's identity.
     !(outcome.result.is_refused() && !authored_code.is_empty())
 }
 
@@ -1774,138 +1785,40 @@ fn build_identity_source_map(source: &str, source_name: &str) -> String {
     .to_json_string()
 }
 
-#[derive(Debug, Clone)]
-enum MapComposition {
-    NotStarted,
-    Composing(Box<SourceMap<'static>>),
-    Abandoned,
-}
+/// The map a materialized rewrite produced, if one was requested and built.
+///
+/// A single terminal `CodeTransform` per cascade run means there is never an
+/// accumulated map to compose a later stage onto: every plan carries authored
+/// coordinates right up to that one transform, so the map it generates is
+/// already authored-source-to-final-code.
+type MaterializedMap = Option<Box<SourceMap<'static>>>;
 
-impl MapComposition {
-    const fn accumulated(&self) -> Option<&SourceMap<'static>> {
-        match self {
-            Self::Composing(map) => Some(map),
-            Self::NotStarted | Self::Abandoned => None,
-        }
-    }
-}
-
-/// Applies a stage's collected edits against `code`, returning the new
-/// `(code, map composition)` pair when the stage rewrote anything, or `None`
-/// when it did not (in which case the caller retains its already-parsed IR
-/// for the next stage instead of re-parsing).
+/// Applies a run's collected edits against `code`, returning the new
+/// `(code, map)` pair when there was anything to rewrite, or `None` when there
+/// was not (in which case the caller keeps the input bytes as its output).
 fn apply_cascade_stage(
     code: &str,
     source: StyleSourceIdentity<'_>,
     dialect: CssDialect,
     stage: StyleRewriteStage,
     edits: Vec<StyleEdit>,
-    composition: &MapComposition,
     want_source_map: bool,
-) -> Result<Option<(String, MapComposition)>, StyleRewriteFailure> {
+) -> Result<Option<(String, MaterializedMap)>, StyleRewriteFailure> {
     if edits.is_empty() {
         return Ok(None);
     }
-    let (source_name, accumulated) = if !want_source_map {
-        (None, None)
-    } else {
-        match composition {
-            MapComposition::NotStarted => (Some(source.source_name), None),
-            MapComposition::Composing(map) => (None, Some(map.as_ref())),
-            MapComposition::Abandoned => (None, None),
-        }
-    };
     let Some((code, source_map)) = build_transform_output(
         code,
         dialect,
         stage,
         edits,
-        source_name,
-        accumulated,
+        want_source_map.then_some(source.source_name),
         want_source_map,
     )?
     else {
         unreachable!("non-empty edits always produce a rewrite")
     };
-    let composition = match (composition, source_map) {
-        (MapComposition::Abandoned, _) => MapComposition::Abandoned,
-        (_, Some(source_map)) => MapComposition::Composing(Box::new(source_map)),
-        (_, None) => MapComposition::Abandoned,
-    };
-    Ok(Some((code, composition)))
-}
-
-struct AuthoredVueStyleState {
-    owned: Option<(String, MapComposition)>,
-    facts: VueStyleFacts,
-    stage_failures: Vec<StyleRewriteFailure>,
-    retained_ir: Option<ParsedStyleIr>,
-}
-
-fn run_vue_authored_v_bind_stage(
-    input: AuthoredStyleInput<'_>,
-    scope_id: &str,
-    want_source_map: bool,
-) -> AuthoredVueStyleState {
-    let mut owned: Option<(String, MapComposition)> = None;
-    let mut facts = VueStyleFacts::default();
-    let mut stage_failures = Vec::new();
-    let mut retained_ir: Option<ParsedStyleIr> = None;
-
-    // Authored v-bind — always runs, on the authored dialect. A
-    // stage failure is recorded without clearing the accumulated output:
-    // the modules/scoped-selector stages below still run against the
-    // original authored bytes.
-    {
-        let stage: Result<_, StyleRewriteFailure> = (|| {
-            let ir = authored_or_parsed_ir(input, StyleRewriteStage::AuthoredVBind)?;
-            observe_style_ir(StyleRewriteStage::AuthoredVBind, &ir);
-            let origin = ir.source().origin();
-            let (edits, vars) = v_bind_edits_from_ir(&ir, input.dialect, scope_id)?;
-            let edits = relocate_edits(
-                edits,
-                origin,
-                StyleRewriteStage::AuthoredVBind,
-                input.dialect,
-            )?;
-            let vars = relocate_v_bind_vars(vars, origin);
-            Ok((ir, edits, vars))
-        })();
-        match stage {
-            Ok((ir, edits, vars)) => {
-                facts.v_bind_vars = vars;
-                // This stage parsed the cascade's input, so it publishes the
-                // inventory through the shared recorder rather than assigning
-                // the list alone: the derived "does this pull in bytes nothing
-                // here parsed" answer is what consumers branch on, and a bare
-                // assignment leaves it at its default while making every later
-                // stage's recorder call a no-op.
-                record_input_dependencies(&mut facts, &ir);
-                facts.rewrites.v_bind = !edits.is_empty();
-                match apply_cascade_stage(
-                    input.code,
-                    input.source,
-                    input.dialect,
-                    StyleRewriteStage::AuthoredVBind,
-                    edits,
-                    &MapComposition::NotStarted,
-                    want_source_map,
-                ) {
-                    Ok(Some(rewritten)) => owned = Some(rewritten),
-                    Ok(None) => retained_ir = Some(ir),
-                    Err(failure) => stage_failures.push(failure),
-                }
-            }
-            Err(failure) => stage_failures.push(failure),
-        }
-    }
-
-    AuthoredVueStyleState {
-        owned,
-        facts,
-        stage_failures,
-        retained_ir,
-    }
+    Ok(Some((code, source_map.map(Box::new))))
 }
 
 /// The stage the bytes a cascade run was handed belong to, with the provenance
@@ -1934,49 +1847,6 @@ impl CascadeInput {
     }
 }
 
-/// Which byte space each stage of one cascade run was handed.
-///
-/// A refusal's span addresses the bytes the refusing stage parsed, so the only
-/// party that can say which space that is, is the runner that handed those
-/// bytes over. It records the answer per stage here instead of letting the
-/// outcome assembler re-derive it from one earlier stage's rewrite flag: every
-/// stage in the cascade can rewrite bytes on its own, so "did `v-bind()`
-/// rewrite" answers for the CSS-Modules stage and is simply wrong for the
-/// scoped-selector stage below it, which parses whatever CSS Modules left
-/// behind.
-///
-/// `true` means the stage was handed the cascade's own input bytes. A stage
-/// that never ran cannot have produced a refusal, so its value is never read.
-#[derive(Debug, Clone, Copy)]
-struct CascadeStageSpaces {
-    modules_at_input: bool,
-    scoping_at_input: bool,
-}
-
-impl CascadeStageSpaces {
-    /// The state before any post-`v-bind()` stage runs: whatever runs next
-    /// still sees the cascade input.
-    const AT_INPUT: Self = Self {
-        modules_at_input: true,
-        scoping_at_input: true,
-    };
-
-    /// Resolve a refused stage to the stage its span's byte space belongs to.
-    /// The authored-`v-bind()` stage always runs against the cascade input.
-    const fn space_of(self, stage: StyleRewriteStage, input_stage: StyleStage) -> StyleStage {
-        let at_input = match stage {
-            StyleRewriteStage::AuthoredVBind => true,
-            StyleRewriteStage::PostPreprocessModules => self.modules_at_input,
-            StyleRewriteStage::PostPreprocessScoping => self.scoping_at_input,
-        };
-        if at_input {
-            input_stage
-        } else {
-            StyleStage::FrameworkRewritten
-        }
-    }
-}
-
 /// What a finished cascade run left as its output.
 ///
 /// The three states are genuinely different answers to "who produced these
@@ -1989,29 +1859,850 @@ impl CascadeStageSpaces {
 enum CascadeOutput {
     /// No stage produced bytes; the cascade's input still stands.
     Passthrough,
-    /// A stage rewrote the input into these bytes, with the map composed
-    /// across every rewrite that ran.
+    /// A stage rewrote the input into these bytes, with the map the one
+    /// terminal transform generated.
     Rewritten {
         code: String,
-        composition: MapComposition,
+        source_map: MaterializedMap,
     },
     /// A stage refused and wiped the output.
     ClearedByRefusal,
 }
 
-impl CascadeOutput {
-    /// Read the stage runner's state as one of the three answers above. The
-    /// clearing flag wins: a refusal that wiped the output leaves owned bytes
-    /// behind (empty ones), and those are the bytes nothing produced.
-    fn from_stage_state(owned: Option<(String, MapComposition)>, cleared_by_refusal: bool) -> Self {
-        if cleared_by_refusal {
-            return Self::ClearedByRefusal;
-        }
-        match owned {
-            Some((code, composition)) => Self::Rewritten { code, composition },
-            None => Self::Passthrough,
+/// What recording a refusal does to the run's output.
+///
+/// Named at every site that records one, so "was the output cleared" is
+/// decided where the refusal is raised rather than recovered downstream.
+/// Neither half of a recorded failure determines it: the same `AuthoredVBind`
+/// stage raising the same `ParseFailure` class clears a `<style module>`
+/// request and leaves a v-bind-only request's bytes published, because what
+/// differs is what the request needed. A publication read keyed on the class
+/// (or on the stage) would therefore be guessing, which is why
+/// [`cascade_output_is_publishable`] asks what the runner recorded instead.
+#[derive(Clone, Copy)]
+enum RefusalEffect {
+    /// The cascade's input still stands; only this stage's rewrite was lost.
+    KeepsOutput,
+    /// The block's meaning depended on a rewrite that could not be planned,
+    /// so publishing the un-rewritten bytes would be actively wrong.
+    ClearsOutput,
+}
+
+/// The refusals one cascade run recorded, with the run's clearing state
+/// derived from their effects.
+///
+/// The clearing state is not a field a caller sets: the only way to reach it
+/// is to record a refusal and name its effect, so a run cannot be cleared
+/// without the refusal that cleared it, and a clearing refusal cannot be
+/// recorded without clearing.
+struct StageFailures {
+    failures: Vec<StyleRewriteFailure>,
+    cleared_by_refusal: bool,
+}
+
+impl StageFailures {
+    const fn new() -> Self {
+        Self {
+            failures: Vec::new(),
+            cleared_by_refusal: false,
         }
     }
+
+    fn record(&mut self, failure: StyleRewriteFailure, effect: RefusalEffect) {
+        self.failures.push(failure);
+        self.cleared_by_refusal |= matches!(effect, RefusalEffect::ClearsOutput);
+    }
+
+    fn into_vec(self) -> Vec<StyleRewriteFailure> {
+        self.failures
+    }
+}
+
+/// The CSS-only stages one cascade run may plan, after the plain-CSS gate has
+/// answered.
+///
+/// `refusal` is `Some` exactly when the gate refused, and the gate refusing is
+/// exactly why `module`/`scoped` are cleared. Holding both in one value is
+/// what keeps "which stages were planned" and "was a refusal recorded" from
+/// becoming two flags a second entry point could set inconsistently.
+struct CssStageRequest {
+    module: bool,
+    scoped: bool,
+    refusal: Option<StyleRewriteFailure>,
+}
+
+impl CssStageRequest {
+    /// Admit `<style module>` / `<style scoped>` only for bytes that are
+    /// already plain CSS.
+    ///
+    /// [`PlainCssInput::try_new`] is the SOLE predicate. Spelling a second one
+    /// here (`dialect == CssDialect::Css`) would make the admitted and the
+    /// refused sets complements only by review: a dialect that is neither
+    /// plain CSS nor externally preprocessed would be admitted here and
+    /// rejected there, skipping the rewrite with no diagnostic.
+    fn gated(input: AuthoredStyleInput<'_>, module: bool, scoped: bool) -> Self {
+        if !(module || scoped) {
+            return Self::admitted(false, false);
+        }
+        match PlainCssInput::try_new(
+            input.code,
+            input.dialect,
+            input.source.source_name,
+            input.source.source_space_token,
+            input.source.content_artifact_token,
+        ) {
+            Ok(_) => Self::admitted(module, scoped),
+            Err(refusal) => Self {
+                module: false,
+                scoped: false,
+                refusal: Some(refusal),
+            },
+        }
+    }
+
+    /// Stages over bytes whose plain-CSS grammar the caller already proved —
+    /// there is nothing left for the gate to decide.
+    const fn admitted(module: bool, scoped: bool) -> Self {
+        Self {
+            module,
+            scoped,
+            refusal: None,
+        }
+    }
+}
+
+struct SharedVueStylePlan {
+    edits: Vec<StyleEdit>,
+    facts: VueStyleFacts,
+    terminal_stage: StyleRewriteStage,
+    failures: StageFailures,
+}
+
+impl SharedVueStylePlan {
+    fn refused(
+        facts: VueStyleFacts,
+        terminal_stage: StyleRewriteStage,
+        mut failures: StageFailures,
+        failure: StyleRewriteFailure,
+    ) -> Self {
+        failures.record(failure, RefusalEffect::ClearsOutput);
+        Self {
+            edits: Vec::new(),
+            facts,
+            terminal_stage,
+            failures,
+        }
+    }
+}
+
+/// The one order a shared plan keeps its edits in, from the moment the first
+/// stage's edits are planned to the terminal transform: ascending by start,
+/// then by end.
+fn edit_order_key(edit: &StyleEdit) -> (u32, u32) {
+    (edit.start(), edit.end())
+}
+
+/// Edits held in [`edit_order_key`] order AND pairwise disjoint.
+///
+/// Both halves are ONE type invariant rather than a documented precondition or
+/// a debug assertion. Order alone would be the weaker claim: the merge's
+/// `Insert` arm inspects only the nearest earlier edit by start offset, and
+/// that single candidate is the unique possible container exactly when the
+/// stream it scans is disjoint — with disjointness, `prior[i - 2].end <=
+/// prior[i - 1].start < at`, so no earlier edit can reach the offset. Carrying
+/// disjointness in the type is what stops a future caller from handing that arm
+/// an overlapping stream it would silently mis-read; stating the precondition
+/// on the arm left it checked by review.
+///
+/// The only routes in are [`Self::from_planned`] (sorts, then checks) and
+/// [`Self::from_ordered`] (checks edits already in plan order), and the only
+/// route on is [`merge_shared_stage_edits`], which re-mints through
+/// `from_ordered` because a merge composes two disjoint streams and the
+/// composition need not be disjoint. A three-stage plan therefore sorts each
+/// stage's own edits exactly once and never re-sorts what a previous merge
+/// already ordered.
+///
+/// A debug assertion would not have held it: the workspace's sanctioned
+/// assertion macro force-evaluates its condition in every profile, so
+/// asserting sortedness here would run the scan in shipped builds too.
+///
+/// `build_transform_output` keeps its own independent sort-and-check as the
+/// backstop for every route, including the direct per-stage transforms that
+/// never build a shared plan.
+struct PlanDisjointEdits(Vec<StyleEdit>);
+
+impl PlanDisjointEdits {
+    /// The plan a stage that refused to run contributes.
+    const fn empty() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Establish the invariant over one stage's freshly planned edits.
+    fn from_planned(mut edits: Vec<StyleEdit>) -> Option<Self> {
+        edits.sort_by_key(edit_order_key);
+        Self::from_ordered(edits)
+    }
+
+    /// Establish the invariant over edits already in [`edit_order_key`] order.
+    /// Refuses when two edits touch the same bytes; zero-width inserts on an
+    /// overwrite boundary are disjoint. Reads the maintained order rather than
+    /// restoring it.
+    fn from_ordered(edits: Vec<StyleEdit>) -> Option<Self> {
+        let mut previous_end = 0;
+        for edit in &edits {
+            if edit.start() < previous_end {
+                return None;
+            }
+            previous_end = previous_end.max(edit.end());
+        }
+        Some(Self(edits))
+    }
+
+    fn into_vec(self) -> Vec<StyleEdit> {
+        self.0
+    }
+}
+
+fn edit_overwrite_span(edit: &StyleEdit) -> Option<Span> {
+    match edit {
+        StyleEdit::Overwrite { span, .. } => Some(*span),
+        StyleEdit::Insert { .. } => None,
+    }
+}
+
+fn edit_overlaps_span(edit: &StyleEdit, span: Span) -> bool {
+    match edit {
+        StyleEdit::Overwrite {
+            span: candidate, ..
+        } => candidate.start < span.end && span.start < candidate.end,
+        StyleEdit::Insert { at, .. } => span.start < *at && *at < span.end,
+    }
+}
+
+fn span_contains_edit(span: Span, edit: &StyleEdit) -> bool {
+    match edit {
+        StyleEdit::Overwrite {
+            span: candidate, ..
+        } => span.start <= candidate.start && candidate.end <= span.end,
+        StyleEdit::Insert { at, .. } => span.start <= *at && *at < span.end,
+    }
+}
+
+/// Merge a later stage into authored-coordinate edits. A later edit wholly
+/// inside an earlier overwrite targets source bytes that no longer reach that
+/// stage and is discarded. A later deletion may subsume earlier work in bytes
+/// it removes. Every other intersection is refused because retaining either
+/// edit would misrepresent stage order.
+fn merge_shared_stage_edits(
+    prior: PlanDisjointEdits,
+    later: Vec<StyleEdit>,
+) -> Option<PlanDisjointEdits> {
+    let PlanDisjointEdits(prior) = prior;
+    let mut later = later;
+    later.sort_by_key(edit_order_key);
+    let mut keep_prior = vec![true; prior.len()];
+    let mut keep_later = vec![true; later.len()];
+    for (later_index, later_edit) in later.iter().enumerate() {
+        let later_span = match later_edit {
+            // Only the nearest earlier edit by start offset is inspected. That
+            // single candidate is the unique possible container because
+            // [`PlanDisjointEdits`] carries `prior`'s disjointness in its type:
+            // there is no way to reach this arm with a stream whose earlier
+            // edits overlap, so the arm needs no scan of its own.
+            StyleEdit::Insert { at, .. } => {
+                let prior_index = prior.partition_point(|edit| edit.start() < *at);
+                if let Some(candidate) = prior_index.checked_sub(1).and_then(|i| prior.get(i)) {
+                    if let Some(span) = edit_overwrite_span(candidate) {
+                        if span.start < *at && *at < span.end {
+                            keep_later[later_index] = false;
+                        }
+                    }
+                }
+                continue;
+            }
+            StyleEdit::Overwrite { span, .. } => *span,
+        };
+        let mut prior_index = prior.partition_point(|edit| edit.end() <= later_span.start);
+        while let Some(prior_edit) = prior.get(prior_index) {
+            if prior_edit.start() >= later_span.end {
+                break;
+            }
+            if !edit_overlaps_span(prior_edit, later_span) {
+                prior_index += 1;
+            } else if edit_overwrite_span(prior_edit).is_some_and(|prior_span| {
+                prior_span.start < later_span.start && later_span.end < prior_span.end
+            }) {
+                keep_later[later_index] = false;
+                break;
+            } else if span_contains_edit(later_span, prior_edit)
+                && matches!(later_edit, StyleEdit::Overwrite { content, .. } if content.is_empty())
+            {
+                keep_prior[prior_index] = false;
+                prior_index += 1;
+            } else {
+                return None;
+            }
+        }
+    }
+
+    // Both retained streams are in plan order, so interleaving them yields
+    // plan order — this is what makes the returned invariant hold without a
+    // second sort.
+    let capacity = prior.len() + later.len();
+    let mut retained_prior = prior
+        .into_iter()
+        .zip(keep_prior)
+        .filter_map(|(edit, keep)| keep.then_some(edit))
+        .peekable();
+    let mut retained_later = later
+        .into_iter()
+        .zip(keep_later)
+        .filter_map(|(edit, keep)| keep.then_some(edit))
+        .peekable();
+    let mut merged = Vec::with_capacity(capacity);
+    loop {
+        let take_prior = match (retained_prior.peek(), retained_later.peek()) {
+            (Some(prior_edit), Some(later_edit)) => {
+                edit_order_key(prior_edit) <= edit_order_key(later_edit)
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        let next = if take_prior {
+            retained_prior.next()
+        } else {
+            retained_later.next()
+        };
+        match next {
+            Some(edit) => merged.push(edit),
+            None => break,
+        }
+    }
+    // `later` carries no disjointness of its own, and a composition of two
+    // disjoint streams need not be disjoint, so the invariant is re-established
+    // here rather than assumed.
+    PlanDisjointEdits::from_ordered(merged)
+}
+
+#[cfg(test)]
+mod merge_shared_stage_edits_tests {
+    use super::{merge_shared_stage_edits, span_contains_edit, PlanDisjointEdits, StyleEdit};
+    use verter_span::Span;
+
+    /// Establishes the plan invariant over `prior` the same way
+    /// `shared_vue_style_plan` does, then unwraps the merged result so each case
+    /// reads as edits in, edits out. `prior` is expected to satisfy the
+    /// invariant: a stream that does not cannot reach a merge at all, which is
+    /// what `overlapping_prior_edits_cannot_be_minted_into_a_plan` pins.
+    fn merge(prior: Vec<StyleEdit>, later: Vec<StyleEdit>) -> Option<Vec<StyleEdit>> {
+        let prior = PlanDisjointEdits::from_planned(prior)
+            .expect("a merge's prior stream is disjoint by construction");
+        merge_shared_stage_edits(prior, later).map(PlanDisjointEdits::into_vec)
+    }
+
+    fn overwrite(start: u32, end: u32, content: &str) -> StyleEdit {
+        StyleEdit::Overwrite {
+            span: Span::new(start, end),
+            content: content.to_string(),
+        }
+    }
+
+    fn insert(at: u32, content: &str) -> StyleEdit {
+        StyleEdit::Insert {
+            at,
+            content: content.to_string(),
+        }
+    }
+
+    /// Path 1: an earlier overwrite strictly containing a later edit discards
+    /// the later edit — the later stage targeted bytes the earlier stage
+    /// already replaced.
+    ///
+    /// Mutation recipe: drop the `keep_later[later_index] = false` in the
+    /// strictly-contained overwrite arm — the merge then keeps both edits and
+    /// `PlanDisjointEdits::from_ordered` refuses, so `expect` panics.
+    #[test]
+    fn earlier_overwrite_strictly_containing_later_edit_discards_the_later_edit() {
+        let prior = vec![overwrite(0, 20, "var(--sc1-tone)")];
+        let later = vec![overwrite(5, 10, ".hashed")];
+
+        let merged = merge(prior.clone(), later.clone())
+            .expect("a later edit inside an earlier overwrite must not refuse the merge");
+
+        assert_eq!(merged, prior, "only the earlier overwrite survives");
+    }
+
+    /// Path 2: a later deletion (an empty-content overwrite) strictly
+    /// containing one or more earlier edits discards those earlier edits
+    /// instead — the later stage rewrote the whole region away, so the
+    /// earlier work inside it never reaches the source.
+    ///
+    /// Mutation recipe: drop `keep_prior[prior_index] = false` from that arm —
+    /// the earlier edits survive inside the deletion, the merged vector is no
+    /// longer disjoint, and `expect` panics.
+    #[test]
+    fn later_empty_overwrite_strictly_containing_earlier_edits_discards_the_earlier_edits() {
+        let prior = vec![overwrite(5, 10, "one"), overwrite(12, 15, "two")];
+        let later = vec![overwrite(0, 20, "")];
+
+        let merged = merge(prior.clone(), later.clone())
+            .expect("a later deletion subsuming earlier edits must not refuse the merge");
+
+        assert_eq!(
+            merged, later,
+            "only the later deletion survives; both earlier edits are discarded"
+        );
+    }
+
+    /// Path 2's boundary complement: a deletion `[start, end)` removes no byte
+    /// at `end`, so an earlier insert positioned exactly at the deletion's end
+    /// addresses the gap AFTER the removed bytes and must survive the merge.
+    /// This is the shape a later deletion would see the moment any stage
+    /// deletion follows a scope-attribute insert.
+    ///
+    /// Mutation recipe: the boundary insert is shielded by two independent
+    /// rails, and the recipe has to break both. Widen `edit_overlaps_span`'s
+    /// insert arm to the closed `span.start <= *at && *at <= span.end` AND
+    /// relax the scan's break to `prior_edit.start() > later_span.end` — the
+    /// boundary insert is then read as overlapping the deletion, the half-open
+    /// containment arm no longer subsumes it, and the merge refuses instead of
+    /// keeping it. Widening the overlap arm alone cannot bite: the scan breaks
+    /// on `insert.start() == later_span.end` before overlap is consulted.
+    #[test]
+    fn earlier_insert_at_a_later_deletions_end_survives() {
+        let prior = vec![insert(20, "[data-v-sc1]")];
+        let later = vec![overwrite(0, 20, "")];
+
+        let merged = merge(prior.clone(), later.clone())
+            .expect("an insert at a deletion's end offset must not refuse the merge");
+
+        assert_eq!(
+            merged,
+            vec![later[0].clone(), prior[0].clone()],
+            "the deletion survives and the boundary insert is kept, in plan order"
+        );
+    }
+
+    /// A later deletion that only partially overlaps an earlier edit — never
+    /// strictly containing it — is neither path 1 nor path 2, so the merge
+    /// refuses rather than silently dropping or keeping either edit.
+    ///
+    /// Two independent rails refuse it, and the recipe has to break both: the
+    /// classifier's trailing `return None`, and the re-mint of the merged
+    /// vector through `PlanDisjointEdits::from_ordered`.
+    ///
+    /// Mutation recipe: replace that `return None` with `prior_index += 1` AND
+    /// make `PlanDisjointEdits::from_ordered` return `Some(Self(edits))`
+    /// unconditionally — the merge then hands the terminal transform two edits
+    /// whose spans overlap. Breaking either rail alone still refuses.
+    #[test]
+    fn partially_overlapping_edits_refuse_the_merge() {
+        let prior = vec![overwrite(0, 10, "one")];
+        let later = vec![overwrite(5, 15, "")];
+
+        assert!(
+            merge(prior, later).is_none(),
+            "a partial overlap must refuse rather than guess an ordering"
+        );
+    }
+
+    /// The classifier only ever compares a LATER edit against the prior ones,
+    /// so two prior edits that overlap each other would pass it untouched — and
+    /// the `Insert` arm reads only the nearest prior edit by start offset, so it
+    /// would mis-read them rather than refuse. Nothing downstream can catch that,
+    /// which is why the mint is where it is refused: a stream whose own edits
+    /// overlap can never become a [`PlanDisjointEdits`], so it can never be
+    /// handed to a merge at all.
+    ///
+    /// Mutation recipe: make `PlanDisjointEdits::from_ordered` return
+    /// `Some(Self(edits))` unconditionally — the overlapping pair mints a plan
+    /// and this case resolves to a `Some` it must not.
+    #[test]
+    fn overlapping_prior_edits_cannot_be_minted_into_a_plan() {
+        let overlapping = vec![overwrite(0, 10, "one"), overwrite(5, 15, "two")];
+
+        assert!(
+            PlanDisjointEdits::from_planned(overlapping).is_none(),
+            "overlapping edits must never become a plan a merge can read"
+        );
+    }
+
+    /// The re-mint over the merged vector is not redundant with the classifier
+    /// either: `later` carries no invariant of its own, so two LATER edits that
+    /// overlap each other reach the merged vector untouched. Only the re-mint
+    /// sees them, and it must refuse — handing the terminal transform
+    /// overlapping spans is the half-ordered rewrite the whole merge exists to
+    /// prevent.
+    ///
+    /// Mutation recipe: make `PlanDisjointEdits::from_ordered` return
+    /// `Some(Self(edits))` unconditionally — every other merge case still
+    /// refuses through the classifier, and only this one resolves to a `Some`
+    /// it must not.
+    #[test]
+    fn overlapping_later_edits_refuse_even_when_the_prior_plan_is_disjoint() {
+        // Neither rail below inspects this pair: the classifier walks `later`
+        // against `prior`, never `later` against itself.
+        let prior = vec![insert(40, "[data-v-sc1]")];
+        let later = vec![overwrite(0, 10, "one"), overwrite(5, 15, "two")];
+
+        assert!(
+            merge(prior, later).is_none(),
+            "overlapping edits must never reach the terminal transform"
+        );
+    }
+
+    /// The containment scan reads the NEAREST earlier edit by start offset, so
+    /// it has to find the right container when several prior edits precede the
+    /// insertion point. That is exactly what [`PlanDisjointEdits`] buys the arm:
+    /// with `prior` disjoint, the nearest-by-start edit is the only one that can
+    /// contain the offset, so one candidate is enough.
+    /// A scan that read a fixed prior edit instead would splice a scope
+    /// attribute into the middle of a `v-bind()` replacement whenever any
+    /// unrelated rewrite came first.
+    ///
+    /// Mutation recipe: replace the `partition_point` lookup with a fixed
+    /// index — the interior insert is no longer recognised as contained, and
+    /// this merge hands back three edits instead of two.
+    #[test]
+    fn later_insert_finds_its_container_past_an_unrelated_earlier_overwrite() {
+        let prior = vec![
+            overwrite(0, 10, "var(--sc1-tone)"),
+            overwrite(20, 40, ".hashed"),
+        ];
+        let later = vec![insert(30, "[data-v-sc1]")];
+
+        let merged = merge(prior.clone(), later)
+            .expect("an insert inside the later overwrite must not refuse the merge");
+
+        assert_eq!(
+            merged, prior,
+            "the interior insert is dropped and both overwrites survive"
+        );
+    }
+
+    /// Only a DELETION may subsume earlier work. A later overwrite that
+    /// contains an earlier edit but writes bytes of its own has no defined
+    /// composition — keeping the earlier edit would apply it to bytes the
+    /// later stage replaced, dropping it would silently lose that stage's
+    /// rewrite — so the merge refuses instead of choosing.
+    ///
+    /// Mutation recipe: weaken the arm's
+    /// `matches!(later_edit, StyleEdit::Overwrite { content, .. } if content.is_empty())`
+    /// guard to `matches!(later_edit, StyleEdit::Overwrite { .. })` — the
+    /// earlier edit is silently discarded and this merge resolves.
+    #[test]
+    fn later_non_empty_overwrite_containing_an_earlier_edit_refuses_the_merge() {
+        let prior = vec![overwrite(5, 10, "var(--sc1-tone)")];
+        let later = vec![overwrite(0, 20, ".hashed { color: red; }")];
+
+        assert!(
+            merge(prior, later).is_none(),
+            "only an empty later overwrite (a deletion) may subsume earlier edits"
+        );
+    }
+
+    /// Path 1 for the insert shape: a later insertion point strictly inside an
+    /// earlier overwrite addresses bytes that overwrite already replaced, so
+    /// it is discarded. A scope-attribute insert landing inside a `v-bind()`
+    /// replacement is the live shape — keeping it would splice the attribute
+    /// into the middle of `var(--sc1-tone)`.
+    ///
+    /// Mutation recipe: delete the `keep_later[later_index] = false` in the
+    /// `StyleEdit::Insert` arm — the insert survives and the merge hands back
+    /// two edits instead of one.
+    #[test]
+    fn later_insert_strictly_inside_an_earlier_overwrite_is_discarded() {
+        let prior = vec![overwrite(0, 20, "var(--sc1-tone)")];
+        let later = vec![insert(10, "[data-v-sc1]")];
+
+        let merged = merge(prior.clone(), later)
+            .expect("an insert inside an earlier overwrite must not refuse the merge");
+
+        assert_eq!(
+            merged, prior,
+            "only the earlier overwrite survives; the interior insert is dropped"
+        );
+    }
+
+    /// The boundaries are not interior. An insert exactly at an overwrite's
+    /// start or end still addresses live authored bytes, so both survive —
+    /// which is what keeps the discard rule from eating the common
+    /// scope-attribute insert that abuts a rewritten selector.
+    ///
+    /// Mutation recipe: widen the interior test to `span.start <= *at && *at <=
+    /// span.end` and both boundary inserts vanish from the merge.
+    #[test]
+    fn later_insert_on_an_earlier_overwrite_boundary_survives() {
+        for at in [0, 20] {
+            let prior = vec![overwrite(0, 20, "var(--sc1-tone)")];
+            let later = vec![insert(at, "[data-v-sc1]")];
+
+            let merged =
+                merge(prior, later.clone()).expect("a boundary insert must not refuse the merge");
+
+            assert!(
+                merged.contains(&later[0]),
+                "an insert at offset {at} abuts the overwrite rather than \
+                 sitting inside it: {merged:?}"
+            );
+            assert_eq!(merged.len(), 2, "{merged:?}");
+        }
+    }
+
+    /// The insert scan reads the nearest earlier edit by start offset, so an
+    /// insert must survive an unrelated overwrite that merely precedes it.
+    ///
+    /// Mutation recipe: drop the `edit_overwrite_span` containment test in the
+    /// insert arm and every insert following any overwrite is discarded.
+    #[test]
+    fn later_insert_after_a_disjoint_earlier_overwrite_survives() {
+        let prior = vec![overwrite(0, 10, "var(--sc1-tone)")];
+        let later = vec![insert(30, "[data-v-sc1]")];
+
+        let merged = merge(prior.clone(), later.clone())
+            .expect("a disjoint insert must not refuse the merge");
+
+        assert_eq!(merged, vec![prior[0].clone(), later[0].clone()]);
+    }
+
+    /// Deletion subsumption reads inserts against the same half-open span the
+    /// rest of the module does: an insert is contained only strictly interior,
+    /// because `[start, end)` owns no position at `end`. The predicate is
+    /// reachable only behind `edit_overlaps_span`'s strictly-interior insert
+    /// guard, so no merge case can distinguish the end edge — it is pinned
+    /// here, against the predicate itself. The left edge stays closed to
+    /// mirror the overwrite arm's `span.start <= candidate.start`.
+    ///
+    /// Mutation recipe: revert the arm to `*at <= span.end` — the
+    /// end-boundary assertion fails.
+    #[test]
+    fn span_containment_for_inserts_ends_at_the_half_open_edge() {
+        let deletion = Span::new(0, 20);
+
+        assert!(
+            span_contains_edit(deletion, &insert(10, "[data-v-sc1]")),
+            "an insert strictly inside the deleted bytes is subsumed"
+        );
+        assert!(
+            !span_contains_edit(deletion, &insert(20, "[data-v-sc1]")),
+            "position 20 is the gap after the deleted bytes, not a deleted byte"
+        );
+    }
+}
+
+/// Build every compatible Vue rewrite from one syntax IR. The plans retain
+/// authored coordinates until the terminal `CodeTransform`, so compatible
+/// stages need neither an intermediate stylesheet nor a second parse.
+fn shared_vue_style_plan(
+    ir: &ParsedStyleIr,
+    dialect: CssDialect,
+    scope_id: &str,
+    module: bool,
+    scoped: bool,
+) -> SharedVueStylePlan {
+    let origin = ir.source().origin();
+    let terminal_stage = if scoped {
+        StyleRewriteStage::PostPreprocessScoping
+    } else if module {
+        StyleRewriteStage::PostPreprocessModules
+    } else {
+        StyleRewriteStage::AuthoredVBind
+    };
+    let mut facts = VueStyleFacts::default();
+    // Recorded from the parse, before any stage plans an edit. Every route
+    // into a plan lands here, so the derived "does this block declare its
+    // whole surface" answer cannot depend on which entry point the same
+    // request took, and a stage that refuses to plan does not un-survey a
+    // parse that already read the block's inclusions.
+    record_input_dependencies(&mut facts, ir);
+    let mut failures = StageFailures::new();
+
+    observe_style_ir(StyleRewriteStage::AuthoredVBind, ir);
+    let mut edits = match plan_authored_v_bind_edits(ir, dialect, scope_id) {
+        Ok((edits, v_bind_vars)) => {
+            facts.v_bind_vars = v_bind_vars;
+            facts.rewrites.v_bind = !edits.is_empty();
+            // The one sort of this stage's own edits, and the one place the
+            // plan's order-and-disjointness invariant is established. Every
+            // merge below re-establishes it over its own composition, so no
+            // later gate has to re-derive it.
+            match PlanDisjointEdits::from_planned(edits) {
+                Some(edits) => edits,
+                None => {
+                    return SharedVueStylePlan::refused(
+                        facts,
+                        terminal_stage,
+                        failures,
+                        StyleRewriteFailure::new(
+                            StyleRewriteFailureClass::OverlappingEdits,
+                            StyleRewriteStage::AuthoredVBind,
+                            dialect,
+                            None,
+                        ),
+                    );
+                }
+            }
+        }
+        Err(failure) => {
+            // The cascade's input bytes still stand, and every later stage
+            // plans those same bytes, so a refusal here costs the `v-bind()`
+            // lowering and nothing else.
+            failures.record(failure, RefusalEffect::KeepsOutput);
+            PlanDisjointEdits::empty()
+        }
+    };
+
+    if module {
+        observe_style_ir(StyleRewriteStage::PostPreprocessModules, ir);
+        let (module_edits, classes) =
+            match module_classes_and_edits_from_ir(ir, CssDialect::Css, scope_id) {
+                Ok(planned) => planned,
+                Err(failure) => {
+                    return SharedVueStylePlan::refused(facts, terminal_stage, failures, failure);
+                }
+            };
+        facts.rewrites.css_modules |= !module_edits.is_empty();
+        facts.module_classes.extend(classes);
+        // Relocated here, with the stage that actually produced these edits,
+        // so a `checked_sub` underflow on this group is reported against
+        // `PostPreprocessModules` rather than borrowing whichever stage
+        // happens to be terminal.
+        let module_edits = match relocate_edits(
+            module_edits,
+            origin,
+            StyleRewriteStage::PostPreprocessModules,
+            dialect,
+        ) {
+            Ok(edits) => edits,
+            Err(failure) => {
+                return SharedVueStylePlan::refused(facts, terminal_stage, failures, failure);
+            }
+        };
+        let Some(merged) = merge_shared_stage_edits(edits, module_edits) else {
+            return SharedVueStylePlan::refused(
+                facts,
+                terminal_stage,
+                failures,
+                StyleRewriteFailure::new(
+                    StyleRewriteFailureClass::OverlappingEdits,
+                    StyleRewriteStage::PostPreprocessModules,
+                    dialect,
+                    None,
+                ),
+            );
+        };
+        edits = merged;
+    }
+    if scoped {
+        observe_style_ir(StyleRewriteStage::PostPreprocessScoping, ir);
+        let (scope_edits, scope_facts) = match scoped_edits_and_facts_from_ir(ir, scope_id) {
+            Ok(planned) => planned,
+            Err(failure) => {
+                return SharedVueStylePlan::refused(facts, terminal_stage, failures, failure);
+            }
+        };
+        // Accumulated, never assigned: a plan folds every stage's observations
+        // into one fact set, so a stage that arrives later must not be able to
+        // clear what an earlier one recorded. Today no earlier stage sets these
+        // fields, which is exactly why an assignment would look correct right
+        // up until one does.
+        facts.rewrites.deep |= scope_facts.rewrites.deep;
+        facts.rewrites.slotted |= scope_facts.rewrites.slotted;
+        facts.rewrites.global |= scope_facts.rewrites.global;
+        facts.rewrites.keyframes |= scope_facts.rewrites.keyframes;
+        facts.rewrites.scoped_selector |= scope_facts.rewrites.scoped_selector;
+        facts.refusals.extend(scope_facts.refusals);
+        // Relocated here, with the stage that actually produced these edits —
+        // see the module-edit relocation above.
+        let scope_edits = match relocate_edits(
+            scope_edits,
+            origin,
+            StyleRewriteStage::PostPreprocessScoping,
+            dialect,
+        ) {
+            Ok(edits) => edits,
+            Err(failure) => {
+                return SharedVueStylePlan::refused(facts, terminal_stage, failures, failure);
+            }
+        };
+        let Some(merged) = merge_shared_stage_edits(edits, scope_edits) else {
+            return SharedVueStylePlan::refused(
+                facts,
+                terminal_stage,
+                failures,
+                StyleRewriteFailure::new(
+                    StyleRewriteFailureClass::OverlappingEdits,
+                    StyleRewriteStage::PostPreprocessScoping,
+                    dialect,
+                    None,
+                ),
+            );
+        };
+        edits = merged;
+    }
+
+    // No terminal disjointness gate: `edits` is a [`PlanDisjointEdits`], so
+    // every route that produced it already refused rather than composed
+    // overlapping spans.
+    SharedVueStylePlan {
+        edits: edits.into_vec(),
+        facts,
+        terminal_stage,
+        failures,
+    }
+}
+
+/// The ONE route from a parsed IR to a finished cascade outcome. Every entry
+/// point — authored-only, the full authored cascade, and the verified plain-CSS
+/// one — reaches materialization through here, so a request that names the same
+/// stages is answered the same way whatever spelled it.
+#[allow(clippy::too_many_arguments)]
+fn run_shared_vue_style_plan(
+    ir: &ParsedStyleIr,
+    input: CascadeInput,
+    code: &str,
+    source: StyleSourceIdentity<'_>,
+    dialect: CssDialect,
+    scope_id: &str,
+    css: CssStageRequest,
+    want_source_map: bool,
+) -> VueStyleCascadeOutcome {
+    let SharedVueStylePlan {
+        edits,
+        facts,
+        terminal_stage,
+        mut failures,
+    } = shared_vue_style_plan(ir, dialect, scope_id, css.module, css.scoped);
+    // Recorded before materialization, not after: a gate refusal already
+    // dropped the stages the request's meaning depended on, so building a
+    // transform whose output is about to be wiped would be work nobody reads.
+    if let Some(refusal) = css.refusal {
+        failures.record(refusal, RefusalEffect::ClearsOutput);
+    }
+    let output = if failures.cleared_by_refusal {
+        CascadeOutput::ClearedByRefusal
+    } else {
+        match apply_cascade_stage(
+            code,
+            source,
+            dialect,
+            terminal_stage,
+            edits,
+            want_source_map,
+        ) {
+            Ok(Some((code, source_map))) => CascadeOutput::Rewritten { code, source_map },
+            Ok(None) => CascadeOutput::Passthrough,
+            Err(failure) => {
+                // The terminal transform materializes the WHOLE plan, so a
+                // failure here loses every stage's rewrite at once and leaves
+                // nothing safe to publish.
+                failures.record(failure, RefusalEffect::ClearsOutput);
+                CascadeOutput::ClearedByRefusal
+            }
+        }
+    };
+    finish_vue_style_cascade(input, dialect, code, output, facts, failures.into_vec())
 }
 
 /// Assemble the one cascade outcome shape from a finished run.
@@ -2025,33 +2716,20 @@ impl CascadeOutput {
 /// them. A run that changed nothing stays at that stage; a run that produced
 /// output is a framework-rewritten result.
 ///
-/// `spaces` is the per-stage record of which bytes each stage was handed. It
-/// is deliberately not derived from the output state: a plain-CSS-only stage
-/// that refuses also CLEARS the output, and that clearing happens after the
-/// refusal — it does not move the bytes the refusal was reported against.
+/// Shared planning hands every compatible stage the same cascade-input IR, so
+/// a later-stage refusal's span always addresses the cascade's own input
+/// space — authored carrier bytes or admitted preprocessed CSS — never a
+/// later rewrite that has not been materialized yet. Clearing the output
+/// after a refusal does not move the bytes the refusal was reported against.
 fn finish_vue_style_cascade(
     input: CascadeInput,
     dialect: CssDialect,
     input_code: &str,
-    spaces: CascadeStageSpaces,
     output: CascadeOutput,
     facts: VueStyleFacts,
     stage_failures: Vec<StyleRewriteFailure>,
 ) -> VueStyleCascadeOutcome {
     let input_stage = input.stage();
-    let cleared_by_refusal = matches!(output, CascadeOutput::ClearedByRefusal);
-    let rewritten = matches!(output, CascadeOutput::Rewritten { .. });
-    let (code, source_map) = match output {
-        CascadeOutput::Rewritten { code, composition } => (
-            code,
-            composition
-                .accumulated()
-                .map(SourceMap::to_json_string)
-                .unwrap_or_default(),
-        ),
-        CascadeOutput::ClearedByRefusal => (String::new(), String::new()),
-        CascadeOutput::Passthrough => (input_code.to_string(), String::new()),
-    };
     // Projected once, here, for every entry point. This is the SOLE
     // publication route (see `VueStyleCascadeOutcome.result`), so doing it
     // per-consumer instead would re-derive the same strings once per reader
@@ -2063,21 +2741,34 @@ fn finish_vue_style_cascade(
         .refusals
         .iter()
         .chain(stage_failures.iter())
-        .map(|failure| failure.to_diagnostic(spaces.space_of(failure.stage, input_stage)))
+        .map(|failure| failure.to_diagnostic(input_stage))
         .collect();
-    let result = if cleared_by_refusal {
+    // The output state carries the bytes that state owns, so each arm reads
+    // its own — a rewrite cannot reach for bytes a passthrough never minted.
+    let (result, source_map) = match output {
         // Nothing produced these (absent) bytes, so nothing claims them. The
         // stage still names the space the refusals' own coordinates belong
         // to, which is what makes them placeable.
-        QualifiedStyleResult::refused(input_stage, dialect, diagnostics)
-    } else if rewritten {
-        QualifiedStyleResult::framework_rewritten(dialect, code, diagnostics)
-    } else {
-        match input {
-            CascadeInput::Authored => QualifiedStyleResult::authored(dialect, code, diagnostics),
-            CascadeInput::Preprocessed(producer) => {
-                QualifiedStyleResult::preprocessed(producer, code, diagnostics)
-            }
+        CascadeOutput::ClearedByRefusal => (
+            QualifiedStyleResult::refused(input_stage, dialect, diagnostics),
+            String::new(),
+        ),
+        CascadeOutput::Rewritten { code, source_map } => (
+            QualifiedStyleResult::framework_rewritten(dialect, code, diagnostics),
+            source_map
+                .map(|map| map.to_json_string())
+                .unwrap_or_default(),
+        ),
+        CascadeOutput::Passthrough => {
+            let result = match input {
+                CascadeInput::Authored => {
+                    QualifiedStyleResult::authored(dialect, input_code, diagnostics)
+                }
+                CascadeInput::Preprocessed(producer) => {
+                    QualifiedStyleResult::preprocessed(producer, input_code, diagnostics)
+                }
+            };
+            (result, String::new())
         }
     };
     VueStyleCascadeOutcome {
@@ -2095,43 +2786,49 @@ fn finish_vue_style_cascade(
 /// It never requests CSS Modules or selector scoping, so authored SCSS/Sass/
 /// Less/Stylus cannot be mistaken for completed CSS. The returned facts still
 /// drive `_useCssVars` generation in the runtime module.
+///
+/// Literally [`run_vue_style_cascade`] with neither attribute set: those are
+/// the same request — `v-bind()` lowering and nothing else — and delegating
+/// rather than re-deriving it is what keeps the two entry points from
+/// answering it differently. A second route here diverged on exactly one
+/// recorded fact (whether a parse that survived but whose `v-bind()` planning
+/// refused had surveyed the block's inclusions), which no signature could have
+/// caught.
 pub fn run_vue_style_authored_only(
     input: AuthoredStyleInput<'_>,
     scope_id: &str,
     want_source_map: bool,
 ) -> VueStyleCascadeOutcome {
-    verter_audit::attribute_scope!(CssTransform);
-    let state = run_vue_authored_v_bind_stage(input, scope_id, want_source_map);
-    finish_vue_style_cascade(
-        CascadeInput::Authored,
-        input.dialect,
-        input.code,
-        // No post-`v-bind()` stage runs on this entry point.
-        CascadeStageSpaces::AT_INPUT,
-        // The authored-`v-bind()` stage keeps whatever preceded it on failure
-        // and never wipes the output.
-        CascadeOutput::from_stage_state(state.owned, false),
-        state.facts,
-        state.stage_failures,
-    )
+    run_vue_style_cascade(input, scope_id, false, false, want_source_map)
 }
 
-/// Runs Vue's authored-v-bind → CSS-Modules → scoped-selector cascade,
-/// parsing each content identity at most once: a stage that produces
-/// no edits hands its own already-parsed `StyleSyntaxIr` to the next stage
-/// instead of causing a re-parse. Only a stage that DID change bytes forces
-/// the following stage to parse fresh (the new bytes are a new content
-/// identity `StyleSyntaxIr` never saw). `module`/`scoped` mirror the SFC's
-/// `<style module>`/`<style scoped>` attributes; both require the AUTHORED
-/// dialect to already be plain CSS (external preprocessing, JS/builder-owned,
-/// is not modelled here — same `PlainCssInput` gate the CSS-Modules/
-/// scoped-selector stages already enforce individually).
+/// Runs Vue's authored-v-bind → CSS-Modules → scoped-selector cascade.
+/// Compatible stages derive authored-coordinate edits from one
+/// `StyleSyntaxIr` and materialize them once. A plan whose edits cannot be
+/// composed returns a terminal refusal without materializing partial output
+/// or entering a staged fallback. Every CSS input — including v-bind-only —
+/// takes that shared plan, with a terminal stage naming the last stage that
+/// actually ran. `module`/`scoped` mirror the SFC's
+/// `<style module>`/`<style scoped>` attributes; a non-CSS dialect with
+/// either attribute set refuses at the [`PlainCssInput`] gate and never
+/// parses those bytes as CSS.
 ///
 /// A stage that cannot safely run does not abort the whole cascade — see
 /// [`VueStyleCascadeOutcome::stage_failures`]. The authored-v-bind stage
 /// runs against the authored bytes regardless of whether it itself
-/// succeeds, so a v-bind failure still lets CSS-Modules/scoped-selector
-/// process those same authored bytes.
+/// succeeds, so a v-bind rewrite failure still lets CSS-Modules/scoped-selector
+/// plan those same authored bytes.
+///
+/// A parse miss is recorded exactly once, by the parse that ran. What it does
+/// to the output depends on what was asked for, and the answer is the same one
+/// [`run_vue_style_authored_only`] gives, because they are the same request:
+/// with neither `module` nor `scoped` the only work was `v-bind()` lowering,
+/// nothing was rewritten, and the authored bytes are published beside the
+/// diagnostic rather than deleted. With either attribute set the block's
+/// meaning depends on a rewrite that could not be planned — unhashed class
+/// names, or selectors that would apply to the whole document instead of this
+/// component — so publishing the authored bytes would be actively wrong and
+/// the output is cleared.
 pub fn run_vue_style_cascade(
     input: AuthoredStyleInput<'_>,
     scope_id: &str,
@@ -2140,65 +2837,64 @@ pub fn run_vue_style_cascade(
     want_source_map: bool,
 ) -> VueStyleCascadeOutcome {
     verter_audit::attribute_scope!(CssTransform);
-    let AuthoredVueStyleState {
-        mut owned,
-        mut facts,
-        mut stage_failures,
-        retained_ir,
-    } = run_vue_authored_v_bind_stage(input, scope_id, want_source_map);
-    let mut spaces = CascadeStageSpaces::AT_INPUT;
-    let mut cleared_by_refusal = false;
-
-    if module || scoped {
-        let current_code = owned.as_ref().map_or(input.code, |(code, _)| code.as_str());
-        let composition = owned
-            .as_ref()
-            .map_or(MapComposition::NotStarted, |(_, composition)| {
-                composition.clone()
-            });
-        let post = run_post_v_bind_stages(
-            current_code,
-            owned.is_none(),
+    // One gate for every dialect, answered before anything is parsed. A
+    // non-CSS `<style module>`/`<style scoped>` loses those stages here and
+    // records the refusal that lost them; a v-bind-only request never consults
+    // it. There is no second branch to keep in step with this one.
+    let css = CssStageRequest::gated(input, module, scoped);
+    match authored_or_parsed_ir(input, StyleRewriteStage::AuthoredVBind) {
+        Ok(parsed) => run_shared_vue_style_plan(
+            &parsed,
+            CascadeInput::Authored,
+            input.code,
             input.source,
             input.dialect,
-            retained_ir,
             scope_id,
-            module,
-            scoped,
-            &mut facts,
-            &mut stage_failures,
-            composition,
+            css,
             want_source_map,
-        );
-        spaces = post.spaces;
-        cleared_by_refusal = post.output_cleared_by_refusal;
-        if let Some(rewritten) = post.owned {
-            owned = Some(rewritten);
+        ),
+        Err(failure) => {
+            // Nothing parsed, so nothing planned. See this function's doc
+            // comment: only a request whose meaning depends on a CSS rewrite
+            // clears on a parse miss.
+            let mut failures = StageFailures::new();
+            failures.record(
+                failure,
+                if module || scoped {
+                    RefusalEffect::ClearsOutput
+                } else {
+                    RefusalEffect::KeepsOutput
+                },
+            );
+            if let Some(refusal) = css.refusal {
+                failures.record(refusal, RefusalEffect::ClearsOutput);
+            }
+            finish_vue_style_cascade(
+                CascadeInput::Authored,
+                input.dialect,
+                input.code,
+                if failures.cleared_by_refusal {
+                    CascadeOutput::ClearedByRefusal
+                } else {
+                    CascadeOutput::Passthrough
+                },
+                VueStyleFacts::default(),
+                failures.into_vec(),
+            )
         }
     }
-
-    finish_vue_style_cascade(
-        CascadeInput::Authored,
-        input.dialect,
-        input.code,
-        spaces,
-        CascadeOutput::from_stage_state(owned, cleared_by_refusal),
-        facts,
-        stage_failures,
-    )
 }
 
 /// Runs the full Vue style cascade from native-CSS grammar provenance.
 ///
-/// The supplied parse is reused for the first stage. If that stage leaves the
-/// bytes unchanged, the same parsed structure continues into later stages.
-///
-/// `input_stage` names where these bytes came from. Plain CSS reaching this
-/// entry is either a carrier's own authored CSS or an external preprocessor's
-/// output, and only the caller knows which — the bytes look the same either
-/// way. It is a parameter rather than an inference because guessing writes the
-/// wrong provenance onto every result and, worse, the wrong coordinate space
-/// onto every refusal.
+/// The supplied parse is the cascade's only CSS parse. Compatible stages
+/// plan over it and materialize once. `input_stage` names where these bytes
+/// came from. Plain CSS reaching this entry is either a carrier's own
+/// authored CSS or an external preprocessor's output, and only the caller
+/// knows which — the bytes look the same either way. It is a parameter
+/// rather than an inference because guessing writes the wrong provenance
+/// onto every result and, worse, the wrong coordinate space onto every
+/// refusal.
 ///
 /// The authored-`v-bind()` stage runs on both: a preprocessor leaves
 /// `v-bind()` untouched in its output, so lowering it is still this cascade's
@@ -2224,81 +2920,17 @@ pub fn run_vue_style_cascade_verified(
         content_artifact_token,
     };
     let parsed = ParsedStyleIr::from_existing(verified.ir.clone());
-    let mut owned: Option<(String, MapComposition)> = None;
-    let mut facts = VueStyleFacts::default();
-    let mut stage_failures = Vec::new();
-    let mut retained_ir = None;
-
-    observe_style_ir(StyleRewriteStage::AuthoredVBind, &parsed);
-    record_input_dependencies(&mut facts, &parsed);
-    let origin = parsed.source().origin();
-    match v_bind_edits_from_ir(&parsed, CssDialect::Css, scope_id).and_then(|(edits, vars)| {
-        let edits = relocate_edits(
-            edits,
-            origin,
-            StyleRewriteStage::AuthoredVBind,
-            CssDialect::Css,
-        )?;
-        Ok((edits, relocate_v_bind_vars(vars, origin)))
-    }) {
-        Ok((edits, vars)) => {
-            facts.v_bind_vars = vars;
-            facts.rewrites.v_bind = !edits.is_empty();
-            match apply_cascade_stage(
-                code,
-                source,
-                CssDialect::Css,
-                StyleRewriteStage::AuthoredVBind,
-                edits,
-                &MapComposition::NotStarted,
-                want_source_map,
-            ) {
-                Ok(Some(rewritten)) => owned = Some(rewritten),
-                Ok(None) => retained_ir = Some(parsed),
-                Err(failure) => stage_failures.push(failure),
-            }
-        }
-        Err(failure) => stage_failures.push(failure),
-    }
-    let mut spaces = CascadeStageSpaces::AT_INPUT;
-    let mut cleared_by_refusal = false;
-
-    if module || scoped {
-        let current_code = owned.as_ref().map_or(code, |(value, _)| value.as_str());
-        let composition = owned
-            .as_ref()
-            .map_or(MapComposition::NotStarted, |(_, composition)| {
-                composition.clone()
-            });
-        let post = run_post_v_bind_stages(
-            current_code,
-            owned.is_none(),
-            source,
-            CssDialect::Css,
-            retained_ir,
-            scope_id,
-            module,
-            scoped,
-            &mut facts,
-            &mut stage_failures,
-            composition,
-            want_source_map,
-        );
-        spaces = post.spaces;
-        cleared_by_refusal = post.output_cleared_by_refusal;
-        if let Some(rewritten) = post.owned {
-            owned = Some(rewritten);
-        }
-    }
-
-    finish_vue_style_cascade(
+    run_shared_vue_style_plan(
+        &parsed,
         input_stage,
-        CssDialect::Css,
         code,
-        spaces,
-        CascadeOutput::from_stage_state(owned, cleared_by_refusal),
-        facts,
-        stage_failures,
+        source,
+        CssDialect::Css,
+        scope_id,
+        // `VerifiedPlainCss` already carries the plain-CSS grammar proof the
+        // authored gate exists to establish, so there is nothing left to gate.
+        CssStageRequest::admitted(module, scoped),
+        want_source_map,
     )
 }
 
@@ -2327,216 +2959,6 @@ pub fn transform_vue_style(
         scoped,
         want_source_map,
     )
-}
-
-/// Outcome of the post-`v-bind()` half of the cascade: the bytes it produced,
-/// if any, and which byte space each of its stages was handed.
-struct PostVBindStages {
-    owned: Option<(String, MapComposition)>,
-    spaces: CascadeStageSpaces,
-    /// A stage refused and WIPED the output rather than producing it. Read
-    /// as a recorded fact, never re-derived from `owned`'s bytes being
-    /// empty: a rewrite can legitimately produce nothing, and only the stage
-    /// that cleared the output knows the difference.
-    output_cleared_by_refusal: bool,
-}
-
-/// Shared CSS-Modules → scoped-selector continuation of the style cascade
-/// (stages 2 and 3), used by both cascade entry points so the module→scoped
-/// IR hand-off applies identically to each. `owned` is
-/// `Some((code, source_map))` when a stage rewrote bytes or hard-failed (in
-/// which case `code` is empty); `None` when neither stage produced output.
-///
-/// A CSS-Modules or scoped-selector stage that cannot safely run pushes its
-/// failure onto `stage_failures` and clears the output rather than leaving
-/// unsafe partial bytes in place; a CSS-Modules failure also skips the
-/// scoped-selector stage below it, since it would only ever see the
-/// cleared, empty output.
-///
-/// `code_is_cascade_input` says whether `current_code` is still the bytes the
-/// cascade was handed. Only the caller knows — an earlier stage may already
-/// have rewritten them — and it decides whether a parse here may contribute
-/// the input's inclusion inventory, whose spans must address the input space.
-#[allow(clippy::too_many_arguments)]
-fn run_post_v_bind_stages(
-    current_code: &str,
-    code_is_cascade_input: bool,
-    source: StyleSourceIdentity<'_>,
-    dialect: CssDialect,
-    mut retained_ir: Option<ParsedStyleIr>,
-    scope_id: &str,
-    module: bool,
-    scoped: bool,
-    facts: &mut VueStyleFacts,
-    stage_failures: &mut Vec<StyleRewriteFailure>,
-    composition_in: MapComposition,
-    want_source_map: bool,
-) -> PostVBindStages {
-    let mut owned: Option<(String, MapComposition)> = None;
-    let mut spaces = CascadeStageSpaces {
-        modules_at_input: code_is_cascade_input,
-        scoping_at_input: code_is_cascade_input,
-    };
-    let mut output_cleared_by_failure = false;
-    let composition_for = |owned: &Option<(String, MapComposition)>| {
-        owned.as_ref().map_or_else(
-            || composition_in.clone(),
-            |(_, composition)| composition.clone(),
-        )
-    };
-
-    // Stage 2: CSS Modules — plain-CSS only. Nothing has rewritten yet, so
-    // this stage reads the cascade's input whenever the caller says the code
-    // it was handed is that input. The scoped stage below cannot say the same:
-    // this stage may have replaced the bytes underneath it.
-    if module {
-        let at_input = code_is_cascade_input;
-        spaces.modules_at_input = at_input;
-        let code_now = owned
-            .as_ref()
-            .map_or(current_code, |(code, _)| code.as_str());
-        let stage: Result<_, StyleRewriteFailure> = (|| {
-            let plain = PlainCssInput::try_new(
-                code_now,
-                dialect,
-                source.source_name,
-                source.source_space_token,
-                source.content_artifact_token,
-            )?;
-            let ir = match retained_ir.take() {
-                Some(ir) => ir,
-                None => parse_ir(
-                    plain.code,
-                    CssDialect::Css,
-                    StyleRewriteStage::PostPreprocessModules,
-                )?,
-            };
-            observe_style_ir(StyleRewriteStage::PostPreprocessModules, &ir);
-            if at_input {
-                record_input_dependencies(facts, &ir);
-            }
-            let origin = ir.source().origin();
-            let (edits, classes) =
-                module_classes_and_edits_from_ir(&ir, CssDialect::Css, scope_id)?;
-            let edits = relocate_edits(
-                edits,
-                origin,
-                StyleRewriteStage::PostPreprocessModules,
-                CssDialect::Css,
-            )?;
-            Ok((plain, ir, edits, classes))
-        })();
-        match stage {
-            Ok((plain, ir, edits, classes)) => {
-                facts.module_classes = classes.into_iter().collect();
-                facts.rewrites.css_modules = !edits.is_empty();
-                let composition = composition_for(&owned);
-                match apply_cascade_stage(
-                    plain.code,
-                    source,
-                    CssDialect::Css,
-                    StyleRewriteStage::PostPreprocessModules,
-                    edits,
-                    &composition,
-                    want_source_map,
-                ) {
-                    Ok(Some(rewritten)) => owned = Some(rewritten),
-                    Ok(None) => retained_ir = Some(ir),
-                    Err(failure) => {
-                        stage_failures.push(failure);
-                        owned = Some((String::new(), MapComposition::Abandoned));
-                        retained_ir = None;
-                        output_cleared_by_failure = true;
-                    }
-                }
-            }
-            Err(failure) => {
-                stage_failures.push(failure);
-                owned = Some((String::new(), MapComposition::Abandoned));
-                retained_ir = None;
-                output_cleared_by_failure = true;
-            }
-        }
-    }
-
-    // Stage 3: scoped selectors + keyframes — plain-CSS only. Skipped when
-    // the modules stage above hard-failed and cleared the output.
-    if scoped && !output_cleared_by_failure {
-        let at_input = code_is_cascade_input && owned.is_none();
-        spaces.scoping_at_input = at_input;
-        let code_now = owned
-            .as_ref()
-            .map_or(current_code, |(code, _)| code.as_str());
-        let stage: Result<_, StyleRewriteFailure> = (|| {
-            let plain = PlainCssInput::try_new(
-                code_now,
-                dialect,
-                source.source_name,
-                source.source_space_token,
-                source.content_artifact_token,
-            )?;
-            let ir = match retained_ir.take() {
-                Some(ir) => ir,
-                None => parse_ir(
-                    plain.code,
-                    CssDialect::Css,
-                    StyleRewriteStage::PostPreprocessScoping,
-                )?,
-            };
-            observe_style_ir(StyleRewriteStage::PostPreprocessScoping, &ir);
-            if at_input {
-                record_input_dependencies(facts, &ir);
-            }
-            let origin = ir.source().origin();
-            let (edits, stage_facts) = scoped_edits_and_facts_from_ir(&ir, scope_id)?;
-            let edits = relocate_edits(
-                edits,
-                origin,
-                StyleRewriteStage::PostPreprocessScoping,
-                CssDialect::Css,
-            )?;
-            Ok((plain, edits, stage_facts))
-        })();
-        match stage {
-            Ok((plain, edits, stage_facts)) => {
-                facts.rewrites.deep |= stage_facts.rewrites.deep;
-                facts.rewrites.slotted |= stage_facts.rewrites.slotted;
-                facts.rewrites.global |= stage_facts.rewrites.global;
-                facts.rewrites.keyframes |= stage_facts.rewrites.keyframes;
-                facts.rewrites.scoped_selector |= stage_facts.rewrites.scoped_selector;
-                facts.refusals.extend(stage_facts.refusals);
-                let composition = composition_for(&owned);
-                match apply_cascade_stage(
-                    plain.code,
-                    source,
-                    CssDialect::Css,
-                    StyleRewriteStage::PostPreprocessScoping,
-                    edits,
-                    &composition,
-                    want_source_map,
-                ) {
-                    Ok(Some(rewritten)) => owned = Some(rewritten),
-                    Ok(None) => {}
-                    Err(failure) => {
-                        stage_failures.push(failure);
-                        owned = Some((String::new(), MapComposition::Abandoned));
-                        output_cleared_by_failure = true;
-                    }
-                }
-            }
-            Err(failure) => {
-                stage_failures.push(failure);
-                owned = Some((String::new(), MapComposition::Abandoned));
-                output_cleared_by_failure = true;
-            }
-        }
-    }
-
-    PostVBindStages {
-        owned,
-        spaces,
-        output_cleared_by_refusal: output_cleared_by_failure,
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2762,38 +3184,52 @@ impl VueScopePlanner<'_> {
                         };
                         let special_name = self.vue_special_pseudo_name(component);
                         if special_name == Some(VueSpecialPseudo::Global) {
-                            let argument = self.render_special_argument(pseudo, false)?;
+                            // `:global()` with nothing to unwrap is a refusal,
+                            // not an erasure: dropping the selector would leave
+                            // the declarations attached to whatever followed.
+                            let argument = self.trusted_first_selector_argument(pseudo)?;
                             edits.truncate(edits_checkpoint);
-                            edits.push(StyleEdit::Overwrite {
-                                span: selector_content_span(selector),
-                                content: argument,
-                            });
+                            self.collect_unwrapped_argument_edits(
+                                selector_content_span(selector),
+                                argument.span(),
+                                String::new(),
+                                edits,
+                            );
                             self.facts.rewrites.global = true;
                             return Ok(true);
                         }
                         if special_name == Some(VueSpecialPseudo::Deep) {
-                            let argument = self.render_special_argument(pseudo, true)?;
+                            let argument = self.trusted_selector_argument_allowing_empty(pseudo)?;
                             let same_compound_anchor = component_index > 0;
                             let anchor = same_compound_anchor
                                 .then_some(compound)
                                 .or(previous_compound);
-                            let content = if let Some(anchor) = anchor {
+                            let prefix = if let Some(anchor) = anchor {
                                 edits.push(StyleEdit::Insert {
                                     at: self.scope_insertion(anchor),
                                     content: self.scope_attr.clone(),
                                 });
                                 if same_compound_anchor {
-                                    format!(" {argument}")
+                                    " ".to_string()
                                 } else {
-                                    argument
+                                    String::new()
                                 }
                             } else {
-                                format!("{} {argument}", self.scope_attr)
+                                format!("{} ", self.scope_attr)
                             };
-                            edits.push(StyleEdit::Overwrite {
-                                span: component.span(),
-                                content,
-                            });
+                            if let Some(argument) = argument {
+                                self.collect_unwrapped_argument_edits(
+                                    component.span(),
+                                    argument.span(),
+                                    prefix,
+                                    edits,
+                                );
+                            } else {
+                                edits.push(StyleEdit::Overwrite {
+                                    span: component.span(),
+                                    content: prefix,
+                                });
+                            }
                             self.facts.rewrites.deep = true;
                             return Ok(true);
                         }
@@ -2863,15 +3299,25 @@ impl VueScopePlanner<'_> {
         Ok(found)
     }
 
-    fn render_special_argument(
+    fn collect_unwrapped_argument_edits(
         &self,
-        pseudo: &SelectorPseudo,
-        allow_empty: bool,
-    ) -> Result<String, StyleRewriteFailure> {
-        let Some(selector) = self.trusted_first_selector_argument(pseudo, allow_empty)? else {
-            return Ok(String::new());
-        };
-        Ok(self.source.slice(selector.span()).to_string())
+        outer: Span,
+        argument: Span,
+        prefix: String,
+        edits: &mut Vec<StyleEdit>,
+    ) {
+        if outer.start < argument.start || !prefix.is_empty() {
+            edits.push(StyleEdit::Overwrite {
+                span: Span::new(outer.start, argument.start),
+                content: prefix,
+            });
+        }
+        if argument.end < outer.end {
+            edits.push(StyleEdit::Overwrite {
+                span: Span::new(argument.end, outer.end),
+                content: String::new(),
+            });
+        }
     }
 
     /// Rewrites `:slotted(<arg>)` to `<arg>` with the slotted scope attribute
@@ -2894,16 +3340,9 @@ impl VueScopePlanner<'_> {
         pseudo: &SelectorPseudo,
         edits: &mut Vec<StyleEdit>,
     ) -> Result<(), StyleRewriteFailure> {
-        let Some(selector) = self.trusted_first_selector_argument(pseudo, false)? else {
-            // Unreachable with `allow_empty: false`; preserved as the exact
-            // outcome the string-rendering path produced for a missing
-            // argument: the whole `:slotted()` component is deleted.
-            edits.push(StyleEdit::Overwrite {
-                span: component.span(),
-                content: String::new(),
-            });
-            return Ok(());
-        };
+        // `:slotted()` with nothing to unwrap refuses for the same reason
+        // `:global()` does — there is no selector to carry the declarations.
+        let selector = self.trusted_first_selector_argument(pseudo)?;
         let component_span = component.span();
         let argument_span = selector.span();
         edits.push(StyleEdit::Overwrite {
@@ -3028,10 +3467,26 @@ impl VueScopePlanner<'_> {
         }
     }
 
+    /// The pseudo's first argument selector, for the pseudos whose rewrite has
+    /// no meaning without one. An absent or untrusted argument is a refusal,
+    /// so callers get a selector or an error and never a third case to spell.
     fn trusted_first_selector_argument<'a>(
         &self,
         pseudo: &'a SelectorPseudo,
-        allow_empty: bool,
+    ) -> Result<&'a ComplexSelector, StyleRewriteFailure> {
+        let argument_span = pseudo.argument_span();
+        self.trusted_selector_argument_allowing_empty(pseudo)?
+            .ok_or_else(|| self.untrusted(argument_span))
+    }
+
+    /// The `::v-deep`/`:deep()` variant: an argument-less `:deep` is the
+    /// documented bare form (`:deep .child`), so an empty argument list over
+    /// whitespace-only bytes is a real answer rather than a refusal. Anything
+    /// else inside the parentheses that did not parse into a trusted selector
+    /// still refuses.
+    fn trusted_selector_argument_allowing_empty<'a>(
+        &self,
+        pseudo: &'a SelectorPseudo,
     ) -> Result<Option<&'a ComplexSelector>, StyleRewriteFailure> {
         let argument_span = pseudo.argument_span();
         let selector_list = pseudo
@@ -3042,7 +3497,7 @@ impl VueScopePlanner<'_> {
         }
         match selector_list.selectors().first() {
             Some(selector) => Ok(Some(selector)),
-            None if allow_empty && self.source.slice(argument_span).trim().is_empty() => Ok(None),
+            None if self.source.slice(argument_span).trim().is_empty() => Ok(None),
             None => Err(self.untrusted(argument_span)),
         }
     }
