@@ -3,9 +3,8 @@ import type { DocumentStructureResponseV1, StructureRangeV1 } from "@verter/lang
 export type StyleLang = "css" | "scss" | "less" | "sass" | "stylus" | "postcss";
 
 export interface StyleBlockInfo {
+  /** The parser's sealed block identity — the only key consumers join on. */
   blockToken: string;
-  /** Legacy preprocessor DTO identity only; no feature joins use this ordinal. */
-  legacyPreprocessorIndex: number;
   /**
    * The block's dialect, or `null` when the parser reported one this client
    * cannot address. Consumers fail closed on `null` — see [`styleLang`].
@@ -111,7 +110,6 @@ export function styleBlocksFromStructure(
     );
     result.push({
       blockToken: block.section.blockToken,
-      legacyPreprocessorIndex: result.length,
       lang: styleLang(block.section.role.dialect),
       scoped: block.section.role.scoped,
       externalSrc,
