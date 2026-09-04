@@ -659,6 +659,26 @@ routes above, and the two differ in WHO owns the demand:
   picks a winner. A per-input failure isolates to that entry.
 - **No compile cache slot.** This route consults and publishes none, so
   distinct requests for one canonical are distinct compiles.
+- **Refusals name the caller's field, not a Rust spelling.** A
+  `CompileRequestError::UnsupportedOption` / `MalformedOptionValue` renders
+  its option through `FrameworkOption`'s `Display`, which reads the row's
+  `(surface, option)` columns from the committed option inventories
+  (`packages/framework-conformance-harness/evidence/{vue,svelte}-options.tsv`,
+  via the exhaustive `VueOption::tsv_row` / `SvelteOption::tsv_row`) and
+  emits `vue:hoistStatic`, `svelte:accessors`,
+  `svelte:customElement.props.*.type`. Never derive that path from the
+  variant's `Debug` spelling: the variants are `Surface_option`, so a
+  case-lowered `Debug` names a field (`vue:transformOptionsHoistStatic`)
+  that no schema and no caller has.
+- **Diagnostics publish their arguments.** Every FFI diagnostic carries
+  `arguments` — the values its message is rendered from — through the ONE
+  shared projection `verter_ffi::convert::host_diagnostic_to_ffi` /
+  `host_diagnostic_arg_to_ffi`, so the native and browser bindings cannot
+  fork on argument shape, severity spelling, or UTF-16 span mapping. A
+  `Span` argument's offsets are UTF-16 code units like every other
+  published span; `Unsigned`/`Signed` cross as exact decimal STRINGS,
+  because a 64-bit integer above 2^53 cannot reach a JavaScript double
+  without rounding and a diagnostic argument may not round silently.
 
 `compile_request` is available on native and `wasm32`; the browser binding
 calls it synchronously after decoding one typed request. `compile_request_many`
