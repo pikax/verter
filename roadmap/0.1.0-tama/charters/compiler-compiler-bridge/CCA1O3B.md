@@ -45,7 +45,7 @@ Move the direct WASM transport-surface probe to CCA1O3's typed request while the
 
 - The sole production/tooling surface is `packages/wasm/scripts/probe-transport-surface.mjs`.
 - Owns every profile-bearing `getVirtualFile`, `getIde`, and `ensureIdeCompiled` probe case in that file, including Vue/Svelte success, optional-product, structural-absence, and refusal variants. Each becomes one typed `compileRequest`; the IDE cases stop being an ensure-then-read pair.
-- Exported-surface enumeration, missing-versus-refused classification, canonical IDs, output/map/diagnostic normalization, SFC-absolute span meaning, and JavaScript UTF-16 offsets remain unchanged.
+- Exported-surface enumeration, the structural missing-versus-refused distinction, canonical IDs, output/map/diagnostic normalization, SFC-absolute span meaning, and JavaScript UTF-16 offsets remain unchanged.
 
 ## Exact predecessor contract
 
@@ -57,15 +57,28 @@ Move the direct WASM transport-surface probe to CCA1O3's typed request while the
 ## Acceptance and evidence
 
 - The probe contains no legacy profile request or positional IDE profile and exercises the typed Vue/Svelte request variants. Every probe axis survives, and each former ensure-then-read IDE case is one typed call; no case gains a WASM call or copies a source into its request.
-- Probe output keys, ordering, output/map/refusal classification, canonical IDs, and serialized offsets are equivalent.
+- Probe output keys, ordering, canonical IDs, and serialized offsets are equivalent. Classification follows the two-route contract: wherever both routes answer the same demand — success, optional-product, structural absence, typed refusal — the transports classify identically. The routes' semantics differ in exactly two places, and in each the transport is held to the in-process host's answer to that route's own demand: a node of a refused compile (a cached per-node read answers `missing`; a complete-only typed request carries the refusal as `error`) and a map-less IDE demand (a cached read of a never-ensured profile answers `missing`; a complete typed compile publishes the projection without the map).
 - `node --check`, WASM request-conversion fixtures, and the existing native/WASM transport comparison prove shape and behavior.
 
 ## Deletions, budgets, and aborts
 
 - Delete no WASM compatibility type, binding decode, probe case, output key, or comparison rail.
 - Ceiling: 250 production/tooling LOC, 1 production/tooling file, 1 related package; rescope above 600 LOC, 3 files, 2 unrelated packages, or if fixture generation or playground runtime routing enters.
-- Abort on a deleted probe axis, duplicate WASM execution, changed normalization, or transport divergence.
+- Abort on a deleted probe axis, duplicate WASM execution, changed normalization, or a transport whose answer diverges from the in-process host's answer to the same demand on that transport's own route.
 
 ## Verification and review
 
 Run `node --check`, WASM request-conversion tests, the hermetic transport comparison, and `targeted-domain`. Add only CCA1O3B's ledger row and apply `public-3`.
+
+## Recorded deviation (ratified: charter amended)
+
+The complete-only typed route this charter originally mandated admits no
+`missing` classification for two of the cases it also directed to preserve,
+so the implementation classifies `svelteServerStyle` (`missing` → `error`)
+and `getIdeWithoutMap` (`missing` → `published`) on the WASM transport
+only; the NAPI transport's classifications are unchanged. The conflict, why
+no third answer exists, and the ratification options are recorded in
+`decisions/2026-09-03-complete-only-transport-probe-classification-deviation.md`.
+The architect ruling of 2026-09-04 selected option (b): the acceptance and
+abort clauses above now state the two-route contract, which is the invariant
+this charter enforces from here on.

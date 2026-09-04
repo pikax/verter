@@ -2,8 +2,25 @@
 // Drive the WASM transport's representative cases and print JSON for
 // Rust-side comparison against the in-process host.
 //
+// Every compiled product here is demanded through the transport's typed
+// compile request: one call per demand, stating the products it wants, with
+// the case then selecting what it is about out of the response. No compile
+// profile is built, no ensure-then-read ordering is relied on, and no case
+// drives the module more than once.
+//
 // Enumerates the exported surface from the built artifact, never from
-// source. Exit: 0 probed, 2 module could not load (never a pass).
+// source.
+//
+// Exit: 0 probed with the whole record on stdout; 2 the module could not
+// load, with a `{loaded: false}` record naming why (never a pass). A third
+// state exists and is deliberate: a wire break a case cannot classify
+// (`soleProductRow`) throws out of the case and past the single
+// `process.stdout.write` at the end, so the process exits non-zero having
+// printed NOTHING — including every unrelated case. The Rust side reads
+// that as "the probe emitted no JSON" and fails with the captured stderr.
+// Aborting the record is the intent: a response whose product rows do not
+// match the demand makes every other case's reading of that response
+// unsafe.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -46,24 +63,160 @@ const SUPPORTED_SVELTE =
   '<script>\n  let count = $state(0);\n</script>\n\n<div class="root">{count}</div>\n\n<style>\n  .root { color: red; }\n</style>\n';
 const VUE_SFC =
   "<script setup>\nconst props = defineProps({ label: { type: String, required: true } });\n</script>\n\n<template>\n  <button>{{ label }}</button>\n</template>\n";
+// The same SFC WITH a `<style>` block. The structural-absence case below
+// reads `style[0]` out of a Vue runtime product; that absence only means
+// "this carrier has no such block" if a Vue runtime product WOULD carry the
+// row when the carrier does have one. This carrier is the positive control
+// that pins it, on the same framework arm and the same typed demand.
+const VUE_SFC_WITH_STYLE = `${VUE_SFC}\n<style>\n.root { color: red; }\n</style>\n`;
 
-function virtualFile(host, canonicalId, kind, compileProfile, index) {
-  const nodeKind = index === undefined ? { kind } : { kind, index };
+// ── The typed compile request ────────────────────────────────────────────
+//
+// One call carries the whole demand and answers with every product it asked
+// for, so a case about one node of a carrier's runtime surface selects that
+// node out of the response instead of issuing a read of its own. Sibling
+// cases over the SAME demand share one compile: this route consults and
+// publishes no compile cache slot, so re-stating a demand would compile it
+// a second time rather than hit a warm slot.
+//
+// The HMR strategy has no slot on this request. The route compiles with HMR
+// off, which is exactly what a `"none"` strategy asked for.
+
+/**
+ * A carrier's runtime surface, as one typed request.
+ *
+ * The requested product kind IS the client/server demand: on the Svelte arm
+ * there is no second bit that could disagree with it. The Vue arm keeps its
+ * own `options.ssr` row, which the request schema carries separately and
+ * which therefore CAN contradict the product tag; both are derived from the
+ * one `ssr` argument here so this probe never states that contradiction.
+ * The source-map axis is stated per product rather than once for the whole
+ * compile.
+ */
+function runtimeRequest(fileKind, { sourceMap, ssr }) {
+  const identity = { isProduction: true, forceJs: false };
+  const products = [
+    ssr
+      ? { runtimeServer: { runtimeSourceMap: sourceMap } }
+      : { runtimeClient: { runtimeSourceMap: sourceMap } },
+  ];
+  if (fileKind === "svelte") return { svelte: { identity, products, options: {} } };
+  return {
+    vue: {
+      identity,
+      products,
+      options: { backend: "inferred", ssr, isCustomElement: [], babelParserPlugins: [] },
+    },
+  };
+}
+
+/**
+ * A carrier's IDE surface, as one typed request.
+ *
+ * `ideChunkBoundaries` is REQUIRED to be false: the carrier bridge
+ * substitutes its own value derived from the selected template block, so
+ * the host route refuses the request outright when a caller asks for `true`
+ * and `false` is the only admitted value. The remaining axes are stated at
+ * the same values a bare IDE demand leaves them at.
+ */
+function ideRequest(fileKind, sourceMap) {
+  const identity = { isProduction: false, forceJs: false };
+  const products = [
+    {
+      ideCompanion: {
+        wantSourceMap: sourceMap,
+        embedAmbientTypes: false,
+        conditionalRootNarrowing: false,
+        strictSlots: false,
+        ideChunkBoundaries: false,
+      },
+    },
+  ];
+  if (fileKind === "svelte") return { svelte: { identity, products, options: {} } };
+  return {
+    vue: {
+      identity,
+      products,
+      options: { backend: "inferred", ssr: false, isCustomElement: [], babelParserPlugins: [] },
+    },
+  };
+}
+
+/**
+ * Execute ONE typed request.
+ *
+ * The route is complete-only: a refusal at any stage throws the refusal
+ * message as a string and publishes nothing, while a completed compile
+ * carries every requested product. The two are separated here so no case
+ * downstream has to infer which of them happened.
+ */
+function compile(host, canonicalId, request) {
   try {
-    const response = host.getVirtualFile({ canonicalId, nodeKind, compileProfile });
-    // A MISSING node comes back as a null/absent response; a REFUSED one
-    // throws. Both are recorded distinctly — collapsing them would hide which
-    // one the transport produced.
-    if (response === null || response === undefined) return { outcome: "missing" };
-    return {
-      outcome: "published",
-      code: response.code,
-      hasMap: response.sourceMap !== null && response.sourceMap !== undefined,
-      lang: response.lang ?? null,
-    };
+    return { refusal: null, response: host.compileRequest(canonicalId, request) };
   } catch (error) {
-    return { outcome: "error", message: String(error?.message ?? error) };
+    return { refusal: String(error?.message ?? error), response: null };
   }
+}
+
+/**
+ * The single product row of a completed compile, taken by tag — never by
+ * position.
+ *
+ * A response carries one row per requested product, tagged with the
+ * request's own spelling, so a one-product demand answered by anything else
+ * is a wire break inside this probe. It fails the probe loudly rather than
+ * riding into the record as an absent product.
+ */
+function soleProductRow(response, tags) {
+  const products = Array.isArray(response?.products) ? response.products : [];
+  const observed = products.map((product) => product?.kind ?? "<untagged>");
+  if (products.length !== 1 || !tags.includes(observed[0])) {
+    throw new Error(
+      `expected exactly one [${tags.join("|")}] product row, got: [${observed.join(", ")}]`,
+    );
+  }
+  return products[0];
+}
+
+/**
+ * One node of a carrier's compiled runtime surface.
+ *
+ * Three classes, kept apart. A REFUSED compile is an `error` carrying the
+ * host's typed diagnostic code: the transaction produced nothing, so no
+ * node of it exists. A node the carrier simply does not have is `missing`:
+ * the compile completed and its product carries no such row. Everything
+ * else is the published node. Collapsing any two of these would hide which
+ * one the transport produced.
+ *
+ * `productTag` is the exact requested product (`runtimeClient` or
+ * `runtimeServer`). A completed compile whose sole row is the other tag
+ * is a wire break, not a pass.
+ */
+function runtimeNodeCase(compiled, productTag, kind, index) {
+  if (compiled.refusal !== null) return { outcome: "error", message: compiled.refusal };
+  const nodes = soleProductRow(compiled.response, [productTag]).nodes ?? [];
+  const node = nodes.find(
+    (row) => row?.node?.kind === kind && (row?.node?.index ?? null) === (index ?? null),
+  );
+  if (node === undefined) return { outcome: "missing" };
+  return {
+    outcome: "published",
+    code: node.code,
+    hasMap: node.sourceMap !== null && node.sourceMap !== undefined,
+    lang: node.lang ?? null,
+  };
+}
+
+/** The IDE projection of a completed compile, or the refusal that replaced it. */
+function ideCase(compiled) {
+  if (compiled.refusal !== null) return { outcome: "error", message: compiled.refusal };
+  const row = soleProductRow(compiled.response, ["ideCompanion"]);
+  return {
+    outcome: "published",
+    code: row.code,
+    hasMap: row.sourceMap !== null && row.sourceMap !== undefined,
+    isJsx: row.isJsx ?? null,
+  };
 }
 
 const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
@@ -77,23 +230,23 @@ const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
     source: SUPPORTED_SVELTE,
     fileKind: "svelte",
   });
-  results.cases.svelteMainWithMap = virtualFile(host, "/probe/Ok.svelte", "main", {
-    isProduction: true,
-    sourceMap: true,
-    hmrStrategy: "none",
-  });
-  results.cases.svelteMainWithoutMap = virtualFile(host, "/probe/Ok.svelte", "main", {
-    isProduction: true,
-    sourceMap: false,
-    hmrStrategy: "none",
-  });
-  results.cases.svelteStyleWithMap = virtualFile(
+  // One compile per DEMAND, not per case: the main and style cases below are
+  // two nodes of the one mapped runtime surface, so they read the same
+  // response rather than compiling that surface twice.
+  const mapped = compile(
     host,
     "/probe/Ok.svelte",
-    "style",
-    { isProduction: true, sourceMap: true, hmrStrategy: "none" },
-    0,
+    runtimeRequest("svelte", { sourceMap: true, ssr: false }),
   );
+  // The map axis is its own demand, so it is its own compile.
+  const unmapped = compile(
+    host,
+    "/probe/Ok.svelte",
+    runtimeRequest("svelte", { sourceMap: false, ssr: false }),
+  );
+  results.cases.svelteMainWithMap = runtimeNodeCase(mapped, "runtimeClient", "main");
+  results.cases.svelteMainWithoutMap = runtimeNodeCase(unmapped, "runtimeClient", "main");
+  results.cases.svelteStyleWithMap = runtimeNodeCase(mapped, "runtimeClient", "style", 0);
   results.cases.svelteNodeList = host.listVirtualFiles("/probe/Ok.svelte");
 }
 
@@ -106,28 +259,27 @@ const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
     source: SUPPORTED_SVELTE,
     fileKind: "svelte",
   });
-  results.cases.svelteServerRefusal = virtualFile(host, "/probe/Server.svelte", "main", {
-    isProduction: true,
-    sourceMap: true,
-    ssr: true,
-    hmrStrategy: "none",
-  });
-  results.cases.svelteServerStyle = virtualFile(
+  // The server surface is ONE demand, and the route refuses it as a whole:
+  // no product is assembled, so neither the main node nor the CSS node of
+  // that surface exists. Both cases therefore observe the same typed
+  // refusal, carrying the host's diagnostic code, and neither carries bytes.
+  const server = compile(
     host,
     "/probe/Server.svelte",
-    "style",
-    { isProduction: true, sourceMap: true, ssr: true, hmrStrategy: "none" },
-    0,
+    runtimeRequest("svelte", { sourceMap: true, ssr: true }),
   );
+  results.cases.svelteServerRefusal = runtimeNodeCase(server, "runtimeServer", "main");
+  results.cases.svelteServerStyle = runtimeNodeCase(server, "runtimeServer", "style", 0);
 }
 
 // STRUCTURAL ABSENCE: a node the carrier simply does not have
 //
-// The refusal case above reaches a missing node THROUGH a refused compilation.
-// This one never involves a refusal at all: the carrier compiles normally and
-// the requested node does not exist, because the SFC has no `<style>` block.
-// The two are distinct classes of "no product" and a transport can serialize
-// them differently, so both are probed.
+// The case above never produces a node because the whole compile is refused.
+// This one involves no refusal at all: the carrier compiles normally, its
+// runtime product is complete, and the requested node is still not in it —
+// the SFC has no `<style>` block. The two are distinct classes of "no
+// product" and the transport serializes them differently, so both are
+// probed and the successful control below proves the file loaded.
 {
   const host = new module_.VerterHost({});
   host.upsert({
@@ -136,24 +288,55 @@ const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
     source: VUE_SFC,
     fileKind: "vue",
   });
-  results.cases.vueMissingStyle = virtualFile(
+  const styleless = compile(
     host,
     "/probe/NoStyle.vue",
-    "style",
-    { isProduction: true, sourceMap: true, hmrStrategy: "none" },
-    0,
+    runtimeRequest("vue", { sourceMap: true, ssr: false }),
   );
-  // The SUCCESSFUL control on the same carrier: the node that DOES exist is
-  // published, so an absent answer above cannot be a host that failed to load
-  // the file at all.
-  results.cases.vueMissingStyleControl = virtualFile(host, "/probe/NoStyle.vue", "main", {
-    isProduction: true,
-    sourceMap: true,
-    hmrStrategy: "none",
+  results.cases.vueMissingStyle = runtimeNodeCase(styleless, "runtimeClient", "style", 0);
+  // The SUCCESSFUL control, out of the SAME completed compile: the node that
+  // DOES exist is published, so the absent answer above cannot be a host that
+  // failed to load the file at all.
+  results.cases.vueMissingStyleControl = runtimeNodeCase(styleless, "runtimeClient", "main");
+
+  // Internal positive control for the absent node itself. A Vue carrier that
+  // HAS a `<style>` block must publish `style[0]` on this same demand, or the
+  // absence above is vacuous. This is NOT a probe output key: adding one
+  // would change the case set. A miss aborts the record instead.
+  host.upsert({
+    canonicalId: "/probe/WithStyle.vue",
+    inputId: "/probe/WithStyle.vue",
+    source: VUE_SFC_WITH_STYLE,
+    fileKind: "vue",
   });
+  const styled = compile(
+    host,
+    "/probe/WithStyle.vue",
+    runtimeRequest("vue", { sourceMap: true, ssr: false }),
+  );
+  const styleControl = runtimeNodeCase(styled, "runtimeClient", "style", 0);
+  if (styleControl.outcome !== "published") {
+    throw new Error(
+      `Vue carrier with a style block produced ${styleControl.outcome}, so vueMissingStyle cannot discriminate a missing style node`,
+    );
+  }
 }
 
-// IDE/TSX: ensure + read, on the profile the LSP uses
+// IDE/TSX: the IDE surface as a requested product
+//
+// There is no ensure-then-read pair here and no ordering for a caller to
+// get right: one typed call states the IDE demand and answers with the
+// projection. `ensureIdeCompiled` is that same call's producibility answer
+// — the demanded IDE product came back. On this complete-only route that
+// answer is the error arm: a completed `compileRequest` response cannot
+// lack the `ideCompanion` row (`compile_request_response_to_wasm` maps
+// products 1:1 or errors), so no live boolean exists to report on the ok
+// arm and none is invented. `outcome: "ok"` plus the published
+// `getIdeWithMap` case below are the producibility proof.
+//
+// The map axis is a second demand, so it is a second call. It is no longer
+// a never-compiled slot that answers absent: a complete compile publishes
+// the projection either way, with the map only when it was asked for.
 {
   const host = new module_.VerterHost({});
   host.upsert({
@@ -162,37 +345,14 @@ const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
     source: SUPPORTED_SVELTE,
     fileKind: "svelte",
   });
-  const ideProfile = { target: "ide", sourceMap: true, hmrStrategy: "none" };
-  try {
-    results.cases.ensureIdeCompiled = {
-      outcome: "ok",
-      value: host.ensureIdeCompiled("/probe/Ide.svelte", ideProfile),
-    };
-  } catch (error) {
-    results.cases.ensureIdeCompiled = {
-      outcome: "error",
-      message: String(error?.message ?? error),
-    };
-  }
-  for (const [label, profile] of [
-    ["getIdeWithMap", ideProfile],
-    ["getIdeWithoutMap", { target: "ide", sourceMap: false, hmrStrategy: "none" }],
-  ]) {
-    try {
-      const ide = host.getIde("/probe/Ide.svelte", profile);
-      results.cases[label] =
-        ide === null || ide === undefined
-          ? { outcome: "missing" }
-          : {
-              outcome: "published",
-              code: ide.code,
-              hasMap: ide.sourceMap !== null && ide.sourceMap !== undefined,
-              isJsx: ide.isJsx ?? null,
-            };
-    } catch (error) {
-      results.cases[label] = { outcome: "error", message: String(error?.message ?? error) };
-    }
-  }
+  const mappedIde = compile(host, "/probe/Ide.svelte", ideRequest("svelte", true));
+  const unmappedIde = compile(host, "/probe/Ide.svelte", ideRequest("svelte", false));
+  results.cases.ensureIdeCompiled =
+    mappedIde.refusal !== null
+      ? { outcome: "error", message: mappedIde.refusal }
+      : { outcome: "ok" };
+  results.cases.getIdeWithMap = ideCase(mappedIde);
+  results.cases.getIdeWithoutMap = ideCase(unmappedIde);
 }
 
 // PUBLIC API: option conversion of the `mode` argument

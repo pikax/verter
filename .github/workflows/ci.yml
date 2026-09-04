@@ -347,11 +347,11 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
-  # The two build configurations no other job compiles.
+  # The build configurations no other job compiles.
   #
-  # Every other Rust job here builds the HOST target in DEBUG. Both of the
-  # configurations below have already shipped defects that were structurally
-  # invisible to that:
+  # Every other Rust job here builds the HOST target in DEBUG with default
+  # features. Each configuration below has already shipped a defect that was
+  # structurally invisible to that:
   #
   # - RELEASE. `debug_assert!` gates on `cfg!`, a RUNTIME constant, so its body
   #   still name-resolves in release. A `#[cfg(debug_assertions)]` helper called
@@ -365,6 +365,17 @@ jobs:
   #   `extensions/*` manifests; nothing linted the wasm32 build that the
   #   playground and `@verter/wasm` consumers actually run.
   #
+  # - The `transport-authoritative` FEATURE. Its suite compiles only when that
+  #   opt-in cargo feature is on, so no job above sees it: a signature change in
+  #   a crate it calls leaves it uncompilable while every default job stays
+  #   green, and the breakage surfaces only when someone runs the suite by hand.
+  #   That already happened — a `transform_vue_style` parameter addition and a
+  #   field-to-method change landed against call sites in that suite and nothing
+  #   failed. Checking the feature keeps the drift loud. Execution of the
+  #   native/WASM comparison lanes lives in `transport-route-equivalence`,
+  #   which consumes the `wasm-build` and `build-native-node` artifacts.
+  #   This clippy step is NOT that lane.
+  #
   # `cargo check` (not `build`) for release: this is a compile-configuration
   # gate, not an artifact producer, and skipping codegen keeps it cheap.
   # ---------------------------------------------------------------------------
@@ -373,7 +384,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -387,6 +398,8 @@ jobs:
         run: cargo check --workspace --release
       - name: Clippy (wasm32-unknown-unknown)
         run: cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings
+      - name: Clippy (transport-equivalence feature)
+        run: cargo clippy -p verter_session --tests --features transport-authoritative -- -D warnings
 
   # Build the provider-free default-feature Rust test universe once. Real
   # providers have separate serial libtest jobs below because each third-party
@@ -1330,6 +1343,94 @@ jobs:
       - name: Native-eval @verter/component-meta
         run: pnpm --filter @verter/component-meta test:native
 
+  # Native + WASM transport-route comparison, executed. Clippy in
+  # rust-build-configs only compiles the feature; this job builds the two
+  # artifacts the comparison drives, runs the suite on an exact allowlist
+  # of the native/WASM/census names, and fails unless the
+  # `running N tests` line proves the named comparisons ran. The bundler
+  # lane is not on that list: it needs a matching unplugin freshness pin
+  # owned elsewhere.
+  transport-route-equivalence:
+    name: Transport route equivalence
+    needs: [detect-changes, wasm-build, build-native-node]
+    if: needs.detect-changes.outputs.rust == 'true' || needs.detect-changes.outputs.wasm == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: transport-route-equivalence
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download WASM build
+        uses: actions/download-artifact@v7
+        with:
+          name: wasm-build
+          path: packages/wasm
+      - name: Download native binding
+        uses: actions/download-artifact@v7
+        with:
+          name: native-node
+          path: packages/native/dist
+      - name: Syntax-check the WASM transport probe
+        run: node --check packages/wasm/scripts/probe-transport-surface.mjs
+      - name: Execute native and WASM transport comparisons
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          # Exact allowlist of the executed names, not substring skips over
+          # the bundler lane: a later test whose name merely contains a
+          # skipped token (or a bundler-lane test without "bundler" in its
+          # name) must never be silently dropped or need extra skip patches.
+          # A listed name that stops matching fails the floor check below
+          # rather than quietly not running.
+          executed=(
+            "framework::suite_census::the_transport_route_equivalence_suite_is_present_and_non_vacuous"
+            "framework::transport_route_equivalence_tests::this_suite_is_registered_with_the_census"
+            "framework::transport_route_equivalence_tests::the_napi_transport_matches_the_in_process_host_route"
+            "framework::transport_route_equivalence_tests::the_napi_batch_route_matches_the_in_process_batch_route_item_for_item"
+            "framework::transport_route_equivalence_tests::every_exported_napi_spelling_is_executed_or_classified_out_of_scope"
+            "framework::transport_route_equivalence_tests::the_wasm_transport_matches_the_in_process_host_route"
+            "framework::transport_route_equivalence_tests::every_exported_wasm_spelling_is_executed_or_classified_out_of_scope"
+            "framework::transport_route_equivalence_tests::the_audited_compile_spelling_captures_for_vue_and_not_for_svelte_on_both_transports"
+            "framework::transport_route_equivalence_tests::the_transports_report_a_missing_node_the_same_way"
+          )
+          set +e
+          cargo test -p verter_session --lib --features transport-authoritative \
+            -- --exact "${executed[@]}" --test-threads=1 \
+            >"$out" 2>&1
+          rc=$?
+          set -e
+          cat "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::transport route-equivalence tests failed"
+            exit "$rc"
+          fi
+          if ! grep -F -q 'the_wasm_transport_matches_the_in_process_host_route' "$out"; then
+            echo "::error::wasm transport comparison did not run; read the running N tests line, never the exit code"
+            exit 1
+          fi
+          if ! grep -F -q 'the_napi_transport_matches_the_in_process_host_route' "$out"; then
+            echo "::error::napi transport comparison did not run; read the running N tests line, never the exit code"
+            exit 1
+          fi
+          n="$(sed -n 's/^running \([0-9][0-9]*\) tests$/\1/p' "$out" | tail -n1)"
+          if [ -z "${n}" ] || [ "${n}" -lt 9 ]; then
+            echo "::error::expected at least 9 executed transport-equivalence tests, got running N tests line: ${n:-missing}"
+            exit 1
+          fi
+          echo "transport route-equivalence executed ${n} tests"
+
   dx-harness-hermetic:
     name: DX Harness (raw-LSP hermetic)
     needs: [detect-changes, build-lsp-debug]
@@ -1851,6 +1952,7 @@ jobs:
       - editor-neutral-lsp
       - vscode-e2e
       - native-test
+      - transport-route-equivalence
       - dx-harness-hermetic
       - build-lsp-debug
       - build-native-node

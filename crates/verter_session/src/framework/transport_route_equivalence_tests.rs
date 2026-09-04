@@ -14,18 +14,44 @@
 //! Behind `transport-authoritative`. Missing artifacts FAIL (name the
 //! build command) — never skip.
 //!
+//! THREE artifacts, not two. Each transport this module compares is a
+//! separately built product, and a run missing any one of them fails a
+//! whole lane with that lane's build command — so build all three before
+//! reading any result as evidence about the route:
+//!
 //! ```text
 //! CARGO_BUILD_JOBS=4 pnpm --filter @verter/native run build:debug
 //! CARGO_BUILD_JOBS=4 cargo build -p verter_wasm --target wasm32-unknown-unknown \
 //!   && wasm-bindgen --target web --out-dir packages/wasm/wasm --out-name verter_wasm \
 //!      target/wasm32-unknown-unknown/debug/verter_wasm.wasm
+//! pnpm --filter @verter/unplugin build
 //! cargo test -p verter_session --lib --features transport-authoritative \
 //!   transport_route_equivalence -- --test-threads=1
 //! ```
 //!
+//! The bundler lane additionally pins the built plugin against a committed
+//! source/dist fingerprint (`packages/unplugin/scripts/
+//! probe-bundler-route.freshness.json`). Editing that package WITHOUT
+//! regenerating the record turns every bundler test into a `Build it first`
+//! failure that a correct build cannot clear, which reads as a missing
+//! artifact rather than as the stale pin it is. Rebuild the plugin, then
+//! rewrite the record from the observed hashes the probe reports.
+//!
 //! Without the feature this module is not compiled: a filter naming it
 //! matches ZERO tests and `cargo test` still exits 0. Read the
 //! `running N tests` line, never the exit code.
+//!
+//! CI executes the native and WASM comparison lanes (`Transport route
+//! equivalence` in `.github/workflows/ci.yml`) against freshly built
+//! `@verter/native` and wasm-bindgen web artifacts. That job runs an
+//! EXACT allowlist of the nine native/WASM/census names — substring
+//! skips are not used, so a later test cannot be silently dropped for
+//! its name's tokens — and fails if the `running N tests` line is
+//! missing, below the allowlist floor (9), or does not name those two
+//! comparisons. The bundler lane is not on the list: it also needs a
+//! matching `@verter/unplugin` freshness pin, a different surface. Clippy
+//! with `--features transport-authoritative` in `Rust Build
+//! Configurations` stays the cheap signature-drift check.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -290,6 +316,178 @@ fn host_node(
     }
 }
 
+/// Which framework arm of the WASM probe's typed request builders a
+/// mirrored in-process request states.
+#[derive(Clone, Copy)]
+enum ProbeFramework {
+    Svelte,
+    Vue,
+}
+
+/// The framework arm mirroring the probe's `runtimeRequest(fileKind, …)` /
+/// `ideRequest(fileKind, …)` option objects field for field: Svelte `{}`
+/// (all-default options), Vue `{ backend: "inferred", ssr, isCustomElement:
+/// [], babelParserPlugins: [] }`.
+fn probe_framework_request(
+    framework: ProbeFramework,
+    ssr: bool,
+) -> verter_compiler::compile_request::FrameworkCompileRequest {
+    use verter_compiler::compile_request::{
+        FrameworkCompileRequest, SvelteCompileRequest, VueBackendRequest, VueCompileRequest,
+    };
+    match framework {
+        ProbeFramework::Svelte => FrameworkCompileRequest::Svelte(SvelteCompileRequest::default()),
+        ProbeFramework::Vue => FrameworkCompileRequest::Vue(VueCompileRequest {
+            backend: VueBackendRequest::Inferred,
+            ssr,
+            is_custom_element: Vec::new(),
+            babel_parser_plugins: Vec::new(),
+            ..VueCompileRequest::default()
+        }),
+    }
+}
+
+/// The response's single product row, mirroring the probe's `soleProductRow`
+/// strictness: a one-product demand answered by anything else is a wire
+/// break on the comparison side too, not a datum.
+#[track_caller]
+fn sole_typed_row<'a>(
+    response: &'a crate::CompileRequestResponse,
+    canonical: &str,
+) -> &'a crate::CompiledProduct {
+    let [row] = response.products.as_slice() else {
+        panic!(
+            "{canonical}: expected exactly one typed product row, got {}: {:?}",
+            response.products.len(),
+            response
+                .products
+                .iter()
+                .map(|product| match product {
+                    crate::CompiledProduct::Runtime { kind, .. } => kind.wire_tag(),
+                    crate::CompiledProduct::Ide(_) => "ideCompanion",
+                    crate::CompiledProduct::Analysis(_) => "analysis",
+                })
+                .collect::<Vec<_>>()
+        )
+    };
+    row
+}
+
+/// The in-process host's answer to the SAME typed request the WASM probe
+/// issues for one node of a carrier's runtime surface — `runtimeRequest(
+/// fileKind, { sourceMap, ssr })` mirrored field for field: the stated
+/// identity (`isProduction: true`, `forceJs: false`, no filename, no
+/// component id), the one mapped runtime product, default style ownership,
+/// and the framework's own default options.
+///
+/// The binding this probe drives decodes its JS request into the canonical
+/// `CompileRequest` and calls `VerterHost::compile_request`
+/// (`crates/verter_wasm/src/lib.rs`), so the comparison the typed route
+/// deserves is against this entry — never against a per-node profile read,
+/// which answers a different question through a second option authority: a
+/// typed axis the profile happens not to model for this SFC would pass
+/// unnoticed.
+#[track_caller]
+fn host_typed_runtime_node(
+    host: &VerterHost,
+    canonical: &str,
+    framework: ProbeFramework,
+    ssr: bool,
+    source_map: bool,
+    node: VirtualNodeKind,
+) -> HostOutcome {
+    use verter_compiler::compile_request::{CompileProduct, CompileRequest, RuntimeProductRequest};
+
+    let runtime = RuntimeProductRequest {
+        runtime_source_map: source_map,
+        ..RuntimeProductRequest::default()
+    };
+    let product = if ssr {
+        CompileProduct::RuntimeServer(runtime)
+    } else {
+        CompileProduct::RuntimeClient(runtime)
+    };
+    let request = CompileRequest::new(
+        vec![product],
+        probe_framework_request(framework, ssr),
+        None,
+        None,
+        None,
+        true,
+        false,
+    )
+    .unwrap_or_else(|error| {
+        panic!("{canonical}: the probe's own request shape no longer constructs: {error:?}")
+    });
+
+    match host.compile_request(canonical, request) {
+        Ok(response) => {
+            let crate::CompiledProduct::Runtime { nodes, .. } =
+                sole_typed_row(&response, canonical)
+            else {
+                panic!("{canonical}: the completed typed runtime request carried no runtime row");
+            };
+            match nodes.iter().find(|candidate| candidate.node == node) {
+                Some(row) => HostOutcome::Published {
+                    code: row.code.to_string(),
+                    source_map: row.source_map.as_ref().map(|map| map.to_string()),
+                    lang: row.lang.clone(),
+                },
+                // A completed compile whose product carries no such node is
+                // structural absence — the same class the cached read's
+                // `MissingVirtualNode` answers.
+                None => HostOutcome::Missing,
+            }
+        }
+        Err(crate::CompileRequestFailure::RuntimeSurfaceRefused {
+            diagnostic_code, ..
+        }) => HostOutcome::Refused { diagnostic_code },
+        Err(other) => panic!("{canonical}: unmodelled typed request outcome {other:?}"),
+    }
+}
+
+/// The in-process host's IDE projection for the SAME typed request the WASM
+/// probe issues — its `ideRequest("svelte", sourceMap)` mirrored field for
+/// field: `isProduction: false`, `forceJs: false`, default Svelte options,
+/// and one `ideCompanion` product with every axis stated (`wantSourceMap`,
+/// and `false` for `embedAmbientTypes`, `conditionalRootNarrowing`,
+/// `strictSlots`, and the carrier-bridge-substituted `ideChunkBoundaries`).
+#[track_caller]
+fn host_typed_ide(host: &VerterHost, canonical: &str, source_map: bool) -> crate::IdeResponse {
+    use verter_compiler::compile_request::{CompileProduct, CompileRequest, IdeProductRequest};
+
+    let request = CompileRequest::new(
+        vec![CompileProduct::IdeCompanion(IdeProductRequest {
+            want_source_map: source_map,
+            embed_ambient_types: false,
+            conditional_root_narrowing: false,
+            strict_slots: false,
+            types_module_name: None,
+            ide_chunk_boundaries: false,
+            ..IdeProductRequest::default()
+        })],
+        probe_framework_request(ProbeFramework::Svelte, false),
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .unwrap_or_else(|error| {
+        panic!("{canonical}: the probe's own request shape no longer constructs: {error:?}")
+    });
+
+    match host.compile_request(canonical, request) {
+        Ok(response) => {
+            let crate::CompiledProduct::Ide(ide) = sole_typed_row(&response, canonical) else {
+                panic!("{canonical}: the completed typed IDE request carried no ideCompanion row");
+            };
+            ide.clone()
+        }
+        Err(other) => panic!("{canonical}: the typed IDE request refused: {other:?}"),
+    }
+}
+
 /// Assert one probe case equals the in-process host's answer for the same typed
 /// request.
 #[track_caller]
@@ -350,46 +548,72 @@ fn assert_case_matches_host(transport: &str, label: &str, case: &Value, expected
     }
 }
 
+/// How a transport's probe obtains a carrier's products.
+///
+/// The two routes answer the same questions about bytes, maps, languages
+/// and refusal codes, so every comparison below is shared. They differ in
+/// exactly two places, and only because the QUESTION differs: what happens
+/// to a node of a compile that was refused, and what an IDE demand means
+/// when nothing has been compiled for it yet.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProductRoute {
+    /// Cached per-node reads, plus the ensure-then-read IDE pair. A node of
+    /// a refused compile reads as absent, and an IDE read for a profile
+    /// nothing ensured has no slot to serve.
+    ProfileCachedReads,
+    /// One complete typed compile request per demand. A refusal replaces
+    /// the whole transaction, so a node of it does not exist to be absent;
+    /// and every IDE demand compiles, so none of them is unserved.
+    TypedCompileRequest,
+}
+
 /// Every case the probes execute, compared against the in-process host.
-fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
-    // Success + optional-product axis (supported Svelte).
+fn assert_transport_matches_the_host_route(transport: &str, record: &Value, route: ProductRoute) {
+    // Success + optional-product axis (supported Svelte). Each route is
+    // compared against the host's answer to ITS OWN demand: the cached
+    // per-node read on NAPI, the identical typed compile request executed
+    // in-process on WASM. Comparing the typed arm against the profile-cache
+    // read would route the expected value through a second option authority
+    // — a typed axis the profile does not model for this SFC would pass
+    // unnoticed.
     let svelte = host_with(
         "/probe/Ok.svelte",
         SUPPORTED_SVELTE,
         verter_language::FileLanguage::svelte(),
     );
+    let expected_svelte_node = |source_map: bool, kind: VirtualNodeKind| match route {
+        ProductRoute::ProfileCachedReads => host_node(
+            &svelte,
+            "/probe/Ok.svelte",
+            kind,
+            &probe_profile(false, source_map),
+        ),
+        ProductRoute::TypedCompileRequest => host_typed_runtime_node(
+            &svelte,
+            "/probe/Ok.svelte",
+            ProbeFramework::Svelte,
+            false,
+            source_map,
+            kind,
+        ),
+    };
     assert_case_matches_host(
         transport,
         "svelteMainWithMap",
         &record["cases"]["svelteMainWithMap"],
-        &host_node(
-            &svelte,
-            "/probe/Ok.svelte",
-            VirtualNodeKind::Main,
-            &probe_profile(false, true),
-        ),
+        &expected_svelte_node(true, VirtualNodeKind::Main),
     );
     assert_case_matches_host(
         transport,
         "svelteMainWithoutMap",
         &record["cases"]["svelteMainWithoutMap"],
-        &host_node(
-            &svelte,
-            "/probe/Ok.svelte",
-            VirtualNodeKind::Main,
-            &probe_profile(false, false),
-        ),
+        &expected_svelte_node(false, VirtualNodeKind::Main),
     );
     assert_case_matches_host(
         transport,
         "svelteStyleWithMap",
         &record["cases"]["svelteStyleWithMap"],
-        &host_node(
-            &svelte,
-            "/probe/Ok.svelte",
-            VirtualNodeKind::Style { index: 0 },
-            &probe_profile(false, true),
-        ),
+        &expected_svelte_node(true, VirtualNodeKind::Style { index: 0 }),
     );
     // Optional-product axis both ways; no module-byte change.
     assert_eq!(
@@ -436,12 +660,26 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
         SUPPORTED_SVELTE,
         verter_language::FileLanguage::svelte(),
     );
-    let refusal = host_node(
-        &server,
-        "/probe/Server.svelte",
-        VirtualNodeKind::Main,
-        &probe_profile(true, true),
-    );
+    // Each route is compared against the host's answer to ITS OWN demand.
+    // On the typed arm a per-node profile read would compare two different
+    // questions and would not notice a different code or a different
+    // failure arm.
+    let refusal = match route {
+        ProductRoute::ProfileCachedReads => host_node(
+            &server,
+            "/probe/Server.svelte",
+            VirtualNodeKind::Main,
+            &probe_profile(true, true),
+        ),
+        ProductRoute::TypedCompileRequest => host_typed_runtime_node(
+            &server,
+            "/probe/Server.svelte",
+            ProbeFramework::Svelte,
+            true,
+            true,
+            VirtualNodeKind::Main,
+        ),
+    };
     assert_eq!(
         refusal,
         HostOutcome::Refused {
@@ -456,17 +694,57 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
         &record["cases"]["svelteServerRefusal"],
         &refusal,
     );
-    // No CSS survives the refusal, across the boundary.
+    // No CSS survives the refusal, across the boundary. What "no CSS" LOOKS
+    // like is the one place the two routes legitimately differ, and each is
+    // compared against the host's answer to ITS OWN demand — never against
+    // the other route's. Neither may carry bytes.
+    //
+    // What the complete-request route can no longer prove: with nothing
+    // assembled, there is no CSS-specific artifact to interrogate, so this
+    // case's record is byte-identical to `svelteServerRefusal`'s and its
+    // residual value is the no-bytes check below. That is the honest limit
+    // of a complete-only wire, not a gap to paper over; per-product refusal
+    // granularity returns here only if the wire ever gains partial-product
+    // responses, and is the owner of that wire change's job.
+    let expected_style = match route {
+        ProductRoute::ProfileCachedReads => {
+            // A cached per-node read of the refused compile finds no node.
+            let absent = host_node(
+                &server,
+                "/probe/Server.svelte",
+                VirtualNodeKind::Style { index: 0 },
+                &probe_profile(true, true),
+            );
+            assert_eq!(
+                absent,
+                HostOutcome::Missing,
+                "{transport}: the cached per-node read of a refused compile no longer answers \
+                 absent, so this comparison is measuring something else"
+            );
+            absent
+        }
+        ProductRoute::TypedCompileRequest => {
+            // The host's answer to the demand the probe ACTUALLY issued:
+            // the same typed server-runtime compile request, executed
+            // in-process. Comparing against the per-node read's refusal
+            // instead would compare two different questions and would not
+            // notice the typed route carrying a different code or a
+            // different failure arm.
+            host_typed_runtime_node(
+                &server,
+                "/probe/Server.svelte",
+                ProbeFramework::Svelte,
+                true,
+                true,
+                VirtualNodeKind::Style { index: 0 },
+            )
+        }
+    };
     assert_case_matches_host(
         transport,
         "svelteServerStyle",
         &record["cases"]["svelteServerStyle"],
-        &host_node(
-            &server,
-            "/probe/Server.svelte",
-            VirtualNodeKind::Style { index: 0 },
-            &probe_profile(true, true),
-        ),
+        &expected_style,
     );
     assert!(
         record["cases"]["svelteServerStyle"]["code"] == Value::Null,
@@ -474,34 +752,61 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
         record["cases"]["svelteServerStyle"]
     );
 
-    // IDE/TSX: ensure + read vs host.
+    // IDE/TSX vs host. The BYTES, the map presence and the JSX flag are
+    // compared identically on both routes; each against the host's answer to
+    // that route's OWN demand — the cached ensure-then-read pair on NAPI,
+    // the identical typed IDE request executed in-process on WASM. What
+    // differs beyond that is what the producibility case reports and what a
+    // map-less IDE demand means.
     let ide_host = host_with(
         "/probe/Ide.svelte",
         SUPPORTED_SVELTE,
         verter_language::FileLanguage::svelte(),
     );
-    let ide_profile = CompileProfile {
-        target: crate::CompileTarget::IDE,
-        source_map: true,
-        hmr_strategy: crate::types::HmrStrategy::None,
-        ..CompileProfile::default()
-    };
-    let host_ensured = ide_host
-        .ensure_ide_compiled("/probe/Ide.svelte", &ide_profile)
-        .unwrap_or_else(|error| panic!("{transport}: host ensure_ide_compiled failed: {error:?}"));
     assert_eq!(
         record["cases"]["ensureIdeCompiled"]["outcome"], "ok",
         "{transport}/ensureIdeCompiled: the transport errored: {}",
         record["cases"]["ensureIdeCompiled"]
     );
-    assert_eq!(
-        record["cases"]["ensureIdeCompiled"]["value"], host_ensured,
-        "{transport}/ensureIdeCompiled: the transport's answer differs from the host's"
-    );
-
-    let host_ide = ide_host
-        .get_ide("/probe/Ide.svelte", &ide_profile)
-        .unwrap_or_else(|| panic!("{transport}: the host published no IDE product"));
+    let host_ide = match route {
+        ProductRoute::ProfileCachedReads => {
+            let ide_profile = CompileProfile {
+                target: crate::CompileTarget::IDE,
+                source_map: true,
+                hmr_strategy: crate::types::HmrStrategy::None,
+                ..CompileProfile::default()
+            };
+            // This route's transport case reports the cached spelling's own
+            // boolean, so it is pinned against the host's — a route that
+            // quietly stopped producing the surface reports `false` here
+            // and fails.
+            let host_ensured = ide_host
+                .ensure_ide_compiled("/probe/Ide.svelte", &ide_profile)
+                .unwrap_or_else(|error| {
+                    panic!("{transport}: host ensure_ide_compiled failed: {error:?}")
+                });
+            assert!(
+                host_ensured,
+                "{transport}/ensureIdeCompiled: the host no longer produces this carrier's IDE \
+                 surface, so the comparison below decides nothing"
+            );
+            assert_eq!(
+                record["cases"]["ensureIdeCompiled"]["value"], host_ensured,
+                "{transport}/ensureIdeCompiled: the transport's answer differs from the host's"
+            );
+            ide_host
+                .get_ide("/probe/Ide.svelte", &ide_profile)
+                .unwrap_or_else(|| panic!("{transport}: the host published no IDE product"))
+        }
+        ProductRoute::TypedCompileRequest => {
+            // No `value` pin exists on this route and none is invented: a
+            // completed response cannot lack the `ideCompanion` row (the
+            // probe's strict row reader aborts the record if it did), so
+            // `outcome === "ok"` plus the published mapped product below ARE
+            // the producibility proof.
+            host_typed_ide(&ide_host, "/probe/Ide.svelte", true)
+        }
+    };
     let transported = &record["cases"]["getIdeWithMap"];
     assert_eq!(
         transported["outcome"], "published",
@@ -521,23 +826,60 @@ fn assert_transport_matches_the_host_route(transport: &str, record: &Value) {
         transported["isJsx"], host_ide.is_jsx,
         "{transport}/getIde: the reported JSX flag differs from the host's"
     );
-    // `get_ide` is a cached read: never-ensured profile has nothing to return.
-    let unensured_profile = CompileProfile {
-        source_map: false,
-        ..ide_profile.clone()
-    };
-    assert!(
-        ide_host
-            .get_ide("/probe/Ide.svelte", &unensured_profile)
-            .is_none(),
-        "{transport}: the host now serves an IDE product for a never-ensured profile, so the \
-         comparison below is stale"
-    );
-    assert_eq!(
-        record["cases"]["getIdeWithoutMap"]["outcome"], "missing",
-        "{transport}/getIde: the transport answered for a never-ensured profile: {}",
-        record["cases"]["getIdeWithoutMap"]
-    );
+    // The map-less IDE demand. What it MEANS is route-decided, so each route
+    // is held to its own meaning against the host.
+    let unmapped = &record["cases"]["getIdeWithoutMap"];
+    match route {
+        ProductRoute::ProfileCachedReads => {
+            // A cached read of a profile nothing ensured has no slot to serve.
+            let unmapped_ide_profile = CompileProfile {
+                target: crate::CompileTarget::IDE,
+                source_map: false,
+                hmr_strategy: crate::types::HmrStrategy::None,
+                ..CompileProfile::default()
+            };
+            assert!(
+                ide_host
+                    .get_ide("/probe/Ide.svelte", &unmapped_ide_profile)
+                    .is_none(),
+                "{transport}: the host now serves an IDE product for a never-ensured profile, so \
+                 the comparison below is stale"
+            );
+            assert_eq!(
+                unmapped["outcome"], "missing",
+                "{transport}/getIde: the transport answered for a never-ensured profile: {unmapped}"
+            );
+        }
+        ProductRoute::TypedCompileRequest => {
+            // A complete compile always publishes the projection, so this is
+            // the IDE surface's optional-product axis: the map is withheld,
+            // and withholding it does not change the generated bytes.
+            let host_unmapped = host_typed_ide(&ide_host, "/probe/Ide.svelte", false);
+            assert_eq!(
+                unmapped["outcome"], "published",
+                "{transport}/getIde: a complete IDE compile published nothing: {unmapped}"
+            );
+            assert_eq!(
+                unmapped["code"].as_str(),
+                Some(host_unmapped.code.as_ref()),
+                "{transport}/getIde: the map-less IDE bytes differ from the host's"
+            );
+            assert_eq!(
+                host_unmapped.source_map, None,
+                "{transport}: the host now emits a map for a map-less IDE demand, so this axis \
+                 decides nothing"
+            );
+            assert_eq!(
+                unmapped["hasMap"], false,
+                "{transport}/getIde: the transport published an IDE map that was never requested: \
+                 {unmapped}"
+            );
+            assert_eq!(
+                transported["code"], unmapped["code"],
+                "{transport}/getIde: the source-map axis changed the generated IDE bytes"
+            );
+        }
+    }
 
     // Option conversion: public-API `mode`.
     let vue = host_with(
@@ -588,17 +930,42 @@ fn assert_partition(
     exported: &[String],
     executed: &[&str],
     out_of_scope: &[(&str, &str)],
-    extra_out_of_scope: &[(&str, &str)],
+    extra_classified: &[&[(&str, &str)]],
 ) {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     let exported_set: BTreeSet<&str> = exported.iter().map(String::as_str).collect();
-    let executed_set: BTreeSet<&str> = executed.iter().copied().collect();
-    let classified_set: BTreeSet<&str> = out_of_scope
+    let mut executed_set: BTreeSet<&str> = BTreeSet::new();
+    let mut duplicate_executed: Vec<&str> = Vec::new();
+    for name in executed {
+        if !executed_set.insert(*name) {
+            duplicate_executed.push(*name);
+        }
+    }
+    assert!(
+        duplicate_executed.is_empty(),
+        "{transport}: {} spelling(s) are listed executed more than once, so the classification \
+         cannot prove uniqueness: {duplicate_executed:?}",
+        duplicate_executed.len()
+    );
+
+    let mut classified: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut duplicate_classified: Vec<(&str, &str, &str)> = Vec::new();
+    for (name, reason) in out_of_scope
         .iter()
-        .chain(extra_out_of_scope.iter())
-        .map(|(name, _)| *name)
-        .collect();
+        .chain(extra_classified.iter().copied().flatten())
+    {
+        if let Some(prior) = classified.insert(*name, *reason) {
+            duplicate_classified.push((*name, prior, *reason));
+        }
+    }
+    assert!(
+        duplicate_classified.is_empty(),
+        "{transport}: {} spelling(s) appear in two classified lists, so the classification \
+         cannot prove uniqueness: {duplicate_classified:?}",
+        duplicate_classified.len()
+    );
+    let classified_set: BTreeSet<&str> = classified.keys().copied().collect();
 
     let both: Vec<&&str> = executed_set.intersection(&classified_set).collect();
     assert!(
@@ -712,6 +1079,23 @@ const NAPI_EXECUTED: &[&str] = &[
     "upsert",
 ];
 
+/// Typed compile-route spellings this probe does not drive: it exercises
+/// NAPI's cached profile route (`getVirtualFile`/`ensureIdeCompiled`/
+/// `getIde`), which is the route this suite compares against the
+/// in-process host, and these exports are the typed-route vocabulary it
+/// states no case in. No coverage over them is claimed here — this probe
+/// neither executes them nor verifies that any other suite does.
+const NAPI_TYPED_ROUTES_NOT_DRIVEN: &[(&str, &str)] = &[
+    (
+        "compileRequest",
+        "typed single-carrier compile route; this probe drives the cached profile route instead",
+    ),
+    (
+        "compileRequests",
+        "typed batch compile route; this probe drives the cached profile route instead",
+    ),
+];
+
 #[test]
 fn the_napi_transport_matches_the_in_process_host_route() {
     let record = probe(
@@ -719,7 +1103,7 @@ fn the_napi_transport_matches_the_in_process_host_route() {
         "packages/native/scripts/probe-transport-surface.mjs",
         NAPI_BUILD,
     );
-    assert_transport_matches_the_host_route("napi", &record);
+    assert_transport_matches_the_host_route("napi", &record, ProductRoute::ProfileCachedReads);
 
     let transformed = &record["cases"]["transformVueStyle"];
     let parsed = verter_compiler::style_planner::parse_plain_css_for_verification(
@@ -732,6 +1116,9 @@ fn the_napi_transport_matches_the_in_process_host_route() {
             .expect("the verification parser produced native CSS syntax IR");
     let expected_transform = verter_compiler::style_planner::transform_vue_style(
         verified,
+        // The probe hands over its own authored bytes with no external tool in
+        // front of them, so reported spans address exactly those bytes.
+        verter_compiler::style_planner::CascadeInput::Authored,
         "style.css",
         "style.css",
         "style.css",
@@ -743,7 +1130,7 @@ fn the_napi_transport_matches_the_in_process_host_route() {
     assert!(expected_transform.stage_failures.is_empty());
     assert_eq!(
         transformed["code"].as_str(),
-        Some(expected_transform.code.as_str()),
+        Some(expected_transform.code()),
         "napi/transformVueStyle: the transported CSS differs from the in-process route's"
     );
     assert_eq!(
@@ -826,7 +1213,7 @@ fn the_napi_batch_route_matches_the_in_process_batch_route_item_for_item() {
             );
             assert_eq!(
                 entry["code"].as_str(),
-                Some(host_entry.code().as_ref()),
+                Some(host_entry.code()),
                 "napi/{label}[{index}]: the transport's module bytes differ from the host's"
             );
             assert_eq!(
@@ -836,7 +1223,7 @@ fn the_napi_batch_route_matches_the_in_process_batch_route_item_for_item() {
             );
             assert_eq!(
                 entry["lang"].as_str(),
-                host_entry.lang().as_deref(),
+                host_entry.lang(),
                 "napi/{label}[{index}]: the reported module language differs from the host's"
             );
             let errors: Vec<&str> = entry["errors"]
@@ -972,7 +1359,13 @@ fn every_exported_napi_spelling_is_executed_or_classified_out_of_scope() {
         "the enumeration found no VerterHost methods, so it proves nothing"
     );
 
-    assert_partition("napi", &methods, NAPI_EXECUTED, NAPI_OUT_OF_SCOPE, &[]);
+    assert_partition(
+        "napi",
+        &methods,
+        NAPI_EXECUTED,
+        NAPI_OUT_OF_SCOPE,
+        &[NAPI_TYPED_ROUTES_NOT_DRIVEN],
+    );
 
     // The module-level exports are accounted for too.
     let module_exports: Vec<String> = record["surface"]["moduleExports"]
@@ -1056,6 +1449,37 @@ const WASM_OUT_OF_SCOPE: &[(&str, &str)] = &[
     ("setImportDependencies", "dependency-resolution input"),
 ];
 
+/// Legacy cached-route spellings this probe does not drive: it demands
+/// every product through the typed `compileRequest`, and these exports are
+/// the binding-local cached route that route supersedes.
+///
+/// A separate class from [`WASM_OUT_OF_SCOPE`] because the reason is this
+/// probe's route choice, not the method's product — each name IS a live
+/// product route a per-keystroke consumer is steered toward. The rows make
+/// NO coverage claim over them: this probe neither executes them nor
+/// verifies that any other suite does. A wasm-bindgen-test suite drives
+/// them on a different JS host than this Node web probe, and deleting its
+/// `legacy_ide` / `legacy_virtual_file` tests leaves this enumeration
+/// green — that is this classification's honest limit, stated here rather
+/// than papered over with a cross-suite coverage claim nothing enforces.
+const WASM_LEGACY_CACHED_ROUTES_NOT_DRIVEN: &[(&str, &str)] = &[
+    (
+        "ensureIdeCompiled",
+        "legacy cached IDE-compile route; this probe demands IDE products through the typed \
+         `compileRequest` instead",
+    ),
+    (
+        "getIde",
+        "legacy cached IDE read; this probe demands IDE products through the typed \
+         `compileRequest` instead",
+    ),
+    (
+        "getVirtualFile",
+        "legacy cached per-node read; this probe demands runtime products through the typed \
+         `compileRequest` instead",
+    ),
+];
+
 /// wasm-bindgen's own memory-management members on every generated class.
 /// They are binding-runtime plumbing, not product spellings.
 const WASM_BINDING_RUNTIME: &[(&str, &str)] = &[
@@ -1071,13 +1495,11 @@ const WASM_BINDING_RUNTIME: &[(&str, &str)] = &[
 
 /// The `VerterHost` methods the WASM probe actually executes.
 const WASM_EXECUTED: &[&str] = &[
+    "compileRequest",
     "compileWithAudit",
-    "getVirtualFile",
     "listVirtualFiles",
     "getPublicApi",
     "analyzeWithAudit",
-    "ensureIdeCompiled",
-    "getIde",
     "upsert",
 ];
 
@@ -1088,7 +1510,7 @@ fn the_wasm_transport_matches_the_in_process_host_route() {
         "packages/wasm/scripts/probe-transport-surface.mjs",
         WASM_BUILD,
     );
-    assert_transport_matches_the_host_route("wasm", &record);
+    assert_transport_matches_the_host_route("wasm", &record, ProductRoute::TypedCompileRequest);
 
     // wasm32 has no audited analysis; typed refusal, not empty success.
     let analyze = &record["cases"]["analyzeWithAudit"];
@@ -1134,7 +1556,7 @@ fn every_exported_wasm_spelling_is_executed_or_classified_out_of_scope() {
         &methods,
         WASM_EXECUTED,
         WASM_OUT_OF_SCOPE,
-        WASM_BINDING_RUNTIME,
+        &[WASM_BINDING_RUNTIME, WASM_LEGACY_CACHED_ROUTES_NOT_DRIVEN],
     );
 }
 
@@ -1202,12 +1624,24 @@ fn the_audited_compile_spelling_captures_for_vue_and_not_for_svelte_on_both_tran
 
 // The missing-node transport contract
 
-/// Both transports report a missing node the same way: an absent response
-/// for `Err(HostError::MissingVirtualNode)`, never a throw. Absence is
-/// structural (no such node), not a failure — a throw would require matching
-/// error text. Driven both as structural absence (`style[0]` with no
-/// `<style>`) and through a refusal. A successful control on the same
-/// carrier proves the file loaded. Neither transport leaks a product.
+/// Both transports report STRUCTURAL absence the same way: an absent
+/// response for `Err(HostError::MissingVirtualNode)`, never a throw.
+/// Absence is structural (no such node), not a failure — a throw would
+/// require matching error text. A successful control on the same carrier
+/// proves the file loaded, and neither transport leaks a product.
+///
+/// The WASM probe's Vue-arm positive control is internal: a Vue carrier
+/// that HAS a `<style>` block must publish `style[0]` or the probe aborts
+/// the record. It is not a probe output key.
+///
+/// Absence reached THROUGH a refusal is a second lane, and there the two
+/// transports answer different questions. A cached per-node read of a
+/// refused compile still finds no node and reports it absent. A complete
+/// typed compile request has no such intermediate state: the refusal
+/// replaces the whole transaction, so the same demand carries the host's
+/// typed refusal code instead. Both are asserted, so a transport that
+/// silently swapped one class for the other fails here — what neither may
+/// do is publish a product.
 #[test]
 fn the_transports_report_a_missing_node_the_same_way() {
     let napi = probe(
@@ -1257,33 +1691,29 @@ fn the_transports_report_a_missing_node_the_same_way() {
     );
 
     // The successful control, on the SAME carrier as the structural case.
-    let control = host_node(
+    // Each transport's control is the host's answer to that transport's OWN
+    // demand for the same node — the cached per-node read for NAPI, the
+    // identical typed runtime request executed in-process for WASM.
+    let napi_control = host_node(
         &no_style,
         "/probe/NoStyle.vue",
         VirtualNodeKind::Main,
         &probe_profile(false, true),
     );
-    let HostOutcome::Published {
-        code: control_code, ..
-    } = &control
-    else {
-        panic!(
-            "the host no longer publishes the control node, so absence proves nothing: {control:?}"
-        )
-    };
+    let wasm_control = host_typed_runtime_node(
+        &no_style,
+        "/probe/NoStyle.vue",
+        ProbeFramework::Vue,
+        false,
+        true,
+        VirtualNodeKind::Main,
+    );
 
-    for (label, napi_case, wasm_case) in [
-        (
-            "absence through a refusal",
-            &napi["cases"]["svelteServerStyle"],
-            &wasm["cases"]["svelteServerStyle"],
-        ),
-        (
-            "structural absence",
-            &napi["cases"]["vueMissingStyle"],
-            &wasm["cases"]["vueMissingStyle"],
-        ),
-    ] {
+    // Structural absence, where both transports still answer identically.
+    {
+        let label = "structural absence";
+        let napi_case = &napi["cases"]["vueMissingStyle"];
+        let wasm_case = &wasm["cases"]["vueMissingStyle"];
         // A missing node is never published as a product.
         for (transport, case) in [("napi", napi_case), ("wasm", wasm_case)] {
             assert_ne!(
@@ -1320,21 +1750,89 @@ fn the_transports_report_a_missing_node_the_same_way() {
         }
     }
 
+    // Absence reached THROUGH a refusal. The demand is the same on both
+    // transports — the CSS node of a server surface this carrier cannot
+    // emit — and neither may answer with bytes. What each reports is its own
+    // route's honest answer: the cached read finds no node in the refused
+    // compile, while the complete typed compile refuses the transaction and
+    // carries the host's diagnostic code.
+    //
+    // On the complete-request route this record is byte-identical to
+    // `svelteServerRefusal`'s: nothing was assembled, so the CSS demand and
+    // the main-node demand cannot produce different answers, and the
+    // `kind`/`index` the case asked for never gets consulted. This is
+    // therefore NOT a second independent rail there — its residual value is
+    // the no-bytes check above. Restoring per-product refusal granularity
+    // needs a wire that can answer per product, and belongs to whoever
+    // introduces partial-product responses.
+    let napi_refused = &napi["cases"]["svelteServerStyle"];
+    let wasm_refused = &wasm["cases"]["svelteServerStyle"];
+    for (transport, case) in [("napi", napi_refused), ("wasm", wasm_refused)] {
+        assert_ne!(
+            case["outcome"], "published",
+            "{transport}/absence through a refusal: a product was published for a refused \
+             compile: {case}"
+        );
+        assert_eq!(
+            case["code"],
+            Value::Null,
+            "{transport}/absence through a refusal: a product crossed the boundary for a refused \
+             compile: {case}"
+        );
+    }
+    assert_eq!(
+        napi_refused["outcome"], "missing",
+        "napi/absence through a refusal: the cached per-node read no longer reports the node of \
+         a refused compile as an absent response: {napi_refused}"
+    );
+    assert_eq!(
+        napi_refused["message"],
+        Value::Null,
+        "napi/absence through a refusal: the cached per-node read threw rather than answering \
+         absent: {napi_refused}"
+    );
+    assert_eq!(
+        wasm_refused["outcome"], "error",
+        "wasm/absence through a refusal: the typed compile request no longer surfaces the \
+         carrier's refusal for a node of the refused surface: {wasm_refused}"
+    );
+    assert!(
+        wasm_refused["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("svelte-runtime-unsupported-server-generate")),
+        "wasm/absence through a refusal: the refusal does not carry the host's typed diagnostic \
+         code: {wasm_refused}"
+    );
+
     // Control: the node that exists is published — absence is about the node.
-    for (transport, record) in [("napi", &napi), ("wasm", &wasm)] {
+    for (transport, record, control) in [
+        ("napi", &napi, &napi_control),
+        ("wasm", &wasm, &wasm_control),
+    ] {
         let case = &record["cases"]["vueMissingStyleControl"];
         assert_eq!(
             case["outcome"], "published",
             "{transport}: the successful control did not publish, so the absent answers above \
              cannot be attributed to the requested node: {case}"
         );
+        let HostOutcome::Published { code, .. } = control else {
+            panic!(
+                "{transport}: the host route no longer publishes the control node, so absence \
+                 proves nothing: {control:?}"
+            )
+        };
         assert_eq!(
             case["code"].as_str(),
-            Some(control_code.as_str()),
+            Some(code.as_str()),
             "{transport}: the successful control published something other than the host's \
              own product"
         );
     }
+
+    // The WASM probe's Vue-arm positive control is internal to the probe
+    // (a Vue carrier with a `<style>` block must publish `style[0]` or the
+    // process aborts with no JSON). It is not a case key: adding one would
+    // change the probe's output set.
 }
 
 // The bundler route
@@ -3125,6 +3623,9 @@ fn the_non_vite_style_lane_scopes_through_the_shared_css_processor() {
             .expect("the verification parser produced native CSS syntax IR");
     let processed = verter_compiler::style_planner::transform_vue_style(
         verified,
+        // The probe hands over its own authored bytes with no external tool in
+        // front of them, so reported spans address exactly those bytes.
+        verter_compiler::style_planner::CascadeInput::Authored,
         "style.css",
         "style.css",
         "style.css",
@@ -3136,7 +3637,7 @@ fn the_non_vite_style_lane_scopes_through_the_shared_css_processor() {
     assert!(processed.stage_failures.is_empty());
     assert_eq!(
         scoped,
-        processed.code.as_str(),
+        processed.code(),
         "the non-Vite style lane's product is not the shared CSS processor's product for the same \
          bytes and scope id"
     );
