@@ -6,8 +6,7 @@
  * ships) over a small set of committed carrier sources and snapshots the three
  * generated surfaces per source:
  *
- *   - IDE carrier      — `compileRequest(id, { vue|svelte: {...} })`
- *                        an `ideCompanion` product                 → `Comp.vue.tsx`
+ *   - IDE carrier      — `getIde(id, profile)`             → `Comp.vue.tsx`
  *   - declaration      — `getPublicApi(id, "declaration")` → `Comp.d.vue.ts`
  *   - API carrier      — `getPublicApi(id)`                → `Comp.vue.verter.ts`
  *
@@ -152,56 +151,6 @@ function publicApiSurface(result) {
   return surface(result.value);
 }
 
-/**
- * The single requested product: the IDE surface, with source maps on and
- * every axis the legacy `{ sourceMap: true, target: "ide", forceJs: true }`
- * profile implied left at its (false) default. The typed host-request
- * route's equivalence tests pin these axis values verbatim, but against a
- * `{ target: "full", sourceMap: true, isProduction: false }` legacy demand
- * with `forceJs` at its identity — this tool's `forceJs: true` +
- * `target: "ide"` pairing is covered only indirectly, through the shared
- * IDE response projection and this script's own fixture freshness rail.
- */
-function ideRequest(fileKind) {
-  const identity = { isProduction: false, forceJs: true };
-  const products = [
-    {
-      ideCompanion: {
-        wantSourceMap: true,
-        embedAmbientTypes: false,
-        conditionalRootNarrowing: false,
-        strictSlots: false,
-        ideChunkBoundaries: false,
-      },
-    },
-  ];
-  if (fileKind === "svelte") return { svelte: { identity, products, options: {} } };
-  return {
-    vue: {
-      identity,
-      products,
-      options: { backend: "inferred", ssr: false, isCustomElement: [], babelParserPlugins: [] },
-    },
-  };
-}
-
-/**
- * The IDE row of a compile response, taken by kind tag — never by position.
- * The response carries one row per requested product, tagged and in request
- * order, so a capture that requested exactly one IDE product must find
- * exactly one `ideCompanion` row. Anything else is a wire break inside this
- * tool, so it fails the capture loudly instead of snapshotting the
- * silent-null `ide: null` shape the fixture must never carry.
- */
-function ideProductRow(response) {
-  const products = Array.isArray(response?.products) ? response.products : [];
-  const kinds = products.map((product) => product?.kind ?? "<untagged>");
-  if (products.length !== 1 || kinds[0] !== "ideCompanion") {
-    throw new Error(`expected exactly one ideCompanion product row, got: [${kinds.join(", ")}]`);
-  }
-  return products[0];
-}
-
 function capture(wasmModule, { filename, fileKind, source }) {
   // A fresh host per fixture keeps every entry independent of capture order.
   const host = new wasmModule.VerterHost({
@@ -209,27 +158,22 @@ function capture(wasmModule, { filename, fileKind, source }) {
     compileErrorPolicy: "devServeLastKnownGood",
     maxProfilesPerFile: 8,
   });
-  // Registration carries source only, no compile demand — the compile demand
-  // is stated on the typed request below, by canonical id, never by copying
-  // the source into it.
+  const profile = { filename, sourceMap: true, target: "ide", forceJs: true };
+  // Registration carries source only. Compile demand is stated on the compile
+  // calls below, which is the only place the host reads a profile from.
   host.upsert({ inputId: filename, source, fileKind, aliases: [] });
 
   let ide = null;
   let ideUnavailable = null;
-  let response;
   try {
-    response = host.compileRequest(filename, ideRequest(fileKind));
+    host.ensureIdeCompiled(filename, profile);
+    ide = surface(host.getIde(filename, profile));
   } catch (err) {
     // An IDE compile failure is recorded explicitly (`ideUnavailable`) so the
     // fixture stays honest about what the host produced — a guard asserting
     // IDE parity fails on the recorded gap instead of a silent null.
     ideUnavailable = String(err?.message ?? err).split("\n")[0];
   }
-  // Row selection runs OUTSIDE the failure catch above: a malformed (or
-  // missing) product list is this tool's wire break, not a host compile
-  // failure, and must fail the capture rather than ride into the fixture
-  // as a silent `ide: null`.
-  if (ideUnavailable === null) ide = surface(ideProductRow(response));
   const decl = publicApiSurface(host.getPublicApi(filename, "declaration"));
   const api = publicApiSurface(host.getPublicApi(filename));
   // No explicit `host.free()`: if an IDE compile trapped, the host borrow is

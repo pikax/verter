@@ -189,6 +189,52 @@ fn exception_message_without_coercion(
     unsafe { String::from_napi_value(env.raw(), message) }
 }
 
+/// One engine-side handle scope, closed when it drops.
+///
+/// A native call runs in ONE scope, so every handle a batch's traversal
+/// creates — a key name, a looked-up property, a decoded element — stays
+/// pinned until the whole call returns. The per-call byte and value
+/// budgets bound what the traversal RETAINS natively; they say nothing
+/// about the engine-side handles it pins, and a batch admitted by those
+/// budgets can still pin millions of them at once. Opening a nested scope
+/// per batch entry bounds that to one entry's worth: the entry's handles
+/// are released as soon as its own decode has produced owned Rust values.
+///
+/// Nothing engine-side may outlive the guard. Every value a batch entry's
+/// decode produces — the source `Arc<str>`, the canonical id, the decoded
+/// request, a failure's message — is owned Rust, so the whole entry is
+/// self-contained by construction. Dropping (rather than closing
+/// explicitly) is what makes the early-`continue` and early-`return` paths
+/// safe, and closing on drop keeps the required LIFO nesting.
+struct JsHandleScope {
+    env: napi::sys::napi_env,
+    scope: napi::sys::napi_handle_scope,
+}
+
+impl JsHandleScope {
+    fn open(env: &Env) -> Result<Self> {
+        let mut scope = std::ptr::null_mut();
+        napi::check_status!(
+            unsafe { napi::sys::napi_open_handle_scope(env.raw(), &mut scope) },
+            "Failed to open a handle scope for a compile request batch entry"
+        )?;
+        Ok(Self {
+            env: env.raw(),
+            scope,
+        })
+    }
+}
+
+impl Drop for JsHandleScope {
+    fn drop(&mut self) {
+        // SAFETY: opened on this env by `open`, and closed exactly once —
+        // guards are held in nested lexical scopes, so closes are LIFO.
+        unsafe {
+            napi::sys::napi_close_handle_scope(self.env, self.scope);
+        }
+    }
+}
+
 /// Capture and clear a JavaScript exception left pending by a recoverable
 /// accessor failure. Continuing with it pending makes every later N-API call
 /// fail, defeating per-entry batch isolation.
@@ -312,6 +358,22 @@ fn decode_compile_requests_priority(
         )));
     }
     for index in 0..count {
+        // Measured before it is copied, the same bound
+        // `exception_message_without_coercion` applies to a thrown string:
+        // an own key is caller-controlled and unbounded, and a refusal
+        // only has to be readable. Above the bound the key is named by its
+        // size rather than quoted, so a hostile multi-megabyte key cannot
+        // ride into a thrown Error's message.
+        let key_bytes = match keys.retained_bytes(index) {
+            Ok(bytes) => bytes,
+            Err(error) => return Err(recover_pending_exception(env, error)?),
+        };
+        if key_bytes > MAX_EXCEPTION_MESSAGE_BYTES {
+            return Err(ffi_err(format!(
+                "unknown field, named by {key_bytes} bytes above the \
+                 {MAX_EXCEPTION_MESSAGE_BYTES} a refusal quotes"
+            )));
+        }
         let key = match keys.at(index) {
             Ok(key) => key,
             Err(error) => return Err(recover_pending_exception(env, error)?),
@@ -360,6 +422,13 @@ fn decode_compile_requests_priority(
 /// [`verter_session::VerterHost::compile_request_many`], one per input in
 /// original order) is not exactly `expected_canonical_ids` — same count,
 /// same names, same positions. `None` when it is.
+///
+/// `expected_canonical_ids` must already be HOST-canonical — resolved
+/// through `VerterHost::resolve_alias_or_canonical`, exactly as the
+/// executor resolves its own inputs. Comparing a caller's raw spelling
+/// here would make every non-canonical id (a Windows path, an alias, a
+/// `?`-suffixed id) read as a transposition and discard a whole batch of
+/// valid work.
 ///
 /// The batch executor's own contract already guarantees one entry per
 /// input in order; this is the binding's own check that the guarantee
@@ -2486,6 +2555,14 @@ impl NapiVerterHost {
         );
         for array_index in 0..declared {
             let position = array_index as usize;
+            // One nested handle scope per entry. Every engine-side handle
+            // this iteration creates — the input object, its property
+            // values, and every key name and property the request decode
+            // walks — is released when the guard drops at the end of the
+            // iteration, instead of staying pinned in the call's single
+            // outer scope until the whole batch returns. Everything that
+            // escapes the iteration is owned Rust.
+            let _entry_scope = JsHandleScope::open(&env)?;
             let input = match inputs.get_element::<Object<'_>>(array_index) {
                 Ok(input) => input,
                 Err(error) => {
@@ -2517,7 +2594,21 @@ impl NapiVerterHost {
                     // SAFETY: the value was read from this env and validated
                     // as a string immediately above.
                     match unsafe { String::from_napi_value(env.raw(), raw_canonical_id.raw()) } {
-                        Ok(canonical_id) => canonical_id,
+                        // Canonicalized HERE, once, through the host's own
+                        // identity resolver — not left as the caller's raw
+                        // spelling. `compile_request_many` canonicalizes
+                        // every input it is handed (a Windows drive letter
+                        // lowercases, a backslash becomes a slash, a `?`
+                        // query tail and an extended-length prefix are
+                        // stripped, a registered alias resolves), so a
+                        // binding that kept the raw spelling would report
+                        // one id on a locally-refused entry and a different
+                        // id on its compiling sibling, and the order guard
+                        // below would read every non-canonical input as a
+                        // transposition and fail the whole batch. The
+                        // resolver is idempotent, so passing the resolved id
+                        // back in is the same demand.
+                        Ok(canonical_id) => self.inner.resolve_alias_or_canonical(&canonical_id),
                         Err(error) => {
                             let error = recover_pending_exception(&env, error)?;
                             output[position] = Some(binding_failure_entry(

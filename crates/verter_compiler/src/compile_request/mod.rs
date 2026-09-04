@@ -247,6 +247,14 @@ impl std::fmt::Display for CompileRequestError {
     /// bindings that each wrote their own sentence would drift apart for
     /// the same refusal.
     ///
+    /// Every value this embeds renders through its OWN `Display`
+    /// ([`FrameworkOption`], [`VueOnlyAxis`], [`CapabilityCell`],
+    /// [`ProductKind`], [`RuntimeStyleProcessing`]), never through a
+    /// direct call to that type's spelling accessor. Each of those types
+    /// owns exactly one caller-facing name, and a `Display` that is not
+    /// the way its name reaches a message is a second spelling waiting to
+    /// disagree with the first.
+    ///
     /// Exhaustive on purpose: a new refusal arm is a compile error here
     /// rather than a message that silently reads as another arm's.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -271,18 +279,16 @@ impl std::fmt::Display for CompileRequestError {
                 f.write_str("inline assembly is not implemented for Vapor")
             }
             CompileRequestError::CapabilityUnsupported(cell) => {
-                write!(f, "unsupported capability '{}'", cell.cell_id())
+                write!(f, "unsupported capability '{cell}'")
             }
             CompileRequestError::EmptyProductSet => f.write_str("product set is empty"),
             CompileRequestError::DuplicateProduct(kind) => {
-                write!(f, "duplicate product '{}'", kind.wire_tag())
+                write!(f, "duplicate product '{kind}'")
             }
             CompileRequestError::ConflictingRuntimeStyleProcessing { first, conflicting } => {
                 write!(
                     f,
-                    "conflicting runtime styleProcessing values '{}' and '{}'",
-                    first.wire_name(),
-                    conflicting.wire_name()
+                    "conflicting runtime styleProcessing values '{first}' and '{conflicting}'"
                 )
             }
             CompileRequestError::RuntimeStyleProcessingUnsupported {
@@ -290,8 +296,7 @@ impl std::fmt::Display for CompileRequestError {
                 requested,
             } => write!(
                 f,
-                "runtime styleProcessing '{}' is unsupported for {framework}",
-                requested.wire_name()
+                "runtime styleProcessing '{requested}' is unsupported for {framework}"
             ),
             CompileRequestError::FrameworkMismatch { expected, actual } => write!(
                 f,

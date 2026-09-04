@@ -71,6 +71,16 @@
 //!   DAG expands into a distinct native copy on every visit, so the
 //!   traversal itself is what the budget bounds.
 //!
+//! Those budgets bound what a traversal RETAINS NATIVELY, and nothing
+//! else. Engine-side handles are a separate resource with a separate
+//! bound: a traversal pins one handle per key name and one per looked-up
+//! property, and they live until the enclosing handle scope closes, not
+//! until the budget refuses. [`JsValueGraph::property_at`] halves the
+//! per-key cost by reusing the key list's own name handle instead of
+//! minting a second engine string, and a caller that walks many graphs in
+//! one native call — the batch compile route — opens a nested handle
+//! scope per entry so the pinned set stays one entry deep.
+//!
 //! ## What this layer does not own
 //!
 //! No key vocabulary lives here. This layer decides only what a JS value
@@ -290,6 +300,25 @@ pub trait JsValueGraph {
     /// Whatever `object[key]` holds, `undefined` included.
     fn property(&self, object: &Self::Value, key: &str) -> Result<Self::Value>;
 
+    /// Whatever the property named by `keys`' entry at `index` holds —
+    /// the same value [`Self::property`] answers for that key's spelling.
+    ///
+    /// Separate from [`Self::property`] because the key list already HOLDS
+    /// a handle to each name: looking the property up through that handle
+    /// costs nothing, where spelling the key back out mints a second
+    /// engine-side string per key that lives until the enclosing scope
+    /// closes. A traversal is the only caller that has the list; a caller
+    /// that only has a spelling still uses [`Self::property`].
+    fn property_at(
+        &self,
+        object: &Self::Value,
+        keys: &Self::Keys,
+        index: u32,
+    ) -> Result<Self::Value> {
+        let key = keys.at(index)?;
+        self.property(object, &key)
+    }
+
     /// How many elements `array` DECLARES. A declared element need not
     /// exist; reading one that does not answers `undefined`.
     fn element_count(&self, array: &Self::Value) -> Result<u32>;
@@ -412,7 +441,7 @@ fn materialize_nested<G: JsValueGraph>(
             for index in 0..declared {
                 budget.retain_bytes(keys.retained_bytes(index)?)?;
                 let key = keys.at(index)?;
-                let property = graph.property(value, &key)?;
+                let property = graph.property_at(value, &keys, index)?;
                 let property = materialize_nested(graph, &property, depth + 1, budget, false)?;
                 materialized.insert(key, property);
             }
@@ -604,6 +633,26 @@ impl JsValueGraph for NapiValueGraph {
         napi::check_status!(
             unsafe { sys::napi_get_property(self.env, *object, property_key, &mut property) },
             "Failed to read the request property `{key}`"
+        )?;
+        Ok(property)
+    }
+
+    fn property_at(
+        &self,
+        object: &Self::Value,
+        keys: &Self::Keys,
+        index: u32,
+    ) -> Result<Self::Value> {
+        // The name handle the key list already holds — no second engine
+        // string per key, and `name_at` memoises the element read the
+        // measure/copy steps of this same key already performed.
+        let name = keys.name_at(index)?;
+        let mut property = ptr::null_mut();
+        // SAFETY: as `classify`; `name` is a live string element of this
+        // object's own-key names array.
+        napi::check_status!(
+            unsafe { sys::napi_get_property(self.env, *object, name, &mut property) },
+            "Failed to read own enumerable property {index} of a request object"
         )?;
         Ok(property)
     }
