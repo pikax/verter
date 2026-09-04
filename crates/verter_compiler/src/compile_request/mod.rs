@@ -57,33 +57,53 @@ impl FrameworkOption {
             FrameworkOption::Svelte(_) => "svelte",
         }
     }
+
+    /// The host compile request's own slot for this option — see
+    /// [`vue::VueOption::request_field`] /
+    /// [`svelte::SvelteOption::request_field`].
+    pub const fn request_field(self) -> Option<&'static str> {
+        match self {
+            FrameworkOption::Vue(option) => option.request_field(),
+            FrameworkOption::Svelte(option) => option.request_field(),
+        }
+    }
 }
 
 impl std::fmt::Display for FrameworkOption {
-    /// The caller-facing option path a request-construction refusal names,
-    /// read off the committed option inventory rather than reconstructed
-    /// from the Rust variant spelling. The path is the row's `option`
-    /// column, prefixed by whatever option-path segments its `surface`
-    /// column carries beyond the surface type itself, so a nested row keeps
-    /// its nesting (`svelte:SvelteOptions.customElement` + `tag` reads
-    /// `svelte:customElement.tag`) and a flat one does not gain any
-    /// (`compiler-core:TransformOptions` + `hoistStatic` reads
-    /// `vue:hoistStatic`, which is the field a caller actually wrote).
+    /// The caller-facing option path a request-construction refusal names:
+    /// the framework tag plus the REQUEST SCHEMA's own field path for the
+    /// option ([`Self::request_field`]).
     ///
-    /// Deriving the path from `{self:?}` instead would name a field no
-    /// schema and no caller has: the variant is `Surface_option`, so a
-    /// case-lowered `Debug` spelling reads `vue:transformOptionsHoistStatic`
-    /// while the request field is `hoistStatic`.
+    /// The request schema is the flat, camelCase object a caller writes
+    /// (`packages/native/host-compile-request.generated.ts`), so the two
+    /// `compatConfig` rows the official inventory records on two different
+    /// surfaces are the two distinct fields `compatConfig` and
+    /// `transformCompatConfig`, and `SvelteOptions.customElement.props` +
+    /// `*.type` is `customElementDescriptor.props.*.propType`. Naming the
+    /// property from [`Self::tsv_row`] instead would name the OFFICIAL
+    /// framework's surface, which is a different namespace: a caller told
+    /// to remove `vue:compatConfig.MODE` has no such field to remove, and
+    /// two distinct request fields would collapse onto one path.
+    ///
+    /// Deriving the path from `{self:?}` would be wrong for a third
+    /// reason: the variant is `Surface_option`, so a case-lowered `Debug`
+    /// spelling reads `vue:transformOptionsHoistStatic` while the request
+    /// field is `hoistStatic`.
+    ///
+    /// An option the request carries NO slot for cannot have been written
+    /// by a caller, and no [`CompileRequestError`] names one. Should one
+    /// ever reach here, it renders as its full inventory identity
+    /// (`vue:compiler-core:ParserOptions.onWarn`) — the only name that
+    /// option has anywhere — rather than as a bare leaf that would read
+    /// like a request field.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let framework = self.framework();
-        let (surface, option) = self.tsv_row();
-        let local_surface = match surface.rsplit_once(':') {
-            Some((_, local)) => local,
-            None => surface,
-        };
-        match local_surface.split_once('.') {
-            Some((_, nested_path)) => write!(f, "{framework}:{nested_path}.{option}"),
-            None => write!(f, "{framework}:{option}"),
+        match self.request_field() {
+            Some(field) => write!(f, "{framework}:{field}"),
+            None => {
+                let (surface, option) = self.tsv_row();
+                write!(f, "{framework}:{surface}.{option}")
+            }
         }
     }
 }
@@ -101,6 +121,25 @@ pub enum VueOnlyAxis {
     ConditionalRootNarrowing,
     /// Vue strict slot typing in the TSX projection.
     StrictSlots,
+}
+
+impl VueOnlyAxis {
+    /// The wire spelling of this axis on the host compile request's IDE
+    /// product options — the field a caller wrote, so a refusal names it
+    /// the way they spelled it.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            VueOnlyAxis::TypesModuleName => "typesModuleName",
+            VueOnlyAxis::ConditionalRootNarrowing => "conditionalRootNarrowing",
+            VueOnlyAxis::StrictSlots => "strictSlots",
+        }
+    }
+}
+
+impl std::fmt::Display for VueOnlyAxis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.wire_name())
+    }
 }
 
 /// Every reason canonical request construction (or, for the two
@@ -185,6 +224,73 @@ pub enum CompileRequestError {
         expected: &'static str,
         actual: &'static str,
     },
+}
+
+impl std::fmt::Display for CompileRequestError {
+    /// The caller-facing sentence a transport embeds when request
+    /// construction refuses — one vocabulary for every binding.
+    ///
+    /// It renders the REASON only, without a leading "refused" clause, so
+    /// each transport keeps its own framing (the native binding's
+    /// "compile request construction refused: …", the browser binding's
+    /// "refused host compile request: …") while the words naming the
+    /// offending option, capability, product or axis come from here. A
+    /// binding that rendered `{self:?}` instead would publish the Rust
+    /// variant spelling — `UnsupportedOption { option: Vue(
+    /// TransformOptionsHoistStatic), capability: None }` — and two
+    /// bindings that each wrote their own sentence would drift apart for
+    /// the same refusal.
+    ///
+    /// Exhaustive on purpose: a new refusal arm is a compile error here
+    /// rather than a message that silently reads as another arm's.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompileRequestError::UnsupportedOption { option, .. } => {
+                write!(f, "unsupported option '{option}'")
+            }
+            CompileRequestError::MalformedOptionValue { option, value } => {
+                write!(f, "malformed value '{value}' for option '{option}'")
+            }
+            CompileRequestError::SsrVaporBackendUnsupported => {
+                f.write_str("SSR is unsupported with a Vapor backend")
+            }
+            CompileRequestError::VueOnlyAxisOnSvelteRequest(axis) => write!(
+                f,
+                "Vue-only option '{axis}' is not admitted on a Svelte request"
+            ),
+            CompileRequestError::InlineSsrUnsupported => {
+                f.write_str("inline assembly is unsupported with SSR")
+            }
+            CompileRequestError::VaporInlineNotYetImplemented => {
+                f.write_str("inline assembly is not implemented for Vapor")
+            }
+            CompileRequestError::CapabilityUnsupported(cell) => {
+                write!(f, "unsupported capability '{}'", cell.cell_id())
+            }
+            CompileRequestError::EmptyProductSet => f.write_str("product set is empty"),
+            CompileRequestError::DuplicateProduct(kind) => {
+                write!(f, "duplicate product '{}'", kind.wire_tag())
+            }
+            CompileRequestError::ConflictingRuntimeStyleProcessing { first, conflicting } => write!(
+                f,
+                "conflicting runtime styleProcessing values '{}' and '{}'",
+                first.wire_name(),
+                conflicting.wire_name()
+            ),
+            CompileRequestError::RuntimeStyleProcessingUnsupported {
+                framework,
+                requested,
+            } => write!(
+                f,
+                "runtime styleProcessing '{}' is unsupported for {framework}",
+                requested.wire_name()
+            ),
+            CompileRequestError::FrameworkMismatch { expected, actual } => write!(
+                f,
+                "compile request framework '{actual}' does not match '{expected}'"
+            ),
+        }
+    }
 }
 
 /// Resolved once parsing determines the source's own backend marker

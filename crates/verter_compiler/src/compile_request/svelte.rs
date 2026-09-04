@@ -165,6 +165,66 @@ impl SvelteOption {
             OptimizeOptionsHydrate => ("svelte:OptimizeOptions", "hydrate"),
         }
     }
+
+    /// The host compile request's own slot for this option, as
+    /// `packages/native/host-compile-request.generated.ts` declares it.
+    ///
+    /// Same contract as
+    /// [`crate::compile_request::VueOption::request_field`]: the field
+    /// path a caller writes, not the official option surface
+    /// [`Self::tsv_row`] quotes. `svelte:ModuleCompileOptions` +
+    /// `experimental.async` is the request's flat `experimentalAsync`
+    /// slot, `SvelteOptions.customElement.props` + `*.type` is
+    /// `customElementDescriptor.props.*.propType`, and the request's
+    /// `customElement` is a sibling boolean of the descriptor rather than
+    /// its parent object.
+    ///
+    /// `None` means the request carries no slot for the row, so no caller
+    /// can have written it. Exhaustive: a new `svelte-options.tsv` row
+    /// without an arm here is a compile error.
+    pub const fn request_field(self) -> Option<&'static str> {
+        use SvelteOption::*;
+        match self {
+            ParseLoose => Some("loose"),
+            ModuleDev => Some("dev"),
+            ModuleGenerate => Some("generateModule"),
+            ModuleExperimentalAsync => Some("experimentalAsync"),
+            CompileOptionsCustomElement => Some("customElement"),
+            CompileOptionsAccessors => Some("accessors"),
+            CompileOptionsNamespace => Some("namespace"),
+            CompileOptionsImmutable => Some("immutable"),
+            CompileOptionsCss => Some("css"),
+            CompileOptionsPreserveComments => Some("preserveComments"),
+            CompileOptionsPreserveWhitespace => Some("preserveWhitespace"),
+            CompileOptionsFragments => Some("fragments"),
+            CompileOptionsRunes => Some("runes"),
+            CompileOptionsDiscloseVersion => Some("discloseVersion"),
+            CompileOptionsCompatibility => Some("compatibility"),
+            CompileOptionsCompatibilityComponentApi => Some("compatibilityComponentApi"),
+            CompileOptionsHmr => Some("hmr"),
+            CustomElementTag => Some("customElementDescriptor.tag"),
+            CustomElementShadow => Some("customElementDescriptor.shadow"),
+            CustomElementExtend => Some("customElementExtend"),
+            CustomElementPropsAttribute => Some("customElementDescriptor.props.*.attribute"),
+            CustomElementPropsReflect => Some("customElementDescriptor.props.*.reflect"),
+            CustomElementPropsType => Some("customElementDescriptor.props.*.propType"),
+
+            // No slot: derived, host-resolved, oracle-only, or an output
+            // shape this compiler does not publish.
+            ParseFilename
+            | ParseModern
+            | ModuleFilename
+            | ModuleRootDir
+            | ModuleWarningFilter
+            | CompileOptionsName
+            | CompileOptionsCssHash
+            | CompileOptionsSourcemap
+            | CompileOptionsOutputFilename
+            | CompileOptionsCssOutputFilename
+            | CompileOptionsModernAst
+            | OptimizeOptionsHydrate => None,
+        }
+    }
 }
 
 pub const ALL_SVELTE_OPTIONS: [SvelteOption; 35] = {

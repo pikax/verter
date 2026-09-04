@@ -520,6 +520,171 @@ impl VueOption {
             }
         }
     }
+
+    /// The host compile request's own slot for this option, as
+    /// `packages/native/host-compile-request.generated.ts` declares it —
+    /// the field path a caller actually writes, and the path a refusal
+    /// names.
+    ///
+    /// `None` means the request carries no slot for the row at all: the
+    /// option is derived, host-resolved, preprocessor-external,
+    /// oracle-only, or not applicable to any published product, so no
+    /// caller can have written it. Every option a
+    /// [`crate::compile_request::CompileRequestError`] names answers
+    /// `Some`.
+    ///
+    /// This is deliberately NOT [`Self::tsv_row`]. The inventory describes
+    /// the OFFICIAL framework's option surfaces
+    /// (`compiler-core:ParserOptions` + `compatConfig.MODE`); the host
+    /// request is a FLAT camelCase object with one slot per admitted or
+    /// explicitly refused row (`compatConfigMode`). Naming the offending
+    /// property from the inventory would name a field the caller's request
+    /// object does not have, and would collapse the two distinct
+    /// `compatConfig` slots — `compatConfig` and `transformCompatConfig` —
+    /// onto one path.
+    ///
+    /// Two rows may legitimately share a slot: `isCustomElement` and
+    /// `hoistStatic` are each inventoried on two surfaces and fold onto
+    /// one canonical field, which is the exactly-once-per-ROW rule
+    /// [`Self::class`] documents.
+    ///
+    /// Exhaustive for the same reason [`Self::class`] is: a new
+    /// `vue-options.tsv` row without an arm here is a compile error, not a
+    /// silently pathless refusal.
+    pub const fn request_field(self) -> Option<&'static str> {
+        use VueOption::*;
+        match self {
+            ParserOptionsIsCustomElement | TransformOptionsIsCustomElement => {
+                Some("isCustomElement")
+            }
+            ParserOptionsDelimiters => Some("delimiters"),
+            ParserOptionsWhitespace => Some("whitespace"),
+            ParserOptionsComments => Some("comments"),
+            ParserOptionsCompatConfig => Some("compatConfig"),
+            ParserOptionsCompatConfigMode => Some("compatConfigMode"),
+            ParserOptionsCompatConfigCompilerIsOnElement => Some("compatConfigCompilerIsOnElement"),
+            ParserOptionsCompatConfigCompilerVBindSync => Some("compatConfigCompilerVBindSync"),
+            ParserOptionsCompatConfigCompilerVIfVForPrecedence => {
+                Some("compatConfigCompilerVIfVForPrecedence")
+            }
+            ParserOptionsCompatConfigCompilerVBindObjectOrder => {
+                Some("compatConfigCompilerVBindObjectOrder")
+            }
+            ParserOptionsCompatConfigCompilerVOnNative => Some("compatConfigCompilerVOnNative"),
+            ParserOptionsCompatConfigCompilerNativeTemplate => {
+                Some("compatConfigCompilerNativeTemplate")
+            }
+            ParserOptionsCompatConfigCompilerInlineTemplate => {
+                Some("compatConfigCompilerInlineTemplate")
+            }
+            ParserOptionsCompatConfigCompilerFilters => Some("compatConfigCompilerFilters"),
+            TransformOptionsCompatConfig => Some("transformCompatConfig"),
+            TransformOptionsHoistStatic | CompileScriptHoistStatic => Some("hoistStatic"),
+            TransformOptionsCacheHandlers => Some("cacheHandlers"),
+            TransformOptionsHmr => Some("hmr"),
+            SharedTransformCodegenOptionsSsr => Some("ssr"),
+            CodegenOptionsMode => Some("codegenMode"),
+            CodegenOptionsOptimizeImports => Some("optimizeImports"),
+            CodegenOptionsRuntimeModuleName => Some("runtimeModuleName"),
+            CodegenOptionsSsrRuntimeModuleName => Some("ssrRuntimeModuleName"),
+            ParsePad => Some("parsePad"),
+            ParseIgnoreEmpty => Some("ignoreEmpty"),
+            CompileScriptBabelParserPlugins => Some("babelParserPlugins"),
+            CompileScriptGenDefaultAs => Some("genDefaultAs"),
+            CompileScriptPropsDestructure => Some("propsDestructure"),
+            CompileScriptCustomElement => Some("scriptCustomElement"),
+            CompileTemplateTransformAssetUrls => Some("transformAssetUrls"),
+            AssetUrlOptionsBase => Some("transformAssetUrls.enabled.base"),
+            AssetUrlOptionsIncludeAbsolute => Some("transformAssetUrls.enabled.includeAbsolute"),
+            AssetUrlOptionsTags => Some("transformAssetUrls.enabled.tags"),
+            CompileStyleTrim => Some("styleTrim"),
+            CompileStyleModules | CompileStyleModulesOptions => Some("cssModules"),
+            CssModulesOptionsScopeBehaviour => Some("cssModules.scopeBehaviour"),
+            CssModulesOptionsHashPrefix => Some("cssModules.hashPrefix"),
+            CssModulesOptionsLocalsConvention => Some("cssModules.localsConvention"),
+            CssModulesOptionsExportGlobals => Some("cssModules.exportGlobals"),
+
+            // No slot: the request derives these, resolves them from the
+            // host, forwards them to an external preprocessor, or does not
+            // publish the output shape they apply to.
+            ParserOptionsOnWarn
+            | ParserOptionsOnError
+            | ParserOptionsParseMode
+            | ParserOptionsNs
+            | ParserOptionsIsNativeTag
+            | ParserOptionsIsVoidTag
+            | ParserOptionsIsPreTag
+            | ParserOptionsIsIgnoreNewlineTag
+            | ParserOptionsIsBuiltInComponent
+            | ParserOptionsGetNamespace
+            | ParserOptionsDecodeEntities
+            | ParserOptionsPrefixIdentifiers
+            | ParserOptionsExpressionPlugins
+            | TransformOptionsNodeTransforms
+            | TransformOptionsDirectiveTransforms
+            | TransformOptionsTransformHoist
+            | TransformOptionsOnWarn
+            | TransformOptionsOnError
+            | TransformOptionsIsBuiltInComponent
+            | TransformOptionsScopeId
+            | TransformOptionsSlotted
+            | TransformOptionsSsrCssVars
+            | SharedTransformCodegenOptionsPrefixIdentifiers
+            | SharedTransformCodegenOptionsExpressionPlugins
+            | SharedTransformCodegenOptionsInSsr
+            | SharedTransformCodegenOptionsBindingMetadata
+            | SharedTransformCodegenOptionsInline
+            | SharedTransformCodegenOptionsIsTs
+            | SharedTransformCodegenOptionsFilename
+            | CodegenOptionsSourceMap
+            | CodegenOptionsScopeId
+            | CodegenOptionsRuntimeGlobalName
+            | ParseFilename
+            | ParseSourceMap
+            | ParseSourceRoot
+            | ParseCompiler
+            | ParseTemplateParseOptions
+            | CompileScriptId
+            | CompileScriptIsProd
+            | CompileScriptSourceMap
+            | CompileScriptGlobalTypeFiles
+            | CompileScriptInlineTemplate
+            | CompileScriptTemplateOptions
+            | CompileScriptFs
+            | CompileScriptVapor
+            | CompileTemplateSource
+            | CompileTemplateAst
+            | CompileTemplateFilename
+            | CompileTemplateId
+            | CompileTemplateScoped
+            | CompileTemplateSlotted
+            | CompileTemplateIsProd
+            | CompileTemplateVapor
+            | CompileTemplateSsr
+            | CompileTemplateSsrCssVars
+            | CompileTemplateInMap
+            | CompileTemplateCompiler
+            | CompileTemplateCompilerOptions
+            | CompileTemplatePreprocessLang
+            | CompileTemplatePreprocessOptions
+            | CompileTemplatePreprocessCustomRequire
+            | CompileStyleSource
+            | CompileStyleFilename
+            | CompileStyleId
+            | CompileStyleScoped
+            | CompileStyleIsProd
+            | CompileStyleInMap
+            | CompileStylePreprocessLang
+            | CompileStylePreprocessOptions
+            | CompileStylePreprocessCustomRequire
+            | CompileStylePostcssOptions
+            | CompileStylePostcssPlugins
+            | CompileStyleMap
+            | CompileStyleIsAsync
+            | CssModulesOptionsGenerateScopedName
+            | CssModulesOptionsGlobalModulePaths => None,
+        }
+    }
 }
 
 /// The 118 rows, for exhaustiveness/count tests. Kept as a `const` array

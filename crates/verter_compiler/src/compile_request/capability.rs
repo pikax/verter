@@ -81,7 +81,106 @@ pub enum CapabilityDisposition {
     VersionIncompatible,
 }
 
+/// The 34 committed matrix rows, for exhaustiveness/parity tests and for
+/// any consumer that has to enumerate cells. The exhaustiveness proof
+/// itself lives in [`CapabilityCell::disposition`] /
+/// [`CapabilityCell::cell_id`]'s matches; this list exists so a caller can
+/// iterate.
+pub const ALL_CAPABILITY_CELLS: [CapabilityCell; 34] = {
+    use CapabilityCell::*;
+    [
+        VueParseLocal,
+        VueVdomClient,
+        VueVaporClient,
+        VueSsr,
+        VueSsrVaporBackend,
+        VueMacroLocal,
+        VueMacroImported,
+        VueScopedSlotted,
+        VueCustomElement,
+        VueTemplateOptions,
+        VueAsyncSetup,
+        VuePublicApi,
+        VueTsc,
+        VueDeclaration,
+        VueCompatV2,
+        VueOtherVersion,
+        SveltePraseLocal,
+        SvelteClientRunes,
+        SvelteClientLegacy,
+        SvelteServerRunes,
+        SvelteServerLegacy,
+        SvelteComponent,
+        SvelteModule,
+        SvelteSemanticCore,
+        SvelteCustomElement,
+        SvelteAsyncExperimental,
+        SvelteHydration,
+        SveltePublicApi,
+        SvelteTsc,
+        SvelteDeclaration,
+        SvelteHmr,
+        SvelteCompatApi4,
+        SvelteOfficialAst,
+        SvelteOtherVersion,
+    ]
+};
+
+impl std::fmt::Display for CapabilityCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.cell_id())
+    }
+}
+
 impl CapabilityCell {
+    /// The cell's `cell_id` column, verbatim from `capability-matrix.tsv`.
+    ///
+    /// The single owner of that mapping: a refusal naming an unsupported
+    /// capability quotes the matrix's own identifier, so a caller can find
+    /// the row that refused them, and every transport reads it from here
+    /// rather than keeping its own copy that drifts. Exhaustive, and
+    /// checked against the committed matrix by
+    /// `cell_ids_match_the_committed_matrix`.
+    pub const fn cell_id(self) -> &'static str {
+        use CapabilityCell::*;
+        match self {
+            VueParseLocal => "VUE-PARSE-LOCAL",
+            VueVdomClient => "VUE-VDOM-CLIENT",
+            VueVaporClient => "VUE-VAPOR-CLIENT",
+            VueSsr => "VUE-SSR",
+            VueSsrVaporBackend => "VUE-SSR-VAPOR-BACKEND",
+            VueMacroLocal => "VUE-MACRO-LOCAL",
+            VueMacroImported => "VUE-MACRO-IMPORTED",
+            VueScopedSlotted => "VUE-SCOPED-SLOTTED",
+            VueCustomElement => "VUE-CUSTOM-ELEMENT",
+            VueTemplateOptions => "VUE-TEMPLATE-OPTIONS",
+            VueAsyncSetup => "VUE-ASYNC-SETUP",
+            VuePublicApi => "VUE-PUBLIC-API",
+            VueTsc => "VUE-TSC",
+            VueDeclaration => "VUE-DECLARATION",
+            VueCompatV2 => "VUE-COMPAT-V2",
+            VueOtherVersion => "VUE-OTHER-VERSION",
+            SveltePraseLocal => "SVELTE-PARSE-LOCAL",
+            SvelteClientRunes => "SVELTE-CLIENT-RUNES",
+            SvelteClientLegacy => "SVELTE-CLIENT-LEGACY",
+            SvelteServerRunes => "SVELTE-SERVER-RUNES",
+            SvelteServerLegacy => "SVELTE-SERVER-LEGACY",
+            SvelteComponent => "SVELTE-COMPONENT",
+            SvelteModule => "SVELTE-MODULE",
+            SvelteSemanticCore => "SVELTE-SEMANTIC-CORE",
+            SvelteCustomElement => "SVELTE-CUSTOM-ELEMENT",
+            SvelteAsyncExperimental => "SVELTE-ASYNC-EXPERIMENTAL",
+            SvelteHydration => "SVELTE-HYDRATION",
+            SveltePublicApi => "SVELTE-PUBLIC-API",
+            SvelteTsc => "SVELTE-TSC",
+            SvelteDeclaration => "SVELTE-DECLARATION",
+            SvelteHmr => "SVELTE-HMR",
+            SvelteCompatApi4 => "SVELTE-COMPAT-API4",
+            SvelteOfficialAst => "SVELTE-OFFICIAL-AST",
+            SvelteOtherVersion => "SVELTE-OTHER-VERSION",
+        }
+    }
+
     /// `target_disposition`, verbatim from `capability-matrix.tsv`.
     pub const fn disposition(self) -> CapabilityDisposition {
         use CapabilityCell::*;
@@ -142,42 +241,7 @@ impl CapabilityCell {
 mod tests {
     use super::*;
 
-    const ALL_CELLS: [CapabilityCell; 34] = [
-        CapabilityCell::VueParseLocal,
-        CapabilityCell::VueVdomClient,
-        CapabilityCell::VueVaporClient,
-        CapabilityCell::VueSsr,
-        CapabilityCell::VueSsrVaporBackend,
-        CapabilityCell::VueMacroLocal,
-        CapabilityCell::VueMacroImported,
-        CapabilityCell::VueScopedSlotted,
-        CapabilityCell::VueCustomElement,
-        CapabilityCell::VueTemplateOptions,
-        CapabilityCell::VueAsyncSetup,
-        CapabilityCell::VuePublicApi,
-        CapabilityCell::VueTsc,
-        CapabilityCell::VueDeclaration,
-        CapabilityCell::VueCompatV2,
-        CapabilityCell::VueOtherVersion,
-        CapabilityCell::SveltePraseLocal,
-        CapabilityCell::SvelteClientRunes,
-        CapabilityCell::SvelteClientLegacy,
-        CapabilityCell::SvelteServerRunes,
-        CapabilityCell::SvelteServerLegacy,
-        CapabilityCell::SvelteComponent,
-        CapabilityCell::SvelteModule,
-        CapabilityCell::SvelteSemanticCore,
-        CapabilityCell::SvelteCustomElement,
-        CapabilityCell::SvelteAsyncExperimental,
-        CapabilityCell::SvelteHydration,
-        CapabilityCell::SveltePublicApi,
-        CapabilityCell::SvelteTsc,
-        CapabilityCell::SvelteDeclaration,
-        CapabilityCell::SvelteHmr,
-        CapabilityCell::SvelteCompatApi4,
-        CapabilityCell::SvelteOfficialAst,
-        CapabilityCell::SvelteOtherVersion,
-    ];
+    use super::ALL_CAPABILITY_CELLS as ALL_CELLS;
 
     /// Non-vacuity + exact disposition-count proof against
     /// `capability-matrix.tsv`'s committed 34 rows.
