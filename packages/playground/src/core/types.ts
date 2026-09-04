@@ -341,10 +341,14 @@ export interface CompilerOptions {
 export interface CompileTiming {
   verterNewJs: number | null; // ms for total compilation (JS-measured)
   parseDurationMs: number | null; // ms for Rust parse phase
-  scriptMs: number | null; // ms for script codegen
-  templateMs: number | null; // ms for template codegen
-  styleMs: number | null; // ms for style codegen (total)
-  tsxMs: number | null; // ms for IDE/TSX codegen
+  /** Per-stage script codegen. Null: one compileRequest owns the whole client compile. */
+  scriptMs: number | null;
+  /** Per-stage template codegen. Null: one compileRequest owns the whole client compile. */
+  templateMs: number | null;
+  /** Per-stage style codegen. Null: one compileRequest owns the whole client compile. */
+  styleMs: number | null;
+  /** Wall time of the typed compile request (runtime + IDE companion). */
+  tsxMs: number | null;
   tscMs: number | null; // ms for public API codegen
   lintMs: number | null; // ms for lint execution
 }

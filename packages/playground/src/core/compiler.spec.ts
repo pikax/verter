@@ -19,43 +19,67 @@ import { File } from "./types";
 import { combineSourceMaps, lookupGenerated, lookupSource, parseMappings } from "./sourcemap";
 import { allFrameworkExtensions } from "./frameworks";
 
+const VUE_CLIENT_IDE_REQUEST = {
+  vue: {
+    identity: { isProduction: false, forceJs: true },
+    products: [
+      { runtimeClient: { runtimeSourceMap: true } },
+      {
+        ideCompanion: {
+          wantSourceMap: true,
+          embedAmbientTypes: false,
+          conditionalRootNarrowing: false,
+          strictSlots: false,
+          ideChunkBoundaries: false,
+        },
+      },
+    ],
+    options: {
+      backend: "inferred" as const,
+      ssr: false,
+      isCustomElement: [] as string[],
+      babelParserPlugins: [] as string[],
+    },
+  },
+};
+
+const SVELTE_CLIENT_IDE_REQUEST = {
+  svelte: {
+    identity: { isProduction: false, forceJs: true },
+    products: [
+      { runtimeClient: { runtimeSourceMap: true } },
+      {
+        ideCompanion: {
+          wantSourceMap: true,
+          embedAmbientTypes: false,
+          conditionalRootNarrowing: false,
+          strictSlots: false,
+          ideChunkBoundaries: false,
+        },
+      },
+    ],
+    options: {},
+  },
+};
+
 async function generateRealTsxOutput(
   vueSource: string,
 ): Promise<{ code: string; sourceMap: string }> {
-  const thisDir = dirname(fileURLToPath(import.meta.url));
-  const wasmJs = resolve(thisDir, "../../../wasm/wasm/verter_wasm.js");
-  const wasmBin = resolve(thisDir, "../../../wasm/wasm/verter_wasm_bg.wasm");
-
-  const wasmModule = (await import(pathToFileURL(wasmJs).href)) as any;
-  const wasmBytes = readFileSync(wasmBin);
-  await wasmModule.default({ module_or_path: wasmBytes });
-
-  const host = new wasmModule.VerterHost({
-    devMode: true,
-    compileErrorPolicy: "devServeLastKnownGood",
-    maxProfilesPerFile: 8,
-  });
-
-  const profile = { sourceMap: true, target: "ide", forceJs: true };
+  const host = await loadWasmHost();
   host.upsert({
     inputId: "App.vue",
     source: vueSource,
     fileKind: "vue",
     aliases: [],
-    compileProfile: profile,
   });
 
-  host.getVirtualFile({
-    rawId: "App.vue",
-    compileProfile: profile,
-  });
-
-  const tsx = host.getIde("App.vue", profile);
-  if (!tsx?.code || !tsx?.sourceMap) {
-    throw new Error("expected host.getIde() to return code + sourceMap");
+  const response = host.compileRequest("App.vue", VUE_CLIENT_IDE_REQUEST);
+  const ide = response.products.find((product) => product.kind === "ideCompanion");
+  if (!ide || ide.code == null || !ide.sourceMap) {
+    throw new Error("expected compileRequest ideCompanion to return code + sourceMap");
   }
 
-  return { code: tsx.code, sourceMap: tsx.sourceMap };
+  return { code: ide.code, sourceMap: ide.sourceMap };
 }
 
 const VUE_TYPE_STUB = `
@@ -516,7 +540,10 @@ describe("applyTsxOutput", () => {
 
   it("stores real host TSX output and source map unchanged", async () => {
     const file = new File("App.vue", "<template><div>{{ msg }}</div></template>");
-    const vueCode = `<script setup lang=\"ts\">\\nconst msg: string = 'hello'\\n</script>\\n<template><div>{{ msg }}</div></template>`;
+    const vueCode = `<script setup lang="ts">
+const msg: string = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>`;
     const tsx = await generateRealTsxOutput(vueCode);
 
     applyTsxOutput(file, tsx);
@@ -551,14 +578,12 @@ defineProps<Props>()
       [app.filename]: app,
       [types.filename]: types,
     };
-    const profile = { sourceMap: true, target: "bundler" };
 
     const upsert = host.upsert({
       inputId: app.filename,
       source: app.code,
       fileKind: "vue",
       aliases: [],
-      compileProfile: profile,
     });
     const deps = resolveKnownModuleReferenceDependencies(
       app.filename,
@@ -573,24 +598,19 @@ defineProps<Props>()
       source: types.code,
       fileKind: "non_sfc",
       aliases: [],
-      compileProfile: profile,
     });
     host.setImportDependencies(
       app.filename,
       deps.map((dep) => ({ specifier: dep, resolvedCanonicalId: dep })),
     );
 
-    const main = requireVirtualFile(
-      host.getVirtualFile({
-        rawId: app.filename,
-        compileProfile: profile,
-      }),
-      app.filename,
-    );
+    const response = host.compileRequest(app.filename, VUE_CLIENT_IDE_REQUEST);
+    const runtime = response.products.find((product) => product.kind === "runtimeClient");
+    const assembled = (runtime?.nodes ?? []).map((node) => node.code).join("\n");
 
-    expect(main.diagnostics.diagnostics).toEqual([]);
-    expect(main.code).toContain("name");
-    expect(main.code).toContain("count");
+    expect(response.diagnostics.diagnostics).toEqual([]);
+    expect(assembled).toContain("name");
+    expect(assembled).toContain("count");
   });
 });
 
@@ -599,9 +619,8 @@ defineProps<Props>()
 // Discriminates the descriptor-driven svelte path against a Vue-only host
 // wiring, including the playground's generic Main/style/IDE surface assembly.
 describe("svelte WASM smoke", () => {
-  it("upserts a .svelte file with fileKind:'svelte' and returns non-empty main virtual file", async () => {
+  it("upserts a .svelte file with fileKind:'svelte' and returns non-empty main runtime node", async () => {
     const host = await loadWasmHost();
-    const profile = { sourceMap: true, target: "bundler", forceJs: true };
     const source = `<script lang="ts">\n  let count = $state(0)\n</script>\n\n<button onclick={() => count++}>{count}</button>\n`;
 
     const upsert = host.upsert({
@@ -609,16 +628,14 @@ describe("svelte WASM smoke", () => {
       source,
       fileKind: "svelte",
       aliases: [],
-      compileProfile: profile,
     });
     expect(upsert.moduleReferences).toBeDefined();
 
-    const main = requireVirtualFile(
-      host.getVirtualFile({ rawId: "App.svelte", compileProfile: profile }),
-      "App.svelte",
-    );
-    expect(main.code.length).toBeGreaterThan(0);
-    expect(main.diagnostics.diagnostics).toEqual([]);
+    const response = host.compileRequest("App.svelte", SVELTE_CLIENT_IDE_REQUEST);
+    const runtime = response.products.find((product) => product.kind === "runtimeClient");
+    const main = runtime?.nodes?.find((node) => node.node.kind === "main");
+    expect(main?.code.length).toBeGreaterThan(0);
+    expect(response.diagnostics.diagnostics).toEqual([]);
   });
 
   it("compileFile preserves Svelte Main, scoped CSS, and IDE output", async () => {
@@ -640,7 +657,61 @@ describe("svelte WASM smoke", () => {
       expect(file.compiled.types).toContain("@jsxImportSource @verter/svelte-jsx");
       expect(file.compiled.compilerDiagnostics).toEqual([]);
       expect(file.compiled.errors).toEqual([]);
-      expect(timing.styleMs).not.toBeNull();
+      expect(timing.scriptMs).toBeNull();
+      expect(timing.templateMs).toBeNull();
+      expect(timing.styleMs).toBeNull();
+      expect(timing.tsxMs).not.toBeNull();
+    } finally {
+      teardown();
+    }
+  });
+
+  // @ai-generated - Real WASM must accept a Svelte compileFile with playground strictSlots enabled.
+  it("compileFile succeeds for Svelte when Vue-only strictSlots is set", async () => {
+    const host = await loadWasmHost();
+    const teardown = __setHostForTest(host as any);
+    try {
+      const file = new File(
+        "Slots.svelte",
+        `<script lang="ts">let count = $state(0)</script>\n<button onclick={() => count++}>{count}</button>`,
+      );
+      await compileFile(file, { isProduction: false, ssr: false, strictSlots: true });
+      expect(file.compiled.js.length).toBeGreaterThan(0);
+      expect(file.compiled.errors).toEqual([]);
+    } finally {
+      teardown();
+    }
+  });
+
+  // @ai-generated - Real WASM Vue compileFile must match leftover getVirtualFile/getIde bytes.
+  it("compileFile preserves Vue runtime, CSS, and IDE output through the typed request", async () => {
+    const host = await loadWasmHost();
+    const teardown = __setHostForTest(host as any);
+    try {
+      const source = `<script setup lang="ts">
+const { café } = defineProps<{ café: string }>()
+</script>
+<template>
+  <div class="box">{{ café }}</div>
+</template>
+<style>.box { color: red; }</style>`;
+      const file = new File("App.vue", source);
+      const timing = await compileFile(file);
+      const legacy = assembleVueViaLegacyVirtualFiles(host, file.filename, source);
+
+      expect(file.compiled.js).toBe(legacy.js);
+      expect(file.compiled.css).toBe(legacy.css);
+      expect(file.compiled.types).toBe(legacy.types);
+      expect(file.compiled.typesSourceMap).toBe(legacy.typesSourceMap);
+      expect(file.compiled.verterSourceMap).toBe(legacy.verterSourceMap);
+      expect(file.compiled.errors).toEqual(legacy.errors);
+      expect(file.compiled.destructuredBlock).toEqual(legacy.destructuredBlock);
+      expect(file.compiled.js).toContain("__sfc__");
+      expect(file.compiled.js).toContain("café");
+      expect(file.compiled.css).toMatch(/\.box/);
+      expect(file.compiled.types.length).toBeGreaterThan(0);
+      expect(file.compiled.verterSourceMap.length).toBeGreaterThan(0);
+      expect(JSON.parse(file.compiled.verterSourceMap).mappings.length).toBeGreaterThan(0);
       expect(timing.tsxMs).not.toBeNull();
     } finally {
       teardown();
@@ -650,7 +721,6 @@ describe("svelte WASM smoke", () => {
   // @ai-generated - Verifies standalone rune modules stay off component-only virtual-file surfaces.
   it("does not publish a component virtual file for a .svelte.ts rune module", async () => {
     const host = await loadWasmHost();
-    const profile = { sourceMap: true, target: "ide", forceJs: true };
     const source = `export function createCounter() {\n  let v = $state(0)\n  return { get value() { return v } }\n}\n`;
 
     host.upsert({
@@ -658,11 +728,10 @@ describe("svelte WASM smoke", () => {
       source,
       fileKind: "svelte",
       aliases: [],
-      compileProfile: profile,
     });
     const componentVirtualFile = host.getVirtualFile({
       rawId: "counter.svelte.ts",
-      compileProfile: profile,
+      compileProfile: { sourceMap: true, target: "ide", forceJs: true },
     });
     expect(componentVirtualFile).toBeNull();
   });
@@ -858,6 +927,24 @@ interface VirtualFile {
 
 interface WasmHostUpsertResult {
   moduleReferences?: HostModuleReference[];
+  diagnostics?: { diagnostics: Array<unknown> };
+}
+
+interface WasmCompiledNode {
+  node: { kind: string; index?: number };
+  code: string;
+  sourceMap?: string;
+}
+
+interface WasmCompileResponse {
+  canonicalId: string;
+  diagnostics: { diagnostics: Array<unknown>; hasErrors?: boolean };
+  products: Array<{
+    kind: string;
+    nodes?: WasmCompiledNode[];
+    code?: string;
+    sourceMap?: string;
+  }>;
 }
 
 interface WasmHost {
@@ -866,13 +953,36 @@ interface WasmHost {
     source: string;
     fileKind: string;
     aliases: string[];
-    compileProfile: Record<string, unknown>;
+    compileProfile?: Record<string, unknown>;
   }): WasmHostUpsertResult;
+  compileRequest(canonicalId: string, request: unknown): WasmCompileResponse;
   getVirtualFile(query: {
     rawId: string;
     compileProfile?: Record<string, unknown>;
   }): VirtualFile | null;
   listVirtualFiles(canonicalId: string): Array<{ kind: string; index?: number }>;
+  getDocumentStructure?(canonicalId: string): {
+    blocks: Array<{
+      kind: string;
+      section?: {
+        role: { kind: string };
+        openingRange: { start: number };
+      };
+    }>;
+  } | null;
+  getIde(
+    canonicalId: string,
+    profile?: Record<string, unknown>,
+  ): {
+    code: string;
+    sourceMap?: string;
+    destructuredBlock?: {
+      bindings: Array<{ name: string; sourceStart: number; sourceEnd: number }>;
+      blockStart: number;
+      blockEnd: number;
+    } | null;
+  } | null;
+  ensureIdeCompiled(canonicalId: string, profile?: Record<string, unknown>): boolean;
   setImportDependencies(
     canonicalOrAlias: string,
     resolutions: Array<{
@@ -883,11 +993,147 @@ interface WasmHost {
   ): void;
 }
 
-function requireVirtualFile(file: VirtualFile | null, rawId: string): VirtualFile {
-  if (file === null) {
-    throw new Error(`expected a virtual file for ${rawId}`);
+const LEGACY_VUE_PROFILE = {
+  filename: "App.vue",
+  isProduction: false,
+  customElement: false,
+  ssr: false,
+  hmrStrategy: "none",
+  forceJs: true,
+  sourceMap: true,
+};
+
+function uniqueDiagnosticText(
+  snapshots: Array<{ diagnostics: Array<unknown> } | undefined>,
+): string[] {
+  const seen = new Set<string>();
+  const texts: string[] = [];
+  for (const snapshot of snapshots) {
+    for (const diagnostic of snapshot?.diagnostics ?? []) {
+      const record = diagnostic as {
+        severity?: string;
+        message?: string;
+        spanStart?: number;
+        spanEnd?: number;
+      };
+      const loc =
+        record.spanStart != null
+          ? ` (${record.spanStart}:${record.spanEnd ?? record.spanStart})`
+          : "";
+      const text = `[${record.severity ?? "error"}] ${record.message ?? ""}${loc}`;
+      if (seen.has(text)) continue;
+      seen.add(text);
+      texts.push(text);
+    }
   }
-  return file;
+  return texts;
+}
+
+function assembleVueViaLegacyVirtualFiles(
+  host: WasmHost,
+  filename: string,
+  source: string,
+): {
+  js: string;
+  css: string;
+  types: string;
+  typesSourceMap: string;
+  verterSourceMap: string;
+  errors: string[];
+  destructuredBlock: {
+    bindings: Array<{ name: string; sourceStart: number; sourceEnd: number }>;
+    blockStart: number;
+    blockEnd: number;
+  } | null;
+} {
+  const profile = { ...LEGACY_VUE_PROFILE, filename };
+  const upsert = host.upsert({
+    inputId: filename,
+    source,
+    fileKind: "vue",
+    aliases: [],
+    compileProfile: profile,
+  });
+  const nodes = host.listVirtualFiles(filename);
+  const kinds = new Set(nodes.map((node) => node.kind));
+  const diagnosticSnapshots: Array<{ diagnostics: Array<unknown> } | undefined> = [
+    upsert.diagnostics,
+  ];
+  let assembledJs = "";
+  let scriptCode = "";
+  let scriptSourceMap = "";
+  let templateCode = "";
+  let templateSourceMap = "";
+
+  if (kinds.has("script")) {
+    const script = host.getVirtualFile({
+      rawId: `${filename}?vue&type=script`,
+      compileProfile: profile,
+    });
+    if (!script) throw new Error("legacy script virtual file missing");
+    diagnosticSnapshots.push(script.diagnostics);
+    scriptCode = script.code;
+    scriptSourceMap = script.sourceMap ?? "";
+    assembledJs += script.code;
+  }
+  if (kinds.has("template")) {
+    const template = host.getVirtualFile({
+      rawId: `${filename}?vue&type=template`,
+      compileProfile: profile,
+    });
+    if (!template) throw new Error("legacy template virtual file missing");
+    diagnosticSnapshots.push(template.diagnostics);
+    if (assembledJs) assembledJs += "\n";
+    assembledJs += template.code;
+    templateCode = template.code;
+    templateSourceMap = template.sourceMap ?? "";
+  }
+  if (!assembledJs) {
+    const main = host.getVirtualFile({ rawId: filename, compileProfile: profile });
+    if (!main) throw new Error("legacy main virtual file missing");
+    diagnosticSnapshots.push(main.diagnostics);
+    assembledJs = main.code;
+  }
+
+  const styleChunks: string[] = [];
+  for (const index of nodes
+    .filter((node) => node.kind === "style" && node.index != null)
+    .map((node) => node.index as number)
+    .sort((a, b) => a - b)) {
+    const style = host.getVirtualFile({
+      rawId: `${filename}?vue&type=style&index=${index}`,
+      compileProfile: profile,
+    });
+    if (!style) throw new Error(`legacy style virtual file missing at ${index}`);
+    diagnosticSnapshots.push(style.diagnostics);
+    styleChunks.push(style.code);
+  }
+
+  const js = mergeRenderIntoComponent(assembledJs);
+  const structure = host.getDocumentStructure?.(filename) ?? null;
+  const templateSection = structure?.blocks.find(
+    (block) => block.kind === "section" && block.section?.role.kind === "templateHost",
+  );
+  const verterSourceMap = combineSourceMaps({
+    scriptMap: scriptSourceMap,
+    scriptCode,
+    templateMap: templateSourceMap,
+    templateCode,
+    vueSource: source,
+    templateStartUtf8: templateSection?.section?.openingRange.start ?? null,
+    finalJs: js,
+  });
+  host.ensureIdeCompiled(filename, profile);
+  const ide = host.getIde(filename, profile);
+  return {
+    js,
+    css: styleChunks.join("\n"),
+    types: ide?.code ?? "",
+    typesSourceMap: ide?.sourceMap ?? "",
+    verterSourceMap,
+    errors: uniqueDiagnosticText(diagnosticSnapshots),
+    destructuredBlock: ide?.destructuredBlock ?? null,
+  };
 }
 
 async function loadWasmHost(): Promise<WasmHost> {
@@ -943,6 +1189,17 @@ function createMockPlaygroundHost(options: {
       code: "export default {}",
       diagnostics: { diagnostics: [], hasErrors: false },
     }));
+    compileRequest = vi.fn((canonicalId: string) => ({
+      canonicalId,
+      diagnostics: { diagnostics: [], hasErrors: false },
+      products: [
+        {
+          kind: "runtimeClient",
+          nodes: [{ node: { kind: "main" }, code: "export default {}", meta: {} }],
+        },
+        { kind: "ideCompanion", code: "", sourceMap: "" },
+      ],
+    }));
     setImportDependencies = setImportDependencies;
     getAnalysis = vi.fn(() => null);
 
@@ -973,62 +1230,32 @@ async function compileWithCombinedSourceMap(vueSource: string): Promise<{
   templateCode: string;
 }> {
   const host = await loadWasmHost();
-  const profile = { sourceMap: true, target: "bundler" };
 
   host.upsert({
     inputId: "App.vue",
     source: vueSource,
     fileKind: "vue",
     aliases: [],
-    compileProfile: profile,
   });
 
-  const nodes = host.listVirtualFiles("App.vue");
-  const nodeKinds = new Set(nodes.map((n) => n.kind));
+  const response = host.compileRequest("App.vue", VUE_CLIENT_IDE_REQUEST);
+  const nodes = response.products.find((product) => product.kind === "runtimeClient")?.nodes ?? [];
+  const script = nodes.find((node) => node.node.kind === "script");
+  const template = nodes.find((node) => node.node.kind === "template");
+  const main = nodes.find((node) => node.node.kind === "main");
 
   let assembledJs = "";
-  let scriptCode = "";
-  let scriptSourceMap = "";
-  let templateCode = "";
-  let templateSourceMap = "";
+  const scriptCode = script?.code ?? "";
+  const scriptSourceMap = script?.sourceMap ?? "";
+  const templateCode = template?.code ?? "";
+  const templateSourceMap = template?.sourceMap ?? "";
 
-  if (nodeKinds.has("script")) {
-    const script = requireVirtualFile(
-      host.getVirtualFile({
-        rawId: "App.vue?vue&type=script",
-        compileProfile: profile,
-      }),
-      "App.vue?vue&type=script",
-    );
-    scriptCode = script.code;
-    scriptSourceMap = script.sourceMap ?? "";
-    assembledJs += script.code;
-  }
-
-  if (nodeKinds.has("template")) {
-    const template = requireVirtualFile(
-      host.getVirtualFile({
-        rawId: "App.vue?vue&type=template",
-        compileProfile: profile,
-      }),
-      "App.vue?vue&type=template",
-    );
+  if (script) assembledJs += script.code;
+  if (template) {
     if (assembledJs) assembledJs += "\n";
     assembledJs += template.code;
-    templateCode = template.code;
-    templateSourceMap = template.sourceMap ?? "";
   }
-
-  if (!assembledJs && nodeKinds.has("main")) {
-    const main = requireVirtualFile(
-      host.getVirtualFile({
-        rawId: "App.vue",
-        compileProfile: profile,
-      }),
-      "App.vue",
-    );
-    assembledJs = main.code;
-  }
+  if (!assembledJs && main) assembledJs = main.code;
 
   const finalJs = mergeRenderIntoComponent(assembledJs);
   const combinedMap = combineSourceMaps({
