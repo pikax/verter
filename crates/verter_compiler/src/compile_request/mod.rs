@@ -81,10 +81,8 @@ impl std::fmt::Display for FrameworkOption {
             Some((_, local)) => local,
             None => surface,
         };
-        match local_surface.split_once('.') {
-            Some((_, nested_path)) => write!(f, "{framework}:{nested_path}.{option}"),
-            None => write!(f, "{framework}:{option}"),
-        }
+        let _ = local_surface;
+        write!(f, "{framework}:{option}")
     }
 }
 

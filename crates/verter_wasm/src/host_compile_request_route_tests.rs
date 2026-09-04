@@ -902,7 +902,12 @@ fn published_diagnostic_spans_are_utf16_and_match_the_legacy_route() {
 #[wasm_bindgen_test]
 fn published_diagnostics_carry_their_argument_list_through_serde() {
     let host = js_host();
-    register(&host, "/src/Warn.vue", &diagnostic_carrier(ASCII_PREFIX), "vue");
+    register(
+        &host,
+        "/src/Warn.vue",
+        &diagnostic_carrier(ASCII_PREFIX),
+        "vue",
+    );
 
     let response = compile_request(
         &host,
