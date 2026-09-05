@@ -18,6 +18,7 @@ import {
 import { File } from "./types";
 import { combineSourceMaps, lookupGenerated, lookupSource, parseMappings } from "./sourcemap";
 import { allFrameworkExtensions } from "./frameworks";
+import typedCompileRouteGolden from "./__fixtures__/typed-compile-route.golden.json";
 
 const VUE_CLIENT_IDE_REQUEST = {
   vue: {
@@ -683,57 +684,55 @@ describe("svelte WASM smoke", () => {
     }
   });
 
-  // @ai-generated - Real WASM Vue compileFile must match leftover getVirtualFile/getIde bytes.
-  it("compileFile preserves Vue runtime, CSS, and IDE output through the typed request", async () => {
+  // @ai-generated - Real WASM Vue compileFile produces complete runtime, CSS, and IDE output.
+  it("compileFile produces Vue runtime, CSS, and IDE output through the typed request", async () => {
     const host = await loadWasmHost();
     const teardown = __setHostForTest(host as any);
     try {
       const source = `<script setup lang="ts">
 const { café } = defineProps<{ café: string }>()
+const greeting = café.toUpperCase()
 </script>
 <template>
-  <div class="box">{{ café }}</div>
+  <div class="box">{{ greeting }}</div>
 </template>
 <style>.box { color: red; }</style>`;
       const file = new File("App.vue", source);
       const timing = await compileFile(file);
-      const legacy = assembleVueViaLegacyVirtualFiles(host, file.filename, source);
 
-      expect(file.compiled.js).toBe(legacy.js);
-      expect(file.compiled.css).toBe(legacy.css);
-      expect(file.compiled.types).toBe(legacy.types);
-      expect(file.compiled.typesSourceMap).toBe(legacy.typesSourceMap);
-      expect(file.compiled.verterSourceMap).toBe(legacy.verterSourceMap);
-      expect(file.compiled.errors).toEqual(legacy.errors);
-      expect(file.compiled.destructuredBlock).toEqual(legacy.destructuredBlock);
-      expect(file.compiled.js).toContain("__sfc__");
-      expect(file.compiled.js).toContain("café");
-      expect(file.compiled.css).toMatch(/\.box/);
-      expect(file.compiled.types.length).toBeGreaterThan(0);
-      expect(file.compiled.verterSourceMap.length).toBeGreaterThan(0);
-      expect(JSON.parse(file.compiled.verterSourceMap).mappings.length).toBeGreaterThan(0);
+      // The setup-local name is provenance for the destructuredBlock assertion
+      // below: its SFC-absolute source offsets must match the binding's actual
+      // declaration position in `source`, not a hardcoded guess. (The destructured
+      // prop `café` itself is excluded from this block — it's read via `__props`.)
+      const localName = "greeting";
+      const localStart = source.indexOf(localName);
+      expect(localStart).toBeGreaterThanOrEqual(0);
+
+      // Exact-byte regression guard: `typedCompileRouteGolden` pins a real compile
+      // of this exact fixture through the typed compile route (the only route
+      // this test — or any caller — has to reach the host with). Complete equality
+      // here is load-bearing: the typed route's JS/CSS/IDE/map/diagnostic bytes
+      // are proven against this pinned golden, not against a second live route.
+      expect(file.compiled.js).toBe(typedCompileRouteGolden.js);
+      expect(file.compiled.css).toBe(typedCompileRouteGolden.css);
+      expect(file.compiled.types).toBe(typedCompileRouteGolden.types);
+      expect(file.compiled.typesSourceMap).toBe(typedCompileRouteGolden.typesSourceMap);
+      expect(file.compiled.verterSourceMap).toBe(typedCompileRouteGolden.verterSourceMap);
+      expect(file.compiled.errors).toEqual(typedCompileRouteGolden.errors);
+      expect(file.compiled.destructuredBlock).toEqual(typedCompileRouteGolden.destructuredBlock);
+
+      const block = file.compiled.destructuredBlock;
+      expect(block).not.toBeNull();
+      expect(block!.bindings).toEqual([
+        { name: localName, sourceStart: localStart, sourceEnd: localStart + localName.length },
+      ]);
+      expect(block!.blockStart).toBeGreaterThanOrEqual(0);
+      expect(block!.blockEnd).toBeGreaterThan(block!.blockStart);
+
       expect(timing.tsxMs).not.toBeNull();
     } finally {
       teardown();
     }
-  });
-
-  // @ai-generated - Verifies standalone rune modules stay off component-only virtual-file surfaces.
-  it("does not publish a component virtual file for a .svelte.ts rune module", async () => {
-    const host = await loadWasmHost();
-    const source = `export function createCounter() {\n  let v = $state(0)\n  return { get value() { return v } }\n}\n`;
-
-    host.upsert({
-      inputId: "counter.svelte.ts",
-      source,
-      fileKind: "svelte",
-      aliases: [],
-    });
-    const componentVirtualFile = host.getVirtualFile({
-      rawId: "counter.svelte.ts",
-      compileProfile: { sourceMap: true, target: "ide", forceJs: true },
-    });
-    expect(componentVirtualFile).toBeNull();
   });
 });
 
@@ -919,12 +918,6 @@ const msg = 'hello'
 
 // ── Combined source map integration tests (real WASM) ──────────
 
-interface VirtualFile {
-  code: string;
-  sourceMap?: string;
-  diagnostics: { diagnostics: Array<unknown> };
-}
-
 interface WasmHostUpsertResult {
   moduleReferences?: HostModuleReference[];
   diagnostics?: { diagnostics: Array<unknown> };
@@ -956,10 +949,6 @@ interface WasmHost {
     compileProfile?: Record<string, unknown>;
   }): WasmHostUpsertResult;
   compileRequest(canonicalId: string, request: unknown): WasmCompileResponse;
-  getVirtualFile(query: {
-    rawId: string;
-    compileProfile?: Record<string, unknown>;
-  }): VirtualFile | null;
   listVirtualFiles(canonicalId: string): Array<{ kind: string; index?: number }>;
   getDocumentStructure?(canonicalId: string): {
     blocks: Array<{
@@ -970,19 +959,6 @@ interface WasmHost {
       };
     }>;
   } | null;
-  getIde(
-    canonicalId: string,
-    profile?: Record<string, unknown>,
-  ): {
-    code: string;
-    sourceMap?: string;
-    destructuredBlock?: {
-      bindings: Array<{ name: string; sourceStart: number; sourceEnd: number }>;
-      blockStart: number;
-      blockEnd: number;
-    } | null;
-  } | null;
-  ensureIdeCompiled(canonicalId: string, profile?: Record<string, unknown>): boolean;
   setImportDependencies(
     canonicalOrAlias: string,
     resolutions: Array<{
@@ -991,149 +967,6 @@ interface WasmHost {
       possibleCanonicalIds?: string[];
     }>,
   ): void;
-}
-
-const LEGACY_VUE_PROFILE = {
-  filename: "App.vue",
-  isProduction: false,
-  customElement: false,
-  ssr: false,
-  hmrStrategy: "none",
-  forceJs: true,
-  sourceMap: true,
-};
-
-function uniqueDiagnosticText(
-  snapshots: Array<{ diagnostics: Array<unknown> } | undefined>,
-): string[] {
-  const seen = new Set<string>();
-  const texts: string[] = [];
-  for (const snapshot of snapshots) {
-    for (const diagnostic of snapshot?.diagnostics ?? []) {
-      const record = diagnostic as {
-        severity?: string;
-        message?: string;
-        spanStart?: number;
-        spanEnd?: number;
-      };
-      const loc =
-        record.spanStart != null
-          ? ` (${record.spanStart}:${record.spanEnd ?? record.spanStart})`
-          : "";
-      const text = `[${record.severity ?? "error"}] ${record.message ?? ""}${loc}`;
-      if (seen.has(text)) continue;
-      seen.add(text);
-      texts.push(text);
-    }
-  }
-  return texts;
-}
-
-function assembleVueViaLegacyVirtualFiles(
-  host: WasmHost,
-  filename: string,
-  source: string,
-): {
-  js: string;
-  css: string;
-  types: string;
-  typesSourceMap: string;
-  verterSourceMap: string;
-  errors: string[];
-  destructuredBlock: {
-    bindings: Array<{ name: string; sourceStart: number; sourceEnd: number }>;
-    blockStart: number;
-    blockEnd: number;
-  } | null;
-} {
-  const profile = { ...LEGACY_VUE_PROFILE, filename };
-  const upsert = host.upsert({
-    inputId: filename,
-    source,
-    fileKind: "vue",
-    aliases: [],
-    compileProfile: profile,
-  });
-  const nodes = host.listVirtualFiles(filename);
-  const kinds = new Set(nodes.map((node) => node.kind));
-  const diagnosticSnapshots: Array<{ diagnostics: Array<unknown> } | undefined> = [
-    upsert.diagnostics,
-  ];
-  let assembledJs = "";
-  let scriptCode = "";
-  let scriptSourceMap = "";
-  let templateCode = "";
-  let templateSourceMap = "";
-
-  if (kinds.has("script")) {
-    const script = host.getVirtualFile({
-      rawId: `${filename}?vue&type=script`,
-      compileProfile: profile,
-    });
-    if (!script) throw new Error("legacy script virtual file missing");
-    diagnosticSnapshots.push(script.diagnostics);
-    scriptCode = script.code;
-    scriptSourceMap = script.sourceMap ?? "";
-    assembledJs += script.code;
-  }
-  if (kinds.has("template")) {
-    const template = host.getVirtualFile({
-      rawId: `${filename}?vue&type=template`,
-      compileProfile: profile,
-    });
-    if (!template) throw new Error("legacy template virtual file missing");
-    diagnosticSnapshots.push(template.diagnostics);
-    if (assembledJs) assembledJs += "\n";
-    assembledJs += template.code;
-    templateCode = template.code;
-    templateSourceMap = template.sourceMap ?? "";
-  }
-  if (!assembledJs) {
-    const main = host.getVirtualFile({ rawId: filename, compileProfile: profile });
-    if (!main) throw new Error("legacy main virtual file missing");
-    diagnosticSnapshots.push(main.diagnostics);
-    assembledJs = main.code;
-  }
-
-  const styleChunks: string[] = [];
-  for (const index of nodes
-    .filter((node) => node.kind === "style" && node.index != null)
-    .map((node) => node.index as number)
-    .sort((a, b) => a - b)) {
-    const style = host.getVirtualFile({
-      rawId: `${filename}?vue&type=style&index=${index}`,
-      compileProfile: profile,
-    });
-    if (!style) throw new Error(`legacy style virtual file missing at ${index}`);
-    diagnosticSnapshots.push(style.diagnostics);
-    styleChunks.push(style.code);
-  }
-
-  const js = mergeRenderIntoComponent(assembledJs);
-  const structure = host.getDocumentStructure?.(filename) ?? null;
-  const templateSection = structure?.blocks.find(
-    (block) => block.kind === "section" && block.section?.role.kind === "templateHost",
-  );
-  const verterSourceMap = combineSourceMaps({
-    scriptMap: scriptSourceMap,
-    scriptCode,
-    templateMap: templateSourceMap,
-    templateCode,
-    vueSource: source,
-    templateStartUtf8: templateSection?.section?.openingRange.start ?? null,
-    finalJs: js,
-  });
-  host.ensureIdeCompiled(filename, profile);
-  const ide = host.getIde(filename, profile);
-  return {
-    js,
-    css: styleChunks.join("\n"),
-    types: ide?.code ?? "",
-    typesSourceMap: ide?.sourceMap ?? "",
-    verterSourceMap,
-    errors: uniqueDiagnosticText(diagnosticSnapshots),
-    destructuredBlock: ide?.destructuredBlock ?? null,
-  };
 }
 
 async function loadWasmHost(): Promise<WasmHost> {
@@ -1185,10 +1018,6 @@ function createMockPlaygroundHost(options: {
   class MockHost {
     upsert = upsert;
     listVirtualFiles = vi.fn(() => [{ kind: "main" }]);
-    getVirtualFile = vi.fn(() => ({
-      code: "export default {}",
-      diagnostics: { diagnostics: [], hasErrors: false },
-    }));
     compileRequest = vi.fn((canonicalId: string) => ({
       canonicalId,
       diagnostics: { diagnostics: [], hasErrors: false },

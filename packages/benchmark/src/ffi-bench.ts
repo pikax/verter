@@ -196,17 +196,11 @@ async function benchNapiVsWasm(fixtures: Fixture[]) {
       wasmHost.upsert({ inputId: fname, source: fixture.source });
     });
 
-    // Cached getVirtualFile: NAPI
+    // Cached getVirtualFile: NAPI only — the WASM binding has no
+    // profile-bearing legacy read routes; every WASM caller compiles
+    // through `compileRequest()` instead.
     bench.add("napi:getVirtualFile", () => {
       napiHost.getVirtualFile({
-        canonicalId: fname,
-        nodeKind: { kind: "main" },
-      });
-    });
-
-    // Cached getVirtualFile: WASM
-    bench.add("wasm:getVirtualFile", () => {
-      wasmHost.getVirtualFile({
         canonicalId: fname,
         nodeKind: { kind: "main" },
       });
