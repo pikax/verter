@@ -58,13 +58,13 @@ Skill forward tests and independent review receipt. The current owner is **curre
 
 - **Normative intent:** prove the skills help fresh agents produce valid architecture rather than scaling mistakes faster.
 - **Atomic boundary:** the production surfaces and named API/data boundaries above form this source-owned node's exclusive acceptance subset; this node owns its complete named migration population and exactly one deletion/cutover disposition.
-- **Cutover evidence:** prove removal or structural rejection of **duplicate agent-specific authority**, **enabled skill before forward tests** and satisfy the node-specific acceptance IDs below. A newly independent outcome requires an amendment and a new node before mutation.
+- **Inventory evidence:** classify every displaced authority and assign its implementation/cutover owner. This contract node proves inventory completeness and unambiguous ownership; later implementation nodes prove production deletion.
 
 ## Acceptance IDs and discriminating proof
 
 Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
 
-- **SKL2-AC1 — sole-owner outcome:** the named final owner must be sole and every displaced route named below must be deleted or structurally rejected. Prefer existing type, capability, dependency, compiler, or static enforcement. Add a negative or mutation test only for a plausible critical fail-closed/correctness boundary or a reproduced defect that existing evidence does not discriminate.
+- **SKL2-AC1 — ownership contract:** every inventoried outcome, consumer and displaced route has exactly one declared implementation/deletion owner. Validate contract artifacts and their negative controls; production deletion is acceptance of the later owner, not this documentation-only node.
 - **SKL2-AC2 — positive contract:** the named API/data boundary must preserve exact identities, provenance, completeness, and deterministic ordering. Reuse existing coverage or extend/table-drive one test before creating a new test.
 - **SKL2-AC3 — incremental equivalence:** when the changed scope owns or affects incremental, cache, cancellation, stale-publication, or partial-result authority, prove incremental equals fresh and degraded outcomes cannot warm. Otherwise record a terse not-applicable rationale tied to the untouched authority.
 - **SKL2-AC4 — bounded work:** when the changed scope owns or affects a hot path, prove no hidden duplicate parse, resolve, plan, emit, copy, allocation, or retained candidate using applicable existing counters, inspection, or benchmarks. Otherwise record a terse not-applicable rationale; do not add counters or a soak by default.
@@ -73,8 +73,8 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 
 ## Deletions and forbidden designs
 
-- Delete or structurally reject: **duplicate agent-specific authority**.
-- Delete or structurally reject: **enabled skill before forward tests**.
+- Inventory and assign the later deletion/rejection owner for: **duplicate agent-specific authority**. This node changes no production route.
+- Inventory and assign the later deletion/rejection owner for: **enabled skill before forward tests**. This node changes no production route.
 - Never add a dual-running authority, compatibility fallback, string/regex semantic recovery, test-only production bypass, resource-capacity predecessor, sleep/poll readiness, or unqualified cache/public identity.
 - Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
 
@@ -83,7 +83,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Target ceiling: 0 production LOC, 0 production files, 0 related crates/packages.
 - Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
 - Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
-- Performance budget: when preflight identifies touched authority or a hot path, equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance remains 0.0% unless an owning-authority amendment supplies exact replacement thresholds. Otherwise performance evidence is not applicable; do not create counters or a 100-request retention soak solely to satisfy this charter.
+- Performance acceptance: use the exact applicable metric rows and methodology from performance-gates.toml or the owning ratified product catalog, under contracts/resource-and-finalization.md (L2). Exact work invariants, statistical latency/RSS limits and bounded new-capability budgets are distinct. Missing required coverage needs an owning-contract amendment before measurement; no implicit 0.0% threshold or post-hoc rebaseline applies.
 
 ## Abort conditions
 

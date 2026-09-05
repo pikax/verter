@@ -6,6 +6,7 @@ import {
   listGitHubIssues,
   loadAuthority,
   packetFor,
+  productReport,
   validateAuthority,
 } from "./lib.mjs";
 
@@ -36,6 +37,11 @@ try {
     console.log(JSON.stringify(explainNode(authority, state, positional(1, "node ID")), null, 2));
   } else if (command === "packet") {
     process.stdout.write(packetFor(authority, state, positional(1, "node ID")));
+  } else if (command === "products") {
+    const products = productReport(authority, state);
+    const selected = args[1] ? products.filter((row) => row.product === args[1]) : products;
+    if (!selected.length) throw new Error(`unknown product ${args[1]}`);
+    console.log(JSON.stringify(selected, null, 2));
   } else if (command === "implemented") {
     const rows = authority.ledger.implemented
       .map((row) => ({
@@ -55,7 +61,7 @@ try {
     console.log(JSON.stringify(githubIssueByNumber(authority.ledger, issue), null, 2));
   } else {
     throw new Error(
-      `unknown command ${command}; supported commands: frontier, explain, packet, implemented, github-issues, github-issue`,
+      `unknown command ${command}; supported commands: frontier, explain, packet, products, implemented, github-issues, github-issue`,
     );
   }
 } catch (error) {

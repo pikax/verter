@@ -62,7 +62,7 @@ Implement the sole translation from supported Prettier-compatible options/config
 - **Revision:** 4 — supersedes the 251-charter all-verticals proposal
 - **Prepared:** 2026-08-26
 - **Repository basis:** program/architecture-lock at d1f3d50a948597f036868543b9bb21acacd730ff
-- **Current-program condition:** maintainer work freeze; TCM0 = RESCOPE_REQUIRED; TCM1–TCM4 = LOCKED
+- **Current-program condition:** readiness follows the current DAG and implemented ledger; historical source-plan freeze/lock labels are not active dispatch instructions.
 
 ## Acceptance IDs and discriminating proof
 

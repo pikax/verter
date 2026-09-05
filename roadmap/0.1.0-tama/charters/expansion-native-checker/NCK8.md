@@ -1,7 +1,7 @@
 <!-- unified-charter-v2
 id=NCK8
 name=Native checker terminal and displaced-authority deletion
-predecessors=NCK7,NCKF0,PER0,UAO0,UAP0,BR0
+predecessors=NCK7,NCKF0,PER0,UAO0,UAP0,BR0,PM4
 phase=expansion
 train=expansion.native-checker
 product=native_checker
@@ -304,3 +304,7 @@ Apply `architecture-3`: 3 fresh distinct harness tasks covering exactly `adversa
 ## Trusted implementation ledger
 
 Before squashing or review, the implementation patch transitions this node's predeclared row in `authority/state/implemented.toml` from `status = "pending"` to `status = "implemented"` with the planned squash commit message, approximate date with timezone, and optional pull-request number. The transitioned row is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
+
+## Required contract contribution
+
+- **PM4:** Native checker promotion requires the sole project authority to be used by all public project-sensitive consumers. Its implemented ledger row supplies this predecessor; locator hints remain non-authoritative.

@@ -1,7 +1,7 @@
 <!-- unified-charter-v2
 id=NCF-MP-AUG
 name=Module/global augmentation and cross-file declaration diagnostics
-predecessors=NCK4,NCK6,IDX0,TCM4,D8
+predecessors=NCK4,NCK6,IDX0,TCM4,D8,PM3
 phase=expansion
 train=expansion.native-checker
 product=native_checker
@@ -197,3 +197,7 @@ Apply `semantic-3`: 2 fresh distinct harness tasks covering exactly `adversarial
 ## Trusted implementation ledger
 
 Before squashing or review, the implementation patch transitions this node's predeclared row in `authority/state/implemented.toml` from `status = "pending"` to `status = "implemented"` with the planned squash commit message, approximate date with timezone, and optional pull-request number. The transitioned row is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
+
+## Required contract contribution
+
+- **PM3:** Coherent configured-project membership, compiler environment, package/reference resolution and snapshot provenance supply the diagnostic rule facts. IDX0 is only an index, and historical C1 does not certify this larger project contract. Its implemented ledger row supplies this predecessor; locator hints remain non-authoritative.

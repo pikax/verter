@@ -1,0 +1,49 @@
+schema = 1
+
+[[contract]]
+id = "project-resolution-proof"
+producer = "PM2"
+consumers = ["NCF-MP-MODULE", "NCF-MP-AUG", "NCF-MP-PROJECT"]
+outcome = "Project-bound package, reference, condition and module-resolution proof"
+acceptance = "PM2-AC1 through PM2-AC4"
+evidence = "Project-resolution mode/package/reference matrix, stale-read negative controls and incremental=fresh suite"
+
+[[contract]]
+id = "coherent-project-snapshot"
+producer = "PM3"
+consumers = ["NCF-MP-MODULE", "NCF-MP-AUG", "NCF-MP-PROJECT", "LSO2"]
+outcome = "One immutable membership, environment, reference and resolver snapshot"
+acceptance = "PM3-AC1 through PM3-AC4"
+evidence = "Atomic project publication and mixed-generation rejection through the consumer boundary"
+
+[[contract]]
+id = "project-consumer-convergence"
+producer = "PM4"
+consumers = ["NCK8", "LSO10", "CLI2"]
+outcome = "Public project-sensitive products use the sole project authority"
+acceptance = "PM4 consumer cutover and convergence acceptance"
+evidence = "Owning consumer matrix, residual deletion proof and installed public-boundary tests"
+
+[[contract]]
+id = "retention-budget-contract"
+producer = "MEM0"
+consumers = ["E4", "MEM1", "L1", "L2"]
+outcome = "Measured memory limits, accounting population and fixed churn workload"
+acceptance = "MEM0-AC1 through MEM0-AC4"
+evidence = "catalogs/semantic-memory-budget.toml and its fixture/workload validation, produced by MEM0"
+
+[[contract]]
+id = "aggregate-retention-admission"
+producer = "MEM1"
+consumers = ["G4", "L1", "L4"]
+outcome = "Bounded aggregate retained bytes with complete uncached results under pressure"
+acceptance = "MEM1-AC1 through MEM1-AC4"
+evidence = "Reservation, shared-allocation, concurrent pressure and high-cardinality lifecycle tests"
+
+[[contract]]
+id = "shipped-configuration-execution"
+producer = "SG0"
+consumers = ["L4"]
+outcome = "Shipped-cfg behavioral tests execute in canonical local, CI and release verification"
+acceptance = "SG0-AC1 through SG0-AC3"
+evidence = "Canonical gate execution plus a proven applied debug-assertion-side-effect negative control"

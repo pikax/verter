@@ -1,7 +1,7 @@
 <!-- unified-charter-v2
 id=LSO10
 name=Language-service convergence and legacy route deletion
-predecessors=LSO9,PER0,UAI0,UAP0,BR0
+predecessors=LSO9,PER0,UAI0,UAP0,BR0,PM4
 phase=expansion
 train=expansion.language-service
 product=language_service
@@ -314,3 +314,7 @@ Apply `architecture-3`: 3 fresh distinct harness tasks covering exactly `adversa
 ## Trusted implementation ledger
 
 Before squashing or review, the implementation patch transitions this node's predeclared row in `authority/state/implemented.toml` from `status = "pending"` to `status = "implemented"` with the planned squash commit message, approximate date with timezone, and optional pull-request number. The transitioned row is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
+
+## Required contract contribution
+
+- **PM4:** Language-service project-sensitive operations must converge on the sole live project authority before promotion. Its implemented ledger row supplies this predecessor; locator hints remain non-authoritative.

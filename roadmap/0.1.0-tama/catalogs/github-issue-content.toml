@@ -58,8 +58,8 @@ acceptance = ["The final architecture lock is recorded before any successor work
 node_id = "G4"
 title = "Converge semantic caching on bounded fact-validated storage"
 problem = "Semantic results can be retained by split cache authorities, generation-only validity checks, and unbounded family slots. These paths risk stale reuse, conflicting ownership, and memory growth during long-lived project sessions."
-expected_outcome = "`ProjectTypeStore` is the sole semantic cache authority, validates complete read facts, and retains a bounded number of candidates per family."
-acceptance = ["`ProjectTypeStore` is the only production authority for the affected semantic results.", "Cache admission validates the complete `ReadSetSignature` through a `StoreViewValidationToken`.", "Each result family enforces a deterministic `candidate_cap` with bounded retention.", "Incremental reuse matches a fresh computation and rejected candidates cannot warm later queries.", "Duplicate cache ownership and generation-only validity routes are removed."]
+expected_outcome = "`ProjectTypeStore` is the sole semantic cache authority, validates complete read facts, and retains bounded candidates per family under one aggregate byte budget."
+acceptance = ["`ProjectTypeStore` is the only production authority for the affected semantic results.", "Cache admission validates the complete `ReadSetSignature` through a `StoreViewValidationToken`.", "Each result family enforces a deterministic `candidate_cap`, and all stores and retained parse workers obey aggregate byte reservations.", "Incremental reuse matches a fresh computation and rejected candidates cannot warm later queries.", "Duplicate cache ownership and generation-only validity routes are removed."]
 [[issue]]
 node_id = "G1"
 title = "Make semantic query results depend only on declared facts"
@@ -1610,3 +1610,24 @@ title = "Promote probe states only through owner review"
 problem = "Accumulated canaries, known failures, skips, and benchmark observations never reach a decision point. Unexpected passes stay invisible and skips outlive the prerequisites that justified them. Recorded numbers go stale and never become actionable evidence for the owners who could adopt them, so the evidence this lane collects fails to turn into decisions."
 expected_outcome = "After the relevant semantic and performance authorities converge, an explicit join reviews every accumulated probe state and records selective promotions with named deciding owners, leaving still-deferred behavior explicitly deferred."
 acceptance = ["Allowed transitions only: skip to canary, canary to known-fail, known-fail to gate, canary to gate, each with a named deciding owner and evidence.", "No automatic promotion from a pass streak; the owning semantic contract decides behavior acceptance and the owning performance contract decides numeric baselines.", "Every still-deferred case keeps its owning named future owner, and no gate is weakened without an owner decision.", "The join itself implements no compiler behavior and invents no thresholds."]
+
+[[issue]]
+node_id = "MEM0"
+title = "Define measured aggregate semantic memory budgets"
+problem = "Per-family cache limits do not bound total memory across distinct keys, projects and retained public results. Physical storage changes need one measured allocation inventory and reproducible pressure workload."
+expected_outcome = "A ratified budget assigns every retained allocation to one owner, defines finite cache and request limits, and fixes a hermetic lifecycle workload before retention policy changes."
+acceptance = ["Every allocation class has one accounting and migration owner.", "Normal and pressure budgets distinguish cache, active requests and external result pins.", "At least 10,000 fixed actions cover all required lifecycle classes and comparable control states.", "Missing limits, workload classes or fixture inputs fail the executable validator."]
+
+[[issue]]
+node_id = "MEM1"
+title = "Bound aggregate semantic retention across project sessions"
+problem = "Individually legal cache entries can collectively retain unbounded memory, and concurrent admissions can exceed a budget unless they share one reservation owner."
+expected_outcome = "One process-local reservation policy bounds cache retention across projects while preserving valid readers, complete uncached results and explicit resource-limited outcomes."
+acceptance = ["Concurrent admissions cannot exceed aggregate and per-entry limits.", "Cancellation, failure and eviction release each reservation exactly once.", "Pressure never fabricates complete results or permits stale or partial cache admission.", "Held public results remain valid and their externally pinned bytes remain visible until release."]
+
+[[issue]]
+node_id = "SG0"
+title = "Restore behavioral verification under the shipped build configuration"
+problem = "The canonical gate temporarily skips verification with debug assertions disabled, allowing debug-only side effects to escape the normal acceptance path."
+expected_outcome = "The canonical, CI and release paths execute the shipped-configuration compile and behavioral lanes and refuse incomplete or skipped work."
+acceptance = ["Both the compile surface and behavioral contract execute with debug assertions disabled.", "A demonstrably applied debug-assertion side effect is caught through the canonical entry point.", "Missing summaries, zero selected tests, skipped prerequisites and aborted children cannot pass.", "Temporary-skip documentation is removed only after actual successful execution."]

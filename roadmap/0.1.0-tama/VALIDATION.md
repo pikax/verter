@@ -33,3 +33,7 @@ Two consequences of this coupling are deliberate rather than incidental, and bot
 Pull requests that change Tama-managed paths run these commands in the `Tama Roadmap` CI job. This is deliberately a cheap shape and scope check for agents: it rejects unknown fields, malformed rows, broken DAG references, charter drift, and catalog drift without introducing Git-identity validation.
 
 No command here resolves ledger commit hints or validates them against Git or GitHub. No commit SHA, tree, ancestry, receipt, lease, runtime journal, content digest, or external authorization participates in readiness.
+
+Strict validation also checks `catalogs/contract-dependencies.toml` against its schema and proves a transitive DAG path from each declared producer to every consumer. Removing such a path fails even when the consumer's charter header still matches the edited DAG. This selected inventory is maintained through reviewed amendments; it does not infer semantic dependencies from code or certify runtime adoption.
+
+`node roadmap/0.1.0-tama/tools/programctl.mjs products [PRODUCT]` emits a read-only JSON summary of implemented foundations, ready work, product/final acceptance gates and pending work without explicit release inclusion. `evidence_status = "not_inspected"` is intentional: the ledger report does not infer review, CI execution, runtime quality or product acceptance from node counts.

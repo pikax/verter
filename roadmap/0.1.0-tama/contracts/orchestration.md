@@ -51,3 +51,5 @@ These reviews are agent obligations, not implementation state. Their reports may
 ## Trust model
 
 Agents are trusted to transition rows to implemented only for implemented nodes and to provide useful locator hints. The simplicity is intentional. Do not add commit lookup, exact matching, SHA fallback, ancestry checks, GitHub verification, or a parallel receipt database.
+
+Autonomous repository-roadmap managers apply the default checkpoint policy and actual-candidate review requirements in `APPLICATION.md`. Persist operational coverage across restarts, reserve active candidates within the six-block bound, and keep final train review independent of checkpoint and node-review waivers. These operational controls never alter the ledger-only readiness algorithm.

@@ -26,6 +26,8 @@ Every static implementation charter must contain:
 
 Contract/constitution nodes may have zero production LOC, but their schemas and focused negative guards are still real acceptance artifacts.
 
+A zero-production contract inventories displaced routes and assigns each to a later production-capable deletion owner. It does not require those future deletions as its own acceptance. Convergence/proof nodes verify their predecessors and return missing mechanisms to their owners. Performance-sensitive acceptance cites exact controlling metric rows under `contracts/resource-and-finalization.md`; generic zero-percent boilerplate cannot override a ratified statistical threshold. Cross-train contract consumers belong in `catalogs/contract-dependencies.toml` with a producer path in the DAG.
+
 ## Atomicity tests
 
 A node must be split before dispatch when any of these are true:
