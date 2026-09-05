@@ -48,12 +48,18 @@ use verter_protocol::verter::v1::{
 /// `EvaluateTypeExpressionGraphRequest` / `ResolveSymbolGraphRequest`
 /// closure can request. Producers exceeding this cap receive
 /// [`TypeInfoRequestError::ExpansionBudgetOutOfRange`] before any
-/// semantic execution.
-pub const MAX_EXPANSION_NODE_BUDGET: u32 = 1 << 14; // 16384
+/// semantic execution. Derived from the encoder-side hard cap
+/// (`verter_protocol::typeinfo::graph_export::MAX_EXPORT_NODE_BUDGET`)
+/// so the wire gate and the bounded-export constructor share one
+/// ceiling — a validated request can never carry a budget the encoder
+/// would refuse.
+pub const MAX_EXPANSION_NODE_BUDGET: u32 =
+    verter_protocol::typeinfo::graph_export::MAX_EXPORT_NODE_BUDGET;
 
 /// Upper bound on the expansion-policy `depth_budget`. Same contract
 /// as [`MAX_EXPANSION_NODE_BUDGET`].
-pub const MAX_EXPANSION_DEPTH_BUDGET: u32 = 256;
+pub const MAX_EXPANSION_DEPTH_BUDGET: u32 =
+    verter_protocol::typeinfo::graph_export::MAX_EXPORT_DEPTH_BUDGET;
 
 /// Minimum schema version this validator accepts. Producers sending
 /// older payloads receive

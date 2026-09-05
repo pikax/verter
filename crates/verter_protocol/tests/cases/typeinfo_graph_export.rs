@@ -23,7 +23,7 @@ use prost::Message;
 
 use verter_protocol::typeinfo::graph as g;
 use verter_protocol::typeinfo::graph_export::{
-    encode_type_expr_graph, GraphExportBudgets, UNBOUNDED_SENTINEL_BUDGET,
+    encode_type_expr_graph, GraphExportBudgets, MAX_EXPORT_DEPTH_BUDGET, MAX_EXPORT_NODE_BUDGET,
 };
 use verter_protocol::verter::v1::graph_type_node;
 use verter_type_expr::{
@@ -31,12 +31,45 @@ use verter_type_expr::{
     ObjectMember, ObjectProperty, TypeExpr, TypeParam,
 };
 
-/// Budgets wide enough that nothing degenerates in the mapping tests.
+/// Budgets wide enough that nothing degenerates in the mapping tests: the
+/// hard-cap token is the maximal validated walk, and every fixture here is
+/// far below it.
 fn wide_budgets() -> GraphExportBudgets {
-    GraphExportBudgets {
-        node_budget: UNBOUNDED_SENTINEL_BUDGET,
-        depth_budget: UNBOUNDED_SENTINEL_BUDGET,
-    }
+    GraphExportBudgets::capped()
+}
+
+/// REGRESSION — the bounded-export capability is validated at
+/// construction: an out-of-range axis (the unbounded `u32::MAX` spelling
+/// included) has NO construction path, zero is a legal bound, and the
+/// capped token sits exactly at both hard ceilings. From OUTSIDE the
+/// crate this also proves the budget fields are private — there is no
+/// struct-literal spelling left to bypass the constructor.
+#[test]
+fn unbounded_budgets_have_no_construction_path() {
+    assert!(
+        GraphExportBudgets::new(u32::MAX, u32::MAX).is_none(),
+        "the unbounded sentinel is structurally rejected"
+    );
+    assert!(
+        GraphExportBudgets::new(MAX_EXPORT_NODE_BUDGET + 1, 1).is_none(),
+        "a node axis above the hard cap is rejected"
+    );
+    assert!(
+        GraphExportBudgets::new(1, MAX_EXPORT_DEPTH_BUDGET + 1).is_none(),
+        "a depth axis above the hard cap is rejected"
+    );
+    assert_eq!(
+        GraphExportBudgets::new(0, 0).map(|b| (b.node_budget(), b.depth_budget())),
+        Some((0, 0)),
+        "zero is a legal bound (encode nothing), not an unbounded wildcard"
+    );
+    let capped = GraphExportBudgets::capped();
+    assert_eq!(capped.node_budget(), MAX_EXPORT_NODE_BUDGET);
+    assert_eq!(capped.depth_budget(), MAX_EXPORT_DEPTH_BUDGET);
+    assert!(
+        GraphExportBudgets::new(MAX_EXPORT_NODE_BUDGET, MAX_EXPORT_DEPTH_BUDGET).is_some(),
+        "the hard caps themselves are constructible (inclusive ceiling)"
+    );
 }
 
 fn encode(root: &TypeExpr) -> g::SemanticTypeGraph {
@@ -197,10 +230,8 @@ fn budget_exhaustion_is_a_fail_closed_opaque_marker() {
             TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
         ]));
     }
-    let budgets = GraphExportBudgets {
-        node_budget: UNBOUNDED_SENTINEL_BUDGET,
-        depth_budget: 2,
-    };
+    let budgets =
+        GraphExportBudgets::new(MAX_EXPORT_NODE_BUDGET, 2).expect("in-range budgets construct");
     let graph = encode_type_expr_graph(&ty, &budgets);
 
     // Walking below the budget floor must hit a budget_exceeded opaque
@@ -249,10 +280,8 @@ fn node_budget_caps_the_real_arena() {
     // the reserved absent-sentinel slot and the shared marker), and the
     // root itself degrades to the budget marker — fail-closed, never a
     // truncated member surface.
-    let budgets = GraphExportBudgets {
-        node_budget: 5,
-        depth_budget: UNBOUNDED_SENTINEL_BUDGET,
-    };
+    let budgets =
+        GraphExportBudgets::new(5, MAX_EXPORT_DEPTH_BUDGET).expect("in-range budgets construct");
     let graph = encode_type_expr_graph(&ty, &budgets);
     let real = graph
         .nodes
@@ -283,10 +312,8 @@ fn node_budget_caps_the_real_arena() {
     }
 
     // A budget the tree fits: the full member surface survives.
-    let budgets = GraphExportBudgets {
-        node_budget: 30,
-        depth_budget: UNBOUNDED_SENTINEL_BUDGET,
-    };
+    let budgets =
+        GraphExportBudgets::new(30, MAX_EXPORT_DEPTH_BUDGET).expect("in-range budgets construct");
     let graph = encode_type_expr_graph(&ty, &budgets);
     let g::TypeNode {
         kind: Some(graph_type_node::Kind::Object(obj)),
@@ -886,10 +913,8 @@ fn the_signatures_arena_is_budget_capped() {
         .map(|_| ObjectMember::CallSignature(FunctionExpr::synthetic(Vec::new(), None, Vec::new())))
         .collect();
     let ty = object(members);
-    let budgets = GraphExportBudgets {
-        node_budget: 4,
-        depth_budget: UNBOUNDED_SENTINEL_BUDGET,
-    };
+    let budgets =
+        GraphExportBudgets::new(4, MAX_EXPORT_DEPTH_BUDGET).expect("in-range budgets construct");
     let graph = encode_type_expr_graph(&ty, &budgets);
     assert!(
         graph.signatures.len() <= 4,

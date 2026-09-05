@@ -28,7 +28,6 @@ use verter_audit::RequestKind;
 use verter_protocol::typeinfo::graph::{
     self as wire, Operation, ProjectionMode, TYPEINFO_GRAPH_SCHEMA_VERSION,
 };
-use verter_protocol::typeinfo::graph_export::UNBOUNDED_SENTINEL_BUDGET;
 use verter_protocol::typeinfo::TypeInfoRequest;
 use verter_protocol::verter::v1::{
     graph_closure_policy, graph_type_node, type_info_graph_request, type_info_graph_response,
@@ -179,8 +178,11 @@ fn unbounded_expansion_is_structurally_rejected() {
         request.closure = Some(wire::ClosurePolicy {
             kind: Some(graph_closure_policy::Kind::Expanded(
                 wire::ClosureExpanded {
-                    node_budget: UNBOUNDED_SENTINEL_BUDGET,
-                    depth_budget: UNBOUNDED_SENTINEL_BUDGET,
+                    // Raw out-of-range wire budgets (above both validator
+                    // caps): an unbounded export request is refused by the
+                    // envelope gate, never by trusting the encoder.
+                    node_budget: u32::MAX,
+                    depth_budget: u32::MAX,
                 },
             )),
         });

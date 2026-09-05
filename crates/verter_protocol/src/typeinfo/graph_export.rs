@@ -36,8 +36,12 @@
 //! limit. A validated graph request can never ask for an unbounded
 //! export: the envelope validator
 //! (`verter_session::typeinfo::request_validation`) rejects a missing
-//! closure policy and caps expansion budgets before this encoder runs;
-//! the budgets here are the encoder-side enforcement of that contract.
+//! closure policy and caps expansion budgets before this encoder runs,
+//! and [`GraphExportBudgets`] itself is constructible only through its
+//! validated constructor — both axes hard-capped
+//! ([`MAX_EXPORT_NODE_BUDGET`] / [`MAX_EXPORT_DEPTH_BUDGET`]) — so the
+//! unbounded spelling has no public path into the encoder. The budgets
+//! here are the encoder-side enforcement of that contract.
 //!
 //! ## Degradation vocabulary (explicit, by design)
 //!
@@ -85,21 +89,70 @@ use crate::verter::v1::{
     SemanticTypeGraph,
 };
 
-/// Sentinel budget value meaning "no limit on this axis". Reserved for
-/// internal callers that already hold a validated bounded policy shape;
-/// the graph request validator is the authority that rejects unbounded
-/// export requests before this encoder is reached.
-pub const UNBOUNDED_SENTINEL_BUDGET: u32 = u32::MAX;
+/// Hard ceiling on the node axis of a validated bounded export. A budget
+/// above this cap has no construction path: [`GraphExportBudgets::new`]
+/// rejects it, so the unbounded spelling (`u32::MAX`) is structurally
+/// refused here — not merely declined by an upstream validator.
+pub const MAX_EXPORT_NODE_BUDGET: u32 = 1 << 14;
+
+/// Hard ceiling on the depth axis of a validated bounded export. Same
+/// contract as [`MAX_EXPORT_NODE_BUDGET`].
+pub const MAX_EXPORT_DEPTH_BUDGET: u32 = 256;
 
 /// Node / depth budgets for one bounded export. Both axes are enforced
-/// independently; a value of [`UNBOUNDED_SENTINEL_BUDGET`] disables that
-/// axis (internal callers only — see the module docs).
+/// independently by the walk. The fields are PRIVATE: a
+/// `GraphExportBudgets` value exists only through the validated
+/// [`GraphExportBudgets::new`] constructor or the
+/// [`GraphExportBudgets::capped`] hard-cap token, so every budget that
+/// reaches [`encode_type_expr_graph`] is bounded by construction — an
+/// unbounded export has no public spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GraphExportBudgets {
     /// Maximum number of real (non-marker) nodes the arena may hold.
-    pub node_budget: u32,
+    node_budget: u32,
     /// Maximum traversal depth; the root sits at depth 0.
-    pub depth_budget: u32,
+    depth_budget: u32,
+}
+
+impl GraphExportBudgets {
+    /// The validated bounded constructor — the only public way to mint a
+    /// budget. Returns `None` when either axis exceeds its hard cap
+    /// ([`MAX_EXPORT_NODE_BUDGET`] / [`MAX_EXPORT_DEPTH_BUDGET`]); the
+    /// unbounded sentinel (`u32::MAX`) is out of range by construction.
+    /// Zero is a legal bound on an axis ("encode nothing on this axis"),
+    /// never an unbounded wildcard.
+    #[must_use]
+    pub fn new(node_budget: u32, depth_budget: u32) -> Option<Self> {
+        if node_budget > MAX_EXPORT_NODE_BUDGET || depth_budget > MAX_EXPORT_DEPTH_BUDGET {
+            return None;
+        }
+        Some(Self {
+            node_budget,
+            depth_budget,
+        })
+    }
+
+    /// The hard-cap token: the maximal validated budget, both axes at
+    /// their ceilings. This is the widest walk the encoder can ever take.
+    #[must_use]
+    pub fn capped() -> Self {
+        Self {
+            node_budget: MAX_EXPORT_NODE_BUDGET,
+            depth_budget: MAX_EXPORT_DEPTH_BUDGET,
+        }
+    }
+
+    /// The validated node-axis budget.
+    #[must_use]
+    pub fn node_budget(&self) -> u32 {
+        self.node_budget
+    }
+
+    /// The validated depth-axis budget.
+    #[must_use]
+    pub fn depth_budget(&self) -> u32 {
+        self.depth_budget
+    }
 }
 
 /// Encode one terminal [`TypeExpr`] into a fresh bounded

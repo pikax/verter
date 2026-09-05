@@ -20,11 +20,15 @@
 
 import { create, toBinary } from "@bufbuild/protobuf";
 import {
+  GraphDiagnosticSeverity,
+  GraphExactness,
   GraphObjectMemberKind,
   GraphOperation,
+  GraphOriginEdgeKind,
   GraphPrimitiveKind,
   GraphProjectionMode,
   GraphReductionDemand,
+  GraphSymbolNamespace,
   TYPEINFO_GRAPH_SCHEMA_VERSION,
   TypeInfoGraphRequestSchema,
   TypeInfoGraphResponseSchema,
@@ -106,6 +110,23 @@ describe("buildTypeInfoRequest", () => {
     expect(() => buildTypeInfoRequest({ canonicalId: "", name: "Foo" })).toThrow();
     expect(() => buildTypeInfoRequest({ canonicalId: "/types.ts", name: "" })).toThrow();
   });
+
+  it("carries the provenance request flag (default off, explicit on)", () => {
+    // Default: no provenance maps are requested.
+    const off = buildTypeInfoRequest({ canonicalId: "/types.ts", name: "Foo" });
+    const offPayload = off.payload;
+    if (offPayload.case !== "resolveSymbol") throw new Error("resolve payload expected");
+    expect(offPayload.value.includeProvenance).toBe(false);
+    // Explicit: the host populates nodeIdMap / symbolIdMap on the answer.
+    const on = buildTypeInfoRequest({
+      canonicalId: "/types.ts",
+      name: "Foo",
+      includeProvenance: true,
+    });
+    const onPayload = on.payload;
+    if (onPayload.case !== "resolveSymbol") throw new Error("resolve payload expected");
+    expect(onPayload.value.includeProvenance).toBe(true);
+  });
 });
 
 /** Encode a `TypeInfoGraphResponse` carrying a `graph` arm. */
@@ -157,12 +178,147 @@ describe("decodeTypeInfoResult", () => {
     expect(root.properties[1].optional).toBe(true);
     expect(root.properties[0].optional).toBe(false);
     // Shared value node: the two `string` members share node id 1 —
-    // identity preserved (one node, referenced twice).
-    expect(root.properties[0].type).toEqual(root.properties[2].type);
-    expect(root.properties[0].type.kind).toBe("primitive");
+    // identity preserved at the WIRE level (ONE node in the arena,
+    // referenced twice), which `toEqual` on the projected descriptors
+    // alone cannot discriminate from two duplicated equal descriptors.
+    const members = root.properties;
+    const wireMembers = result.graph.nodes[3]?.kind;
+    if (wireMembers?.case !== "object") throw new Error("wire object root expected");
+    expect(wireMembers.value.members[0].valueNodeId).toBe(1);
+    expect(wireMembers.value.members[2].valueNodeId).toBe(1);
+    expect(
+      result.graph.nodes.filter(
+        (n) => n.kind?.case === "primitive" && n.kind.value.kind === GraphPrimitiveKind.STRING,
+      ),
+    ).toHaveLength(1);
+    expect(members[0].type).toEqual(members[2].type);
+    expect(members[0].type.kind).toBe("primitive");
     // A template-pattern key domain is NOT a flat primitive — it decodes
     // to a named unknown, never a fabricated `string` domain.
     expect(root.indexSignatures?.[0]?.keyType.kind).toBe("unknown");
+  });
+
+  it("preserves the complete wire graph — identity, provenance, completeness", () => {
+    // REGRESSION — the view must carry EVERY wire field the graph
+    // declares: query identity (operation, context, provenance flags,
+    // env hashes, resolver version), origin edges, per-node exactness,
+    // diagnostics, both provenance id maps (with their stable decl-slot
+    // identities and whole-hash bytes), and the relation-proof table.
+    // A decode that drops any of them would silently strip identity or
+    // provenance from the consumer surface.
+    const wholeHash = new Uint8Array([9, 9, 9]);
+    const solverOptionsHash = new Uint8Array([1, 2, 3]);
+    const response = encodeGraphResponse({
+      schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+      query: {
+        operation: GraphOperation.RESOLVE_SYMBOL,
+        path: [],
+        context: { mode: GraphProjectionMode.EXPANDED, demand: GraphReductionDemand.PUBLISHED },
+        substitutions: [],
+        solverOptionsHash,
+        resolverVersion: 7,
+        includeProvenance: true,
+        includeDiagnostics: true,
+        includeProjection: [],
+        resolvedRoots: [],
+      },
+      strings: { entries: ["", "Foo", "/types.ts", "elided context"] },
+      nodes: [
+        {},
+        { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.STRING } } },
+        { kind: { case: "reference", value: { symbolId: 0 } } },
+      ],
+      symbols: [
+        { nameId: 1, canonicalNameId: 2, namespace: GraphSymbolNamespace.TYPE, declSlotRef: 0 },
+      ],
+      signatures: [],
+      edges: [
+        {
+          sourceNodeId: 2,
+          targetNodeId: 1,
+          kind: GraphOriginEdgeKind.REFERENCES,
+          metaNameId: 3,
+          hasMeta: true,
+        },
+      ],
+      rootIds: [2],
+      exactness: [{ nodeId: 2, exactness: GraphExactness.EXACT_RESOLVED }],
+      diagnostics: [
+        {
+          severity: GraphDiagnosticSeverity.INFO,
+          messageNameId: 3,
+          spanCanonicalNameId: 0,
+          spanStart: 0,
+          spanEnd: 0,
+          hasSpan: false,
+        },
+      ],
+      nodeIdMap: [
+        {
+          nodeId: 2,
+          identity: {
+            canonicalNameId: 2,
+            declNameId: 1,
+            wholeHash,
+            namespace: GraphSymbolNamespace.TYPE,
+          },
+        },
+      ],
+      symbolIdMap: [
+        {
+          symbolId: 0,
+          identity: {
+            canonicalNameId: 2,
+            declNameId: 1,
+            wholeHash,
+            namespace: GraphSymbolNamespace.TYPE,
+          },
+        },
+      ],
+      relationProofs: [{ kind: { case: "assignable", value: { subDerivations: [] } } }],
+    });
+
+    const result = decodeTypeInfoResult(response);
+    expect(result.kind).toBe("graph");
+    if (result.kind !== "graph") throw new Error("graph arm expected");
+    const { graph } = result;
+
+    // Query identity — echoed whole.
+    expect(graph.query?.operation).toBe(GraphOperation.RESOLVE_SYMBOL);
+    expect(graph.query?.context?.mode).toBe(GraphProjectionMode.EXPANDED);
+    expect(graph.query?.context?.demand).toBe(GraphReductionDemand.PUBLISHED);
+    expect(graph.query?.includeProvenance).toBe(true);
+    expect(graph.query?.includeDiagnostics).toBe(true);
+    expect(graph.query?.resolverVersion).toBe(7);
+    expect(Array.from(graph.query?.solverOptionsHash ?? [])).toEqual([1, 2, 3]);
+
+    // Completeness — edges, exactness, diagnostics survive with order.
+    expect(graph.edges).toHaveLength(1);
+    expect(graph.edges[0]?.sourceNodeId).toBe(2);
+    expect(graph.edges[0]?.targetNodeId).toBe(1);
+    expect(graph.edges[0]?.kind).toBe(GraphOriginEdgeKind.REFERENCES);
+    expect(graph.edges[0]?.hasMeta).toBe(true);
+    expect(graph.edges[0]?.metaNameId).toBe(3);
+    expect(graph.exactness).toHaveLength(1);
+    expect(graph.exactness[0]?.nodeId).toBe(2);
+    expect(graph.exactness[0]?.exactness).toBe(GraphExactness.EXACT_RESOLVED);
+    expect(graph.diagnostics).toHaveLength(1);
+    expect(graph.diagnostics[0]?.severity).toBe(GraphDiagnosticSeverity.INFO);
+    expect(graph.strings[graph.diagnostics[0]?.messageNameId ?? 0]).toBe("elided context");
+
+    // Provenance — both id maps, stable identities, whole-hash bytes.
+    expect(graph.nodeIdMap).toHaveLength(1);
+    expect(graph.nodeIdMap[0]?.nodeId).toBe(2);
+    expect(graph.nodeIdMap[0]?.identity?.declNameId).toBe(1);
+    expect(Array.from(graph.nodeIdMap[0]?.identity?.wholeHash ?? [])).toEqual([9, 9, 9]);
+    expect(graph.nodeIdMap[0]?.identity?.namespace).toBe(GraphSymbolNamespace.TYPE);
+    expect(graph.symbolIdMap).toHaveLength(1);
+    expect(graph.symbolIdMap[0]?.symbolId).toBe(0);
+    expect(graph.symbolIdMap[0]?.identity?.canonicalNameId).toBe(2);
+
+    // Relation proofs ride the payload-side table.
+    expect(graph.relationProofs).toHaveLength(1);
+    expect(graph.relationProofs[0]?.kind?.case).toBe("assignable");
   });
 
   it("decodes a reference root through the symbol table", () => {

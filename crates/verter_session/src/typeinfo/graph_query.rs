@@ -341,31 +341,31 @@ fn closure_budgets(closure: Option<&wire::ClosurePolicy>) -> GraphExportBudgets 
     use crate::typeinfo::request_validation::{
         MAX_EXPANSION_DEPTH_BUDGET, MAX_EXPANSION_NODE_BUDGET,
     };
-    match closure.and_then(|policy| policy.kind.as_ref()) {
-        Some(graph_closure_policy::Kind::Expanded(expanded)) => GraphExportBudgets {
-            node_budget: if expanded.node_budget == 0 {
+    // The wire values are validator-capped (0..=MAX on both axes), so the
+    // validated bounded constructor accepts every arm by construction; the
+    // `capped` fallback is the defensive shape for validator drift and is
+    // itself the hard ceiling — a missing policy never buys a wider walk
+    // than the maximal validated budget.
+    let (node, depth) = match closure.and_then(|policy| policy.kind.as_ref()) {
+        Some(graph_closure_policy::Kind::Expanded(expanded)) => (
+            if expanded.node_budget == 0 {
                 MAX_EXPANSION_NODE_BUDGET
             } else {
                 expanded.node_budget
             },
-            depth_budget: if expanded.depth_budget == 0 {
+            if expanded.depth_budget == 0 {
                 MAX_EXPANSION_DEPTH_BUDGET
             } else {
                 expanded.depth_budget
             },
-        },
-        Some(graph_closure_policy::Kind::RootOnly(_)) => GraphExportBudgets {
-            node_budget: MAX_EXPANSION_NODE_BUDGET,
-            depth_budget: 1,
-        },
+        ),
+        Some(graph_closure_policy::Kind::RootOnly(_)) => (MAX_EXPANSION_NODE_BUDGET, 1),
         // Post-gate this is one-level; the defensive no-closure fallback
         // takes the same narrow shape (a missing policy never buys the
         // deepest walk).
-        _ => GraphExportBudgets {
-            node_budget: MAX_EXPANSION_NODE_BUDGET,
-            depth_budget: 2,
-        },
-    }
+        _ => (MAX_EXPANSION_NODE_BUDGET, 2),
+    };
+    GraphExportBudgets::new(node, depth).unwrap_or_else(GraphExportBudgets::capped)
 }
 
 /// Build the wire query identity echoed onto the exported graph.
@@ -715,14 +715,15 @@ mod tests {
                 wire::ClosureRootOnly {},
             )),
         }));
-        assert_eq!(root_only.depth_budget, 1, "root-only is the root node");
+        assert_eq!(root_only.depth_budget(), 1, "root-only is the root node");
         let one_level = closure_budgets(Some(&wire::ClosurePolicy {
             kind: Some(graph_closure_policy::Kind::OneLevel(
                 wire::ClosureOneLevel {},
             )),
         }));
         assert_eq!(
-            one_level.depth_budget, 2,
+            one_level.depth_budget(),
+            2,
             "one level adds exactly one child level"
         );
     }

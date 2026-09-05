@@ -5,9 +5,11 @@
  * typed request builder ({@link buildTypeInfoRequest}) over the wire
  * `TypeInfoGraphRequest` envelope, and the typed decode
  * ({@link decodeTypeInfoResult}) of every `TypeInfoGraphResponse` arm —
- * including the bounded `SemanticTypeGraph` export, decoded into the
- * public `TypeDescriptor` space with identity, provenance, and
- * deterministic ordering preserved.
+ * including the bounded `SemanticTypeGraph` export. The decoded
+ * {@link SemanticTypeGraphView} preserves the COMPLETE wire graph —
+ * query identity, origin edges, per-node exactness, diagnostics, the
+ * provenance id maps, and the relation-proof table — alongside the
+ * public `TypeDescriptor` projection of the root.
  *
  * **Bounded export is structural.** The builder refuses an expanded
  * closure without explicit in-range budgets — the same contract the
@@ -31,7 +33,14 @@ import {
   TypeInfoGraphRequestSchema,
   TypeInfoGraphResponseSchema,
   type GraphClosurePolicy,
+  type GraphDiagnostic,
+  type GraphNodeIdMapEntry,
+  type GraphOriginEdge,
+  type GraphNodeStatus,
+  type GraphQueryIdentity,
+  type GraphRelationProofEntry,
   type GraphSignature,
+  type GraphSymbolIdMapEntry,
   type GraphSymbolNode,
   type GraphTypeNode,
   type SemanticTypeGraph,
@@ -94,6 +103,12 @@ export interface ResolveSymbolGraphQuery {
   mode?: GraphProjectionModeTag;
   /** Closure policy; defaults to the bounded one-level policy. */
   closure?: GraphClosureSpec;
+  /**
+   * Ask the host to populate the graph's provenance maps
+   * (`nodeIdMap` / `symbolIdMap` — snapshot-local ids to stable
+   * decl-slot identities); defaults to `false`.
+   */
+  includeProvenance?: boolean;
 }
 
 const MODE_TAGS: Record<GraphProjectionModeTag, number> = {
@@ -134,7 +149,7 @@ export function buildTypeInfoRequest(query: ResolveSymbolGraphQuery): WireTypeIn
           branding: 1,
           budgets: { maxStringLength: 4096, maxDepth: 16 },
         },
-        includeProvenance: false,
+        includeProvenance: query.includeProvenance ?? false,
         includeDiagnostics: true,
         includeProjection: [],
         includeDegraded: false,
@@ -173,14 +188,28 @@ function closureInit(closure: GraphClosureSpec): GraphClosurePolicy {
   }
 }
 
-/** The decoded read-only view over a wire `SemanticTypeGraph`. */
+/**
+ * The decoded read-only view over a wire `SemanticTypeGraph`. Carries the
+ * COMPLETE graph — every identity, provenance, and completeness field the
+ * wire declares: the query identity (`query`), origin `edges`, per-node
+ * `exactness`, `diagnostics`, the provenance maps (`nodeIdMap` /
+ * `symbolIdMap`, populated only when the request asked for provenance),
+ * and the `relationProofs` table. Nothing on the wire answer is dropped.
+ */
 export interface SemanticTypeGraphView {
   readonly schemaVersion: number;
+  readonly query: GraphQueryIdentity | undefined;
   readonly strings: readonly string[];
   readonly nodes: readonly GraphTypeNode[];
   readonly symbols: readonly GraphSymbolNode[];
   readonly signatures: readonly GraphSignature[];
+  readonly edges: readonly GraphOriginEdge[];
   readonly rootIds: readonly number[];
+  readonly exactness: readonly GraphNodeStatus[];
+  readonly diagnostics: readonly GraphDiagnostic[];
+  readonly nodeIdMap: readonly GraphNodeIdMapEntry[];
+  readonly symbolIdMap: readonly GraphSymbolIdMapEntry[];
+  readonly relationProofs: readonly GraphRelationProofEntry[];
 }
 
 /** The decoded `TypeInfoGraphResponse` — one variant per wire arm. */
@@ -204,11 +233,18 @@ export function decodeTypeInfoResult(bytes: Uint8Array): TypeInfoResult {
     const graph = kind.value as SemanticTypeGraph;
     const view: SemanticTypeGraphView = {
       schemaVersion: graph.schemaVersion,
+      query: graph.query,
       strings: graph.strings?.entries ?? [],
       nodes: graph.nodes,
       symbols: graph.symbols,
       signatures: graph.signatures,
+      edges: graph.edges,
       rootIds: graph.rootIds,
+      exactness: graph.exactness,
+      diagnostics: graph.diagnostics,
+      nodeIdMap: graph.nodeIdMap,
+      symbolIdMap: graph.symbolIdMap,
+      relationProofs: graph.relationProofs,
     };
     const rootId = view.rootIds[0];
     const root =
