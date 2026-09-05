@@ -96,7 +96,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 
 1. `cargo nextest run -p verter_language -p verter_protocol -p verter_session`
 2. Run every final command in the bound `docs-domain` profile on the squashed review candidate; targeted success alone is iteration evidence, not acceptance.
-3. Bind the preflight evidence selection and terse rationale in the review report, including CAT0-AC1's known-non-production-owner negative fixture and its existing omission, path, acceptance and conflict checks. Behavioral code changes require TDD with a failing discriminating regression before production changes; do not invent a test or mutation solely to populate evidence.
+3. Bind the preflight evidence selection and terse rationale in the review report, including all CAT0-AC1 rejection checks: known-non-production-owner and unknown-owner negative fixtures, plus omission, path, acceptance and conflict checks. Behavioral code changes require TDD with a failing discriminating regression before production changes; do not invent a test or mutation solely to populate evidence.
 
 ## Review and lower-severity findings
 
