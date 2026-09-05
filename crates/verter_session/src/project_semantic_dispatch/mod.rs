@@ -129,8 +129,8 @@ pub(crate) mod flow_return_tests;
 pub(crate) mod flow_solve;
 // The product lattice of the flow authority: the per-domain dataflow
 // products, their ONE transfer/join route, and the ONE deterministic
-// worklist. Compiled into production; the flow evaluator's own state maps
-// remain the live value path until the evaluator is switched onto it.
+// worklist. The flow evaluator holds its whole semantic state here — the
+// products ARE the live value path.
 pub(crate) mod flow_products;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;

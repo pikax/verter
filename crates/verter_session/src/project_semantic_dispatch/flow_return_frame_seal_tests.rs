@@ -408,3 +408,322 @@ fn an_unmodeled_array_element_collapses_the_array_and_is_owed() {
     );
     assert_eq!(outcome.candidates, 0);
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// The frame's PRODUCT state: the evidence a discharge rests on, the
+// determinism of the state the merges produce, and the budget boundary a
+// merge runs under.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Frames whose semantic state the product domains actually carry: a
+/// binding whose slot facts a discharge must rest on, a branch whose
+/// merge exercises the frame join, and a mutual component whose members
+/// publish together.
+const PRODUCT_CANONICAL: &str = "/ws/flow-products.ts";
+
+const PRODUCT_FIXTURE: &str = r#"
+export function boundControl(c: boolean) {
+  const k = 1;
+  if (c) {
+    return k;
+  }
+  return 2;
+}
+
+export function branchJoin(c: boolean) {
+  let v: string | number = "s";
+  if (c) {
+    v = 1;
+  }
+  return v;
+}
+
+export function switchJoin(c: number) {
+  let v: string | number = "s";
+  switch (c) {
+    case 1:
+      v = 1;
+      break;
+    default:
+      break;
+  }
+  return v;
+}
+
+export function tryJoin(c: boolean) {
+  let v: string | number = "s";
+  try {
+    v = 1;
+  } catch (e) {
+    v = "t";
+  }
+  return v;
+}
+
+export function scBoundA(c: boolean) {
+  const k = 1;
+  if (c) return k;
+  return scBoundB(c);
+}
+
+export function scBoundB(c: boolean) {
+  const m = 2;
+  if (c) return m;
+  return scBoundA(c);
+}
+"#;
+
+fn make_product_host() -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(PRODUCT_CANONICAL.to_string()),
+        input_id: PRODUCT_CANONICAL.to_string(),
+        source: Arc::from(PRODUCT_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(PRODUCT_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    host
+}
+
+fn product_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey {
+    FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(PRODUCT_CANONICAL),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(PRODUCT_CANONICAL),
+        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    }
+}
+
+/// One evaluated demand: the structural type it served (arena-free, so
+/// two hosts are comparable), the slot candidate count, and how many cold
+/// computations the run performed.
+struct ProductRun {
+    served: Option<verter_type_expr::TypeExpr>,
+    candidates: usize,
+    cold_computes: u32,
+}
+
+/// Serve `name` `demands` times, EACH through a fresh store view — the
+/// warm read of a published candidate runs against a view where the cold
+/// build's artifacts are visible — under ONE request context, so the
+/// cold-compute counter measures the whole run.
+fn run_product(host: &Arc<VerterHost>, name: &str, demands: u32) -> ProductRun {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    let ctx = RequestContext::new(1, Arc::from(PRODUCT_CANONICAL), false, None);
+    let _guard = RequestContextGuard::install(ctx);
+    let mut served = None;
+    // bounded-loop: the caller-supplied demand count.
+    for _ in 0..demands {
+        served = with_dispatch(host, |dispatch| {
+            let key = product_key(dispatch, name);
+            match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(result),
+                    ..
+                }) => host.project_node_to_type_expr_for_test(result.return_type()),
+                _ => None,
+            }
+        });
+    }
+    let cold_computes = crate::request_context::current_request_context()
+        .expect("the run installs a RequestContext")
+        .flow_return_cold_computes
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let candidates = with_dispatch(host, |dispatch| {
+        let key = product_key(dispatch, name);
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)))
+    });
+    ProductRun {
+        served,
+        candidates,
+        cold_computes,
+    }
+}
+
+/// A demand's completeness rests on the frame's PRODUCT evidence: a
+/// planned binding obligation discharges only when the evaluation
+/// actually produced that binding's definite-assignment product.
+///
+/// Both legs run the SAME otherwise-clean evaluation. The control admits
+/// warm — one candidate, one cold compute across two demands. With one
+/// required binding-domain product dropped from an otherwise untouched
+/// witness (the walk ledger, the call evidence and the convergence log
+/// all stay clean), the binding obligation stays unclaimed, no
+/// `CompleteFlowResult` mints, and BOTH demands recompute cold with zero
+/// candidates — at the root and at SCC publication alike, since both
+/// finalize through the one discharge report.
+///
+/// The fault is refuse-only: it can withhold evidence, never mint it. A
+/// green control beside a red injected leg therefore proves the seal
+/// discriminates missing product evidence rather than riding the
+/// report's say-so.
+#[test]
+fn flow_discharge_requires_product_evidence() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    // Root leg: the control warms.
+    let host = make_product_host();
+    let control = run_product(&host, "boundControl", 2);
+    assert!(
+        control.served.is_some(),
+        "the control produces a usable value"
+    );
+    assert_eq!(
+        control.candidates, 1,
+        "a clean bound frame warm-admits exactly one candidate"
+    );
+    assert_eq!(
+        control.cold_computes, 1,
+        "the second demand of a clean bound frame is a warm hit"
+    );
+
+    // Root leg: the same evaluation without one binding-domain product.
+    let injected_host = make_product_host();
+    let injected = {
+        let _drop_product = inject::Guard::arm(
+            &injected_host
+                .flow_fault_injection
+                .drop_binding_domain_product,
+        );
+        run_product(&injected_host, "boundControl", 2)
+    };
+    assert_eq!(
+        injected.served, control.served,
+        "the evaluated value is unchanged — only the discharge evidence is"
+    );
+    assert_eq!(
+        injected.candidates, 0,
+        "a binding obligation with no product evidence never mints a proof: \
+         zero candidates"
+    );
+    assert_eq!(
+        injected.cold_computes, 2,
+        "an unproven demand never warms, so the second demand recomputes cold"
+    );
+
+    // SCC leg: a component member's missing product keeps the WHOLE batch
+    // out of the publish set.
+    let scc_control = make_product_host();
+    let scc_control_run = run_product(&scc_control, "scBoundA", 1);
+    assert!(
+        scc_control_run.served.is_some(),
+        "the component control produces a usable value"
+    );
+    let scc_injected = make_product_host();
+    let _drop_product = inject::Guard::arm(
+        &scc_injected
+            .flow_fault_injection
+            .drop_binding_domain_product,
+    );
+    with_dispatch(&scc_injected, |dispatch| {
+        let root = product_key(dispatch, "scBoundA");
+        let peer = product_key(dispatch, "scBoundB");
+        let _ = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(root.clone())));
+        for (name, key) in [("scBoundA", root), ("scBoundB", peer)] {
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "{name}: a member without product evidence never enters the SCC \
+                 publish batch"
+            );
+        }
+    });
+}
+
+/// The frame's product state — and therefore the served result and its
+/// warm candidate — does not depend on the order equivalent demands
+/// arrive in.
+///
+/// Two hosts evaluate the same fixture through DIFFERENT but equivalent
+/// request orders: one takes the branch-joining frame first, the other
+/// takes it last. The state a frame's merges produce is folded in the
+/// plan's own tie-break order over a canonical subject universe, so the
+/// served value node data, the candidate count, and the cold-compute
+/// count must agree exactly.
+#[test]
+fn flow_product_worklist_is_permutation_deterministic() {
+    let forward = make_product_host();
+    let forward_first = run_product(&forward, "branchJoin", 2);
+    let forward_second = run_product(&forward, "boundControl", 2);
+
+    let reverse = make_product_host();
+    let reverse_second = run_product(&reverse, "boundControl", 2);
+    let reverse_first = run_product(&reverse, "branchJoin", 2);
+
+    for (name, a, b) in [
+        ("branchJoin", &forward_first, &reverse_first),
+        ("boundControl", &forward_second, &reverse_second),
+    ] {
+        assert_eq!(
+            a.served, b.served,
+            "{name}: an equivalent request order serves the same value"
+        );
+        assert_eq!(
+            a.candidates, b.candidates,
+            "{name}: an equivalent request order admits the same candidate"
+        );
+        assert_eq!(
+            a.cold_computes, b.cold_computes,
+            "{name}: an equivalent request order performs the same cold work"
+        );
+    }
+}
+
+/// The product budget is the demand plan's OWN policy, and exhausting it
+/// is a typed frame failure that retains nothing.
+///
+/// The control frame merges within its plan's convergence policy and
+/// warm-admits. Under a ZERO-iteration budget the very first frame merge
+/// exhausts the policy, so the merge produces no joined state, the frame
+/// reports the typed budget failure, and the demand retains NO candidate
+/// and recomputes cold on the next request.
+#[test]
+fn flow_product_budget_boundary_is_exact_and_never_warm() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    let host = make_product_host();
+    let control = run_product(&host, "switchJoin", 2);
+    assert!(
+        control.served.is_some(),
+        "the control frame merges within its plan's convergence policy"
+    );
+    assert_eq!(
+        control.candidates, 1,
+        "a converged frame warm-admits exactly one candidate"
+    );
+    assert_eq!(
+        control.cold_computes, 1,
+        "the second demand of a converged frame is a warm hit"
+    );
+
+    let exhausted_host = make_product_host();
+    let _zero_budget = inject::Guard::arm(
+        &exhausted_host
+            .flow_fault_injection
+            .zero_product_iteration_budget,
+    );
+    let exhausted = run_product(&exhausted_host, "switchJoin", 2);
+    assert_eq!(
+        exhausted.candidates, 0,
+        "an exhausted product budget retains no candidate"
+    );
+    assert_eq!(
+        exhausted.cold_computes, 2,
+        "a budget-exhausted demand recomputes cold rather than serving a \
+         retained partial"
+    );
+}
