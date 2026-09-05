@@ -89,6 +89,13 @@ use self::FlowRequirementKind as RK;
 pub enum FlowDomain {
     ReachingValue, ReachingType, Narrowing, Completion, ClosureCapture,
     Freshness, Effects, CallResolution, Relation, ContextualTyping,
+    // Declaration-fact and definite-assignment products of the flow
+    // product lattice. Registered in the ONE domain registry (there is no
+    // second domain enum) and carried by
+    // [`super::flow_products::flow_product_kind`]; no operation contract
+    // declares them, so no demand plan installs an obligation for them
+    // until an operation's closure names them.
+    DeclaredType, DefiniteAssignment,
     // Deliberately declared by NO contract: the gap-installation tests
     // assert an undeclared domain becomes a typed gap.
     #[allow(dead_code)]
@@ -412,6 +419,7 @@ const fn domain_discriminant(domain: FlowDomain) -> u32 {
         FlowDomain::Completion => 4, FlowDomain::ClosureCapture => 5, FlowDomain::Freshness => 6,
         FlowDomain::Effects => 7, FlowDomain::CallResolution => 8, FlowDomain::Relation => 9,
         FlowDomain::ContextualTyping => 10, FlowDomain::Coverage => 11,
+        FlowDomain::DeclaredType => 12, FlowDomain::DefiniteAssignment => 13,
     }
 }
 
@@ -515,7 +523,11 @@ struct ResultContractDescriptor<'a>(&'a FlowOperationContract);
 
 #[rustfmt::skip]
 impl CanonicalEncode for ResultContractDescriptor<'_> {
-    const DOMAIN_TAG: &'static str = "verter.session.flow.result_contract.v3";
+    // The domain vocabulary this identity ranks over is identity schema:
+    // adding, removing, or renumbering a `FlowDomain` variant bumps the
+    // tag, so every minted contract identity changes with the registry
+    // revision even when no individual contract row was edited.
+    const DOMAIN_TAG: &'static str = "verter.session.flow.result_contract.v4";
     fn encode_fields(&self, e: &mut CanonicalEncoder) {
         let contract = self.0;
         e.field_str(1, contract.tag.name());
@@ -798,7 +810,7 @@ pub fn derive_demand_subject(
 /// kind anywhere) yields NO identity, and kinds the cross-frame vocabulary
 /// cannot name yield NONE by construction; the planner turns `None` into
 /// an unmodelable obligation (a typed gap at install).
-fn resolve_binding_identities(
+pub(super) fn resolve_binding_identities(
     skeleton: &FunctionBodySkeleton,
     inventory: &FlowBindingInventory,
     function: &FunctionProgramKey,
