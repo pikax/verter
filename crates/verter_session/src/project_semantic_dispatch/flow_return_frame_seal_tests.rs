@@ -649,23 +649,40 @@ fn flow_discharge_requires_product_evidence() {
 /// arrive in.
 ///
 /// Two hosts evaluate the same fixture through DIFFERENT but equivalent
-/// request orders: one takes the branch-joining frame first, the other
-/// takes it last. The state a frame's merges produce is folded in the
-/// plan's own tie-break order over a canonical subject universe, so the
-/// served value node data, the candidate count, and the cold-compute
-/// count must agree exactly.
+/// request orders: one takes the merging frame first, the other takes it
+/// last. Request order decides which semantic nodes are interned first,
+/// so it decides their ids — and the product join's contributor
+/// aggregation must not let that reach the answer. The served type, the
+/// candidate count, and the cold-compute count must agree exactly under
+/// either order.
 #[test]
 fn flow_product_worklist_is_permutation_deterministic() {
     let forward = make_product_host();
-    let forward_first = run_product(&forward, "branchJoin", 2);
+    let forward_first = run_product(&forward, "switchJoin", 2);
     let forward_second = run_product(&forward, "boundControl", 2);
 
     let reverse = make_product_host();
     let reverse_second = run_product(&reverse, "boundControl", 2);
-    let reverse_first = run_product(&reverse, "branchJoin", 2);
+    let reverse_first = run_product(&reverse, "switchJoin", 2);
+
+    // The merging frame's answer is the JOIN of both dispatch edges, not
+    // one edge's: the assertion the order-independence above is about.
+    for (order, run) in [("forward", &forward_first), ("reverse", &reverse_first)] {
+        let Some(verter_type_expr::TypeExpr::Union(arms)) = run.served.as_ref() else {
+            panic!(
+                "{order}: the merging frame serves the union of both dispatch                  edges, got {:?}",
+                run.served
+            );
+        };
+        assert_eq!(
+            arms.len(),
+            2,
+            "{order}: both incoming edges contribute to the merged reaching type"
+        );
+    }
 
     for (name, a, b) in [
-        ("branchJoin", &forward_first, &reverse_first),
+        ("switchJoin", &forward_first, &reverse_first),
         ("boundControl", &forward_second, &reverse_second),
     ] {
         assert_eq!(
