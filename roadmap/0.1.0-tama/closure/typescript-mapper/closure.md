@@ -236,7 +236,7 @@ Subject: `roadmap/0.1.0-tama/tools/closure-register.mjs`, `roadmap/0.1.0-tama/sc
 - `P-ledger-model` terminal summary: tests 26 | pass 26 | fail 0 | cancelled 0 | skipped 0 | todo 0
 - `P-instrument-controls` terminal summary: tests 38 | pass 38 | fail 0 | cancelled 0 | skipped 0 | todo 0
 - `P-instrument-check` terminal summary: closure-register: PASS instrument=typescript-mapper-closure claims=7 atoms=52 proofs=9 controls=9 findings=36 residues=3 obligations=545 state=READY_FOR_REVIEW
-- `P-targeted-domain` terminal summary: Summary [duration not transcribed] 8949 tests run: 8949 passed, 547 skipped
+- `P-targeted-domain` terminal summary: Summary [  73.559s] 8949 tests run: 8949 passed, 547 skipped
   - declared skips: the command applies no filter expression, so nextest counts a test as skipped only for being marked #[ignore]: the 547 are the three packages' opt-in real-provider, corpus, and soak cases, and the clean half of the control lane's re-application re-derives executed and skipped live against this transcript. The selection is shaped by the lane's CI platform — unix-gated and windows-gated cases compile on different hosts, so the five counts are the linux selection's, and a lane run on a platform that compiles a different cfg set fails the clean-run comparison by exactly those cases rather than being tolerated
 
 ## Negative controls
