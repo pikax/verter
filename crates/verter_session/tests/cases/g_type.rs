@@ -18,6 +18,8 @@ mod type_resolution_audit_pathological_recursion;
 mod type_resolution_audit_read_once;
 #[path = "g_type/type_resolution_audit_tls_propagation.rs"]
 mod type_resolution_audit_tls_propagation;
+#[path = "g_type/typeinfo_graph_query_executor.rs"]
+mod typeinfo_graph_query_executor;
 #[path = "g_type/typeinfo_request_validation.rs"]
 mod typeinfo_request_validation;
 #[path = "g_type/vue_macro_runtime_oracle.rs"]
