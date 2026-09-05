@@ -175,7 +175,7 @@ schema = 2
 "D2C" = { status = "implemented", commit_message = "feat(session): explain flow-return partiality in the audit payload", commit_date = "2026-09-02T09:00:00+01:00" }
 "D2D" = { status = "implemented", commit_message = "feat(session): make every surface producer return a typed resolution outcome", commit_date = "2026-09-01T19:15:00+01:00" }
 "D3C" = { status = "pending" }
-"D3I" = { status = "pending" }
+"D3I" = { status = "implemented", commit_message = "feat(flowslice): complete stable binding identity", commit_date = "2026-09-05T11:21:01Z", pull_request = 503 }
 "D3P" = { status = "pending" }
 "D3R" = { status = "pending" }
 "D4" = { status = "pending" }
