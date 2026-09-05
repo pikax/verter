@@ -90,7 +90,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Target ceiling: 0 production LOC, 0 production files, 0 related crates/packages.
 - Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
 - Correctness budget: zero control that can pass while its guarded machinery is broken.
-- Performance budget: the controls stay small and run in the required gate without materially increasing gate latency.
+- Performance budget: exactly four hermetic controls, each one in-process invocation of the classifier, evaluator, or comparator over constructed inputs; no subprocess, no corpus access, no network.
 
 ## Abort conditions
 

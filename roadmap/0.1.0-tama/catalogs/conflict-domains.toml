@@ -261,8 +261,8 @@ symbols = ["SvelteProduct","SvelteCompileRequest"]
 description = "Exclusive mutation lease for the concrete svelte product authority surface."
 [[domain]]
 id = "validation_observability"
-path_roots = ["crates/verter_validation_probe"]
-symbols = ["ProbeOutcomeClass","ProbeStateManifest","JoinRecord"]
+path_roots = ["crates/verter_validation_probe","roadmap/0.1.0-tama/catalogs/validation-authorities.toml","roadmap/0.1.0-tama/tools/validate-probe-authorities.mjs","roadmap/0.1.0-tama/tools/validate-probe-authorities.test.mjs"]
+symbols = ["ProbeOutcomeClass","ProbeStateManifest","Authority","ObservationArtifact","JoinRecord"]
 description = "Exclusive mutation lease for the test-only probe crate: outcome taxonomy, probe-state manifest, workload runner and corpus adapters, false-green controls, observation capture, and the promotion join record. Workflow, script, and benchmark files it must wire are leased through their existing domains (release_orchestration, performance_evidence) declared on each node."
 [[domain]]
 id = "vertical_manifest"

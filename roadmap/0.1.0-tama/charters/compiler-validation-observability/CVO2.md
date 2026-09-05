@@ -9,7 +9,7 @@ semantic_role=delivery
 class=compiler
 predecessors=CVO1,CVO1S,CPER0M
 owner=compiler.validation-observability:test-only validation and observability lane
-conflict_domains=validation_observability,performance_evidence,release_orchestration
+conflict_domains=validation_observability,release_orchestration
 resource_class=rust-mixed
 review_profile=semantic-3
 gate_profile=targeted-domain
@@ -45,9 +45,9 @@ Benchmark numbers recorded alongside the workload probes as machine-readable obs
 
 ## Concrete surfaces and APIs
 
-- Production surfaces: none; observation capture reuses existing benchmark infrastructure.
-- Named API/data boundaries: observation artifact schema (per case/corpus: correctness status, cold/warm observations, throughput, benchmark-suite native statistics, workload size, `comparison_eligible` labeling) and reproducibility metadata block.
-- Test/CI homes: `crates/verter_validation_probe/src/observe.rs` and the observation job in `.github/workflows/validation-probe.yml` (a `release_orchestration` root this node leases); metric capture reuses `packages/benchmark` (`bench:json`, `bench:svelte:compiler`, a `performance_evidence` root) unchanged in shape. `crates/verter_bench/benches` is not touched by this node.
+- Production surfaces: none. The existing benchmark entry points are not reused: `packages/benchmark` `bench:json` emits a pass/warning/fail status and `bench:svelte:compiler` applies thresholds and exits non-zero, both of which are performance verdicts this node must not carry. Observation capture is a raw adapter in the probe crate over the CVO1/CVO1S selections and the same public routes.
+- Named API/data boundaries: `crates/verter_validation_probe/src/observe.rs` — `ObservationArtifact` written to `target/validation-probe/observations.json`, with `ObservationArtifact::validate`; one `ObservationRow` per `(framework, case, mode)` with stable `row_id = "<framework>/<case>@<mode>"` where `mode ∈ { cold, warm }`; `cold` is one fresh worker process per case issuing one request, `warm` is five in-process repeats after one discarded request; each row carries `samples: Vec<Duration>` (never a single aggregate), `sample_count`, `observed_outcome`, `comparison_eligible`, and optional `memory: { peak_bytes, live_bytes }` taken through the native memory-audit lifecycle `memoryAuditEnable` → `memoryAuditResetHighWater` → request → `memoryAuditSnapshot` (`crates/verter_napi`, owned by CPER0M; `memoryAuditSites` is not used); the artifact header carries the reproducibility metadata block and a `throughput` entry (`cases`, `wall`) for the whole selection in one process. The schema has no status, verdict, threshold, or baseline field, so a performance verdict is structurally unrepresentable. Retention boundary: the workflow uploads the file as the GitHub Actions artifact `validation-probe-observations`; nothing else stores or reads it in CI.
+- Test/CI homes: `crates/verter_validation_probe` (`src/observe.rs`, cases under `tests/cases/observe.rs` through the single `tests/main.rs`) and the observation job in `.github/workflows/validation-probe.yml` (a `release_orchestration` root this node leases). `packages/benchmark` and `crates/verter_bench` are not touched by this node.
 - Mutation boundary: test/CI/evidence bytes only; production LOC is zero.
 
 ## Exact predecessor contracts
@@ -62,10 +62,10 @@ Benchmark numbers recorded alongside the workload probes as machine-readable obs
 - **Intent:** visibility and historical evidence, not performance policy.
 - **Problem:** without recorded observations there is no historical evidence for later performance-authority nodes to adopt, and wall-clock claims cannot be checked for correctness-equivalence after the fact.
 - **Solution and architecture decisions:**
-  - capture, where existing benchmark infrastructure supports them reliably: cold compile observations, warm/repeated compile observations, throughput or total fixture processing rate, benchmark-suite native statistics, and workload size/case count;
+  - capture through the raw adapter: cold and warm compile samples per case, selection throughput, sample counts, and workload size/case count; the existing suites' native statistics are not imported because they are computed under threshold policies;
   - memory data only as the CPER0M-backed peak/live-bytes pair; no allocation counts or sampling; no new instrumentation invented solely to increase the metric count;
   - every artifact identifies Verter commit, external workload revision, Rust/Node/toolchain versions as relevant, runner OS/architecture, execution mode, warm/cold state, sample/run count, and relevant compiler options;
-  - correctness labeling separates two facts: `observed_outcome` (the CVO0 terminal class the lane reported) and `comparison_eligible`, which is `false` by default for every result and may be `true` only when an exact owning contract is cited on the row (`equivalence_basis = { node, contract_section }`, e.g. the CPER0 equivalent-work ledger and the case's semantic owner). A probe observation never sets it; a workload with `comparison_eligible = false` may record timing as observation but must not be ranked as evidence that Verter is faster or slower for equivalent work.
+  - correctness labeling separates two facts: `observed_outcome` (the CVO0 terminal class the lane reported) and `comparison_eligible`, which is `false` by default for every result and may be `true` only when an exact owning contract is cited on the row (`equivalence_basis = { authority: Authority, contract_section }`, e.g. `compiler.equivalent-work-ledger` plus the case's semantic authority) and `validate-probe-authorities.mjs` confirms both authorities are implemented and cover the row's framework and the `Performance` dimension. A probe observation never sets it; a workload with `comparison_eligible = false` may record timing as observation but must not be ranked as evidence that Verter is faster or slower for equivalent work.
 
 ## Acceptance IDs and discriminating proof
 
@@ -76,7 +76,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - **CVO2-AC3 — incremental equivalence:** not applicable; the lane owns no incremental, cache, cancellation, or publication authority.
 - **CVO2-AC4 — bounded work:** not applicable; no new counters or instrumentation paths are created.
 - Every proposed new test must name a plausible regression or contract boundary not already discriminated. Do not add implementation mirrors or duplicate permutations.
-- Test homes: the CVO1 test-only crate, `crates/verter_bench`, `packages/benchmark`.
+- Test homes: `crates/verter_validation_probe/tests/cases/observe.rs` via `tests/main.rs`.
 
 ## Deletions and forbidden designs
 
@@ -90,7 +90,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Target ceiling: 0 production LOC, 0 production files, 0 related crates/packages.
 - Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
 - Correctness budget: zero observation artifact without correctness labeling; zero equivalent-work ranking for non-correctness-equivalent cases.
-- Performance budget: the observation lane is non-gating; it adds no required-gate latency beyond the CVO1 envelope.
+- Performance budget: the observation lane adds zero work to the required gate: it is a separate non-required workflow job, and the default `cargo nextest` run contains no observation test.
 
 ## Abort conditions
 
@@ -119,7 +119,7 @@ Before squashing or review, the implementation patch transitions this node's pre
 
 **Solution and architecture decisions:**
 
-- reuse existing benchmark infrastructure for cold/warm/throughput/native-statistics/workload-size capture;
+- raw observation adapter in the probe crate for cold/warm samples, throughput and workload size; no reuse of threshold-bearing benchmark scripts;
 - memory only as the CPER0M-backed peak/live-bytes pair;
 - full reproducibility metadata on every artifact;
 - `observed_outcome` and `comparison_eligible` (default `false`; `true` only with a cited owning contract) on every result;
@@ -129,8 +129,8 @@ Before squashing or review, the implementation patch transitions this node's pre
 
 **Normative source decomposition:**
 
-1. **CVO2-A — Metric capture.** Wire existing benchmark paths to the pinned slice.
-2. **CVO2-B — Artifact schema.** Observations plus reproducibility metadata plus correctness labeling.
+1. **CVO2-A — Metric capture.** The raw adapter over the pinned selections and the memory-audit lifecycle.
+2. **CVO2-B — Artifact schema.** `ObservationArtifact`, stable row ids, `validate`, reproducibility metadata, correctness labeling.
 3. **CVO2-C — Observation CI lane.** Separate non-gating lane producing and retaining artifacts.
 4. **CVO2-D — Non-gating proof.** Structural demonstration that no threshold/rebaseline logic exists.
 5. **CVO2-E — Independent review.** Confirm no performance policy leaks in.
