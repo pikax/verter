@@ -263,7 +263,7 @@ description = "Exclusive mutation lease for the concrete svelte product authorit
 id = "validation_observability"
 path_roots = ["crates/verter_validation_probe","roadmap/0.1.0-tama/catalogs/validation-authorities.toml","roadmap/0.1.0-tama/tools/validate-probe-authorities.mjs","roadmap/0.1.0-tama/tools/validate-probe-authorities.test.mjs"]
 symbols = ["ProbeOutcomeClass","ProbeStateManifest","Authority","ObservationArtifact","JoinRecord"]
-description = "Exclusive mutation lease for the test-only probe crate: outcome taxonomy, probe-state manifest, workload runner and corpus adapters, false-green controls, observation capture, and the promotion join record. Workflow, script, and benchmark files it must wire are leased through their existing domains (release_orchestration, performance_evidence) declared on each node."
+description = "Exclusive mutation lease for the test-only probe crate: outcome taxonomy, probe-state manifest, workload runner and corpus adapters, false-green controls, observation capture, and the promotion join record. Workflow files it must wire (.github/workflows) are leased through both existing workflow-owning domains, release_orchestration and github_projection_state, declared on each node that touches them."
 [[domain]]
 id = "vertical_manifest"
 path_roots = [".claude/skills","AGENTS.md","crates","packages","roadmap/0.1.0-tama"]

@@ -9,7 +9,7 @@ semantic_role=convergence
 class=compiler
 predecessors=CVO1,CVO1S,CVO2,CVO3,CPER0,CPER2,VCP7,SCP7
 owner=compiler.validation-observability:test-only validation and observability lane
-conflict_domains=validation_observability,performance_evidence
+conflict_domains=validation_observability
 resource_class=rust-mixed
 review_profile=semantic-3
 gate_profile=targeted-domain
@@ -46,7 +46,7 @@ An explicit, selective review join over accumulated canaries, known failures, sk
 ## Concrete surfaces and APIs
 
 - Production surfaces: none.
-- Named API/data boundaries: the promotion join record `crates/verter_validation_probe/join/<date>.toml` — per probe, its current state, candidate transition (`skip -> canary`, `canary -> known-fail`, `known-fail -> gate`, `canary -> gate`) or `deferred`, deciding authority (`Authority` plus the contract section relied on; never a roadmap identifier), and rationale; the join validator `crates/verter_validation_probe/src/join.rs` (`JoinRecord::validate(manifest, observations)`), which proves total inventory — every manifest entry from CVO1/CVO1S and every `ObservationArtifact` row id appears exactly once in the record — that every non-deferred entry cites an authority and section, and that every transition is one of the four allowed; `validate-probe-authorities.mjs` (CVO0) then proves each cited authority's owning node is implemented and covers the probe's framework and dimension, so a promotion to `gate` cannot rest on an unimplemented or wrong-framework authority; updated probe-state manifest entries.
+- Named API/data boundaries: the promotion join record `crates/verter_validation_probe/join/<date>.toml` — per probe, its current state, candidate transition (`skip -> canary`, `canary -> known-fail`, `known-fail -> gate`, `canary -> gate`) or `deferred`, deciding authority (`{ authority, atom }`; never a roadmap identifier), and rationale, plus the list of observation `artifact_id`s the join inventoried; the join validator `crates/verter_validation_probe/src/join.rs` (`JoinRecord::validate(manifest, observations)`), which proves total inventory — every manifest entry from CVO1/CVO1S and every retrievable observation `{ artifact_id, row_id }` appears exactly once in the record — that every non-deferred entry cites an authority and section, and that every transition is one of the four allowed; `validate-probe-authorities.mjs --join crates/verter_validation_probe/join` (CVO0) then proves each cited authority's owning node is implemented and its catalog row covers the probe's framework and dimension through the cited atom, so a promotion to `gate` cannot rest on an unimplemented or wrong-framework authority; updated probe-state manifest entries.
 - Mutation boundary: the join record, the validator, and manifest entries; production LOC is zero.
 
 ## Exact predecessor contracts
