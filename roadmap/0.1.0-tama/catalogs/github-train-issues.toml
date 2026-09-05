@@ -341,3 +341,12 @@ expected_outcome = "Maintainers approve an optimization design whose inputs, out
 acceptance = ["Optimization scope is separated from semantic correctness work.", "Every proposed gain preserves equivalent observable work.", "Maintainers ratify the evidence and resulting implementation scope."]
 problem_label = "problem:performance"
 gh_milestone = "0.1.0"
+
+[[train_issue]]
+train = "compiler.validation-observability"
+title = "Observe real compiler workloads without premature gates"
+problem = "Verter is not continuously exercised against representative real Vue and Svelte workloads, so regressions surface late. When something does fail, the failure collapses into a generic state that cannot say whether the compiler, the harness, the product, or a comparison broke. Gaps owned by future work cannot run at all without either turning CI red or silently passing, and no benchmark history is recorded anywhere."
+expected_outcome = "A test-only validation and observability lane runs pinned external Vue and Svelte workloads (pikax/vue-benchmarks, pikax/svelte-benchmarks; both frameworks first-class) through public compiler routes, classifies every outcome in one typed taxonomy, records non-gating benchmark observations, proves its own machinery cannot false-green, and promotes probe states only through owner review."
+acceptance = ["Every probe result carries a specific outcome class and causal ordering; no generic failure state survives.", "Known future failures execute as canary or known-fail with named implementation owners and do not turn required CI red.", "Unexpected passes and unrelated new failure classes are surfaced, never silently accepted.", "Benchmark observations carry correctness labeling and reproducibility metadata but no thresholds or gates.", "Critical false-green controls are small, required, and each names the invariant, plausible false-green, and positive-coverage gap it discriminates."]
+problem_label = "problem:automation"
+gh_milestone = "0.1.0"

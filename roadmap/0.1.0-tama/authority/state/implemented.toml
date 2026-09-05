@@ -163,6 +163,12 @@ schema = 2
 "CPER3" = { status = "pending" }
 "CPF0" = { status = "pending" }
 "CPF1" = { status = "pending" }
+"CVO0" = { status = "pending" }
+"CVO1" = { status = "pending" }
+"CVO1S" = { status = "pending" }
+"CVO2" = { status = "pending" }
+"CVO3" = { status = "pending" }
+"CVO4" = { status = "pending" }
 "D1" = { status = "implemented", commit_message = "feat(session): add private hermetic flow completeness foundation", commit_date = "2026-08-29T20:05:00+01:00" }
 "D2A" = { status = "implemented", commit_message = "feat(session): canonical flow demand and proof substrate", commit_date = "2026-08-30T09:46:00+01:00" }
 "D2B" = { status = "implemented", commit_message = "feat(session): route flow-return admission through the sole completeness proof", commit_date = "2026-08-30T17:32:00+01:00" }
