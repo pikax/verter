@@ -1,0 +1,85 @@
+warning: unreachable expression
+  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:18:13
+   |
+18 |       let _ = OperandBinderIdentity {
+   |  _____________^
+19 | |         visibility: todo!(),
+   | |                     ------- any code following this expression is unreachable
+20 | |     };
+   | |_____^ unreachable expression
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable expression
+  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:23:27
+   |
+22 |         parse_env_hash: todo!(),
+   |                         ------- any code following this expression is unreachable
+23 |         resolve_env_hash: todo!(),
+   |                           ^^^^^^^ unreachable expression
+
+warning: unreachable expression
+  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:28:13
+   |
+28 |       let _ = SemanticOperand {
+   |  _____________^
+29 | |         kind: todo!(),
+   | |               ------- any code following this expression is unreachable
+30 | |     };
+   | |_____^ unreachable expression
+
+error[E0451]: fields `canonical_id` and `owner` of struct `OperandLexicalScope` are private
+  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:15:9
+   |
+14 |     let _ = OperandLexicalScope {
+   |             ------------------- in this type
+15 |         canonical_id: canonical,
+   |         ^^^^^^^^^^^^ private field
+16 |         owner: TopLevelOwnerId::ordinary_file(),
+   |         ^^^^^ private field
+
+error[E0451]: field `visibility` of struct `OperandBinderIdentity` is private
+  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:19:9
+   |
+18 |     let _ = OperandBinderIdentity {
+   |             --------------------- in this type
+19 |         visibility: todo!(),
+   |         ^^^^^^^^^^ private field
+
+error[E0451]: fields `parse_env_hash`, `resolve_env_hash`, `type_env_hash`, `lib_env_hash` and `project_identity` of struct `OperandSplitEnv` are private
+  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:22:9
+   |
+21 |     let _ = OperandSplitEnv {
+   |             --------------- in this type
+22 |         parse_env_hash: todo!(),
+   |         ^^^^^^^^^^^^^^ private field
+23 |         resolve_env_hash: todo!(),
+   |         ^^^^^^^^^^^^^^^^ private field
+24 |         type_env_hash: todo!(),
+   |         ^^^^^^^^^^^^^ private field
+25 |         lib_env_hash: todo!(),
+   |         ^^^^^^^^^^^^ private field
+26 |         project_identity: todo!(),
+   |         ^^^^^^^^^^^^^^^^ private field
+
+error[E0451]: field `kind` of struct `SemanticOperand` is private
+  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:29:9
+   |
+28 |     let _ = SemanticOperand {
+   |             --------------- in this type
+29 |         kind: todo!(),
+   |         ^^^^ private field
+
+error[E0451]: field `context` of struct `SemanticOperandForceRequest` is private
+  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:32:9
+   |
+31 |     let _ = SemanticOperandForceRequest {
+   |             --------------------------- in this type
+32 |         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+   |         ^^^^^^^ private field
+
+error: type `operand::SemanticOperandKind` is private
+  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:29:15
+   |
+29 |         kind: todo!(),
+   |               ^^^^^^^ private type

@@ -60,14 +60,20 @@ error: cannot construct `InstantiateKey` with struct literal syntax due to priva
 60 |         args: args.clone(),
    |         ------------------ private field
    |
-   = note: ...and other private field `context` that was not provided
-help: you might have meant to use the `new` associated function
+   = note: ...and other private fields `source` and `context` that were not provided
+help: you might have meant to use an associated function to build this type
    |
 58 -     let _forged_key = InstantiateKey {
 59 -         base: base.clone(),
 60 -         args: args.clone(),
 61 -     };
 58 +     let _forged_key = InstantiateKey::new(_, _, _);
+   |
+58 -     let _forged_key = InstantiateKey {
+59 -         base: base.clone(),
+60 -         args: args.clone(),
+61 -     };
+58 +     let _forged_key = InstantiateKey::new_authored(_, _, _, _, _);
    |
 
 error[E0559]: variant `SemanticQueryKey::Instantiate` has no field named `base`

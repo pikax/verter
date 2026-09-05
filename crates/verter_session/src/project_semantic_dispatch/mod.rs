@@ -140,6 +140,16 @@ pub(crate) mod relation_predicates;
 mod return_equation;
 #[cfg(test)]
 mod return_equation_tests;
+/// The one semantic-operand forcing boundary
+/// (`force_semantic_operand`) — the sole authority for evaluating a
+/// demand-selected
+/// [`SemanticOperand`](crate::semantic_query::operand::SemanticOperand)
+/// under the force request's complete projection-reduction context.
+pub(crate) mod semantic_operand;
+#[cfg(test)]
+mod semantic_operand_binder_tests;
+#[cfg(test)]
+mod semantic_operand_tests;
 pub(crate) mod semantic_source;
 mod semantic_source_compose;
 pub(crate) mod semantic_source_leaf_facts;
@@ -198,6 +208,33 @@ mod body_source_witness {
     }
 }
 pub(crate) use body_source_witness::BodySourceWitness;
+
+// Private leaf module sealing the semantic-operand capability. The token is
+// mintable only through the `pub(super)` mint below — reachable from the
+// dispatch module tree (the forcing authority), unforgeable everywhere else
+// in the crate. The operand vocabulary (`semantic_query::operand`) requires
+// it for raw construction, inspection, authored-key creation, and evidence
+// capture but cannot construct it — the same house family as
+// `BodySourceWitness`: a capability, not a convention.
+mod semantic_operand_authority {
+    /// Capability token gating the sealed semantic-operand surface
+    /// (`semantic_query::operand` constructors, `parts()` inspection,
+    /// `InstantiateKey::new_authored`, and the store's evidence-capture
+    /// entry). The inner unit field is private to this leaf module, so the
+    /// ONLY production mint is [`Self::mint_for_forcing_boundary`], visible
+    /// to the dispatch module tree alone. `Copy` so one mint threads
+    /// through the several gated calls of a single force.
+    #[derive(Clone, Copy)]
+    pub(crate) struct SemanticOperandAuthority(());
+
+    impl SemanticOperandAuthority {
+        /// The sole production mint — dispatch-module-tree visibility.
+        pub(super) const fn mint_for_forcing_boundary() -> Self {
+            Self(())
+        }
+    }
+}
+pub(crate) use semantic_operand_authority::SemanticOperandAuthority;
 
 // Private leaf module sealing object-spread projection context construction.
 // The witness is mintable only inside the dispatch module tree; the semantic
@@ -371,6 +408,19 @@ pub struct ProjectSemanticDispatch<'a> {
     /// `cache_suppress` (memo non-admission), never the request partial
     /// sticky (which would wrongly refuse component-meta warm).
     pub(super) build_local_taint: std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    /// Runtime evidence injected into the cold build for the EXACT key the
+    /// active force targets. Paired with that target key so the merge never
+    /// leaks into a transitively nested build the target key's own
+    /// construction triggers (a substitution-independent `LowerLocator` or
+    /// other child candidate must not inherit the operand's roots).
+    pub(super) active_operand_evidence: std::cell::RefCell<
+        smallvec::SmallVec<
+            [(
+                SemanticQueryKey,
+                crate::semantic_query::operand::SemanticOperandEvidence,
+            ); 2],
+        >,
+    >,
     /// Lexical demand-scope stack: the canonical containing the
     /// member-access/call site currently being evaluated. Installed by the
     /// flow evaluator around member-projection dispatches (RAII guard,
@@ -540,6 +590,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            active_operand_evidence: std::cell::RefCell::new(smallvec::SmallVec::new()),
             lexical_demand_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
             dispatch_txn: std::cell::RefCell::new(
                 dispatch_txn::CheckerDispatchTransaction::default(),
@@ -940,6 +991,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 {
                     top.observed_self_roots.push(root);
                 }
+            }
+        }
+    }
+
+    /// Merge a sealed runtime operand's producer roots into the candidate
+    /// currently being built. Read-set facts travel through the fact tracer;
+    /// this is the matching self-root rail.
+    pub(super) fn deposit_operand_self_roots(
+        &self,
+        roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
+    ) {
+        let mut stack = self.build_local_taint.borrow_mut();
+        let Some(top) = stack.last_mut() else {
+            return;
+        };
+        for root in roots {
+            if !top
+                .observed_self_roots
+                .iter()
+                .any(|existing| existing == root)
+            {
+                top.observed_self_roots.push(root.clone());
             }
         }
     }
@@ -2282,7 +2355,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if matches!(key, SemanticQueryKey::FlowReturn(_)) {
             return self.execute_flow_return_cold_build(key);
         }
-        self.execute_via_cold_build_helper_with_publication_capture(key, None)
+        self.execute_via_cold_build_helper_with_publication_capture(key, None, None)
     }
 
     fn execute_via_cold_build_helper_capturing_publication(
@@ -2290,13 +2363,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key: SemanticQueryKey,
         publication: &mut Option<crate::semantic_query_memo::PublishedMemoCandidate>,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
-        self.execute_via_cold_build_helper_with_publication_capture(key, Some(publication))
+        self.execute_via_cold_build_helper_with_publication_capture(key, Some(publication), None)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn execute_via_cold_build_helper_capturing_operand_evidence(
+        &self,
+        key: SemanticQueryKey,
+        evidence: &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        self.execute_via_cold_build_helper_with_publication_capture(key, None, Some(evidence))
     }
 
     fn execute_via_cold_build_helper_with_publication_capture(
         &self,
         key: SemanticQueryKey,
         publication: Option<&mut Option<crate::semantic_query_memo::PublishedMemoCandidate>>,
+        operand_evidence: Option<
+            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+        >,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
         // THE shared dispatch choke point: both `execute` and `execute_read`
         // funnel here, so this scope's inclusive time and heap traffic cover
@@ -2623,7 +2708,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     context,
                 } => self.build_typeof(&value_root.root, context.projection_reduction),
                 SemanticQueryKey::Instantiate(k) => {
-                    self.build_instantiate(k.base(), k.args(), k.context())
+                    self.build_instantiate(k.base(), k.args(), k.source(), k.context())
                 }
                 // `ProjectMember` / `IndexedAccess` are API sugar that
                 // admission-time canonicalisation rewrites to
@@ -2840,6 +2925,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let provenance = Arc::clone(&host.provenance);
         let carrier_prelude_for_build = carrier_prelude.clone();
         let basis_source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
+        // Operand evidence merges ONLY into the build for the EXACT key the
+        // active force targets — never into a transitively nested build this
+        // key's own construction triggers. This is the shared choke point
+        // for every `SemanticQueryKey` cold build, and the evidence channel
+        // is empty whenever no operand force is in flight, so the key
+        // clone, the per-key merge, and the key-equality scan below are
+        // all gated on the channel being non-empty — zero evidence tax on
+        // ordinary cold builds. `Some` here means "at least one force is
+        // active"; entry-for-key equality still decides the merge.
+        let evidence_target_key =
+            (!self.active_operand_evidence.borrow().is_empty()).then(|| key.clone());
         let traced_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput<
             SemanticQueryValue,
         > {
@@ -2893,6 +2989,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     {
                         self.fold_into_top_build_local_taint(true, false);
                     }
+                    #[cfg(test)]
+                    host.test_force.semantic_operand_cold_build_seam.fire_once();
+                    if let Some(target) = &evidence_target_key {
+                        self.merge_active_operand_evidence_for_build(target);
+                    }
                     raw_build()
                 },
             );
@@ -2927,23 +3028,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
             provenance
                 .memo_entry_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // `true` only for the exact build an active force targets —
+            // never a nested build reached underneath it, and never an
+            // unrelated caller's build (see `evidence_target_key` above and
+            // `finalise_traced_build_output`'s parameter doc).
+            let operand_force_active = evidence_target_key.as_ref().is_some_and(|target| {
+                self.active_operand_evidence
+                    .borrow()
+                    .iter()
+                    .any(|(entry, _)| entry == target)
+            });
             finalise_traced_build_output(
                 self.ctx,
                 output,
                 finalise,
                 &provenance,
                 &carrier_prelude_for_build,
+                operand_force_active,
             )
         };
-        let cache_read = match publication {
-            Some(publication) => graph.execute_cooperative_value_capturing_publication(
+        let cache_read = match (publication, operand_evidence) {
+            (Some(publication), None) => graph.execute_cooperative_value_capturing_publication(
                 self.ctx,
                 key.clone(),
                 sentinel,
                 traced_build,
                 publication,
             ),
-            None => graph.execute_cooperative_value(self.ctx, key.clone(), sentinel, traced_build),
+            (None, Some(evidence)) => graph.execute_cooperative_value_capturing_operand_evidence(
+                self.ctx,
+                key.clone(),
+                sentinel,
+                traced_build,
+                evidence,
+                &SemanticOperandAuthority::mint_for_forcing_boundary(),
+            ),
+            (None, None) => {
+                graph.execute_cooperative_value(self.ctx, key.clone(), sentinel, traced_build)
+            }
+            (Some(_), Some(_)) => unreachable!("capture modes are mutually exclusive"),
         };
         // Attribute the dispatch by `SemanticQueryKey` kind +
         // cold/warm. Cold = the `traced_build` closure ran. Warm = the
@@ -3152,6 +3275,16 @@ fn finalise_traced_build_output<T>(
     finalise: crate::resolver_core::FactReadSetFinalise,
     provenance: &crate::types::MetaProvenance,
     carrier_prelude: &CarrierNormalizationPrelude,
+    // Gates the `ShallowDiagnostic::SignatureOverflow` walker diagnostic
+    // below: `true` ONLY when this exact cold build is the direct build for
+    // an actively-forcing operand's own key (never a transitively nested
+    // build, never an unrelated consumer). This finalizer runs for EVERY
+    // `SemanticQueryKey` in the system; the diagnostic must stay invisible
+    // to every other caller — including component-meta's public
+    // `MacroExpansionDiagnostics` conversion — or a plain, unrelated
+    // overflow starts reporting a NEW `BudgetExceeded` reason it never did
+    // before, which the charter forbids.
+    operand_force_active: bool,
 ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<T> {
     let mut output = output;
     if carrier_prelude.is_partial() {
@@ -3274,6 +3407,11 @@ fn finalise_traced_build_output<T>(
                     // project-generation gate.
                     output.cache_suppress = true;
                     if reason == crate::cache_runtime::NonAdmissionReason::SignatureOverflow {
+                        if operand_force_active {
+                            output.walker_diagnostics.push(
+                                crate::project_semantic_dispatch::walk::ShallowDiagnostic::SignatureOverflow,
+                            );
+                        }
                         provenance
                             .memo_entry_overflow_refusals
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3288,6 +3426,11 @@ fn finalise_traced_build_output<T>(
             }
         }
         crate::resolver_core::FactReadSetFinalise::Overflow => {
+            if operand_force_active {
+                output.walker_diagnostics.push(
+                    crate::project_semantic_dispatch::walk::ShallowDiagnostic::SignatureOverflow,
+                );
+            }
             provenance
                 .memo_entry_overflow_refusals
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

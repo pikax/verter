@@ -722,14 +722,20 @@ impl ProjectSemanticDispatch<'_> {
 fn runtime_query_error_partial_reason(error: &QueryError) -> Option<PartialReasonSet> {
     match error {
         QueryError::Miss | QueryError::DeclPlaceholder { .. } => None,
-        QueryError::BudgetExceeded(_) => Some(PartialReasonSet::BUDGET_EXCEEDED),
+        QueryError::BudgetExceeded(_) | QueryError::SignatureOverflow => {
+            Some(PartialReasonSet::BUDGET_EXCEEDED)
+        }
         QueryError::Cancelled => Some(PartialReasonSet::CANCELLED),
-        QueryError::UnstableState { .. } => Some(PartialReasonSet::UNSTABLE_STATE),
+        QueryError::UnstableState { .. } | QueryError::StaleSemanticOperand => {
+            Some(PartialReasonSet::UNSTABLE_STATE)
+        }
+        QueryError::IncompleteSemanticOperand { reasons } => Some(*reasons),
         QueryError::AliasCycle { .. }
         | QueryError::RecursiveRef { .. }
         | QueryError::RaiseAliasCycle
         | QueryError::TypeParamCycle => Some(PartialReasonSet::SAME_PATH_RECURSION),
         QueryError::UnsupportedIntrinsic { .. }
+        | QueryError::ForeignSemanticOperand
         | QueryError::Other(_)
         | QueryError::ValueDomainMismatch { .. }
         | QueryError::RaiseMiss

@@ -96,7 +96,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let result = self
             .substitute_with_change_tracking(node, parameter_node, arg)
             .0;
-        if self.canonical_evidence_epoch.get() == epoch_before {
+        if self.canonical_evidence_epoch.get() == epoch_before && !self.ctx.is_cancelled() {
             self.graph()
                 .substitute_memo_publish(node, parameter_node, arg, result);
         }
@@ -179,7 +179,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let epoch_before = self.canonical_evidence_epoch.get();
         let (result, changed) =
             self.substitute_with_change_tracking_inner(node, parameter_node, arg);
-        if self.canonical_evidence_epoch.get() == epoch_before {
+        if self.canonical_evidence_epoch.get() == epoch_before && !self.ctx.is_cancelled() {
             self.graph()
                 .substitute_memo_publish(node, parameter_node, arg, result);
         }

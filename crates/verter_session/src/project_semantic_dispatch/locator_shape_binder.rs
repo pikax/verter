@@ -476,9 +476,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .with_infer_source(key.locator());
 
         let node = match derefed.shape {
-            DerefedBodyShape::Single(expr) => {
-                self.lower_type_expr_for_locator_shape(&expr, &shape_ctx)
-            }
+            DerefedBodyShape::Single(expr) => match derefed.lexical_root {
+                Some(root) => {
+                    let ancestor = self.lower_type_expr_for_locator_shape(&root.expr, &shape_ctx);
+                    self.navigate_lowered_locator(ancestor, &root.path)
+                        .unwrap_or_else(|| self.opaque(QueryError::Miss))
+                }
+                None => self.lower_type_expr_for_locator_shape(&expr, &shape_ctx),
+            },
             // A whole merged decl body lowers each contributor and interns
             // the DISTINCT MergedDecl carrier — never a bare Intersection
             // (the peer-merge reducer needs the contributor structure).
@@ -521,6 +526,232 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
             .into();
         output.with_observed_self_roots(observed_self_roots)
+    }
+
+    fn navigate_lowered_locator(
+        &self,
+        node: SemanticNodeId,
+        path: &[verter_type_expr::locators::TypeBodyPathStep],
+    ) -> Option<SemanticNodeId> {
+        enum Position {
+            Node(SemanticNodeId),
+            Member(crate::semantic_query::SurfaceMember),
+            IndexSignature(crate::semantic_query::IndexSignature),
+        }
+
+        use verter_type_expr::locators::TypeBodyPathStep as Step;
+        let mut position = Position::Node(node);
+        for step in path {
+            if let Position::IndexSignature(signature) = &position {
+                position = match step {
+                    Step::IndexSignatureKey => Position::Node(signature.key_type),
+                    Step::IndexSignatureValue => Position::Node(signature.value_type),
+                    _ => return None,
+                };
+                continue;
+            }
+            if let Position::Member(member) = &position {
+                position = match step {
+                    Step::MemberValue => Position::Node(member.value),
+                    Step::MemberKey => match &member.key {
+                        crate::semantic_query::AuthoredPropertyKey::Computed(key) => {
+                            Position::Node(*key)
+                        }
+                        _ => return None,
+                    },
+                    _ => Position::Node(member.value),
+                };
+                if matches!(step, Step::MemberValue | Step::MemberKey) {
+                    continue;
+                }
+            }
+            let node = match &position {
+                Position::Node(node) => *node,
+                Position::Member(member) => member.value,
+                Position::IndexSignature(_) => unreachable!("handled above"),
+            };
+            // Alias wrappers are transparent at every navigation step —
+            // the lowered-graph counterpart of the pre-lowering
+            // `unwrap_parenthesized`: a reference the ancestor lowering
+            // resolved onto an already-interned `Alias` carrier still
+            // exposes its structural child.
+            // bounded-loop: at most ALIAS_UNWRAP_BUDGET alias hops before
+            // the conservative typed miss, so a malformed alias cycle
+            // cannot hang the navigator.
+            const ALIAS_UNWRAP_BUDGET: usize = 64;
+            let mut budget = ALIAS_UNWRAP_BUDGET;
+            let mut node = node;
+            let mut data = self.graph().node_data(node)?;
+            while let SemanticNodeData::Alias(child) = data.as_ref() {
+                if budget == 0 {
+                    return None;
+                }
+                budget -= 1;
+                node = *child;
+                data = self.graph().node_data(node)?;
+            }
+            let data = data.as_ref();
+            // The match is over the closed STEP vocabulary with no
+            // wildcard: a new `TypeBodyPathStep` variant is a compile
+            // error here, forcing its author to classify it for the
+            // lowered-graph navigator (and the pre-lowering
+            // `navigate_expr` it must agree with) instead of silently
+            // degrading to a miss. A shape/ordinal mismatch inside an
+            // arm is still the typed `None` miss.
+            position = match step {
+                Step::MergedContributor { ordinal } => match data {
+                    SemanticNodeData::MergedDecl { contributors } => {
+                        Position::Node(*contributors.get(*ordinal as usize)?)
+                    }
+                    _ => return None,
+                },
+                Step::IntersectionArm { ordinal } => match data {
+                    SemanticNodeData::Intersection(arms) => {
+                        Position::Node(*arms.get(*ordinal as usize)?)
+                    }
+                    _ => return None,
+                },
+                Step::UnionArm { ordinal } => match data {
+                    SemanticNodeData::Union(arms) => Position::Node(*arms.get(*ordinal as usize)?),
+                    _ => return None,
+                },
+                // A lazy generic application keeps its arguments in its own
+                // `args` field rather than the opaque-carrier accessor, so
+                // it needs its own arm: without it a `Foo<Arg>` written in a
+                // GENERIC declaration's body (which lowers its ancestor and
+                // walks the graph) would miss the argument the pre-lowering
+                // walk over `TypeExpr::Ref { type_arguments }` finds in a
+                // non-generic declaration's body.
+                Step::TypeArgument { ordinal } => match data {
+                    SemanticNodeData::InstantiationRef { args, .. } => {
+                        Position::Node(*args.get(*ordinal as usize)?)
+                    }
+                    _ => Position::Node(*data.carrier_type_args().get(*ordinal as usize)?),
+                },
+                Step::Member { ordinal } => match data {
+                    SemanticNodeData::Object(surface) => {
+                        match surface.entries.get(*ordinal as usize)? {
+                            crate::semantic_query::SurfaceEntry::Member(member) => {
+                                Position::Member(member.clone())
+                            }
+                            crate::semantic_query::SurfaceEntry::CallSignature(signature)
+                            | crate::semantic_query::SurfaceEntry::ConstructSignature(signature) => {
+                                Position::Node(*signature)
+                            }
+                            crate::semantic_query::SurfaceEntry::IndexSignature(signature) => {
+                                Position::IndexSignature(signature.clone())
+                            }
+                        }
+                    }
+                    _ => return None,
+                },
+                // `MemberKey` / `MemberValue` are consumed by the
+                // selected-member position above; at a NODE position there
+                // is no member axis to descend, so the typed miss mirrors
+                // the pre-lowering navigator's refusal.
+                Step::MemberKey | Step::MemberValue => return None,
+                // Likewise `IndexSignatureKey` / `IndexSignatureValue`
+                // apply only to a selected index-signature entry; at any
+                // other position they are the typed miss.
+                Step::IndexSignatureKey | Step::IndexSignatureValue => return None,
+                // A `TypeParamBound` step is valid only as the FIRST path
+                // step (served from the decl header before navigation
+                // begins); reaching the lowered graph means it appeared
+                // mid-path — the same misplaced-step refusal the
+                // pre-lowering navigator spells
+                // `TypeParamBoundStepMisplaced`.
+                Step::TypeParamBound { .. } => return None,
+                Step::FunctionParam { ordinal } => match data {
+                    SemanticNodeData::Signature { params, .. } => {
+                        Position::Node(params.get(*ordinal as usize)?.ty)
+                    }
+                    _ => return None,
+                },
+                Step::FunctionReturn => match data {
+                    SemanticNodeData::Signature { return_type, .. } => Position::Node(*return_type),
+                    _ => return None,
+                },
+                // A group-level `ValueSignature` step is consumed by the
+                // value-parts deref BEFORE binder-crossing detection, so a
+                // root path can never legitimately carry one; reaching the
+                // lowered graph with it is the typed miss.
+                Step::ValueSignature { .. } => return None,
+                Step::MappedSource => match data {
+                    SemanticNodeData::Mapped { source, .. } => Position::Node(*source),
+                    _ => return None,
+                },
+                Step::MappedValue => match data {
+                    SemanticNodeData::Mapped { mapper, .. } => Position::Node(mapper.value_expr),
+                    _ => return None,
+                },
+                Step::MappedNameType => match data {
+                    SemanticNodeData::Mapped { mapper, .. } => Position::Node(mapper.name_remap?),
+                    _ => return None,
+                },
+                Step::ConditionalCheck => match data {
+                    SemanticNodeData::Conditional { check, .. } => Position::Node(*check),
+                    _ => return None,
+                },
+                Step::ConditionalExtends => match data {
+                    SemanticNodeData::Conditional { extends, .. } => Position::Node(*extends),
+                    _ => return None,
+                },
+                Step::ConditionalTrue => match data {
+                    SemanticNodeData::Conditional {
+                        true_branch_ref, ..
+                    } => Position::Node(*true_branch_ref),
+                    _ => return None,
+                },
+                Step::ConditionalFalse => match data {
+                    SemanticNodeData::Conditional {
+                        false_branch_ref, ..
+                    } => Position::Node(*false_branch_ref),
+                    _ => return None,
+                },
+                Step::IndexedAccessObject => match data {
+                    SemanticNodeData::IndexedAccess { object, .. } => Position::Node(*object),
+                    _ => return None,
+                },
+                Step::IndexedAccessIndex => match data {
+                    SemanticNodeData::IndexedAccess { index, .. } => {
+                        Position::Node(self.index_key_node(index)?)
+                    }
+                    _ => return None,
+                },
+                Step::TupleElement { ordinal } => match data {
+                    SemanticNodeData::Tuple { elements, .. } => {
+                        Position::Node(elements.get(*ordinal as usize)?.value)
+                    }
+                    _ => return None,
+                },
+            };
+        }
+        match position {
+            Position::Node(node) => Some(node),
+            Position::Member(member) => Some(member.value),
+            Position::IndexSignature(_) => None,
+        }
+    }
+
+    /// The indexed-access key as a NODE.
+    ///
+    /// A computed key already is one. The folded literal forms (`T["a"]`,
+    /// `T[0]`) are stored as authored key DATA rather than as a child
+    /// node, so addressing that authored position interns the literal type
+    /// the key denotes — the same type the pre-lowering walk selects
+    /// directly from `TypeExpr::IndexedAccess { index }`. A unique-symbol
+    /// key denotes no literal type node, so it stays a typed miss.
+    fn index_key_node(&self, index: &IndexKey) -> Option<SemanticNodeId> {
+        match index {
+            IndexKey::Computed(node) => Some(*node),
+            IndexKey::String(name) => Some(self.graph().intern_node(SemanticNodeData::Literal(
+                verter_type_expr::LiteralValue::String(name.to_string()),
+            ))),
+            IndexKey::Number(value) => Some(self.graph().intern_node(SemanticNodeData::Literal(
+                verter_type_expr::LiteralValue::Number(value.get() as f64),
+            ))),
+            IndexKey::UniqueSymbol(_) => None,
+        }
     }
 
     /// Stamp the root signature's occurrence from the lowering key's
@@ -640,5 +871,66 @@ fn locator_with_path_step(
         AuthoredBodyLocator::MacroPayload(payload) => {
             AuthoredBodyLocator::MacroPayload(payload.clone())
         }
+    }
+}
+
+/// Compile-enforced completeness tripwire for the closed
+/// `TypeBodyPathStep` vocabulary the two independent navigators share:
+/// [`ProjectSemanticDispatch::navigate_lowered_locator`] here
+/// (post-lowering `SemanticNodeData`) and `navigate_expr`
+/// (`decl_body_memo::locator_deref`, pre-lowering `TypeExpr`). Both fail
+/// closed (`None` / `PathUnresolved`) on an unhandled step, so a forgotten
+/// variant degrades to a typed miss rather than silently wrong data.
+///
+/// This match has NO wildcard arm, so adding a new [`TypeBodyPathStep`]
+/// variant is a compile error HERE — the prompt to add handling to both
+/// navigators, never a name-keyed source scanner. It asserts vocabulary
+/// COMPLETENESS only; it cannot observe what either navigator selects.
+/// That behavioral agreement is proven separately by forcing the same
+/// authored position through both routes — a body nested under a generic
+/// callable's return takes the lowered-graph navigator, the same body as a
+/// whole declaration takes the pre-lowering one — in
+/// `both_locator_navigators_select_the_same_authored_position`.
+#[cfg(test)]
+mod step_vocabulary_completeness {
+    use verter_type_expr::locators::{TypeBodyPathStep, TypeParamBoundPosition};
+
+    fn assert_every_step_variant_is_named(step: TypeBodyPathStep) {
+        match step {
+            TypeBodyPathStep::MergedContributor { .. }
+            | TypeBodyPathStep::IntersectionArm { .. }
+            | TypeBodyPathStep::TypeArgument { .. }
+            | TypeBodyPathStep::Member { .. }
+            | TypeBodyPathStep::MemberKey
+            | TypeBodyPathStep::MemberValue
+            | TypeBodyPathStep::TypeParamBound { .. }
+            | TypeBodyPathStep::FunctionParam { .. }
+            | TypeBodyPathStep::FunctionReturn
+            | TypeBodyPathStep::ValueSignature { .. }
+            | TypeBodyPathStep::MappedSource
+            | TypeBodyPathStep::MappedValue
+            | TypeBodyPathStep::MappedNameType
+            | TypeBodyPathStep::ConditionalCheck
+            | TypeBodyPathStep::ConditionalExtends
+            | TypeBodyPathStep::ConditionalTrue
+            | TypeBodyPathStep::ConditionalFalse
+            | TypeBodyPathStep::UnionArm { .. }
+            | TypeBodyPathStep::IndexedAccessObject
+            | TypeBodyPathStep::IndexedAccessIndex
+            | TypeBodyPathStep::IndexSignatureKey
+            | TypeBodyPathStep::IndexSignatureValue
+            | TypeBodyPathStep::TupleElement { .. } => {}
+        }
+    }
+
+    #[test]
+    fn step_vocabulary_is_exhaustively_named() {
+        // Constructing one instance is enough to type-check the exhaustive
+        // match above; the real assertion is the compile-time exhaustiveness
+        // itself (no wildcard arm), not this runtime call.
+        assert_every_step_variant_is_named(TypeBodyPathStep::TypeParamBound {
+            ordinal: 0,
+            position: TypeParamBoundPosition::Constraint,
+        });
     }
 }
