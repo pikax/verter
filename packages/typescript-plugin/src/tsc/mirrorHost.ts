@@ -72,12 +72,17 @@ import type * as TS from "typescript";
 
 import { VIRTUAL_FILE_NAMING, type VirtualPathPolicy } from "@verter/language-shared";
 import type {
+  HostCompileRequest,
+  HostCompileResponse,
+  HostIdeCompiledProduct,
   HostPublicApiProjectionError,
   HostPublicApiResult,
+  HostRequestedProduct,
   HostTscFailureSubject,
   HostTscDeclarationShapeReason,
   HostTscProjectionDetailCode,
   HostTscUnavailableOutcome,
+  VerterHost,
 } from "@verter/native";
 
 /**
@@ -112,20 +117,18 @@ export interface CarrierCodegenHost {
     aliases?: string[];
   }): unknown;
   /**
-   * Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
-   * `getIde` is a PURE CACHED READ — it returns `null` until the IDE surface
-   * has been compiled, so the driver calls this first. Returns `true` when the
-   * projection now exists, `false` for a non-carrier.
+   * Execute ONE typed compile request against an already-registered source —
+   * the sole native compile route this driver consumes. The route is
+   * complete-only: a construction/admission/execution refusal THROWS (the
+   * batch aborts, exactly as the legacy ensure path aborted on a real
+   * failure), and a completed compile answers every requested product. The
+   * driver requests one `ideCompanion` product per source (see
+   * {@link IDE_COMPILE_REQUEST_BY_FRAMEWORK}); a completed compile whose
+   * products carry
+   * no IDE artifact (a non-carrier surface) is the driver's `absent`
+   * outcome, mirroring the legacy pure cached read's `null`.
    */
-  ensureIdeCompiled?(
-    canonicalId: string,
-    profile?: { target?: "bundler" | "ide" | "analysis"; sourceMap?: boolean },
-  ): boolean;
-  /** The IDE diagnostic carrier (`.vue.tsx`/`.svelte.tsx`) content + map. */
-  getIde(
-    canonicalId: string,
-    profile?: { target?: "bundler" | "ide" | "analysis"; sourceMap?: boolean },
-  ): { code: string; sourceMap?: string; isJsx: boolean } | null;
+  compileRequest(canonicalId: string, request: HostCompileRequest): HostCompileResponse;
   /**
    * The API (`.verter.ts`) / declaration (`.d.<ext>.ts`) carrier content + map
    * for referenced projects. Mirrors `@verter/native`'s `HostPublicApiMode`
@@ -176,6 +179,56 @@ export class CarrierPublicApiProjectionFailure extends Error {
 /** The framework of a carrier source — selects the virtual-file-naming row. */
 export type CarrierFramework = "vue" | "svelte";
 
+/**
+ * The ONE typed IDE request this driver issues per carrier source: a single
+ * `ideCompanion` product on the source's own framework arm, the dev identity
+ * (`isProduction: false`, `forceJs: false`), and the framework's default
+ * compile options (Vue: inferred backend, no SSR, no custom elements, no Babel
+ * plugins; Svelte: all-default). The canonical id is the route argument, NOT a
+ * request field — leaving `identity.filename` unset lets the native route bind
+ * the canonical id itself (a caller-stated name would pin path spelling/casing
+ * the mirror host deliberately does not own).
+ *
+ * Every IDE axis is stated (`wantSourceMap` from the caller's source-map
+ * intent; `false` for the rest) at the values the legacy positional
+ * `{ target: "ide", sourceMap }` profile resolved to — the native real-host
+ * boundary test asserts the typed route answers the profile route byte-for-byte
+ * at exactly these values. `ideChunkBoundaries: false` is the only admitted
+ * value there: the carrier bridge substitutes its own.
+ *
+ * Keyed by the closed `CarrierFramework` union (the `NAMING_KEY_BY_FRAMEWORK`
+ * shape): adding a framework is a single-row change with no literal arm gate.
+ */
+const IDE_COMPILE_REQUEST_BY_FRAMEWORK: Record<
+  CarrierFramework,
+  (wantSourceMap: boolean) => HostCompileRequest
+> = {
+  vue: (wantSourceMap) => ({
+    framework: "vue",
+    identity: { isProduction: false, forceJs: false },
+    products: [ideCompanionProduct(wantSourceMap)],
+    options: { backend: "inferred", ssr: false, isCustomElement: [], babelParserPlugins: [] },
+  }),
+  svelte: (wantSourceMap) => ({
+    framework: "svelte",
+    identity: { isProduction: false, forceJs: false },
+    products: [ideCompanionProduct(wantSourceMap)],
+    options: {},
+  }),
+};
+
+/** The single `ideCompanion` product: the driver's IDE demand, every axis stated. */
+function ideCompanionProduct(wantSourceMap: boolean): HostRequestedProduct {
+  return {
+    kind: "ideCompanion",
+    wantSourceMap,
+    embedAmbientTypes: false,
+    conditionalRootNarrowing: false,
+    strictSlots: false,
+    ideChunkBoundaries: false,
+  };
+}
+
 /** Project-ownership disposition for a `.vue`/`.svelte` (from the §2.6 resolver). */
 export type CarrierOwnership = "Owned" | "NoProject" | "Ambiguous";
 
@@ -194,7 +247,8 @@ export interface CarrierSource {
   ownership: CarrierOwnership;
   /**
    * The carrier role to materialise:
-   * - `"ide"` — the leaf diagnostic carrier (`getIde` → `.vue.tsx`).
+   * - `"ide"` — the leaf diagnostic carrier (one typed `ideCompanion`
+   *   compile request → `.vue.tsx`).
    * - `"api"` — a referenced project's declaration carrier (`getPublicApi` →
    *   `.verter.ts`), the surface build mode emits a `.d.ts` from.
    */
@@ -610,7 +664,7 @@ export function runBatchTypecheck(args: RunBatchTypecheckArgs): BatchTypecheckRe
     args.host ??
     (() => {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const native = require("@verter/native") as { VerterHost: new () => CarrierCodegenHost };
+      const native = require("@verter/native") as { VerterHost: new () => VerterHost };
       return new native.VerterHost();
     })();
 
@@ -729,10 +783,20 @@ export function runBatchTypecheck(args: RunBatchTypecheckArgs): BatchTypecheckRe
       const group = groupFor(src.projectTsconfigPath ?? leafTsconfigPath);
 
       if (src.role === "ide") {
-        // `getIde` is a pure cached read — populate the IDE projection first.
-        const ideProfile = { target: "ide" as const, sourceMap: true };
-        host.ensureIdeCompiled?.(canonical, ideProfile);
-        const ide = host.getIde(canonical, ideProfile);
+        // Exactly ONE typed IDE call against the already-registered source —
+        // no second native compile, no source copy. The complete-only route
+        // throws on a refusal (aborting the batch, as the legacy ensure path
+        // did); a completed compile with no IDE artifact (a non-carrier
+        // surface) is this source's `absent`, as the legacy pure cached
+        // read's `null` was.
+        const response = host.compileRequest(
+          canonical,
+          IDE_COMPILE_REQUEST_BY_FRAMEWORK[src.framework](true),
+        );
+        const ide =
+          response.products.find(
+            (product): product is HostIdeCompiledProduct => product.kind === "ideCompanion",
+          )?.ide ?? null;
         if (!ide) {
           result.sourceOutcomes.set(sourcePath, { kind: "absent" });
           continue;

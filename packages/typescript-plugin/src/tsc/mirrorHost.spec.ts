@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { VerterHost } from "@verter/native";
+import type { HostCompileRequest } from "@verter/native";
 
 import {
   CarrierPublicApiProjectionFailure,
@@ -140,8 +141,7 @@ describe(
       };
       const failingHost: CarrierCodegenHost = {
         upsert: native.upsert.bind(native),
-        ensureIdeCompiled: native.ensureIdeCompiled.bind(native),
-        getIde: native.getIde.bind(native),
+        compileRequest: native.compileRequest.bind(native),
         getPublicApi: (canonicalId, mode) =>
           canonicalId === "Ordinal.vue"
             ? { value: null, error: projectionError }
@@ -170,6 +170,73 @@ describe(
         expect(result.materializedCarriers.has(later)).toBe(true);
       } finally {
         failingHost.close?.();
+      }
+    });
+
+    it("issues exactly ONE typed IDE call per source — framework-discriminated, single product, no extra compile", () => {
+      const fx = track(
+        createSingleProjectFixture([
+          {
+            rel: "src/One.vue",
+            content: `<script setup lang="ts">\nconst value = 1\n</script>`,
+          },
+          {
+            rel: "src/Two.svelte",
+            content: `<script lang="ts">\nconst value = 2\n</script>`,
+          },
+        ]),
+      );
+      const native = host();
+      const calls: { canonicalId: string; request: HostCompileRequest }[] = [];
+      const countingHost: CarrierCodegenHost = {
+        upsert: native.upsert.bind(native),
+        compileRequest: (canonicalId, request) => {
+          calls.push({ canonicalId, request });
+          return native.compileRequest(canonicalId, request);
+        },
+        getPublicApi: native.getPublicApi.bind(native),
+        close: native.close.bind(native),
+      };
+
+      try {
+        const one = path.join(fx.root, "src/One.vue").replace(/\\/g, "/");
+        const two = path.join(fx.root, "src/Two.svelte").replace(/\\/g, "/");
+        const result = runBatchTypecheck({
+          tsconfigPath: fx.tsconfigPath,
+          carrierSources: [
+            ideCarrier(fx.root, "src/One.vue", "vue"),
+            ideCarrier(fx.root, "src/Two.svelte", "svelte"),
+          ],
+          host: countingHost,
+        });
+
+        // Exactly one typed call per already-registered source, in carrier
+        // order — no second native compile anywhere on this route.
+        expect(calls.map((c) => c.canonicalId)).toEqual(["One.vue", "Two.svelte"]);
+        // The requests type-check against the generated native declaration
+        // (no cast): the framework arm is discriminated at compile time.
+        expect(calls[0].request.framework).toBe("vue");
+        expect(calls[1].request.framework).toBe("svelte");
+        for (const call of calls) {
+          // One product only — the IDE companion at the source-map intent the
+          // driver fixes on this route, every other IDE axis stated closed.
+          expect(call.request.products).toHaveLength(1);
+          expect(call.request.products[0]).toEqual({
+            kind: "ideCompanion",
+            wantSourceMap: true,
+            embedAmbientTypes: false,
+            conditionalRootNarrowing: false,
+            strictSlots: false,
+            ideChunkBoundaries: false,
+          });
+          // The canonical id binds on the route, not in a caller-stated name.
+          expect(call.request.identity).toEqual({ isProduction: false, forceJs: false });
+        }
+        // Both carriers materialised through their single call each.
+        expect(result.sourceOutcomes.get(one)).toMatchObject({ kind: "materialized" });
+        expect(result.sourceOutcomes.get(two)).toMatchObject({ kind: "materialized" });
+      } finally {
+        countingHost.close?.();
       }
     });
 
