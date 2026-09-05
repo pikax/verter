@@ -4,15 +4,59 @@
 //!
 //! Every relation judgement — top-level consumer asks, conditional branch
 //! selection, `Extract`/`Exclude` per-arm filtering, the oracle adapter,
-//! AND every recursive sub-relation — re-enters the SAME full-key authority
-//! [`ProjectSemanticDispatch::execute_relate`]. There is no second engine:
-//! the deleted process-global TLS in-flight guard and the bare-pair
-//! entry point are replaced by the per-transaction
-//! [`super::dispatch_txn::CheckerDispatchTransaction`] reentry/assumption substrate,
-//! and the family `execute` path's degenerate `Miss` arm plus the
-//! execute-invisibility fence are gone — decided binary judgements admit
-//! into the `Relate` family slot and warm-serve through the standard family
-//! read.
+//! AND every recursive assignability sub-relation — re-enters the SAME
+//! full-key authority [`ProjectSemanticDispatch::execute_relate`]. Comparable
+//! member descent stays inside its root frame's iterative budget.
+//!
+//! The two descents are DELIBERATELY not one walker. Assignability answers
+//! "is every source inhabitant a target inhabitant"; comparability answers
+//! "is there one inhabitant of both". They agree on nothing below the root:
+//! a union SOURCE conjoins for assignability and disjoins for comparability,
+//! an extra source member is an excess-property question for one and
+//! irrelevant to the other, and optional members are skipped by one and
+//! variance-checked by the other. Sharing a descent would mean one walker
+//! branching on the relation kind at every hop — a second engine wearing one
+//! name. What they DO share is the single proven-disjoint tag oracle
+//! ([`super::canonical_algebra::tag_level_disjoint`]) and the single nominal
+//! leaf, which is where a drift between them would actually be a defect.
+//! Extending object descent (index signatures, `ObjectSpreadProgram`,
+//! `Alias` / `MergedDecl` decomposition) must therefore be decided per
+//! descent, not assumed to propagate.
+//!
+//! The divergence extends past the descent SHAPE into cycle discipline.
+//! Assignability re-enters the full authority for every sub-relation, so a
+//! re-entered pair goes through the transaction's obligation/re-discharge
+//! machinery. Comparability's member descent stays inside ONE frame, so it
+//! carries its own coinductive assumption: a pair re-entered while still
+//! being decided is assumed to OVERLAP. That direction is the safe one — both
+//! folds propagate permissiveness, so an assumption can only miss a
+//! disjointness proof, never mint one, and a frame-local memo entry finished
+//! under an assumption carries only that same permissiveness forward. Only
+//! the ROOT pair is published to the shared memo, so no assumed sub-result
+//! escapes the frame that made the assumption.
+//!
+//! Disjointness proofs and intersection collapse are two different jobs.
+//! The oracle SUPPLIES the proof — concrete tag conflicts (delegated to the
+//! crate's sole proven-disjoint tag oracle, so it cannot drift from the
+//! canonical intersection collapse), the nominal axis, and two structural
+//! surfaces carrying the same REQUIRED member with disjoint values (a
+//! COMPOSED root — an intersection body, an object-spread program — is
+//! composed into its one-level surface first, so an `A & { kind: "a" }`
+//! versus `A & { kind: "b" }` conflict is still proved, at any member
+//! depth). Reducing a provably disjoint intersection to `never` is the
+//! canonical algebra's decision: the proof carries the checker's collapse
+//! class for the pair ([`DisjointnessProof::checker_reduces_intersection_to_never`]),
+//! and a consumer narrows to `never` only on the checker-compatible
+//! unit-discriminant criteria — disjoint tags, distinct `unique symbol`
+//! identities, or a conflicting shared REQUIRED member whose values are
+//! both unit types. A conflict reachable only through non-unit member
+//! values keeps `A & B`, exactly as `tsc`'s `getNarrowedType` keeps it.
+//!
+//! There is one reentry substrate, not a second engine: the per-transaction
+//! [`super::dispatch_txn::CheckerDispatchTransaction`] provides the
+//! obligation/re-discharge machinery and the coinductive assumption, and
+//! decided binary judgements admit into the `Relate` family slot and
+//! warm-serve through the standard family read.
 //!
 //! Admission (design §2.3 / Decision 4): a pure non-binding SCC closes at
 //! SCC-close (positive ⇒ `Assignable` + `CoinductiveCycle`; a negative
@@ -30,7 +74,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::dispatch_txn::{
     provisional_relate_step, redischarge_is_stable, select_inference_candidates,
@@ -409,6 +453,195 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.execute_relate(self.relate_key_for(source, target))
     }
 
+    /// [`Self::execute_relate_pair`] for a NON-default relation kind — the
+    /// same pure-delegation helper, keyed on the asked relation.
+    pub(crate) fn execute_relate_pair_kind(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        relation: RelationKind,
+    ) -> RelationStep {
+        self.execute_relate(self.relate_key_for_kind(source, target, relation))
+    }
+
+    /// Ask the shared authority whether `a` and `b` can have a common
+    /// inhabitant ([`RelationKind::Comparable`]).
+    ///
+    /// The three verdicts are exactly the relation's three, and a consumer
+    /// must treat [`ComparabilityVerdict::Undecided`] as "no fact" — never
+    /// as either answer — and must never re-derive the judgement locally.
+    /// A `Disjoint` verdict carries the proof AND the checker's intersection
+    /// collapse class for the pair; the consumer reads
+    /// [`DisjointnessProof::checker_reduces_intersection_to_never`] instead
+    /// of deciding collapse itself.
+    pub(crate) fn nodes_comparable(
+        &self,
+        a: SemanticNodeId,
+        b: SemanticNodeId,
+    ) -> ComparabilityVerdict {
+        match self.execute_relate_pair_kind(a, b, RelationKind::Comparable) {
+            RelationStep::Assignable { .. } => ComparabilityVerdict::Overlaps,
+            RelationStep::NotAssignable => ComparabilityVerdict::Disjoint(DisjointnessProof::new(
+                self.checker_intersection_collapse(a, b),
+            )),
+            RelationStep::Unknown | RelationStep::BudgetExceeded(_) | RelationStep::Assumed(_) => {
+                ComparabilityVerdict::Undecided
+            }
+        }
+    }
+
+    /// Classify how the checker reduces an intersection of a PROVED-disjoint
+    /// pair — minted only for a pair the `Comparable` reduction already
+    /// answered negative, as the payload of that proof.
+    ///
+    /// This is not a second disjointness oracle: it never decides WHETHER
+    /// the pair is disjoint (that verdict arrived), only WHICH disjointness
+    /// shapes the checker's intersection reducer collapses. It reads the
+    /// pair's top-level node shapes through the same tag oracle, nominal
+    /// identities, and one-level member surfaces the reduction used, so it
+    /// stays warm-safe — the class is a pure function of the pair, not of
+    /// the descent that proved it.
+    ///
+    /// The checker's criteria (`tsc` `getNarrowedType` /
+    /// `isTypeDisjointTo`): disjoint primitive/literal tags and distinct
+    /// `unique symbol` identities are unit-discriminant conflicts, as is a
+    /// shared REQUIRED member whose two types are BOTH unit types (a
+    /// literal or a `unique symbol`) and conflict. A conflict reachable
+    /// only through member values that are not both unit types — at ANY
+    /// depth — is a real disjointness proof whose intersection the checker
+    /// KEEPS. Unions distribute the decision: every alternative pair must
+    /// satisfy a collapse criterion, else the intersection is kept.
+    ///
+    /// Runs OUTSIDE the relation budget, including for warm `Comparable`
+    /// hits: the class is a pure function of the pair's top-level shapes —
+    /// structurally bounded (at most two widen retries, flat union arms,
+    /// unit conflicts bottom out) with family-memoized inner reads — and it
+    /// runs only for a pair the reduction ALREADY answered negative, so it
+    /// cannot widen the work any unanswered pair performs.
+    fn checker_intersection_collapse(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> IntersectionCollapse {
+        let source = match self.unwrap_identity_carrier_for_relation(source) {
+            IdentityCarrierUnwrap::Concrete(id) => id,
+            IdentityCarrierUnwrap::Unresolvable => return IntersectionCollapse::Kept,
+        };
+        let target = match self.unwrap_identity_carrier_for_relation(target) {
+            IdentityCarrierUnwrap::Concrete(id) => id,
+            IdentityCarrierUnwrap::Unresolvable => return IntersectionCollapse::Kept,
+        };
+        if let Some(leaf) =
+            self.relation_nominal_leaf(source, target, RelationKind::Comparable, &[])
+        {
+            // The nominal leaf DECIDED the pair negative exactly when the
+            // two declaring identities are distinct — a unit-discriminant
+            // conflict between the only nominal unit types TypeScript has.
+            if let NominalLeaf::Decided(RelationResult::NotAssignable) = leaf {
+                return IntersectionCollapse::ReducesToNever;
+            }
+            // A widened retry re-asks the pair on the ordinary lattice.
+            if let NominalLeaf::Retry(widened_source, widened_target) = leaf {
+                return self.checker_intersection_collapse(widened_source, widened_target);
+            }
+            return IntersectionCollapse::Kept;
+        }
+        let (Some(source_data), Some(target_data)) = (
+            self.graph().node_data(source),
+            self.graph().node_data(target),
+        ) else {
+            return IntersectionCollapse::Kept;
+        };
+        if let SemanticNodeData::Union(members) = &*source_data {
+            let members = members.members_arc();
+            return self.union_collapse_class(members.iter().copied(), target);
+        }
+        if let SemanticNodeData::Union(members) = &*target_data {
+            let members = members.members_arc();
+            return self.union_collapse_class(members.iter().copied(), source);
+        }
+        if super::canonical_algebra::tag_level_disjoint(self.graph(), source, target) {
+            // Disjoint tags at the TOP level of the two operands: an empty
+            // primitive/literal intersection, which the checker's
+            // intersection reducer collapses to `never`.
+            return IntersectionCollapse::ReducesToNever;
+        }
+        // Two structural surfaces: the checker collapses only on a shared
+        // REQUIRED member whose two types are both UNIT types and conflict.
+        // Any other member conflict — nested descent, non-unit values —
+        // leaves `A & B` standing.
+        let (ComparableSurface::Object(source_view), ComparableSurface::Object(target_view)) = (
+            self.comparable_surface(source),
+            self.comparable_surface(target),
+        ) else {
+            return IntersectionCollapse::Kept;
+        };
+        for source_member in source_view.positive_members() {
+            if source_member.optional {
+                continue;
+            }
+            let Some(member_key) = source_member.key.cloned_known() else {
+                continue;
+            };
+            let crate::semantic_query::SurfaceKeyProjection::Exact(target_member) =
+                target_view.project_known_key(&member_key)
+            else {
+                continue;
+            };
+            if target_member.optional {
+                continue;
+            }
+            if self.unit_types_conflict(source_member.value, target_member.value) {
+                return IntersectionCollapse::ReducesToNever;
+            }
+        }
+        IntersectionCollapse::Kept
+    }
+
+    /// Every alternative must satisfy a collapse criterion for the union's
+    /// intersection to reduce; one kept alternative leaves the intersection
+    /// standing, exactly as the checker composes per-arm narrowing.
+    fn union_collapse_class(
+        &self,
+        arms: impl Iterator<Item = SemanticNodeId>,
+        other: SemanticNodeId,
+    ) -> IntersectionCollapse {
+        let mut arms = arms.peekable();
+        if arms.peek().is_none() {
+            return IntersectionCollapse::Kept;
+        }
+        for arm in arms {
+            if matches!(
+                self.checker_intersection_collapse(arm, other),
+                IntersectionCollapse::Kept
+            ) {
+                return IntersectionCollapse::Kept;
+            }
+        }
+        IntersectionCollapse::ReducesToNever
+    }
+
+    /// Whether two member values are BOTH unit types (a literal or a
+    /// `unique symbol` identity) that provably conflict — the checker's
+    /// unit-discriminant criterion. Bounded to one hop: a unit type is
+    /// never an object, so the recursion bottoms out in the tag / nominal
+    /// arms immediately.
+    fn unit_types_conflict(&self, left: SemanticNodeId, right: SemanticNodeId) -> bool {
+        let unit = |node: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Literal(_)) | Some(SemanticNodeData::TypeOfNominal(_))
+            )
+        };
+        if !unit(left) || !unit(right) {
+            return false;
+        }
+        match self.checker_intersection_collapse(left, right) {
+            IntersectionCollapse::ReducesToNever => true,
+            IntersectionCollapse::Kept => false,
+        }
+    }
+
     /// Test-support adapter mapping the authority's step onto the
     /// reducer's tri-state lattice so legacy verdict assertions keep
     /// their shape. `Assumed` / `BudgetExceeded` collapse onto `Unknown`
@@ -683,6 +916,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> RelateMemoKey {
+        self.relate_key_for_kind(source, target, RelationKind::Assignable)
+    }
+
+    /// [`Self::relate_key_for`] for a NON-default relation kind. The env,
+    /// substitution, reduction context, and strict-family policy are the
+    /// SAME projection — only the relation axis differs, so the identity /
+    /// comparability judgements over a node pair occupy their own memo
+    /// slots beside the assignability one instead of aliasing it.
+    pub(crate) fn relate_key_for_kind(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        relation: RelationKind,
+    ) -> RelateMemoKey {
         let host = self.ctx.host_for_fact_tracer_install();
         let env = host.host_view_env_hashes();
         let strict = self.relation_strict_config();
@@ -694,7 +941,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             substitution: crate::semantic_query::SubstitutionCanonicalHash::empty(),
             projection_reduction: ProjectionReductionContext::structural_transit(),
         };
-        let mut key = RelateMemoKey::assignable(source, target, context);
+        let mut key = RelateMemoKey::for_kind(source, target, relation, context);
         key.policy = RelationPolicy {
             variance: strict.variance_policy(),
             ..RelationPolicy::default()
@@ -3157,6 +3404,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::InferRef { .. }
                 | SemanticNodeData::DeclRef { .. }
+                // The nominal terminal's payload is a scalar identity — no
+                // infer-bearing child and no carrier args to descend.
+                | SemanticNodeData::TypeOfNominal(_)
                 // The sealed callable carrier never carries an `infer`
                 // placeholder.
                 | SemanticNodeData::DeferredCallable(_)
@@ -4027,6 +4277,643 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // The nominal axis: `unique symbol` declaring identity
+    // ──────────────────────────────────────────────────────────────────
+
+    /// The NOMINAL identity a node denotes, or `None` when the node carries
+    /// no nominal identity of its own (a structural or tag-level subject the
+    /// structural half of the relation decides).
+    ///
+    /// The only nominal type TypeScript has is `unique symbol`: two
+    /// `unique symbol` declarations denote DIFFERENT types even though both
+    /// widen to the same `symbol` primitive, and one declaration denotes ONE
+    /// type however many aliases, imports, or re-exports a reference
+    /// travelled through. The declaring
+    /// [`verter_type_expr::facts::ValueDeclIdentityPart`] IS that identity.
+    /// It is minted from the existing unique-symbol lookup and carried on
+    /// the `TypeOf` node, so relation reads are O(1): there is no second
+    /// unique-symbol identity type or resolution path.
+    pub(crate) fn relation_nominal_identity(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
+        self.graph()
+            .node_data(node)?
+            .typeof_nominal_identity()
+            .cloned()
+    }
+
+    /// The widened (non-nominal) type a nominal subject inhabits — the bare
+    /// `symbol` primitive a `unique symbol` declaration widens to.
+    ///
+    /// Used for a nominal source in assignability, and symmetrically for
+    /// comparability. A non-nominal source is never accepted by widening a
+    /// nominal assignability target.
+    ///
+    /// The primitive is INTERNED, never re-queried: the `typeof` key now
+    /// answers a `unique symbol` root with the nominal carrier itself (the
+    /// carrier IS the type), so re-asking it here would return the carrier
+    /// again. The widened inhabitant of a `unique symbol` is by definition
+    /// the `symbol` primitive — the exact node the annotation lowers to —
+    /// and structural interning mints or finds that one node, with no
+    /// second resolution pass.
+    fn symbol_primitive(&self) -> SemanticNodeId {
+        self.graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol))
+    }
+
+    /// Whether a node is a nominal (`unique symbol`) `typeof` carrier —
+    /// [`Self::relation_nominal_identity`] without the identity clone, for
+    /// the tag-test sites that only need the boolean.
+    fn node_is_nominal_typeof(&self, node: SemanticNodeId) -> bool {
+        self.graph()
+            .node_data(node)
+            .is_some_and(|data| data.typeof_nominal_identity().is_some())
+    }
+
+    /// The nominal leaf of the structural lattice, asked once per pair
+    /// BEFORE the deferred gate would swallow a preserved `typeof` carrier.
+    ///
+    /// * both sides nominal — the DECLARING identities decide: equal is one
+    ///   type, distinct are two different types.
+    /// * exactly one side nominal - comparability widens either side;
+    ///   assignability widens only a nominal source.
+    /// * neither side nominal — `None`: this leaf has nothing to say and the
+    ///   caller continues (a `typeof` carrier over a NON-unique value is an
+    ///   ordinary deferred shell, decided by the gate below it).
+    ///
+    /// The widen step is DIRECTION-SYMMETRIC in what it declines. Widening a
+    /// nominal side against a composite would erase the declaring identity
+    /// every distributed arm still needs, and for a symmetric question like
+    /// comparability that makes the answer depend on operand order:
+    /// `Comparable(typeof A | typeof B, typeof C)` would widen the target to
+    /// `symbol` and report an overlap, while the same pair asked the other
+    /// way round distributes and proves disjointness. Both directions
+    /// therefore decline and let the composite distribute first.
+    fn relation_nominal_leaf(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        relation: RelationKind,
+        bindings: &[InferBinding],
+    ) -> Option<NominalLeaf> {
+        let source_nominal = self.relation_nominal_identity(source);
+        let target_nominal = self.relation_nominal_identity(target);
+        // Frames the leaf must NOT pre-empt, on WHICHEVER side they sit: a
+        // composite still has to distribute (widening first erases the
+        // declaring identity every distributed arm needs), and an
+        // assignability `Infer` position still has to receive the CARRIER as
+        // its inference candidate — depositing the widened `symbol` would
+        // lose the identity for every later ask on the bound parameter.
+        // Comparability runs no inference, so `Infer` is not its deferral.
+        let declines_widening = |node: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
+            ) || (relation != RelationKind::Comparable
+                && matches!(
+                    self.graph().node_data(node).as_deref(),
+                    Some(SemanticNodeData::Infer { .. })
+                ))
+        };
+        match (source_nominal, target_nominal) {
+            (Some(a), Some(b)) => Some(NominalLeaf::Decided(if a == b {
+                assignable(bindings)
+            } else {
+                RelationResult::NotAssignable
+            })),
+            (Some(_), None) if declines_widening(target) => None,
+            (Some(_), None) => Some(NominalLeaf::Retry(self.symbol_primitive(), target)),
+            (None, Some(_)) if declines_widening(source) => None,
+            (None, Some(_)) if relation == RelationKind::Comparable => {
+                Some(NominalLeaf::Retry(source, self.symbol_primitive()))
+            }
+            (None, Some(_)) => Some(NominalLeaf::Decided(
+                match self.graph().node_data(source).as_deref() {
+                    Some(SemanticNodeData::Primitive(
+                        PrimitiveKind::Any | PrimitiveKind::Never,
+                    )) => assignable(bindings),
+                    None | Some(SemanticNodeData::Opaque(_)) => RelationResult::Unknown,
+                    Some(data) if is_deferred(data) => RelationResult::Unknown,
+                    Some(_) => RelationResult::NotAssignable,
+                },
+            )),
+            (None, None) => None,
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // `RelationKind::Identity` — bounded to the nominal axis
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Reduce a [`RelationKind::Identity`] judgement.
+    ///
+    /// BOUNDED: this authority owns the NOMINAL half of type identity —
+    /// whether two subjects denote the same `unique symbol` declaration.
+    /// Scope-insensitive STRUCTURAL constituent identity (the exhaustive
+    /// comparator the canonical union / intersection algebra needs) is a
+    /// DIFFERENT authority; answering it here would be two engines for one
+    /// question, so a non-nominal subject stays undecided — `ReturnOnly`,
+    /// never warm — rather than borrowing the assignability lattice.
+    fn reduce_identity(&self, key: &RelateMemoKey) -> RelationResult {
+        if !self.relation_reads_node_pair_only(key) {
+            return RelationResult::Unknown;
+        }
+        let source = match self.unwrap_identity_carrier_for_relation(key.source) {
+            IdentityCarrierUnwrap::Concrete(id) => id,
+            IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
+        };
+        let target = match self.unwrap_identity_carrier_for_relation(key.target) {
+            IdentityCarrierUnwrap::Concrete(id) => id,
+            IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
+        };
+        match (
+            self.relation_nominal_identity(source),
+            self.relation_nominal_identity(target),
+        ) {
+            (Some(a), Some(b)) => {
+                if a == b {
+                    assignable(&[])
+                } else {
+                    RelationResult::NotAssignable
+                }
+            }
+            // A nominal subject against anything else is left to the
+            // structural-identity authority: `typeof K` versus `symbol` is a
+            // STRUCTURAL question this bounded reduction does not answer.
+            _ => RelationResult::Unknown,
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // `RelationKind::Comparable` — the overlap oracle
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Reduce a [`RelationKind::Comparable`] judgement — "can these two
+    /// types have a common inhabitant?".
+    ///
+    /// Three outcomes, and the NEGATIVE one is the load-bearing fact:
+    ///
+    /// * `NotAssignable` — a PROOF of empty overlap. A consumer may act on
+    ///   it (a narrowing consumer treats it as its disjointness proof).
+    ///   Whether a provably disjoint INTERSECTION collapses to `never` is the
+    ///   canonical type algebra's decision, not this relation's: supplying
+    ///   the proof and reducing a type are two different jobs.
+    /// * `Assignable` — the oracle found NO proof of empty overlap, so the
+    ///   two are treated as comparable. This is the permissive arm, exactly
+    ///   as the checker's comparability relation is permissive.
+    /// * `Unknown` — a subject the oracle cannot answer on: an opaque node,
+    ///   an unsubstituted `infer` reference, a bare / imported / declaration
+    ///   reference that survived the identity unwrap (a name that did not
+    ///   resolve), OR an operator the reduction did not itself expand — an
+    ///   unreduced `typeof` / `keyof` / indexed access / mapped /
+    ///   conditional / raw-fallback operand. Missing knowledge is never
+    ///   converted into a positive fact: the permissive arm PROMISES "no
+    ///   proof of empty overlap was found", and an operand whose content
+    ///   was never read cannot back that promise. `ReturnOnly`; the
+    ///   consumer records its typed gap and the enclosing batch stays cold
+    ///   until the operand is resolvable.
+    ///
+    /// The proof itself is DELIBERATELY conservative and stays inside this
+    /// one authority: concrete tag conflicts (delegated to the crate's sole
+    /// proven-disjoint tag oracle, so this cannot drift from the canonical
+    /// intersection collapse), the nominal axis above, and two structural
+    /// surfaces carrying the same REQUIRED member with disjoint values —
+    /// where a COMPOSED root (an intersection body, an object-spread
+    /// program) is composed into its one-level surface first, so an
+    /// `A & { kind: "a" }` versus `A & { kind: "b" }` conflict is still
+    /// proved. Different object key sets can overlap and are never declared
+    /// disjoint.
+    fn reduce_comparable(&self, key: &RelateMemoKey) -> RelationResult {
+        if !self.relation_reads_node_pair_only(key) {
+            return RelationResult::Unknown;
+        }
+        self.comparable_worklist(key.source, key.target)
+    }
+
+    /// Whether a key's non-pair axes are at the values these two reductions
+    /// were written for.
+    ///
+    /// [`Self::reduce_identity`] and [`Self::reduce_comparable`] read ONLY
+    /// `source` and `target`. The substitution, inference-context, and
+    /// freshness axes are part of the memo slot's identity, so a key that
+    /// varies one of them would be answered by a value that never looked at
+    /// it — a decision published under a substitution it ignored. Refusing
+    /// (undecided, `ReturnOnly`, zero admission) is the same axis-refusal
+    /// discipline the reducer applies to an unimplemented relation kind.
+    fn relation_reads_node_pair_only(&self, key: &RelateMemoKey) -> bool {
+        key.inference_context.is_none()
+            && key.source_freshness == crate::semantic_query::FreshnessKey::Regular
+            && key.context.substitution == crate::semantic_query::SubstitutionCanonicalHash::empty()
+    }
+
+    /// The one-level member surface the disjointness proof descends, or why
+    /// there is none.
+    ///
+    /// A terminal `Object` node already IS its surface. A COMPOSED root —
+    /// an intersection body, an object-spread program — is not: its members
+    /// exist only once the shared empty-path `Shallow` synthesiser merges
+    /// its arms. Reading only the terminal tag would answer every
+    /// `type A = Base & { kind: "a" }` pair permissively and lose the
+    /// conflicting-discriminant proof that the whole oracle exists to
+    /// supply, so a composed root is composed HERE through the single
+    /// shared surface reader (which owns the own-body-shadows-heritage
+    /// merge, the declaration-placeholder unwrap, and the cross-file
+    /// carrier resolution) before the member descent runs. Alias and
+    /// merged-declaration roots never reach this point: the relation's
+    /// identity unwrap already flattened them.
+    ///
+    /// A composition that does not yield a surface (a partial or errored
+    /// projection) is `NonObject`, i.e. permissive — the same answer the
+    /// pair had before any composition was attempted, never a proof minted
+    /// from a surface the oracle could not read.
+    fn comparable_surface(&self, node: SemanticNodeId) -> ComparableSurface {
+        let composed = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Object(view)) => return ComparableSurface::Object(view.clone()),
+            None | Some(SemanticNodeData::Opaque(_)) => {
+                return ComparableSurface::Unresolvable;
+            }
+            Some(SemanticNodeData::Intersection(_) | SemanticNodeData::ObjectSpreadProgram(_)) => {
+                true
+            }
+            Some(_) => false,
+        };
+        if !composed {
+            return ComparableSurface::NonObject;
+        }
+        match self
+            .resolve_typeinfo_surface_view(node, ProjectionReductionContext::structural_transit())
+        {
+            Some(view) => ComparableSurface::Object(view),
+            None => ComparableSurface::NonObject,
+        }
+    }
+
+    fn relation_budget_limit(&self) -> u64 {
+        (self.graph().node_count() as u64)
+            .saturating_mul(10)
+            .max(4096)
+    }
+
+    fn note_relation_budget_exceeded(&self, budget_limit: u64) {
+        let cap = RecursionOrBudgetCap {
+            kind: crate::semantic_query::BudgetExceededKind::RelationBudget,
+            limit: budget_limit.min(u64::from(u32::MAX)) as u32,
+        };
+        let mut txn = self.dispatch_txn.borrow_mut();
+        if let Some(depth) = txn.reentry().depth().checked_sub(1) {
+            txn.reentry_mut().note_budget_edge(depth, cap);
+        }
+    }
+
+    fn comparable_worklist(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> RelationResult {
+        enum Work {
+            Eval(SemanticNodeId, SemanticNodeId),
+            /// Disjoin the results above `base` (`source`-union alternatives).
+            CombineAnyFrom(usize),
+            /// Conjoin the results above `base` (shared required members).
+            CombineAllFrom(usize),
+            Finish((SemanticNodeId, SemanticNodeId)),
+        }
+
+        // Pair descent, union alternatives, and member enumeration share one
+        // iterative envelope; descendants never open a fresh relation budget.
+        let graph = self.graph();
+        let budget_limit = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .relation_knobs
+            .force_budget_exhaustion
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0
+        } else {
+            self.relation_budget_limit()
+        };
+        // The pair is canonicalized (lesser node first) once, before any
+        // descent: comparability is answer-symmetric, so the frame-local
+        // memo and the shared memo key (canonicalized at the
+        // `RelateMemoKey` constructor) agree on one entry per unordered
+        // pair — a reversed ask reuses the frame's own work instead of
+        // retaining a second, redundant entry.
+        //
+        // An operand whose identity unwrap cannot resolve is UNREAD — the
+        // same doctrine the worklist body applies: falling back to the raw
+        // pair would let the fast path decide `Overlaps` (or a tag verdict)
+        // for a carrier it never read, while the slow path reports
+        // `Unknown` — a verdict that flips with the budget knob. No fact:
+        // `Unknown`, before any fast-path arm runs.
+        let (mut source, mut target) = match (|| {
+            let source = match self.unwrap_identity_carrier_for_relation(source) {
+                IdentityCarrierUnwrap::Concrete(id) => id,
+                IdentityCarrierUnwrap::Unresolvable => return None,
+            };
+            let target = match self.unwrap_identity_carrier_for_relation(target) {
+                IdentityCarrierUnwrap::Concrete(id) => id,
+                IdentityCarrierUnwrap::Unresolvable => return None,
+            };
+            Some(if source > target {
+                (target, source)
+            } else {
+                (source, target)
+            })
+        })() {
+            Some(pair) => pair,
+            None => return RelationResult::Unknown,
+        };
+
+        // ALLOCATION-FREE FAST PATH — runs before the work/results vectors
+        // and the active/memo tables exist. These are the operand shapes
+        // every narrowing consumer asks about on its hot edge (a nominal
+        // carrier against a literal or another carrier, the same node
+        // twice, a tag-level mismatch), and each is decided from at most
+        // two node-data borrows with no allocation and no budget charge
+        // (each is O(1) graph reads, the floor the budget exists to
+        // bound). A nominal-leaf retry widens one side and re-runs the
+        // fast path exactly once before any slow-path allocation. The
+        // forced-exhaustion knob bypasses the fast path entirely so a
+        // tripped budget is still reported as the TYPED cap outcome, never
+        // silently decided.
+        if budget_limit > 0 {
+            // bounded-loop: at most one nominal widen retry — O(1) graph reads, no allocation.
+            for _ in 0..2 {
+                if let Some(leaf) =
+                    self.relation_nominal_leaf(source, target, RelationKind::Comparable, &[])
+                {
+                    match leaf {
+                        NominalLeaf::Decided(result) => return result,
+                        NominalLeaf::Retry(widened_source, widened_target) => {
+                            (source, target) = (widened_source, widened_target);
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            if source == target {
+                return assignable(&[]);
+            }
+            if let (Some(source_data), Some(target_data)) =
+                (graph.node_data(source), graph.node_data(target))
+            {
+                if !matches!(&*source_data, SemanticNodeData::Union(_))
+                    && !matches!(&*target_data, SemanticNodeData::Union(_))
+                    && (super::canonical_algebra::tag_level_disjoint(graph, source, target)
+                        || comparable_root_kinds_disjoint(&source_data, &target_data))
+                {
+                    return RelationResult::NotAssignable;
+                }
+            }
+        }
+
+        let mut budget_used = 0u64;
+        let mut work = vec![Work::Eval(source, target)];
+        let mut results = Vec::new();
+        let mut active = FxHashSet::default();
+        let mut memo: FxHashMap<(SemanticNodeId, SemanticNodeId), RelationResult> =
+            FxHashMap::default();
+
+        while let Some(item) = work.pop() {
+            match item {
+                Work::CombineAnyFrom(base) => {
+                    let combined = results
+                        .drain(base..)
+                        .fold(RelationResult::NotAssignable, result_or);
+                    results.push(combined);
+                }
+                Work::CombineAllFrom(base) => {
+                    let combined = results.drain(base..).fold(assignable(&[]), result_and);
+                    results.push(combined);
+                }
+                Work::Finish(pair) => {
+                    let result = results
+                        .pop()
+                        .expect("a comparable pair must publish one result");
+                    active.remove(&pair);
+                    memo.insert(pair, result.clone());
+                    results.push(result);
+                }
+                Work::Eval(source, target) => {
+                    budget_used = budget_used.saturating_add(1);
+                    if budget_used > budget_limit {
+                        self.note_relation_budget_exceeded(budget_limit);
+                        return RelationResult::Unknown;
+                    }
+                    let source = match self.unwrap_identity_carrier_for_relation(source) {
+                        IdentityCarrierUnwrap::Concrete(id) => id,
+                        IdentityCarrierUnwrap::Unresolvable => {
+                            results.push(RelationResult::Unknown);
+                            continue;
+                        }
+                    };
+                    let target = match self.unwrap_identity_carrier_for_relation(target) {
+                        IdentityCarrierUnwrap::Concrete(id) => id,
+                        IdentityCarrierUnwrap::Unresolvable => {
+                            results.push(RelationResult::Unknown);
+                            continue;
+                        }
+                    };
+                    // Comparability is answer-symmetric: canonicalizing the
+                    // pair makes the frame-local memo and the coinductive
+                    // `active` set agree for both operand orders, so a
+                    // re-entered reversed pair hits the assumption rail
+                    // instead of duplicating the descent.
+                    let pair = if source > target {
+                        (target, source)
+                    } else {
+                        (source, target)
+                    };
+                    let (source, target) = pair;
+                    if let Some(result) = memo.get(&pair) {
+                        results.push(result.clone());
+                        continue;
+                    }
+                    if !active.insert(pair) {
+                        // Coinductive ASSUMPTION: a pair re-entered while it
+                        // is still being decided is assumed to overlap, so a
+                        // cyclic type terminates on the permissive arm rather
+                        // than fabricating a disjointness proof. Both folds
+                        // propagate permissiveness (`result_or` for union
+                        // alternatives, `result_and` for member conjunction),
+                        // so the assumption can only MISS a proof, never mint
+                        // one. A result finished under it is recorded in the
+                        // frame-local memo like any other, which is sound for
+                        // the same reason: reusing it can only carry the
+                        // permissive answer forward, never a proof.
+                        results.push(assignable(&[]));
+                        continue;
+                    }
+                    work.push(Work::Finish(pair));
+
+                    if let Some(leaf) =
+                        self.relation_nominal_leaf(source, target, RelationKind::Comparable, &[])
+                    {
+                        match leaf {
+                            NominalLeaf::Decided(result) => results.push(result),
+                            NominalLeaf::Retry(source, target) => {
+                                work.push(Work::Eval(source, target));
+                            }
+                        }
+                        continue;
+                    }
+                    if source == target {
+                        results.push(assignable(&[]));
+                        continue;
+                    }
+                    let (Some(source_data), Some(target_data)) =
+                        (graph.node_data(source), graph.node_data(target))
+                    else {
+                        results.push(RelationResult::Unknown);
+                        continue;
+                    };
+
+                    if let SemanticNodeData::Union(members) = &*source_data {
+                        let members = members.members_arc();
+                        work.push(Work::CombineAnyFrom(results.len()));
+                        for member in members.iter() {
+                            work.push(Work::Eval(*member, target));
+                        }
+                        continue;
+                    }
+                    if let SemanticNodeData::Union(members) = &*target_data {
+                        let members = members.members_arc();
+                        work.push(Work::CombineAnyFrom(results.len()));
+                        for member in members.iter() {
+                            work.push(Work::Eval(source, *member));
+                        }
+                        continue;
+                    }
+                    if super::canonical_algebra::tag_level_disjoint(graph, source, target)
+                        || comparable_root_kinds_disjoint(&source_data, &target_data)
+                    {
+                        results.push(RelationResult::NotAssignable);
+                        continue;
+                    }
+
+                    // A subject the oracle CANNOT obtain, as opposed to one
+                    // it merely did not reduce. An opaque node carries no
+                    // type; an unsubstituted infer REFERENCE denotes nothing
+                    // yet; and a bare / imported / declaration REFERENCE
+                    // that survived the identity unwrap above is a name that
+                    // did not resolve — a missing dependency, not a shape.
+                    // For these the oracle never read the subject at all, so
+                    // it reports no fact: undecided, `ReturnOnly`, and the
+                    // consumer records its typed gap.
+                    //
+                    // A bare `Infer` / `TypeParam` operand is deliberately
+                    // NOT in this list: a binder's inhabitant EXISTS by
+                    // binding — the oracle is not missing knowledge about
+                    // it, it merely cannot bound it — so the pair takes the
+                    // permissive `Overlaps` arm rather than a typed gap.
+                    // Asymmetric with the doctrine above by design; revisit
+                    // only if a consumer ever needs a no-fact verdict from
+                    // an unbound parameter pair.
+                    let unresolvable = |data: &SemanticNodeData| {
+                        matches!(
+                            data,
+                            SemanticNodeData::Opaque(_)
+                                | SemanticNodeData::InferRef { .. }
+                                | SemanticNodeData::BareRef(_)
+                                | SemanticNodeData::ImportType(_)
+                                | SemanticNodeData::DeclRef { .. }
+                                | SemanticNodeData::InstantiationRef { .. }
+                        )
+                    };
+                    if unresolvable(&source_data) || unresolvable(&target_data) {
+                        results.push(RelationResult::Unknown);
+                        continue;
+                    }
+                    // A DEFERRED operator or carrier is UNREAD. The
+                    // permissive arm is a PROMISE — "no proof of empty
+                    // overlap exists" — and an operand whose content was
+                    // never read cannot back it: answering `Overlaps`
+                    // would convert missing knowledge into a positive,
+                    // memo-admissible fact (a consumer could warm-serve a
+                    // completeness the oracle never had). The oracle
+                    // reports no fact instead: undecided, `ReturnOnly`,
+                    // zero admission, and the consumer records its typed
+                    // gap until the operand resolves.
+                    let unreduced_operator = |data: &SemanticNodeData| {
+                        matches!(
+                            data,
+                            SemanticNodeData::TypeOf(_)
+                                | SemanticNodeData::KeyOf { .. }
+                                | SemanticNodeData::IndexedAccess { .. }
+                                | SemanticNodeData::Mapped { .. }
+                                | SemanticNodeData::Conditional { .. }
+                                | SemanticNodeData::RawFallback { .. }
+                        )
+                    };
+                    if unreduced_operator(&source_data) || unreduced_operator(&target_data) {
+                        results.push(RelationResult::Unknown);
+                        continue;
+                    }
+
+                    let (source_view, target_view) = match (
+                        self.comparable_surface(source),
+                        self.comparable_surface(target),
+                    ) {
+                        (ComparableSurface::Object(source), ComparableSurface::Object(target)) => {
+                            (source, target)
+                        }
+                        (ComparableSurface::Unresolvable, _)
+                        | (_, ComparableSurface::Unresolvable) => {
+                            results.push(RelationResult::Unknown);
+                            continue;
+                        }
+                        _ => {
+                            results.push(assignable(&[]));
+                            continue;
+                        }
+                    };
+                    // The member descent charges the work it actually
+                    // performs: one unit per source member step PLUS the
+                    // target-surface width for each key projection (the
+                    // projection scans the target's members for the
+                    // element-access collision). A flat one-unit charge per
+                    // member would let a single descent perform
+                    // O(source-width × target-width) comparisons inside a
+                    // linear budget; charging the scan keeps the budget an
+                    // honest bound on comparisons performed.
+                    let target_width = target_view.positive_members().len() as u64;
+                    work.push(Work::CombineAllFrom(results.len()));
+                    for source_member in source_view.positive_members() {
+                        budget_used = budget_used.saturating_add(1);
+                        if budget_used > budget_limit {
+                            self.note_relation_budget_exceeded(budget_limit);
+                            return RelationResult::Unknown;
+                        }
+                        if source_member.optional {
+                            continue;
+                        }
+                        let Some(member_key) = source_member.key.cloned_known() else {
+                            continue;
+                        };
+                        budget_used = budget_used.saturating_add(target_width);
+                        if budget_used > budget_limit {
+                            self.note_relation_budget_exceeded(budget_limit);
+                            return RelationResult::Unknown;
+                        }
+                        let crate::semantic_query::SurfaceKeyProjection::Exact(target_member) =
+                            target_view.project_known_key(&member_key)
+                        else {
+                            continue;
+                        };
+                        if !target_member.optional {
+                            work.push(Work::Eval(source_member.value, target_member.value));
+                        }
+                    }
+                }
+            }
+        }
+
+        results.pop().unwrap_or(RelationResult::Unknown)
+    }
+
     // The reducer: prefilter → carrier unwrap → structural worklist
     // ──────────────────────────────────────────────────────────────────
 
@@ -4039,28 +4926,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key: &RelateMemoKey,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        // Axis refusal: the reducer implements the ASSIGNABILITY relation
-        // (regular AND fresh sources; the excess-property policy runs the
-        // fresh prepass below). A key on any not-yet-implemented axis
-        // (`Identity` / `Subtype` / `StrictSubtype` / `Comparable`, a
-        // non-default overload-selection policy) must REFUSE — undecided,
-        // ReturnOnly, zero admission — never route the ask through the
-        // assignability lattice (an `Identity` ask through the
-        // `(_, unknown) => Assignable` arm would publish a false verdict).
-        // Both strict variance regimes ARE implemented (RI-10).
-        if key.relation != RelationKind::Assignable
-            || key.policy.overload_selection != crate::semantic_query::OverloadSelectionPolicy::All
-        {
+        // Axis refusal: a key on a not-yet-implemented axis (`Subtype` /
+        // `StrictSubtype`, a non-default overload-selection policy) must
+        // REFUSE — undecided, ReturnOnly, zero admission — never route the
+        // ask through a NEIGHBOURING relation's lattice (a `Subtype` ask
+        // answered by the `(_, unknown) => Assignable` assignability arm
+        // would publish a false verdict). Both strict variance regimes ARE
+        // implemented (RI-10).
+        if key.policy.overload_selection != crate::semantic_query::OverloadSelectionPolicy::All {
             return RelationResult::Unknown;
         }
         // Test-only forced budget knob (D6): trips the work budget on the
         // first driver pass so the typed `BudgetExceeded` outcome and its
         // three-layer non-admission are exercised deterministically.
         let host = self.ctx.host_for_fact_tracer_install();
-        if host
-            .relation_knobs
-            .force_budget_exhaustion
-            .load(std::sync::atomic::Ordering::Relaxed)
+        if key.relation != RelationKind::Comparable
+            && host
+                .relation_knobs
+                .force_budget_exhaustion
+                .load(std::sync::atomic::Ordering::Relaxed)
         {
             let cap = RecursionOrBudgetCap {
                 kind: crate::semantic_query::BudgetExceededKind::RelationBudget,
@@ -4071,6 +4955,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 txn.reentry_mut().note_budget_edge(depth, cap);
             }
             return RelationResult::Unknown;
+        }
+        match key.relation {
+            RelationKind::Assignable => {}
+            RelationKind::Identity => return self.reduce_identity(key),
+            RelationKind::Comparable => return self.reduce_comparable(key),
+            RelationKind::Subtype | RelationKind::StrictSubtype => return RelationResult::Unknown,
         }
         let occurrence = self.relation_current_occurrence();
         if let Some(result) =
@@ -4875,8 +5765,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             return assignable(bindings);
         }
-        let graph = self.graph();
-        let budget_limit: u64 = (graph.node_count() as u64).saturating_mul(10).max(4096);
+        let budget_limit = self.relation_budget_limit();
         let mut budget_used: u64 = 0;
         let mut work: Vec<RelateWork> = Vec::new();
         let mut results: Vec<RelationResult> = Vec::new();
@@ -4884,14 +5773,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         while let Some(item) = work.pop() {
             budget_used = budget_used.saturating_add(1);
             if budget_used > budget_limit {
-                let cap = RecursionOrBudgetCap {
-                    kind: crate::semantic_query::BudgetExceededKind::RelationBudget,
-                    limit: budget_limit as u32,
-                };
-                let mut txn = self.dispatch_txn.borrow_mut();
-                if let Some(depth) = txn.reentry().depth().checked_sub(1) {
-                    txn.reentry_mut().note_budget_edge(depth, cap);
-                }
+                self.note_relation_budget_exceeded(budget_limit);
                 return RelationResult::Unknown;
             }
             match item {
@@ -4914,18 +5796,59 @@ impl<'a> ProjectSemanticDispatch<'a> {
         results.pop().unwrap_or(RelationResult::Unknown)
     }
 
+    /// Whether a recursive sub-pair must re-enter the full memoized relation
+    /// authority instead of expanding inline.
+    ///
+    /// A `Conditional` always must: its branch selection is itself a
+    /// relation, so expanding it inline would run a second selection outside
+    /// the memo.
+    ///
+    /// A declaration CARRIER (a `DeclRef` / `InstantiationRef` / an
+    /// unexpanded declaration or recursive-reference placeholder) must too,
+    /// but ONLY when the pair's other side carries a nominal identity: the
+    /// nominal axis compares DECLARING identities, and a carrier's identity
+    /// is revealed only by the canonical frame's identity unwrap plus
+    /// `Instantiate`. Widening that to every carrier pair would decide
+    /// composites, array/tuple elements, and object members that the
+    /// deferred gate answers `Unknown` today — a general change to the
+    /// assignability lattice, not a nominal one — so the predicate stays
+    /// scoped to the pairs the nominal axis owns.
+    ///
+    /// This runs on EVERY `RelateWork::Eval`, so its cost is the relation
+    /// engine's per-pair floor: each side's node data is read AT MOST ONCE
+    /// and the nominal axis is decided from those same two borrows. A
+    /// `Conditional` source short-circuits after a single read — the axis
+    /// adds no graph read to any pair.
     fn relation_eval_requires_canonical_frame(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> bool {
         let graph = self.graph();
-        [source, target].into_iter().any(|node| {
+        let Some(source_data) = graph.node_data(source) else {
+            return false;
+        };
+        if matches!(&*source_data, SemanticNodeData::Conditional { .. }) {
+            return true;
+        }
+        let Some(target_data) = graph.node_data(target) else {
+            return false;
+        };
+        if matches!(&*target_data, SemanticNodeData::Conditional { .. }) {
+            return true;
+        }
+        let is_decl_carrier = |data: &SemanticNodeData| {
             matches!(
-                graph.node_data(node).as_deref(),
-                Some(SemanticNodeData::Conditional { .. })
+                data,
+                SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::Opaque(
+                        QueryError::DeclPlaceholder { .. } | QueryError::RecursiveRef { .. }
+                    )
             )
-        })
+        };
+        (source_data.typeof_nominal_identity().is_some() && is_decl_carrier(&target_data))
+            || (target_data.typeof_nominal_identity().is_some() && is_decl_carrier(&source_data))
     }
 
     /// Expand a single relate pair into direct result(s) or sub-work
@@ -5229,8 +6152,64 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return;
         }
 
+        // ── Nominal (`unique symbol`) leaf, BEFORE the deferred gate ───
+        //    A preserved `typeof K` carrier is a deferred shell by shape,
+        //    but its DECLARING identity is exactly what makes it a type, so
+        //    the gate below must not swallow it. Two nominal identities
+        //    decide; one nominal side widens to its inhabited type and the
+        //    pair re-enters the ordinary lattice.
+        //
+        //    Gated on the shapes ALREADY read above: a pair with no `typeof`
+        //    carrier on either side costs one tag test and never reaches the
+        //    declaration lookup, so the nominal axis adds no work to the hot
+        //    structural path — the arms below keep their ordering verbatim
+        //    for every pair the nominal axis has nothing to say about.
+        let mut nominal_defers_gate = false;
+        if matches!(
+            &*source_data,
+            SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_)
+        ) || matches!(
+            &*target_data,
+            SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_)
+        ) {
+            match self.relation_nominal_leaf(source, target, RelationKind::Assignable, bindings) {
+                Some(leaf) => {
+                    drop(source_data);
+                    drop(target_data);
+                    match leaf {
+                        NominalLeaf::Decided(result) => results.push(result),
+                        NominalLeaf::Retry(source, target) => {
+                            work.push(RelateWork::Eval(source, target))
+                        }
+                    }
+                    return;
+                }
+                // The leaf DECLINED a pair it recognised: exactly one side
+                // carries a nominal identity and the other is the composite
+                // or inference frame that must run FIRST. That frame lives
+                // below the deferred gate, and the nominal carrier is a
+                // deferred shell by shape, so this ONE pair would need to
+                // step over the gate to reach it.
+                //
+                // DEFENSE-IN-DEPTH only: under the current arm ordering this
+                // bypass is unreachable — `is_deferred` excludes the nominal
+                // terminal, and every shape that reaches this arm with a
+                // declined leaf arrives non-deferred (composites and
+                // inference frames are dispatched by earlier arms, plain
+                // deferred shells still defer below). It is kept so a future
+                // arm reorder cannot silently swallow a nominal-declined
+                // pair into `Unknown` without this gate having to be
+                // reinvented; an ordinary deferred shell (including a
+                // non-unique `typeof`) still defers.
+                None => {
+                    nominal_defers_gate =
+                        self.node_is_nominal_typeof(source) || self.node_is_nominal_typeof(target);
+                }
+            }
+        }
+
         // ── Deferred shells on either side → Unknown ───────────────────
-        if is_deferred(&source_data) || is_deferred(&target_data) {
+        if !nominal_defers_gate && (is_deferred(&source_data) || is_deferred(&target_data)) {
             results.push(RelationResult::Unknown);
             return;
         }
@@ -5743,17 +6722,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         drop(data);
         let transit = ProjectionReductionContext::structural_transit();
-        let unwrapped = match self.execute_type_node(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                self.type_slot_for(
-                    Arc::clone(&identity.canonical_id),
-                    identity.owner,
-                    Arc::clone(&identity.decl_name),
-                ),
-                args,
-                self.instantiate_context_for(&identity.canonical_id, transit),
+        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            self.type_slot_for(
+                Arc::clone(&identity.canonical_id),
+                identity.owner,
+                Arc::clone(&identity.decl_name),
             ),
-        )) {
+            args,
+            self.instantiate_context_for(&identity.canonical_id, transit),
+        ));
+        // `execute_type_node` IS the shared read boundary: it counts the
+        // dispatch intent and folds the build-local taint once, inside
+        // `execute_read`. A second fold here would double-count the same
+        // read into the parent frame.
+        let unwrapped = match self.execute_type_node(key) {
             QueryResult::Value(SemanticQueryOutput {
                 value: unwrapped, ..
             }) => unwrapped,
@@ -5767,7 +6749,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Fully unwrap an identity carrier for ordinary structural relation.
-    pub(super) fn unwrap_identity_carrier_for_relation(
+    pub(crate) fn unwrap_identity_carrier_for_relation(
         &self,
         id: SemanticNodeId,
     ) -> IdentityCarrierUnwrap {
@@ -5845,22 +6827,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => return IdentityCarrierUnwrap::Concrete(current),
             };
             drop(data);
-            let unwrapped = match self.execute_type_node(SemanticQueryKey::Instantiate(
-                crate::semantic_query::InstantiateKey::new(
-                    self.type_slot_for(
-                        Arc::clone(&identity.canonical_id),
-                        identity.owner,
-                        Arc::clone(&identity.decl_name),
-                    ),
-                    args,
-                    self.instantiate_context_for(&identity.canonical_id, transit),
+            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                self.type_slot_for(
+                    Arc::clone(&identity.canonical_id),
+                    identity.owner,
+                    Arc::clone(&identity.decl_name),
                 ),
-            )) {
+                args,
+                self.instantiate_context_for(&identity.canonical_id, transit),
+            ));
+            // `execute_type_node` IS the shared read boundary (dispatch
+            // counters + the universal build-local taint fold); a bespoke
+            // re-fold here would double-count the same read.
+            let unwrapped = match self.execute_type_node(key) {
                 QueryResult::Value(SemanticQueryOutput {
                     value: unwrapped, ..
-                }) => self
-                    .evaluate_deferred_semantic_node_with_context(unwrapped, transit)
-                    .into_active_query_build_node(self),
+                }) => {
+                    // A nominal `typeof` carrier IS the type it denotes, so
+                    // the deferred evaluator must not be handed it: that
+                    // evaluator's job is to resolve a shell to its content,
+                    // and this carrier's content is the widened `symbol`
+                    // primitive, which is exactly the declaring identity the
+                    // relation is about to read.
+                    if self.node_is_nominal_typeof(unwrapped) {
+                        unwrapped
+                    } else {
+                        self.evaluate_deferred_semantic_node_with_context(unwrapped, transit)
+                            .into_active_query_build_node(self)
+                    }
+                }
                 _ => return IdentityCarrierUnwrap::Unresolvable,
             };
             if unwrapped == current {
@@ -6499,8 +7494,98 @@ enum FramePop {
 
 /// Outcome of the identity-carrier unwrap performed before relation
 /// dispatch.
-pub(super) enum IdentityCarrierUnwrap {
+pub(crate) enum IdentityCarrierUnwrap {
     Concrete(SemanticNodeId),
+    Unresolvable,
+}
+
+/// A PROOF that two nodes have no common inhabitant, carrying the CHECKER'S
+/// answer to the one question a consumer may not decide for itself: whether
+/// an intersection of the two operands reduces to `never` or is kept.
+///
+/// The fields are private to this module, so a value of this type cannot be
+/// constructed anywhere else in the crate — the disjointness proof is
+/// mintable ONLY by the shared relation authority's `Comparable` reduction,
+/// and a value of it in a consumer's hands therefore came from the
+/// authority. The collapse class is minted WITH the proof by the same
+/// authority: `tsc`'s intersection reduction answers `never` for a unit
+/// discriminant (disjoint primitive/literal tags, distinct `unique symbol`
+/// identities, a shared REQUIRED member whose two types are both unit types
+/// and conflict) and KEEPS `A & B` for a conflict reachable only through
+/// non-unit member values, at any depth. A consumer that collapsed every
+/// disjoint pair would publish `never` where the checker publishes an
+/// intersection — a wrong-complete warm value.
+///
+/// The confinement is a SUPPORTING constraint, not the enforcement. It is
+/// deliberately honest about its limit: today's consumer decides by
+/// ELIMINATION (`let ComparabilityVerdict::Disjoint(_) = comparable else`),
+/// so a re-introduced private classifier would compute a bare `bool` and
+/// branch on it without ever needing to construct this type. What actually
+/// holds "flow owns no relation classifier" is BEHAVIOURAL: the narrow
+/// populates the shared `Comparable` memo family, issues zero `Identity`
+/// judgements, and publishes a value only the authority's own descent can
+/// produce — a permissive private classifier would fail all three. No
+/// `#[must_use]` here either: it would not fire on the `let ... else`
+/// pattern the verdict is matched through and would read as enforcement
+/// that is not there.
+pub(crate) struct DisjointnessProof {
+    collapse: IntersectionCollapse,
+}
+
+/// Whether the checker reduces an intersection of a provably disjoint pair
+/// to `never`, or keeps `A & B`. Minted only inside the relation module,
+/// alongside the proof it classifies.
+pub(crate) enum IntersectionCollapse {
+    /// The conflict is a checker collapse criterion: disjoint tags, distinct
+    /// nominal identities, or a shared REQUIRED member whose values are both
+    /// unit types and conflict.
+    ReducesToNever,
+    /// The disjointness proof is real, but the conflict is reachable only
+    /// through member values that are not both unit types. `tsc` keeps the
+    /// intersection; a consumer narrowing by it must too.
+    Kept,
+}
+
+impl DisjointnessProof {
+    fn new(collapse: IntersectionCollapse) -> Self {
+        Self { collapse }
+    }
+
+    /// Whether the checker reduces an intersection of the proved-disjoint
+    /// operands to `never`. `false` means the consumer must keep the
+    /// intersection — never a license to widen or to guess a different value.
+    pub(crate) fn checker_reduces_intersection_to_never(&self) -> bool {
+        matches!(self.collapse, IntersectionCollapse::ReducesToNever)
+    }
+}
+
+/// The three verdicts of [`RelationKind::Comparable`] as its consumers see
+/// them.
+pub(crate) enum ComparabilityVerdict {
+    /// No proof of empty overlap exists — treat the two as comparable.
+    Overlaps,
+    /// The two provably have NO common inhabitant. Carries the authority's
+    /// [`DisjointnessProof`]; what a consumer DOES with a disjointness proof
+    /// (whether an intersection collapses to `never`) is the consumer's /
+    /// the canonical algebra's decision, not this relation's.
+    Disjoint(DisjointnessProof),
+    /// Undecided — a subject the oracle could not read, a budget cap, or an
+    /// open coinductive assumption. Never warm-admitted, never either answer.
+    Undecided,
+}
+
+/// What the nominal (`unique symbol`) leaf contributed to one relation pair.
+enum NominalLeaf {
+    /// The nominal axis alone decides the pair.
+    Decided(RelationResult),
+    /// Exactly one side was nominal: it widened to its inhabited type and
+    /// the pair is re-asked on the ordinary lattice.
+    Retry(SemanticNodeId, SemanticNodeId),
+}
+
+enum ComparableSurface {
+    Object(SurfaceView),
+    NonObject,
     Unresolvable,
 }
 
@@ -6622,6 +7707,112 @@ fn distribute_and<F>(
         forward.push(RelateWork::ReduceAnd(n as u32));
     }
     push_forward_work(work, forward);
+}
+
+/// Concrete root-kind tags for the overlap oracle. Mixed tags that cannot
+/// share an inhabitant are disjoint; tags that TypeScript treats as
+/// overlapping (array/function vs object, template vs string, `object`
+/// vs a structural object) stay permissive.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ComparableRootKind {
+    Primitive(PrimitiveKind),
+    Literal,
+    Nominal,
+    Object,
+    ArrayLike,
+    Callable,
+    Template,
+}
+
+fn comparable_root_kind(data: &SemanticNodeData) -> Option<ComparableRootKind> {
+    match data {
+        SemanticNodeData::Primitive(kind) => match kind {
+            PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Never => None,
+            _ => Some(ComparableRootKind::Primitive(*kind)),
+        },
+        SemanticNodeData::Literal(_) => Some(ComparableRootKind::Literal),
+        SemanticNodeData::TypeOfNominal(_) => Some(ComparableRootKind::Nominal),
+        SemanticNodeData::Object(_)
+        | SemanticNodeData::ObjectSpreadProgram(_)
+        | SemanticNodeData::MergedDecl { .. } => Some(ComparableRootKind::Object),
+        SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. } => {
+            Some(ComparableRootKind::ArrayLike)
+        }
+        SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
+            Some(ComparableRootKind::Callable)
+        }
+        SemanticNodeData::TemplateLiteral { .. } => Some(ComparableRootKind::Template),
+        SemanticNodeData::Union(_)
+        | SemanticNodeData::Intersection(_)
+        | SemanticNodeData::Alias(_)
+        | SemanticNodeData::Opaque(_)
+        | SemanticNodeData::KeyOf { .. }
+        | SemanticNodeData::IndexedAccess { .. }
+        | SemanticNodeData::Mapped { .. }
+        | SemanticNodeData::TypeOf(_)
+        | SemanticNodeData::TypeParam { .. }
+        | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::InferRef { .. }
+        | SemanticNodeData::Conditional { .. }
+        | SemanticNodeData::DeclRef { .. }
+        | SemanticNodeData::InstantiationRef { .. }
+        | SemanticNodeData::BareRef(_)
+        | SemanticNodeData::ImportType(_)
+        | SemanticNodeData::RawFallback { .. }
+        | SemanticNodeData::SyntheticBinding { .. } => None,
+    }
+}
+
+fn comparable_root_kinds_disjoint(a: &SemanticNodeData, b: &SemanticNodeData) -> bool {
+    let (Some(left), Some(right)) = (comparable_root_kind(a), comparable_root_kind(b)) else {
+        return false;
+    };
+    if left == right {
+        return false;
+    }
+    match (left, right) {
+        (ComparableRootKind::Primitive(x), ComparableRootKind::Primitive(y)) => {
+            // KNOWN DIVERGENCE, inherited from the shared tag oracle: the
+            // checker's disjointness answer for `null` / `undefined`
+            // participates depends on the strict-null-checks regime, and a
+            // `Comparable` key never reads the strict snapshot the
+            // assignability engine applies. The oracle answers with the
+            // canonical tag algebra — the same answer in every regime — so
+            // a loose-mode program where `null` overlaps everything still
+            // gets the strict-regime verdict here.
+            let widening_pair = matches!(
+                (x, y),
+                (PrimitiveKind::Undefined, PrimitiveKind::Void)
+                    | (PrimitiveKind::Void, PrimitiveKind::Undefined)
+            );
+            x != y && !widening_pair
+        }
+        (ComparableRootKind::Literal, ComparableRootKind::Primitive(_))
+        | (ComparableRootKind::Primitive(_), ComparableRootKind::Literal) => false,
+        (ComparableRootKind::Nominal, ComparableRootKind::Primitive(PrimitiveKind::Symbol))
+        | (ComparableRootKind::Primitive(PrimitiveKind::Symbol), ComparableRootKind::Nominal) => {
+            false
+        }
+        (ComparableRootKind::Template, ComparableRootKind::Primitive(PrimitiveKind::String))
+        | (ComparableRootKind::Primitive(PrimitiveKind::String), ComparableRootKind::Template)
+        | (ComparableRootKind::Template, ComparableRootKind::Literal)
+        | (ComparableRootKind::Literal, ComparableRootKind::Template) => false,
+        (ComparableRootKind::Primitive(PrimitiveKind::Object), ComparableRootKind::Object)
+        | (ComparableRootKind::Object, ComparableRootKind::Primitive(PrimitiveKind::Object))
+        | (ComparableRootKind::ArrayLike, ComparableRootKind::Object)
+        | (ComparableRootKind::Object, ComparableRootKind::ArrayLike)
+        | (ComparableRootKind::Callable, ComparableRootKind::Object)
+        | (ComparableRootKind::Object, ComparableRootKind::Callable)
+        | (ComparableRootKind::ArrayLike, ComparableRootKind::Callable)
+        | (ComparableRootKind::Callable, ComparableRootKind::ArrayLike)
+        | (ComparableRootKind::ArrayLike, ComparableRootKind::Primitive(PrimitiveKind::Object))
+        | (ComparableRootKind::Primitive(PrimitiveKind::Object), ComparableRootKind::ArrayLike)
+        | (ComparableRootKind::Callable, ComparableRootKind::Primitive(PrimitiveKind::Object))
+        | (ComparableRootKind::Primitive(PrimitiveKind::Object), ComparableRootKind::Callable) => {
+            false
+        }
+        _ => true,
+    }
 }
 
 /// Proven tag-level disjointness for the contravariant-candidate

@@ -78,6 +78,7 @@ pub(crate) fn build_resolved_local_type_fact(src: &ResolvedLocalType) -> Resolve
 pub(crate) fn value_type_annotation_fact(
     annotation: Option<&TypeExpr>,
     is_unique_symbol: bool,
+    unique_symbol_members: &[String],
     own_decl_name: &str,
     declaring_canonical: &Arc<str>,
     owner: TopLevelOwnerId,
@@ -85,12 +86,15 @@ pub(crate) fn value_type_annotation_fact(
     expression_source: Option<verter_type_expr::facts::SemanticExpressionSource>,
     inference_unavailable: Option<InferenceUnavailableReason>,
 ) -> ValueTypeAnnotationFact {
+    let unique_symbol_members: Arc<[String]> =
+        Arc::from(unique_symbol_members.to_vec().into_boxed_slice());
     if let Some(reason) = inference_unavailable {
         verter_debug_assert!(annotation.is_none());
         verter_debug_assert!(annotation_source.is_none());
         verter_debug_assert!(expression_source.is_none());
         return ValueTypeAnnotationFact {
             is_unique_symbol: false,
+            unique_symbol_members,
             typeof_alias_target: None,
             classification: ValueAnnotationClass::InferenceUnavailable(reason),
             annotation: None,
@@ -103,6 +107,7 @@ pub(crate) fn value_type_annotation_fact(
             verter_debug_assert!(annotation_source.is_none());
             return ValueTypeAnnotationFact {
                 is_unique_symbol: false,
+                unique_symbol_members,
                 typeof_alias_target: None,
                 classification: ValueAnnotationClass::Direct,
                 annotation: None,
@@ -116,6 +121,7 @@ pub(crate) fn value_type_annotation_fact(
         );
         return ValueTypeAnnotationFact {
             is_unique_symbol: false,
+            unique_symbol_members,
             typeof_alias_target: None,
             classification: ValueAnnotationClass::Absent,
             annotation: None,
@@ -144,6 +150,7 @@ pub(crate) fn value_type_annotation_fact(
     };
     ValueTypeAnnotationFact {
         is_unique_symbol,
+        unique_symbol_members,
         typeof_alias_target,
         classification,
         annotation: annotation_source,
@@ -368,6 +375,7 @@ mod tests {
         let fact = value_type_annotation_fact(
             Some(&typeof_annotation(&["source"])),
             false,
+            &[],
             "alias",
             &canonical,
             TopLevelOwnerId::ordinary_file(),
@@ -391,6 +399,7 @@ mod tests {
         let fact = value_type_annotation_fact(
             Some(&typeof_annotation(&["obj", "member"])),
             false,
+            &[],
             "alias",
             &canonical,
             TopLevelOwnerId::ordinary_file(),
@@ -413,6 +422,7 @@ mod tests {
         let fact = value_type_annotation_fact(
             Some(&typeof_annotation(&["own"])),
             false,
+            &[],
             "own",
             &canonical,
             TopLevelOwnerId::ordinary_file(),
@@ -444,6 +454,7 @@ mod tests {
             value_type_annotation_fact(
                 annotation,
                 false,
+                &[],
                 "subject",
                 &canonical,
                 TopLevelOwnerId::ordinary_file(),
@@ -519,6 +530,7 @@ mod tests {
         let absent = value_type_annotation_fact(
             None,
             false,
+            &[],
             "x",
             &canonical,
             TopLevelOwnerId::ordinary_file(),
@@ -533,6 +545,7 @@ mod tests {
         let direct = value_type_annotation_fact(
             Some(&TypeExpr::Primitive(PrimitiveName::String)),
             false,
+            &[],
             "x",
             &canonical,
             TopLevelOwnerId::ordinary_file(),

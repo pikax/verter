@@ -462,6 +462,7 @@ fn cycle_gate_has_complex_surface(
         | SemanticNodeData::Mapped { .. }
         | SemanticNodeData::KeyOf { .. }
         | SemanticNodeData::TypeOf(_)
+        | SemanticNodeData::TypeOfNominal(_)
         | SemanticNodeData::TemplateLiteral { .. } => true,
         _ => false,
     }
@@ -590,8 +591,10 @@ fn cycle_gate_body_contains_recursive_ref(
             // Carrier `type_args` are descended (args-only): a carrier's
             // applied arguments can carry an `Opaque(RecursiveRef)` back-edge.
             // The carrier head is not inspected (head resolution is separate).
+            // The nominal terminal carries no args, so it descends nothing.
             SemanticNodeData::BareRef(_)
             | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::TypeOfNominal(_)
             | SemanticNodeData::ImportType(_) => {
                 for &arg in data.carrier_type_args().iter() {
                     stack.push(arg);
@@ -739,6 +742,7 @@ fn cycle_gate_collect_ref_identities(
             // identity); head resolution is a separate concern.
             SemanticNodeData::BareRef(_)
             | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::TypeOfNominal(_)
             | SemanticNodeData::ImportType(_) => {
                 for &arg in data.carrier_type_args().iter() {
                     stack.push(arg);

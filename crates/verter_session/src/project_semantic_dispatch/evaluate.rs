@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    CacheRead, IndexKey, LiteralValue, PartialReasonSet, PathSegment, ProjectionMode,
+    CacheRead, IndexKey, LiteralValue, PartialReasonSet, ProjectionMode,
     ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ResultCompleteness,
     ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
@@ -955,73 +955,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 let fallback = self.opaque(QueryError::Miss);
                                 self.deferred_read_action(frame, read, fallback)
                             }
+                            // A NOMINAL (`unique symbol`) carrier is
+                            // TERMINAL: resolving its head would project the
+                            // annotation down to the shared `symbol`
+                            // primitive and erase the declaring identity that
+                            // IS the type. Finish on the carrier.
+                            SemanticNodeData::TypeOfNominal(_) => frames
+                                .last_mut()
+                                .expect("active evaluator frame")
+                                .advance_or_finish(current),
                             SemanticNodeData::TypeOf(_) => {
                                 let (value_root, path) =
                                     data.typeof_head().expect("TypeOf carrier head");
+                                let value_root = value_root.clone();
+                                let path = Arc::clone(path);
                                 let type_args: Vec<SemanticNodeId> =
                                     data.carrier_type_args().to_vec();
                                 let context =
                                     frames.last().expect("active evaluator frame").context;
-                                let read = self
-                                    .execute_read(self.typeof_key_for(value_root.clone(), context));
+                                let read = self.execute_read(
+                                    self.typeof_key_with_path(value_root, path, context),
+                                );
                                 let frame = frames.last_mut().expect("active evaluator frame");
                                 frame.merge_read(&read);
                                 crate::request_context::observe_component_meta_read_suppress(&read);
                                 match read.value {
-                                    QueryResult::Value(root) => {
-                                        let projected = if path.is_empty() {
-                                            Some(root)
+                                    QueryResult::Value(projected) => {
+                                        let next = if type_args.is_empty() {
+                                            projected
                                         } else {
-                                            let projection_path: Arc<[PathSegment]> = Arc::from(
-                                                path.iter()
-                                                    .map(|segment| {
-                                                        PathSegment::Member(
-                                                            crate::semantic_query::PropertyKey::identifier(
-                                                                Arc::clone(segment),
-                                                            ),
-                                                        )
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                                    .into_boxed_slice(),
-                                            );
-                                            let read =
-                                                self.execute_read(SemanticQueryKey::ProjectPath {
-                                                    base: root,
-                                                    path: projection_path,
-                                                    context: ProjectionReductionContext::published(
-                                                        ProjectionMode::Navigate,
-                                                    )
-                                                    .with_orthogonal_axes_from(context),
-                                                });
-                                            let frame =
-                                                frames.last_mut().expect("active evaluator frame");
-                                            frame.merge_read(&read);
-                                            crate::request_context::observe_component_meta_read_suppress(
-                                                &read,
-                                            );
-                                            match read.value {
-                                                QueryResult::Value(id) => Some(id),
-                                                _ => None,
-                                            }
+                                            self.apply_typeof_instantiation_args(
+                                                projected, &type_args,
+                                            )
                                         };
-                                        match projected {
-                                            Some(projected) => {
-                                                let next = if type_args.is_empty() {
-                                                    projected
-                                                } else {
-                                                    self.apply_typeof_instantiation_args(
-                                                        projected, &type_args,
-                                                    )
-                                                };
-                                                frames
-                                                    .last_mut()
-                                                    .expect("active evaluator frame")
-                                                    .advance_or_finish(next)
-                                            }
-                                            None => DeferredEvaluationAction::Finish(
-                                                self.opaque(QueryError::Miss),
-                                            ),
-                                        }
+                                        frames
+                                            .last_mut()
+                                            .expect("active evaluator frame")
+                                            .advance_or_finish(next)
                                     }
                                     _ => DeferredEvaluationAction::Finish(
                                         self.opaque(QueryError::Miss),

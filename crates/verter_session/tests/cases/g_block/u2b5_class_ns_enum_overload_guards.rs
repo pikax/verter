@@ -709,6 +709,7 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
             typeof_env.type_env_hash,
             typeof_env.lib_env_hash,
         ),
+        path: Arc::from([]),
         context: verter_session::semantic_query::TypeOfContext::new(
             verter_session::semantic_query::ProjectionReductionContext::published(
                 verter_session::semantic_query::ProjectionMode::Shallow,

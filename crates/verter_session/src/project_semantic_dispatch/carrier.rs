@@ -1183,6 +1183,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `type_args` apply AFTER the projection — resolve -> project -> apply,
         // mirroring the walker's `TypeOf` arm.
         if is_typeof {
+            // A NOMINAL (`unique symbol`) carrier is TERMINAL: it has no
+            // content to normalize, and resolving its head would project the
+            // member annotation down to the shared `symbol` primitive,
+            // erasing the declaring identity that IS the type.
+            if graph
+                .node_data(node)
+                .is_some_and(|data| data.typeof_nominal_identity().is_some())
+            {
+                self.carrier_normalizing.borrow_mut().pop();
+                return node;
+            }
             let (value_root, typeof_path) = {
                 let data = graph.node_data(node).expect("TypeOf carrier data");
                 let (value_root, typeof_path) = data.typeof_head().expect("TypeOf head");
@@ -1199,37 +1210,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // folds its `result_is_partial` + `cache_suppress` into the request
             // (`observe_component_meta_read_suppress`) — the no-poison rail: a
             // partial carrier resolution must not warm any enclosing cache.
-            let typeof_key = self.typeof_key_for(value_root, context);
+            let typeof_key = self.typeof_key_with_path(value_root, typeof_path, context);
             let root_read = self.execute_read(typeof_key);
             crate::request_context::observe_component_meta_read_suppress(&root_read);
             let mut resolved = match root_read.value {
                 QueryResult::Value(id) => id,
                 _ => self.opaque(QueryError::Miss),
             };
-            if resolved != node && !typeof_path.is_empty() {
-                let projection_path: Arc<[PathSegment]> = Arc::from(
-                    typeof_path
-                        .iter()
-                        .map(|seg| {
-                            PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
-                                Arc::clone(seg),
-                            ))
-                        })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                let path_read = self.execute_read(SemanticQueryKey::ProjectPath {
-                    base: resolved,
-                    path: projection_path,
-                    context: ProjectionReductionContext::published(ProjectionMode::Navigate)
-                        .with_orthogonal_axes_from(context),
-                });
-                crate::request_context::observe_component_meta_read_suppress(&path_read);
-                resolved = match path_read.value {
-                    QueryResult::Value(id) => id,
-                    _ => self.opaque(QueryError::Miss),
-                };
-            }
             if resolved != node && !type_args.is_empty() {
                 resolved = self.apply_typeof_instantiation_args(resolved, &type_args);
             }
@@ -1427,6 +1414,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The non-empty-path `TypeOf` case is deliberately excluded: its
     /// resolve/project/apply chain belongs to the path walker, so retaining the
     /// carrier at entry is not a failed normalization.
+    ///
+    /// A NOMINAL (`unique symbol`) `TypeOf` carrier is likewise excluded, in
+    /// EVERY key arm. It is not an unresolved authored head that failed to
+    /// normalize: it is the terminal answer — the declaring identity IS the
+    /// type, and [`Self::resolve_carrier_subject_node_inner`] returns it
+    /// unchanged on purpose because resolving its head would widen it to the
+    /// shared `symbol` primitive. Classifying it as a fault would mark a
+    /// COMPLETE result partial and force `ReturnOnly` admission at the Vue
+    /// publication boundary, so `keyof typeof KIND` (and the empty-path /
+    /// mapped-source shapes that reach here with `deferred_typeof == false`)
+    /// would never warm.
+    /// Test-support view of the carrier-normalization prelude's
+    /// classification: normalize the key's carrier subject exactly as the
+    /// prelude does, then classify the NORMALIZED key. Both halves are
+    /// required — the classifier judges the post-normalization subject, so
+    /// classifying the raw key would judge a shape the prelude never sees.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn normalized_carrier_partial_reasons_for_tests(
+        &self,
+        key: SemanticQueryKey,
+    ) -> PartialReasonSet {
+        let normalized = self.normalize_carrier_subject_key(key);
+        self.carrier_normalization_partial_reasons(&normalized)
+    }
+
     pub(super) fn carrier_normalization_partial_reasons(
         &self,
         key: &SemanticQueryKey,
@@ -1451,6 +1463,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return PartialReasonSet::MISSING_SEMANTIC_NODE_DATA;
         };
         if deferred_typeof && data.typeof_head().is_some() {
+            return PartialReasonSet::empty();
+        }
+        if data.typeof_nominal_identity().is_some() {
             return PartialReasonSet::empty();
         }
         if data.bare_ref_head().is_some()

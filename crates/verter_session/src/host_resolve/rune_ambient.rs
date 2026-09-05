@@ -317,6 +317,7 @@ mod tests {
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: verter_type_expr::facts::ValueTypeAnnotationFact {
                 is_unique_symbol: false,
+                unique_symbol_members: Arc::from([]),
                 typeof_alias_target: None,
                 classification: verter_type_expr::facts::ValueAnnotationClass::Absent,
                 annotation: None,

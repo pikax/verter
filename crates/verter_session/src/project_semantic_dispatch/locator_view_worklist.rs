@@ -34,10 +34,10 @@ use super::locator_view::{LocatorViewInputs, ViewMemo};
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     may_reduce_operator, FunctionParam, IndexKey, IndexSignature, MapperKey, MemberMergeRole,
-    NodeScopeId, PathSegment, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
-    QueryError, QueryResult, ReductionDemand, ResolveDeclKey, ResultCompleteness, ScopeId,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
-    SurfaceMember, SurfaceView, TupleElement, TypeParamDecl, ValueRootKey,
+    NodeScopeId, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
+    QueryResult, ReductionDemand, ResolveDeclKey, ResultCompleteness, ScopeId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember,
+    SurfaceView, TupleElement, TypeParamDecl, ValueRootKey,
 };
 
 #[must_use]
@@ -189,27 +189,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
     ) -> ReferenceProjectionPlan {
         match data {
+            // The terminal nominal carrier IS the type it denotes: resolving
+            // its head would project the annotation down to the shared
+            // `symbol` primitive and erase the declaring identity. The plan
+            // is already complete.
+            SemanticNodeData::TypeOfNominal(_) => ReferenceProjectionPlan::Ready(node),
             SemanticNodeData::TypeOf(_) => {
                 let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
                 let value_root = value_root.clone();
                 let path = Arc::clone(path);
                 let type_args: Arc<[SemanticNodeId]> =
                     Arc::from(data.carrier_type_args().to_vec().into_boxed_slice());
-                let single_query =
-                    self.execute_type_node(self.typeof_key_for(value_root.clone(), context));
-                let (mut result, consumed_rest) = match single_query {
-                    QueryResult::Value(SemanticQueryOutput { value, .. }) => (value, 0usize),
+                let result = match self.execute_type_node(self.typeof_key_with_path(
+                    value_root.clone(),
+                    Arc::clone(&path),
+                    context,
+                )) {
+                    QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
                     _ if !path.is_empty() => {
                         let joined: Arc<str> =
                             Arc::from(format!("{}.{}", value_root.name, path[0]));
-                        match self.execute_type_node(self.typeof_key_for(
+                        let rest: Arc<[Arc<str>]> =
+                            Arc::from(path[1..].to_vec().into_boxed_slice());
+                        match self.execute_type_node(self.typeof_key_with_path(
                             ValueRootKey {
                                 scope: value_root.scope.clone(),
                                 name: joined,
                             },
+                            rest,
                             context,
                         )) {
-                            QueryResult::Value(SemanticQueryOutput { value, .. }) => (value, 1),
+                            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
                             _ => {
                                 return ReferenceProjectionPlan::Ready(
                                     self.opaque(QueryError::Miss),
@@ -221,30 +231,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         return ReferenceProjectionPlan::Ready(self.opaque(QueryError::Miss));
                     }
                 };
-                if path.len() > consumed_rest {
-                    let segments: Arc<[PathSegment]> = Arc::from(
-                        path[consumed_rest..]
-                            .iter()
-                            .map(|segment| {
-                                PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
-                                    Arc::clone(segment),
-                                ))
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    );
-                    result = match self.execute_type_node(SemanticQueryKey::ProjectPath {
-                        base: result,
-                        path: segments,
-                        context: ProjectionReductionContext::published(ProjectionMode::Navigate)
-                            .with_orthogonal_axes_from(context),
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                        _ => {
-                            return ReferenceProjectionPlan::Ready(self.opaque(QueryError::Miss));
-                        }
-                    };
-                }
                 if type_args.is_empty() {
                     ReferenceProjectionPlan::Ready(result)
                 } else {
@@ -1117,6 +1103,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Ok(true)
             }
             SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::TypeOfNominal(_)
             | SemanticNodeData::DeclRef { .. }
             | SemanticNodeData::BareRef(_)
             | SemanticNodeData::ImportType(_) => {
@@ -1278,6 +1265,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Conditional { .. }
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::TypeOf(_)
+            // The nominal terminal is a resolved scalar leaf.
+            | SemanticNodeData::TypeOfNominal(_)
             | SemanticNodeData::DeclRef { .. }
             | SemanticNodeData::BareRef(_)
             | SemanticNodeData::ImportType(_) => {

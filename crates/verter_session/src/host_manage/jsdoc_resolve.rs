@@ -660,7 +660,7 @@ fn node_has_direct_macro_reference(
             continue;
         };
         match data.as_ref() {
-            SemanticNodeData::TypeOf(_) => {
+            SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
                 if let Some((value_root, path)) = data.typeof_head() {
                     if value_root.name.as_ref() == needle
                         || path.iter().any(|segment| segment.as_ref() == needle)

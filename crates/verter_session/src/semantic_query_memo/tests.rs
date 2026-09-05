@@ -9342,6 +9342,7 @@ mod env_scoped_key_identity_guards {
     ) -> SemanticQueryKey {
         SemanticQueryKey::TypeOf {
             value_root: slot,
+            path: Arc::from([]),
             context: crate::semantic_query::TypeOfContext::new(prc, resolve_env),
         }
     }
@@ -10428,6 +10429,7 @@ mod prepared_identity_bijection {
             SemanticQueryKeyTag::TypeOf => (
                 SemanticQueryKey::TypeOf {
                     value_root: value_root("v"),
+                    path: Arc::from([]),
                     context: TypeOfContext::new(
                         ProjectionReductionContext::published(ProjectionMode::Shallow),
                         h16(0),
@@ -10435,6 +10437,7 @@ mod prepared_identity_bijection {
                 },
                 SemanticQueryKey::TypeOf {
                     value_root: value_root("w"),
+                    path: Arc::from([]),
                     context: TypeOfContext::new(
                         ProjectionReductionContext::published(ProjectionMode::Shallow),
                         h16(0),

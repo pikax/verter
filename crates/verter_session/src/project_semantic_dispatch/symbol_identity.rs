@@ -534,7 +534,8 @@ impl ProjectSemanticDispatch<'_> {
                         }
                         SemanticNodeData::BareRef(_)
                         | SemanticNodeData::ImportType(_)
-                        | SemanticNodeData::TypeOf(_) => {
+                        | SemanticNodeData::TypeOf(_)
+                        | SemanticNodeData::TypeOfNominal(_) => {
                             if !visited_nodes.insert(node) {
                                 return self.partial_symbol_identity(
                                     PropCallableRoleUnresolvedReason::Cycle,
@@ -544,6 +545,19 @@ impl ProjectSemanticDispatch<'_> {
                                 return self.partial_symbol_identity(partial_reason(reasons));
                             }
                             drop(data);
+                            // The callable role is a STRUCTURAL question and
+                            // a `unique symbol` is definitively not one of
+                            // the symbol identities this walk looks for. A
+                            // nominal carrier is terminal under carrier
+                            // resolution, so the `resolved == node` rail
+                            // below would publish a resolution-FAILURE
+                            // marker for a program that resolves fine.
+                            // Widen and let the walk terminate on the
+                            // concrete primitive.
+                            if let Some(widened) = self.widened_nominal_typeof(node) {
+                                subject = IdentitySubject::Node(widened);
+                                continue;
+                            }
                             let (resolved, observed, completeness) =
                                 self.resolve_carrier_subject_node_capturing_suppress(node, context);
                             if observed.result_is_partial {
