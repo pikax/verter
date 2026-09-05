@@ -1493,6 +1493,8 @@ jobs:
           path: packages/native/dist
       - name: Syntax-check the WASM transport probe
         run: node --check packages/wasm/scripts/probe-transport-surface.mjs
+      - name: Syntax-check the native transport probe
+        run: node --check packages/native/scripts/probe-transport-surface.mjs
       - name: Execute native and WASM transport comparisons
         env:
           CARGO_TERM_COLOR: never

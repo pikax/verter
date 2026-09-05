@@ -45,7 +45,7 @@ Move the native binding's direct transport-surface probe to CCA1O2's typed reque
 
 - The sole production/tooling surface is `packages/native/scripts/probe-transport-surface.mjs`.
 - Owns every profile-bearing `getVirtualFile`, `getIde`, `ensureIdeCompiled`, and runtime-render `compileMany` probe case in that file, including success, refusal, optional-product, ordering, and audit variants. Each becomes one typed call — `compileRequest` for the single-file cases, the typed plural route for the batch cases — and the IDE cases stop being an ensure-then-read pair.
-- Surface enumeration, result normalization, refusal-vs-missing distinctions, audit attribution, canonical IDs, and UTF-16/public span encoding remain unchanged.
+- Surface enumeration, result normalization, audit attribution, canonical IDs, and UTF-16/public span encoding remain unchanged. Refusal-vs-missing classification follows the complete-only wire rather than the legacy NAPI per-product missing answers (see Acceptance and evidence).
 
 ## Exact predecessor contract
 
@@ -57,13 +57,13 @@ Move the native binding's direct transport-surface probe to CCA1O2's typed reque
 ## Acceptance and evidence
 
 - The probe contains no legacy general or render compile-profile object and exercises the typed Vue/Svelte request variants. Every probe axis survives, and each former ensure-then-read IDE case is one typed call; no case gains a binding call or copies a source into its request.
-- Probe output keys, ordering, output/map/refusal classification, diagnostics, audit fields, canonical IDs, and serialized offsets are equivalent.
+- Probe output keys, ordering, diagnostics, audit fields, canonical IDs, and serialized offsets are equivalent. Every demand is held to `VerterHost::compile_request`, and output/map/refusal classification follows the complete-only wire: NAPI matches WASM, so optional products the legacy route answered as missing (for example `svelteServerStyle` or `getIdeWithoutMap`) classify as the complete-only host answers, and `ensureIdeCompiled` carries no boolean value key.
 
 ## Deletions, budgets, and aborts
 
 - Delete no NAPI/native type, converter, probe case, output key, or audit field.
 - Ceiling: 250 production/tooling LOC, 1 production/tooling file, 1 related package; rescope above 600 LOC, 3 files, 2 unrelated packages, or if another consumer enters.
-- Abort on a deleted probe axis, duplicate binding call, changed normalization, or transport divergence.
+- Abort on a deleted probe axis, duplicate binding call, changed normalization, or divergence between the transports' answers to `VerterHost::compile_request`; classification inherited from the complete-only wire is not divergence.
 
 ## Verification and review
 
