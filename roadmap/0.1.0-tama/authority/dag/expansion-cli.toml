@@ -78,7 +78,7 @@ rescope_unrelated_packages = 3
 [[node]]
 id = "CLI2"
 name = "Verter-native `typecheck` command"
-predecessors = ["CLI1","TIF0"]
+predecessors = ["CLI1","TIF0","PM4"]
 phase = "expansion"
 train = "expansion.cli"
 product = "cli"

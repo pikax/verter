@@ -1,7 +1,7 @@
 <!-- unified-charter-v2
 id=EPR2
 name=Managed download and verified atomic installation channel
-predecessors=EPR1,G5
+predecessors=EPR1,G5,EPR4
 phase=expansion
 train=expansion.engine-provisioning
 product=engine_provisioning
@@ -66,6 +66,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 ## Exact predecessor contracts
 
 - **EPR1:** implemented ledger row for “Engine artifact identity, compatibility, integrity, and cache contract”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **EPR4:** supplies the production artifact types and shared compatibility/integrity/origin validator specified by EPR1. This channel consumes that implementation and adds no parallel candidate-validation authority. Its implemented ledger row satisfies the predecessor; commit metadata remains a locator hint only.
 - **G5:** implemented ledger row for “Scheduler pool host runtime convergence”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **External requirement maintainer_managed_engine_acquisition:** agents obtain the maintainer decision; tooling does not validate it.
 
@@ -112,7 +113,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 - Query approved metadata endpoint with bounded response/time/redirects.
 - Parse exact version/platform/artifact URL/integrity/signature metadata.
-- Apply EPR0 update/channel policy and EPR1 compatibility before download.
+- Apply EPR0 update/channel policy and the EPR4 compatibility evaluator under the EPR1 contract before download.
 
 **Expected changes:**
 
@@ -156,7 +157,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
-- Produce EPR1 integrity/origin evidence.
+- Produce source-specific acquisition evidence for the EPR4 validator, which constructs the normalized EPR1 integrity/origin receipt.
 - Quarantine/delete only managed temporary data on failure.
 
 **Discriminating proof:**
@@ -176,7 +177,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
-- Implement safe extractor/installer over EPR1 APIs.
+- Implement safe extraction, atomic installation, and managed corruption quarantine under the EPR1 layout contract; consume EPR4 artifact types and validation before READY exposure.
 - Loser installers verify winner or discard temp.
 
 **Discriminating proof:**
@@ -231,7 +232,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 - Unavailable, unauthorized, incompatible, corrupt, offline, cancelled, and operationally failed outcomes remain distinct and capability-visible.
 - All caches/installations are content/version/platform scoped, race-safe, and fail closed on symlink/reparse/permission/ownership violations.
 - Acquisition requests are explicit side effects and never run inside a semantic/query hot path.
-- Downloaded metadata/artifacts are untrusted until EPR1 validation receipts exist.
+- Downloaded metadata/artifacts are untrusted until the EPR4 validator has produced the EPR1-specified validation receipts.
 - Managed acquisition may mutate only its private managed root.
 
 ### Migration and cutover

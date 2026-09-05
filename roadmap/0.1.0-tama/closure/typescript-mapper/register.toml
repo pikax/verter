@@ -752,12 +752,12 @@ adapter = "node-tool"
 argv_tail = ["roadmap/0.1.0-tama/tools/validate-program-dag.mjs", "--strict"]
 fixtures = ["roadmap/0.1.0-tama/authority/dag/rev11-typescript-mapper.toml", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM0R.md"]
 covers = ["A-authority-consistent"]
-selected = 408
-executed = 408
-passed = 408
+selected = 411
+executed = 411
+passed = 411
 failed = 0
 skipped = 0
-terminal_summary = "validate-program-dag: PASS nodes=408 edges=1024 modules=52 charters=408 critical_path=112 max_width=36"
+terminal_summary = "validate-program-dag: PASS nodes=411 edges=1044 modules=52 charters=411 critical_path=113 max_width=36"
 count_key = "nodes"
 control = "CTL-authority-edge"
 
@@ -767,12 +767,12 @@ adapter = "node-test"
 argv_tail = ["roadmap/0.1.0-tama/tools/implementation-ledger.test.mjs"]
 fixtures = ["roadmap/0.1.0-tama/authority/state/implemented.toml", "roadmap/0.1.0-tama/schemas/implementation-ledger.schema.json"]
 covers = ["A-ledger-model-intact"]
-selected = 26
-executed = 26
-passed = 26
+selected = 30
+executed = 30
+passed = 30
 failed = 0
 skipped = 0
-terminal_summary = "tests 26 | pass 26 | fail 0 | cancelled 0 | skipped 0 | todo 0"
+terminal_summary = "tests 30 | pass 30 | fail 0 | cancelled 0 | skipped 0 | todo 0"
 control = "CTL-ledger-row"
 
 [[proof]]
@@ -914,7 +914,7 @@ subject = "roadmap/0.1.0-tama/authority/state/implemented.toml"
 reverted = "\"TCM1\" = { status = \"pending\" }\n\"TCM2\" = { status = \"pending\" }"
 applied = "\"TCM1\" = { status = \"landed\" }\n\"TCM2\" = { status = \"pending\" }"
 uniqueness = "unique-new-occurrence"
-observed = "node exit 1\ntests 26 | pass 19 | fail 7 | cancelled 0 | skipped 0 | todo 0\nseven cases reported `implementation ledger: TCM1: status must be pending or implemented` beside the schema error `authority.implementation-ledger.implementation.TCM1.status: expected one of pending, implemented`"
+observed = "node exit 1\ntests 30 | pass 22 | fail 8 | cancelled 0 | skipped 0 | todo 0\neight cases reported `implementation ledger: TCM1: status must be pending or implemented` beside the schema error `authority.implementation-ledger.implementation.TCM1.status: expected one of pending, implemented`"
 
 [[control]]
 id = "CTL-register-status"

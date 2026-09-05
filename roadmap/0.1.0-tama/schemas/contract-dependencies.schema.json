@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cross-train contract dependencies",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "contract"],
+  "properties": {
+    "schema": { "const": 1 },
+    "contract": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "producer", "consumers", "outcome", "acceptance", "evidence"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "producer": { "type": "string", "minLength": 1 },
+          "consumers": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "outcome": { "type": "string", "minLength": 1 },
+          "acceptance": { "type": "string", "minLength": 1 },
+          "evidence": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}
