@@ -394,7 +394,7 @@ schema = 2
 "TCM4" = { status = "pending" }
 "TE1" = { status = "implemented", commit_message = "feat: sealed semantic operands and forcing boundary", commit_date = "2026-09-04T01:30:00+01:00", pull_request = 474 }
 "TE2" = { status = "pending" }
-"TE3" = { status = "pending" }
+"TE3" = { status = "implemented", commit_message = "feat(core): demand-selected projection precision at the operand forcing boundary", commit_date = "2026-09-05T12:00:00+01:00" }
 "TE4" = { status = "pending" }
 "TE5" = { status = "pending" }
 "TIF0" = { status = "pending" }
