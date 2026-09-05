@@ -2587,6 +2587,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         base: &crate::semantic_query::ResolvedDeclSlotIdentity,
         args: &Arc<[SemanticNodeId]>,
+        source: &crate::semantic_query::InstantiateSource,
         instantiate_context: crate::semantic_query::InstantiateContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         verter_audit::attribute_scope!(Instantiate);
@@ -2599,6 +2600,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `Instantiate` sub-key this build re-emits via
         // `instantiate_context_for`.
         let context = instantiate_context.projection_reduction();
+        if let Some(identity) = source.authored_identity() {
+            return self.build_authored_instantiation(
+                base,
+                identity.locator(),
+                args,
+                instantiate_context,
+            );
+        }
         // demand-driven reducer spec: the call-site provides
         // the publication / structural-transit context. `body_mode` is
         // shorthand for `context.mode` everywhere the existing lowering
@@ -4035,7 +4044,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// degrades substitution to a no-op for that parameter while the
     /// read-boundary fold (`lower_locator`'s `execute_read`) taints the
     /// enclosing build's warm admission — degraded, never poisoned.
-    fn locator_binder_frame_from_narrow_params(
+    pub(in crate::project_semantic_dispatch) fn locator_binder_frame_from_narrow_params(
         &self,
         scope: &NodeScopeId,
         owner_symbol: &Arc<str>,

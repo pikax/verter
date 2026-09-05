@@ -33,6 +33,12 @@ pub(crate) const OPEN_SURFACE: &str = "projectedOpenSurface";
 pub(crate) const UNMODELED_POSITION: &str = "unmodeledPosition";
 /// `QueryError::Cancelled`.
 pub(crate) const CANCELLED: &str = "cancelled";
+/// `QueryError::SignatureOverflow`.
+pub(crate) const SEMANTIC_SIGNATURE_OVERFLOW: &str = "semanticSignatureOverflow";
+/// `QueryError::ForeignSemanticOperand`.
+pub(crate) const SEMANTIC_FOREIGN_OPERAND: &str = "semanticForeignOperand";
+/// `QueryError::StaleSemanticOperand`.
+pub(crate) const SEMANTIC_STALE_OPERAND: &str = "semanticStaleOperand";
 
 // ---------------------------------------------------------------------------
 // Parameterised prefixes
@@ -59,6 +65,32 @@ pub(crate) const VALUE_DOMAIN_MISMATCH_PREFIX: &str = "valueDomainMismatch(";
 /// Legacy `materialize:<…>` family prefix (display family only; no current
 /// producer).
 pub(crate) const MATERIALIZE_PREFIX: &str = "materialize:";
+/// `QueryError::IncompleteSemanticOperand` —
+/// `semanticIncompleteOperand(<reason>|<reason>)`.
+pub(crate) const SEMANTIC_INCOMPLETE_OPERAND_PREFIX: &str = "semanticIncompleteOperand(";
+
+/// The recorded partial reasons as stable `|`-joined names in bit order,
+/// or `none` for an empty set.
+///
+/// This is what the observable spellings render instead of the reason
+/// set's `Debug` shape: `Debug` on a bitflag newtype leaks the numeric
+/// representation into strings component-meta consumers can read, and it
+/// changes whenever a bit is added or reordered. The names come from the
+/// closed [`PartialReason`](super::PartialReason) taxonomy, so a new
+/// reason class gets a name rather than a number.
+pub(crate) fn spell_partial_reasons(reasons: super::PartialReasonSet) -> String {
+    let mut spelled = String::new();
+    for reason in reasons.iter() {
+        if !spelled.is_empty() {
+            spelled.push('|');
+        }
+        spelled.push_str(reason.name());
+    }
+    if spelled.is_empty() {
+        spelled.push_str("none");
+    }
+    spelled
+}
 
 /// DISPLAY-ONLY predicate: does `raw` spell one of the legacy sentinel
 /// strings the terminal compatibility projection can emit (exact family plus

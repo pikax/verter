@@ -37,6 +37,9 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_unmaterialized_sentin
         QueryError::Miss
         | QueryError::UnsupportedIntrinsic { .. }
         | QueryError::BudgetExceeded(_)
+        | QueryError::SignatureOverflow
+        | QueryError::StaleSemanticOperand
+        | QueryError::IncompleteSemanticOperand { .. }
         | QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::AliasCycle { .. }
@@ -53,11 +56,19 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_unmaterialized_sentin
         // `recursiveRef(name)` (RecursiveRef) raises to a materialised
         // `RecursiveRef` leaf; `valueDomainMismatch(...)` raises to a
         // non-sentinel spelling; `DeclPlaceholder` raises to the named `Ref`
-        // shell; `Other(..)` is inert caller text, never a sentinel.
+        // shell; `Other(..)` is inert caller text, never a sentinel. A
+        // FOREIGN operand (`ForeignSemanticOperand`) is likewise NOT an
+        // unmaterialised hole: the disposition authority classifies it
+        // `Failure`/`Fault` — a caller reached the boundary with an operand
+        // minted by another store/generation, which is a hard fault a
+        // consumer must observe, not a partially-materialised value to fold
+        // into a hole (unlike the genuinely incomplete forces
+        // `Stale`/`Incomplete` above).
         QueryError::RaiseMiss
         | QueryError::TypeParamCycle
         | QueryError::RecursiveRef { .. }
         | QueryError::ValueDomainMismatch { .. }
+        | QueryError::ForeignSemanticOperand
         | QueryError::Other(_)
         | QueryError::DeclPlaceholder { .. } => false,
     }
@@ -80,6 +91,10 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_object_surface_sentin
         QueryError::Miss
         | QueryError::UnsupportedIntrinsic { .. }
         | QueryError::BudgetExceeded(_)
+        | QueryError::SignatureOverflow
+        | QueryError::ForeignSemanticOperand
+        | QueryError::StaleSemanticOperand
+        | QueryError::IncompleteSemanticOperand { .. }
         | QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::AliasCycle { .. }
@@ -112,6 +127,10 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_semantic_miss_sentine
         QueryError::Miss => true,
         QueryError::UnsupportedIntrinsic { .. }
         | QueryError::BudgetExceeded(_)
+        | QueryError::SignatureOverflow
+        | QueryError::ForeignSemanticOperand
+        | QueryError::StaleSemanticOperand
+        | QueryError::IncompleteSemanticOperand { .. }
         | QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::AliasCycle { .. }
@@ -188,6 +207,12 @@ mod tests {
             QueryError::OpenSurface,
             QueryError::UnrepresentableSurface,
             QueryError::UnrepresentableSurfaceMember,
+            QueryError::SignatureOverflow,
+            QueryError::ForeignSemanticOperand,
+            QueryError::StaleSemanticOperand,
+            QueryError::IncompleteSemanticOperand {
+                reasons: crate::semantic_query::PartialReasonSet::empty(),
+            },
         ]
     }
 
@@ -207,6 +232,9 @@ mod tests {
     /// The typed unmaterialised authority: exactly the typed sentinel
     /// carriers classify unmaterialised; EVERY text-bearing `Other` payload —
     /// even one spelled identically to a legacy sentinel — is MATERIALISED.
+    /// The unmaterialised set agrees with the disposition authority's
+    /// partial/absence classes; a `Failure`/`Fault` variant (a foreign
+    /// operand) is a hard fault, never a foldable hole.
     #[test]
     fn unmaterialized_classification_is_typed_only() {
         let expected_unmaterialized = |err: &QueryError| {
@@ -215,6 +243,9 @@ mod tests {
                 QueryError::Miss
                     | QueryError::UnsupportedIntrinsic { .. }
                     | QueryError::BudgetExceeded(_)
+                    | QueryError::SignatureOverflow
+                    | QueryError::StaleSemanticOperand
+                    | QueryError::IncompleteSemanticOperand { .. }
                     | QueryError::Cancelled
                     | QueryError::UnstableState { .. }
                     | QueryError::AliasCycle { .. }
@@ -241,6 +272,9 @@ mod tests {
         ));
         assert!(!query_error_is_unmaterialized_sentinel(
             &QueryError::RaiseMiss
+        ));
+        assert!(!query_error_is_unmaterialized_sentinel(
+            &QueryError::ForeignSemanticOperand
         ));
         assert!(!query_error_is_unmaterialized_sentinel(&QueryError::Other(
             Arc::from("semanticMiss")

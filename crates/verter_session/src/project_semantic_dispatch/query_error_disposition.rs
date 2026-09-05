@@ -189,7 +189,7 @@ pub(crate) const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
         // The three publish DIFFERENT reasons: a budget trip, a cancellation
         // and a fence that gave up because the world moved under the read are
         // three distinct diagnostics.
-        QueryError::BudgetExceeded(_) => (
+        QueryError::BudgetExceeded(_) | QueryError::SignatureOverflow => (
             QueryErrorDisposition::Partial,
             ClosedLiteralDomainUnresolvedReason::BudgetExceeded,
         ),
@@ -199,7 +199,7 @@ pub(crate) const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
         ),
         // The completion fence exhausted its retry budget because the observed
         // inputs kept moving — a revision mismatch, not a fault in the query.
-        QueryError::UnstableState { .. } => (
+        QueryError::UnstableState { .. } | QueryError::StaleSemanticOperand => (
             QueryErrorDisposition::Partial,
             ClosedLiteralDomainUnresolvedReason::RevisionMismatch,
         ),
@@ -208,7 +208,13 @@ pub(crate) const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
             QueryErrorDisposition::Failure,
             ClosedLiteralDomainUnresolvedReason::Unsupported,
         ),
-        QueryError::Other(_) | QueryError::ValueDomainMismatch { .. } => (
+        QueryError::IncompleteSemanticOperand { .. } => (
+            QueryErrorDisposition::Partial,
+            ClosedLiteralDomainUnresolvedReason::Fault,
+        ),
+        QueryError::Other(_)
+        | QueryError::ValueDomainMismatch { .. }
+        | QueryError::ForeignSemanticOperand => (
             QueryErrorDisposition::Failure,
             ClosedLiteralDomainUnresolvedReason::Fault,
         ),

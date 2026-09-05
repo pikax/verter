@@ -252,6 +252,42 @@ function requireSubcommand(adapterIds) {
   );
 }
 
+function spawnWithFreshTrybuildResults(targetDir, program, argv, options) {
+  fs.rmSync(path.join(targetDir, "tests", "trybuild"), { recursive: true, force: true });
+  return spawnSync(program, argv, options);
+}
+
+// @ai-generated - Guards isolation of trybuild's fixture-project result cache.
+test("delegated commands discard cached trybuild fixture results", () => {
+  const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), "ctl-target-"));
+  const trybuildDir = path.join(targetDir, "tests", "trybuild", "fixture");
+  const retainedBuild = path.join(targetDir, "debug", "deps");
+  try {
+    fs.mkdirSync(trybuildDir, { recursive: true });
+    fs.mkdirSync(retainedBuild, { recursive: true });
+    fs.writeFileSync(path.join(trybuildDir, "result"), "stale");
+    fs.writeFileSync(path.join(retainedBuild, "artifact"), "warm");
+
+    const run = spawnWithFreshTrybuildResults(targetDir, process.execPath, ["--version"], {
+      encoding: "utf8",
+    });
+
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(
+      fs.existsSync(path.join(targetDir, "tests", "trybuild")),
+      false,
+      "trybuild result cache must be removed",
+    );
+    assert.equal(
+      fs.readFileSync(path.join(retainedBuild, "artifact"), "utf8"),
+      "warm",
+      "ordinary build artifacts must remain reusable",
+    );
+  } finally {
+    fs.rmSync(targetDir, { recursive: true, force: true });
+  }
+});
+
 test(
   "every control the instrument suite delegates is re-applied and refused",
   { timeout: CONTROL_LANE_DEADLINE_MS },
@@ -304,9 +340,10 @@ test(
     // Build OUTPUT only ever flows into the mirror through this variable; the
     // tree under review is never written to, and the mirror still excludes
     // `target` from its copy.
+    const cargoTargetDir = path.join(REPO_ROOT, "target", "closure-controls");
     const env = {
       ...process.env,
-      CARGO_TARGET_DIR: path.join(REPO_ROOT, "target", "closure-controls"),
+      CARGO_TARGET_DIR: cargoTargetDir,
       CARGO_TERM_COLOR: "never",
     };
     // The runner must not inherit this process's test context: a nested node:test
@@ -315,14 +352,24 @@ test(
     delete env.NODE_TEST_CONTEXT;
     // The register declares the runner; the argument vector starts at a
     // subcommand, so reading the program out of it would be a guess.
-    const spawn = (argv, adapter) =>
-      spawnSync(adapter.runner === "node" ? process.execPath : adapter.runner, argv, {
-        cwd: mirror,
-        encoding: "utf8",
-        env,
-        timeout: CONTROL_LANE_COMMAND_DEADLINE_MS,
-        maxBuffer: 64 * 1024 * 1024,
-      });
+    const spawn = (argv, adapter) => {
+      // trybuild's fixture project caches the prior compile verdict inside the
+      // shared target tree. A source control intentionally reverses that verdict,
+      // so every clean and mutated command starts without those result artifacts.
+      // Ordinary Cargo output remains warm.
+      return spawnWithFreshTrybuildResults(
+        cargoTargetDir,
+        adapter.runner === "node" ? process.execPath : adapter.runner,
+        argv,
+        {
+          cwd: mirror,
+          encoding: "utf8",
+          env,
+          timeout: CONTROL_LANE_COMMAND_DEADLINE_MS,
+          maxBuffer: 64 * 1024 * 1024,
+        },
+      );
+    };
 
     let reApplied = 0;
     for (const control of owned) {

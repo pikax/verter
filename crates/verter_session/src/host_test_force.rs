@@ -34,6 +34,23 @@ pub(crate) struct TestForceKnobs {
     /// every content-addressed product stays one snapshot object — never an
     /// independent later scheduler read.
     pub(crate) indexed_source_capture_seam_hook: SeamHook,
+    /// One-shot rendezvous inside the next semantic cold build. Operand
+    /// concurrency tests use it to hold the winning build while an identical
+    /// caller joins the graph's existing in-flight entry.
+    pub(crate) semantic_operand_cold_build_seam: SeamHook,
+    /// Repeating seam fired BETWEEN the two halves of the operand
+    /// environment window read. Sealing tests install a real unrelated
+    /// content upsert here so a genuine republication lands inside the
+    /// window while every read value stays identical — the composite read
+    /// the epoch bracket must reject as torn.
+    pub(crate) semantic_operand_env_window_seam: SeamHook,
+    /// One-shot seam fired inside the authored force AFTER its nested
+    /// locator-lowering child has completed and published, and BEFORE the
+    /// force finishes its own candidate. Admission tests install a
+    /// cancellation or budget drain here to prove that a refusal
+    /// discovered past a completed child still withholds the force's own
+    /// result.
+    pub(crate) semantic_operand_post_child_seam: SeamHook,
     /// Deterministic entry/release rendezvous for the once-per-SFC Vue macro
     /// scheduled closure. The first barrier reports that the winner entered;
     /// the second holds it while a sibling joins and the winner is cancelled.
@@ -306,6 +323,28 @@ impl TestForceKnobs {
 pub(crate) struct SeamHook(
     pub(crate) parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
 );
+
+#[cfg(test)]
+impl SeamHook {
+    /// Fire an installed one-shot hook, removing it first so a hook that
+    /// re-enters the same seam cannot recurse.
+    pub(crate) fn fire_once(&self) {
+        let hook = self.0.lock().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    /// Fire an installed hook WITHOUT removing it, so a bounded retry loop
+    /// observes it on every attempt. The lock is released before the call:
+    /// a hook that touches the host must not run under this mutex.
+    pub(crate) fn fire_repeating(&self) {
+        let hook = self.0.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
 
 #[cfg(test)]
 impl std::fmt::Debug for SeamHook {

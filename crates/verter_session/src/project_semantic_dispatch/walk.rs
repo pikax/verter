@@ -121,6 +121,8 @@ pub(crate) fn probe_walk_typeof_resolved(
 /// human-readable messages without re-walking the graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ShallowDiagnostic {
+    /// The force/read dependency carrier exceeded its bounded signature.
+    SignatureOverflow,
     /// The connected root demand exhausted its projection/evaluation work
     /// envelope while identities were still changing. This is operational
     /// partiality, not a semantic cycle or an unresolved-reference carrier.

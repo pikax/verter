@@ -20,7 +20,7 @@ use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator, LocatorSymbolSpace,
     MacroPayloadPosition, TypeBodyPathStep, TypeParamBoundPosition, TypeParamVisibility,
 };
-use verter_type_expr::{FunctionExpr, ObjectMember, TypeExpr, TypeParam};
+use verter_type_expr::{FunctionExpr, ObjectMember, TupleElement, TypeExpr, TypeParam};
 
 use super::{DeclBodyMemo, DemandOutcome, TransientTypeParts, TransientValueParts};
 
@@ -121,6 +121,7 @@ pub(crate) enum DerefedBodyShape {
 #[derive(Debug, Clone)]
 pub(crate) struct DerefedAuthoredBody {
     pub(crate) shape: DerefedBodyShape,
+    pub(crate) lexical_root: Option<DerefedLexicalRoot>,
     /// The owning declaration's FULL header type-parameter list, in source
     /// order — never pre-truncated. Which of them the shape may reference
     /// is `visibility`'s to say.
@@ -131,6 +132,12 @@ pub(crate) struct DerefedAuthoredBody {
     /// prior siblings only, with self / later siblings present-as-shadow
     /// but forbidden as references.
     pub(crate) visibility: TypeParamVisibility,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DerefedLexicalRoot {
+    pub(crate) expr: TypeExpr,
+    pub(crate) path: Arc<[TypeBodyPathStep]>,
 }
 
 impl DeclBodyMemo {
@@ -208,6 +215,7 @@ impl DeclBodyMemo {
                     match lowering.as_ref() {
                         SvelteTypeArgumentLowering::TypeArgument(expr) => Ok(DerefedAuthoredBody {
                             shape: DerefedBodyShape::Single(expr.clone()),
+                            lexical_root: None,
                             type_parameters: Vec::new(),
                             visibility: TypeParamVisibility::Body,
                         }),
@@ -248,6 +256,7 @@ impl DeclBodyMemo {
                     match lowering.as_ref() {
                         MacroFieldPayloadLowering::Payload(expr) => Ok(DerefedAuthoredBody {
                             shape: DerefedBodyShape::Single(expr.clone()),
+                            lexical_root: None,
                             type_parameters: Vec::new(),
                             visibility: TypeParamVisibility::Body,
                         }),
@@ -280,6 +289,7 @@ impl DeclBodyMemo {
                     match lowering.as_ref() {
                         PropsAnnotationLowering::Annotation(expr) => Ok(DerefedAuthoredBody {
                             shape: DerefedBodyShape::Single(expr.clone()),
+                            lexical_root: None,
                             // A binding annotation declares no header type
                             // parameters (mirrors the JsdocTypedefBody arm).
                             type_parameters: Vec::new(),
@@ -418,28 +428,32 @@ impl DeclBodyMemo {
                             slot.anchor.owner,
                             slot.anchor.symbol.as_ref(),
                         ))?;
-                        let expr = match navigate_value_parts(&parts, &slot.path, &slot.anchor) {
-                            Ok(expr) => expr,
-                            // A shapeless, annotation-less, signature-less
-                            // position falls through to the enum-object
-                            // surface: an enum value declaration carries no
-                            // authored annotation/object-shape/signature at
-                            // all (its type surface is entirely the member
-                            // inventory), so the ordinary value-body facts
-                            // never populate for it — mirroring the
-                            // TYPE-space enum union above, one property per
-                            // member, keyed by name, valued by the member's
-                            // own scalar type.
-                            Err(LocatorBodyDerefError::ValueAnnotationAbsent) => self
-                                .navigate_enum_value_surface(
-                                    slot.anchor.owner,
-                                    slot.anchor.symbol.as_ref(),
-                                    &slot.path,
-                                )?,
-                            Err(other) => return Err(other),
-                        };
+                        let (expr, lexical_root) =
+                            match navigate_value_parts(&parts, &slot.path, &slot.anchor) {
+                                Ok(selected) => selected,
+                                // A shapeless, annotation-less, signature-less
+                                // position falls through to the enum-object
+                                // surface: an enum value declaration carries no
+                                // authored annotation/object-shape/signature at
+                                // all (its type surface is entirely the member
+                                // inventory), so the ordinary value-body facts
+                                // never populate for it — mirroring the
+                                // TYPE-space enum union above, one property per
+                                // member, keyed by name, valued by the member's
+                                // own scalar type.
+                                Err(LocatorBodyDerefError::ValueAnnotationAbsent) => (
+                                    self.navigate_enum_value_surface(
+                                        slot.anchor.owner,
+                                        slot.anchor.symbol.as_ref(),
+                                        &slot.path,
+                                    )?,
+                                    None,
+                                ),
+                                Err(other) => return Err(other),
+                            };
                         Ok(DerefedAuthoredBody {
                             shape: DerefedBodyShape::Single(expr),
+                            lexical_root,
                             // A plain value annotation position binds no
                             // declared type parameters of its own; a
                             // dual-space declaration (a `class K<T>` whose
@@ -524,9 +538,15 @@ impl DeclBodyMemo {
                     typedef.anchor.owner,
                     typedef.anchor.symbol.as_ref(),
                 ))?;
-                let expr = navigate_expr(body.as_ref().clone(), &typedef.path)?;
+                // A typedef payload is the same authored type space as a
+                // decl body: a path that descends through a mapped key,
+                // infer-true, or generic callable must keep that binder,
+                // or the bare descendant binds a file-scope same-name alias.
+                let (expr, lexical_root) =
+                    navigate_capturing_crossed_root(body.as_ref().clone(), &typedef.path)?;
                 Ok(DerefedAuthoredBody {
                     shape: DerefedBodyShape::Single(expr),
+                    lexical_root,
                     // A JSDoc typedef declares no header type parameters.
                     type_parameters: Vec::new(),
                     visibility: TypeParamVisibility::Body,
@@ -736,9 +756,15 @@ fn navigate_type_space_body(
             TypeParamBoundPosition::Default => tp.default.as_ref(),
         }
         .ok_or(LocatorBodyDerefError::TypeParamBoundAbsent { ordinal, position })?;
-        let expr = navigate_expr(bound.as_ref().clone(), &path[1..])?;
+        // A bound may itself introduce binders below the header frame
+        // (`T extends { [K in Keys]: K }[Keys]`); descending past one and
+        // lowering the bare descendant would strip the binder that gives
+        // the selection meaning.
+        let (expr, lexical_root) =
+            navigate_capturing_crossed_root(bound.as_ref().clone(), &path[1..])?;
         return Ok(DerefedAuthoredBody {
             shape: DerefedBodyShape::Single(expr),
+            lexical_root,
             // The FULL sibling list plus the bound's position-exact
             // visibility: the binder-frame constructor reconstructs the TS
             // lexical view from `(all params, ordinal, position)` — a
@@ -752,9 +778,10 @@ fn navigate_type_space_body(
             },
         });
     }
-    let shape = navigate_type_body(body, path)?;
+    let (shape, lexical_root) = navigate_type_body(body, path)?;
     Ok(DerefedAuthoredBody {
         shape,
+        lexical_root,
         type_parameters: transient_type_parameters.to_vec(),
         visibility: TypeParamVisibility::Body,
     })
@@ -765,12 +792,23 @@ fn navigate_type_space_body(
 /// merged-contributor carrier); a non-empty path selects exactly the named
 /// sub-position. Fail-closed: any shape/ordinal mismatch is
 /// [`LocatorBodyDerefError::PathUnresolved`].
+///
+/// The ancestor [`DerefedLexicalRoot`] is minted for exactly one reason:
+/// the path DESCENDS THROUGH a node that declares a binder scoping over
+/// the selection (see [`step_crosses_binder_scope`]), so the bare
+/// descendant carries no declaration for it. The owning declaration's OWN
+/// header parameters are NOT such a reason — the lowering caller builds
+/// the header binder frame from the derefed `type_parameters` +
+/// `visibility` and lowers under it, so a header-generic declaration whose
+/// path crosses nothing keeps the cheaper direct sub-expression lowering.
+/// Capturing the ancestor there would intern every unselected sibling/arm
+/// of the whole declaration body just to answer a single-member request.
 fn navigate_type_body(
     body: DerefedBodyShape,
     path: &[TypeBodyPathStep],
-) -> Result<DerefedBodyShape, LocatorBodyDerefError> {
+) -> Result<(DerefedBodyShape, Option<DerefedLexicalRoot>), LocatorBodyDerefError> {
     let Some((first, rest)) = path.split_first() else {
-        return Ok(body);
+        return Ok((body, None));
     };
     let (start, remaining) = match (body, first) {
         (
@@ -790,7 +828,74 @@ fn navigate_type_body(
         // the body expression directly.
         (DerefedBodyShape::Single(expr), _) => (expr, path),
     };
-    navigate_expr(start, remaining).map(DerefedBodyShape::Single)
+    let (selected, lexical_root) = navigate_capturing_crossed_root(start, remaining)?;
+    Ok((DerefedBodyShape::Single(selected), lexical_root))
+}
+
+/// Navigate `path` over `expr`, returning the FIRST binder-crossing node
+/// as the lexical ancestor when — and only when — the descent crossed a
+/// binder-introducing node.
+///
+/// The ancestor is that crossed expression (a mapped type, an inferring
+/// conditional, a generic callable), not the navigation start. Capturing
+/// the start would intern every unselected sibling of a large enclosing
+/// object just to preserve a nested binder.
+///
+/// [`step_may_cross_binder_scope`] pre-filters the path so a descent that
+/// provably crosses nothing never retains (nor clones) the ancestor at
+/// all; the debug assertion pins the two classifiers together at runtime,
+/// and the pre-filter's wildcard-free match pins them at compile time.
+fn navigate_capturing_crossed_root(
+    expr: TypeExpr,
+    path: &[TypeBodyPathStep],
+) -> Result<(TypeExpr, Option<DerefedLexicalRoot>), LocatorBodyDerefError> {
+    if !path.iter().any(step_may_cross_binder_scope) {
+        let (selected, root) = navigate_expr_detecting(expr, path)?;
+        verter_debug_assert!(
+            root.is_none(),
+            "step_may_cross_binder_scope missed a crossing step kind"
+        );
+        return Ok((selected, None));
+    }
+    navigate_expr_detecting(expr, path)
+}
+
+/// Conservative, node-independent pre-filter over the closed step
+/// vocabulary: only these step kinds can EVER make
+/// [`step_crosses_binder_scope`] true, so a path containing none of them
+/// provably crosses no binder and the caller can skip retaining an
+/// ancestor entirely.
+///
+/// The match has no wildcard arm, so a new [`TypeBodyPathStep`] variant is
+/// a compile error here — the prompt to classify it against
+/// [`step_crosses_binder_scope`] rather than let a new crossing step slip
+/// past the pre-filter.
+fn step_may_cross_binder_scope(step: &TypeBodyPathStep) -> bool {
+    match step {
+        TypeBodyPathStep::MappedValue
+        | TypeBodyPathStep::MappedNameType
+        | TypeBodyPathStep::ConditionalTrue
+        | TypeBodyPathStep::FunctionParam { .. }
+        | TypeBodyPathStep::FunctionReturn => true,
+        TypeBodyPathStep::MergedContributor { .. }
+        | TypeBodyPathStep::IntersectionArm { .. }
+        | TypeBodyPathStep::UnionArm { .. }
+        | TypeBodyPathStep::TypeArgument { .. }
+        | TypeBodyPathStep::Member { .. }
+        | TypeBodyPathStep::MemberKey
+        | TypeBodyPathStep::MemberValue
+        | TypeBodyPathStep::TypeParamBound { .. }
+        | TypeBodyPathStep::ValueSignature { .. }
+        | TypeBodyPathStep::MappedSource
+        | TypeBodyPathStep::ConditionalCheck
+        | TypeBodyPathStep::ConditionalExtends
+        | TypeBodyPathStep::ConditionalFalse
+        | TypeBodyPathStep::IndexedAccessObject
+        | TypeBodyPathStep::IndexedAccessIndex
+        | TypeBodyPathStep::IndexSignatureKey
+        | TypeBodyPathStep::IndexSignatureValue
+        | TypeBodyPathStep::TupleElement { .. } => false,
+    }
 }
 
 /// Navigate a producer-emitted VALUE-space path over the re-borrowed
@@ -809,7 +914,7 @@ fn navigate_value_parts(
     parts: &TransientValueParts,
     path: &[TypeBodyPathStep],
     anchor: &AuthoredAnchor,
-) -> Result<TypeExpr, LocatorBodyDerefError> {
+) -> Result<(TypeExpr, Option<DerefedLexicalRoot>), LocatorBodyDerefError> {
     match path.first() {
         Some(TypeBodyPathStep::ValueSignature { ordinal }) => {
             let signature = parts
@@ -823,7 +928,7 @@ fn navigate_value_parts(
                 .object_shape
                 .clone()
                 .expect("guarded by the arm condition");
-            navigate_expr(TypeExpr::Object(Arc::new(shape)), path)
+            navigate_binder_preserving(TypeExpr::Object(Arc::new(shape)), path)
         }
         _ => {
             // The value declaration's TYPE SURFACE, in the same precedence
@@ -841,10 +946,10 @@ fn navigate_value_parts(
             // addresses one overload directly). A shapeless, annotation-less,
             // signature-less position is the typed absence.
             if let Some(annotation) = parts.type_annotation.clone() {
-                return navigate_expr(annotation, path);
+                return navigate_binder_preserving(annotation, path);
             }
             if let Some(shape) = parts.object_shape.clone() {
-                return navigate_expr(TypeExpr::Object(Arc::new(shape)), path);
+                return navigate_binder_preserving(TypeExpr::Object(Arc::new(shape)), path);
             }
             if path.is_empty() {
                 if let [signature] = parts.signatures.as_slice() {
@@ -861,13 +966,24 @@ fn navigate_value_parts(
 /// signature as its function type — a body-derived return then names its
 /// served function position (declaration body vs initializer at the group
 /// ordinal) so the lowering demands it from the whole-function producer.
+///
+/// A `FunctionParam` / `FunctionReturn` descent that selects a sub-position
+/// still returns the SIGNATURE's own synthesized function type as a
+/// [`DerefedLexicalRoot`] ancestor whenever the signature declares its own
+/// generic clause (`function f<T>(x: T): T`): the selected sub-expression
+/// alone carries no binder for `T`, so lowering it directly would force a
+/// detached type parameter with no constraint/default frame. Re-lowering the
+/// whole signature and navigating the LOWERED graph (the same mechanism the
+/// type-space body navigator uses) predeclares the signature's own binders
+/// first. A non-generic signature has nothing to lose, so it keeps the
+/// cheaper direct sub-expression lowering.
 fn navigate_signature_parts(
     signature: &LoweredSignatureParts,
     rest: &[TypeBodyPathStep],
     anchor: &AuthoredAnchor,
     kind: Option<verter_semantic::analysis::type_eval::ValueDeclKind>,
     signature_ordinal: u32,
-) -> Result<TypeExpr, LocatorBodyDerefError> {
+) -> Result<(TypeExpr, Option<DerefedLexicalRoot>), LocatorBodyDerefError> {
     match rest.first() {
         None => {
             let mut function = FunctionExpr::synthetic(
@@ -897,24 +1013,61 @@ fn navigate_signature_parts(
                     },
                 ));
             }
-            Ok(TypeExpr::Function(Arc::new(function)))
+            Ok((TypeExpr::Function(Arc::new(function)), None))
         }
         Some(TypeBodyPathStep::FunctionParam { ordinal }) => {
             let param = signature
                 .parameters
                 .get(*ordinal as usize)
                 .ok_or(LocatorBodyDerefError::PathUnresolved)?;
-            navigate_expr(param.ty.clone(), &rest[1..])
+            let (selected, nested_root) = navigate_expr_detecting(param.ty.clone(), &rest[1..])?;
+            let lexical_root = if signature.type_parameters.is_empty() {
+                nested_root
+            } else {
+                signature_lexical_root(signature, rest, true)
+            };
+            Ok((selected, lexical_root))
         }
         Some(TypeBodyPathStep::FunctionReturn) => {
             let return_type = signature
                 .return_type
                 .clone()
                 .ok_or(LocatorBodyDerefError::PathUnresolved)?;
-            navigate_expr(return_type, &rest[1..])
+            let (selected, nested_root) = navigate_expr_detecting(return_type, &rest[1..])?;
+            let lexical_root = if signature.type_parameters.is_empty() {
+                nested_root
+            } else {
+                signature_lexical_root(signature, rest, true)
+            };
+            Ok((selected, lexical_root))
         }
         Some(_) => Err(LocatorBodyDerefError::PathUnresolved),
     }
+}
+
+/// The signature's own synthesized function type as a
+/// [`DerefedLexicalRoot`] ancestor, minted when the signature declares at
+/// least one generic parameter of its own OR the selection descended
+/// through a binder-introducing node inside it (`crossed_binder`). A
+/// non-generic signature whose selected sub-position crosses no binder has
+/// nothing to preserve, so callers keep the cheaper direct sub-expression
+/// lowering by getting back `None`.
+fn signature_lexical_root(
+    signature: &LoweredSignatureParts,
+    rest: &[TypeBodyPathStep],
+    crossed_binder: bool,
+) -> Option<DerefedLexicalRoot> {
+    if signature.type_parameters.is_empty() && !crossed_binder {
+        return None;
+    }
+    Some(DerefedLexicalRoot {
+        expr: TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+            signature.parameters.clone(),
+            signature.return_type.clone().map(Arc::new),
+            signature.type_parameters.clone(),
+        ))),
+        path: Arc::from(rest.to_vec().into_boxed_slice()),
+    })
 }
 
 /// The current navigation position: an expression, or a selected object /
@@ -925,161 +1078,435 @@ enum NavigatePosition {
     Member(ObjectMember),
 }
 
+/// Navigate `path` over an owned expression, keeping `expr` as the lexical
+/// ancestor when the descent crosses a binder-introducing node.
+fn navigate_binder_preserving(
+    expr: TypeExpr,
+    path: &[TypeBodyPathStep],
+) -> Result<(TypeExpr, Option<DerefedLexicalRoot>), LocatorBodyDerefError> {
+    navigate_capturing_crossed_root(expr, path)
+}
+
 /// Navigate `path` over an owned expression. Parenthesized wrappers are
 /// structurally transparent at every expression step.
 fn navigate_expr(
     expr: TypeExpr,
     path: &[TypeBodyPathStep],
 ) -> Result<TypeExpr, LocatorBodyDerefError> {
+    navigate_expr_detecting(expr, path).map(|(selected, _)| selected)
+}
+
+/// [`navigate_expr`], additionally returning the first binder-crossing
+/// ancestor when the descent passed THROUGH a node that introduces a
+/// binder scoping over the selected child — a mapped type's key binder, a
+/// conditional's `infer` binders as seen from its true branch, or a
+/// generic callable's own type parameters.
+///
+/// The selected sub-expression alone carries no declaration for such a
+/// binder, so lowering it detached would leave the reference unbound (it
+/// would dangle, or worse, capture an unrelated same-named symbol from an
+/// outer scope). Callers that get a root must lower the ANCESTOR and
+/// navigate the LOWERED graph instead, so every crossed binder is
+/// predeclared first.
+fn navigate_expr_detecting(
+    expr: TypeExpr,
+    path: &[TypeBodyPathStep],
+) -> Result<(TypeExpr, Option<DerefedLexicalRoot>), LocatorBodyDerefError> {
+    let mut lexical_root = None;
     let mut position = NavigatePosition::Expr(expr);
-    for step in path {
-        position = match (position, step) {
-            (NavigatePosition::Expr(expr), TypeBodyPathStep::IntersectionArm { ordinal }) => {
-                match unwrap_parenthesized(expr) {
-                    TypeExpr::Intersection(ref arms) => NavigatePosition::Expr(
-                        arms.get(*ordinal as usize)
-                            .cloned()
-                            .ok_or(LocatorBodyDerefError::PathUnresolved)?,
-                    ),
-                    _ => return Err(LocatorBodyDerefError::PathUnresolved),
-                }
-            }
-            (NavigatePosition::Expr(expr), TypeBodyPathStep::TypeArgument { ordinal }) => {
-                match unwrap_parenthesized(expr) {
-                    TypeExpr::Ref {
-                        ref type_arguments, ..
-                    } => NavigatePosition::Expr(
-                        type_arguments
-                            .get(*ordinal as usize)
-                            .cloned()
-                            .ok_or(LocatorBodyDerefError::PathUnresolved)?,
-                    ),
-                    _ => return Err(LocatorBodyDerefError::PathUnresolved),
-                }
-            }
-            (NavigatePosition::Expr(expr), TypeBodyPathStep::UnionArm { ordinal }) => {
-                match unwrap_parenthesized(expr) {
-                    TypeExpr::Union(ref arms) => NavigatePosition::Expr(
-                        arms.get(*ordinal as usize)
-                            .cloned()
-                            .ok_or(LocatorBodyDerefError::PathUnresolved)?,
-                    ),
-                    _ => return Err(LocatorBodyDerefError::PathUnresolved),
-                }
-            }
-            (NavigatePosition::Expr(expr), TypeBodyPathStep::IndexedAccessObject) => {
-                match unwrap_parenthesized(expr) {
-                    TypeExpr::IndexedAccess { ref object, .. } => {
-                        NavigatePosition::Expr(object.as_ref().clone())
+    for (index, step) in path.iter().enumerate() {
+        if lexical_root.is_none() && step_crosses_binder_scope(&position, step) {
+            lexical_root = Some(DerefedLexicalRoot {
+                expr: lexical_ancestor_expr(&position, step)?,
+                path: Arc::from(path[index..].to_vec().into_boxed_slice()),
+            });
+        }
+        position =
+            match (position, step) {
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::IntersectionArm { ordinal }) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Intersection(ref arms) => NavigatePosition::Expr(
+                            arms.get(*ordinal as usize)
+                                .cloned()
+                                .ok_or(LocatorBodyDerefError::PathUnresolved)?,
+                        ),
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
                     }
-                    _ => return Err(LocatorBodyDerefError::PathUnresolved),
                 }
-            }
-            (NavigatePosition::Expr(expr), TypeBodyPathStep::IndexedAccessIndex) => {
-                match unwrap_parenthesized(expr) {
-                    TypeExpr::IndexedAccess { ref index, .. } => {
-                        NavigatePosition::Expr(index.as_ref().clone())
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::TypeArgument { ordinal }) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Ref {
+                            ref type_arguments, ..
+                        } => NavigatePosition::Expr(
+                            type_arguments
+                                .get(*ordinal as usize)
+                                .cloned()
+                                .ok_or(LocatorBodyDerefError::PathUnresolved)?,
+                        ),
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
                     }
-                    _ => return Err(LocatorBodyDerefError::PathUnresolved),
                 }
-            }
-            (NavigatePosition::Expr(expr), TypeBodyPathStep::Member { ordinal }) => {
-                match unwrap_parenthesized(expr) {
-                    TypeExpr::Object(ref obj) => NavigatePosition::Member(
-                        obj.properties
-                            .get(*ordinal as usize)
-                            .cloned()
-                            .ok_or(LocatorBodyDerefError::PathUnresolved)?,
-                    ),
-                    _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::UnionArm { ordinal }) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Union(ref arms) => NavigatePosition::Expr(
+                            arms.get(*ordinal as usize)
+                                .cloned()
+                                .ok_or(LocatorBodyDerefError::PathUnresolved)?,
+                        ),
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
                 }
-            }
-            (NavigatePosition::Member(member), TypeBodyPathStep::MemberValue) => {
-                NavigatePosition::Expr(member_value_expr(member)?)
-            }
-            (NavigatePosition::Member(member), TypeBodyPathStep::MemberKey) => {
-                NavigatePosition::Expr(member_key_expr(member)?)
-            }
-            // A selected FUNCTION-LIKE member's authored parameter / return
-            // positions (`[Member { k }, FunctionParam { i }]` /
-            // `[Member { k }, FunctionReturn]` — the member-signature fact
-            // vocabulary). The member's function IR is recovered first, then
-            // the sub-position selected; an absent authored position is the
-            // typed miss.
-            (NavigatePosition::Member(member), TypeBodyPathStep::FunctionParam { ordinal }) => {
-                let function = member_function_expr(member)?;
-                NavigatePosition::Expr(
-                    function
-                        .parameters
-                        .get(*ordinal as usize)
-                        .map(|param| param.ty.clone())
-                        .ok_or(LocatorBodyDerefError::PathUnresolved)?,
-                )
-            }
-            (NavigatePosition::Member(member), TypeBodyPathStep::FunctionReturn) => {
-                let function = member_function_expr(member)?;
-                NavigatePosition::Expr(
-                    function
-                        .return_type
-                        .as_deref()
-                        .cloned()
-                        .ok_or(LocatorBodyDerefError::PathUnresolved)?,
-                )
-            }
-            // A selected INDEX-SIGNATURE member's authored key / value
-            // positions.
-            (
-                NavigatePosition::Member(ObjectMember::IndexSignature(index)),
-                TypeBodyPathStep::IndexSignatureKey,
-            ) => NavigatePosition::Expr(index.key_type.clone()),
-            (
-                NavigatePosition::Member(ObjectMember::IndexSignature(index)),
-                TypeBodyPathStep::IndexSignatureValue,
-            ) => NavigatePosition::Expr(index.value_type.clone()),
-            // A bare function-typed EXPRESSION position's parameter / return
-            // sub-steps (defensive totality over the closed vocabulary — the
-            // producers address function positions through their member step,
-            // but a function-valued expression position remains navigable).
-            (NavigatePosition::Expr(expr), TypeBodyPathStep::FunctionParam { ordinal }) => {
-                match unwrap_parenthesized(expr) {
-                    TypeExpr::Function(ref function) => NavigatePosition::Expr(
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::IndexedAccessObject) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::IndexedAccess { ref object, .. } => {
+                            NavigatePosition::Expr(object.as_ref().clone())
+                        }
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::IndexedAccessIndex) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::IndexedAccess { ref index, .. } => {
+                            NavigatePosition::Expr(index.as_ref().clone())
+                        }
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::MappedSource) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Mapped { ref source, .. } => {
+                            NavigatePosition::Expr(source.as_ref().clone())
+                        }
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::MappedValue) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Mapped { ref value, .. } => {
+                            NavigatePosition::Expr(value.as_ref().clone())
+                        }
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::MappedNameType) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Mapped {
+                            name_type: Some(ref name_type),
+                            ..
+                        } => NavigatePosition::Expr(name_type.as_ref().clone()),
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::ConditionalCheck) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Conditional { ref check, .. } => {
+                            NavigatePosition::Expr(check.as_ref().clone())
+                        }
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::ConditionalExtends) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Conditional { ref extends, .. } => {
+                            NavigatePosition::Expr(extends.as_ref().clone())
+                        }
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::ConditionalTrue) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Conditional { ref true_type, .. } => {
+                            NavigatePosition::Expr(true_type.as_ref().clone())
+                        }
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::ConditionalFalse) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Conditional { ref false_type, .. } => {
+                            NavigatePosition::Expr(false_type.as_ref().clone())
+                        }
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::TupleElement { ordinal }) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Tuple { ref elements, .. } => NavigatePosition::Expr(
+                            elements
+                                .get(*ordinal as usize)
+                                .map(|element| element.ty.clone())
+                                .ok_or(LocatorBodyDerefError::PathUnresolved)?,
+                        ),
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::Member { ordinal }) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Object(ref obj) => NavigatePosition::Member(
+                            obj.properties
+                                .get(*ordinal as usize)
+                                .cloned()
+                                .ok_or(LocatorBodyDerefError::PathUnresolved)?,
+                        ),
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                (NavigatePosition::Member(member), TypeBodyPathStep::MemberValue) => {
+                    NavigatePosition::Expr(member_value_expr(member)?)
+                }
+                (NavigatePosition::Member(member), TypeBodyPathStep::MemberKey) => {
+                    NavigatePosition::Expr(member_key_expr(member)?)
+                }
+                // A selected FUNCTION-LIKE member's authored parameter / return
+                // positions (`[Member { k }, FunctionParam { i }]` /
+                // `[Member { k }, FunctionReturn]` — the member-signature fact
+                // vocabulary). The member's function IR is recovered first, then
+                // the sub-position selected; an absent authored position is the
+                // typed miss.
+                (NavigatePosition::Member(member), TypeBodyPathStep::FunctionParam { ordinal }) => {
+                    let function = member_function_expr(member)?;
+                    NavigatePosition::Expr(
                         function
                             .parameters
                             .get(*ordinal as usize)
                             .map(|param| param.ty.clone())
                             .ok_or(LocatorBodyDerefError::PathUnresolved)?,
-                    ),
-                    _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    )
                 }
-            }
-            (NavigatePosition::Expr(expr), TypeBodyPathStep::FunctionReturn) => {
-                match unwrap_parenthesized(expr) {
-                    TypeExpr::Function(ref function) => NavigatePosition::Expr(
+                (NavigatePosition::Member(member), TypeBodyPathStep::FunctionReturn) => {
+                    let function = member_function_expr(member)?;
+                    NavigatePosition::Expr(
                         function
                             .return_type
                             .as_deref()
                             .cloned()
                             .ok_or(LocatorBodyDerefError::PathUnresolved)?,
-                    ),
-                    _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    )
                 }
-            }
-            // A `TypeParamBound` step is valid ONLY as the first path step
-            // (served from the decl header before navigation begins); reaching
-            // one here means it appeared mid-path — fail closed with the
-            // distinct misplaced error rather than a generic path miss.
-            (_, TypeBodyPathStep::TypeParamBound { .. }) => {
-                return Err(LocatorBodyDerefError::TypeParamBoundStepMisplaced);
-            }
-            _ => return Err(LocatorBodyDerefError::PathUnresolved),
-        };
+                // A selected INDEX-SIGNATURE member's authored key / value
+                // positions.
+                (
+                    NavigatePosition::Member(ObjectMember::IndexSignature(index)),
+                    TypeBodyPathStep::IndexSignatureKey,
+                ) => NavigatePosition::Expr(index.key_type.clone()),
+                (
+                    NavigatePosition::Member(ObjectMember::IndexSignature(index)),
+                    TypeBodyPathStep::IndexSignatureValue,
+                ) => NavigatePosition::Expr(index.value_type.clone()),
+                // A bare function-typed EXPRESSION position's parameter / return
+                // sub-steps (defensive totality over the closed vocabulary — the
+                // producers address function positions through their member step,
+                // but a function-valued expression position remains navigable).
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::FunctionParam { ordinal }) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Function(ref function)
+                        | TypeExpr::ConstructorType(ref function) => NavigatePosition::Expr(
+                            function
+                                .parameters
+                                .get(*ordinal as usize)
+                                .map(|param| param.ty.clone())
+                                .ok_or(LocatorBodyDerefError::PathUnresolved)?,
+                        ),
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                (NavigatePosition::Expr(expr), TypeBodyPathStep::FunctionReturn) => {
+                    match unwrap_parenthesized(expr) {
+                        TypeExpr::Function(ref function)
+                        | TypeExpr::ConstructorType(ref function) => NavigatePosition::Expr(
+                            function
+                                .return_type
+                                .as_deref()
+                                .cloned()
+                                .ok_or(LocatorBodyDerefError::PathUnresolved)?,
+                        ),
+                        _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                    }
+                }
+                // A `TypeParamBound` step is valid ONLY as the first path step
+                // (served from the decl header before navigation begins); reaching
+                // one here means it appeared mid-path — fail closed with the
+                // distinct misplaced error rather than a generic path miss.
+                (_, TypeBodyPathStep::TypeParamBound { .. }) => {
+                    return Err(LocatorBodyDerefError::TypeParamBoundStepMisplaced);
+                }
+                _ => return Err(LocatorBodyDerefError::PathUnresolved),
+            };
     }
     match position {
-        NavigatePosition::Expr(expr) => Ok(expr),
+        NavigatePosition::Expr(expr) => Ok((expr, lexical_root)),
         // A path terminating on a selected member derefs to that member's
         // value type (the one typed-IR expression at a member position).
-        NavigatePosition::Member(member) => member_value_expr(member),
+        NavigatePosition::Member(member) => {
+            member_value_expr(member).map(|expr| (expr, lexical_root))
+        }
     }
+}
+
+/// Whether taking `step` from `position` leaves a binder declared BY that
+/// position behind. Descending into a mapped type's value / name-remap
+/// crosses its key binder; descending into a conditional's true branch
+/// crosses the `infer` binders its `extends` clause declares (they are not
+/// in scope in the check, extends, or false positions, so those hops keep
+/// the direct route); descending into a callable's parameters or return
+/// crosses that callable's own type parameters.
+fn step_crosses_binder_scope(position: &NavigatePosition, step: &TypeBodyPathStep) -> bool {
+    let generic_callable = |expr: &TypeExpr| match expr {
+        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
+            !function.type_parameters.is_empty()
+        }
+        _ => false,
+    };
+    match (position, step) {
+        (
+            NavigatePosition::Expr(expr),
+            TypeBodyPathStep::MappedValue | TypeBodyPathStep::MappedNameType,
+        ) => matches!(peek_parenthesized(expr), TypeExpr::Mapped { .. }),
+        (NavigatePosition::Expr(expr), TypeBodyPathStep::ConditionalTrue) => {
+            matches!(
+                peek_parenthesized(expr),
+                TypeExpr::Conditional { extends, .. } if extends_declares_infer(extends)
+            )
+        }
+        (
+            NavigatePosition::Expr(expr),
+            TypeBodyPathStep::FunctionParam { .. } | TypeBodyPathStep::FunctionReturn,
+        ) => generic_callable(peek_parenthesized(expr)),
+        (
+            NavigatePosition::Member(member),
+            TypeBodyPathStep::FunctionParam { .. } | TypeBodyPathStep::FunctionReturn,
+        ) => match member {
+            ObjectMember::Method(method) => !method.function.type_parameters.is_empty(),
+            ObjectMember::CallSignature(function) | ObjectMember::ConstructSignature(function) => {
+                !function.type_parameters.is_empty()
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// The expression to re-lower as the lexical ancestor of a binder-crossing
+/// step: the current expression, or the selected member's function type
+/// when the step descends into a generic callable member.
+fn lexical_ancestor_expr(
+    position: &NavigatePosition,
+    step: &TypeBodyPathStep,
+) -> Result<TypeExpr, LocatorBodyDerefError> {
+    match position {
+        NavigatePosition::Expr(expr) => Ok(expr.clone()),
+        NavigatePosition::Member(member) => match step {
+            TypeBodyPathStep::FunctionParam { .. } | TypeBodyPathStep::FunctionReturn => Ok(
+                TypeExpr::Function(Arc::new(member_function_expr(member.clone())?)),
+            ),
+            _ => member_value_expr(member.clone()),
+        },
+    }
+}
+
+/// Whether `extends` of a conditional declares an `infer` binder that the
+/// true branch can see. Nested conditionals own their own `infer`s and are
+/// not walked.
+fn extends_declares_infer(expr: &TypeExpr) -> bool {
+    let mut stack = vec![peek_parenthesized(expr)];
+    while let Some(expr) = stack.pop() {
+        match expr {
+            TypeExpr::Infer { .. } => return true,
+            TypeExpr::Parenthesized(inner) => stack.push(peek_parenthesized(inner)),
+            TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+                stack.extend(arms.iter().map(peek_parenthesized));
+            }
+            TypeExpr::Ref { type_arguments, .. } => {
+                stack.extend(type_arguments.iter().map(peek_parenthesized));
+            }
+            TypeExpr::Array { element, .. }
+            | TypeExpr::KeyOf(element)
+            | TypeExpr::Rest(element) => {
+                stack.push(peek_parenthesized(element));
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                stack.push(peek_parenthesized(object));
+                stack.push(peek_parenthesized(index));
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                stack.push(peek_parenthesized(source));
+                stack.push(peek_parenthesized(value));
+                if let Some(name_type) = name_type {
+                    stack.push(peek_parenthesized(name_type));
+                }
+            }
+            TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
+                push_function_infer_needles(function, &mut stack);
+            }
+            TypeExpr::Object(object) => {
+                for member in &object.properties {
+                    match member {
+                        ObjectMember::Property(property) => {
+                            stack.push(peek_parenthesized(&property.ty));
+                        }
+                        ObjectMember::IndexSignature(index) => {
+                            stack.push(peek_parenthesized(&index.key_type));
+                            stack.push(peek_parenthesized(&index.value_type));
+                        }
+                        ObjectMember::CallSignature(function)
+                        | ObjectMember::ConstructSignature(function) => {
+                            push_function_infer_needles(function, &mut stack);
+                        }
+                        ObjectMember::Method(method) => {
+                            push_function_infer_needles(&method.function, &mut stack);
+                        }
+                        ObjectMember::Spread(spread) => {
+                            stack.push(peek_parenthesized(&spread.ty));
+                        }
+                    }
+                }
+            }
+            TypeExpr::Tuple { elements, .. } => {
+                for TupleElement { ty, .. } in elements.iter() {
+                    stack.push(peek_parenthesized(ty));
+                }
+            }
+            TypeExpr::TemplateLiteral { expressions, .. } => {
+                stack.extend(expressions.iter().map(peek_parenthesized));
+            }
+            TypeExpr::Conditional { .. } => {}
+            _ => {}
+        }
+    }
+    false
+}
+
+fn push_function_infer_needles<'a>(function: &'a FunctionExpr, stack: &mut Vec<&'a TypeExpr>) {
+    stack.extend(
+        function
+            .parameters
+            .iter()
+            .map(|parameter| peek_parenthesized(&parameter.ty)),
+    );
+    if let Some(return_type) = function.return_type.as_deref() {
+        stack.push(peek_parenthesized(return_type));
+    }
+    for parameter in &function.type_parameters {
+        if let Some(constraint) = parameter.constraint.as_deref() {
+            stack.push(peek_parenthesized(constraint));
+        }
+        if let Some(default) = parameter.default.as_deref() {
+            stack.push(peek_parenthesized(default));
+        }
+    }
+}
+
+/// Borrowing peer of [`unwrap_parenthesized`] for classification-only reads.
+fn peek_parenthesized(mut expr: &TypeExpr) -> &TypeExpr {
+    while let TypeExpr::Parenthesized(inner) = expr {
+        expr = inner.as_ref();
+    }
+    expr
 }
 
 /// Unwrap structurally-transparent `Parenthesized` layers.

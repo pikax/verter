@@ -551,5 +551,15 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
         QueryError::UnrepresentableSurfaceMember => spell::SEMANTIC_SURFACE_MEMBER.to_string(),
         QueryError::OpenSurface => spell::OPEN_SURFACE.to_string(),
         QueryError::UnmodeledPosition => spell::UNMODELED_POSITION.to_string(),
+        QueryError::SignatureOverflow => spell::SEMANTIC_SIGNATURE_OVERFLOW.to_string(),
+        QueryError::ForeignSemanticOperand => spell::SEMANTIC_FOREIGN_OPERAND.to_string(),
+        QueryError::StaleSemanticOperand => spell::SEMANTIC_STALE_OPERAND.to_string(),
+        QueryError::IncompleteSemanticOperand { reasons } => {
+            format!(
+                "{}{})",
+                spell::SEMANTIC_INCOMPLETE_OPERAND_PREFIX,
+                spell::spell_partial_reasons(*reasons)
+            )
+        }
     }
 }

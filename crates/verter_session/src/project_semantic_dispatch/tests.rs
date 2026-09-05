@@ -1511,6 +1511,7 @@ fn semantic_publication_refuses_a_post_finalise_over_cap_carrier() {
         crate::resolver_core::FactReadSetFinalise::Ok(Arc::from(traced)),
         &host.provenance,
         &CarrierNormalizationPrelude::none(),
+        false,
     );
 
     assert!(completed.cache_suppress);

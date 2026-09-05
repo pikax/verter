@@ -676,7 +676,10 @@ fn partial_reason(reasons: PartialReasonSet) -> PropCallableRoleUnresolvedReason
 pub(crate) fn query_error_partial_reasons(error: &QueryError) -> PartialReasonSet {
     match error {
         QueryError::Cancelled => PartialReasonSet::CANCELLED,
-        QueryError::UnstableState { .. } => PartialReasonSet::UNSTABLE_STATE,
+        QueryError::UnstableState { .. } | QueryError::StaleSemanticOperand => {
+            PartialReasonSet::UNSTABLE_STATE
+        }
+        QueryError::IncompleteSemanticOperand { reasons } => *reasons,
         other => reason_partial_set(query_error_reason(other)),
     }
 }
@@ -692,7 +695,9 @@ fn query_error_reason(error: &QueryError) -> PropCallableRoleUnresolvedReason {
         QueryError::OpenSurface | QueryError::UnmodeledPosition => {
             PropCallableRoleUnresolvedReason::MissingDependency
         }
-        QueryError::BudgetExceeded(_) => PropCallableRoleUnresolvedReason::BudgetExceeded,
+        QueryError::BudgetExceeded(_) | QueryError::SignatureOverflow => {
+            PropCallableRoleUnresolvedReason::BudgetExceeded
+        }
         QueryError::AliasCycle { .. }
         | QueryError::RecursiveRef { .. }
         | QueryError::RaiseAliasCycle
@@ -702,6 +707,9 @@ fn query_error_reason(error: &QueryError) -> PropCallableRoleUnresolvedReason {
         | QueryError::UnrepresentableSurfaceMember => PropCallableRoleUnresolvedReason::Unsupported,
         QueryError::Cancelled
         | QueryError::UnstableState { .. }
+        | QueryError::ForeignSemanticOperand
+        | QueryError::StaleSemanticOperand
+        | QueryError::IncompleteSemanticOperand { .. }
         | QueryError::Other(_)
         | QueryError::ValueDomainMismatch { .. } => PropCallableRoleUnresolvedReason::Fault,
     }

@@ -110,6 +110,11 @@ impl ResolveEnvHash {
     pub(crate) const fn from_env_hash(hash: HashValue) -> Self {
         Self(hash)
     }
+
+    #[must_use]
+    pub(crate) const fn get(self) -> HashValue {
+        self.0
+    }
 }
 impl sealed::Sealed for ResolveEnvHash {}
 impl R6KeyDimension for ResolveEnvHash {}

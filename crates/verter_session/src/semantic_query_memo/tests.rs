@@ -8890,6 +8890,143 @@ mod env_scoped_key_identity_guards {
         assert_eq!(baseline, fam(&inst_key(base_t, [0u8; 16])));
     }
 
+    /// `Instantiate` must follow the same `provenance`/`merge_role` family-
+    /// identity pattern proven for `KeyOf` / `MappedType` in
+    /// `keyof_and_mapped_type_context_axes_do_not_alias_family_identity`. A
+    /// heritage-arm instantiation and a structural instantiation of the same
+    /// decl + args carry distinct member-merge semantics and must not collide
+    /// on one family slot; likewise a macro-own-body instantiation and a
+    /// structural one. Regression coverage for `family_and_slot` silently
+    /// dropping `prc.provenance` / `prc.merge_role` on the `Instantiate` arm
+    /// instead of reading them from the key's live `ProjectionReductionContext`.
+    #[test]
+    fn instantiate_context_axes_do_not_alias_family_identity() {
+        let canonical: Arc<str> = Arc::from("/u2b9/context.ts");
+        let name: Arc<str> = Arc::from("Ctx");
+        let slot = ResolvedDeclSlotIdentity::type_slot(
+            Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
+            Arc::clone(&name),
+            0,
+            [1u8; 16],
+            [0u8; 16],
+        );
+        let inst_key_with_context = |context: ProjectionReductionContext| {
+            SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                slot.clone(),
+                empty_args(),
+                InstantiateContext::non_file(
+                    context,
+                    [0u8; 16],
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                ),
+            ))
+        };
+
+        let structural = fam(&inst_key_with_context(context_with_axes(
+            SurfaceProvenanceContext::Structural,
+            MemberMergeRole::Authored,
+        )));
+        assert_ne!(
+            structural,
+            fam(&inst_key_with_context(context_with_axes(
+                SurfaceProvenanceContext::MacroTypeArgOwnBody,
+                MemberMergeRole::Authored,
+            ))),
+            "Instantiate provenance must distinguish the FamilyKey"
+        );
+        assert_ne!(
+            structural,
+            fam(&inst_key_with_context(context_with_axes(
+                SurfaceProvenanceContext::Structural,
+                MemberMergeRole::Heritage,
+            ))),
+            "Instantiate merge_role must distinguish the FamilyKey"
+        );
+        assert_eq!(
+            structural,
+            fam(&inst_key_with_context(context_with_axes(
+                SurfaceProvenanceContext::Structural,
+                MemberMergeRole::Authored,
+            )))
+        );
+    }
+
+    /// An authored-locator instantiate key must occupy a DISTINCT family from
+    /// the declaration-source key over the same (slot, args, context). The
+    /// authored payload is boxed into `InstantiateAuthored` so it cannot
+    /// inflate the declaration-source `Instantiate` envelope that drives the
+    /// hot keyspace. The authored key comes from the forcing authority's own
+    /// issuing fixture — raw operand construction, environment tuples, and
+    /// authored-key creation are authority-private, so this test can only
+    /// obtain the identity the authority derived.
+    #[test]
+    fn authored_instantiate_does_not_alias_declaration_family() {
+        use crate::locator_identity::{
+            LibEnvHash, ParseEnvHash, ProjectIdentityDim, ResolveEnvHash, TypeEnvHash,
+        };
+        use verter_type_expr::locators::{
+            AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
+        };
+
+        let canonical: Arc<str> = Arc::from("/w/authored.ts");
+        let name: Arc<str> = Arc::from("Ctx");
+        let slot = ResolvedDeclSlotIdentity::type_slot(
+            Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
+            Arc::clone(&name),
+            0,
+            [1u8; 16],
+            [0u8; 16],
+        );
+        let context = InstantiateContext::non_file(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            [0u8; 16],
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+        );
+        let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::clone(&canonical),
+                owner: TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::clone(&name),
+                space: LocatorSymbolSpace::Type,
+            },
+            path: Arc::from([TypeBodyPathStep::Member { ordinal: 0 }]),
+        });
+        let split_env_axes = (
+            ParseEnvHash::from_env_hash([0u8; 16]),
+            ResolveEnvHash::from_env_hash([0u8; 16]),
+            TypeEnvHash::from_env_hash([0u8; 16]),
+            LibEnvHash::from_env_hash([0u8; 16]),
+            ProjectIdentityDim::from_project_identity(0),
+        );
+        let authored_key = |slot: &ResolvedDeclSlotIdentity, locator: &AuthoredBodyLocator| {
+            crate::project_semantic_dispatch::semantic_operand::authored_instantiate_key_fixture(
+                slot.clone(),
+                locator.clone(),
+                empty_args(),
+                split_env_axes,
+                context,
+            )
+        };
+        let declaration = fam(&SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(slot.clone(), empty_args(), context),
+        ));
+        let authored = fam(&authored_key(&slot, &locator));
+        let authored_again = fam(&authored_key(&slot, &locator));
+        assert_ne!(
+            declaration, authored,
+            "authored-locator instantiate identity must not alias the declaration-source family"
+        );
+        assert_eq!(
+            authored, authored_again,
+            "the same authored identity must occupy one family"
+        );
+        assert_eq!(declaration.variant_label(), "Instantiate");
+        assert_eq!(authored.variant_label(), "InstantiateAuthored");
+        assert_eq!(authored.candidate_cap(), declaration.candidate_cap());
+    }
+
     /// Closes the "env validity purely ReadSetSignature" gap: a `type_env` /
     /// `lib_env` change to the DECLARATION ITSELF (its slot — not a dependency)
     /// now produces a KEY difference, not merely a fact-revalidation miss.
@@ -10757,4 +10894,67 @@ mod prepared_identity_bijection {
              token equality is full-key equality, never (family, slot) equality"
         );
     }
+}
+
+/// Fail-closed operand-evidence root reconstruction: a listed self-root
+/// canonical with no matching `FileWholeHash` fact on the carrier refuses
+/// — the force's typed incomplete — never a silently SHRUNK root set that
+/// would validate at mint/force and let a `mint -> force -> mint` chain
+/// serve stale-complete after a dead-operand edit. An overflowed carrier
+/// keeps its (partial) evidence so the force maps the overflow flag to
+/// the typed `SignatureOverflow` refusal instead of the blander one.
+#[test]
+fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
+    use crate::resolver_core::FactVersionRef;
+
+    let dep = empty_signature();
+    let root_owner: Arc<str> = Arc::from("/w/owner.ts");
+    let root_producer: Arc<str> = Arc::from("/w/producer.ts");
+    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
+        vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: root_owner.as_ref().to_string(),
+                hash: [1u8; 16],
+            },
+            // A whole-hash for a DIFFERENT canonical (a cross-file
+            // dependency): the rail is non-empty, but it carries no
+            // whole-hash for `root_producer`.
+            FactVersionRef::FileWholeHash {
+                canonical_id: String::from("/w/other.ts"),
+                hash: [2u8; 16],
+            },
+        ]
+        .into_boxed_slice(),
+    ));
+
+    // A listed root WITH its fact reconstructs onto the evidence.
+    let evidence = semantic_operand_evidence(&carrier, &[Arc::clone(&root_owner)], &dep)
+        .expect("a backed root must reconstruct");
+    assert_eq!(
+        evidence.self_roots(),
+        &[(Arc::clone(&root_owner), [1u8; 16])]
+    );
+
+    // A listed root with NO matching whole-hash fact refuses outright.
+    assert!(
+        semantic_operand_evidence(&carrier, &[Arc::clone(&root_producer)], &dep).is_none(),
+        "an unbacked listed root must refuse, not shrink the root set"
+    );
+    // Mixed: one backed and one unbacked root still refuses the whole
+    // reconstruction.
+    assert!(semantic_operand_evidence(
+        &carrier,
+        &[Arc::clone(&root_owner), Arc::clone(&root_producer)],
+        &dep
+    )
+    .is_none());
+
+    // An overflowed carrier keeps its (shrunk) evidence: the overflow
+    // flag — not this reconstruction — is the typed refusal the force
+    // reads.
+    let overflow = crate::fact_signature_helpers::ReadSetSignature::overflow();
+    let evidence = semantic_operand_evidence(&overflow, &[Arc::clone(&root_producer)], &dep)
+        .expect("an overflowed carrier keeps its partial evidence");
+    assert!(evidence.self_roots().is_empty());
+    assert!(evidence.read_set().overflowed);
 }

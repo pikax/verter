@@ -182,6 +182,16 @@ pub(super) enum FamilyKey {
         /// value-affecting axis must remain on the family identity.
         vue_heritage_policy: VueHeritagePolicy,
     },
+    /// Authored-locator instantiate identity. BOXED so the declaration-source
+    /// [`Self::Instantiate`] variant — the hot keyspace driver — stays at its
+    /// existing envelope. An inline `InstantiateSource` pointer on that
+    /// variant would inflate EVERY family key, including ordinary dispatches
+    /// whose source is `declaration()`. Hash/Eq still distinguish two
+    /// authored locators and keep them apart from the declaration-source
+    /// family.
+    InstantiateAuthored {
+        identity: Box<InstantiateAuthoredFamilyIdentity>,
+    },
     ProjectMember {
         base: SemanticNodeId,
         member: Arc<str>,
@@ -558,6 +568,46 @@ pub(super) enum FamilyKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct InstantiateAuthoredFamilyIdentity {
+    base: crate::semantic_query::ResolvedDeclSlotIdentity,
+    args: Arc<[SemanticNodeId]>,
+    authored: crate::semantic_query::operand::AuthoredOperandQueryIdentity,
+    resolve_env_hash: crate::semantic_query::HashValue,
+    body_source: crate::semantic_query::InstantiateBodySource,
+    provenance: crate::semantic_query::SurfaceProvenanceContext,
+    merge_role: crate::semantic_query::MemberMergeRole,
+    vue_heritage_policy: VueHeritagePolicy,
+}
+
+// Family-side R6 witness. `base` is the env-bearing content-free slot;
+// `authored` is the content-free locator/scope/binder/split-env identity;
+// `resolve_env_hash` is a named env dimension. No content/version hash can
+// be added without updating this exhaustive no-`..` destructure.
+const _: fn(&InstantiateAuthoredFamilyIdentity) = w_instantiate_authored_family_identity;
+
+#[allow(dead_code)]
+fn w_instantiate_authored_family_identity(identity: &InstantiateAuthoredFamilyIdentity) {
+    let InstantiateAuthoredFamilyIdentity {
+        base,
+        args,
+        authored,
+        resolve_env_hash,
+        body_source,
+        provenance,
+        merge_role,
+        vue_heritage_policy,
+    } = identity;
+    let _: &crate::semantic_query::ResolvedDeclSlotIdentity = base;
+    let _: &Arc<[SemanticNodeId]> = args;
+    let _: &crate::semantic_query::operand::AuthoredOperandQueryIdentity = authored;
+    let _: &crate::semantic_query::HashValue = resolve_env_hash;
+    let _: &crate::semantic_query::InstantiateBodySource = body_source;
+    let _: &crate::semantic_query::SurfaceProvenanceContext = provenance;
+    let _: &crate::semantic_query::MemberMergeRole = merge_role;
+    let _: &VueHeritagePolicy = vue_heritage_policy;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct ObjectSpreadProjectionFamilyIdentity {
     program: SemanticNodeId,
     selector: crate::semantic_query::ObjectProjectionSelector,
@@ -617,6 +667,7 @@ impl FamilyKey {
         match self {
             FamilyKey::ResolveDecl(_) => "ResolveDecl",
             FamilyKey::Instantiate { .. } => "Instantiate",
+            FamilyKey::InstantiateAuthored { .. } => "InstantiateAuthored",
             FamilyKey::ProjectMember { .. } => "ProjectMember",
             FamilyKey::IndexedAccess { .. } => "IndexedAccess",
             FamilyKey::KeyOf { .. } => "KeyOf",
@@ -674,6 +725,7 @@ impl FamilyKey {
     pub(super) fn candidate_cap(&self) -> usize {
         match self {
             FamilyKey::Instantiate { .. }
+            | FamilyKey::InstantiateAuthored { .. }
             | FamilyKey::TypeOf { .. }
             | FamilyKey::Conditional { .. }
             | FamilyKey::MappedType { .. }
@@ -1525,8 +1577,20 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         }
         SemanticQueryKey::Instantiate(k) => {
             let prc = k.projection_reduction();
-            (
-                FamilyKey::Instantiate {
+            let family = match k.source().authored_identity() {
+                Some(identity) => FamilyKey::InstantiateAuthored {
+                    identity: Box::new(InstantiateAuthoredFamilyIdentity {
+                        base: k.base().clone(),
+                        args: Arc::clone(k.args()),
+                        authored: identity.clone(),
+                        resolve_env_hash: k.resolve_env_hash(),
+                        body_source: k.body_source(),
+                        provenance: prc.provenance,
+                        merge_role: prc.merge_role,
+                        vue_heritage_policy: prc.vue_heritage_policy,
+                    }),
+                },
+                None => FamilyKey::Instantiate {
                     base: k.base().clone(),
                     args: Arc::clone(k.args()),
                     resolve_env_hash: k.resolve_env_hash(),
@@ -1535,8 +1599,8 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                     merge_role: prc.merge_role,
                     vue_heritage_policy: prc.vue_heritage_policy,
                 },
-                context_to_slot(prc),
-            )
+            };
+            (family, context_to_slot(prc))
         }
         SemanticQueryKey::ProjectMember { base, member, mode } => (
             FamilyKey::ProjectMember {
