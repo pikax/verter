@@ -135,7 +135,10 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
         | SemanticNodeData::InferRef { .. }
         | SemanticNodeData::Conditional { .. }
         | SemanticNodeData::Signature { .. }
-        | SemanticNodeData::MergedDecl { .. } => SnippetParamsArg::ResolvedNonTuple,
+        | SemanticNodeData::MergedDecl { .. }
+        // The nominal terminal is a RESOLVED scalar (it widens to the
+        // `symbol` primitive), never an unresolved carrier.
+        | SemanticNodeData::TypeOfNominal(_) => SnippetParamsArg::ResolvedNonTuple,
         // FAIL-CLOSED — an unresolved residual carrier or a non-type artifact the
         // demand primitive could not resolve to a concrete `Params`. A `Params`
         // we cannot resolve to a tuple must fail closed, never presenting a
@@ -584,6 +587,10 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 | SemanticNodeData::IndexedAccess { .. }
                 | SemanticNodeData::Mapped { .. }
                 | SemanticNodeData::TypeOf(_)
+                // The nominal terminal widens to the bare `symbol`
+                // primitive — never a string literal and never resolvable to
+                // one, so it is a decided non-contributor, not fail-closed.
+                | SemanticNodeData::TypeOfNominal(_)
                 | SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::InferRef { .. }

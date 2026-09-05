@@ -1283,31 +1283,26 @@ future_catalog_contract!(
     }
 );
 
-// OB12 — a `unique symbol` computed key keeps the literal's SHAPE: one
-// property, provisioned under a computed key.
+// OB12 — a `unique symbol` computed key names the member by the DECLARING
+// symbol identity: one property, keyed `UniqueSymbol(ob12Key)`.
 //
-// The nominal identity of the key is a RECORDED divergence, asserted in
-// the body so it cannot drift unnoticed. The object literal lowers
-// structurally (which is what keeps a call-sourced spread beside a
-// computed key reducing at all — see `value_inference::
-// object_return_entry_forms_lower_structurally_over_a_call_spread`), and
-// the structural path names a key from its evaluated VALUE. The flow
-// evaluator flattens a `unique symbol` binding's value to the bare
-// `symbol` primitive, so the identity that IS the name does not survive
-// the value channel, and the authored `typeof ob12Key` carrier reduces to
-// the same primitive through the shared type lowering.
+// The object literal lowers structurally (which is what keeps a
+// call-sourced spread beside a computed key reducing at all — see
+// `value_inference::object_return_entry_forms_lower_structurally_over_a_call_spread`),
+// and the structural path names a key from its evaluated VALUE. A
+// `unique symbol` value keeps its declaring identity on that channel, so
+// the key that IS the name survives: a distinct `unique symbol`
+// declaration is a distinct property, never one shared computed slot.
 //
-// The trade is deliberate and bounded: the member SET stays complete (the
-// property is present, under a computed key the downstream key reader can
-// still carry), rather than the whole return failing closed. Carrying the
-// nominal identity needs the symbol's uniqueness on the evaluator's value
-// channel, which is the same missing fact both channels hit.
+// A NON-unique `symbol` key still resolves through the authored carrier —
+// it provisions an index signature rather than one nominal property, and
+// telling those apart is the key's own uniqueness, not this contract.
 catalog_contract!(
-    flow_return_ob12_keeps_unique_symbol_computed_key_shape,
+    flow_return_ob12_names_a_unique_symbol_key_by_its_declaring_identity,
     "OB12",
     |expr| {
         let TypeExpr::Object(object) = expr else {
-            panic!("expected computed-key object shape, got {expr:?}");
+            panic!("expected symbol-keyed object shape, got {expr:?}");
         };
         let [ObjectMember::Property(property)] = object.properties.as_slice() else {
             panic!(
@@ -1315,16 +1310,16 @@ catalog_contract!(
                 object.properties
             );
         };
-        assert!(
-            matches!(
-                &property.key,
-                verter_type_expr::AuthoredPropertyKey::Computed(_)
-            ),
-            "the member survives under a COMPUTED key; the nominal `ob12Key` identity is the \
-             recorded divergence — flip this to `UniqueSymbol` when the evaluator's value \
-             channel carries symbol uniqueness. Got {:?}",
-            property.key
-        );
+        let verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) = &property.key else {
+            panic!(
+                "a `unique symbol` key names ONE nominal property by its declaring identity; a \
+                 `Computed` key here would mean the uniqueness was lost on the value channel and \
+                 two distinct symbols could collapse onto one slot. Got {:?}",
+                property.key
+            );
+        };
+        assert_eq!(identity.symbol.as_ref(), "ob12Key");
+        assert!(identity.member_path.is_empty());
     }
 );
 

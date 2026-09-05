@@ -301,7 +301,10 @@ fn push_child_ids(data: &SemanticNodeData, out: &mut Vec<SemanticNodeId>) -> boo
         | D::RawFallback { .. }
         | D::Infer { .. }
         | D::InferRef { .. }
-        | D::DeclRef { .. } => true,
+        | D::DeclRef { .. }
+        // The nominal terminal's payload is a scalar declaring identity —
+        // no child node ids.
+        | D::TypeOfNominal(_) => true,
         D::Alias(inner) | D::KeyOf { base: inner } => {
             out.push(*inner);
             true
@@ -971,6 +974,8 @@ fn payload_is_childless(data: &SemanticNodeData) -> bool {
     match data {
         D::Primitive(_) | D::Literal(_) | D::Opaque(_) | D::RawFallback { .. } => true,
         D::Infer { .. } | D::InferRef { .. } | D::DeclRef { .. } => true,
+        // The nominal terminal's declaring identity is a scalar facts record.
+        D::TypeOfNominal(_) => true,
         // A TypeParam without constraint/default has no children.
         D::TypeParam {
             constraint,
@@ -1280,6 +1285,14 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
             carrier.bare_ref_head().hash(hasher);
             carrier.import_type_head().hash(hasher);
             carrier.carrier_type_args().len().hash(hasher);
+        }
+        // The nominal terminal hashes its head AND its declaring identity:
+        // the identity is the whole semantic content of the node, so two
+        // same-headed carriers denoting different declarations must hash
+        // apart.
+        D::TypeOfNominal(_) => {
+            data.typeof_head().hash(hasher);
+            data.typeof_nominal_identity().hash(hasher);
         }
         D::TypeParam {
             decl,
@@ -1775,6 +1788,16 @@ fn compare_shallow(
             }
             true
         }
+        // Nominal terminals compare by head AND declaring identity — the
+        // identity IS the type, and a structural comparator that skipped it
+        // would alias two distinct `unique symbol` declarations.
+        (a @ D::TypeOfNominal(_), b @ D::TypeOfNominal(_)) => {
+            a.typeof_head() == b.typeof_head()
+                && a.typeof_nominal_identity() == b.typeof_nominal_identity()
+        }
+        // A deferred shell and a terminal nominal carrier never structurally
+        // alias.
+        (D::TypeOf(_), D::TypeOfNominal(_)) | (D::TypeOfNominal(_), D::TypeOf(_)) => false,
         (a @ D::BareRef(_), b @ D::BareRef(_)) => {
             if a.bare_ref_head() != b.bare_ref_head() {
                 return false;

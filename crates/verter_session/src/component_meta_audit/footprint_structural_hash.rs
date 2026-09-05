@@ -110,6 +110,7 @@ enum VariantTag {
     IndexedAccess = 12,
     Mapped = 13,
     TypeOf = 14,
+    TypeOfNominal = 19,
     TypeParam = 15,
     Infer = 16,
     Conditional = 17,
@@ -635,6 +636,24 @@ impl StructuralEncoder<'_> {
                 self.push_str_slice(path);
                 let args = data.carrier_type_args().to_vec();
                 self.encode_child_slice(&args, depth);
+            }
+            // The nominal terminal's DECLARING IDENTITY participates in the
+            // structural hash: it is the whole semantic content of the node,
+            // so two same-headed carriers with different declaring symbols
+            // must not share a structural fingerprint. The identity is
+            // encoded field-by-field through the shared encoder
+            // (`encode_value_decl_identity`) like every sibling arm — a
+            // `Debug` render is not a stability contract and can reorder
+            // fields without the fingerprint contract noticing.
+            SemanticNodeData::TypeOfNominal(_) => {
+                self.buf.push(VariantTag::TypeOfNominal as u8);
+                let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+                self.encode_value_root(value_root);
+                self.push_str_slice(path);
+                let identity = data
+                    .typeof_nominal_identity()
+                    .expect("TypeOfNominal carrier identity");
+                self.encode_value_decl_identity(identity);
             }
             SemanticNodeData::BareRef(_) => {
                 self.buf.push(VariantTag::BareRef as u8);

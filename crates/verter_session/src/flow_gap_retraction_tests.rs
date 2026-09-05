@@ -9,7 +9,7 @@ use crate::host_flow_return_audit::FlowReturnError;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     FlowGap, FlowInputContext, FlowReturnDegradation, FlowReturnFailure, FlowReturnKey,
-    ReturnProjectionDemand, SemanticQueryKey,
+    RelationKind, ReturnProjectionDemand, SemanticQueryKey,
 };
 use crate::{FileLanguage, VerterHost};
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
@@ -216,14 +216,420 @@ fn assert_complete_warm(trace: &Trace, expected_json: Option<&str>) {
     }
 }
 
+/// Readable composite subjects are not a nominal-resolution failure. When
+/// the overlap oracle has no disjointness proof, narrowing stays complete and
+/// cacheable for unions, intersections, arrays, tuples, and call signatures.
+/// Each row pins the EXACT narrowed value — the subject intersected with the
+/// predicate type, composed with the widened literal arm — so a wrong-but-
+/// complete narrow (a collapsed `never`, a dropped subject half, or a
+/// fabricated intersection) fails here and not only on the temperature axis.
+#[test]
+fn readable_composite_predicate_narrows_remain_complete_and_warm() {
+    let fixtures = [
+        (
+            "union",
+            "function isC(x: { a: number } | { b: number }): x is { c: number } { return true as boolean as never }\nfunction makeProps(x: { a: number } | { b: number }) { return { v: isC(x) ? x : \"no\" } }",
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"intersection","types":[{"kind":"union","types":[{"kind":"object","properties":[{"key":{"kind":"string","value":"a"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"number"}}]},{"kind":"object","properties":[{"key":{"kind":"string","value":"b"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"number"}}]}]},{"kind":"object","properties":[{"key":{"kind":"string","value":"c"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"number"}}]}]},{"kind":"primitive","name":"string"}]}}]}"#,
+        ),
+        (
+            "intersection",
+            "function isC(x: { a: number } & { b: number }): x is { c: number } { return true as boolean as never }\nfunction makeProps(x: { a: number } & { b: number }) { return { v: isC(x) ? x : \"no\" } }",
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"intersection","types":[{"kind":"object","properties":[{"key":{"kind":"string","value":"a"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"number"}}]},{"kind":"object","properties":[{"key":{"kind":"string","value":"b"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"number"}}]},{"kind":"object","properties":[{"key":{"kind":"string","value":"c"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"number"}}]}]},{"kind":"primitive","name":"string"}]}}]}"#,
+        ),
+        (
+            "array",
+            "function isStrings(x: number[]): x is string[] { return true as boolean as never }\nfunction makeProps(x: number[]) { return { v: isStrings(x) ? x : \"no\" } }",
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"primitive","name":"string"},{"kind":"intersection","types":[{"element":{"kind":"primitive","name":"number"},"kind":"array","readonly":false},{"element":{"kind":"primitive","name":"string"},"kind":"array","readonly":false}]}]}}]}"#,
+        ),
+        (
+            "tuple",
+            "function isPair(x: [number]): x is [string] { return true as boolean as never }\nfunction makeProps(x: [number]) { return { v: isPair(x) ? x : \"no\" } }",
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"primitive","name":"string"},{"kind":"intersection","types":[{"elements":[{"label":null,"optional":false,"rest":false,"ty":{"kind":"primitive","name":"number"}}],"kind":"tuple","readonly":false},{"elements":[{"label":null,"optional":false,"rest":false,"ty":{"kind":"primitive","name":"string"}}],"kind":"tuple","readonly":false}]}]}}]}"#,
+        ),
+        (
+            "signature",
+            "function isB(x: (value: number) => number): x is (value: string) => string { return true as boolean as never }\nfunction makeProps(x: (value: number) => number) { return { v: isB(x) ? x : \"no\" } }",
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"primitive","name":"string"},{"kind":"intersection","types":[{"kind":"function","parameters":[{"name":"value","optional":false,"rest":false,"ty":{"kind":"primitive","name":"number"}}],"returnType":{"kind":"primitive","name":"number"}},{"kind":"function","parameters":[{"name":"value","optional":false,"rest":false,"ty":{"kind":"primitive","name":"string"}}],"returnType":{"kind":"primitive","name":"string"}}]}]}}]}"#,
+        ),
+    ];
+
+    for (id, source, expected_json) in fixtures {
+        let trace = run(&format!("readable_composite_{id}"), source, "makeProps");
+        assert_complete_warm(&trace, Some(expected_json));
+    }
+}
+
+/// A discriminated union whose arms are INTERSECTIONS still narrows to
+/// `never` on the impossible edge.
+///
+/// The disjointness proof comes from a member descent over the two arms'
+/// one-level surfaces, and an intersection HAS no members until its arms
+/// are merged. A relation oracle that read only the terminal node tag would
+/// answer this pair permissively, and the consumer's `let ... else` would
+/// publish `A & B` alongside the false edge — a WRONG value admitted
+/// complete and warm, which is the outcome the value pin below discriminates
+/// and the sibling complete/warm-only rows cannot see.
+#[test]
+fn intersection_arm_predicate_narrow_publishes_the_disjoint_edge() {
+    const SOURCE: &str = "type Base = { id: string };\n\
+         type TaggedA = Base & { kind: \"a\" };\n\
+         type TaggedB = Base & { kind: \"b\" };\n\
+         function isB(x: TaggedA | TaggedB): x is TaggedB { return x.kind === \"b\" }\n\
+         function makeProps(x: TaggedA) { return { v: isB(x) ? x : \"no\" } }";
+
+    let trace = run("intersection_arm_narrow", SOURCE, "makeProps");
+    assert_complete_warm(
+        &trace,
+        Some(
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"string"}}]}"#,
+        ),
+    );
+}
+
+/// A disjointness proof whose conflict is NOT a checker collapse criterion
+/// narrows to the CHECKER-KEPT intersection, never to `never`.
+///
+/// `{ m: { b: number } }` versus `{ m: { b: string } }` is provably
+/// disjoint (the shared required member conflicts one level down), but
+/// `tsc`'s intersection reducer KEEPS `A & B` — the conflict is reachable
+/// only through member values that are not both unit types, at any depth.
+/// The proof carries the checker's collapse class for exactly this pair,
+/// so the narrow publishes the intersection on the positive edge: the
+/// value pin discriminates `never` (the projected `v` would collapse to
+/// the literal `"no"` alone) from the kept intersection (`v` still carries
+/// the `m` member).
+#[test]
+fn non_unit_member_conflict_narrows_to_the_checker_kept_intersection() {
+    const SOURCE: &str = "type LeftN = { m: { b: number } };\n\
+         type RightN = { m: { b: string } };\n\
+         function isRight(x: LeftN): x is RightN { return true as boolean as never }\n\
+         function makeProps(x: LeftN) { return { v: isRight(x) ? x : \"no\" } }";
+    let trace = run("non_unit_member_conflict", SOURCE, "makeProps");
+    assert_complete_warm(&trace, None);
+    let json = trace
+        .first
+        .json
+        .as_deref()
+        .expect("the kept intersection must project a value");
+    assert!(
+        json.contains("\"kind\":\"intersection\"")
+            && json.contains("\"LeftN\"")
+            && json.contains("\"RightN\""),
+        "the narrowed value keeps the checker's `LeftN & RightN` intersection — collapsing to \
+         `never` would leave only the widened `\"no\"` literal arm: {json}"
+    );
+}
+
+/// A predicate narrow over an operand nobody can read publishes NO fact in
+/// either direction — the subject keeps its own type, with no degradation.
+///
+/// The deciding member value is an indexed access (`Boxed["k"]`) that no
+/// relation stage reduces: assignability defers, so the narrow never
+/// reaches a decided judgement at all, and the recompute (not a warm
+/// serve — an unread operand publishes nothing cacheable either) answers
+/// the same way. The temperature pins below carry that cold half: BOTH
+/// requests recompute (`from_cache` false, cold work nonzero) and neither
+/// admits a candidate, so an undecided relation can never be served warm
+/// as a decision. Both wrong-complete directions are discriminated by the
+/// value pin: minting a disjointness proof from the unread operand would
+/// publish `never` (the `v` type would collapse to the widened literal arm
+/// alone), and fabricating an overlap would publish an intersection the
+/// checker does not have.
+#[test]
+fn predicate_narrow_over_an_unreduced_operand_publishes_no_fact() {
+    const SOURCE: &str = "type Boxed = { k: \"a\" };\n\
+         type Subject = { v: Boxed[\"k\"] };\n\
+         function isOther(x: Subject): x is { v: \"b\" } { return true as boolean as never }\n\
+         function makeProps(x: Subject) { return { v: isOther(x) ? x : \"no\" } }";
+    let trace = run("unreduced_operand_narrow", SOURCE, "makeProps");
+    for sample in [&trace.first, &trace.second] {
+        assert_eq!(sample.error, None, "must evaluate: {trace:#?}");
+        assert_eq!(
+            sample.degradation, None,
+            "an unread fact is not a gap: {trace:#?}"
+        );
+        assert!(
+            !sample.from_cache,
+            "an unread operand publishes nothing cacheable — every request must \
+             recompute, never warm-serve an undecided narrow: {trace:#?}"
+        );
+        assert!(
+            sample.cold_computes >= 1,
+            "a recompute must do cold work: {trace:#?}"
+        );
+        assert_eq!(
+            sample.candidates, 0,
+            "an undecided relation admits no candidate: {trace:#?}"
+        );
+        let json = sample
+            .json
+            .as_deref()
+            .expect("the unchanged subject must project a value");
+        assert!(
+            json.contains("\"kind\":\"ref\",\"name\":\"Subject\""),
+            "the unread operand decides nothing: the subject keeps its own type rather than \
+             narrowing to `never` or to a fabricated intersection: {json}"
+        );
+        assert!(
+            !json.contains("\"kind\":\"intersection\""),
+            "no overlap fact exists for an unread operand: {json}"
+        );
+    }
+    assert_eq!(
+        trace.first.json, trace.second.json,
+        "both samples answer identically"
+    );
+}
+
+#[test]
+fn nominal_relation_gap_retracts_only_when_decided() {
+    const DECIDED: &str = "declare const A_KIND: unique symbol; declare const B_KIND: unique symbol;\ntype A = { kind: typeof A_KIND; a: number }; type B = { kind: typeof B_KIND; b: number };\nfunction isA(x: A | B): x is A { return x.kind === A_KIND }\nfunction isB(x: A | B): x is B { return x.kind === B_KIND }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? x : \"ok\") : \"no\" } }";
+    const UNRESOLVED: &str = "import type { AKind, BKind } from \"./absent-nominal-source\";\ntype A = { kind: AKind; a: number }; type B = { kind: BKind; b: number };\nfunction isA(x: A | B): x is A { return true as boolean as never }\nfunction isB(x: A | B): x is B { return true as boolean as never }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? x : \"ok\") : \"no\" } }";
+
+    let decided = run("nominal_decided", DECIDED, "makeProps");
+    assert_complete_warm(
+        &decided,
+        Some(
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"string"}}]}"#,
+        ),
+    );
+
+    let unresolved = run("nominal_unresolved", UNRESOLVED, "makeProps");
+    assert_partial(&unresolved, FlowGap::NominalRelation);
+}
+
+/// AC3 same-host evidence: editing the unique-symbol DECLARATION on one
+/// live host must flip a flow-level nominal narrow — the decided warm
+/// result is retracted, never served stale.
+///
+/// Before the edit: both kinds are declared `unique symbol`, so the inner
+/// `isB` branch is provably disjoint after `isA` and `v` decides to `string`
+/// (cold, then warm). The declaration file is then EDITED to drop
+/// `B_KIND`: the import behind `typeof B_KIND` no longer resolves, the
+/// `Comparable` ask turns UNDECIDED, and the SAME host must answer the
+/// next request cold with the typed `NominalRelation` gap — a warm serve
+/// of the pre-edit verdict would be a stale publication.
+#[test]
+fn nominal_narrow_retracts_when_a_declaration_changes_on_one_host() {
+    let host = make_audit_host();
+    let decl = "/flow-gap-retraction/edit-decl.ts";
+    let consumer = "/flow-gap-retraction/edit-consumer.ts";
+    upsert(
+        &host,
+        decl,
+        &super::module_script(
+            "export declare const A_KIND: unique symbol; export declare const B_KIND: unique symbol;",
+        ),
+        FileLanguage::script_ts(),
+    );
+    upsert(
+        &host,
+        consumer,
+        &super::module_script(
+            "import { A_KIND, B_KIND } from \"./edit-decl\";\ntype A = { kind: typeof A_KIND; a: number }; type B = { kind: typeof B_KIND; b: number };\nfunction isA(x: A | B): x is A { return x.kind === A_KIND }\nfunction isB(x: A | B): x is B { return x.kind === B_KIND }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? x : \"ok\") : \"no\" } }",
+        ),
+        FileLanguage::script_ts(),
+    );
+
+    let decided = run_on(&host, consumer, "makeProps");
+    assert_complete_warm(
+        &decided,
+        Some(
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"string"}}]}"#,
+        ),
+    );
+
+    // Edit the declaration on the SAME host: `B_KIND` is gone.
+    upsert(
+        &host,
+        decl,
+        &super::module_script("export declare const A_KIND: unique symbol;"),
+        FileLanguage::script_ts(),
+    );
+    let retracted = run_on(&host, consumer, "makeProps");
+    for sample in [&retracted.first, &retracted.second] {
+        assert_eq!(
+            sample.error, None,
+            "partial result remains usable: {retracted:#?}"
+        );
+        assert_eq!(
+            sample.degradation,
+            Some(FlowReturnDegradation::FlowGap(FlowGap::NominalRelation)),
+            "the unread operand flips the narrow back to the typed gap: {retracted:#?}"
+        );
+        assert!(
+            !sample.from_cache,
+            "a retracted verdict must NEVER warm — not after the edit, not on \
+             the replay: {retracted:#?}"
+        );
+    }
+    let flipped = retracted.first.json.as_deref().unwrap_or_default();
+    assert!(
+        flipped.contains("\"kind\":\"intersection\""),
+        "undecided keeps the intersection the decided run collapsed: {flipped}"
+    );
+    assert_ne!(
+        decided.first.json, retracted.first.json,
+        "the edit must flip the narrow, not serve the pre-edit verdict: {retracted:#?}"
+    );
+}
+
+/// An unread `typeof` operand in a type-predicate target stays a typed
+/// gap: the flow value is partial, admits no candidate, and cannot warm.
+#[test]
+fn unreduced_predicate_target_stays_partial_and_cold() {
+    const SOURCE: &str = "import { absent } from \"./absent-unreduced-source\";\n\
+         function isString(x: typeof absent | string): x is string { return true as boolean as never }\n\
+         function makeProps(x: typeof absent | string) { return { v: isString(x) ? x : \"no\" } }";
+    let trace = run("unreduced_predicate_target", SOURCE, "makeProps");
+    for sample in [&trace.first, &trace.second] {
+        assert_eq!(
+            sample.error, None,
+            "partial result remains usable: {trace:#?}"
+        );
+        assert_eq!(
+            sample.degradation,
+            Some(FlowReturnDegradation::UnresolvedValue),
+            "unread typeof stays a typed unresolved value: {trace:#?}"
+        );
+        assert!(
+            !sample.from_cache,
+            "partial result must stay cold: {trace:#?}"
+        );
+        assert!(
+            sample.cold_computes >= 1,
+            "cold work must be nonzero: {trace:#?}"
+        );
+        assert_eq!(
+            sample.candidates, 0,
+            "partial result admits no candidate: {trace:#?}"
+        );
+        assert!(
+            sample.json.is_some(),
+            "partial result must project: {trace:#?}"
+        );
+    }
+}
+
+#[test]
+fn flow_has_no_private_relation_classifier() {
+    const SOURCE: &str = "declare const A_KIND: unique symbol; declare const B_KIND: unique symbol;\ntype A = { kind: typeof A_KIND; a: number }; type B = { kind: typeof B_KIND; b: number };\nfunction isB(x: A | B): x is B { return x.kind === B_KIND }\nfunction makeProps(x: A) { return { v: isB(x) ? x : \"no\" } }";
+    let host = make_audit_host();
+    let canonical = "/flow-gap-retraction/authority-result.ts";
+    upsert(
+        &host,
+        canonical,
+        &super::module_script(SOURCE),
+        FileLanguage::script_ts(),
+    );
+    let trace = run_on(&host, canonical, "makeProps");
+    assert_complete_warm(
+        &trace,
+        Some(
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"string"}}]}"#,
+        ),
+    );
+
+    let graph = host.project_type_store().semantic_graph();
+    assert!(
+        graph.relation_memo_count_of_kind(RelationKind::Comparable) > 0,
+        "the narrow must publish through the Comparable family",
+    );
+    assert_eq!(
+        graph.relation_memo_count_of_kind(RelationKind::Identity),
+        0,
+        "flow narrowing must not issue an identity judgement",
+    );
+}
+
+#[test]
+fn call_resolution_remains_assignability_only() {
+    const SOURCE: &str = "declare const TOKEN: unique symbol;\n\
+         declare const arbitrary: symbol;\n\
+         function exact(x: typeof TOKEN): \"nominal\";\n\
+         function exact(x: symbol): \"wide\";\n\
+         function exact(x: symbol): \"nominal\" | \"wide\" { return \"wide\" }\n\
+         function pick(x: number): \"missed\";\n\
+         function pick(x: \"a\"): \"picked\";\n\
+         function pick(x: unknown): \"fallback\" { return \"fallback\" as \"fallback\" }\n\
+         function acceptsUnion(x: typeof TOKEN | string): \"union\" { return \"union\" }\n\
+         function ident<T>(x: T): T { return x }\n\
+         function makeProps() { return { v: pick(\"a\"), w: ident(\"b\" as const), x: exact(arbitrary), y: acceptsUnion(TOKEN) } }";
+    let trace = run("assignability_calls", SOURCE, "makeProps");
+    assert_complete_warm(
+        &trace,
+        Some(
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"literal","literalKind":"string","value":"picked"}},{"excessOrigin":"freshOwn","key":{"kind":"string","value":"w"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"literal","literalKind":"string","value":"b"}},{"excessOrigin":"freshOwn","key":{"kind":"string","value":"x"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"literal","literalKind":"string","value":"wide"}},{"excessOrigin":"freshOwn","key":{"kind":"string","value":"y"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"literal","literalKind":"string","value":"union"}}]}"#,
+        ),
+    );
+}
+
+#[test]
+fn nominal_computed_keys_preserve_declaring_identity() {
+    let host = make_audit_host();
+    upsert(
+        &host,
+        "/flow-gap-retraction/decl.ts",
+        &super::module_script(
+            "export declare const A_KIND: unique symbol; export declare const B_KIND: unique symbol;",
+        ),
+        FileLanguage::script_ts(),
+    );
+    upsert(
+        &host,
+        "/flow-gap-retraction/namespace.ts",
+        &super::module_script(
+            "import * as Tokens from \"./decl\"; function makeProps() { return { [Tokens.A_KIND]: \"v\" as const } }",
+        ),
+        FileLanguage::script_ts(),
+    );
+    let trace = run_on(&host, "/flow-gap-retraction/namespace.ts", "makeProps");
+    // The namespace-qualified leg asserts error / degradation / value on BOTH
+    // requests but deliberately does NOT use `assert_complete_warm`: a
+    // namespace-qualified VALUE read is cold on the second request for
+    // reasons that predate the nominal axis and are not this contract's
+    // subject. What IS this contract's subject — the declaring identity that
+    // names the member — is pinned identically on both samples, so a
+    // regression that lost the identity on recompute still fails here. The
+    // direct-import leg below carries the warm assertion.
+    for sample in [&trace.first, &trace.second] {
+        assert_eq!(sample.error, None, "must evaluate: {trace:#?}");
+        assert_eq!(sample.degradation, None, "must be complete: {trace:#?}");
+        assert_eq!(
+            sample.json.as_deref(),
+            Some(
+                r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"identity":{"canonical_id":"/flow-gap-retraction/decl.ts","member_path":[],"owner":{"kind":"Module","ordinal":0},"symbol":"A_KIND"},"kind":"uniqueSymbol"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"literal","literalKind":"string","value":"v"}}]}"#,
+            ),
+        );
+    }
+
+    let host = make_audit_host();
+    upsert(
+        &host,
+        "/flow-gap-retraction/decl.ts",
+        &super::module_script("export declare const A_KIND: unique symbol;"),
+        FileLanguage::script_ts(),
+    );
+    upsert(
+        &host,
+        "/flow-gap-retraction/direct.ts",
+        &super::module_script(
+            "import { A_KIND } from \"./decl\"; function makeProps() { return { [A_KIND]: \"v\" as const } }",
+        ),
+        FileLanguage::script_ts(),
+    );
+    let trace = run_on(&host, "/flow-gap-retraction/direct.ts", "makeProps");
+    assert_complete_warm(
+        &trace,
+        Some(
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"identity":{"canonical_id":"/flow-gap-retraction/decl.ts","member_path":[],"owner":{"kind":"Module","ordinal":0},"symbol":"A_KIND"},"kind":"uniqueSymbol"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"literal","literalKind":"string","value":"v"}}]}"#,
+        ),
+    );
+}
+
 #[test]
 fn flow_gap_known_gap_results_are_typed_partial_and_never_warm() {
     let fixtures = [
-        (
-            "g3",
-            "declare const A_KIND: unique symbol; declare const B_KIND: unique symbol;\ntype A = { kind: typeof A_KIND; a: number }; type B = { kind: typeof B_KIND; b: number };\nfunction isA(x: A | B): x is A { return x.kind === A_KIND }\nfunction isB(x: A | B): x is B { return x.kind === B_KIND }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? x : \"ok\") : \"no\" } }",
-            FlowGap::NominalRelation,
-        ),
         (
             "g6",
             "function makeProps() { let x: \"a\" | \"b\" = \"a\"; const f = () => x; x = \"b\"; return f }",

@@ -27,7 +27,8 @@
 //! `map_carrier_type_args` (`pub(crate)`), `new_typeof` / `new_bare_ref` /
 //! `new_import_type` (`pub`), and `typeof_head` / `bare_ref_head` /
 //! `import_type_head` (`pub(crate)`). The carriers' OWN payload methods
-//! (`new`, the head getters, `arg_nodes`, `with_type_args`) are PRIVATE to
+//! (`new`, the nominal constructor/getter, the head getters, `arg_nodes`,
+//! `with_type_args`) are PRIVATE to
 //! this module, so they are reachable ONLY from that accessor block — NOT from
 //! the ~6000-line parent `semantic_query` module. The raw-args surface is thus
 //! COMPILER-CONFINED to `carrier.rs`: a sibling `impl carrier::BareRefCarrier`
@@ -54,9 +55,11 @@
 use std::sync::Arc;
 
 use super::{NodeScopeId, SemanticNodeData, SemanticNodeId, ValueRootKey};
+use verter_type_expr::facts::ValueDeclIdentityPart;
 
-/// Borrowed head view of a [`SemanticNodeData::TypeOf`] carrier —
-/// `(value_root, path)`, NEVER its `type_args` (descend those through
+/// Borrowed head view of a [`SemanticNodeData::TypeOf`] or
+/// [`SemanticNodeData::TypeOfNominal`] carrier — `(value_root, path)`,
+/// NEVER the deferred carrier's `type_args` (descend those through
 /// [`SemanticNodeData::carrier_type_args`]).
 pub(crate) type TypeOfHead<'a> = (&'a ValueRootKey, &'a Arc<[Arc<str>]>);
 
@@ -118,6 +121,58 @@ impl TypeOfCarrier {
             path: self.path.clone(),
             type_args,
         }
+    }
+}
+
+/// Terminal nominal `typeof` carrier payload — the `unique symbol` type
+/// itself.
+///
+/// A [`SemanticNodeData::TypeOf`] node is ALWAYS a deferred shell: a lookup
+/// whose content has not been read yet. A terminal nominal `typeof` is a
+/// DIFFERENT semantic class — the declaring
+/// [`ValueDeclIdentityPart`] IS the type, so there is nothing left to
+/// resolve and no `type_args` to apply. Giving it its own
+/// [`SemanticNodeData`] variant (instead of an optional marker inside the
+/// deferred shell) makes the classification COMPILER-HELD: every exhaustive
+/// match over [`SemanticNodeData`] fails to compile until it classifies the
+/// terminal, and no substitution path can rebuild a nominal terminal with
+/// type arguments because it has none to rebuild.
+///
+/// Like the deferred shell, the HEAD stays the AUTHORED reference (the
+/// value root and dotted path the source actually wrote) while the identity
+/// rides the payload, so a renamed import displays as its local spelling
+/// and still compares equal to every other spelling of the same
+/// declaration.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct TypeOfNominalCarrier {
+    value_root: ValueRootKey,
+    path: Arc<[Arc<str>]>,
+    identity: ValueDeclIdentityPart,
+}
+
+impl TypeOfNominalCarrier {
+    fn new(
+        value_root: ValueRootKey,
+        path: Arc<[Arc<str>]>,
+        identity: ValueDeclIdentityPart,
+    ) -> Self {
+        Self {
+            value_root,
+            path,
+            identity,
+        }
+    }
+
+    fn value_root(&self) -> &ValueRootKey {
+        &self.value_root
+    }
+
+    fn path(&self) -> &Arc<[Arc<str>]> {
+        &self.path
+    }
+
+    fn identity(&self) -> &ValueDeclIdentityPart {
+        &self.identity
     }
 }
 
@@ -265,8 +320,12 @@ impl SemanticNodeData {
             Self::TypeOf(c) => c.arg_nodes(),
             Self::ImportType(c) => c.arg_nodes(),
             // EXHAUSTIVE non-carrier enumeration — NO `_` wildcard, so a new
-            // variant forces a compile error at this accessor (see docstring).
-            Self::Alias(_)
+            // variant forces a compile error at this accessor (see
+            // docstring). The NOMINAL terminal is classified here as an
+            // args-free node: it IS the type it denotes, never an
+            // instantiation site.
+            Self::TypeOfNominal(_)
+            | Self::Alias(_)
             | Self::Object(_)
             | Self::ObjectSpreadProgram(_)
             | Self::Union(_)
@@ -308,6 +367,23 @@ impl SemanticNodeData {
         Self::TypeOf(TypeOfCarrier::new(value_root, path, type_args))
     }
 
+    /// Construct a terminal nominal `typeof` carrier
+    /// ([`TypeOfNominal`](Self::TypeOfNominal)). The declaring identity is
+    /// minted from prepared facts once; readers never repeat declaration or
+    /// route resolution merely to classify the carrier.
+    #[must_use]
+    pub(crate) fn new_nominal_typeof(
+        value_root: ValueRootKey,
+        path: Arc<[Arc<str>]>,
+        nominal_identity: ValueDeclIdentityPart,
+    ) -> Self {
+        Self::TypeOfNominal(TypeOfNominalCarrier::new(
+            value_root,
+            path,
+            nominal_identity,
+        ))
+    }
+
     /// Construct a [`BareRef`](Self::BareRef) carrier (`Foo` / `Foo<Arg>`).
     #[must_use]
     pub fn new_bare_ref(
@@ -335,14 +411,30 @@ impl SemanticNodeData {
         ))
     }
 
-    /// Head fields of a [`TypeOf`](Self::TypeOf) carrier — `(value_root, path)`.
-    /// NEVER returns `type_args` (descend those through
+    /// Head fields of a [`TypeOf`](Self::TypeOf) or
+    /// [`TypeOfNominal`](Self::TypeOfNominal) carrier —
+    /// `(value_root, path)`. NEVER returns the deferred carrier's
+    /// `type_args` (descend those through
     /// [`carrier_type_args`](Self::carrier_type_args)). `None` for any
-    /// non-`TypeOf` node.
+    /// non-`typeof` node.
     #[must_use]
     pub(crate) fn typeof_head(&self) -> Option<TypeOfHead<'_>> {
         match self {
             Self::TypeOf(c) => Some((c.value_root(), c.path())),
+            Self::TypeOfNominal(c) => Some((c.value_root(), c.path())),
+            _ => None,
+        }
+    }
+
+    /// Declaring identity carried by a terminal nominal `typeof` node.
+    /// `Some` ONLY on [`TypeOfNominal`](Self::TypeOfNominal) — a deferred
+    /// [`TypeOf`](Self::TypeOf) shell NEVER carries one, so this marker is
+    /// the compiler-held discriminator between the terminal and the shell,
+    /// not an optional field either could hold.
+    #[must_use]
+    pub(crate) fn typeof_nominal_identity(&self) -> Option<&ValueDeclIdentityPart> {
+        match self {
+            Self::TypeOfNominal(c) => Some(c.identity()),
             _ => None,
         }
     }
@@ -388,8 +480,11 @@ impl SemanticNodeData {
             Self::BareRef(c) => Some(Self::BareRef(c.with_type_args(new_args))),
             Self::ImportType(c) => Some(Self::ImportType(c.with_type_args(new_args))),
             // EXHAUSTIVE non-carrier enumeration — NO `_` wildcard (see
-            // docstring); mirrors `carrier_type_args`.
-            Self::Alias(_)
+            // docstring); mirrors `carrier_type_args`. The NOMINAL terminal
+            // is unrebuildable with arguments: it has no `type_args` to
+            // swap, so a substitution that reaches one leaves it untouched.
+            Self::TypeOfNominal(_)
+            | Self::Alias(_)
             | Self::Object(_)
             | Self::ObjectSpreadProgram(_)
             | Self::Union(_)

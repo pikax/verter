@@ -1667,3 +1667,149 @@ fn same_spelled_distinct_indexed_roots_cannot_mint_symbolic_equivalence() {
         "same-spelled indexed roots from distinct canonical declarations are not equivalent"
     );
 }
+
+/// Two same-spelled `unique symbol` references to DISTINCT declarations
+/// cannot mint a symbolic-equivalence proof — the DECLARING identity, not
+/// the authored spelling, decides.
+///
+/// Both raised sources are terminal nominal carriers with the SAME head
+/// shape (`typeof TOKEN`): a shape-only comparison (head + path + args)
+/// certifies them equivalent, and a retarget between the two declarations
+/// (an import edit that re-points `TOKEN`) would then reuse a stale
+/// publication for a type that changed underneath it. The identity-bearing
+/// reference map and the nominal shape arm must both refuse. The
+/// same-source control pins that refusal is not a blanket rejection.
+#[test]
+fn same_spelled_distinct_nominal_identities_cannot_mint_symbolic_equivalence() {
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/a/token.ts",
+        "export declare const TOKEN: unique symbol;",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/b/token.ts",
+        "export declare const TOKEN: unique symbol;",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/annos.ts",
+        "import { TOKEN } from \"/workspace/a/token.ts\";\nexport type TokenAnno = typeof TOKEN;",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/resolved.ts",
+        "import { TOKEN } from \"/workspace/b/token.ts\";\nexport type TokenResolved = typeof TOKEN;",
+    );
+    // A VALUE-space `typeof` read resolves its import through the route
+    // table, so the fixture must register each consumer's route.
+    for (consumer, target) in [
+        ("/workspace/annos.ts", "/workspace/a/token.ts"),
+        ("/workspace/resolved.ts", "/workspace/b/token.ts"),
+    ] {
+        host.set_import_dependencies(
+            consumer,
+            vec![crate::DependencyResolution {
+                specifier: target.to_owned(),
+                resolved_canonical_id: Some(target.to_owned()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+    }
+
+    let _authored_source = decl_body_source("/workspace/annos.ts", "TokenAnno");
+    let lower_nominal = |canonical: &str| {
+        crate::for_tests::dispatch_lower_type_expr_in_scope_with_context_for_tests(
+            &host,
+            canonical,
+            &verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: vec!["TOKEN".to_string()],
+                type_args: Vec::new(),
+            }),
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
+        .expect("the nominal typeof fixture must lower")
+    };
+    let authored = lower_nominal("/workspace/annos.ts");
+    let resolved = lower_nominal("/workspace/resolved.ts");
+    let nominal_identity = |node| match node_data(&host, node).as_deref() {
+        Some(SemanticNodeData::TypeOfNominal(_)) => {
+            node_data(&host, node).and_then(|data| data.typeof_nominal_identity().cloned())
+        }
+        other => panic!("fixture must be a terminal nominal carrier; got {other:?}"),
+    };
+    let authored_identity = nominal_identity(authored).expect("authored carrier identity");
+    let resolved_identity = nominal_identity(resolved).expect("resolved carrier identity");
+    assert_ne!(
+        authored_identity.canonical_id, resolved_identity.canonical_id,
+        "fixture: the two spellings name DISTINCT declarations"
+    );
+    assert_eq!(
+        authored_identity.symbol, resolved_identity.symbol,
+        "fixture: the authored spelling is identical"
+    );
+
+    assert_eq!(
+        symbolic_projection_eq_for_test(&host, resolved, authored),
+        Some(false),
+        "same-spelled references to distinct `unique symbol` declarations are not equivalent"
+    );
+    assert_eq!(
+        symbolic_projection_eq_for_test(&host, authored, authored),
+        Some(true),
+        "a reference to ONE declaration is equivalent to itself"
+    );
+
+    // The finding's exact shape: two carriers with an IDENTICAL authored
+    // head (same consumer file, same spelling, same path) carrying
+    // DISTINCT declaring identities — what an incremental RETARGET of one
+    // import produces. A shape-only comparison (head + path + args) sees
+    // one type; only the identity payload tells them apart, so the
+    // identity-bearing reference map and the nominal shape arm must EACH
+    // be load-bearing. Hand-interned so the heads are byte-identical,
+    // which the lowered fixtures above cannot guarantee (their heads carry
+    // each consumer's own scope).
+    {
+        use crate::semantic_query::{ScopeId, SemanticNodeData, ValueRootKey};
+        let graph = host.project_type_store().semantic_graph();
+        let head = || ValueRootKey {
+            scope: ScopeId::file(
+                Arc::from("/workspace/annos.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
+            name: Arc::from("TOKEN"),
+        };
+        let identity_for = |declaring: &str| verter_type_expr::facts::ValueDeclIdentityPart {
+            canonical_id: Arc::from(declaring),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from("TOKEN"),
+            member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
+        };
+        let before_retarget = graph.intern_node(SemanticNodeData::new_nominal_typeof(
+            head(),
+            Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+            identity_for("/workspace/a/token.ts"),
+        ));
+        let after_retarget = graph.intern_node(SemanticNodeData::new_nominal_typeof(
+            head(),
+            Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+            identity_for("/workspace/b/token.ts"),
+        ));
+        assert_ne!(
+            before_retarget, after_retarget,
+            "fixture: same head, distinct identities intern apart"
+        );
+        assert_eq!(
+            symbolic_projection_eq_for_test(&host, after_retarget, before_retarget),
+            Some(false),
+            "an identical head whose import RETARGETED to a distinct declaration is not \
+             equivalent — a shape-only comparison would certify the stale publication"
+        );
+        assert_eq!(
+            symbolic_projection_eq_for_test(&host, before_retarget, before_retarget),
+            Some(true),
+            "the pre-retarget carrier is equivalent to itself"
+        );
+    }
+}

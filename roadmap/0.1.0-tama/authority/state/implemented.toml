@@ -177,7 +177,7 @@ schema = 2
 "D3C" = { status = "pending" }
 "D3I" = { status = "pending" }
 "D3P" = { status = "pending" }
-"D3R" = { status = "pending" }
+"D3R" = { status = "implemented", commit_message = "feat(session): nominal relation authority for unique-symbol identity and comparability", commit_date = "2026-09-04T02:30:00+01:00" }
 "D4" = { status = "pending" }
 "D5" = { status = "pending" }
 "D6" = { status = "pending" }

@@ -235,6 +235,10 @@ pub struct LoweredTypeDeclParts {
     pub type_parameters: Vec<TypeParam>,
     /// The fully-lowered declaration body.
     pub body: TypeExpr,
+    /// Statically-named members whose authored annotations are exactly
+    /// `unique symbol` — object-type-literal and interface property
+    /// members, including intersection arms.
+    pub unique_symbol_members: Vec<String>,
 }
 
 /// Where a transient signature's authored function node lives, relative to its
@@ -288,6 +292,12 @@ pub struct LoweredValueDeclParts {
     /// Exact declaration-site nominality for an authored `unique symbol`
     /// annotation.
     pub is_unique_symbol: bool,
+    /// Statically-named MEMBERS whose authored annotations are exactly
+    /// `unique symbol` — class statics and object-type-literal annotation
+    /// members. The lowered [`TypeExpr`] erases the `unique` keyword, so this
+    /// list is the only member-level nominal record; a `typeof Root.Member`
+    /// reference to a listed member denotes the member's own nominal type.
+    pub unique_symbol_members: Vec<String>,
     /// The lowered annotation typed IR: the authored TS annotation, the JSDoc
     /// `@type` payload, or the initializer-inferred type (in that precedence).
     pub type_annotation: Option<TypeExpr>,
@@ -383,6 +393,15 @@ pub fn build_eval_env_with_owners(
     // declaration of the same name always wins (TS-decl precedence).
     register_jsdoc_typedefs(program, source, ctx, owners, &mut env);
 
+    // NOTE: a value whose annotation REFERENCES a named type (`a: Shape`) does
+    // NOT copy that type's `unique_symbol_members` onto its own fact here. A
+    // same-file bare-name match is scope-blind (shadowing, imports), and the
+    // copy would anchor the member's nominal identity on the VALUE — where tsc
+    // unifies `typeof a.K` and `typeof b.K` through the one interface member
+    // type. Certification through a named type happens at consumption, in
+    // `ProjectSemanticDispatch::member_nominal_typeof`, through the annotation
+    // fact's own `name_resolution` (the proper scope-aware authority), and
+    // anchors the identity on the TYPE declaration it resolves to.
     env
 }
 
@@ -634,6 +653,7 @@ fn lower_jsdoc_typedef_named_matching(
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
             body: typedef.body.clone(),
+            unique_symbol_members: Vec::new(),
         };
         env.add_type(mint_type_decl(&parts, &ctx.canonical_id, owner));
         return Some(typedef);
@@ -672,6 +692,7 @@ fn register_jsdoc_typedefs(
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
             body: typedef.body,
+            unique_symbol_members: Vec::new(),
         };
         env.add_type(mint_type_decl(
             &parts,
@@ -836,6 +857,7 @@ fn mint_type_decl(
         kind: parts.kind,
         type_parameters: narrow_decl_header_type_params(&parts.type_parameters, &anchor),
         direct_member_headers: member_header_facts_from_body(&parts.body),
+        unique_symbol_members: Arc::from(parts.unique_symbol_members.clone().into_boxed_slice()),
         body: anchored_slot(&anchor, Vec::new()),
     }
 }
@@ -1217,6 +1239,7 @@ fn mint_value_decl(
     let type_annotation = value_type_annotation_fact(
         parts.type_annotation.as_ref(),
         parts.is_unique_symbol,
+        &parts.unique_symbol_members,
         &parts.name,
         canonical_id,
         owner,
@@ -1318,6 +1341,70 @@ fn format_enum_number(value: f64) -> String {
     format!("{value}")
 }
 
+/// Whether an authored type is exactly `unique symbol` — TypeScript's one
+/// nominal type. The lowered [`TypeExpr`] models both `symbol` and
+/// `unique symbol` as the same primitive, so the authored distinction is
+/// preserved as declaration facts (root and member) instead. The AUTHORED
+/// annotation is the only spelling that certifies: an `as unique symbol` /
+/// `<unique symbol>` assertion is a TS1335 error in every position, so a
+/// program carrying one is ill-typed and must not mint nominal identity.
+fn ts_type_is_unique_symbol(ty: &TSType<'_>) -> bool {
+    matches!(
+        ty,
+        TSType::TSTypeOperatorType(operator)
+            if operator.operator == TSTypeOperatorOperator::Unique
+                && matches!(&operator.type_annotation, TSType::TSSymbolKeyword(_))
+    )
+}
+
+/// The statically-named members of an authored type whose annotations are
+/// exactly `unique symbol`. Walks object literals, parenthesized types, and
+/// intersection arms; a type reference is resolved later against same-file
+/// aliases. Only plain property members with static keys qualify.
+///
+/// READONLY members only: tsc widens a mutable `K: unique symbol` member to
+/// the bare `symbol` primitive (with an error at the declaration site), so a
+/// mutable annotation never denotes a nominal member type.
+fn unique_symbol_members_of_ts_type(ty: &TSType<'_>) -> Vec<String> {
+    let mut members = Vec::new();
+    collect_unique_symbol_members_of_ts_type(ty, &mut members);
+    members
+}
+
+fn collect_unique_symbol_members_of_ts_type(ty: &TSType<'_>, out: &mut Vec<String>) {
+    match ty {
+        TSType::TSTypeLiteral(literal) => {
+            for member in &literal.members {
+                let TSSignature::TSPropertySignature(property) = member else {
+                    continue;
+                };
+                let Some(key) =
+                    crate::analysis::function_program::static_property_key_name(&property.key)
+                else {
+                    continue;
+                };
+                if property.readonly
+                    && property.type_annotation.as_ref().is_some_and(|annotation| {
+                        ts_type_is_unique_symbol(&annotation.type_annotation)
+                    })
+                    && !out.iter().any(|existing| existing == &key)
+                {
+                    out.push(key);
+                }
+            }
+        }
+        TSType::TSParenthesizedType(parenthesized) => {
+            collect_unique_symbol_members_of_ts_type(&parenthesized.type_annotation, out);
+        }
+        TSType::TSIntersectionType(intersection) => {
+            for arm in &intersection.types {
+                collect_unique_symbol_members_of_ts_type(arm, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Type declarations
 // ---------------------------------------------------------------------------
@@ -1402,6 +1489,7 @@ fn lower_named_type_alias_parts(
         kind: TypeDeclKind::Alias,
         type_parameters,
         body,
+        unique_symbol_members: unique_symbol_members_of_ts_type(&decl.type_annotation),
     }
 }
 
@@ -1470,7 +1558,32 @@ fn lower_named_interface_parts(
         kind: TypeDeclKind::Interface,
         type_parameters,
         body,
+        unique_symbol_members: unique_symbol_members_of_interface_body(decl),
     }
+}
+
+/// The READONLY interface members whose annotations are exactly
+/// `unique symbol` — the same mutable-member widening rule
+/// [`unique_symbol_members_of_ts_type`] applies to object-literal members.
+fn unique_symbol_members_of_interface_body(decl: &TSInterfaceDeclaration<'_>) -> Vec<String> {
+    decl.body
+        .body
+        .iter()
+        .filter_map(|member| {
+            let TSSignature::TSPropertySignature(property) = member else {
+                return None;
+            };
+            if !property.readonly {
+                return None;
+            }
+            let key = crate::analysis::function_program::static_property_key_name(&property.key)?;
+            property
+                .type_annotation
+                .as_ref()
+                .filter(|annotation| ts_type_is_unique_symbol(&annotation.type_annotation))
+                .map(|_| key)
+        })
+        .collect()
 }
 
 fn collect_module_declaration(
@@ -1963,6 +2076,7 @@ fn alias_default_export_type_symbol(
         type_parameters: decl.type_parameters.clone(),
         body: decl.body.clone(),
         direct_member_headers: decl.direct_member_headers.clone(),
+        unique_symbol_members: Arc::clone(&decl.unique_symbol_members),
     };
     env.add_type(aliased);
 }
@@ -2101,6 +2215,9 @@ fn collect_named_class(
     // `ConstructSignature` — never a separate field.
     let mut members = Vec::new();
     let mut static_members = Vec::new();
+    // Statically-named statics whose authored annotations are exactly
+    // `unique symbol` — the member-level nominal fact for `typeof C.A`.
+    let mut static_unique_symbol_members = Vec::new();
     let mut ctor_sig = None;
     let mut ctor_fn_spans = FunctionSpans::default();
     let mut inference_unavailable = None;
@@ -2235,6 +2352,20 @@ fn collect_named_class(
                         spans,
                     ));
                 if prop.r#static {
+                    // `static readonly K: unique symbol` is tsc's one member
+                    // spelling of a nominal unique-symbol member: a mutable
+                    // static widens (with an error), and an assertion
+                    // initializer is a TS1335 error in every position.
+                    let annotated_unique = prop.readonly
+                        && prop
+                            .type_annotation
+                            .as_ref()
+                            .is_some_and(|ta| ts_type_is_unique_symbol(&ta.type_annotation));
+                    if annotated_unique {
+                        if let Some(key) = static_property_key_name(&prop.key) {
+                            static_unique_symbol_members.push(key);
+                        }
+                    }
                     static_members.push(member);
                 } else {
                     members.push(member);
@@ -2448,6 +2579,7 @@ fn collect_named_class(
         kind: TypeDeclKind::Class,
         type_parameters,
         body,
+        unique_symbol_members: Vec::new(),
     });
 
     // Also register as a value (for typeof ClassName / InstanceType)
@@ -2499,6 +2631,7 @@ fn collect_named_class(
         name,
         kind: ValueDeclKind::Class,
         is_unique_symbol: false,
+        unique_symbol_members: static_unique_symbol_members,
         type_annotation: None,
         annotation_is_authored: false,
         inference_unavailable,
@@ -2766,6 +2899,7 @@ fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
     out.value_decls.push(LoweredValueDeclParts {
         name: name.clone(),
         kind: ValueDeclKind::Enum,
+        unique_symbol_members: Vec::new(),
         is_unique_symbol: false,
         type_annotation: None,
         annotation_is_authored: false,
@@ -2797,6 +2931,7 @@ fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
         kind: TypeDeclKind::Alias,
         type_parameters: Vec::new(),
         body: TypeExpr::Primitive(PrimitiveName::Never),
+        unique_symbol_members: Vec::new(),
     });
 }
 
@@ -2822,6 +2957,7 @@ fn lower_function_parts(func: &Function<'_>, source: &str) -> Option<LoweredValu
 
     Some(LoweredValueDeclParts {
         name,
+        unique_symbol_members: Vec::new(),
         kind,
         is_unique_symbol: false,
         type_annotation: None,
@@ -3252,14 +3388,15 @@ fn lower_variable_parts(
         VariableDeclarationKind::Var => ValueDeclKind::Var,
     };
 
-    let is_unique_symbol = decl.type_annotation.as_ref().is_some_and(|annotation| {
-        matches!(
-            &annotation.type_annotation,
-            TSType::TSTypeOperatorType(operator)
-                if operator.operator == TSTypeOperatorOperator::Unique
-                    && matches!(&operator.type_annotation, TSType::TSSymbolKeyword(_))
-        )
-    });
+    // The AUTHORED annotation alone certifies: tsc allows `unique symbol`
+    // only as an annotated `declare const`/const annotation, and every
+    // assertion spelling (`as unique symbol`) is a TS1335 error. The fact is
+    // therefore annotation-only: an inferred or asserted initializer never
+    // sets it.
+    let is_unique_symbol = decl
+        .type_annotation
+        .as_ref()
+        .is_some_and(|annotation| ts_type_is_unique_symbol(&annotation.type_annotation));
 
     // Extract type annotation from the variable declarator
     let mut type_annotation = decl
@@ -3374,6 +3511,15 @@ fn lower_variable_parts(
         name,
         kind: var_kind,
         is_unique_symbol,
+        // INLINE annotation members only: a value's own object-literal
+        // annotation is its own member type. A member reached through a named
+        // type reference is certified at consumption (see the NOTE at
+        // [`build_eval_env_with_owners`]) and anchors on the type declaration.
+        unique_symbol_members: decl
+            .type_annotation
+            .as_ref()
+            .map(|ta| unique_symbol_members_of_ts_type(&ta.type_annotation))
+            .unwrap_or_default(),
         type_annotation,
         annotation_is_authored,
         inference_unavailable: if annotation_is_authored {
@@ -3423,6 +3569,7 @@ fn lower_default_expression_parts(expr: &Expression<'_>, source: &str) -> Lowere
     }
 
     LoweredValueDeclParts {
+        unique_symbol_members: Vec::new(),
         name: "default".to_string(),
         kind: ValueDeclKind::Const,
         is_unique_symbol: false,
@@ -5697,6 +5844,7 @@ pub fn parse_and_lower_parts(source: &str) -> LoweredFileParts {
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
             body: typedef.body,
+            unique_symbol_members: Vec::new(),
         });
     }
     out

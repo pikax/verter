@@ -23221,6 +23221,7 @@ fn projection_budget_counts_instantiate_and_conditional() {
             HashValue::default(),
             HashValue::default(),
         ),
+        path: Arc::from([]),
         context: crate::semantic_query::TypeOfContext::new(
             ProjectionReductionContext::structural_transit(),
             HashValue::default(),
@@ -24705,6 +24706,7 @@ fn typeof_value_node(
             env.type_env_hash,
             env.lib_env_hash,
         ),
+        path: Arc::from([]),
         context: crate::semantic_query::TypeOfContext::new(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
             env.resolve_env_hash,

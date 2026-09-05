@@ -60,7 +60,7 @@ pub(super) fn direct_member_dependency_is_missing(
                     work.push((resolved, tracked_dependency));
                 }
             }
-            SemanticNodeData::TypeOf(_) => {
+            SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
                 let (root, _) = data.typeof_head().expect("TypeOf carrier head");
                 let tracked_dependency =
                     tracked_dependency || dependency_names.contains(root.name.as_ref());
@@ -242,8 +242,19 @@ fn is_definitely_non_object_root(
             SemanticNodeData::Alias(inner) => subject = *inner,
             SemanticNodeData::BareRef(_)
             | SemanticNodeData::ImportType(_)
-            | SemanticNodeData::TypeOf(_) => {
+            | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::TypeOfNominal(_) => {
                 drop(data);
+                // A nominal (`unique symbol`) carrier is terminal under
+                // carrier resolution, so the `resolved == subject` rail
+                // below would read it as an unresolved reference. It IS a
+                // definitely-non-object root — exactly as its widened
+                // `symbol` inhabitant is — so widen and let the primitive
+                // arm decide.
+                if let Some(widened) = dispatch.widened_nominal_typeof(subject) {
+                    subject = widened;
+                    continue;
+                }
                 let resolved = dispatch.resolve_carrier_subject_node(subject, resolution_context);
                 if resolved == subject {
                     return false;

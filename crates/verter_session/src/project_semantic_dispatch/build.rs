@@ -487,6 +487,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn build_typeof(
         &self,
         value_root: &ValueRootKey,
+        path: &[Arc<str>],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         // Telemetry for the typeof traversal site.
@@ -669,6 +670,88 @@ impl<'a> ProjectSemanticDispatch<'a> {
         else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
+        // A `unique symbol` value is TypeScript's one NOMINAL type, and its
+        // widened inhabitant — the bare `symbol` primitive — is interned ONCE
+        // per graph. Lowering the annotation here would therefore hand every
+        // consumer of this query the SAME node for `typeof A_KIND` and
+        // `typeof B_KIND`, erasing the declaring identity that IS the type
+        // before any consumer can read it. The `typeof` CARRIER is the answer
+        // instead, and this is its SOLE mint site for DECLARATION ROOTS: every
+        // typeof-resolving
+        // consumer (the deferred evaluator, the path walker, the locator
+        // projection, the carrier normalizer, the raising reducer, the eager
+        // lowering) resolves a carrier head through the same
+        // [`SemanticQueryKey::TypeOf`] key, so a declaration root converges
+        // here however it was reached and no consumer mints a second marked
+        // node from a projected value. Each of them classifies the result:
+        // a consumer asking a NOMINAL question reads the carrier as terminal,
+        // and a consumer asking a STRUCTURAL one takes the widened inhabitant
+        // through `widened_nominal_typeof`. The nominal relation resolves the
+        // carrier back to the DECLARING value identity (chasing aliases /
+        // imports / re-exports), so one declaration names one type however it
+        // was referenced. The carrier is minted from the `prepared` facts this
+        // builder already read — no second lookup.
+        //
+        // A MEMBER-qualified `typeof C.K` is the SAME query with a non-empty
+        // path. The member's own nominal carrier is minted HERE when the
+        // declaring value (or a type it aliases) records the member as an
+        // authored `unique symbol`; every other member shape projects below.
+        if prepared.type_annotation.is_unique_symbol {
+            let identity = verter_type_expr::facts::ValueDeclIdentityPart {
+                canonical_id: Arc::clone(&effective_canonical),
+                owner: effective_owner,
+                symbol: Arc::clone(&effective_symbol),
+                member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
+            };
+            // The carrier's head is the ASKED root — the reference the
+            // consumer wrote — while the declaring identity rides the
+            // payload. A renamed import therefore still displays and anchors
+            // as the local spelling, and still compares EQUAL to every other
+            // reference to the same declaration.
+            let carrier = self.intern_nominal_typeof(
+                value_root.clone(),
+                Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                identity,
+                scope.clone(),
+            );
+            if path.is_empty() {
+                return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                    QueryResult::Value(carrier),
+                    self.dep_signature_for(&value_root.scope.canonical_id, observed_hash),
+                ))
+                .with_observed_self_roots([(
+                    Arc::clone(&value_root.scope.canonical_id),
+                    observed_hash,
+                )]);
+            }
+            // `typeof TOKEN.description` — remaining segments read the
+            // `Symbol` interface on the widened primitive.
+            let widened = self
+                .widened_nominal_typeof(carrier)
+                .expect("a unique-symbol root always widens");
+            return self.project_typeof_path(widened, path, context, observed_hash, value_root);
+        }
+        // The member rail reuses the root this builder already resolved —
+        // the effective declaration and its prepared facts — instead of
+        // repeating the bare-name resolve and export-target walk.
+        let effective_root: EffectivePreparedValueDecl = (
+            Arc::clone(&effective_canonical),
+            effective_owner,
+            Arc::clone(&effective_symbol),
+            Arc::clone(&prepared),
+        );
+        if let Some(nominal) =
+            self.member_nominal_typeof(value_root, path, &effective_root, Some(scope.clone()))
+        {
+            return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(nominal),
+                self.dep_signature_for(&value_root.scope.canonical_id, observed_hash),
+            ))
+            .with_observed_self_roots([(
+                Arc::clone(&value_root.scope.canonical_id),
+                observed_hash,
+            )]);
+        }
         let empty_env = FxHashMap::default();
         let mut substitutions = Vec::new();
         // CONVERGENCE (scope-bounded to a synthesized `.vue`/typeinfo-scratch
@@ -943,16 +1026,69 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
-        let signature = self.dep_signature_for(&value_root.scope.canonical_id, observed_hash);
+        if path.is_empty() {
+            let signature = self.dep_signature_for(&value_root.scope.canonical_id, observed_hash);
+            let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(node_id),
+                signature,
+            ))
+            .with_observed_self_roots([(
+                Arc::clone(&value_root.scope.canonical_id),
+                observed_hash,
+            )]);
+            // Two-signal fold: a partial composed class-surface read surfaces as
+            // a partial `TypeOf` result (it would otherwise pass through with
+            // `result_is_partial = false`).
+            output.result_is_partial |= composed_partial;
+            return output;
+        }
+        let mut output =
+            self.project_typeof_path(node_id, path, context, observed_hash, value_root);
+        output.result_is_partial |= composed_partial;
+        output
+    }
+
+    fn project_typeof_path(
+        &self,
+        base: SemanticNodeId,
+        path: &[Arc<str>],
+        context: crate::semantic_query::ProjectionReductionContext,
+        observed_hash: verter_semantic::analysis::Hash16,
+        value_root: &ValueRootKey,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let projection_path: Arc<[PathSegment]> = Arc::from(
+            path.iter()
+                .map(|segment| PathSegment::Member(PropertyKey::identifier(Arc::clone(segment))))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        // The intermediate-hop rule: the typeof query's REMAINING member
+        // path projects in `Navigate` — matching the evaluate / raise arms —
+        // with only the orthogonal axes inherited from the caller's context.
+        // The mode rides the key itself, and the cfg(test) probe records
+        // exactly what the key carried, so a regression to caller-mode
+        // inheritance is observable at the asserting test.
+        let internal_context =
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate)
+                .with_orthogonal_axes_from(context);
+        #[cfg(test)]
+        super::walk::observe_typeof_internal_path_mode(internal_context.mode);
+        let read = self.execute_read(SemanticQueryKey::ProjectPath {
+            base,
+            path: projection_path,
+            context: internal_context,
+        });
+        let node = match read.value {
+            QueryResult::Value(id) => id,
+            _ => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+        };
         let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-            QueryResult::Value(node_id),
-            signature,
+            QueryResult::Value(node),
+            self.dep_signature_for(&value_root.scope.canonical_id, observed_hash),
         ))
         .with_observed_self_roots([(Arc::clone(&value_root.scope.canonical_id), observed_hash)]);
-        // Two-signal fold: a partial composed class-surface read surfaces as
-        // a partial `TypeOf` result (it would otherwise pass through with
-        // `result_is_partial = false`).
-        output.result_is_partial |= composed_partial;
+        output.result_is_partial |= read.result_is_partial;
+        output.partial_reasons = output.partial_reasons.union(read.partial_reason_classes());
         output
     }
 
@@ -2321,7 +2457,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the demanded arguments in the derived class's scope. Non-class decls
     /// and heritage-free classes return an empty list (the producer mints no
     /// facts for them).
-    fn class_heritage_bases(
+    pub(super) fn class_heritage_bases(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
@@ -6715,7 +6851,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         found.push(node);
                     }
                 }
-                SemanticNodeData::TypeOf(_) | SemanticNodeData::ImportType(_) => {
+                SemanticNodeData::TypeOf(_)
+                | SemanticNodeData::TypeOfNominal(_)
+                | SemanticNodeData::ImportType(_) => {
                     stack.extend(data.carrier_type_args().iter().copied());
                 }
                 _ => {}
@@ -7381,6 +7519,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | SemanticNodeData::IndexedAccess { .. }
                 | SemanticNodeData::Mapped { .. }
                 | SemanticNodeData::TypeOf(_)
+                | SemanticNodeData::TypeOfNominal(_)
                 | SemanticNodeData::Conditional { .. }
                 | SemanticNodeData::Alias(_)
                 // Un-resolved reference carriers. Navigate / Skeleton body

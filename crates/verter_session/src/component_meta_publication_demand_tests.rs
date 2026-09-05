@@ -168,6 +168,7 @@ fn published_expanded_classifier_sees_every_context_bearing_family() {
             Default::default(),
             Default::default(),
         ),
+        path: Arc::from([]),
         context: TypeOfContext::new(ctx, Default::default()),
     };
     assert!(

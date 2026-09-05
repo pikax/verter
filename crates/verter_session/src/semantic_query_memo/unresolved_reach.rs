@@ -238,6 +238,9 @@ impl SemanticGraphStore {
             | SemanticNodeData::BareRef(_)
             | SemanticNodeData::ImportType(_)
             | SemanticNodeData::TypeOf(_)
+            // The nominal terminal is a RESOLVED scalar — its declaring
+            // identity is known content, never an unresolved name.
+            | SemanticNodeData::TypeOfNominal(_)
             | SemanticNodeData::SyntheticBinding { .. } => {}
         }
         (children, unresolved)

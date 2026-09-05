@@ -270,47 +270,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::Object(view) => {
                 let member_context = context.into_structural_provenance();
-                let members: Vec<_> =
-                    view.positive_members()
-                        .iter()
-                        .map(|member| SurfaceMember {
-                            key: match &member.key {
-                                verter_type_expr::AuthoredPropertyKey::Computed(computed) => {
-                                    self.unique_symbol_identity_for_typeof_node(*computed)
+                let members: Vec<_> = view
+                    .positive_members()
+                    .iter()
+                    .map(|member| SurfaceMember {
+                        key: match &member.key {
+                            // A key that already names a nominal identity is
+                            // answered without projecting it at all: the
+                            // projection (and its memo writes) is computed
+                            // only on the fallback path.
+                            verter_type_expr::AuthoredPropertyKey::Computed(computed) => self
+                                .unique_symbol_identity_for_typeof_node(*computed)
+                                .map(verter_type_expr::AuthoredPropertyKey::UniqueSymbol)
+                                .unwrap_or_else(|| {
+                                    let projected = projected(memo, *computed, member_context);
+                                    self.unique_symbol_identity_for_typeof_node(projected)
                                         .map(verter_type_expr::AuthoredPropertyKey::UniqueSymbol)
-                                        .unwrap_or_else(|| {
-                                            verter_type_expr::AuthoredPropertyKey::Computed(
-                                                projected(memo, *computed, member_context),
-                                            )
-                                        })
-                                }
-                                verter_type_expr::AuthoredPropertyKey::String(value) => {
-                                    verter_type_expr::AuthoredPropertyKey::String(Arc::clone(value))
-                                }
-                                verter_type_expr::AuthoredPropertyKey::Number(value) => {
-                                    verter_type_expr::AuthoredPropertyKey::Number(*value)
-                                }
-                                verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) => {
-                                    verter_type_expr::AuthoredPropertyKey::UniqueSymbol(
-                                        identity.clone(),
-                                    )
-                                }
-                            },
-                            value: projected(memo, member.value, member_context),
-                            optional: member.optional,
-                            readonly: member.readonly,
-                            method_kind: member.method_kind,
-                            has_implementation_body: member.has_implementation_body,
-                            visibility: member.visibility,
-                            // Projection preserves the member's excess-property
-                            // provenance verbatim (structure-preserving rewrite).
-                            excess_origin: member.excess_origin,
-                            spans: member.spans,
-                            declaration_origin: member.declaration_origin.clone(),
-                            declared_in_macro_type_arg: context.own_body_stamp(),
-                            merge_role: context.role_stamp(),
-                        })
-                        .collect();
+                                        .unwrap_or(verter_type_expr::AuthoredPropertyKey::Computed(
+                                            projected,
+                                        ))
+                                }),
+                            verter_type_expr::AuthoredPropertyKey::String(value) => {
+                                verter_type_expr::AuthoredPropertyKey::String(Arc::clone(value))
+                            }
+                            verter_type_expr::AuthoredPropertyKey::Number(value) => {
+                                verter_type_expr::AuthoredPropertyKey::Number(*value)
+                            }
+                            verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) => {
+                                verter_type_expr::AuthoredPropertyKey::UniqueSymbol(
+                                    identity.clone(),
+                                )
+                            }
+                        },
+                        value: projected(memo, member.value, member_context),
+                        optional: member.optional,
+                        readonly: member.readonly,
+                        method_kind: member.method_kind,
+                        has_implementation_body: member.has_implementation_body,
+                        visibility: member.visibility,
+                        // Projection preserves the member's excess-property
+                        // provenance verbatim (structure-preserving rewrite).
+                        excess_origin: member.excess_origin,
+                        spans: member.spans,
+                        declaration_origin: member.declaration_origin.clone(),
+                        declared_in_macro_type_arg: context.own_body_stamp(),
+                        merge_role: context.role_stamp(),
+                    })
+                    .collect();
                 let call_signatures: Vec<_> = view
                     .call_signatures
                     .iter()
@@ -483,11 +489,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     IndexKey::String(value) => IndexKey::String(Arc::clone(value)),
                     IndexKey::Number(value) => IndexKey::Number(*value),
                     IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
+                    // A key that already names a nominal identity is
+                    // answered without projecting it at all; the projection
+                    // is computed only on the fallback path.
                     IndexKey::Computed(value) => self
                         .unique_symbol_identity_for_typeof_node(*value)
                         .map(IndexKey::UniqueSymbol)
                         .unwrap_or_else(|| {
-                            self.normalized_index_key_node(projected(memo, *value, context))
+                            let projected = projected(memo, *value, context);
+                            self.unique_symbol_identity_for_typeof_node(projected)
+                                .map(IndexKey::UniqueSymbol)
+                                .unwrap_or_else(|| self.normalized_index_key_node(projected))
                         }),
                 };
                 let should_defer = matches!(index, IndexKey::Computed(_))
@@ -608,6 +620,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Conditional { .. }
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::TypeOf(_)
+            // The nominal terminal self-resolves; it reaches projection
+            // finish only as an already-complete leaf.
+            | SemanticNodeData::TypeOfNominal(_)
             | SemanticNodeData::DeclRef { .. }
             | SemanticNodeData::BareRef(_)
             | SemanticNodeData::ImportType(_) => {
