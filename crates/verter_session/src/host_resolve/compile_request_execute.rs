@@ -7,8 +7,11 @@
 //! call. The supplied request is the demand document end to end: no
 //! function on this route holds a `CompileProfile`, derives one, or reads
 //! one — the product set, the framework options, the published node set
-//! and the assembly axes all come from the request itself, and the
-//! registered immutable source snapshot supplies the bytes.
+//! and the assembly axes all come from the request itself, the registered
+//! immutable source snapshot supplies the bytes, and supplied (externally
+//! preprocessed) block artifacts are read from the profile-less bucket
+//! only — the one `apply_block_overrides` writes to when the caller names
+//! no compile profile.
 //!
 //! [`publish_runtime_nodes`] is the ONE projection of an admitted runtime
 //! bundle into virtual nodes. Both lanes drive it: the profile-derived one
@@ -47,7 +50,13 @@ impl VerterHost {
     /// decide what to compile, or consults a profile-keyed cache slot: the
     /// product set, the framework options, the source identity, and the
     /// published node set all come from the request itself, and the
-    /// registered immutable source snapshot supplies the bytes.
+    /// registered immutable source snapshot supplies the bytes. Supplied
+    /// (externally preprocessed) block artifacts are visible ONLY from the
+    /// profile-less admission bucket — the one `apply_block_overrides`
+    /// writes to when the caller names no compile profile; artifacts
+    /// admitted under a named profile stay invisible, and a block whose
+    /// authored dialect needs preprocessing with no profile-less override
+    /// still refuses as unavailable.
     ///
     /// The source is NOT part of the request. This entry reads the already
     /// stored snapshot by canonical id, resolving an alias once, and a
@@ -110,22 +119,21 @@ impl VerterHost {
                     })
                 })?;
             let parse = &hd.parse;
-            // The registered carrier source is the sole content authority
-            // for this route: it admits no supplied (externally
-            // preprocessed) block artifacts, so it draws from no supplied
-            // bucket and never inherits another route's preprocessed bytes.
-            // A block whose authored dialect needs external preprocessing
-            // therefore refuses as unavailable.
+            // This route reads supplied (externally preprocessed) block
+            // artifacts from the PROFILE-LESS bucket — the bucket
+            // `apply_block_overrides` writes to when the caller names no
+            // compile profile — and no other: artifacts admitted under a
+            // named profile stay invisible, so the route never inherits
+            // another route's preprocessed bytes. A block whose authored
+            // dialect needs external preprocessing and has no profile-less
+            // override still refuses as unavailable.
             let style_content = self.capture_compiler_style_content(
                 &canonical,
                 &parse.style_analyses,
-                SuppliedBlockScope::RegisteredSourceOnly,
+                SuppliedBlockScope::Unprofiled,
             );
             let block_content = self
-                .capture_compiler_block_content(
-                    &canonical,
-                    SuppliedBlockScope::RegisteredSourceOnly,
-                )
+                .capture_compiler_block_content(&canonical, SuppliedBlockScope::Unprofiled)
                 .map_err(CompileRequestFailure::Host)?;
             CompileInput {
                 canonical_id: canonical.clone(),
@@ -267,17 +275,22 @@ impl VerterHost {
             ssr: requested.contains(&ProductKind::RuntimeServer),
             is_production: request.is_production(),
             // The dev-server tooling flavour and the SSR-manifest key form
-            // are host build knobs with no canonical-request field. This
-            // route states the neutral shape rather than guessing a
-            // build's intent: no `__file`, no HMR acceptance, and the
-            // canonical id as the registered manifest key.
-            hmr_strategy: HmrStrategy::None,
+            // are host build knobs the canonical request carries as its own
+            // axes (`with_host_assembly_axes`) — the same pair the legacy
+            // `CompileProfile` states.
+            hmr_strategy: match request.hmr_strategy() {
+                verter_compiler::compile_request::RuntimeHmrStrategy::None => HmrStrategy::None,
+                verter_compiler::compile_request::RuntimeHmrStrategy::Vite => HmrStrategy::Vite,
+                verter_compiler::compile_request::RuntimeHmrStrategy::Webpack => {
+                    HmrStrategy::Webpack
+                }
+            },
             // The official plugin emits the SSR-manifest registration
             // unconditionally on an ssr build (dev AND production), so an
             // ssr compile that omitted it would leave the bundler unable
             // to collect this module's render-tree dependencies.
             emit_ssr_module_registration: true,
-            ssr_module_id: None,
+            ssr_module_id: request.ssr_module_id().map(str::to_owned),
         };
         let policy = RuntimeNodePublication {
             // A runtime product is the whole runtime surface: its

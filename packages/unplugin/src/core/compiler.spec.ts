@@ -5,7 +5,7 @@
  * Note: NAPI-RS converts snake_case Rust fields to camelCase at JS runtime,
  * so we use camelCase for all object properties despite the TS types showing snake_case.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { loadHost, resetHost, generateComponentId, getHash } from "./compiler";
 
@@ -532,5 +532,211 @@ describe("host: applyBlockOverrides", () => {
         ],
       } as any),
     ).toThrow(/correlation.*terminal/i);
+  });
+});
+
+describe("typed render request construction", () => {
+  const base = {
+    filename: "/test/App.vue",
+    componentId: "abc123",
+    isProduction: false,
+    customElement: false,
+    ssr: false,
+    forceJs: false,
+    hmrStrategy: "vite" as const,
+    sourceMap: true,
+  };
+
+  it("builds one Vue client runtime product with identity and option axes", async () => {
+    const { typedRenderRequest } = await import("./compiler");
+    const request = typedRenderRequest(base, "vue");
+    expect(request.framework).toBe("vue");
+    expect(request.products).toEqual([{ kind: "runtimeClient", runtimeSourceMap: true }]);
+    expect(request.identity).toMatchObject({
+      isProduction: false,
+      forceJs: false,
+      filename: "/test/App.vue",
+      componentId: "abc123",
+    });
+    expect(request.options).toMatchObject({
+      backend: "inferred",
+      ssr: false,
+      scriptCustomElement: false,
+      isCustomElement: [],
+      babelParserPlugins: [],
+    });
+  });
+
+  it("selects the runtimeServer product for SSR demands", async () => {
+    const { typedRenderRequest } = await import("./compiler");
+    const request = typedRenderRequest({ ...base, ssr: true }, "vue");
+    expect(request.products).toEqual([{ kind: "runtimeServer", runtimeSourceMap: true }]);
+    expect(request.options).toMatchObject({ ssr: true });
+  });
+
+  it("builds the neutral svelte request shape", async () => {
+    const { typedRenderRequest } = await import("./compiler");
+    const request = typedRenderRequest(base, "sveltejs");
+    expect(request.framework).toBe("svelte");
+    expect(request.products).toEqual([{ kind: "runtimeClient", runtimeSourceMap: true }]);
+    expect(request.options).toEqual({});
+  });
+});
+
+describe("typed render request assembly axes", () => {
+  const profile = {
+    filename: "/test/App.vue",
+    componentId: "abc123",
+    isProduction: true,
+    customElement: false,
+    ssr: true,
+    ssrModuleId: "src/App.vue",
+    forceJs: false,
+    hmrStrategy: "none" as const,
+    sourceMap: false,
+  };
+
+  it("carries the SSR-manifest key and dev-server flavour on the identity", async () => {
+    const { typedRenderRequest } = await import("./compiler");
+    const request = typedRenderRequest(profile, "vue");
+    expect(request.identity).toMatchObject({
+      ssrModuleId: "src/App.vue",
+      hmrStrategy: "none",
+    });
+
+    const without = typedRenderRequest({ ...profile, ssrModuleId: undefined }, "vue");
+    expect(without.identity.ssrModuleId).toBeUndefined();
+
+    const dev = typedRenderRequest({ ...profile, isProduction: false, hmrStrategy: "vite" }, "vue");
+    expect(dev.identity.hmrStrategy).toBe("vite");
+  });
+
+  it("states the authored-only style cascade only when the bundler owns styles", async () => {
+    const { typedRenderRequest } = await import("./compiler");
+    const authoredOnly = typedRenderRequest(profile, "vue", { authoredOnlyStyles: true });
+    expect(authoredOnly.products).toEqual([
+      { kind: "runtimeServer", runtimeSourceMap: false, styleProcessing: "authored-only" },
+    ]);
+
+    const complete = typedRenderRequest(profile, "vue");
+    expect(complete.products).toEqual([{ kind: "runtimeServer", runtimeSourceMap: false }]);
+  });
+});
+
+describe("typed response readers", () => {
+  beforeEach(() => {
+    resetHost();
+  });
+
+  it("one typed compile publishes the Main node and indexed style artifacts", async () => {
+    const { typedRenderRequest, runtimeMainNode, runtimeStyleArtifacts } =
+      await import("./compiler");
+    const host = loadHost();
+    host.upsert({
+      inputId: "/test/TypedReader.vue",
+      source: [
+        "<script setup>const x = 1</script>",
+        "<template><div>{{ x }}</div></template>",
+        "<style>.a { color: red }</style>",
+        "<style>.b { color: blue }</style>",
+      ].join("\n"),
+    });
+
+    const response = host.compileRequest(
+      "/test/TypedReader.vue",
+      typedRenderRequest(
+        {
+          filename: "/test/TypedReader.vue",
+          isProduction: true,
+          customElement: false,
+          ssr: false,
+          forceJs: false,
+          hmrStrategy: "none",
+          sourceMap: false,
+        },
+        "vue",
+      ),
+    );
+
+    const main = runtimeMainNode(response, false);
+    expect(main).toBeDefined();
+    expect(main?.code).toContain("_sfc_main");
+    expect(main?.code).toContain("export default");
+
+    const styles = runtimeStyleArtifacts(response, false);
+    expect(styles).toHaveLength(2);
+    expect(styles[0].code).toContain("red");
+    expect(styles[1].code).toContain("blue");
+    expect(styles[0].lang).toBe("css");
+  });
+});
+
+describe("typed compile diagnostic disposition", () => {
+  it("throws on error-severity diagnostics", async () => {
+    const { forwardTypedDiagnostics } = await import("./compiler");
+    expect(() =>
+      forwardTypedDiagnostics("/test/App.vue", {
+        canonicalId: "/test/App.vue",
+        diagnostics: {
+          hasErrors: true,
+          diagnostics: [
+            { severity: "error", code: "E1", message: "typed boom", spanStart: 0, spanEnd: 0 },
+          ],
+        },
+        products: [],
+      }),
+    ).toThrow(/typed boom/);
+  });
+
+  it("throws when hasErrors is set even without an error item", async () => {
+    const { forwardTypedDiagnostics } = await import("./compiler");
+    expect(() =>
+      forwardTypedDiagnostics("/test/App.vue", {
+        canonicalId: "/test/App.vue",
+        diagnostics: { hasErrors: true, diagnostics: [] },
+        products: [],
+      }),
+    ).toThrow(/typed compile reported errors/);
+  });
+
+  it("forwards only warning-severity diagnostics", async () => {
+    const { forwardTypedDiagnostics } = await import("./compiler");
+    const warn = vi.fn();
+    forwardTypedDiagnostics(
+      "/test/App.vue",
+      {
+        canonicalId: "/test/App.vue",
+        diagnostics: {
+          hasErrors: false,
+          diagnostics: [
+            { severity: "warning", code: "W1", message: "soft", spanStart: 0, spanEnd: 0 },
+            { severity: "info", code: "I1", message: "chatter", spanStart: 0, spanEnd: 0 },
+          ],
+        },
+        products: [],
+      },
+      warn,
+    );
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0].message).toContain("W1");
+    expect(warn.mock.calls[0][0].message).toContain("soft");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("chatter");
+  });
+});
+
+describe("typed compile Main reader", () => {
+  it("throws when the typed response published no runtime Main node", async () => {
+    const { requireRuntimeMain } = await import("./compiler");
+    expect(() =>
+      requireRuntimeMain(
+        {
+          canonicalId: "/test/App.vue",
+          diagnostics: { hasErrors: false, diagnostics: [] },
+          products: [{ kind: "runtimeClient", nodes: [] }],
+        },
+        false,
+        "/test/App.vue",
+      ),
+    ).toThrow(/published no runtime Main node/);
   });
 });

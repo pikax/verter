@@ -328,21 +328,25 @@ pub(crate) struct CompilerBlockContentCapture {
 pub(crate) enum SuppliedBlockScope<'p> {
     /// Supplied artifacts admitted under this compile profile's bucket.
     Profile(&'p CompileProfile),
-    /// No supplied bucket at all: the registered carrier source is the
-    /// sole content authority for this read. A block whose authored
-    /// dialect needs external preprocessing therefore refuses as
-    /// unavailable rather than silently borrowing another route's bytes.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    RegisteredSourceOnly,
+    /// Supplied artifacts admitted by a caller that named no compile
+    /// profile — the bucket `apply_block_overrides` writes to when the
+    /// FFI conversion of an absent profile resolves to
+    /// `CompileProfile::default()`. The canonical-request route reads
+    /// this bucket: it carries no compile profile of its own, so the
+    /// profile-less artifacts are exactly the ones a caller intended
+    /// for it, while artifacts admitted under a NAMED profile stay
+    /// invisible to it.
+    Unprofiled,
 }
 
 impl SuppliedBlockScope<'_> {
-    /// The supplied-artifact bucket key, or `None` for a read entitled to
-    /// no bucket.
-    fn bucket(&self) -> Option<u64> {
+    /// The supplied-artifact bucket key. Every live scope admits a bucket;
+    /// a read entitled to no supplied artifacts at all does not exist —
+    /// the registered carrier source is the fallback every bucket shares.
+    fn bucket(&self) -> u64 {
         match self {
-            Self::Profile(profile) => Some(compile_profile_hash(profile)),
-            Self::RegisteredSourceOnly => None,
+            Self::Profile(profile) => compile_profile_hash(profile),
+            Self::Unprofiled => compile_profile_hash(&CompileProfile::default()),
         }
     }
 }
@@ -1047,12 +1051,10 @@ impl VerterHost {
             });
         }
 
-        let supplied = scope.bucket().and_then(|profile_hash| {
-            read_lock(&self.block_content.state)
-                .supplied
-                .get(&(canonical_id, profile_hash, selected.block_token.clone()))
-                .cloned()
-        });
+        let supplied = read_lock(&self.block_content.state)
+            .supplied
+            .get(&(canonical_id, scope.bucket(), selected.block_token.clone()))
+            .cloned();
         if let Some(supplied) = supplied {
             if supplied.owner_revision != selected.owner_revision
                 || supplied.artifact_token != selected.artifact_token
@@ -1276,9 +1278,7 @@ impl VerterHost {
         canonical_id: &str,
         scope: SuppliedBlockScope<'_>,
     ) -> Result<CompilerBlockContentCapture, HostError> {
-        let has_supplied = scope.bucket().is_some_and(|profile_hash| {
-            self.has_current_supplied_block_content(canonical_id, profile_hash)
-        });
+        let has_supplied = self.has_current_supplied_block_content(canonical_id, scope.bucket());
         let inputs = self.compiler_block_content_inputs(canonical_id, scope)?;
         let stamp = compiler_block_content_stamp(has_supplied, &inputs);
         Ok(CompilerBlockContentCapture {
@@ -1679,13 +1679,57 @@ impl VerterHost {
             if !unique.insert(entry.block_token.clone()) {
                 return Err(terminal_on_error(BlockContentRefusal::DuplicateBlock));
             }
-            if entry.captured_echo != pending.captured_echo
-                || entry.correlation_token != entry.captured_echo.request.correlation_token
-                || entry.block_token != entry.captured_echo.request.block_token
-                || entry.owner_revision != entry.captured_echo.request.owner_revision
-                || entry.artifact_token != entry.captured_echo.request.artifact_token
-                || entry.basis_token != entry.captured_echo.basis_token
-                || entry.captured_echo.request.canonical_id != canonical_id
+            // The echo must reproduce the capture exactly, with one
+            // exception: `canonical_id`. The caller cannot know the host's
+            // canonical spelling (a `C:/…` input id canonicalizes to
+            // `c:/…`), so that one field is compared through the same
+            // normalization the top-level id went through — every other
+            // field stays byte-exact, and an echo minted for a DIFFERENT
+            // file still mismatches after normalization.
+            //
+            // Both echoes are destructured with no rest pattern, so a field
+            // added to `BlockContentPreCaptureEcho` later fails compilation
+            // here (E0027) instead of silently escaping this fail-closed
+            // comparison.
+            let BlockContentCapturedEcho {
+                request:
+                    BlockContentPreCaptureEcho {
+                        correlation_token: entry_echo_correlation_token,
+                        canonical_id: entry_echo_canonical_id,
+                        block_token: entry_echo_block_token,
+                        owner_revision: entry_echo_owner_revision,
+                        artifact_token: entry_echo_artifact_token,
+                        expected_language: entry_echo_expected_language,
+                        prior_basis_token: entry_echo_prior_basis_token,
+                    },
+                basis_token: entry_echo_basis_token,
+            } = &entry.captured_echo;
+            let BlockContentCapturedEcho {
+                request:
+                    BlockContentPreCaptureEcho {
+                        correlation_token: pending_echo_correlation_token,
+                        canonical_id: _,
+                        block_token: pending_echo_block_token,
+                        owner_revision: pending_echo_owner_revision,
+                        artifact_token: pending_echo_artifact_token,
+                        expected_language: pending_echo_expected_language,
+                        prior_basis_token: pending_echo_prior_basis_token,
+                    },
+                basis_token: pending_echo_basis_token,
+            } = &pending.captured_echo;
+            if entry_echo_correlation_token != pending_echo_correlation_token
+                || entry_echo_block_token != pending_echo_block_token
+                || entry_echo_owner_revision != pending_echo_owner_revision
+                || entry_echo_artifact_token != pending_echo_artifact_token
+                || entry_echo_expected_language != pending_echo_expected_language
+                || entry_echo_prior_basis_token != pending_echo_prior_basis_token
+                || entry_echo_basis_token != pending_echo_basis_token
+                || entry.correlation_token != *entry_echo_correlation_token
+                || entry.block_token != *entry_echo_block_token
+                || entry.owner_revision != *entry_echo_owner_revision
+                || entry.artifact_token != *entry_echo_artifact_token
+                || entry.basis_token != *entry_echo_basis_token
+                || crate::id::canonicalize_id(entry_echo_canonical_id).as_ref() != canonical_id
             {
                 return Err(terminal_on_error(BlockContentRefusal::CorrelationMismatch));
             }
