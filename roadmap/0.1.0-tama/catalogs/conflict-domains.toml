@@ -261,7 +261,7 @@ symbols = ["SvelteProduct","SvelteCompileRequest"]
 description = "Exclusive mutation lease for the concrete svelte product authority surface."
 [[domain]]
 id = "validation_observability"
-path_roots = ["crates/verter_validation_probe","roadmap/0.1.0-tama/catalogs/validation-authorities.toml","roadmap/0.1.0-tama/tools/validate-probe-authorities.mjs","roadmap/0.1.0-tama/tools/validate-probe-authorities.test.mjs"]
+path_roots = ["crates/verter_validation_probe","Cargo.toml","Cargo.lock","roadmap/0.1.0-tama/catalogs/validation-authorities.toml","roadmap/0.1.0-tama/tools/validate-probe-authorities.mjs","roadmap/0.1.0-tama/tools/validate-probe-authorities.test.mjs"]
 symbols = ["ProbeOutcomeClass","ProbeStateManifest","Authority","ObservationArtifact","JoinRecord"]
 description = "Exclusive mutation lease for the test-only probe crate: outcome taxonomy, probe-state manifest, workload runner and corpus adapters, false-green controls, observation capture, and the promotion join record. Workflow files it must wire (.github/workflows) are leased through both existing workflow-owning domains, release_orchestration and github_projection_state, declared on each node that touches them."
 [[domain]]
