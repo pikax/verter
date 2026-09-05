@@ -9,8 +9,8 @@
 //! one — the product set, the framework options, the published node set
 //! and the assembly axes all come from the request itself, the registered
 //! immutable source snapshot supplies the bytes, and supplied (externally
-//! preprocessed) block artifacts are read from the profile-less bucket
-//! only — the one `apply_block_overrides` writes to when the caller names
+//! preprocessed) block artifacts are read from the default-profile hash
+//! bucket — the one `apply_block_overrides` writes to when the caller names
 //! no compile profile.
 //!
 //! [`publish_runtime_nodes`] is the ONE projection of an admitted runtime
@@ -52,11 +52,12 @@ impl VerterHost {
     /// published node set all come from the request itself, and the
     /// registered immutable source snapshot supplies the bytes. Supplied
     /// (externally preprocessed) block artifacts are visible ONLY from the
-    /// profile-less admission bucket — the one `apply_block_overrides`
-    /// writes to when the caller names no compile profile; artifacts
-    /// admitted under a named profile stay invisible, and a block whose
-    /// authored dialect needs preprocessing with no profile-less override
-    /// still refuses as unavailable.
+    /// default-profile hash bucket — the one `apply_block_overrides` writes
+    /// to when the caller names no compile profile. An explicitly named
+    /// default-valued profile shares that bucket; artifacts admitted under
+    /// a profile whose hash differs from the default stay invisible. A block
+    /// whose authored dialect needs preprocessing with no default-bucket
+    /// override still refuses as unavailable.
     ///
     /// The source is NOT part of the request. This entry reads the already
     /// stored snapshot by canonical id, resolving an alias once, and a
@@ -120,13 +121,13 @@ impl VerterHost {
                 })?;
             let parse = &hd.parse;
             // This route reads supplied (externally preprocessed) block
-            // artifacts from the PROFILE-LESS bucket — the bucket
+            // artifacts from the default-profile hash bucket — the bucket
             // `apply_block_overrides` writes to when the caller names no
-            // compile profile — and no other: artifacts admitted under a
-            // named profile stay invisible, so the route never inherits
-            // another route's preprocessed bytes. A block whose authored
-            // dialect needs external preprocessing and has no profile-less
-            // override still refuses as unavailable.
+            // compile profile. A named default-valued profile shares that
+            // bucket; artifacts admitted under a profile whose hash differs
+            // from the default stay invisible. A block whose authored dialect
+            // needs external preprocessing and has no default-bucket override
+            // still refuses as unavailable.
             let style_content = self.capture_compiler_style_content(
                 &canonical,
                 &parse.style_analyses,

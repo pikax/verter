@@ -147,8 +147,21 @@ export async function preprocessStyle(
   // non-CSS bytes can reach it.
   const lower = lang.toLowerCase();
   if (lower === "scss" || lower === "sass") {
+    let sass: typeof import("sass");
     try {
-      const sass = await import("sass");
+      sass = await import("sass");
+    } catch (e: unknown) {
+      if (e !== null && typeof e === "object" && "code" in e && e.code === "ERR_MODULE_NOT_FOUND") {
+        console.warn(
+          `[verter] Style preprocessing for lang="${lang}" requires the "sass" package. ` +
+            `Install it to compile ${lower} blocks outside Vite.`,
+        );
+        return null;
+      }
+      throw e;
+    }
+
+    try {
       const result = sass.compileString(content, {
         syntax: lower === "sass" ? "indented" : "scss",
         sourceMap: true,
@@ -160,13 +173,6 @@ export async function preprocessStyle(
       };
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
-      if (/Cannot find package|Failed to resolve import|MODULE_NOT_FOUND/.test(message)) {
-        console.warn(
-          `[verter] Style preprocessing for lang="${lang}" requires the "sass" package. ` +
-            `Install it to compile ${lower} blocks outside Vite.`,
-        );
-        return null;
-      }
       // A genuine compile failure is not "no preprocessor available": if it
       // were swallowed to `null` the host would later refuse the block as
       // `ProcessedContentRequired`, burying the compiler's own message.

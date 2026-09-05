@@ -1174,17 +1174,16 @@ fn the_batch_registers_each_source_exactly_once() {
 // ── the mechanisms this route invented ───────────────────────────────
 
 /// The route reads supplied (externally preprocessed) block artifacts from
-/// the PROFILE-LESS bucket — the bucket `apply_block_overrides` writes to
-/// when the caller names no compile profile — and serves them to the
-/// compile.
+/// the default-profile hash bucket — the bucket `apply_block_overrides`
+/// writes to when the caller names no compile profile — and serves them to
+/// the compile.
 ///
-/// The seam carries no compile profile of its own, so the profile-less
-/// bucket is exactly the one its callers can intend for it. A block whose
-/// authored dialect needs external preprocessing compiles from the
-/// profile-less supplied bytes.
+/// An explicitly named default-valued profile shares this compatibility
+/// bucket. A block whose authored dialect needs external preprocessing
+/// compiles from the supplied bytes in that bucket.
 ///
 /// Discrimination: under the no-bucket scope the compile below refuses as
-/// unavailable; under a named-profile bucket it serves nothing here.
+/// unavailable; under a non-default-profile bucket it serves nothing here.
 #[test]
 fn the_route_reads_the_profile_less_supplied_artifact_bucket() {
     let host = new_host();
@@ -1208,7 +1207,7 @@ fn the_route_reads_the_profile_less_supplied_artifact_bucket() {
 
     // Admit the preprocessed bytes WITHOUT a compile profile — the FFI
     // conversion of an absent profile is `CompileProfile::default()`, so
-    // this IS the profile-less bucket the seam reads.
+    // this is the default-profile hash bucket the seam reads.
     let _ = host
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: update.canonical_id.clone(),
@@ -1240,8 +1239,8 @@ fn the_route_reads_the_profile_less_supplied_artifact_bucket() {
 }
 
 /// An override admitted under a NAMED (non-default) compile profile stays
-/// invisible to this route: the seam draws from the profile-less bucket
-/// alone and never inherits another route's preprocessed bytes.
+/// invisible to this route: the seam draws from the default-profile hash
+/// bucket and never inherits a non-default profile's preprocessed bytes.
 ///
 /// Discrimination: reading the named bucket would serve the artifact
 /// admitted below, and the refusal assertion fails.
@@ -1297,7 +1296,7 @@ fn the_route_does_not_read_a_named_profile_supplied_bucket() {
         "control: the named profile's bucket must hold the admitted artifact"
     );
 
-    // THE PIN: the seam reads the profile-less bucket alone, so the block
+    // THE PIN: the seam reads the default-profile hash bucket, so the block
     // that needs external preprocessing is unavailable to it.
     let failure = host
         .compile_request("/src/Themed.vue", vue_request(vec![runtime_client(false)]))

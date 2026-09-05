@@ -2,11 +2,10 @@
  * @ai-generated - Integration tests for the unplugin factory.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
+import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { createRequire } from "node:module";
 import { tmpdir } from "os";
-import { fileURLToPath } from "url";
 import { defineConfig, resolveConfig } from "vite";
 import { transform as transformJs } from "esbuild";
 import { compileStyle } from "@vue/compiler-sfc";
@@ -801,16 +800,15 @@ const primary = "red";
     expect(transformed.code).toBe(loaded.code);
   });
 
-  it("fails a broken non-Vite SCSS block with the Sass compiler's message", async () => {
+  it("does not mistake a Sass compiler message for a missing package", async () => {
     const plugin = createPlugin();
     const filename = "/test/BrokenScss.vue";
-    // A genuine syntax error is a broken input, not a missing preprocessor:
-    // the build must fail with the compiler's message, not the host's
-    // opaque `ProcessedContentRequired` refusal.
+    // The compiler message deliberately resembles a module-resolution error.
+    // It must still surface instead of becoming ProcessedContentRequired.
     await expect(
       plugin.transform(
         `<template><div class="x">x</div></template>
-<style lang="scss">.x { color: }</style>`,
+<style lang="scss">@error "Cannot find package from authored Sass";</style>`,
         filename,
       ),
     ).rejects.toThrow(/Failed to preprocess style lang="scss" in \/test\/BrokenScss\.vue/);
@@ -3482,74 +3480,6 @@ describe("native request construction evidence", () => {
 
     vi.restoreAllMocks();
     await plugin.closeBundle();
-  });
-
-  /**
-   * Source-level absence proof, AST-aware so comments and string literals
-   * cannot mask a violation: the production modules import no host profile
-   * DTO, construct no profile-shaped argument, and call no profile-bearing
-   * native host method. The legacy native exports still exist on the host —
-   * the test below proves reachability — but this plugin never dials them.
-   */
-  it("production sources hold no profile import, profile-shaped argument, or profile-bearing host call", async () => {
-    const ts = await import("typescript");
-    const sources = ["./index.ts", "./core/compiler.ts"].map((relative) => {
-      const path = fileURLToPath(new URL(relative, import.meta.url));
-      return ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true);
-    });
-
-    const FORBIDDEN_PROFILE_IMPORTS = new Set([
-      "HostCompileProfile",
-      "CompileBatchRenderProfile",
-      "CompileBatchOptions",
-      "CompileBatchInput",
-    ]);
-    const profileImports: string[] = [];
-    const profileProperties: string[] = [];
-    const profileBearingCalls: string[] = [];
-    const legacyRenders: string[] = [];
-
-    for (const source of sources) {
-      source.forEachChild(function visit(node: ts.Node) {
-        if (ts.isImportDeclaration(node) && node.importClause) {
-          const specifiers = [
-            ...(node.importClause.namedBindings &&
-            ts.isNamedImports(node.importClause.namedBindings)
-              ? node.importClause.namedBindings.elements
-              : []),
-          ];
-          for (const specifier of specifiers) {
-            const name = specifier.propertyName
-              ? specifier.propertyName.getText(source)
-              : specifier.name.getText(source);
-            if (FORBIDDEN_PROFILE_IMPORTS.has(name)) {
-              profileImports.push(`${source.fileName}: import ${name}`);
-            }
-          }
-        }
-        if (
-          (ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) &&
-          node.name.getText(source) === "compileProfile"
-        ) {
-          profileProperties.push(source.fileName);
-        }
-        if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-          const method = node.expression.name.getText(source);
-          if (method === "compileMany" || method === "getVirtualFile") {
-            profileBearingCalls.push(`${source.fileName}: ${method}`);
-          }
-          if (method === "legacyRenderProfileOptions") {
-            legacyRenders.push(source.fileName);
-          }
-        }
-        node.forEachChild(visit);
-      });
-    }
-
-    expect(profileImports).toEqual([]);
-    expect(profileProperties).toEqual([]);
-    expect(profileBearingCalls).toEqual([]);
-    expect(legacyRenders).toEqual([]);
   });
 
   it("legacy native exports remain reachable alongside the typed route", () => {

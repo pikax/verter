@@ -321,9 +321,9 @@ pub(crate) struct CompilerBlockContentCapture {
 /// A supplied (externally preprocessed) block artifact is admitted under
 /// the compile profile the admitting caller named, so a read has to state
 /// which bucket it is entitled to. The distinction is a property of the
-/// READING ROUTE, never of the content: a route with no channel for
-/// admitting supplied artifacts reads the registered carrier source alone
-/// and must not inherit another route's preprocessed bytes.
+/// READING ROUTE, never of the content. The profile-less compatibility
+/// route selects the default-profile hash bucket, which is also selected by
+/// an explicitly named default-valued profile.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SuppliedBlockScope<'p> {
     /// Supplied artifacts admitted under this compile profile's bucket.
@@ -332,10 +332,9 @@ pub(crate) enum SuppliedBlockScope<'p> {
     /// profile — the bucket `apply_block_overrides` writes to when the
     /// FFI conversion of an absent profile resolves to
     /// `CompileProfile::default()`. The canonical-request route reads
-    /// this bucket: it carries no compile profile of its own, so the
-    /// profile-less artifacts are exactly the ones a caller intended
-    /// for it, while artifacts admitted under a NAMED profile stay
-    /// invisible to it.
+    /// this compatibility bucket. It is shared with an explicitly named
+    /// profile equal to the default; artifacts admitted under a profile
+    /// whose hash differs from the default stay invisible to the route.
     Unprofiled,
 }
 
