@@ -184,7 +184,7 @@ schema = 2
 "D7" = { status = "pending" }
 "D8" = { status = "pending" }
 "DEM0" = { status = "pending" }
-"E1" = { status = "pending" }
+"E1" = { status = "implemented", commit_message = "feat(typeinfo): resolve-symbol graph operation with bounded SemanticTypeGraph export", commit_date = "2026-09-05T01:30:00+01:00" }
 "E2" = { status = "pending" }
 "E3" = { status = "pending" }
 "E4" = { status = "pending" }

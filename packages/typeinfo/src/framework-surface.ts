@@ -184,7 +184,7 @@ export function decodeFrameworkSurfaceResponse(
   const kind = response.kind;
 
   if (kind.case === "frameworkSurface") {
-    return decodePayload(kind.value);
+    return decodeFrameworkSurfacePayload(kind.value);
   }
   if (kind.case === "error") {
     // Surface the TYPED error oneof (`{ case, value }`) verbatim — never a
@@ -198,7 +198,13 @@ export function decodeFrameworkSurfaceResponse(
   return { error: { case: undefined } as TypeInfoRequestError["kind"] };
 }
 
-function decodePayload(payload: FrameworkSurfacePayload): FrameworkSurface {
+/**
+ * Decode an already-decoded `framework_surface` payload arm into the
+ * public {@link FrameworkSurface}. Exported so the graph operation-DTO
+ * decode (`graph.ts`) can handle the arm without duplicating this
+ * projection.
+ */
+export function decodeFrameworkSurfacePayload(payload: FrameworkSurfacePayload): FrameworkSurface {
   const strings = payload.graph?.strings?.entries ?? [];
 
   const kinds = new Map<FrameworkSurfaceKind, FrameworkSurfaceKindResult>();
