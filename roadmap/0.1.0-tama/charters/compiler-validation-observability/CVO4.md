@@ -100,7 +100,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 ## Abort conditions
 
 - Stop before mutation if an owning authority contract needed for a candidate decision is not yet available; leave the candidate deferred rather than guessing.
-- Abort the join if `ObservationInventory::fetch` (CVO2's cutoff: every artifact with `expired == false` at `started_at`, no other time filter) returns an empty inventory, or an inventory in which either pinned framework has no row: a join never proceeds on a vanished or one-sided observation window, and the abort names the `retrieval_window` it found.
+- Abort the join if `ObservationInventory::fetch` (CVO2's cutoff: `created_at <= started_at` and `expires_at > started_at`, nothing else) returns an empty inventory, or an inventory in which either pinned framework has no row: a join never proceeds on a vanished or one-sided observation window, and the abort names the `retrieval_window` it found.
 - Abort the candidate if the join would require a compiler semantic change or a new threshold; those belong to their owning nodes.
 
 ## Targeted verification
