@@ -1,0 +1,45 @@
+error[E0603]: enum `ForceProjectionSegment` is private
+ --> tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs:9:5
+  |
+9 |     ForceProjectionSegment, SemanticOperandForceDemand, SemanticOperandForceProjection,
+  |     ^^^^^^^^^^^^^^^^^^^^^^ private enum
+  |
+note: the enum `ForceProjectionSegment` is defined here
+ --> src/semantic_query/operand.rs
+  |
+  | pub(crate) enum ForceProjectionSegment {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: enum `SemanticOperandForceDemand` is private
+ --> tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs:9:29
+  |
+9 |     ForceProjectionSegment, SemanticOperandForceDemand, SemanticOperandForceProjection,
+  |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^ private enum
+  |
+note: the enum `SemanticOperandForceDemand` is defined here
+ --> src/semantic_query/operand.rs
+  |
+  | pub(crate) enum SemanticOperandForceDemand {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: enum `SemanticOperandForceProjection` is private
+ --> tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs:9:57
+  |
+9 |     ForceProjectionSegment, SemanticOperandForceDemand, SemanticOperandForceProjection,
+  |                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private enum
+  |
+note: the enum `SemanticOperandForceProjection` is defined here
+ --> src/semantic_query/operand.rs
+  |
+  | pub(crate) enum SemanticOperandForceProjection {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unreachable call
+  --> tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs:18:13
+   |
+18 |     let _ = ForceProjectionSegment::Member(todo!());
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
+   |             |
+   |             unreachable call
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default

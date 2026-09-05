@@ -2600,11 +2600,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `Instantiate` sub-key this build re-emits via
         // `instantiate_context_for`.
         let context = instantiate_context.projection_reduction();
-        if let Some(identity) = source.authored_identity() {
+        if let Some(authored) = source.authored_source() {
             return self.build_authored_instantiation(
                 base,
-                identity.locator(),
+                authored.identity().locator(),
                 args,
+                authored.projection(),
                 instantiate_context,
             );
         }
