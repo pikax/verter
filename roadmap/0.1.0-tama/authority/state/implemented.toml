@@ -391,7 +391,7 @@ schema = 2
 "TA2" = { status = "implemented", commit_message = "feat(session): demand-scoped truthiness domain authority consumed by flow", commit_date = "2026-09-01T04:00:00+01:00" }
 "TCM0" = { status = "pending" }
 "TCM0R" = { status = "implemented", commit_message = "fix(*): deduplicate the canonical set field and ratify the TypeScript dual-plane contract", commit_date = "2026-09-04T18:00:00+01:00", pull_request = 477 }
-"TCM1" = { status = "pending" }
+"TCM1" = { status = "implemented", commit_message = "feat(core): dual-surface mapping product inside CodeTransform", commit_date = "2026-09-05T00:00:00+01:00" }
 "TCM2" = { status = "pending" }
 "TCM3" = { status = "pending" }
 "TCM4" = { status = "pending" }

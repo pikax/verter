@@ -197,6 +197,8 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
    * content rather than blocking or a negative — the C10 sticky-`TS2307` defense.
    */
   private readonly lastGoodBlob = new Map<string, string>();
+  /** Parsed maps are immutable content-addressed artifacts. */
+  private readonly parsedMaps = new Map<string, unknown>();
 
   constructor(storeDir: string | undefined, projectKey?: string, useCaseSensitiveFileNames = true) {
     this.storeDir = storeDir;
@@ -606,6 +608,8 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
     if (this.storeDir === undefined) {
       return undefined;
     }
+    const cached = this.parsedMaps.get(mapRel);
+    if (cached !== undefined) return cached;
     let raw: string;
     try {
       raw = fs.readFileSync(path.join(this.storeDir, mapRel), "utf8");
@@ -613,7 +617,9 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
       return undefined;
     }
     try {
-      return JSON.parse(raw);
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed !== undefined) this.parsedMaps.set(mapRel, parsed);
+      return parsed;
     } catch {
       return undefined;
     }

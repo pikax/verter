@@ -105,7 +105,7 @@ pub struct CodeGenOutput<'alloc> {
     /// the [`CodeTransform`] in [`apply_to`](Self::apply_to) so source-map generation can report
     /// the generated-TSX position immediately after it (the typed preamble-end boundary). `None`
     /// when no helper-import preamble was emitted.
-    helper_preamble: Option<&'alloc str>,
+    helper_preamble: Option<(Option<u32>, &'alloc str)>,
 
     /// Inline-mode hoisted-constant module preamble, recorded via
     /// [`set_module_preamble`](Self::set_module_preamble). Transferred to
@@ -334,10 +334,15 @@ impl<'alloc> CodeGenOutput<'alloc> {
     /// imports themselves stay unmapped synthetic text); the only addition is the recorded identity.
     /// Called once per IDE script generation from `emit_helper_imports`.
     #[inline]
-    pub fn prepend_helper_preamble(&mut self, pos: u32, content: &str) {
+    pub fn prepend_helper_preamble(
+        &mut self,
+        pos: u32,
+        carrier_anchor: Option<u32>,
+        content: &str,
+    ) {
         let allocated = self.alloc.alloc_str(content);
         self.prepends.push((pos, allocated));
-        self.helper_preamble = Some(allocated);
+        self.helper_preamble = Some((carrier_anchor, allocated));
     }
 
     /// Record module-scope preamble content (inline-mode hoisted constants)
@@ -640,8 +645,11 @@ impl<'alloc> CodeGenOutput<'alloc> {
         // Carry the recorded helper-import preamble identity into the transform. The same `&'alloc
         // str` becomes an `Inserted` chunk below, so source-map generation can locate it by pointer
         // and report the typed preamble-end boundary. No-op when no preamble was emitted.
-        if let Some(preamble) = self.helper_preamble {
-            ct.set_helper_preamble_content(preamble);
+        if let Some((carrier_anchor, preamble)) = self.helper_preamble {
+            match carrier_anchor {
+                Some(anchor) => ct.set_helper_preamble_content_at(preamble, anchor),
+                None => ct.set_helper_preamble_content(preamble),
+            }
         }
 
         // Apply wrapped moves FIRST — they operate on Original chunks and must
