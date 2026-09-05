@@ -252,6 +252,14 @@ Every subblock below produces contract schemas, decision tables, owner mappings,
 | Stale-selection/revocation races at activation and activation status | EPR5-SB1/SB6, EPR5-AC-REVALIDATE |
 
 
+### Ownership inventory deliverables
+
+EPR1 implements `catalogs/engine-validation-ownership.toml`, `schemas/engine-validation-ownership.schema.json` and `tools/validate-engine-validation-ownership.mjs` with focused fixtures. These are future EPR1 contract artifacts; this amendment does not claim that they already exist or that the static charter-header validator inspects their contents.
+
+EPR1 owns its contract schemas, inventories, validators and fixture artifacts. The successor bindings inventory the runtime outcomes and consumer obligations specified by those artifacts; they do not transfer EPR1's contract deliverables to a production owner. That runtime population covers every subblock's specified behavior, named API/data boundary, consumer and source-class obligation in this charter, plus the displaced routes identified by read-only source reconciliation. Include manual, project, system, editor, managed and bundled sources with their policy applicability; optional channels remain inventoried without becoming mandatory production outcomes. Each row identifies its population member and source reference, role, concrete owner node and exact receiving acceptance ID. The schema checks row structure; the validator checks full population coverage, unique ownership, production-capable owners, current DAG successor paths and acceptance IDs in the receiving charters. The prose table above is a summary, not a substitute for that complete checked inventory.
+
+Bind the validator's actual invocation into EPR1's docs-domain acceptance before completion. Its negative fixtures cover the omissions and invalid bindings named by EPR1-AC-SOLE. The validator must accept pending receiving implementation nodes: its purpose here is to verify ownership and dependency contracts, not to claim those future runtime owners are implemented.
+
 ### Consumers and unlocks
 
 - Unlocks required EPR4; optional EPR2/EPR3 also require its shared production validator.
@@ -262,7 +270,7 @@ Every subblock below produces contract schemas, decision tables, owner mappings,
 
 Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
 
-- **EPR1-AC1 — sole-owner outcome:** the contract artifacts establish the named ownership rules and inventory every displaced production route with its later production-capable deletion owner; this zero-production node performs no runtime migration. Add a negative or mutation test only for a plausible critical fail-closed/correctness boundary or reproduced defect that existing evidence does not discriminate.
+- **EPR1-AC1 — sole-owner outcome:** deliver the schema-checked ownership inventory required by contracts/successor-charter-quality.md for every in-scope runtime outcome, consumer and displaced route. EPR1 retains ownership of its contract deliverables; each specified runtime outcome/consumer binds one production-capable implementation owner; each displaced route binds one later production-capable deletion/rejection owner. Resolve concrete DAG node IDs, a successor dependency path from EPR1, and the exact receiving acceptance criterion. This zero-production node validates the complete transfer without performing the later runtime migration.
 - **EPR1-AC2 — positive contract:** the named API/data boundary preserves exact identities, provenance, completeness, and deterministic ordering. Reuse existing coverage or extend/table-drive one test before creating a new test.
 - **EPR1-AC3 — incremental contract:** the cache and invalidation decision tables bind unchanged reuse and changed-basis rejection to exact fixture vectors and later behavioral owners. EPR4/EPR5 supply runtime incremental/fresh evidence; EPR1 records that it is not yet executed.
 - **EPR1-AC4 — bounded-work contract:** declare finite validation/cache limits, work counters, and zero-work modes with their later implementation owners. No runtime hot-path or soak result is required from this zero-production contract.
@@ -279,7 +287,7 @@ These acceptance IDs require schema/decision-table fixtures and an exact product
 - **EPR1-AC-INTEGRITY:** byte/origin/signature/manifest mutation vectors specify pre-execution rejection and map to EPR4-SB3 plus the EPR2/EPR3 evidence producers.
 - **EPR1-AC-INSTALL:** layout and state-transition fixtures forbid partial/untrusted READY entries and enumerate crash/concurrency/symlink/permission cases for EPR2-SB5, EPR3-SB5, and EPR4-SB7.
 - **EPR1-AC-REVOCATION:** decision tables specify invalidation at validation/selection/activation and bind implementation to EPR4-SB3/SB6 and EPR5-SB1.
-- **EPR1-AC-SOLE:** the transfer inventory assigns each displaced route exactly one production deletion owner; a missing or duplicate owner fails contract validation.
+- **EPR1-AC-SOLE:** the executable ownership-inventory validator rejects an omitted outcome, consumer or displaced route; an unknown owner node; an owner without a successor dependency path from EPR1; a missing or nonexistent receiving acceptance criterion; and conflicting owners for one population member. Each negative fixture starts from a valid complete inventory and proves rejection for its intended reason.
 - **EPR1-AC-CONTRACT:** schema fields, identities, typed outcomes, provenance, and public redaction vectors are exact, deterministic, and complete.
 - **EPR1-AC-INCREMENTAL:** contract vectors distinguish unchanged reuse from stale, cancelled, partial, and changed-basis rejection; EPR4-SB6 and EPR5-SB1 own runtime incremental/fresh proof.
 - **EPR1-AC-WORK:** finite validation/cache budgets and equivalent-work counters are specified for EPR4-SB6; acquisition, shipping, and activation work remains with EPR2/EPR3/EPR5. EPR1 makes no runtime performance claim.
@@ -332,7 +340,7 @@ The program-wide prohibitions also apply: no dual-running semantic authority, co
 ### Pack-specific verification inventory
 
 1. Validate artifact identity, compatibility, integrity, signature, and origin schemas against positive and negative contract fixture vectors.
-1. Validate the cache-layout/state-transition decision tables and complete runtime-owner mapping for permission, symlink/reparse, crash, concurrency, quarantine, and revocation cases.
+1. Run the ownership-inventory schema and validator against the complete required outcome/consumer/displaced-route population and each omission, unknown-node, missing-path, missing-acceptance and conflicting-owner negative fixture. Validate the cache-layout/state-transition decision tables and their runtime-owner bindings for permission, symlink/reparse, crash, concurrency, quarantine, and revocation cases.
 1. Validate public status redaction/portability goldens and the declared warm-validation budgets/counter schema; bind runtime execution to the mapped later owners.
 
 The canonical gate profile remains authoritative. Targeted success is iteration evidence only. Final acceptance requires fresh RED/GREEN evidence when applicable, the configured independent review profile, and the owning final gate on the squashed review candidate.
