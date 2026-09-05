@@ -764,6 +764,7 @@ pub mod projection_bench_support {
 pub use crate::cache_runtime::flow_slice_node::PlannedFlowSlice;
 pub use crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::*;
 pub use crate::project_semantic_dispatch::dispatch_txn::ObligationRuntime;
+pub use crate::project_semantic_dispatch::flow_products::*;
 pub use crate::project_semantic_dispatch::flow_solve::*;
 
 /// One hermetic flow-solve fixture: `source`'s first function declaration,
@@ -813,6 +814,13 @@ impl FlowGraphFixtureForTests {
     /// error, never a proof plan.
     pub fn build_plan_with_retained(&self, request: FlowDemandRequest, retained: &PlannedFlowSlice) -> Result<FlowDemandPlan, FlowDemandPlanError> {
         crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, retained, &self.inventory)
+    }
+
+    /// The product-lattice inputs over this fixture's store-bound graph:
+    /// the graph plus the frame's binding identities, resolved through the
+    /// SAME single slot-numbering authority the demand planner uses.
+    pub fn product_inputs(&self) -> FlowProductInputs {
+        FlowProductInputs::for_bound_graph(&self.bound, &self.inventory)
     }
 }
 
