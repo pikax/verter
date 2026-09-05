@@ -177,6 +177,7 @@ schema = 2
 "D6" = { status = "pending" }
 "D7" = { status = "pending" }
 "D8" = { status = "pending" }
+"DEBT-COMPILER-EXECUTION" = { status = "pending" }
 "DEM0" = { status = "pending" }
 "E1" = { status = "pending" }
 "E2" = { status = "pending" }
