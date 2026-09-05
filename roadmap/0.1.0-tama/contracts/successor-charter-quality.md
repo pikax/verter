@@ -30,6 +30,8 @@ A zero-production contract inventories displaced production routes and assigns e
 
 Before a pending ownership-contract node completes, its own inventory artifacts enumerate every in-scope outcome, consumer and displaced route. Each outcome/consumer binds one implementation owner; each displaced production route binds one later production-capable deletion/rejection owner. These bindings use concrete DAG node IDs, a valid successor dependency path from the contract, and a named receiving acceptance criterion; the node's descriptive `owner` string is not such a binding. The contract-owned schema and validator reject omitted population members, unknown nodes, missing paths, missing acceptance criteria and conflicting owners. These are artifacts that the pending contract node must implement and verify, not a claim that the current static charter-header validator already inspects future inventory contents.
 
+For runtime implementation and production deletion/rejection bindings, the validator also checks that the receiving charter authorizes those production changes. A known contract-only or documentation-only node cannot own a production obligation merely because its node ID, path and acceptance ID are valid. A focused negative fixture preserves those valid bindings while substituting a non-production owner and proves rejection for lack of production authority. This requirement does not transfer the contract node's own schema, validator or fixture artifacts to a runtime owner, and advisory LOC budgets alone do not establish mutation authority.
+
 ## Atomicity tests
 
 A node must be split before dispatch when any of these are true:
