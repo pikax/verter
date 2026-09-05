@@ -641,14 +641,6 @@ const counts = (selected, executed, passed, failed, skipped) => ({
  *
  * Nothing here reads the record's authored numbers: this is the independent
  * half of the comparison the validator then makes.
- *
- * A bracketed elapsed time is not part of the transcription. The nextest and
- * libtest grammars match the duration position opaquely (`[^\]]*`), and no
- * comparison — the static count check, the instrument lane's re-execution, or
- * a control lane's clean run — ever reads it: no two runs of the same suite
- * report the same duration, so a transcribed one could only be a stale
- * literal from an earlier run presenting as evidence. A record is free to
- * state that absence in place of a fabricated time.
  */
 export function parseTerminalSummary(grammar, summary, countKey) {
   const text = stripStyling(normalizeLines(summary));

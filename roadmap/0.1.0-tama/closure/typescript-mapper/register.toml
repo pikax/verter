@@ -817,12 +817,6 @@ failed = 0
 skipped = 547
 expected_skips = 547
 skip_basis = "the command applies no filter expression, so nextest counts a test as skipped only for being marked #[ignore]: the 547 are the three packages' opt-in real-provider, corpus, and soak cases, and the clean half of the control lane's re-application re-derives executed and skipped live against this transcript. The selection is shaped by the lane's CI platform — unix-gated and windows-gated cases compile on different hosts, so the five counts are the linux selection's, and a lane run on a platform that compiles a different cfg set fails the clean-run comparison by exactly those cases rather than being tolerated"
-# The bracketed elapsed time is NOT part of this transcription and is never
-# compared: it is the one field of the runner's own line that cannot be
-# re-derived (no two runs of the same suite report the same duration), so the
-# record states that absence in place of a stale literal rather than carrying
-# a millisecond value from an earlier run. The five counts are transcribed
-# verbatim from the recorded run and are what every comparison reads.
 terminal_summary = "Summary [duration not transcribed] 8949 tests run: 8949 passed, 547 skipped"
 control = "CTL-targeted-selector"
 
