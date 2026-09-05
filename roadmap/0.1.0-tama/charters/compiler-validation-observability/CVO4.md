@@ -100,13 +100,14 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 ## Abort conditions
 
 - Stop before mutation if an owning authority contract needed for a candidate decision is not yet available; leave the candidate deferred rather than guessing.
+- Abort the join if `ObservationInventory::fetch` returns an empty inventory, or an inventory lacking at least one non-expired artifact per pinned framework created within the 30 days before `started_at`, or one that does not cover both pinned corpora: a join never proceeds on a vanished or one-sided observation window, and the abort names the window it found.
 - Abort the candidate if the join would require a compiler semantic change or a new threshold; those belong to their owning nodes.
 
 ## Targeted verification
 
 1. `cargo nextest run -p verter_validation_probe` and `node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict`
 2. Run every final command in the bound `targeted-domain` profile on the squashed review candidate; targeted success alone is iteration evidence, not acceptance.
-3. Bind the preflight evidence selection and terse rationale in the review report. The two planted negatives are the TDD artifact for the validator.
+3. Bind the preflight evidence selection and terse rationale in the review report. The five planted negatives named in CVO4-AC2 are the TDD artifact for the validator.
 
 ## Review and lower-severity findings
 
