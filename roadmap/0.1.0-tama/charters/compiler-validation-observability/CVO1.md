@@ -7,9 +7,9 @@ product=validation_observability
 kind=implementation
 semantic_role=delivery
 class=compiler
-predecessors=CVO0
+predecessors=CVO0,CCA1O2J
 owner=compiler.validation-observability:test-only validation and observability lane
-conflict_domains=validation_observability
+conflict_domains=validation_observability,release_orchestration
 resource_class=rust-mixed
 review_profile=semantic-3
 gate_profile=targeted-domain
@@ -46,13 +46,16 @@ A bounded real-workload CI lane that exercises Verter against one pinned `pikax/
 ## Concrete surfaces and APIs
 
 - Production surfaces: none; the runner and manifest are test/CI tooling.
-- Named API/data boundaries: workload runner (table/data driven, no one-test-per-fixture jobs), `ProbeStateManifest` entries with stable case ids, aggregate summary artifact.
-- Test/CI homes: a test-only crate under `crates/verter_validation_probe` (or the nearest existing test-only home if that name is taken), `.github/workflows` lane wiring, `scripts` entrypoints.
+- Named API/data boundaries: the workload runner (`crates/verter_validation_probe/src/runner.rs`, table/data driven, no one-test-per-fixture jobs) bound to the public NAPI routes `compileRequest` / `compileRequests` on the exported host object (`crates/verter_napi/src/lib.rs`, owned by CCA1O2J) and to no other entry point; the corpus adapter `crates/verter_validation_probe/src/corpus/vue_benchmarks.rs`; `ProbeStateManifest` entries with stable case ids `vue/<relative-path-in-corpus>`; the summary artifact `target/validation-probe/summary.json` written by `scripts/validation-probe.mjs`.
+- Comparator and the meaning of `pass`: the lane compares Verter's product against the output of the pinned upstream reference compiler (`@vue/compiler-sfc` at the version pinned in the root `package.json`) using the existing conformance comparator `verter_vue_conformance::compare::compare_modules` and its canonicalizer (`verter_vue_conformance::canon`); nothing new is written to decide equality. `pass` means the public route produced a well-formed product and the comparator reported no diff; `semantic_mismatch` carries the comparator's `DiffReason`. The reference output is comparator input, not expected-output authority: a mismatch is evidence for the owning semantic node (the `compiler.vue-compiler` train), never a verdict on Verter. `runtime_mismatch` and `source_map_mismatch` are declared inapplicable by this lane (never emitted; the manifest records `comparison = structural`) until a later owning node binds an existing runtime executor or map validator.
+- Hermeticity (repository policy “Testing-Hermeticity”): the corpus checkout lives at `.integration-tests/repos/vue-benchmarks` and is read only from tests behind `#[cfg(feature = "external-corpus")]`; the default canonical run (`node scripts/gate.mjs`) neither reads nor requires it, and the guard `external_corpus_paths_not_present_outside_gated_tests` must stay green. Only the dedicated workflow `.github/workflows/validation-probe.yml` provisions the pinned checkout and enables the feature.
+- Test/CI homes: `crates/verter_validation_probe` (modules `corpus`, `runner`, `manifest`, `summary`), `.github/workflows/validation-probe.yml`, `scripts/validation-probe.mjs`. The workflow and script live under `release_orchestration` roots, which this node therefore also leases. No fallback home: if any of these paths cannot be used, stop before mutation and obtain an authority amendment; never place the runner in another train's test home such as `crates/verter_compiler/tests`.
 - Mutation boundary: test/CI bytes only; production LOC is zero.
 
 ## Exact predecessor contracts
 
-- **CVO0:** implemented ledger row for "Probe outcome taxonomy and probe-state manifest contract"; the lane must use that taxonomy and manifest verbatim. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
+- **CVO0:** implemented ledger row for "Probe outcome taxonomy and probe-state manifest contract"; supplies the `verter_validation_probe` crate, `ProbeOutcomeClass::terminal`, and `ProbeStateManifest::validate`, which the lane uses verbatim. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
+- **CCA1O2J:** implemented ledger row for "NAPI typed host-request callable route"; supplies the bound addon methods `compileRequest` and `compileRequests` on the exported host object, the only routes the runner may call. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
 - **External requirements:** agents check `pinned_vue_benchmarks_checkout`; tooling does not validate external state. The pinned revision is recorded in the manifest and every summary artifact.
 
 ## Source-specific scope
@@ -63,7 +66,8 @@ A bounded real-workload CI lane that exercises Verter against one pinned `pikax/
   - one pinned `pikax/vue-benchmarks` revision and one deterministic representative slice; stable case ids; aggregate reporting;
   - the corpus is an external workload probe, not an oracle, semantic authority, expected-output authority, golden source, normalizer authority, or reason to change compiler behavior, and not a replacement for official conformance coverage;
   - requests go through normal/public compiler routes; no test-only semantic shortcuts;
-  - pull requests run a small deterministic smoke slice sized to detect broken compiler/host integration without materially increasing ordinary gate latency; a broader main-lane set may contain canary/known-fail cases and runs separately from the required fast gate;
+  - the runner, manifest, and summary are framework-neutral: `framework` is a case attribute, never a runner variant, so CVO1S plugs the pinned `pikax/svelte-benchmarks` corpus into this same lane without a second runner or summary format;
+  - pull requests run a small deterministic smoke slice bounded structurally, not by wall clock: at most 24 Vue cases, one CI job, one `compileRequests` call per case (no warm repeats in the smoke lane), listed by case id in the manifest; elapsed time is reported as an observation only. A broader main-lane set (at most 200 cases, one job) may contain canary/known-fail cases and runs separately from the required fast gate;
   - the summary artifact reports cases attempted/passed, gated regressions, canary/known failures by outcome class, skips, XPASS/promotion candidates, crashes, timeouts, and harness failures;
   - scope rule for failures: classify first; a cause owned by a future DAG node is recorded with its owner and kept canary/known-fail or skip; a defect in the probe infrastructure itself is repaired here; a regression of an already-gated behavior follows normal regression handling. A test failure alone does not override DAG ownership.
 
@@ -72,7 +76,7 @@ A bounded real-workload CI lane that exercises Verter against one pinned `pikax/
 Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
 
 - **CVO1-AC1 — sole-owner outcome:** no per-fixture test definitions or per-case CI jobs; the lane is table/data driven and every probe/cell is a manifest entry. Prefer static/structural enforcement over new test scaffolding.
-- **CVO1-AC2 — positive contract:** a pinned-revision run produces a deterministic summary (same slice, same classification, stable case ids) containing all required counters; PR smoke slice stays within the agreed gate-latency envelope.
+- **CVO1-AC2 — positive contract:** a pinned-revision run produces a deterministic summary (same slice, same classification, stable case ids) containing all required counters; the smoke slice inventory in the manifest has at most 24 cases and the workflow has exactly one probe job; the default canonical gate passes with the corpus checkout absent.
 - **CVO1-AC3 — incremental equivalence:** not applicable; the lane owns no incremental, cache, cancellation, or publication authority.
 - **CVO1-AC4 — bounded work:** not applicable as a hot path; the runner must not add production counters or instrumentation.
 - Every proposed new test must name a plausible regression or contract boundary not already discriminated; CVO3 owns the false-green controls, so this node adds no mutation cases.
@@ -90,7 +94,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Target ceiling: 0 production LOC, 0 production files, 0 related crates/packages.
 - Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
 - Correctness budget: zero unclassified failure in the summary; zero silent canary-class change; zero gate regression left unreported.
-- Performance budget: not applicable; the PR smoke slice must not materially increase ordinary gate latency.
+- Performance budget: not applicable; the smoke lane is bounded by case count and job count above, and no wall-clock figure is a gate.
 
 ## Abort conditions
 
@@ -137,6 +141,6 @@ Before squashing or review, the implementation patch transitions this node's pre
 
 **Acceptance:** the lane runs the pinned slice deterministically; the summary reports every required counter; known future failures execute without blocking required CI; gated regressions and XPASS candidates are surfaced; the probe infrastructure defects found are repaired here.
 
-**Forbidden:** per-fixture CI jobs, oracle or expected-output claims over corpus output, compiler repairs from this train, scope expansion to other corpora.
+**Forbidden:** per-fixture CI jobs, oracle or expected-output claims over corpus output, compiler repairs from this train, scope expansion to corpora other than the ones this train's own nodes pin (CVO1S adds `pikax/svelte-benchmarks`), Vue-shaped assumptions baked into the runner or summary.
 
 **Deletion/abort:** delete any ad-hoc per-case test scaffolding in favor of the table-driven runner; abort on inability to pin or classify, recording the blocking evidence.

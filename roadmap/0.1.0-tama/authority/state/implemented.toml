@@ -165,6 +165,7 @@ schema = 2
 "CPF1" = { status = "pending" }
 "CVO0" = { status = "pending" }
 "CVO1" = { status = "pending" }
+"CVO1S" = { status = "pending" }
 "CVO2" = { status = "pending" }
 "CVO3" = { status = "pending" }
 "CVO4" = { status = "pending" }

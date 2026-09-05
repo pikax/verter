@@ -7,7 +7,7 @@ product=validation_observability
 kind=verification
 semantic_role=delivery
 class=compiler
-predecessors=CVO0
+predecessors=CVO0,CVO1
 owner=compiler.validation-observability:test-only validation and observability lane
 conflict_domains=validation_observability
 resource_class=rust-mixed
@@ -47,12 +47,13 @@ A small set of required negative/mutation controls proving the validation infras
 
 - Production surfaces: none; controls are test-only.
 - Named API/data boundaries: control harness entries that inject or construct each protected failure and assert the machinery reports the correct specific outcome.
-- Test/CI homes: the CVO test-only crate; the controls run in the required gate.
+- Test/CI homes: `crates/verter_validation_probe/tests/controls.rs`; the controls are hermetic (they construct their inputs, never read a corpus checkout) and therefore run in the default canonical gate.
 - Mutation boundary: test/CI bytes only; production LOC is zero.
 
 ## Exact predecessor contracts
 
 - **CVO0:** implemented ledger row for "Probe outcome taxonomy and probe-state manifest contract"; the controls assert against that taxonomy, its ordering rules, and its expected-state semantics. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
+- **CVO1:** implemented ledger row for "Pinned vue-benchmarks external workload probe lane"; supplies the runner (process execution, deadline handling, classification through `ProbeOutcomeClass::terminal`) and the bound comparator that controls 1–3 exercise. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope
@@ -71,11 +72,11 @@ A small set of required negative/mutation controls proving the validation infras
 Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
 
 - **CVO3-AC1 — sole-owner outcome:** exactly the four seeded control classes exist, each with its stated invariant, plausible false-green, and positive-coverage gap; no repository-wide mutation program and no retrofitted mutation tests on unrelated families.
-- **CVO3-AC2 — positive contract:** each control demonstrably fails open — removing or weakening the guarded machinery makes the control red, and the machinery intact makes it green with the specific expected outcome class.
+- **CVO3-AC2 — positive contract:** each control demonstrably fails closed — removing or weakening the guarded machinery makes the control red, and the machinery intact makes it green with the specific expected outcome class.
 - **CVO3-AC3 — incremental equivalence:** not applicable; the controls own no incremental, cache, cancellation, or publication authority.
 - **CVO3-AC4 — bounded work:** not applicable; controls must not add production counters or instrumentation.
 - Every control is itself evidence; do not add controls for invariants without a plausible false-green path. Do not add mutation cases merely because a node contains an invariant.
-- Test homes: the CVO test-only crate; runs in the required gate.
+- Test homes: `crates/verter_validation_probe/tests/controls.rs`; runs in the default canonical gate.
 
 ## Deletions and forbidden designs
 
@@ -98,7 +99,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 
 ## Targeted verification
 
-1. Run the control set and confirm each reports the specific expected outcome class; then verify fail-open by temporarily disabling one guarded mechanism locally during review.
+1. Run the control set and confirm each reports the specific expected outcome class; then verify fail-closed behavior by temporarily disabling one guarded mechanism locally during review.
 2. Run every final command in the bound `targeted-domain` profile on the squashed review candidate; targeted success alone is iteration evidence, not acceptance.
 3. Bind the preflight evidence selection and terse rationale in the review report. Controls are the TDD artifact themselves: each names the false-green it discriminates before it is written.
 
@@ -123,13 +124,13 @@ Before squashing or review, the implementation patch transitions this node's pre
 - admission rule for new controls: invariant + plausible false-green + why positive coverage misses it;
 - one discriminating control per invariant family.
 
-**Suggested predecessors:** `CVO0` only; runs in parallel with CVO1/CVO2.
+**Suggested predecessors:** `CVO0` for the taxonomy and manifest, `CVO1` for the runner and comparator the controls drive; may run in parallel with CVO1S/CVO2.
 
 **Normative source decomposition:**
 
 1. **CVO3-A — Control harness.** Injection/construct patterns shared by the four controls.
 2. **CVO3-B — Four controls.** One per class above, each with its stated admission record.
-3. **CVO3-C — Fail-open proof.** Local demonstration during review that disabling the machinery turns each control red.
+3. **CVO3-C — Fail-closed proof.** Local demonstration during review that disabling the machinery turns each control red.
 4. **CVO3-D — Admission documentation.** The rule recorded where future controls would be proposed.
 
 **Acceptance:** all four controls discriminate their false-green paths; the set stays small and required; no unrelated test family gains mutation tests.

@@ -10,9 +10,9 @@ class=compiler
 predecessors=CMP0
 owner=compiler.validation-observability:test-only validation and observability lane
 conflict_domains=validation_observability
-resource_class=docs-light
+resource_class=rust-mixed
 review_profile=architecture-3
-gate_profile=docs-domain
+gate_profile=targeted-domain
 implementation_effort_min=medium
 implementation_effort_default=high
 review_effort_min=high
@@ -46,8 +46,8 @@ One shared typed contract for validation and probe results. The current owner is
 ## Concrete surfaces and APIs
 
 - Production surfaces: none; this is a test/CI/tooling-only train.
-- Named API/data boundaries: `ProbeOutcomeClass`, `ProbeStateManifest` (stable probe id, workload/case identity, expected state, expected outcome class, owning DAG node, terse reason, pinned external revision).
-- Mutation boundary: authority/contract bytes and test-only schema only; production LOC is zero.
+- Named API/data boundaries: the test-only workspace crate `crates/verter_validation_probe` (not a member of any production dependency graph) with modules `outcome` (`ProbeOutcomeClass` and the precedence fold `ProbeOutcomeClass::terminal(observed: &[ProbeOutcomeClass]) -> (ProbeOutcomeClass, Vec<ProbeOutcomeClass>)` returning the single terminal class plus retained secondary evidence), `manifest` (`ProbeStateManifest`, `ProbeEntry { probe_id, framework, case, expected_state, expected_class, owner, reason, external_revision }`, `ProbeStateManifest::validate`), and the rejection fixtures under `crates/verter_validation_probe/tests`. Successor nodes plug the runner, corpus adapters, controls, and join validator into this crate; none of them re-declares these types.
+- Mutation boundary: the contract text in this charter, the new test-only crate, and its fixtures; production LOC is zero.
 
 ## Exact predecessor contracts
 
@@ -60,20 +60,21 @@ One shared typed contract for validation and probe results. The current owner is
 - **Problem:** generic failure states hide whether the compiler, the harness/transport, the product shape, the comparator, or the runtime/map comparison failed, and they let known future gaps either block CI or silently pass.
 - **Solution and architecture decisions:**
   - minimum outcome classes: `pass`, `verter_diagnostic`, `product_not_produced`, `product_malformed`, `semantic_mismatch`, `runtime_mismatch`, `source_map_mismatch`, `reference_failure`, `harness_failure`, `unsupported`, `timeout`, `crash`; the set is extensible only for a genuinely distinct actionable class, never by alias or tool-specific variant;
-  - causal ordering when multiple states are present: harness/transport failure before compiler diagnostics before product existence/validity before structural/semantic comparison before runtime/map comparison; a compile diagnostic is never `product_not_produced`; a timeout or signal never satisfies an expected refusal;
+  - causal ordering when multiple states are present is total and deterministic: exactly one class is the outcome, the highest-precedence class present, and every lower class observed in the same run is recorded as secondary evidence, never as the outcome. Precedence, highest first: `harness_failure` (the harness/transport could not execute or observe the case), `crash` (the compiler process died by signal or abnormal exit), `timeout` (the compiler process was stopped by the deadline), `verter_diagnostic` (the compiler reported an error diagnostic), `unsupported` (the compiler explicitly declared the input outside its contract), `reference_failure` (the reference side of a comparison could not be produced or executed), `product_not_produced` (compilation ended without a diagnostic and without a product), `product_malformed` (a product exists but fails its own validity check), `semantic_mismatch` (structural/semantic comparison differs), `runtime_mismatch` (runtime comparison differs), `source_map_mismatch` (map comparison differs; a runtime mismatch outranks a map mismatch because a wrong program makes its map moot), `pass`. Impossible combinations are rejected rather than resolved: a compile diagnostic is never downgraded to `product_not_produced` because no product followed it; a `crash`, `timeout`, or `harness_failure` never satisfies an expected `verter_diagnostic` or `unsupported` (an expected refusal is met only by the refusal class itself); a comparison class is never reported for a case whose product or reference is absent;
   - expected states: `gate` (failure blocks), `canary` (known failure class is non-blocking; an unrelated class such as crash/timeout/harness failure is a new regression), `known-fail` (canary with an owning future DAG node; an unexpected pass is XPASS/promotion candidate, not an automatic gate), `skip` (only when execution is meaningless/impossible/unstable; requires owning future DAG node and reason; prefer canary over skip);
-  - observation does not imply acceptance: a manifest entry records evidence about Verter behavior and never derives semantics from external fixture output.
+  - observation does not imply acceptance: a manifest entry records evidence about Verter behavior and never derives semantics from external fixture output;
+  - the contract is framework-neutral: every manifest entry and every summary row carries `framework` (`vue` or `svelte`; both are first-class Verter targets) as a case attribute, so one taxonomy, one manifest schema, and one summary format serve every corpus the train's nodes pin.
 
 ## Acceptance IDs and discriminating proof
 
 Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
 
-- **CVO0-AC1 — sole-owner outcome:** the contract must structurally reject generic terminal failure states and alias proliferation; no tool-specific outcome variant may bypass the taxonomy. Prefer type/static enforcement; add a negative test only for a plausible contract boundary existing evidence does not discriminate.
+- **CVO0-AC1 — sole-owner outcome:** the contract must structurally reject generic terminal failure states and alias proliferation; no tool-specific outcome variant may bypass the taxonomy (`ProbeOutcomeClass` is a closed enum; there is no string-typed outcome). Planted-invalid proof is required, not optional: `ProbeStateManifest::validate` must reject at least (a) a generic `failed`/`error` alias offered as an outcome class, (b) a `known-fail` or `skip` entry with no owner, (c) an invalid state/class combination (`gate` with an expected failure class; `canary` with `expected_class = pass`), and `ProbeOutcomeClass::terminal` must reject the impossible combinations named above (a diagnostic plus `product_not_produced`; a `crash`/`timeout`/`harness_failure` plus an expected refusal). One fixture per rejection; no permutations.
 - **CVO0-AC2 — positive contract:** ordering rules are total and deterministic for every combination, and every manifest entry validates (stable id, expected state, expected outcome class where applicable, owning DAG node for every deferred/skip entry, pinned external revision where applicable).
 - **CVO0-AC3 — incremental equivalence:** not applicable; the contract owns no incremental, cache, cancellation, or publication authority.
 - **CVO0-AC4 — bounded work:** not applicable; the contract owns no hot path.
 - Every proposed new test must name a plausible regression or contract boundary not already discriminated. Do not add implementation mirrors, duplicate permutations, or universal negative/mutation tests.
-- Test homes: `roadmap/0.1.0-tama/contracts`, the successor test-only crate homes named in CVO1.
+- Test homes: `crates/verter_validation_probe/tests` (rejection fixtures and the precedence-fold cases), this charter for the contract text.
 
 ## Deletions and forbidden designs
 
@@ -96,9 +97,9 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 
 ## Targeted verification
 
-1. `node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict`
-2. Run every final command in the bound `docs-domain` profile on the squashed review candidate; targeted success alone is iteration evidence, not acceptance.
-3. Bind the preflight evidence selection and terse rationale in the review report. This node changes contract bytes, not behavior; no TDD regression is required unless a discriminating boundary is named.
+1. `cargo nextest run -p verter_validation_probe` and `node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict`
+2. Run every final command in the bound `targeted-domain` profile on the squashed review candidate; targeted success alone is iteration evidence, not acceptance.
+3. Bind the preflight evidence selection and terse rationale in the review report. The rejection fixtures are the TDD artifact: each is written red against the schema before the validation that turns it green.
 
 ## Review and lower-severity findings
 
@@ -128,7 +129,7 @@ Before squashing or review, the implementation patch transitions this node's pre
 
 1. **CVO0-A — Outcome taxonomy.** The class set, meanings, and the extension rule.
 2. **CVO0-B — Ordering rules.** Causal precedence, diagnostic-vs-product distinction, timeout/refusal rule.
-3. **CVO0-C — Manifest schema.** Entry fields, stable ids, validation constraints.
+3. **CVO0-C — Manifest schema and crate.** The `verter_validation_probe` crate skeleton, entry fields, stable ids, `validate` constraints, and the three rejection fixtures.
 4. **CVO0-D — Expected-state semantics.** gate/canary/known-fail/skip rules, XPASS, unrelated-class regression, owner requirement.
 5. **CVO0-E — Independent review.** Challenge class sufficiency, ordering totality, and manifest completeness before any lane is built on it.
 

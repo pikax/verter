@@ -7,12 +7,12 @@ product=validation_observability
 kind=convergence
 semantic_role=convergence
 class=compiler
-predecessors=CVO1,CVO2,CVO3,CPER0,CPER2,VCP7
+predecessors=CVO1,CVO1S,CVO2,CVO3,CPER0,CPER2,VCP7,SCP7
 owner=compiler.validation-observability:test-only validation and observability lane
 conflict_domains=validation_observability,performance_evidence
-resource_class=docs-light
+resource_class=rust-mixed
 review_profile=semantic-3
-gate_profile=docs-domain
+gate_profile=targeted-domain
 implementation_effort_min=low
 implementation_effort_default=medium
 review_effort_min=medium
@@ -46,17 +46,19 @@ An explicit, selective review join over accumulated canaries, known failures, sk
 ## Concrete surfaces and APIs
 
 - Production surfaces: none.
-- Named API/data boundaries: the promotion join record — per probe, its current state, candidate transition (`skip -> canary`, `canary -> known-fail`, `known-fail -> gate`, `canary -> gate`), deciding owner, and rationale; updated probe-state manifest entries.
-- Mutation boundary: authority/evidence bytes only; production LOC is zero.
+- Named API/data boundaries: the promotion join record `crates/verter_validation_probe/join/<date>.toml` — per probe, its current state, candidate transition (`skip -> canary`, `canary -> known-fail`, `known-fail -> gate`, `canary -> gate`) or `deferred`, deciding owner (a node id plus the contract section relied on), and rationale; the join validator `crates/verter_validation_probe/src/join.rs` (`JoinRecord::validate(manifest, observations)`), which proves total inventory: every manifest entry from CVO1/CVO1S and every CVO2 observation row appears exactly once in the record, every non-deferred entry names a deciding owner, and every transition is one of the four allowed; updated probe-state manifest entries.
+- Mutation boundary: the join record, the validator, and manifest entries; production LOC is zero.
 
 ## Exact predecessor contracts
 
 - **CVO1:** implemented ledger row for "Pinned vue-benchmarks external workload probe lane"; supplies the accumulated probe states. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
+- **CVO1S:** implemented ledger row for "Pinned svelte-benchmarks external workload probe lane"; supplies the accumulated Svelte probe states. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
 - **CVO2:** implemented ledger row for "Non-gating CI benchmark observation artifacts"; supplies correctness-labeled observations. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
 - **CVO3:** implemented ledger row for "Critical false-green controls for validation machinery"; guarantees the machinery behind the states being promoted is proven. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
 - **CPER0:** implemented ledger row for "Compiler equivalent-work and oracle genesis lock"; the equivalent-work methodology that would make any numeric promotion meaningful. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
-- **CPER2:** implemented ledger row for "Shared compiler physical-execution and zero-work terminal"; the compiler execution authority whose contract determines whether probed behaviors are accepted. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
+- **CPER2:** implemented ledger row for "Shared compiler physical-execution and zero-work terminal"; supplies only the execution and equivalent-work constraints a numeric adoption must satisfy. It decides nothing about behavior acceptance; VCP7, SCP7, or the case's named semantic owner alone does. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
 - **VCP7:** implemented ledger row for "Vue Default compiler product terminal"; the Vue semantic authority convergence that determines whether probed Vue behaviors are part of Verter's accepted contract. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
+- **SCP7:** implemented ledger row for "Svelte Default compiler product terminal"; the Svelte semantic authority convergence that determines whether probed Svelte behaviors are part of Verter's accepted contract. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope
@@ -66,7 +68,7 @@ An explicit, selective review join over accumulated canaries, known failures, sk
 - **Solution and architecture decisions:**
   - review every canary, known-fail, skip, XPASS candidate, and benchmark observation accumulated by CVO1/CVO2;
   - transitions are explicit and selective: `skip -> canary`, `canary -> known-fail`, `known-fail -> gate`, `canary -> gate`;
-  - no automatic promotion merely because a case happens to pass once; the owning semantic node (e.g. VCP7's contract) decides whether behavior is accepted; the owning performance node decides whether a numeric observation becomes a baseline or regression gate;
+  - no automatic promotion merely because a case happens to pass once; the owning semantic node (VCP7 for Vue, SCP7 for Svelte, or the case's named owner) decides whether behavior is accepted; the owning performance node decides whether a numeric observation becomes a baseline or regression gate;
   - cases whose owners remain later in the DAG remain deferred; CVO4 does not require every historical canary to become green;
   - deferred-failure policy stays in force: classify -> associate owner -> canary/known-fail/skip -> continue; a test failure alone does not override DAG ownership.
 
@@ -75,11 +77,11 @@ An explicit, selective review join over accumulated canaries, known failures, sk
 Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence selection that actually discriminates the touched contract. Existing behavioral coverage, static validation, canonical gates, and bounded inspection are valid when accompanied by a terse rationale.
 
 - **CVO4-AC1 — sole-owner outcome:** every promotion in the join record names its deciding owner and evidence; zero promotions decided by CI convenience or pass-streak heuristics.
-- **CVO4-AC2 — positive contract:** after the join, every probe-state manifest entry is internally consistent — gates are enforced as gates, canaries keep their expected classes, skips still name owners, XPASS candidates are either promoted with an owner or left documented.
+- **CVO4-AC2 — positive contract:** `JoinRecord::validate` passes on the published record and fails closed on two planted negatives kept as fixtures: a record omitting one manifest entry, and a `known-fail -> gate` promotion with no deciding owner. After the join, every probe-state manifest entry is internally consistent — gates are enforced as gates, canaries keep their expected classes, skips still name owners, XPASS candidates are either promoted with an owner or left `deferred` with a reason.
 - **CVO4-AC3 — incremental equivalence:** not applicable; the join owns no incremental, cache, cancellation, or publication authority.
 - **CVO4-AC4 — bounded work:** not applicable; the join owns no hot path.
 - Every proposed new test must name a plausible regression or contract boundary not already discriminated; CVO3's controls already prove state-transition machinery. Do not add duplicate permutations.
-- Test homes: manifest validation in the CVO test-only crate.
+- Test homes: `crates/verter_validation_probe/tests/join.rs`.
 
 ## Deletions and forbidden designs
 
@@ -102,9 +104,9 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 
 ## Targeted verification
 
-1. `node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict`
-2. Run every final command in the bound `docs-domain` profile on the squashed review candidate; targeted success alone is iteration evidence, not acceptance.
-3. Bind the preflight evidence selection and terse rationale in the review report. This node changes authority/evidence bytes; no TDD regression is required unless a discriminating boundary is named.
+1. `cargo nextest run -p verter_validation_probe` and `node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict`
+2. Run every final command in the bound `targeted-domain` profile on the squashed review candidate; targeted success alone is iteration evidence, not acceptance.
+3. Bind the preflight evidence selection and terse rationale in the review report. The two planted negatives are the TDD artifact for the validator.
 
 ## Review and lower-severity findings
 
@@ -127,7 +129,7 @@ Before squashing or review, the implementation patch transitions this node's pre
 - deciding owners: semantic authority for behavior acceptance, performance authority for numeric baselines/gates;
 - deferred cases stay deferred; no automatic promotion; no gate weakening without an owner.
 
-**Suggested predecessors:** `CVO1`, `CVO2`, `CVO3` for the evidence; `CPER0`, `CPER2`, `VCP7` for the authorities.
+**Suggested predecessors:** `CVO1`, `CVO1S`, `CVO2`, `CVO3` for the evidence; `VCP7` and `SCP7` for behavior acceptance; `CPER0` and `CPER2` for numeric adoption constraints.
 
 **Normative source decomposition:**
 
