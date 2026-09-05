@@ -61,8 +61,8 @@ A small set of required negative/mutation controls proving the validation infras
 - **Intent:** prove the validator cannot silently report success incorrectly.
 - **Problem:** a plausible defect in classification, timeout handling, comparison, or canary handling could make CI report success while the underlying contract is broken; positive coverage cannot detect its own blind spots.
 - **Solution and architecture decisions — seed exactly four control classes:**
-  1. **Diagnostic propagation:** construct a case where compilation fails after initial ingestion; the result must classify as `verter_diagnostic`, never `product_not_produced` or generic empty output.
-  2. **Timeout/refusal distinction:** a timed-out or signaled process cannot satisfy an expected-refusal/negative-control assertion; asserted through `ProbeEntry::evaluate`, which must return `UnrelatedRegression` for a `timeout`, `crash`, or `harness_failure` terminal against an entry expecting `verter_diagnostic` or `unsupported`.
+  1. **Diagnostic propagation:** construct a case where compilation fails after initial ingestion, exercised at the runner's ingestion boundary rather than at the classifier alone: a constructed driver response line (`{ probe_id, elapsed_ns, response }` whose response carries an error diagnostic and no product) is fed to `runner::ingest_response_line` in-process, and the terminal must be `verter_diagnostic`, never `product_not_produced` or generic empty output.
+  2. **Timeout/refusal distinction:** a timed-out or signaled process cannot satisfy an expected-refusal/negative-control assertion; injected as raw `ExecutionEvent::TimedOut` and `ExecutionEvent::Signaled` through the runner's in-process `runner::classify_execution`, whose classes then flow through the per-dimension fold into `ProbeEntry::evaluate`; the control asserts the classes `timeout` and `crash` and the evaluation `UnrelatedRegression` against an entry expecting `verter_diagnostic` or `unsupported`, and a mutation of the event-to-class mapping (for example `TimedOut` → `verter_diagnostic`) must turn it red.
   3. **Comparator sensitivity:** deliberately perturb a known-valid comparison product; the comparator must report the appropriate mismatch class.
   4. **Canary state transition:** an expected known failure stays non-blocking; an unexpected pass surfaces as XPASS; an unrelated crash/timeout/harness failure is surfaced as a new regression rather than silently accepted as the known failure.
 - Admission rule for any future control: it must state (1) the invariant protected, (2) the plausible false-green regression, (3) why existing positive coverage would not detect it. One discriminating control per invariant family; no permutation farming.
@@ -90,7 +90,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Target ceiling: 0 production LOC, 0 production files, 0 related crates/packages.
 - Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
 - Correctness budget: zero control that can pass while its guarded machinery is broken.
-- Performance budget: exactly four hermetic controls, each one in-process invocation of the classifier, evaluator, or comparator over constructed inputs; no subprocess, no corpus access, no network.
+- Performance budget: exactly four hermetic controls, each one in-process invocation of the ingestion parser, classifier, evaluator, or comparator over constructed inputs; no subprocess, no corpus access, no network.
 
 ## Abort conditions
 
