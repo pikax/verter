@@ -96,7 +96,7 @@ schema = 2
 "CCA1O2B" = { status = "implemented", commit_message = "refactor(compiler-execution): native comparison-tool host-request migration", commit_date = "2026-09-04T21:50:00+01:00" }
 "CCA1O2C" = { status = "implemented", commit_message = "refactor(ssr-baseline): drive SSR casing and attribute probes through the typed host request", commit_date = "2026-09-04T22:30:00+01:00" }
 "CCA1O2D" = { status = "implemented", commit_message = "refactor(ssr-baseline): drive SSR helper and model probes through the typed host request", commit_date = "2026-09-04T23:10:00+01:00" }
-"CCA1O2E" = { status = "pending" }
+"CCA1O2E" = { status = "implemented", commit_message = "refactor(compiler-execution): drive the native transport probe through the typed host request", commit_date = "2026-09-05T00:40:00+01:00" }
 "CCA1O2F" = { status = "implemented", commit_message = "docs(session): name the framework-tagged host request in compile-lane comments", commit_date = "2026-09-02T01:28:36+01:00", pull_request = 466 }
 "CCA1O2G" = { status = "implemented", commit_message = "refactor(compiler-bridge): typescript-plugin mirror host typed IDE request migration", commit_date = "2026-09-05T00:30:00+01:00" }
 "CCA1O2H" = { status = "implemented", commit_message = "fix(napi): refuse a request key stated as undefined", commit_date = "2026-09-01T00:56:27+01:00" }
@@ -386,7 +386,7 @@ schema = 2
 "TCM2" = { status = "pending" }
 "TCM3" = { status = "pending" }
 "TCM4" = { status = "pending" }
-"TE1" = { status = "pending" }
+"TE1" = { status = "implemented", commit_message = "feat: sealed semantic operands and forcing boundary", commit_date = "2026-09-04T01:30:00+01:00", pull_request = 474 }
 "TE2" = { status = "pending" }
 "TE3" = { status = "pending" }
 "TE4" = { status = "pending" }

@@ -26,7 +26,7 @@
 //!   OXC AST pointers — callers materialize semantic data before calling
 //!   [`SemanticGraphStore::intern_node`].
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::instant::Instant;
@@ -230,8 +230,22 @@ pub fn family_key_size_for_tests() -> usize {
 /// This store alone does not execute queries — it is the cache substrate.
 /// Concrete resolution happens inside a dispatcher that owns the solver /
 /// resolver knowledge.
+#[allow(dead_code)]
+struct SemanticGraphIdentity(u64);
+
+impl Default for SemanticGraphIdentity {
+    fn default() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 #[derive(Default)]
 pub struct SemanticGraphStore {
+    /// Process-local identity used only to confine opaque runtime operands to
+    /// the store that issued them.
+    #[allow(dead_code)]
+    operand_identity: SemanticGraphIdentity,
     arena: NodeArena,
     /// Family-keyed warm memo.
     ///
@@ -661,6 +675,94 @@ pub(crate) struct PublishedMemoCandidate {
     pub(crate) admission_seq: u64,
 }
 
+/// Non-identity runtime evidence retained with a store-local node handle.
+///
+/// The store owns the fields: `pub(in crate::semantic_query_memo)` makes
+/// this module tree the ONE struct-literal producer (the capture path
+/// below, reached solely through the token-gated
+/// [`Self::execute_cooperative_value_capturing_operand_evidence`] entry).
+/// The forcing authority combines evidence only through the token-gated
+/// [`Self::seal`]; everywhere else the fields are unreadable private state
+/// and the value can be carried but never fabricated.
+#[derive(Debug, Clone)]
+pub(crate) struct SemanticOperandEvidence {
+    pub(in crate::semantic_query_memo) read_set: crate::fact_signature_helpers::ReadSetSignature,
+    pub(in crate::semantic_query_memo) self_roots: Arc<[ObservedGraphSelfRoot]>,
+    pub(in crate::semantic_query_memo) dep_signatures: Arc<[DepSignature]>,
+}
+
+impl SemanticOperandEvidence {
+    /// Forcing-authority construction: the seal's substitution fold and the
+    /// force's evidence union. Token-gated on the unforgeable
+    /// [`SemanticOperandAuthority`](crate::project_semantic_dispatch::SemanticOperandAuthority)
+    /// so no consumer outside the forcing boundary can fabricate an
+    /// evidence set and hand it to a mint.
+    pub(crate) fn seal(
+        read_set: crate::fact_signature_helpers::ReadSetSignature,
+        self_roots: Arc<[ObservedGraphSelfRoot]>,
+        dep_signatures: Arc<[DepSignature]>,
+        _authority: &crate::project_semantic_dispatch::SemanticOperandAuthority,
+    ) -> Self {
+        Self {
+            read_set,
+            self_roots,
+            dep_signatures,
+        }
+    }
+
+    pub(crate) fn read_set(&self) -> &crate::fact_signature_helpers::ReadSetSignature {
+        &self.read_set
+    }
+
+    pub(crate) fn self_roots(&self) -> &[ObservedGraphSelfRoot] {
+        &self.self_roots
+    }
+
+    pub(crate) fn dep_signatures(&self) -> &[DepSignature] {
+        &self.dep_signatures
+    }
+}
+
+/// Reconstruct the operand evidence for one warm/cold read from the
+/// candidate's fact carrier and its LISTED self-root canonicals.
+///
+/// Fail-closed on root reconstruction: a listed self-root canonical with
+/// no matching `FileWholeHash` fact on the carrier yields `None` — the
+/// force's typed incomplete refusal — never a silently SHRUNK root set.
+/// A shrunk set would validate at mint/force and let a
+/// `mint -> force -> mint` chain drop a producer root, serving
+/// stale-complete after a dead-operand edit. The one exception is an
+/// OVERFLOWED carrier, which keeps its (partial) evidence so the force
+/// maps the overflow flag to the typed `SignatureOverflow` refusal
+/// instead of the blander incomplete one.
+fn semantic_operand_evidence(
+    read_set: &crate::fact_signature_helpers::ReadSetSignature,
+    self_root_canonicals: &[Arc<str>],
+    dep_signature: &DepSignature,
+) -> Option<crate::semantic_query::operand::SemanticOperandEvidence> {
+    let mut self_roots = Vec::with_capacity(self_root_canonicals.len());
+    for canonical in self_root_canonicals {
+        let found = read_set.facts.iter().find_map(|fact| match fact {
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash }
+                if canonical_id == canonical.as_ref() =>
+            {
+                Some((Arc::clone(canonical), *hash))
+            }
+            _ => None,
+        });
+        match found {
+            Some(root) => self_roots.push(root),
+            None if read_set.overflowed => {}
+            None => return None,
+        }
+    }
+    Some(crate::semantic_query::operand::SemanticOperandEvidence {
+        read_set: read_set.clone(),
+        self_roots: Arc::from(self_roots.into_boxed_slice()),
+        dep_signatures: Arc::from([Arc::clone(dep_signature)]),
+    })
+}
+
 enum WarmPublishOutcome {
     Published(PublishedMemoCandidate),
     Skipped,
@@ -696,6 +798,11 @@ impl std::fmt::Debug for SemanticGraphStore {
 }
 
 impl SemanticGraphStore {
+    #[allow(dead_code)]
+    pub(crate) fn operand_store_identity(&self) -> u64 {
+        self.operand_identity.0
+    }
+
     /// Whether this thread is already building `key` and the cooperative memo
     /// will therefore return its established recursion sentinel. Callers may
     /// use this read-only preflight to preserve cycle semantics ahead of an
@@ -1832,7 +1939,7 @@ impl SemanticGraphStore {
         let requested = crate::semantic_query::demand::MaterializedPoint::new(
             family::point_for_slot(slot, &requested_path_for_key(key)),
         );
-        self.get_validated_value_impl(&family, slot, &requested, ctx)
+        self.get_validated_value_impl(&family, slot, &requested, ctx, None)
             .map(narrow_cache_read)
     }
 
@@ -1845,12 +1952,16 @@ impl SemanticGraphStore {
         &self,
         prepared: &PreparedKeyHandle,
         ctx: &dyn crate::resolver_core::ResolverContext,
+        operand_evidence: Option<
+            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+        >,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         self.get_validated_value_impl(
             prepared.family(),
             prepared.slot(),
             prepared.requested_point(),
             ctx,
+            operand_evidence,
         )
     }
 
@@ -1860,6 +1971,9 @@ impl SemanticGraphStore {
         slot: ModeSlot,
         requested: &crate::semantic_query::demand::MaterializedPoint,
         ctx: &dyn crate::resolver_core::ResolverContext,
+        operand_evidence: Option<
+            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+        >,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         // Relation warm-read generation gate (the retired dedicated
         // relation memo's contract, carried onto the family path): a
@@ -1901,6 +2015,13 @@ impl SemanticGraphStore {
             }
         }
         let result = validated.map(|entry| {
+            if let Some(capture) = operand_evidence {
+                *capture = semantic_operand_evidence(
+                    &entry.read_set_signature,
+                    &entry.self_root_canonicals,
+                    &entry.dispatch_dep_signature,
+                );
+            }
             entry.read_set_signature.bubble(ctx);
             let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
             CacheRead {
@@ -2043,6 +2164,7 @@ impl SemanticGraphStore {
             recursion_sentinel,
             build,
             None,
+            None,
         )
     }
 
@@ -2065,6 +2187,35 @@ impl SemanticGraphStore {
             recursion_sentinel,
             build,
             Some(publication),
+            None,
+        )
+    }
+
+    /// Evidence-capturing variant gated on the unforgeable
+    /// [`SemanticOperandAuthority`](crate::project_semantic_dispatch::SemanticOperandAuthority):
+    /// the sole caller is the operand forcing boundary, so evidence flows
+    /// out of the store only on a genuine force read.
+    pub(crate) fn execute_cooperative_value_capturing_operand_evidence<F, R, O>(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        key: SemanticQueryKey,
+        recursion_sentinel: R,
+        build: F,
+        evidence: &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+        _authority: &crate::project_semantic_dispatch::SemanticOperandAuthority,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>>
+    where
+        F: FnOnce() -> O,
+        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>,
+        R: FnOnce() -> SemanticNodeId,
+    {
+        self.execute_cooperative_value_with_publication_capture(
+            ctx,
+            key,
+            recursion_sentinel,
+            build,
+            None,
+            Some(evidence),
         )
     }
 
@@ -2075,6 +2226,9 @@ impl SemanticGraphStore {
         recursion_sentinel: R,
         build: F,
         publication: Option<&mut Option<PublishedMemoCandidate>>,
+        mut operand_evidence: Option<
+            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+        >,
     ) -> CacheRead<QueryResult<SemanticQueryValue>>
     where
         F: FnOnce() -> O,
@@ -2130,7 +2284,9 @@ impl SemanticGraphStore {
         // execution falls through to the cooperative slow path that
         // owns same-path recursion, in-flight admission, and cold-build
         // publish.
-        if let Some(hit) = self.try_warm_value_hit_fast_path(ctx, &prepared) {
+        if let Some(hit) =
+            self.try_warm_value_hit_fast_path(ctx, &prepared, operand_evidence.as_deref_mut())
+        {
             return if ctx.is_cancelled() {
                 cancelled_cache_read()
             } else {
@@ -2147,6 +2303,7 @@ impl SemanticGraphStore {
             build,
             independent_owner,
             publication,
+            operand_evidence,
         )
     }
 
@@ -2192,6 +2349,9 @@ impl SemanticGraphStore {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         prepared: &PreparedKeyHandle,
+        operand_evidence: Option<
+            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+        >,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         let key = prepared.key();
         let family = prepared.family();
@@ -2241,6 +2401,14 @@ impl SemanticGraphStore {
             if let Some(slots) = entries.get_mut(family) {
                 slots.mark_validated_freshest(slot, &entry);
             }
+        }
+
+        if let Some(capture) = operand_evidence {
+            *capture = semantic_operand_evidence(
+                &entry.read_set_signature,
+                &entry.self_root_canonicals,
+                &entry.dispatch_dep_signature,
+            );
         }
 
         // R3/R26/R28 - bubble the entry path-precise fact observation
@@ -2325,6 +2493,9 @@ impl SemanticGraphStore {
         build: F,
         independent_owner: bool,
         mut publication: Option<&mut Option<PublishedMemoCandidate>>,
+        mut operand_evidence: Option<
+            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+        >,
     ) -> CacheRead<QueryResult<SemanticQueryValue>>
     where
         F: FnOnce() -> O,
@@ -2376,7 +2547,9 @@ impl SemanticGraphStore {
             //    variant of `get_validated` — a freshly-published entry
             //    validates; a slot a concurrent invalidation made stale
             //    misses and the cold-build path below recomputes.
-            if let Some(hit) = self.get_validated_value_prepared(&prepared, ctx) {
+            if let Some(hit) =
+                self.get_validated_value_prepared(&prepared, ctx, operand_evidence.as_deref_mut())
+            {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 if let Some(sched_ctx) = verter_scheduler::request_context::current_context() {
                     sched_ctx
@@ -2684,6 +2857,10 @@ impl SemanticGraphStore {
                 // bubble only carries a carrier the follower's view validated.
                 if let Some(ref carrier) = graph_carrier {
                     carrier.bubble_via_tls();
+                    if let Some(capture) = operand_evidence.as_deref_mut() {
+                        *capture =
+                            semantic_operand_evidence(carrier, &winner_self_roots, &dep_signature);
+                    }
                 }
                 if let Some(prov) = self.provenance.as_ref() {
                     prov.execute_cooperative_joiner_path
@@ -3010,6 +3187,13 @@ impl SemanticGraphStore {
         }
         if let (Some(capture), Some(candidate)) = (publication, root_publication) {
             *capture = Some(candidate);
+        }
+        if let Some(capture) = operand_evidence {
+            *capture = semantic_operand_evidence(
+                &broadcast_carrier,
+                &self_root_canonicals,
+                &dep_signature,
+            );
         }
         {
             // Bubble the build's carrier fact rail into this winner

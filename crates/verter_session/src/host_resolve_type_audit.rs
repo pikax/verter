@@ -150,6 +150,20 @@ impl TypeResolutionRequestError {
             QueryError::UnstableState { attempts } => Some(Self::UnstableState {
                 attempts: *attempts,
             }),
+            QueryError::SignatureOverflow => Some(Self::Other(Arc::from(
+                "semantic operand dependency signature overflow",
+            ))),
+            QueryError::ForeignSemanticOperand => Some(Self::Other(Arc::from(
+                "semantic operand belongs to a different graph",
+            ))),
+            QueryError::StaleSemanticOperand => Some(Self::UnstableState { attempts: 1 }),
+            QueryError::IncompleteSemanticOperand { reasons } => Some(Self::Other(Arc::from(
+                format!(
+                    "incomplete semantic operand force: {}",
+                    crate::semantic_query::compat_spelling::spell_partial_reasons(*reasons)
+                )
+                .as_str(),
+            ))),
             QueryError::AliasCycle { chain } => Some(Self::AliasCycle {
                 chain: Arc::clone(chain),
             }),

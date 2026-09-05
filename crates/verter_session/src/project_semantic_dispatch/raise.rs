@@ -467,6 +467,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
         super::narrow_value_cache_read(self.execute_via_cold_build_helper(key))
     }
 
+    // The operand forcing boundary is its only caller. Armed under
+    // `cfg(test)`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn execute_read_with_operand_evidence(
+        &self,
+        key: SemanticQueryKey,
+    ) -> (
+        crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+        Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+    ) {
+        #[cfg(test)]
+        DISPATCH_TRACE.with(|t| t.borrow_mut().push(query_key_discriminant(&key)));
+        #[cfg(test)]
+        record_dispatch_key(&key);
+
+        let mut evidence = None;
+        let read = super::narrow_value_cache_read(
+            self.execute_via_cold_build_helper_capturing_operand_evidence(key, &mut evidence),
+        );
+        (read, evidence)
+    }
+
     /// Context-explicit reduce-then-raise reducer (demand-driven reducer
     /// spec).
     ///

@@ -96,6 +96,11 @@ pub mod index_key;
 /// Canonical syntax identities for authored conditional-`infer` binders.
 pub(crate) mod infer_binder_names;
 
+/// Sealed semantic operands — the demand-selected operand vocabulary for the
+/// one forcing boundary
+/// (`ProjectSemanticDispatch::force_semantic_operand`).
+pub mod operand;
+
 /// The §18.2 cache-admission decision for an error-tolerant semantic result:
 /// [`admit_decision`](admit::admit_decision) maps a result's
 /// [`ResultTaint`] + its [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
@@ -3110,6 +3115,27 @@ pub(crate) enum InstantiateBodySource {
     NonFile,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct InstantiateSource(Option<Box<operand::AuthoredOperandQueryIdentity>>);
+
+impl InstantiateSource {
+    fn declaration() -> Self {
+        Self(None)
+    }
+
+    // Reachable only from the operand forcing boundary. Armed under
+    // `cfg(test)`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn authored(identity: operand::AuthoredOperandQueryIdentity) -> Self {
+        Self(Some(Box::new(identity)))
+    }
+
+    #[must_use]
+    pub(crate) fn authored_identity(&self) -> Option<&operand::AuthoredOperandQueryIdentity> {
+        self.0.as_deref()
+    }
+}
+
 /// Whether `canonical` is one of the true non-file instantiation bases —
 /// the deterministic predicate behind the `instantiate_context_for`
 /// body-source mapping (a `FileBacked` context is constructible iff the
@@ -3191,9 +3217,12 @@ impl InstantiateContext {
     ///
     /// Sealed to the dispatch factory: `pub(crate)` AND gated on the
     /// [`crate::project_semantic_dispatch::BodySourceWitness`] mintable
-    /// only inside the dispatch module — the
-    /// `ProjectSemanticDispatch::instantiate_context_for` choke point is
-    /// the sole production caller. Unit tests mint the witness via
+    /// only inside the dispatch module. `ProjectSemanticDispatch::instantiate_context_for`
+    /// is the sole production caller for an ordinary declaration base;
+    /// `force_semantic_operand`'s authored arm is a second production mint
+    /// site for a sealed authored operand's own base — both reach the
+    /// witness only through the same dispatch-tree factory gate. Unit tests
+    /// mint the witness via
     /// [`crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests`].
     #[must_use]
     pub(crate) const fn file_backed(
@@ -3378,6 +3407,7 @@ pub struct InstantiateKey {
     base: ResolvedDeclSlotIdentity,
     /// The already-lowered generic arguments — part of semantic identity.
     args: Arc<[SemanticNodeId]>,
+    source: InstantiateSource,
     /// The per-key env + reduction context (embeds the source-kind axis).
     context: InstantiateContext,
 }
@@ -3397,6 +3427,32 @@ impl InstantiateKey {
         Self {
             base,
             args,
+            source: InstantiateSource::declaration(),
+            context,
+        }
+    }
+
+    /// Token-gated authored-source builder: the sole caller is the operand
+    /// forcing boundary
+    /// (`ProjectSemanticDispatch::force_semantic_operand`), which combines a
+    /// sealed authored operand identity with the request-owned context. The
+    /// unforgeable
+    /// [`SemanticOperandAuthority`](crate::project_semantic_dispatch::SemanticOperandAuthority)
+    /// keeps every other internal consumer from keying an authored-locator
+    /// instantiate.
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new_authored(
+        base: ResolvedDeclSlotIdentity,
+        identity: operand::AuthoredOperandQueryIdentity,
+        args: Arc<[SemanticNodeId]>,
+        context: InstantiateContext,
+        _authority: crate::project_semantic_dispatch::SemanticOperandAuthority,
+    ) -> Self {
+        Self {
+            base,
+            args,
+            source: InstantiateSource::authored(identity),
             context,
         }
     }
@@ -3431,6 +3487,11 @@ impl InstantiateKey {
     #[must_use]
     pub(crate) fn args(&self) -> &Arc<[SemanticNodeId]> {
         &self.args
+    }
+
+    #[must_use]
+    pub(crate) fn source(&self) -> &InstantiateSource {
+        &self.source
     }
 
     /// The per-key [`InstantiateContext`] (embeds the source-kind axis).
@@ -4472,6 +4533,32 @@ impl PartialReason {
             Self::FlowReturnNoSurface => PartialReasonSet::FLOW_RETURN_NO_SURFACE,
         }
     }
+
+    /// The variant's stable name, for spellings that must NAME a reason in
+    /// an observable string rather than leak the set's `Debug` numeric
+    /// shape.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::BudgetExceeded => "budgetExceeded",
+            Self::Cancelled => "cancelled",
+            Self::SupersededGeneration => "supersededGeneration",
+            Self::UnstableState => "unstableState",
+            Self::SamePathRecursion => "samePathRecursion",
+            Self::WalkerFatal => "walkerFatal",
+            Self::Propagated => "propagated",
+            Self::DeferredEvaluationLimit => "deferredEvaluationLimit",
+            Self::StructuralFactDemandLimit => "structuralFactDemandLimit",
+            Self::SemanticQueryFault => "semanticQueryFault",
+            Self::MissingSemanticNodeData => "missingSemanticNodeData",
+            Self::ProjectionWorkLimit => "projectionWorkLimit",
+            Self::ConnectedQueryDepthLimit => "connectedQueryDepthLimit",
+            Self::MissingDependency => "missingDependency",
+            Self::FlowReturnUninferred => "flowReturnUninferred",
+            Self::FlowReturnUnverified => "flowReturnUnverified",
+            Self::FlowReturnNoSurface => "flowReturnNoSurface",
+        }
+    }
 }
 
 /// Per-result completeness — whether a computed result is the FULL surface
@@ -4871,6 +4958,14 @@ pub enum QueryError {
     Cancelled,
     /// The completion fence exhausted its retry budget (default: 3).
     UnstableState { attempts: u8 },
+    /// The selected force exceeded the bounded dependency signature.
+    SignatureOverflow,
+    /// A store-local operand was presented to a different graph.
+    ForeignSemanticOperand,
+    /// A store-local operand or authored environment is no longer current.
+    StaleSemanticOperand,
+    /// The selected force completed only partially and cannot warm.
+    IncompleteSemanticOperand { reasons: PartialReasonSet },
     /// The path walker re-entered an alias it had already visited on the
     /// same `build_project_path` invocation. Carries the
     /// cycle participants so diagnostics can render the chain end-to-end.
@@ -4970,6 +5065,10 @@ impl QueryError {
             | QueryError::BudgetExceeded(_)
             | QueryError::Cancelled
             | QueryError::UnstableState { .. }
+            | QueryError::SignatureOverflow
+            | QueryError::ForeignSemanticOperand
+            | QueryError::StaleSemanticOperand
+            | QueryError::IncompleteSemanticOperand { .. }
             | QueryError::AliasCycle { .. }
             | QueryError::Other(_)
             | QueryError::ValueDomainMismatch { .. }
@@ -5042,6 +5141,13 @@ impl PartialEq for QueryError {
             (Self::BudgetExceeded(_), Self::BudgetExceeded(_)) => true,
             (Self::Cancelled, Self::Cancelled) => true,
             (Self::UnstableState { attempts: a }, Self::UnstableState { attempts: b }) => a == b,
+            (Self::SignatureOverflow, Self::SignatureOverflow) => true,
+            (Self::ForeignSemanticOperand, Self::ForeignSemanticOperand) => true,
+            (Self::StaleSemanticOperand, Self::StaleSemanticOperand) => true,
+            (
+                Self::IncompleteSemanticOperand { reasons: a },
+                Self::IncompleteSemanticOperand { reasons: b },
+            ) => a == b,
             (Self::AliasCycle { chain: a }, Self::AliasCycle { chain: b }) => a == b,
             (Self::RecursiveRef { name: a }, Self::RecursiveRef { name: b }) => a == b,
             (Self::Other(a), Self::Other(b)) => a == b,
@@ -5106,6 +5212,10 @@ impl QueryError {
             Self::Cancelled => 14,
             Self::OpenSurface => 15,
             Self::UnmodeledPosition => 16,
+            Self::SignatureOverflow => 17,
+            Self::ForeignSemanticOperand => 18,
+            Self::StaleSemanticOperand => 19,
+            Self::IncompleteSemanticOperand { .. } => 20,
         }
     }
 }
@@ -5122,6 +5232,7 @@ impl std::hash::Hash for QueryError {
             Self::UnstableState { attempts } => {
                 attempts.hash(state);
             }
+            Self::IncompleteSemanticOperand { reasons } => reasons.hash(state),
             Self::AliasCycle { chain } => {
                 chain.hash(state);
             }
@@ -5149,6 +5260,9 @@ impl std::hash::Hash for QueryError {
             Self::Miss
             | Self::BudgetExceeded(_)
             | Self::Cancelled
+            | Self::SignatureOverflow
+            | Self::ForeignSemanticOperand
+            | Self::StaleSemanticOperand
             | Self::RaiseAliasCycle
             | Self::TypeParamCycle
             | Self::RaiseMiss
@@ -9387,6 +9501,26 @@ mod tests {
             );
             seen = seen.union(bit);
         }
+
+        // The observable spellings join these names, so two variants
+        // sharing one (or an empty one) makes a rendered reason set
+        // ambiguous about which class actually fired.
+        let mut names: Vec<&'static str> = PartialReason::ALL
+            .into_iter()
+            .map(PartialReason::name)
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.is_empty()),
+            "every reason must carry a non-empty spelling",
+        );
+        names.sort_unstable();
+        let distinct = names.len();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            distinct,
+            "two reason variants share one spelling, so a rendered set is ambiguous",
+        );
 
         assert_eq!(
             seen.iter().collect::<Vec<_>>(),
