@@ -232,7 +232,7 @@ Subject: `roadmap/0.1.0-tama/tools/closure-register.mjs`, `roadmap/0.1.0-tama/sc
 - `P-identity-semantics` terminal summary: test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out | test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 - `P-identity-observation` terminal summary: test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out | test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out
 - `P-identity-multiplicity` terminal summary: test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out | test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out
-- `P-authority-shape` terminal summary: validate-program-dag: PASS nodes=411 edges=1042 modules=52 charters=411 critical_path=113 max_width=36
+- `P-authority-shape` terminal summary: validate-program-dag: PASS nodes=411 edges=1044 modules=52 charters=411 critical_path=113 max_width=36
 - `P-ledger-model` terminal summary: tests 30 | pass 30 | fail 0 | cancelled 0 | skipped 0 | todo 0
 - `P-instrument-controls` terminal summary: tests 38 | pass 38 | fail 0 | cancelled 0 | skipped 0 | todo 0
 - `P-instrument-check` terminal summary: closure-register: PASS instrument=typescript-mapper-closure claims=7 atoms=52 proofs=9 controls=9 findings=36 residues=3 obligations=545 state=READY_FOR_REVIEW

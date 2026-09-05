@@ -15,7 +15,7 @@ Required pressure boundaries include: one entry exceeding the cache cap; many di
 
 ## L1: executable long-churn evidence
 
-MEM0 freezes an ordered hermetic manifest of at least 10,000 actions. Every action names its source fixture, project, query identity, edit/configuration delta, cancellation point and expected result/admission class. The manifest covers both Vue and Svelte, cold and warm requests, high-cardinality keys, edit/revert, project open/close, provider-independent configuration changes, overlapping requests and retained-result release. Same-key repetition alone cannot satisfy this workload.
+MEM0 freezes an ordered hermetic manifest of at least 10,000 actions. Every action names its source fixture, project, query identity, edit/configuration delta, cancellation point and expected result/admission class. The manifest covers both Vue and Svelte, cold and warm requests, high-cardinality keys, edit/revert, project open/close, provider-independent configuration changes, overlapping requests, failed construction and retained-result release. Same-key repetition alone cannot satisfy this workload.
 
 L1 installs an executable runner and binds its exact command in the gate profile or applicable required CI job before its row can be implemented. No generic nextest success substitutes for executing the workload. It runs normal and pressure budgets; inventories all planned actions; requires nonzero completed semantic requests and every declared action class; compares applicable incremental results with fresh construction; and rejects missing summaries, unexpected skips and stale/partial warm admission.
 

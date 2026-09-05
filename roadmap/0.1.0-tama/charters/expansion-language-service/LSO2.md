@@ -69,6 +69,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 - **IDX0:** implemented ledger row for “Atomic semantic contributions and workspace index”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **ENCL0:** implemented ledger row for “LSP and editor coordinate-boundary cutover”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **TIF1:** implemented ledger row for “TypeInfo-first ComponentInfo and component-meta cutover”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **PM3:** implemented ledger row for “Atomic project snapshot publication and invalidation”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope

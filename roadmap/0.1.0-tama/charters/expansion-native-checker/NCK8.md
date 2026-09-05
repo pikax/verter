@@ -69,6 +69,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 - **UAO0:** implemented ledger row for “Activation, observation, TypeInfo, index, and performance contract lock”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **UAP0:** implemented ledger row for “Capability, coexistence, rule/action, formatter, and public contract lock”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **BR0:** implemented ledger row for “Post-L4 successor product promotion”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **PM4:** implemented ledger row for “Project-model consumer cutover and convergence”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope

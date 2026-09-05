@@ -47,3 +47,11 @@ consumers = ["L4"]
 outcome = "Shipped-cfg behavioral tests execute in canonical local, CI and release verification"
 acceptance = "SG0-AC1 through SG0-AC3"
 evidence = "Canonical gate execution plus a proven applied debug-assertion-side-effect negative control"
+
+[[contract]]
+id = "shared-engine-candidate-validation"
+producer = "EPR4"
+consumers = ["EPR2", "EPR3", "EPR5"]
+outcome = "One production owner for executable-candidate identity, compatibility, integrity, origin and revocation validation"
+acceptance = "EPR4-AC-CANDIDATES and EPR4-AC-CONTRACT, plus downstream installer, shipping and activation integration"
+evidence = "Shared validator and receipt/cache/path behavioral cases under EPR4-SB3/SB6/SB7, reused by each consuming owner"

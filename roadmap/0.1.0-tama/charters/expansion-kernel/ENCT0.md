@@ -58,13 +58,13 @@ TCM and certified-TypeScript coordinate-boundary verifier. The current owner is 
 
 - **Normative intent:** read-only verify the pre-BR0 TCM coordinate cutover and prevent successor consumers from bypassing its owners.
 - **Atomic boundary:** the production surfaces and named API/data boundaries above form this source-owned node's exclusive acceptance subset; this node owns its complete named migration population and exactly one deletion/cutover disposition.
-- **Inventory evidence:** classify every displaced authority and assign its implementation/cutover owner. This contract node proves inventory completeness and unambiguous ownership; later implementation nodes prove production deletion.
+- **Inventory evidence:** enumerate every in-scope outcome, consumer and displaced production route. Bind each to its existing owning ancestor and receiving acceptance criterion, and verify the required implementation/deletion evidence is already complete. Missing mechanisms or residual required routes return to their predecessor owner; this verification node grants no future-deletion deferral and performs no production migration.
 
 ## Acceptance IDs and discriminating proof
 
 Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
 
-- **ENCT0-AC1 — ownership contract:** every inventoried outcome, consumer and displaced route has exactly one declared implementation/deletion owner. Validate contract artifacts and their negative controls; production deletion is acceptance of the later owner, not this documentation-only node.
+- **ENCT0-AC1 — sole-owner outcome:** every required outcome and consumer is covered by its implemented owning ancestor, and each required displaced route is already deleted or structurally rejected by that owner. Check the complete inventory, ancestor paths, acceptance criteria and executed evidence; missing, conflicting or residual ownership fails this verifier and returns to the predecessor owner. A named future owner cannot satisfy closure, and this node adds no missing production mechanism.
 - **ENCT0-AC2 — positive contract:** the named API/data boundary must preserve exact identities, provenance, completeness, and deterministic ordering. Reuse existing coverage or extend/table-drive one test before creating a new test.
 - **ENCT0-AC3 — incremental equivalence:** when the changed scope owns or affects incremental, cache, cancellation, stale-publication, or partial-result authority, prove incremental equals fresh and degraded outcomes cannot warm. Otherwise record a terse not-applicable rationale tied to the untouched authority.
 - **ENCT0-AC4 — bounded work:** when the changed scope owns or affects a hot path, prove no hidden duplicate parse, resolve, plan, emit, copy, allocation, or retained candidate using applicable existing counters, inspection, or benchmarks. Otherwise record a terse not-applicable rationale; do not add counters or a soak by default.
@@ -73,9 +73,9 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 
 ## Deletions and forbidden designs
 
-- Inventory and assign the later deletion/rejection owner for: **central framework switch**. This node changes no production route.
-- Inventory and assign the later deletion/rejection owner for: **untagged coordinate/public identity**. This node changes no production route.
-- Inventory and assign the later deletion/rejection owner for: **duplicate component information authority**. This node changes no production route.
+- Verify the owning predecessor has deleted or structurally rejected: **central framework switch**. This node changes no production route.
+- Verify the owning predecessor has deleted or structurally rejected: **untagged coordinate/public identity**. This node changes no production route.
+- Verify the owning predecessor has deleted or structurally rejected: **duplicate component information authority**. This node changes no production route.
 - Never add a dual-running authority, compatibility fallback, string/regex semantic recovery, test-only production bypass, resource-capacity predecessor, sleep/poll readiness, or unqualified cache/public identity.
 - Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
 
@@ -84,7 +84,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Target ceiling: 0 production LOC, 0 production files, 0 related crates/packages.
 - Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
 - Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
-- Performance acceptance: use the exact applicable metric rows and methodology from performance-gates.toml or the owning ratified product catalog, under contracts/resource-and-finalization.md (L2). Exact work invariants, statistical latency/RSS limits and bounded new-capability budgets are distinct. Missing required coverage needs an owning-contract amendment before measurement; no implicit 0.0% threshold or post-hoc rebaseline applies.
+- Performance acceptance: use the exact applicable metric rows and methodology from performance-gates.toml, the applicable MEM0 budget, or the owning ratified product catalog, under contracts/resource-and-finalization.md (L2). Exact work invariants, latency/allocation/RSS limits under their owning methodology, and bounded new-capability budgets are distinct. New capabilities and deliberate pressure policies declare bounded new work and replacement SLOs before measurement. Missing required coverage needs an owning-contract amendment before measurement; no implicit 0.0% threshold or post-hoc rebaseline applies.
 
 ## Abort conditions
 

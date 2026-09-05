@@ -75,7 +75,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 ### Binding architecture
 
 - Resolution enumerates only source classes authorized by the captured EPR0 policy for the request context.
-- Source adapters discover locators and source evidence; EPR1 validates and normalizes before comparison.
+- Source adapters discover locators and source evidence; this node implements the shared validator that normalizes them under the EPR1 contract before comparison. EPR1 supplies schemas and laws, not production code.
 - Every candidate rejection is retained with typed reason; integrity/trust/revocation failure is not silently downgraded to absence.
 - Selection comparator is explicit, deterministic, versioned, and independent of filesystem enumeration order.
 - No source adapter spawns, executes, downloads, updates, or mutates a project/system/editor artifact.
@@ -137,8 +137,10 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
+- Implement the EPR1-specified artifact identity/descriptor/receipt types and one shared compatibility/integrity/origin/revocation validator; migrate source-specific version/path tuples and adapter validation to that authority.
+- Expose validation without source discovery, selection, network, installation, or activation so EPR2 acquisition and EPR3 shipping can consume it independently.
 - Implement concurrent/bounded validation under scheduler pools where beneficial.
-- Delete source-specific trust shortcuts.
+- Delete source-specific trust shortcuts and version-string-only compatibility decisions after their replacement is proven.
 
 **Discriminating proof:**
 
@@ -177,7 +179,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
-- Add PUB0/status adapters and logs.
+- Add PUB0/status adapters and logs, implementing the EPR1 rejection/provenance schemas and secret/path redaction vectors.
 - Delete vague “no provider” fallback reports.
 
 **Discriminating proof:**
@@ -197,7 +199,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
-- Implement project-scoped resolver snapshots/singleflight and counters.
+- Implement project-scoped resolver snapshots/singleflight and the bounded validation-receipt cache, finite retention limits, exact invalidation, and counters ratified by EPR1.
 - Release caches on project/policy/provider teardown.
 
 **Discriminating proof:**
@@ -217,6 +219,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
+- Implement read-only READY/manifest/private-root/path validation under the EPR1 layout contract; reject partial, corrupt, revoked, or unsafe candidates without mutating user or managed artifacts. EPR2 owns managed quarantine and installation.
 - Add adversarial cross-platform fixture harness.
 - Pass immutable descriptor/validation receipt to EPR5, not only path.
 
@@ -262,7 +265,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 ### Pack-specific proof obligations
 
 - **EPR4-AC-SOURCES:** only authorized/opened adapters execute and disabled sources prove zero work.
-- **EPR4-AC-CANDIDATES:** every selected candidate has current EPR1 validation and every rejection remains typed.
+- **EPR4-AC-CANDIDATES:** the shared production validator implements EPR1 identity/compatibility/integrity/origin/revocation laws; every selected candidate has its current normalized receipt and every rejection remains typed. EPR1 contract fixtures become discriminating behavioral tests here, including cache/READY/path mutations.
 - **EPR4-AC-COMPARATOR:** enumeration permutations and dimension mutation matrix yield exact deterministic selection.
 - **EPR4-AC-NO-NETWORK:** resolution never performs network acquisition/update.
 - **EPR4-AC-CACHE:** incremental/warm resolution equals fresh and invalidates exactly under source/policy/revocation changes.

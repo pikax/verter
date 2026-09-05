@@ -48,7 +48,7 @@ The current owner is **path/version probes, source-specific validation, bundle m
 ## Concrete surfaces and APIs
 
 - Future production-owner inventory (read-only in this contract): `crates/verter_identity`, `crates/verter_tsgo_api`, `crates/verter_type_runtime`, `crates/verter_protocol`.
-- Pack production inventory:
+- Planned implementation-consumer inventory (read-only here):
 - `crates/verter_identity` for artifact/platform/origin/digest IDs
 - `crates/verter_tsgo_api::toolchain` and `crates/verter_type_runtime` validation contracts
 - `crates/verter_protocol` public status/provenance projections
@@ -84,9 +84,11 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 ### Internal subblocks
 
+Every subblock below produces contract schemas, decision tables, owner mappings, and positive/negative fixture vectors. Its runtime laws describe obligations for the named later production owner, not runtime effects required to complete EPR1. EPR1 does not add production types, evaluators, caches, adapters, installers, or status paths.
+
 #### EPR1-SB1 - Artifact and platform identity
 
-**Independently testable outcome:** Every candidate has one collision-resistant structural identity independent of path.
+**Independently testable outcome:** The identity schema and fixture vectors specify one collision-resistant structural candidate identity independent of path.
 
 **Architecture:**
 
@@ -96,8 +98,8 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
-- Add identity types and serialization/catalog schemas.
-- Migrate source-specific version/path tuples.
+- Specify identity fields in serialization/catalog schemas and non-production fixture vectors.
+- Assign production identity types and migration of source-specific version/path tuples to EPR4-SB3.
 
 **Discriminating proof:**
 
@@ -106,7 +108,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 #### EPR1-SB2 - Compatibility and feature contract
 
-**Independently testable outcome:** An engine is selectable only when its exact API/protocol/features satisfy the requester.
+**Independently testable outcome:** The compatibility decision table specifies selection eligibility for exact API/protocol/feature requirements.
 
 **Architecture:**
 
@@ -116,8 +118,8 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
-- Centralize compatibility evaluator.
-- Remove source adapter/version-string-only decisions.
+- Ratify one compatibility decision table, including rejection and invalidation cases.
+- Assign the production compatibility evaluator and deletion of adapter/version-string-only decisions to EPR4-SB3.
 
 **Discriminating proof:**
 
@@ -126,7 +128,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 #### EPR1-SB3 - Origin, integrity, signature, and provenance evidence
 
-**Independently testable outcome:** Validation proves what bytes were obtained, from which authorized channel, under which trust root.
+**Independently testable outcome:** The evidence schema specifies which bytes, authorized channel, and trust root a runtime validation receipt must prove.
 
 **Architecture:**
 
@@ -136,8 +138,8 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
-- Implement receipt schemas and source adapter obligations.
-- Ban self-asserted “trusted” booleans.
+- Specify receipt schemas and source-evidence obligations; negative schema fixtures reject self-asserted “trusted” booleans.
+- Assign normalized production receipt construction and source-adapter validation to EPR4-SB3; EPR2 and EPR3 supply acquisition and shipping evidence to that shared validator.
 
 **Discriminating proof:**
 
@@ -146,7 +148,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 #### EPR1-SB4 - Safe cache/install layout and concurrent writers
 
-**Independently testable outcome:** Install/cache entries cannot expose partial, mutable, symlinked, or attacker-controlled executables.
+**Independently testable outcome:** The install/cache state model forbids exposure of partial, mutable, symlinked, or attacker-controlled executables and assigns enforcement to the implementation owners.
 
 **Architecture:**
 
@@ -156,8 +158,8 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
-- Ratify layout consumed by EPR2/EPR3 and existing cache readers.
-- Add corruption/quarantine cleanup policy.
+- Ratify layout, crash-point, concurrency, and forbidden-path fixture vectors for EPR2 installation and EPR3 installed packages.
+- Specify corruption/quarantine cleanup policy; EPR4-SB7 implements read-only candidate validation and EPR2 implements managed-root mutation.
 
 **Discriminating proof:**
 
@@ -166,7 +168,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 #### EPR1-SB5 - Validation cache and exact invalidation
 
-**Independently testable outcome:** Expensive validation reuses receipts only while every artifact/origin/policy/revocation fact matches.
+**Independently testable outcome:** The cache decision table permits receipt reuse only while every artifact/origin/policy/revocation fact matches.
 
 **Architecture:**
 
@@ -176,8 +178,8 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
-- Implement bounded validation receipt cache and counters.
-- Do not cache rejected unknowns across facts that could change.
+- Specify validation receipt cache keys, finite retention limits, invalidation cases, and work counters for EPR4-SB6.
+- Negative contract vectors forbid reuse of rejected unknowns across facts that could change; EPR4 supplies the runtime cache and counters.
 
 **Discriminating proof:**
 
@@ -186,7 +188,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 #### EPR1-SB6 - Revocation, corruption, and quarantine
 
-**Independently testable outcome:** Known-bad or newly revoked artifacts are never selected and are handled without silent fallback.
+**Independently testable outcome:** Revocation and quarantine tables specify rejection without silent fallback and assign every transition to its implementation owner.
 
 **Architecture:**
 
@@ -196,8 +198,8 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
-- Add rejection/status/audit paths.
-- Define retry/update/rollback interaction.
+- Define rejection/status/audit schemas and retry/update/rollback decision tables.
+- Assign revocation-aware validation and reporting to EPR4-SB3/SB5/SB6, activation-race handling to EPR5-SB1, managed quarantine to EPR2-SB5, and bundled withdrawal to EPR3-SB4.
 
 **Discriminating proof:**
 
@@ -206,7 +208,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 #### EPR1-SB7 - Public validation status and secret/path hygiene
 
-**Independently testable outcome:** Users/operators receive actionable source/version/status without leaking secrets or unstable machine roots into portable receipts.
+**Independently testable outcome:** Public status schemas and redaction fixtures specify actionable source/version/status without secrets or unstable machine roots in portable receipts.
 
 **Architecture:**
 
@@ -216,8 +218,8 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 **Expected changes:**
 
-- Amend PUB0 status schema and logs/audit.
-- Add portability guards.
+- Specify PUB0-compatible public status projections, redaction rules, and portable golden fixtures.
+- Assign production validation/status/log adapters to EPR4-SB5 and activation status to EPR5-SB6.
 
 **Discriminating proof:**
 
@@ -236,15 +238,25 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 ### Migration and cutover
 
-- Characterize current source validators and bundle/cache manifests.
-- Introduce normalized descriptor/receipt while preserving current source order under EPR0.
-- Migrate all source adapters before EPR4 selection.
+- Characterize current source validators and bundle/cache manifests without changing their production routes.
+- Ratify the normalized descriptor/receipt schemas and map every displaced path/version tuple, trust shortcut, cache, and status projection to its production owner and acceptance criterion below.
+- EPR4 implements the shared descriptor/validator/cache and migrates every resolver source adapter before its selection cutover. EPR2 and EPR3 consume that implementation after EPR4; neither becomes a predecessor of the required resolution/activation path.
+- EPR1 acceptance checks that this transfer is complete and internally consistent. It does not claim those later migrations or their runtime proofs have executed.
+
+| Contract obligation | Later production owner and acceptance |
+| --- | --- |
+| Structural artifact types, compatibility evaluator, normalized receipt construction, source-adapter migration, and removal of path/version/trust shortcuts | EPR4-SB2/SB3, EPR4-AC-CANDIDATES |
+| Bounded receipt cache, revocation invalidation, read-only cache/READY/path validation, and public validation status/redaction | EPR4-SB5/SB6/SB7, EPR4-AC-CANDIDATES and EPR4-AC-CONTRACT |
+| Managed download evidence, safe extraction, atomic READY-last installation, concurrent writers, and managed quarantine | EPR2-SB4/SB5, EPR2-AC-VERIFY-FIRST and EPR2-AC-SAFE-EXTRACT |
+| Shipping provenance, installed package layout, and bundled withdrawal | EPR3-SB2/SB4/SB5, EPR3-AC-INSTALLED and EPR3-AC-SUPPLY |
+| Stale-selection/revocation races at activation and activation status | EPR5-SB1/SB6, EPR5-AC-REVALIDATE |
+
 
 ### Consumers and unlocks
 
-- Unlocks optional EPR2/EPR3 and required EPR4.
-- Provides uniform validation receipts to selection/activation.
-- Owns safe managed cache/install contract.
+- Unlocks required EPR4; optional EPR2/EPR3 also require its shared production validator.
+- Provides the uniform validation receipt specification to resolution, acquisition, shipping, and activation owners.
+- Owns the safe managed cache/install contract; later owners provide the runtime behavior.
 
 ## Acceptance IDs and discriminating proof
 
@@ -252,23 +264,25 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 
 - **EPR1-AC1 — sole-owner outcome:** the contract artifacts establish the named ownership rules and inventory every displaced production route with its later production-capable deletion owner; this zero-production node performs no runtime migration. Add a negative or mutation test only for a plausible critical fail-closed/correctness boundary or reproduced defect that existing evidence does not discriminate.
 - **EPR1-AC2 — positive contract:** the named API/data boundary preserves exact identities, provenance, completeness, and deterministic ordering. Reuse existing coverage or extend/table-drive one test before creating a new test.
-- **EPR1-AC3 — incremental equivalence:** when the changed scope owns or affects incremental, cache, cancellation, stale-publication, or partial-result authority, prove incremental equals fresh and degraded outcomes cannot warm; otherwise bind a terse not-applicable rationale.
-- **EPR1-AC4 — bounded work:** when the changed scope owns or affects a hot path, prove no hidden duplicate parse, resolve, plan, emit, provider, filesystem, network, allocation, copy, or retained-candidate work; otherwise bind a terse not-applicable rationale.
+- **EPR1-AC3 — incremental contract:** the cache and invalidation decision tables bind unchanged reuse and changed-basis rejection to exact fixture vectors and later behavioral owners. EPR4/EPR5 supply runtime incremental/fresh evidence; EPR1 records that it is not yet executed.
+- **EPR1-AC4 — bounded-work contract:** declare finite validation/cache limits, work counters, and zero-work modes with their later implementation owners. No runtime hot-path or soak result is required from this zero-production contract.
 - Every proposed new test must name a plausible regression or contract boundary not already discriminated; do not add implementation mirrors, duplicate permutations, or universal test quotas.
-- Test homes: `crates/verter_session/tests/cases`, `crates/verter_protocol/tests`, `packages/typescript-plugin/src`, and the exact generated vertical fixture selected by this node.
+- Contract test homes: roadmap schemas, catalogs, and their focused validation fixtures. Existing production tests may be inspected for characterization; new runtime integration tests belong to the mapped implementation owners.
 
 
 ### Pack-specific proof obligations
 
-- **EPR1-AC-IDENTITY:** artifact identity collision/substitution matrix is exact.
-- **EPR1-AC-COMPAT:** compatibility boundaries and feature requirements are mutation-tested.
-- **EPR1-AC-INTEGRITY:** byte/origin/signature/manifest mutations fail before execution.
-- **EPR1-AC-INSTALL:** crash/concurrency/symlink/permission tests never expose partial/untrusted entries.
-- **EPR1-AC-REVOCATION:** revocation invalidates validation/selection/activation immediately.
-- **EPR1-AC-SOLE:** a planted displaced authority or duplicate route is rejected by a static or runtime guard.
-- **EPR1-AC-CONTRACT:** the named APIs, identities, outcomes, and provenance fields are exact, deterministic, and complete for this block.
-- **EPR1-AC-INCREMENTAL:** incremental execution equals fresh execution on the same basis; cancelled, stale, partial, or NeedInputs outcomes are never warm-admitted as complete.
-- **EPR1-AC-WORK:** equivalent-work counters prove no hidden parse, resolve, index walk, provider call, allocation, copy, or retained candidate beyond the declared demand.
+These acceptance IDs require schema/decision-table fixtures and an exact production-owner transfer, not an implemented runtime validator. A contract fixture proves the specification rejects a mutation; the later owner's behavioral test proves the running system rejects it.
+
+- **EPR1-AC-IDENTITY:** schema fixtures distinguish artifact bytes/build/origin/platform and preserve structural identity across permitted locator changes; runtime identity proof belongs to EPR4-SB3.
+- **EPR1-AC-COMPAT:** decision-table mutations discriminate every compatibility boundary and feature requirement; EPR4-SB3 implements and tests the evaluator.
+- **EPR1-AC-INTEGRITY:** byte/origin/signature/manifest mutation vectors specify pre-execution rejection and map to EPR4-SB3 plus the EPR2/EPR3 evidence producers.
+- **EPR1-AC-INSTALL:** layout and state-transition fixtures forbid partial/untrusted READY entries and enumerate crash/concurrency/symlink/permission cases for EPR2-SB5, EPR3-SB5, and EPR4-SB7.
+- **EPR1-AC-REVOCATION:** decision tables specify invalidation at validation/selection/activation and bind implementation to EPR4-SB3/SB6 and EPR5-SB1.
+- **EPR1-AC-SOLE:** the transfer inventory assigns each displaced route exactly one production deletion owner; a missing or duplicate owner fails contract validation.
+- **EPR1-AC-CONTRACT:** schema fields, identities, typed outcomes, provenance, and public redaction vectors are exact, deterministic, and complete.
+- **EPR1-AC-INCREMENTAL:** contract vectors distinguish unchanged reuse from stale, cancelled, partial, and changed-basis rejection; EPR4-SB6 and EPR5-SB1 own runtime incremental/fresh proof.
+- **EPR1-AC-WORK:** finite validation/cache budgets and equivalent-work counters are specified for EPR4-SB6; acquisition, shipping, and activation work remains with EPR2/EPR3/EPR5. EPR1 makes no runtime performance claim.
 
 ## Deletions and forbidden designs
 
@@ -299,7 +313,7 @@ The program-wide prohibitions also apply: no dual-running semantic authority, co
 - Immutable READY entries may use bounded receipt validation; mutable locators revalidate according to explicit policy without repeated full scans.
 - Target ceiling: 0 production LOC, 0 production files, and 0 related packages.
 - No wall-time claim is accepted without equivalent-work counters and allocation/RSS evidence for the same semantic work.
-- After warmup, 100 identical requests must show no unbounded retained-byte growth and no repeated provider or filesystem work unless the request explicitly demands it.
+- The contract assigns the 100-identical-request warm validation and retained-byte proof to EPR4-SB6, with activation lifecycle proof under EPR5-SB7. EPR1 ratifies its finite limits and required counters; it does not run a future production soak.
 
 ## Abort conditions
 
@@ -317,9 +331,9 @@ The program-wide prohibitions also apply: no dual-running semantic authority, co
 
 ### Pack-specific verification inventory
 
-1. Artifact identity/compatibility/integrity/signature/origin mutation matrix.
-1. Cross-platform cache layout, permission, symlink/reparse, crash, concurrency, quarantine, revocation tests.
-1. Public status redaction/portability and warm validation work counters.
+1. Validate artifact identity, compatibility, integrity, signature, and origin schemas against positive and negative contract fixture vectors.
+1. Validate the cache-layout/state-transition decision tables and complete runtime-owner mapping for permission, symlink/reparse, crash, concurrency, quarantine, and revocation cases.
+1. Validate public status redaction/portability goldens and the declared warm-validation budgets/counter schema; bind runtime execution to the mapped later owners.
 
 The canonical gate profile remains authoritative. Targeted success is iteration evidence only. Final acceptance requires fresh RED/GREEN evidence when applicable, the configured independent review profile, and the owning final gate on the squashed review candidate.
 

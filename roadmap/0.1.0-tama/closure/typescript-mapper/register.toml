@@ -757,7 +757,7 @@ executed = 411
 passed = 411
 failed = 0
 skipped = 0
-terminal_summary = "validate-program-dag: PASS nodes=411 edges=1042 modules=52 charters=411 critical_path=113 max_width=36"
+terminal_summary = "validate-program-dag: PASS nodes=411 edges=1044 modules=52 charters=411 critical_path=113 max_width=36"
 count_key = "nodes"
 control = "CTL-authority-edge"
 

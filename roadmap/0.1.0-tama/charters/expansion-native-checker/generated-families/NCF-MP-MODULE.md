@@ -57,6 +57,7 @@ Implement, certify, and promote exactly one native checker feature slice for **m
 - **NCK6:** implemented ledger row for “Family-scoped diagnostic authority arbitration and atomic publication”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **IDX0:** implemented ledger row for “Atomic semantic contributions and workspace index”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **TCM4:** implemented ledger row for “Atomic activation and deletion”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **PM3:** implemented ledger row for “Atomic project snapshot publication and invalidation”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope

@@ -78,7 +78,7 @@ rescope_unrelated_packages = 3
 [[node]]
 id = "EPR2"
 name = "Managed download and verified atomic installation channel"
-predecessors = ["EPR1", "G5"]
+predecessors = ["EPR1", "G5", "EPR4"]
 phase = "expansion"
 train = "expansion.engine-provisioning"
 product = "engine_provisioning"
@@ -115,7 +115,7 @@ rescope_unrelated_packages = 3
 [[node]]
 id = "EPR3"
 name = "Bundled sidecar shipping and distribution channel"
-predecessors = ["EPR1"]
+predecessors = ["EPR1", "EPR4"]
 phase = "expansion"
 train = "expansion.engine-provisioning"
 product = "engine_provisioning"

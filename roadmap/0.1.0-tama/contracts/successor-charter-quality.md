@@ -26,7 +26,9 @@ Every static implementation charter must contain:
 
 Contract/constitution nodes may have zero production LOC, but their schemas and focused negative guards are still real acceptance artifacts.
 
-A zero-production contract inventories displaced routes and assigns each to a later production-capable deletion owner. It does not require those future deletions as its own acceptance. Convergence/proof nodes verify their predecessors and return missing mechanisms to their owners. Performance-sensitive acceptance cites exact controlling metric rows under `contracts/resource-and-finalization.md`; generic zero-percent boilerplate cannot override a ratified statistical threshold. Cross-train contract consumers belong in `catalogs/contract-dependencies.toml` with a producer path in the DAG.
+A zero-production contract inventories displaced production routes and assigns each to a later production-capable deletion owner. It does not require those future deletions as its own acceptance. Convergence/proof nodes verify their predecessors and return missing mechanisms to their owners. Performance-sensitive acceptance cites exact controlling metric rows under `contracts/resource-and-finalization.md`; generic zero-percent boilerplate cannot override a ratified statistical threshold. Cross-train contract consumers belong in `catalogs/contract-dependencies.toml` with a producer path in the DAG.
+
+Before a pending ownership-contract node completes, its own inventory artifacts enumerate every in-scope outcome, consumer and displaced route. Each outcome/consumer binds one implementation owner; each displaced production route binds one later production-capable deletion/rejection owner. These bindings use concrete DAG node IDs, a valid successor dependency path from the contract, and a named receiving acceptance criterion; the node's descriptive `owner` string is not such a binding. The contract-owned schema and validator reject omitted population members, unknown nodes, missing paths, missing acceptance criteria and conflicting owners. These are artifacts that the pending contract node must implement and verify, not a claim that the current static charter-header validator already inspects future inventory contents.
 
 ## Atomicity tests
 
@@ -90,3 +92,5 @@ A successor adding a real capability may have non-zero new work. The requirement
 - emit capability snapshots.
 
 They may not add semantic rules, target logic, occurrence roles, rename transforms, edit algorithms, source adapters, validation mechanisms, selection dimensions, or lifecycle behavior. Discoveries reopen the owning predecessor.
+
+A verification/convergence node certifies already completed owning ancestors and rejects missing mechanisms or required residual routes; it cannot replace that proof with a later deletion owner. A contract/design proof such as CPF0 may inventory a later implementation, but does not certify that implementation. Private experiment code and superseded authority prose remain cleanup obligations of their own proof/contract owner, not future production migrations.
