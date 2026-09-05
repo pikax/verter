@@ -4,8 +4,12 @@
  * Integrates `vscode-css-languageservice` with Verter's virtual file system to provide
  * full CSS intellisense (completions, hover, diagnostics, colors) in `<style>` blocks.
  *
- * - CSS/SCSS/LESS: fed directly to the appropriate language service
- * - Sass/Stylus: transpiled via project compilers, then fed to CSS service
+ * - CSS/SCSS/LESS: the verbatim authored slice is fed directly to the appropriate
+ *   language service — the owner-specific editor adapter over authored bytes
+ * - Sass/Stylus: transpiled via project compilers; the qualified result's
+ *   diagnostics are the block's facts. The generated CSS is NEVER parsed here:
+ *   preprocessed bytes belong to their qualified stage, and a second CSS parse
+ *   of them would report coordinates that address nothing the user wrote.
  */
 
 import {
@@ -67,8 +71,8 @@ interface DocumentCache {
   availability: DocumentStructureResponseV1["kind"] | "transportUnavailable" | "staleInvocation";
   blocks: StyleBlockInfo[];
   source: string;
-  /** Keyed by style block index — qualified preprocessed CSS. */
-  transpiled: Map<number, QualifiedStyleResult>;
+  /** Keyed by sealed block token — qualified preprocessed results. */
+  transpiled: Map<string, QualifiedStyleResult>;
 }
 
 // ── CssService class ─────────────────────────────────────────────
@@ -184,25 +188,23 @@ export class CssService {
     const results: Array<{ blockToken: string; diagnostics: CSSDiagnostic[] }> = [];
 
     for (const block of entry.blocks) {
-      // A preprocessor that reported an error produced no CSS to validate, but
-      // the error itself is the block's real diagnostic. Reporting it here is
-      // what the qualified result made possible: the previous bare transpile
-      // record carried the errors and nothing ever read them, so a Sass or
-      // Stylus compile failure showed up as silence.
+      // A preprocessor dialect's only CSS-side facts are its qualified
+      // result's diagnostics — reported against the bytes the tool CONSUMED
+      // (the authored slice), which is what makes the block's own line
+      // arithmetic the right map. A compile failure recovers here instead of
+      // surfacing as silence; a clean compile is a clean block.
       const preprocessorDiags = this.preprocessorDiagnostics(block, entry);
 
-      const service = this.getServiceForBlock(block, entry);
+      // Only authored dialect slices reach a language service: the adapter's
+      // single parse is over the verbatim bytes the user wrote. Preprocessed
+      // output is never parsed (getServiceForLang has no service for a
+      // preprocessor dialect), so no generated-coordinate ranges exist to
+      // anchor or mis-map.
+      const service = getServiceForLang(block.lang);
       const cssDoc = this.getCssDocument(block, entry, uri);
       const diags =
         service && cssDoc ? service.doValidation(cssDoc, service.parseStylesheet(cssDoc)) : [];
-      if (this.usesGeneratedCss(block, entry)) {
-        // These ranges address generated CSS. Until the preprocessor map is
-        // available here, anchor them rather than applying authored offsets.
-        const blockStart = this.toSfcPosition(block, { line: 0, character: 0 });
-        for (const d of diags) d.range = { start: blockStart, end: blockStart };
-      } else {
-        for (const d of diags) d.range = this.toSfcRange(block, d.range);
-      }
+      for (const d of diags) d.range = this.toSfcRange(block, d.range);
 
       const blockDiags = [...preprocessorDiags, ...diags];
       if (blockDiags.length > 0) {
@@ -226,7 +228,7 @@ export class CssService {
    * arithmetic that does not address it.
    */
   private preprocessorDiagnostics(block: StyleBlockInfo, entry: DocumentCache): CSSDiagnostic[] {
-    const transpiled = entry.transpiled.get(block.legacyPreprocessorIndex);
+    const transpiled = entry.transpiled.get(block.blockToken);
     if (!transpiled) return [];
     const blockStart = this.toSfcPosition(block, { line: 0, character: 0 });
     return transpiled.diagnostics.map((diagnostic) => {
@@ -255,8 +257,7 @@ export class CssService {
     const allColors: ColorInformation[] = [];
 
     for (const block of entry.blocks) {
-      if (this.usesGeneratedCss(block, entry)) continue;
-      const service = this.getServiceForBlock(block, entry);
+      const service = getServiceForLang(block.lang);
       const cssDoc = this.getCssDocument(block, entry, uri);
       if (!service || !cssDoc) continue;
 
@@ -342,33 +343,15 @@ export class CssService {
     const block = findStyleBlockAt(entry.blocks, source, line, character);
     if (!block) return null;
 
-    // Cursor positions and returned ranges are authored coordinates. Generated
-    // CSS cannot safely serve positional features without its source map.
-    if (this.usesGeneratedCss(block, entry)) return null;
-
-    const service = this.getServiceForBlock(block, entry);
+    // Cursor positions and returned ranges are authored coordinates, and only
+    // an authored dialect has a service here: a preprocessor dialect has no
+    // CSS slice to serve positional features on — its facts are the qualified
+    // diagnostics doValidation already maps.
+    const service = getServiceForLang(block.lang);
     const cssDoc = this.getCssDocument(block, entry, uri);
     if (!service || !cssDoc) return null;
 
     return { block, service, cssDoc };
-  }
-
-  private getServiceForBlock(
-    block: StyleBlockInfo,
-    entry: DocumentCache,
-  ): CSSLanguageService | null {
-    // For preprocessors that need transpilation, check if we have transpiled output
-    if (block.lang === "sass" || block.lang === "stylus") {
-      return entry.transpiled.has(block.legacyPreprocessorIndex) ? cssService : null;
-    }
-    return getServiceForLang(block.lang);
-  }
-
-  private usesGeneratedCss(block: StyleBlockInfo, entry: DocumentCache): boolean {
-    return (
-      (block.lang === "sass" || block.lang === "stylus") &&
-      entry.transpiled.has(block.legacyPreprocessorIndex)
-    );
   }
 
   private getCssDocument(
@@ -383,20 +366,11 @@ export class CssService {
 
     // A dialect this client cannot address gets no virtual document at all:
     // there is no language id to open it under, and opening it as CSS anyway
-    // is what produced fabricated CSS errors for non-CSS syntax.
+    // is what produced fabricated CSS errors for non-CSS syntax. A preprocessor
+    // dialect is that case too — its authored bytes are not CSS, and its
+    // preprocessed bytes are qualified output this adapter never parses.
     if (block.lang === null) return null;
-
-    // For transpiled languages, use transpiled CSS
-    if (block.lang === "sass" || block.lang === "stylus") {
-      const transpiled = entry.transpiled.get(block.legacyPreprocessorIndex);
-      if (!transpiled) return null;
-      return TextDocument.create(
-        `${sfcUri}.style.${block.blockToken}.css`,
-        "css",
-        1,
-        transpiled.code,
-      );
-    }
+    if (block.lang === "sass" || block.lang === "stylus") return null;
 
     // For direct languages (css, scss, less, postcss), the CSS service MUST
     // parse the VERBATIM authored slice: `toCssPosition`/`toSfcPosition` are
@@ -478,7 +452,7 @@ export class CssService {
       this.getOpenEpoch(uri) === openEpoch;
     const blocks = admitted && response ? styleBlocksFromStructure(source, response) : [];
     const admittedAvailable = admitted && response !== null && response.kind === "available";
-    const transpiled = new Map<number, QualifiedStyleResult>();
+    const transpiled = new Map<string, QualifiedStyleResult>();
 
     // Transpile preprocessors if needed (resolved from workspace node_modules)
     // Collect missing-preprocessor diagnostics for this URI atomically.
@@ -511,7 +485,7 @@ export class CssService {
       const authored = directStyleDocumentText(source, block);
       const result = await transpile(authored, block.lang, uri, this.preprocessors);
       if (result) {
-        transpiled.set(block.legacyPreprocessorIndex, result);
+        transpiled.set(block.blockToken, result);
       } else {
         // Emit an inline diagnostic on the lang="..." attribute
         if (block.langAttributeRange) {

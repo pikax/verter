@@ -68,6 +68,10 @@ describe("styleBlocksFromStructure", () => {
     const blocks = styleBlocksFromStructure(source, available(source));
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toMatchObject({ blockToken: "style-token", lang: "scss", scoped: true });
+    // The sealed block token is the DTO's only identity axis: no positional
+    // alias may shadow it, because a consumer joining on an ordinal is one
+    // reorder away from attributing one block's facts to another.
+    expect(blocks[0]).not.toHaveProperty("legacyPreprocessorIndex");
     expect(source.slice(blocks[0].contentStartOffset, blocks[0].contentEndOffset)).toBe(
       "\n.foo {}\n",
     );
