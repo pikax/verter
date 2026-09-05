@@ -73,7 +73,7 @@ help: you might have meant to use an associated function to build this type
 59 -         base: base.clone(),
 60 -         args: args.clone(),
 61 -     };
-58 +     let _forged_key = InstantiateKey::new_authored(_, _, _, _, _);
+58 +     let _forged_key = InstantiateKey::new_authored(_, _, _, _, _, _);
    |
 
 error[E0559]: variant `SemanticQueryKey::Instantiate` has no field named `base`

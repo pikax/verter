@@ -2933,9 +2933,13 @@ impl SemanticGraphStore {
         // point for the canonical key — the demand the slot's mode
         // denotes at the key's path. This is the honest materialisation
         // for a single-terminal compute (the producer computed exactly the
-        // slot's mode), NOT a nominal echo of an unrelated request. A
-        // modeless `Single` family yields `Demand::identity()`, so its
-        // gate is a trivial pass.
+        // slot's mode at that path), NOT a nominal echo of an unrelated
+        // request: the requested point is built from
+        // `requested_path_for_key`, which carries an authored selective
+        // force's residual path, so a `Path(["wanted","leaf"])` force
+        // records exactly that path point rather than claiming the whole
+        // surface. A modeless `Single` family yields `Demand::identity()`,
+        // so its gate is a trivial pass.
         let satisfied_projection = if satisfied_projection.is_empty() {
             MaterializedSet::single(prepared.requested_point().clone())
         } else {

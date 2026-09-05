@@ -25,7 +25,7 @@ use verter_type_expr::locators::{
 };
 use verter_type_expr::TopLevelOwnerId;
 
-use super::{ProjectionReductionContext, SemanticNodeId};
+use super::{IndexKey, PathSegment, ProjectionReductionContext, PropertyKey, SemanticNodeId};
 use crate::locator_identity::{
     LibEnvHash, ParseEnvHash, ProjectIdentityDim, ResolveEnvHash, TypeEnvHash,
 };
@@ -603,19 +603,205 @@ impl ForcedSemanticOperand {
     }
 }
 
-/// One-shot owner of the complete projection-reduction context.
-#[derive(Debug, PartialEq, Eq, Hash)]
+/// The projection precision one operand force requests.
+///
+/// Request-owned vocabulary, never an operand axis: it travels on the
+/// one-shot [`SemanticOperandForceRequest`] and enters the query-family
+/// identity the forcing boundary derives from operand identity — exactly
+/// once, alongside the request's unchanged complete
+/// [`ProjectionReductionContext`]. The operand carrier itself never
+/// stores or duplicates it, and no convenience path may default it: a
+/// force that names no precision is the explicit whole-surface case.
+///
+/// Content-free by construction: store-local node identity only — path
+/// segments over known keys plus, for a computed index, the issuing
+/// store's own [`SemanticNodeId`]. No content hash, version hash, source
+/// text, or span can appear in it.
+///
+/// Crate-internal: every force/mint entry point that consumes one is
+/// `pub(crate)`, so the vocabulary itself is too — an external crate can
+/// neither name nor construct a precision.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum SemanticOperandForceProjection {
+    /// The explicit whole-surface case — the empty-path `ProjectPath`.
+    /// For an authored operand this is the only precision that may
+    /// converge on the declaration-source `Instantiate` family; every
+    /// selective precision keeps force-owned family identity.
+    WholeSurface,
+    /// Residual path demand. Intermediate segments run `Navigate`; only
+    /// the terminal segment runs at the request context's mode. The
+    /// requested key or residual path is thereby known BEFORE the
+    /// operand is forced, so no unrelated base surface is requested.
+    ///
+    /// DERIVED, never caller-supplied: a request spells its residual path
+    /// in the request-side [`ForceProjectionSegment`] vocabulary and the
+    /// forcing boundary lowers it here. That is what makes an
+    /// `IndexKey::Computed` segment safe to hash into family identity —
+    /// the boundary has already proven the index node belongs to the
+    /// issuing store at the live generation and merged its producer
+    /// evidence.
+    Path(Arc<[PathSegment]>),
+    /// Key-domain demand: the force answers the operand's `keyof`. It
+    /// forces only key-producing structure and never member values.
+    KeyDomain,
+}
+
+impl SemanticOperandForceProjection {
+    /// The residual path this demand walks, or `None` when the demand is
+    /// not a path projection.
+    ///
+    /// A [`Self::Path`] is NEVER empty — [`SemanticOperandForceRequest::projecting`]
+    /// canonicalises an empty residual path to [`Self::WholeSurface`], so
+    /// "walk nothing" has exactly one spelling. Two spellings would alias
+    /// one value across two family identities: the projection axis is part
+    /// of the authored force family identity, and only the whole-surface
+    /// precision converges onto the declaration-source `Instantiate`
+    /// family, so an empty `Path` would compute the whole-surface answer
+    /// into a second, force-owned entry.
+    #[must_use]
+    pub fn residual_path(&self) -> Option<&Arc<[PathSegment]>> {
+        match self {
+            Self::Path(path) => Some(path),
+            Self::WholeSurface | Self::KeyDomain => None,
+        }
+    }
+
+    /// Whether this demand is the explicit whole-surface precision.
+    #[must_use]
+    pub const fn is_whole_surface(&self) -> bool {
+        matches!(self, Self::WholeSurface)
+    }
+}
+
+/// One segment of a force request's residual path — the REQUEST-side
+/// vocabulary, distinct from the derived [`PathSegment`] path that
+/// eventually enters family identity.
+///
+/// A computed index is a SEALED operand, never a bare graph handle. The
+/// base operand's store identity, generation, and evidence say nothing
+/// about a node minted elsewhere: a handle from a foreign store, or from
+/// a superseded generation of this one, is just an integer that the
+/// current graph would happily interpret as some unrelated node, and its
+/// producer's read facts would never reach the forced candidate. So
+/// [`Self::Index`] carries the statically-known [`PropertyKey`] carrier,
+/// which cannot spell a computed key at all, and [`Self::ComputedIndex`]
+/// is the only spelling for one. The forcing boundary validates the index
+/// operand's store/generation and merges its producer evidence BEFORE the
+/// base is projected, and only then derives the `IndexKey` the shared
+/// path vocabulary carries.
+#[derive(Debug, Clone)]
+pub(crate) enum ForceProjectionSegment {
+    /// A declared member key (`Base.name`).
+    Member(PropertyKey),
+    /// A statically-known index key (`Base["name"]`, `Base[0]`). The
+    /// computed form is structurally unspellable here.
+    Index(PropertyKey),
+    /// A computed index (`Base[K]`) whose key type is itself a forced
+    /// operand — the only way to name a computed index in a force.
+    ComputedIndex(ForcedSemanticOperand),
+}
+
+/// The projection precision a force REQUEST names, before the boundary
+/// validates it.
+///
+/// Distinct from [`SemanticOperandForceProjection`], which is the derived,
+/// hashable precision that enters family identity: this is the caller's
+/// spelling, and its [`Self::Path`] carries sealed segments rather than
+/// raw graph handles.
+#[derive(Debug, Clone)]
+pub(crate) enum SemanticOperandForceDemand {
+    /// The explicit whole-surface case.
+    WholeSurface,
+    /// A non-empty residual path in the sealed segment vocabulary.
+    Path(Arc<[ForceProjectionSegment]>),
+    /// Key-domain (`keyof`) demand.
+    KeyDomain,
+}
+
+impl SemanticOperandForceDemand {
+    /// Whether this demand is the explicit whole-surface precision.
+    #[must_use]
+    pub const fn is_whole_surface(&self) -> bool {
+        matches!(self, Self::WholeSurface)
+    }
+}
+
+/// One-shot owner of the complete projection-reduction context plus the
+/// force's projection demand.
+#[derive(Debug)]
 pub struct SemanticOperandForceRequest {
     context: ProjectionReductionContext,
+    demand: SemanticOperandForceDemand,
 }
 
 impl SemanticOperandForceRequest {
+    /// A whole-surface force: the operand's entire surface at the request
+    /// context's precision. The empty path is the EXPLICIT whole-surface
+    /// case, never an accidental side effect of forcing a base.
     pub(crate) fn new(context: ProjectionReductionContext) -> Self {
-        Self { context }
+        Self {
+            context,
+            demand: SemanticOperandForceDemand::WholeSurface,
+        }
     }
 
-    pub(crate) fn into_context(self) -> ProjectionReductionContext {
-        self.context
+    /// A force requesting the residual path spelled by `segments`: the
+    /// operand is forced only at that path's precision (intermediate hops
+    /// `Navigate`, terminal hop at `context.mode`), so no unrelated base
+    /// surface is ever requested to answer one key.
+    ///
+    /// An empty segment list canonicalises to
+    /// [`SemanticOperandForceDemand::WholeSurface`] so the two spellings
+    /// of "walk nothing" cannot occupy two family identities for one
+    /// value.
+    pub(crate) fn projecting(
+        context: ProjectionReductionContext,
+        segments: Arc<[ForceProjectionSegment]>,
+    ) -> Self {
+        let demand = if segments.is_empty() {
+            SemanticOperandForceDemand::WholeSurface
+        } else {
+            SemanticOperandForceDemand::Path(segments)
+        };
+        Self { context, demand }
+    }
+
+    /// A force requesting the operand's key domain (`keyof`): only
+    /// key-producing structure is forced, never member values.
+    pub(crate) fn key_domain(context: ProjectionReductionContext) -> Self {
+        Self {
+            context,
+            demand: SemanticOperandForceDemand::KeyDomain,
+        }
+    }
+
+    /// The request's complete context and its projection demand. The
+    /// request is CONSUMED: the forcing boundary validates the demand,
+    /// derives the precision, and combines both with the sealed operand
+    /// identity exactly once — nothing stores either axis a second time.
+    pub(crate) fn into_parts(self) -> (ProjectionReductionContext, SemanticOperandForceDemand) {
+        (self.context, self.demand)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn demand(&self) -> &SemanticOperandForceDemand {
+        &self.demand
+    }
+}
+
+/// Lift a statically-known request segment into the shared path
+/// vocabulary. The computed arm is deliberately absent: it needs the
+/// forcing boundary's store/generation proof, so it is derived there.
+#[must_use]
+pub(crate) fn known_segment_to_path_segment(
+    segment: &ForceProjectionSegment,
+) -> Option<PathSegment> {
+    match segment {
+        ForceProjectionSegment::Member(key) => Some(PathSegment::Member(key.clone())),
+        ForceProjectionSegment::Index(key) => {
+            Some(PathSegment::Index(IndexKey::from_known(key.clone())))
+        }
+        ForceProjectionSegment::ComputedIndex(_) => None,
     }
 }
 
