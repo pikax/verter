@@ -47,7 +47,7 @@ A small set of required negative/mutation controls proving the validation infras
 
 - Production surfaces: none; controls are test-only.
 - Named API/data boundaries: control harness entries that inject or construct each protected failure and assert the machinery reports the correct specific outcome.
-- Test/CI homes: `crates/verter_validation_probe/tests/controls.rs`; the controls are hermetic (they construct their inputs, never read a corpus checkout) and therefore run in the default canonical gate.
+- Test/CI homes: `crates/verter_validation_probe/tests/cases/controls.rs`, wired through the crate's single `tests/main.rs`; the controls are hermetic (they construct their inputs, never read a corpus checkout) and therefore run in the default canonical gate.
 - Mutation boundary: test/CI bytes only; production LOC is zero.
 
 ## Exact predecessor contracts
@@ -62,7 +62,7 @@ A small set of required negative/mutation controls proving the validation infras
 - **Problem:** a plausible defect in classification, timeout handling, comparison, or canary handling could make CI report success while the underlying contract is broken; positive coverage cannot detect its own blind spots.
 - **Solution and architecture decisions — seed exactly four control classes:**
   1. **Diagnostic propagation:** construct a case where compilation fails after initial ingestion; the result must classify as `verter_diagnostic`, never `product_not_produced` or generic empty output.
-  2. **Timeout/refusal distinction:** a timed-out or signaled process cannot satisfy an expected-refusal/negative-control assertion.
+  2. **Timeout/refusal distinction:** a timed-out or signaled process cannot satisfy an expected-refusal/negative-control assertion; asserted through `ProbeEntry::evaluate`, which must return `UnrelatedRegression` for a `timeout`, `crash`, or `harness_failure` terminal against an entry expecting `verter_diagnostic` or `unsupported`.
   3. **Comparator sensitivity:** deliberately perturb a known-valid comparison product; the comparator must report the appropriate mismatch class.
   4. **Canary state transition:** an expected known failure stays non-blocking; an unexpected pass surfaces as XPASS; an unrelated crash/timeout/harness failure is surfaced as a new regression rather than silently accepted as the known failure.
 - Admission rule for any future control: it must state (1) the invariant protected, (2) the plausible false-green regression, (3) why existing positive coverage would not detect it. One discriminating control per invariant family; no permutation farming.
@@ -76,7 +76,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - **CVO3-AC3 — incremental equivalence:** not applicable; the controls own no incremental, cache, cancellation, or publication authority.
 - **CVO3-AC4 — bounded work:** not applicable; controls must not add production counters or instrumentation.
 - Every control is itself evidence; do not add controls for invariants without a plausible false-green path. Do not add mutation cases merely because a node contains an invariant.
-- Test homes: `crates/verter_validation_probe/tests/controls.rs`; runs in the default canonical gate.
+- Test homes: `crates/verter_validation_probe/tests/cases/controls.rs` via `tests/main.rs`; runs in the default canonical gate.
 
 ## Deletions and forbidden designs
 

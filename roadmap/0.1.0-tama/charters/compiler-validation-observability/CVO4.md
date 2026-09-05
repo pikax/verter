@@ -81,7 +81,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - **CVO4-AC3 — incremental equivalence:** not applicable; the join owns no incremental, cache, cancellation, or publication authority.
 - **CVO4-AC4 — bounded work:** not applicable; the join owns no hot path.
 - Every proposed new test must name a plausible regression or contract boundary not already discriminated; CVO3's controls already prove state-transition machinery. Do not add duplicate permutations.
-- Test homes: `crates/verter_validation_probe/tests/join.rs`.
+- Test homes: `crates/verter_validation_probe/tests/cases/join.rs` via the crate's single `tests/main.rs`.
 
 ## Deletions and forbidden designs
 

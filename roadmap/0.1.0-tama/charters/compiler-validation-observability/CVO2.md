@@ -125,7 +125,7 @@ Before squashing or review, the implementation patch transitions this node's pre
 - `observed_outcome` and `comparison_eligible` (default `false`; `true` only with a cited owning contract) on every result;
 - no thresholds, no rebaselines, no optimization obligations.
 
-**Suggested predecessors:** `CVO1` for the lane, `CPER0M` for trustworthy memory numbers.
+**Suggested predecessors:** `CVO1` and `CVO1S` for the two lanes, `CPER0M` for the coherent peak/live-bytes pair.
 
 **Normative source decomposition:**
 
