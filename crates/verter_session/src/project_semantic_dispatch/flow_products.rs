@@ -4,11 +4,13 @@
 //! join route, and the ONE deterministic worklist that drive them to a
 //! fixed point.
 //!
-//! The layer is compiled into production and owns no live value path: the
-//! flow evaluator's own state maps remain the value authority until the
-//! evaluator is switched onto these products. Nothing here resolves a
-//! type, opens a file, reaches a store view, or dispatches a query — the
-//! substrate is PURE over its inputs.
+//! The layer owns the live value path: the flow evaluator holds its whole
+//! semantic state in a [`FlowProductStore`] over the frame subject
+//! vocabulary minted here, and every merge point folds through the
+//! per-domain joins. Nothing here resolves a type, opens a file, reaches a
+//! store view, or dispatches a query — the substrate is PURE over its
+//! inputs, and the semantic content of a product is supplied by its
+//! producer.
 //!
 //! Ownership boundaries, all load-bearing:
 //!
@@ -24,9 +26,10 @@
 //!   registry onto the domains this substrate carries a product for — a
 //!   domain with no product is a typed `None`, never a fallthrough.
 //! - **One store, no public product query.** [`FlowProductStore`] is the
-//!   only product storage and a populated one is reachable only through a
-//!   converged solve; there is no second store and no standalone product
-//!   query API.
+//!   only product storage — the graph solve reaches a populated one only
+//!   through a converged solve, and the evaluator reaches its own through
+//!   the frame subject mints. There is no second store and no standalone
+//!   product query API.
 //! - **A degraded outcome retains nothing.** [`FlowTransferOutcome`]'s
 //!   `Gap` and `BudgetExceeded` arms carry NO [`FlowProductValue`], so a
 //!   gapped or budget-exhausted step has nothing a store could admit, and
@@ -46,9 +49,9 @@
 //! canonical bytes, so "same answer" is byte-checkable rather than
 //! field-by-field.
 
-// The substrate is compiled into production ahead of the evaluator that
-// will consume it: its API surface is exercised by the flow product suites
-// and has no production caller until the value path is switched onto it.
+// The graph-side worklist and the canonical solution encoding are the
+// substrate's own surface, exercised by the flow product suites; the frame
+// side is the evaluator's live state.
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};

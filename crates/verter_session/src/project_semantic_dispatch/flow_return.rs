@@ -372,6 +372,22 @@ pub(crate) mod flow_admission_fault_injection {
         /// decided.
         pub(crate) undecided_relation_evidence: AtomicBool,
 
+        /// When armed, `evaluate_flow_return` runs the frame's merges
+        /// under a ZERO-iteration product budget — modelling a demand
+        /// whose own convergence policy cannot admit even one frame
+        /// merge. Refuse-only: an exhausted budget withholds the frame's
+        /// joined state and can never mint one.
+        pub(crate) zero_product_iteration_budget: AtomicBool,
+
+        /// When armed, `evaluate_flow_return` assembles its execution
+        /// witness with the frame's binding-domain product evidence
+        /// dropped — modelling an evaluation that produced no
+        /// binding-domain product while every other rail (the walk
+        /// ledger, the call evidence, the convergence log) stays clean.
+        /// Refuse-only: a missing product withholds a domain's discharge
+        /// and can never mint one.
+        pub(crate) drop_binding_domain_product: AtomicBool,
+
         /// When armed, `evaluate_flow_return` assembles its execution
         /// witness with the evaluator's walk ledger marked aborted —
         /// modelling an evaluation whose structural walk did not run to
@@ -2184,20 +2200,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 })
             })
             .filter(|spec| match spec.basis() {
-                // A contract-DOMAIN obligation of a product-bearing domain
-                // additionally requires the frame's own product evidence:
-                // the evaluation must have produced a product in that
-                // domain. A frame that never computed one has nothing to
-                // discharge the domain with, so the demand cannot seal and
-                // finalizes unproven — a complete flow result always rests
-                // on product evidence.
-                FlowObligationBasis::DemandRoot { .. } => {
-                    whole_selection_executed
-                        && domain_product_evidence(spec.requirement(), witness.products)
+                FlowObligationBasis::FamilyCoverage { .. }
+                | FlowObligationBasis::DemandRoot { .. } => whole_selection_executed,
+                // A BINDING obligation additionally requires the frame's
+                // own product evidence for that binding: the evaluation
+                // must have produced the binding's definite-assignment
+                // product. The executed selection alone says the walk
+                // reached the site; the product says the evaluation
+                // actually established the binding's slot facts. A
+                // binding-domain product the evaluation never produced
+                // therefore leaves its obligation unclaimed, the demand
+                // cannot seal, and the result finalizes unproven — at the
+                // root and at SCC publication alike, both of which
+                // finalize through this one report.
+                FlowObligationBasis::Binding { node, slot } => {
+                    witness
+                        .executed_selection
+                        .is_some_and(|selection| selection.is_selected(*node))
+                        && binding_product_evidence(
+                            &slot.identity,
+                            witness.bindings,
+                            witness.product_evidence,
+                        )
                 }
-                FlowObligationBasis::FamilyCoverage { .. } => whole_selection_executed,
                 FlowObligationBasis::Site { node, .. }
-                | FlowObligationBasis::Binding { node, .. }
                 | FlowObligationBasis::Guard { node, .. }
                 | FlowObligationBasis::ContextualTarget { node, .. }
                 | FlowObligationBasis::CapturedBinding { node, .. } => witness
@@ -3829,6 +3855,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .map_or_else(FlowProductBudget::default, |carrier| {
                 FlowProductBudget::for_demand_plan(&carrier.plan)
             });
+        #[cfg(any(test, feature = "test-support"))]
+        let product_budget = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .zero_product_iteration_budget
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            FlowProductBudget {
+                max_iterations: 0,
+                ..product_budget
+            }
+        } else {
+            product_budget
+        };
         let mut evaluator = FlowEvaluator {
             dispatch: self,
             self_slot: Some(key),
@@ -3840,6 +3881,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bindings: FlowFrameBindings::new(),
             products: FlowProductStore::new(),
             product_budget,
+            product_evidence: rustc_hash::FxHashSet::default(),
             product_budget_exceeded: None,
             bare_return_seen: false,
             implicit_undefined_seen: false,
@@ -3870,7 +3912,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut call_evidence;
         let mut executed_walk;
         let product_budget_exceeded;
-        let frame_products;
+        let frame_product_evidence;
+        let frame_bindings;
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
@@ -3882,7 +3925,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             call_evidence = std::mem::take(&mut evaluator.call_evidence);
             executed_walk = evaluator.executed_walk;
             product_budget_exceeded = evaluator.product_budget_exceeded;
-            frame_products = std::mem::take(&mut evaluator.products);
+            frame_product_evidence = std::mem::take(&mut evaluator.product_evidence);
+            frame_bindings = std::mem::take(&mut evaluator.bindings);
             (outcome, body_falls_through)
         };
         // A call the lowering DECIDED ABOVE (folded into a surviving
@@ -3975,12 +4019,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The discharge-report producer claims obligations from it, never
         // from the plan's own expectations: a short or aborted walk
         // ledger yields NO executed selection.
+        #[cfg(any(test, feature = "test-support"))]
+        let frame_product_evidence = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .drop_binding_domain_product
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            rustc_hash::FxHashSet::default()
+        } else {
+            frame_product_evidence
+        };
         let witness = FlowExecutionWitness {
             executed_selection: executed_walk.completed_selection(planned.selection()),
             skeleton: &skeleton,
             anchor: frame_anchor,
             calls: &call_evidence,
-            products: &frame_products,
+            bindings: &frame_bindings,
+            product_evidence: &frame_product_evidence,
         };
         let contributors = match contributors {
             Ok(contributors) => contributors,
@@ -4845,6 +4902,13 @@ struct FlowEvaluator<'d, 'b> {
     /// constant. A frame with no installed demand runs the substrate
     /// default and can never mint a proof anyway.
     product_budget: FlowProductBudget,
+    /// Every subject this evaluation ESTABLISHED a binding-domain product
+    /// for. The live product store is a point-in-time state — a
+    /// block-scoped binding's products are dropped when its scope closes
+    /// — so the discharge evidence a planned binding obligation rests on
+    /// is this ledger of what the evaluation actually produced, never the
+    /// residue that happens to survive to the end of the frame.
+    product_evidence: rustc_hash::FxHashSet<FlowProductSubject>,
     /// The first typed product-budget exhaustion a frame merge observed.
     /// A budget-exhausted merge has no joined state, so the evaluation
     /// fails with the typed budget reason and can never be admitted warm.
@@ -5021,11 +5085,15 @@ struct FlowExecutionWitness<'w> {
     skeleton: &'w verter_semantic::analysis::flow::FunctionBodySkeleton,
     anchor: u32,
     calls: &'w [FlowCallEvidence],
-    /// The frame's converged product state — the evidence a
-    /// product-bearing contract domain is discharged from. An obligation
-    /// whose domain carries a product but whose frame produced none is
-    /// never claimed, so a demand cannot seal without product evidence.
-    products: &'w FlowProductStore,
+    /// The frame's binding-name resolution authority — the table a
+    /// planned binding obligation's authored name resolves through.
+    bindings: &'w FlowFrameBindings,
+    /// Every subject the evaluation ESTABLISHED a binding-domain product
+    /// for — the evidence a planned binding obligation is discharged
+    /// from. A binding subject the frame resolved but never produced a
+    /// product for is never claimed, so a demand cannot seal without the
+    /// product evidence its own bindings rest on.
+    product_evidence: &'w rustc_hash::FxHashSet<FlowProductSubject>,
 }
 
 /// One return-site contribution: the evaluated node plus whether it came
@@ -5127,27 +5195,41 @@ struct FlowLayerState {
 /// as they stood at the mark.
 type NarrowingSnapshot = Vec<(FlowProductSubject, Option<NarrowingProduct>)>;
 
-/// Whether the frame's product state carries the evidence a contract
-/// DOMAIN obligation discharges on.
+/// Whether the frame's product state carries the binding-domain evidence
+/// one planned binding obligation discharges on.
 ///
-/// A domain the product lattice carries (`flow_product_kind` is `Some`)
-/// discharges only from a real product the evaluation computed in that
-/// domain — a store with no product there proves nothing about it. A
-/// domain the lattice carries no product for discharges on the
-/// enumeration evidence alone, exactly as it did before the value path
-/// moved onto the products, and a fact-family requirement is not a domain
-/// obligation at all.
-fn domain_product_evidence(
-    requirement: &super::flow_solve::FlowRequirement,
-    products: &FlowProductStore,
+/// A `const` / `let` / `var` binding's slot facts live in the frame's
+/// product state: the evaluation establishes them by binding the name,
+/// which publishes the binding's definite-assignment product. A parameter
+/// is the SIGNATURE's slot — the frame holds its value in the parameter
+/// array and publishes a product only when a write retypes it — so a
+/// parameter binding is proven by the signature, not by a frame product,
+/// and it is not gated here.
+fn binding_product_evidence(
+    identity: &verter_semantic::analysis::function_program::FlowBindingIdentity,
+    bindings: &FlowFrameBindings,
+    established: &rustc_hash::FxHashSet<FlowProductSubject>,
 ) -> bool {
-    let super::flow_solve::FlowRequirementKind::Domain(domain) = requirement.requirement else {
-        return true;
-    };
-    if super::flow_products::flow_product_kind(domain).is_none() {
+    use verter_semantic::analysis::function_program::FunctionBindingKind;
+    if identity.kind == FunctionBindingKind::Param {
         return true;
     }
-    !products.subjects_in(domain).is_empty()
+    // Both layers: the skeleton's kind is the DECLARATION's, while the
+    // layer a reaching definition lands in is the evaluation's, and one
+    // authored name is one binding subject to the obligation.
+    let resolved: Vec<FlowProductSubject> = [FlowBindingLayer::Lexical, FlowBindingLayer::Function]
+        .into_iter()
+        .filter_map(|layer| bindings.resolved(layer, identity.name.as_ref()))
+        .map(FlowProductSubject::FrameBinding)
+        .collect();
+    // A name this frame never resolved at all is a declaration the
+    // evaluation never reached — an unexecuted statement, not a missing
+    // product — and its obligation stays on the executed-selection
+    // evidence alone. A name the frame DID resolve must have had its
+    // binding-domain product established: resolving a subject and then
+    // failing to produce its product is exactly the missing evidence this
+    // gate refuses to seal on.
+    resolved.is_empty() || resolved.iter().any(|subject| established.contains(subject))
 }
 
 /// Every guard fact `products` holds, in canonical subject order.
@@ -5871,6 +5953,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             &subject,
             ReachingTypeProduct::of(node).with_widening(widening),
         );
+        // The evaluation ESTABLISHED this binding's slot facts: the
+        // discharge evidence its planned obligation rests on.
+        self.product_evidence.insert(subject.clone());
         // A (re)binding replaces the binding's value: every narrow fact a
         // guard established about the OLD value — at the root or under
         // any member path — dies with it.
@@ -10830,6 +10915,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 bindings: captured_bindings,
                 products: captured_products,
                 product_budget: self.product_budget,
+                product_evidence: rustc_hash::FxHashSet::default(),
                 product_budget_exceeded: None,
                 bare_return_seen: false,
                 implicit_undefined_seen: false,

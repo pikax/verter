@@ -174,7 +174,7 @@ schema = 2
 "D2B" = { status = "implemented", commit_message = "feat(session): route flow-return admission through the sole completeness proof", commit_date = "2026-08-30T17:32:00+01:00" }
 "D2C" = { status = "implemented", commit_message = "feat(session): explain flow-return partiality in the audit payload", commit_date = "2026-09-02T09:00:00+01:00" }
 "D2D" = { status = "implemented", commit_message = "feat(session): make every surface producer return a typed resolution outcome", commit_date = "2026-09-01T19:15:00+01:00" }
-"D3C" = { status = "pending" }
+"D3C" = { status = "implemented", commit_message = "feat(session): flow product worklist cutover", commit_date = "2026-09-05T20:00:00+01:00" }
 "D3I" = { status = "pending" }
 "D3P" = { status = "implemented", commit_message = "feat(session): flow product lattice substrate", commit_date = "2026-09-05T12:00:00+01:00" }
 "D3R" = { status = "implemented", commit_message = "feat(session): nominal relation authority for unique-symbol identity and comparability", commit_date = "2026-09-04T02:30:00+01:00" }
