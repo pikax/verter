@@ -1700,9 +1700,10 @@ impl FlowProductBudget {
     /// policies, never a private constant:
     ///
     /// - `max_iterations` IS the plan's [`FlowConvergencePolicy`];
-    /// - `max_products` IS the plan's selected obligation frontier (a
-    ///   frame that accumulates more product slots than the demand has
-    ///   obligations has left the plan's own work universe);
+    /// - `max_products` IS the plan's selected obligation frontier, one
+    ///   slot per frame domain (an obligation's subject carries at most
+    ///   one product per domain, so a frame that accumulates more slots
+    ///   than that has left the plan's own work universe);
     /// - `max_product_width` IS the slice budget's selected-node ceiling
     ///   (a subject cannot accumulate more contributors than the slice
     ///   selected sites to contribute them).
@@ -1710,7 +1711,9 @@ impl FlowProductBudget {
     pub fn for_demand_plan(plan: &super::flow_solve::FlowDemandPlan) -> Self {
         Self {
             max_iterations: plan.convergence().max_iterations,
-            max_products: u32::try_from(plan.work_order().len()).unwrap_or(u32::MAX),
+            max_products: u32::try_from(plan.work_order().len())
+                .unwrap_or(u32::MAX)
+                .saturating_mul(FLOW_FRAME_DOMAINS.len() as u32),
             max_product_width: plan.resources().slice_budget.max_selected_nodes,
         }
     }

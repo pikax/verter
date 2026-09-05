@@ -3881,6 +3881,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bindings: FlowFrameBindings::new(),
             products: FlowProductStore::new(),
             product_budget,
+            narrowing_writes: Vec::new(),
             product_evidence: rustc_hash::FxHashSet::default(),
             product_budget_exceeded: None,
             bare_return_seen: false,
@@ -4902,6 +4903,13 @@ struct FlowEvaluator<'d, 'b> {
     /// constant. A frame with no installed demand runs the substrate
     /// default and can never mint a proof anyway.
     product_budget: FlowProductBudget,
+    /// The guard facts this frame has WRITTEN, in write order — the
+    /// establishment ledger a scoped guard's mark truncates and a
+    /// union-of-facts guard reads its per-disjunct contribution from.
+    narrowing_writes: Vec<(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )>,
     /// Every subject this evaluation ESTABLISHED a binding-domain product
     /// for. The live product store is a point-in-time state — a
     /// block-scoped binding's products are dropped when its scope closes
@@ -5191,9 +5199,26 @@ struct FlowLayerState {
     inference_only_path: bool,
 }
 
-/// One entry of a narrowing-overlay snapshot: the subject's guard facts
-/// as they stood at the mark.
-type NarrowingSnapshot = Vec<(FlowProductSubject, Option<NarrowingProduct>)>;
+/// A mark in the narrowing overlay: the facts every subject held, plus how
+/// many guard writes the frame had performed. The WRITE COUNT is
+/// load-bearing and not derivable from the facts: a guard that re-narrows
+/// a position to the type it already held ESTABLISHED that fact on its
+/// edge, and a state diff cannot tell that from an untouched position — a
+/// union-of-facts guard that read the diff would drop the disjunct's
+/// contribution and publish a narrower type than every edge proves.
+struct NarrowingSnapshot {
+    facts: Vec<(FlowProductSubject, Option<NarrowingProduct>)>,
+    writes: usize,
+}
+
+impl Clone for NarrowingSnapshot {
+    fn clone(&self) -> Self {
+        Self {
+            facts: self.facts.clone(),
+            writes: self.writes,
+        }
+    }
+}
 
 /// Whether the frame's product state carries the binding-domain evidence
 /// one planned binding obligation discharges on.
@@ -5760,14 +5785,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// scope restores to. Restoring a mark is what keeps a narrow inside
     /// the arm that established it.
     fn narrowing_snapshot(&self) -> NarrowingSnapshot {
-        self.products
-            .subjects_in(super::flow_solve::FlowDomain::Narrowing)
-            .into_iter()
-            .map(|subject| {
-                let facts = self.products.narrowing(&subject).cloned();
-                (subject, facts)
-            })
-            .collect()
+        NarrowingSnapshot {
+            facts: self
+                .products
+                .subjects_in(super::flow_solve::FlowDomain::Narrowing)
+                .into_iter()
+                .map(|subject| {
+                    let facts = self.products.narrowing(&subject).cloned();
+                    (subject, facts)
+                })
+                .collect(),
+            writes: self.narrowing_writes.len(),
+        }
     }
 
     /// Restore the overlay to `mark`: every subject the mark recorded
@@ -5781,11 +5810,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.products
                 .remove(super::flow_solve::FlowDomain::Narrowing, &subject);
         }
-        for (subject, facts) in mark {
+        for (subject, facts) in mark.facts {
             if let Some(facts) = facts {
                 self.products.set_narrowing(&subject, facts);
             }
         }
+        self.narrowing_writes.truncate(mark.writes);
     }
 
     /// Record one guard fact: `subject`'s member `path` narrows to `node`.
@@ -5798,6 +5828,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     ) {
         let root = self.narrow_subject(&subject.root);
         push_narrowing_into(&mut self.products, &root, &subject.path, node);
+        self.narrowing_writes.push((subject.clone(), node));
     }
 
     /// Drop every guard fact rooted at `root` — what a write to the
@@ -5810,7 +5841,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// The guard facts established since `mark`, as authored narrowing
-    /// subjects — the per-disjunct overlay a union-of-facts guard folds.
+    /// subjects, in write order — the per-disjunct overlay a
+    /// union-of-facts guard folds. Read from the frame's own write ledger
+    /// rather than from a state diff, so a disjunct that re-narrows a
+    /// position to the type it already held still contributes its fact.
     fn narrowings_since(
         &self,
         mark: &NarrowingSnapshot,
@@ -5818,55 +5852,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         crate::flow_slice_content::SliceNarrowSubject,
         SemanticNodeId,
     )> {
-        let mut applied = Vec::new();
-        for subject in self
-            .products
-            .subjects_in(super::flow_solve::FlowDomain::Narrowing)
-        {
-            let before = mark
-                .iter()
-                .find(|(candidate, _)| *candidate == subject)
-                .and_then(|(_, facts)| facts.as_ref());
-            let Some(now) = self.products.narrowing(&subject) else {
-                continue;
-            };
-            let Some(root) = self.authored_narrow_root(&subject) else {
-                continue;
-            };
-            for fact in now.facts() {
-                if before.is_some_and(|before| before.facts().contains(fact)) {
-                    continue;
-                }
-                applied.push((
-                    crate::flow_slice_content::SliceNarrowSubject {
-                        root: root.clone(),
-                        path: Arc::clone(&fact.path),
-                    },
-                    fact.narrowed_to,
-                ));
-            }
-        }
-        applied
-    }
-
-    /// The authored narrowing root of a product subject — the inverse of
-    /// [`Self::narrow_subject`], resolved through the frame's own binding
-    /// table so a subject can never be spelled back as a name the frame
-    /// never resolved.
-    fn authored_narrow_root(
-        &self,
-        subject: &FlowProductSubject,
-    ) -> Option<crate::flow_slice_content::SliceNarrowRoot> {
-        match subject {
-            FlowProductSubject::FrameParam(ordinal) => {
-                Some(crate::flow_slice_content::SliceNarrowRoot::Param(*ordinal))
-            }
-            FlowProductSubject::FrameBinding(slot) => self
-                .bindings
-                .name(*slot)
-                .map(|name| crate::flow_slice_content::SliceNarrowRoot::Local(Arc::clone(name))),
-            FlowProductSubject::GraphNode { .. } => None,
-        }
+        self.narrowing_writes[mark.writes.min(self.narrowing_writes.len())..].to_vec()
     }
 
     /// Join two frame states through the ONE frame join route. A merge
@@ -10915,6 +10901,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 bindings: captured_bindings,
                 products: captured_products,
                 product_budget: self.product_budget,
+                narrowing_writes: Vec::new(),
                 product_evidence: rustc_hash::FxHashSet::default(),
                 product_budget_exceeded: None,
                 bare_return_seen: false,
