@@ -810,14 +810,14 @@ adapter = "cargo-nextest"
 argv_tail = ["-p", "verter_type_runtime", "-p", "verter_session", "-p", "verter_protocol"]
 fixtures = ["crates/verter_type_runtime/tests/main.rs", "crates/verter_session/tests/cases/mod.rs", "crates/verter_protocol/tests/cases/typeinfo_proto_roundtrip.rs"]
 covers = ["A-targeted-domain-green"]
-selected = 9438
-executed = 8891
-passed = 8891
+selected = 9466
+executed = 8919
+passed = 8919
 failed = 0
 skipped = 547
 expected_skips = 547
 skip_basis = "the command applies no filter expression, so nextest counts a test as skipped only for being marked #[ignore]: the 547 are the three packages' opt-in real-provider, corpus, and soak cases, and the clean half of the control lane's re-application re-derives executed and skipped live against this transcript. The selection is shaped by the lane's CI platform — unix-gated and windows-gated cases compile on different hosts, so the five counts are the linux selection's, and a lane run on a platform that compiles a different cfg set fails the clean-run comparison by exactly those cases rather than being tolerated"
-terminal_summary = "Summary [ 120.590s] 8891 tests run: 8891 passed, 547 skipped"
+terminal_summary = "Summary [ 120.590s] 8919 tests run: 8919 passed, 547 skipped"
 control = "CTL-targeted-selector"
 
 # ---------------------------------------------------------------------------
@@ -942,7 +942,7 @@ kind = "command"
 mutation = "Re-run the recorded command with an added filter expression that matches no test in the three packages."
 argv_delta = ["-E", "test(zzz_selector_matches_nothing)"]
 uniqueness = "unique-new-occurrence"
-observed = "nextest exit 4, error: no tests to run; Summary [ 0.018s] 0 tests run: 0 passed, 9438 skipped — a record transcribed from that run is refused twice over, for zero selected work and for 9438 skips against 547 declared"
+observed = "nextest exit 4, error: no tests to run; Summary [ 0.018s] 0 tests run: 0 passed, 9466 skipped — a record transcribed from that run is refused twice over, for zero selected work and for 9466 skips against 547 declared"
 
 # ---------------------------------------------------------------------------
 # Findings. Every entry is routed to exactly one claim or one residue; the

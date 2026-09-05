@@ -265,6 +265,15 @@ fn node_budget_caps_the_real_arena() {
         "bounded arena, got {}",
         graph.nodes.len()
     );
+    // The walk STOPS at the trip: no remaining sibling's key is interned
+    // (the reserved sentinel plus the five encoded member keys is the
+    // whole table — width-proportional interning past the budget would
+    // be discarded work, since the root degrades to the marker).
+    let table_len = graph.strings.as_ref().map_or(0, |t| t.entries.len());
+    assert_eq!(
+        table_len, 6,
+        "the string table stops growing when the node budget trips"
+    );
     match root_node(&graph).kind.as_ref() {
         Some(graph_type_node::Kind::Opaque(opaque)) => assert!(matches!(
             opaque.error.as_ref().and_then(|e| e.kind.as_ref()),
@@ -389,7 +398,11 @@ fn spread_bearing_object_encodes_the_ordered_construction_program() {
 
 #[test]
 fn every_representable_arm_maps_to_its_wire_node_kind() {
-    // (label, expression, expected wire discriminant)
+    // (label, expression, expected encoded kind). The expectation is the
+    // FULL payload, not a discriminant: node id 0 and string id 0 are the
+    // reserved absent-sentinels, so real children / names land on exact,
+    // deterministic ids — child wiring, string wiring, and modifier
+    // fields are all pinned.
     let cases: Vec<(&str, TypeExpr, graph_type_node::Kind)> = vec![
         (
             "primitive",
@@ -402,7 +415,7 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
             graph_type_node::Kind::Literal(g::LiteralNode {
                 value: Some(verter_protocol::verter::v1::GraphLiteralValue {
                     kind: Some(
-                        verter_protocol::verter::v1::graph_literal_value::Kind::StringNameId(0),
+                        verter_protocol::verter::v1::graph_literal_value::Kind::StringNameId(1),
                     ),
                 }),
             }),
@@ -413,7 +426,7 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
                 verter_type_expr::PrimitiveName::String,
             )])),
             graph_type_node::Kind::Union(g::UnionNode {
-                member_node_ids: vec![0],
+                member_node_ids: vec![1],
             }),
         ),
         (
@@ -422,7 +435,7 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
                 verter_type_expr::PrimitiveName::String,
             )])),
             graph_type_node::Kind::Intersection(g::IntersectionNode {
-                member_node_ids: vec![0],
+                member_node_ids: vec![1],
             }),
         ),
         (
@@ -432,7 +445,7 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
                 readonly: true,
             },
             graph_type_node::Kind::Array(g::ArrayNode {
-                element_node_id: 0,
+                element_node_id: 1,
                 readonly: true,
             }),
         ),
@@ -449,10 +462,25 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
             },
             graph_type_node::Kind::Tuple(g::TupleNode {
                 elements: vec![verter_protocol::verter::v1::GraphTupleElement {
-                    label_name_id: 0,
-                    value_node_id: 0,
+                    label_name_id: 1,
+                    value_node_id: 1,
                     optional: true,
                     rest: false,
+                }],
+                readonly: false,
+            }),
+        ),
+        (
+            "rest",
+            TypeExpr::Rest(Arc::new(TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::String,
+            ))),
+            graph_type_node::Kind::Tuple(g::TupleNode {
+                elements: vec![verter_protocol::verter::v1::GraphTupleElement {
+                    label_name_id: 0,
+                    value_node_id: 1,
+                    optional: false,
+                    rest: true,
                 }],
                 readonly: false,
             }),
@@ -469,7 +497,7 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
                 symbol_id: 0,
                 decl_slot_ref: 0,
                 param_index: 0,
-                name_id: 0,
+                name_id: 1,
                 constraint_node_id: 0,
                 default_node_id: 0,
                 variance: 0,
@@ -484,7 +512,7 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
                 name: Arc::from("K"),
                 type_arguments: Arc::from(Vec::new()),
             })),
-            graph_type_node::Kind::KeyOf(g::KeyOfNode { base_node_id: 0 }),
+            graph_type_node::Kind::KeyOf(g::KeyOfNode { base_node_id: 1 }),
         ),
         (
             "indexedAccess",
@@ -496,8 +524,8 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
                 index: Arc::new(TypeExpr::Literal(LiteralValue::String("k".into()))),
             },
             graph_type_node::Kind::IndexedAccess(g::IndexedAccessNode {
-                object_node_id: 0,
-                index_node_id: 0,
+                object_node_id: 1,
+                index_node_id: 2,
             }),
         ),
         (
@@ -509,10 +537,10 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
                 false_type: Arc::new(TypeExpr::Primitive(verter_type_expr::PrimitiveName::Never)),
             },
             graph_type_node::Kind::Conditional(g::ConditionalNode {
-                check_node_id: 0,
-                extends_node_id: 0,
-                true_branch_node_id: 0,
-                false_branch_node_id: 0,
+                check_node_id: 1,
+                extends_node_id: 1,
+                true_branch_node_id: 2,
+                false_branch_node_id: 3,
                 distributive: false,
                 resolution: None,
             }),
@@ -531,10 +559,10 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
                 name_type: None,
             },
             graph_type_node::Kind::Mapped(g::MappedNode {
-                key_type_node_id: 0,
-                source_node_id: 0,
+                key_type_node_id: 1,
+                source_node_id: 2,
                 name_remap_node_id: 0,
-                value_type_node_id: 0,
+                value_type_node_id: 3,
                 readonly_modifier: 0,
                 optional_modifier: 1,
             }),
@@ -548,8 +576,8 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
                 )]),
             },
             graph_type_node::Kind::TemplateLiteral(g::TemplateLiteralNode {
-                quasi_name_ids: vec![0, 0],
-                expression_node_ids: vec![0],
+                quasi_name_ids: vec![1, 2],
+                expression_node_ids: vec![1],
             }),
         ),
         (
@@ -558,7 +586,7 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
                 name: "U".to_string(),
             },
             graph_type_node::Kind::InferNode(g::InferNode {
-                name_id: 0,
+                name_id: 1,
                 constraint_node_id: 0,
             }),
         ),
@@ -570,7 +598,7 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
             }),
             graph_type_node::Kind::TypeofNode(verter_protocol::verter::v1::GraphTypeOf {
                 value_root_ref: 0,
-                path_name_ids: vec![0, 0],
+                path_name_ids: vec![1, 2],
             }),
         ),
     ];
@@ -578,16 +606,12 @@ fn every_representable_arm_maps_to_its_wire_node_kind() {
     for (label, ty, expected_kind) in cases {
         let graph = encode(&ty);
         let node = root_node(&graph);
-        let discriminant = std::mem::discriminant(node.kind.as_ref().expect("kind present"));
+        // Full payload identity — a wrong child id, string id, modifier,
+        // or a fall-through to Opaque all fail here.
         assert_eq!(
-            discriminant,
-            std::mem::discriminant(&expected_kind),
-            "`{label}` must encode as its wire node kind"
-        );
-        // No representable arm may fall through to Opaque.
-        assert!(
-            !matches!(node.kind, Some(graph_type_node::Kind::Opaque(_))),
-            "`{label}` must not degrade to opaque"
+            node.kind,
+            Some(expected_kind),
+            "`{label}` must encode as its exact wire node payload"
         );
     }
 }
@@ -723,4 +747,160 @@ fn recursive_ref_encodes_a_cycle_marker_rooted_at_the_reference() {
     assert_eq!(cycle.participants.len(), 1);
     let symbol = &graph.symbols[cycle.participants[0] as usize];
     assert_eq!(str_at(&graph, symbol.name_id), "Json");
+}
+
+#[test]
+fn non_closed_index_key_domains_encode_the_construction_program() {
+    // `[k: string | number]: boolean` — the union key domain has no
+    // closed wire `IndexKeyKind`; the proto default would silently
+    // fabricate `String`. The fail-closed spelling is the ordered
+    // construction program, whose DirectIndex effect keeps the key as a
+    // typed node.
+    let union_key = TypeExpr::Union(Arc::from(vec![
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+    ]));
+    let ty = object(vec![ObjectMember::IndexSignature(
+        IndexSignature::synthetic(
+            "key".to_string(),
+            union_key,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+            false,
+        ),
+    )]);
+    let graph = encode(&ty);
+    let node = root_node(&graph);
+    let g::TypeNode {
+        kind: Some(graph_type_node::Kind::ObjectSpreadProgram(program)),
+        ..
+    } = node
+    else {
+        panic!(
+            "a non-closed index key must encode the construction program, got {:?}",
+            node.kind
+        );
+    };
+    assert_eq!(program.effects.len(), 1);
+    let Some(verter_protocol::verter::v1::graph_object_construction_effect::Kind::DirectIndex(
+        index,
+    )) = program.effects[0].kind.as_ref()
+    else {
+        panic!("the index signature rides a DirectIndex effect");
+    };
+    // The key domain is a typed NODE — the union itself is in the arena.
+    match graph.nodes[index.key_type_node_id as usize].kind.as_ref() {
+        Some(graph_type_node::Kind::Union(_)) => {}
+        other => panic!("the union key domain is preserved as a node, got {other:?}"),
+    }
+
+    // A unique-symbol-style key (a `typeof sym` domain) takes the same
+    // fail-closed route — never a fabricated closed kind.
+    let typeof_key = TypeExpr::TypeOf(verter_type_expr::ValueRef {
+        path: vec!["sym".to_string()],
+        type_args: Vec::new(),
+    });
+    let ty = object(vec![ObjectMember::IndexSignature(
+        IndexSignature::synthetic(
+            "key".to_string(),
+            typeof_key,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            false,
+        ),
+    )]);
+    let graph = encode(&ty);
+    assert!(
+        matches!(
+            root_node(&graph).kind,
+            Some(graph_type_node::Kind::ObjectSpreadProgram(_))
+        ),
+        "a non-closed unique-symbol key domain also takes the program form"
+    );
+}
+
+#[test]
+fn the_string_table_reserves_id_zero_for_absence() {
+    // One named param, one unnamed param, no return annotation: real
+    // names intern from id 1; absent name / absent return stay the 0
+    // sentinel — a 0 in a name-bearing field can never alias the first
+    // interned string.
+    let ty = TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+        vec![
+            FunctionParam::synthetic(
+                Some("x".to_string()),
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+                false,
+                false,
+            ),
+            FunctionParam::synthetic(
+                None,
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                false,
+                false,
+            ),
+        ],
+        None,
+        Vec::new(),
+    )));
+    let graph = encode(&ty);
+    let entries = graph
+        .strings
+        .as_ref()
+        .map(|t| t.entries.as_slice())
+        .unwrap_or(&[] as &[String]);
+    assert_eq!(
+        entries.first().map(String::as_str),
+        Some(""),
+        "string id 0 is the reserved absent sentinel"
+    );
+    let g::TypeNode {
+        kind: Some(graph_type_node::Kind::Object(obj)),
+        ..
+    } = root_node(&graph)
+    else {
+        panic!("function encodes as its callable object spelling");
+    };
+    let sig = &graph.signatures[obj.call_signature_refs[0] as usize];
+    assert_ne!(sig.parameters[0].name_id, 0);
+    assert_eq!(
+        str_at(&graph, sig.parameters[0].name_id),
+        "x",
+        "a named parameter resolves through the table"
+    );
+    assert_eq!(
+        sig.parameters[1].name_id, 0,
+        "an unnamed parameter stays the absent sentinel"
+    );
+    assert_eq!(
+        sig.return_type_node_id, 0,
+        "a missing return annotation stays absent"
+    );
+}
+
+#[test]
+fn the_signatures_arena_is_budget_capped() {
+    // Ten empty call signatures under a node budget of four: the
+    // signatures arena stops at the budget and the object degrades to
+    // the budget marker — never an uncapped arena beside a "validated"
+    // node count.
+    let members: Vec<ObjectMember> = (0..10)
+        .map(|_| ObjectMember::CallSignature(FunctionExpr::synthetic(Vec::new(), None, Vec::new())))
+        .collect();
+    let ty = object(members);
+    let budgets = GraphExportBudgets {
+        node_budget: 4,
+        depth_budget: UNBOUNDED_SENTINEL_BUDGET,
+    };
+    let graph = encode_type_expr_graph(&ty, &budgets);
+    assert!(
+        graph.signatures.len() <= 4,
+        "the signatures arena is capped by the node budget, got {}",
+        graph.signatures.len()
+    );
+    match root_node(&graph).kind.as_ref() {
+        Some(graph_type_node::Kind::Opaque(opaque)) => assert!(matches!(
+            opaque.error.as_ref().and_then(|e| e.kind.as_ref()),
+            Some(verter_protocol::verter::v1::graph_query_error::Kind::BudgetExceeded(_))
+        )),
+        other => panic!("a sig-capped object degrades to the marker, got {other:?}"),
+    }
 }

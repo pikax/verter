@@ -282,6 +282,17 @@ pub fn validate_resolve_symbol_graph_request(
     if request.name.is_empty() {
         return Err(malformed_payload_error_with_detail("missing symbol name")());
     }
+    // `includeDegraded` is rejected rather than ignored: the bounded
+    // graph export's degraded markers are structural fail-closed stops,
+    // not optional detail this operation could admit or withhold, so a
+    // request asking to include them names behavior it cannot get — a
+    // silently ignored flag would be an unclaimed contract.
+    if request.include_degraded {
+        return Err(malformed_payload_error_with_detail(
+            "includeDegraded is not supported: the resolve-symbol bounded export's degraded \
+             markers are structural stops, not optional detail",
+        )());
+    }
     validate_projection_reduction_context(request.context.as_ref())?;
     validate_closure_policy(request.closure.as_ref())?;
     validate_display_policy(request.display_policy.as_ref())?;

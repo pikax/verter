@@ -7,7 +7,9 @@
 //! into that wire graph:
 //!
 //! - **interned strings** — every wire-side name rides the graph string
-//!   table in first-encounter order;
+//!   table in first-encounter order, with id 0 reserved as the absent
+//!   sentinel (mirroring node id 0 — a 0 in a name-bearing field never
+//!   means "the first interned string");
 //! - **deduplicated nodes** — structurally equal sub-expressions share
 //!   one node id (identity, no aliasing), assigned in first-encounter
 //!   traversal order (a deterministic encode);
@@ -22,11 +24,17 @@
 //! ## Boundedness (fail-closed, never truncation)
 //!
 //! The walk runs under explicit node / depth budgets
-//! ([`GraphExportBudgets`]). A subtree that would exceed a budget
+//! ([`GraphExportBudgets`]), and the budgets bound the WORK, not just
+//! the arena: the walk stops at a trip (remaining siblings cost O(1)
+//! each and are never encoded or interned), every arena-pushing helper
+//! — real nodes, opaque degradations, signatures — consumes or is
+//! capped by the node budget, and a subtree that would exceed a budget
 //! degrades to a `GraphOpaque { BudgetExceeded }` marker carrying the
 //! enforced limit — a typed, explicit stop, never a silently truncated
-//! or silently dropped subtree. A validated graph request can never ask
-//! for an unbounded export: the envelope validator
+//! or silently dropped subtree. The arena therefore holds at most
+//! `node_budget` counted nodes plus one marker per distinct enforced
+//! limit. A validated graph request can never ask for an unbounded
+//! export: the envelope validator
 //! (`verter_session::typeinfo::request_validation`) rejects a missing
 //! closure policy and caps expansion budgets before this encoder runs;
 //! the budgets here are the encoder-side enforcement of that contract.
@@ -40,15 +48,20 @@
 //! `RecursiveRef` encodes a `GraphCycle` rooted at the recursive
 //! reference with the participating symbol, plus an elision diagnostic
 //! when active conditional frames were dropped. These are the ONLY
-//! opaque degradations; every other arm maps to its wire node kind.
+//! opaque degradations; every other arm maps to its wire node kind. An
+//! index signature whose key domain is not one of the closed wire kinds
+//! (a union key, a `keyof` key, a unique-symbol ref) is not degraded
+//! either — the whole object takes its ordered construction-program
+//! spelling, which keeps the key as a typed node instead of fabricating
+//! a closed `key_kind` domain.
 //!
 //! This module is a PURE projection: no resolution, no parsing, no
 //! semantic decisions — the input `TypeExpr` is already terminal.
 
-use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 use prost::Message;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
 use verter_type_expr::{
     AuthoredPropertyKey, FunctionExpr, LiteralValue, MappedModifier, MethodSignature, ObjectMember,
     ObjectMethodKind, PrimitiveName, TypeExpr, TypeParam, ValueDeclIdentityPart,
@@ -119,10 +132,14 @@ struct GraphExporter<'a> {
     signatures: Vec<GraphSignature>,
     /// Node arena, first-encounter order (id = index).
     nodes: Vec<GraphTypeNode>,
-    /// Encoded-node-key dedup: encoded bytes → node id. Structurally
-    /// equal wire nodes are byte-equal, so this is an exact identity
-    /// dedup (prost encoding is deterministic).
-    node_ids: HashMap<Vec<u8>, u32>,
+    /// Content-hash dedup: hash of a node's encoded bytes → candidate
+    /// node ids. Lookups confirm candidates by full node equality, so a
+    /// hash collision can never alias two distinct nodes. The encoded
+    /// bytes themselves are never retained — one reusable scratch buffer
+    /// serves every encode.
+    node_hashes: FxHashMap<u64, Vec<u32>>,
+    /// Reusable encode scratch for the dedup hash (empty between calls).
+    scratch: Vec<u8>,
     /// Lazily-minted budget-marker node per enforced limit.
     budget_markers: FxHashMap<u32, u32>,
     /// Count of real (non-reserved, non-marker) nodes pushed — the node
@@ -143,7 +160,8 @@ impl<'a> GraphExporter<'a> {
             symbol_ids: FxHashMap::default(),
             signatures: Vec::new(),
             nodes: Vec::new(),
-            node_ids: HashMap::new(),
+            node_hashes: FxHashMap::default(),
+            scratch: Vec::new(),
             budget_markers: FxHashMap::default(),
             real_nodes: 0,
             diagnostics: Vec::new(),
@@ -153,6 +171,12 @@ impl<'a> GraphExporter<'a> {
         // the slot with an unset-kind node; every real id is >= 1 and a
         // child ref of 0 stays unambiguously "absent".
         exporter.nodes.push(GraphTypeNode { kind: None });
+        // String id 0 mirrors that convention for name-bearing fields
+        // (tuple labels, signature parameter names): the reserved entry
+        // is deliberately NOT indexed in `string_ids`, so a real empty
+        // string interns to its own id (>= 1) and never aliases the
+        // sentinel.
+        exporter.strings.push(String::new());
         exporter
     }
 
@@ -222,20 +246,36 @@ impl<'a> GraphExporter<'a> {
     }
 
     /// Push a node under the budget contract, deduplicating structurally
-    /// equal nodes. Real nodes consume the node budget; when it is
-    /// exhausted the caller receives the shared budget marker instead.
+    /// equal nodes. Real nodes — opaque degradations included — consume
+    /// the node budget; when it is exhausted the caller receives the
+    /// shared budget marker instead.
     fn push_node(&mut self, kind: graph_type_node::Kind) -> u32 {
         if self.real_nodes >= self.budgets.node_budget {
             return self.budget_marker(self.budgets.node_budget);
         }
         let node = GraphTypeNode { kind: Some(kind) };
-        let key = node.encode_to_vec();
-        if let Some(id) = self.node_ids.get(&key) {
-            return *id;
+        // Content-hash identity: encode into the reusable scratch buffer,
+        // hash, and confirm candidates by full equality — structurally
+        // equal wire nodes are byte-equal (prost encoding is
+        // deterministic), and the confirmation step means a hash
+        // collision cannot alias distinct nodes. No per-node byte copy is
+        // retained on the export path.
+        self.scratch.clear();
+        node.encode(&mut self.scratch)
+            .expect("encoding into a growable Vec buffer cannot fail");
+        let mut hasher = FxHasher::default();
+        self.scratch.hash(&mut hasher);
+        let hash = hasher.finish();
+        if let Some(ids) = self.node_hashes.get(&hash) {
+            for &id in ids {
+                if self.nodes[id as usize] == node {
+                    return id;
+                }
+            }
         }
         let id = u32::try_from(self.nodes.len()).unwrap_or(u32::MAX);
         self.nodes.push(node);
-        self.node_ids.insert(key, id);
+        self.node_hashes.entry(hash).or_default().push(id);
         self.real_nodes += 1;
         id
     }
@@ -276,14 +316,13 @@ impl<'a> GraphExporter<'a> {
                 message_name_id: message_id,
             })),
         };
-        let node = GraphTypeNode {
-            kind: Some(graph_type_node::Kind::Opaque(GraphOpaque {
-                error: Some(error),
-            })),
-        };
-        let id = u32::try_from(self.nodes.len()).unwrap_or(u32::MAX);
-        self.nodes.push(node);
-        id
+        // Opaque degradations ride the same budgeted push as every real
+        // node: identical degradations dedup to one node, and a
+        // degradation past the budget reports the budget marker instead
+        // of growing an uncounted arena.
+        self.push_node(graph_type_node::Kind::Opaque(GraphOpaque {
+            error: Some(error),
+        }))
     }
 
     fn elision_diagnostic(&mut self, message: &str) {
@@ -300,10 +339,15 @@ impl<'a> GraphExporter<'a> {
 
     /// Encode one expression at `depth`. Depth exhaustion degrades the
     /// WHOLE subtree to the depth-budget marker — explicit, typed, never
-    /// a truncated walk.
+    /// a truncated walk. The node-budget check sits at the ENTRY: once
+    /// the arena is full the walk stops before any child work or
+    /// interning, so post-trip cost is O(1) per pending sibling.
     fn expr_node(&mut self, expr: &TypeExpr, depth: u32) -> u32 {
         if depth >= self.budgets.depth_budget {
             return self.budget_marker(self.budgets.depth_budget);
+        }
+        if self.real_nodes >= self.budgets.node_budget {
+            return self.budget_marker(self.budgets.node_budget);
         }
         match expr {
             TypeExpr::Primitive(name) => {
@@ -600,7 +644,9 @@ impl<'a> GraphExporter<'a> {
         depth: u32,
         construct: bool,
     ) -> u32 {
-        let signature_ref = self.function_signature(function, depth, construct);
+        let Some(signature_ref) = self.function_signature(function, depth, construct) else {
+            return self.budget_marker(self.budgets.node_budget);
+        };
         let (call_refs, construct_refs) = if construct {
             (Vec::new(), vec![signature_ref])
         } else {
@@ -615,7 +661,21 @@ impl<'a> GraphExporter<'a> {
         }))
     }
 
-    fn function_signature(&mut self, function: &FunctionExpr, depth: u32, construct: bool) -> u32 {
+    /// Encode one function shape into the signatures arena. `None` is the
+    /// arena's budget cap: the signatures arena is bounded by the same
+    /// node-budget axis (one signature per callable node keeps it
+    /// O(node_budget)), and past the cap the ENCLOSING node degrades to
+    /// the budget marker — never an uncapped arena, never a silently
+    /// dropped signature.
+    fn function_signature(
+        &mut self,
+        function: &FunctionExpr,
+        depth: u32,
+        construct: bool,
+    ) -> Option<u32> {
+        if self.signatures.len() >= self.budgets.node_budget as usize {
+            return None;
+        }
         let type_parameter_ids = function
             .type_parameters
             .iter()
@@ -643,7 +703,7 @@ impl<'a> GraphExporter<'a> {
             .as_ref()
             .map(|ret| self.expr_node(ret, depth + 1))
             .unwrap_or(0);
-        self.signature_ref(GraphSignature {
+        Some(self.signature_ref(GraphSignature {
             type_parameter_node_ids: type_parameter_ids,
             this_param: None,
             parameters,
@@ -665,11 +725,23 @@ impl<'a> GraphExporter<'a> {
             } else {
                 SignatureOrigin::CallSignature as i32
             },
-        })
+        }))
     }
 
     fn object_node(&mut self, members: &[ObjectMember], depth: u32) -> u32 {
         if members.iter().any(|m| matches!(m, ObjectMember::Spread(_))) {
+            return self.spread_program_node(members, depth);
+        }
+        // An index signature whose key domain is not one of the closed
+        // wire kinds cannot ride `GraphIndexSignature.key_kind` without
+        // fabricating a closed domain (the proto default's silent
+        // `String` aliasing) — the ordered construction program keeps the
+        // key as a typed node instead (fail-closed, never a made-up
+        // domain).
+        if members.iter().any(|m| match m {
+            ObjectMember::IndexSignature(index) => closed_index_key_kind(&index.key_type).is_none(),
+            _ => false,
+        }) {
             return self.spread_program_node(members, depth);
         }
         let mut encoded_members = Vec::new();
@@ -677,6 +749,13 @@ impl<'a> GraphExporter<'a> {
         let mut call_refs = Vec::new();
         let mut construct_refs = Vec::new();
         for member in members {
+            // A budget trip mid-walk stops the sibling loop: remaining
+            // members are neither walked nor interned, and the enclosing
+            // push below degrades to the budget marker — no discarded
+            // width-proportional work.
+            if self.real_nodes >= self.budgets.node_budget {
+                break;
+            }
             match member {
                 ObjectMember::Property(property) => {
                     let value_id = self.expr_node(&property.ty, depth + 1);
@@ -714,17 +793,29 @@ impl<'a> GraphExporter<'a> {
                 }
                 ObjectMember::IndexSignature(index) => {
                     let value_id = self.expr_node(&index.value_type, depth + 1);
+                    let Some(key_kind) = closed_index_key_kind(&index.key_type) else {
+                        unreachable!(
+                            "non-closed index keys route through the construction program"
+                        );
+                    };
                     index_signatures.push(GraphIndexSignature {
-                        key_kind: index_key_kind(&index.key_type),
+                        key_kind,
                         value_node_id: value_id,
                         readonly: index.readonly,
                     });
                 }
                 ObjectMember::CallSignature(function) => {
-                    call_refs.push(self.function_signature(function, depth, false));
+                    let Some(signature_ref) = self.function_signature(function, depth, false)
+                    else {
+                        return self.budget_marker(self.budgets.node_budget);
+                    };
+                    call_refs.push(signature_ref);
                 }
                 ObjectMember::ConstructSignature(function) => {
-                    construct_refs.push(self.function_signature(function, depth, true));
+                    let Some(signature_ref) = self.function_signature(function, depth, true) else {
+                        return self.budget_marker(self.budgets.node_budget);
+                    };
+                    construct_refs.push(signature_ref);
                 }
                 ObjectMember::Spread(_) => unreachable!("the spread branch is handled above"),
             }
@@ -741,7 +832,9 @@ impl<'a> GraphExporter<'a> {
     /// A method member's value: the callable-object node carrying the
     /// method's signature (origin `MethodDeclaration` / accessor).
     fn method_value_node(&mut self, method: &MethodSignature, depth: u32) -> u32 {
-        let signature_ref = self.function_signature(&method.function, depth, false);
+        let Some(signature_ref) = self.function_signature(&method.function, depth, false) else {
+            return self.budget_marker(self.budgets.node_budget);
+        };
         if let Some(signature) = self.signatures.get_mut(signature_ref as usize) {
             signature.signature_origin = match method.method_kind {
                 ObjectMethodKind::Method => SignatureOrigin::MethodDeclaration,
@@ -759,10 +852,18 @@ impl<'a> GraphExporter<'a> {
     }
 
     /// The canonical ordered construction program for a spread-bearing
-    /// object: one effect per source member, spread operands raw.
+    /// object (or one whose index keys are not closed wire kinds): one
+    /// effect per source member, spread operands and index key types as
+    /// raw typed nodes.
     fn spread_program_node(&mut self, members: &[ObjectMember], depth: u32) -> u32 {
         let mut effects = Vec::new();
         for member in members {
+            // Same mid-walk stop as the plain object walk: once the node
+            // budget trips, remaining effects are not encoded or
+            // interned.
+            if self.real_nodes >= self.budgets.node_budget {
+                break;
+            }
             let effect = match member {
                 ObjectMember::Property(property) => {
                     let value_id = self.expr_node(&property.ty, depth + 1);
@@ -813,13 +914,18 @@ impl<'a> GraphExporter<'a> {
                     })
                 }
                 ObjectMember::CallSignature(function) => {
-                    let signature_ref = self.function_signature(function, depth, false);
+                    let Some(signature_ref) = self.function_signature(function, depth, false)
+                    else {
+                        return self.budget_marker(self.budgets.node_budget);
+                    };
                     graph_object_construction_effect::Kind::DirectCall(GraphObjectSignatureEffect {
                         signature_node_id: signature_ref,
                     })
                 }
                 ObjectMember::ConstructSignature(function) => {
-                    let signature_ref = self.function_signature(function, depth, true);
+                    let Some(signature_ref) = self.function_signature(function, depth, true) else {
+                        return self.budget_marker(self.budgets.node_budget);
+                    };
                     graph_object_construction_effect::Kind::DirectConstruct(
                         GraphObjectSignatureEffect {
                             signature_node_id: signature_ref,
@@ -909,12 +1015,18 @@ fn mapped_modifier(modifier: MappedModifier) -> i32 {
     }
 }
 
-fn index_key_kind(key_type: &TypeExpr) -> i32 {
+/// The closed wire `IndexKeyKind` for an index-signature key domain, or
+/// `None` when the domain is not one of the closed kinds. `None` is NOT a
+/// fallback: the proto default (`String`) would fabricate a closed domain
+/// the source never claimed (a `string | number` union key, a unique
+/// symbol, a `keyof` result), so callers route `None` to the construction
+/// program, which keeps the key as a typed node.
+fn closed_index_key_kind(key_type: &TypeExpr) -> Option<i32> {
     match key_type {
-        TypeExpr::Primitive(PrimitiveName::String) => IndexKeyKind::String as i32,
-        TypeExpr::Primitive(PrimitiveName::Number) => IndexKeyKind::Number as i32,
-        TypeExpr::Primitive(PrimitiveName::Symbol) => IndexKeyKind::Symbol as i32,
-        TypeExpr::TemplateLiteral { .. } => IndexKeyKind::TemplatePattern as i32,
-        _ => IndexKeyKind::String as i32,
+        TypeExpr::Primitive(PrimitiveName::String) => Some(IndexKeyKind::String as i32),
+        TypeExpr::Primitive(PrimitiveName::Number) => Some(IndexKeyKind::Number as i32),
+        TypeExpr::Primitive(PrimitiveName::Symbol) => Some(IndexKeyKind::Symbol as i32),
+        TypeExpr::TemplateLiteral { .. } => Some(IndexKeyKind::TemplatePattern as i32),
+        _ => None,
     }
 }

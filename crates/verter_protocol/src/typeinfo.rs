@@ -17,7 +17,7 @@ pub mod graph_export;
 
 /// The typeinfo graph operation-DTO request envelope.
 ///
-/// Charter-named alias of [`graph::TypeInfoGraphRequest`] — the single
+/// Operation-DTO alias of [`graph::TypeInfoGraphRequest`] — the single
 /// protobuf-authoritative envelope every typeinfo graph operation rides
 /// (resolve-symbol today; the remaining operations as they land). The
 /// alias exists so operation-DTO consumers bind the envelope under its
@@ -26,7 +26,7 @@ pub use graph::TypeInfoGraphRequest as TypeInfoRequest;
 
 /// The typeinfo graph operation-DTO response envelope.
 ///
-/// Charter-named alias of [`graph::TypeInfoGraphResponse`] — the
+/// Operation-DTO alias of [`graph::TypeInfoGraphResponse`] — the
 /// `graph` / `error` / `framework_surface` answer arms. See
 /// [`TypeInfoRequest`] for the alias contract.
 pub use graph::TypeInfoGraphResponse as TypeInfoResult;

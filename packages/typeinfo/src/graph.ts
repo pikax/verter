@@ -16,10 +16,12 @@
  * producer-side walk is budget-bounded and fail-closed (a budget
  * marker is an `opaque` node, decoded here as `unknown(raw)`).
  *
- * **String-table identity.** The graph string table is zero-based: id
- * 0 is a REAL interned string, never an absent sentinel. Every decode
- * resolves ids through the table; only node id 0 is the wire
- * absent-sentinel on child refs (the producer reserves it).
+ * **String-table identity.** The bounded export reserves string id 0 as
+ * the absent sentinel (mirroring node id 0): a 0 in a name-bearing
+ * field (a tuple label, a signature parameter name) means "absent",
+ * never "the first interned string", and real names intern from id 1.
+ * Decode resolves every id through the table, so a foreign graph that
+ * does keep a real string at index 0 still resolves it.
  */
 
 import { create, fromBinary } from "@bufbuild/protobuf";
@@ -348,9 +350,15 @@ export function graphNodeToDescriptor(
       return recursiveRef(name, args, []);
     }
     case "object":
-      return objectDescriptor(view, kind.value, walk);
+      return objectDescriptor(view, kind.value, walk, next);
     case "objectSpreadProgram":
-      return spreadProgramDescriptor(view, kind.value.effects, walk);
+      // An ordered construction program is not a flat member surface:
+      // its spread operands and bare call/construct effects have no
+      // `TypeDescriptor` member form, and publishing only the decodable
+      // properties would present a closed member list the program does
+      // not claim. The wire view (`result.graph`) stays the sole
+      // authority; the descriptor is a named shell.
+      return unknown("objectSpreadProgram");
     case "opaque":
       return unknown(opaqueMessage(view, kind.value.error));
     // Node kinds the bounded export never produces today decode to a
@@ -384,6 +392,7 @@ function objectDescriptor(
   view: SemanticTypeGraphView,
   value: WireObjectShape,
   walk: (id: number) => TypeDescriptor,
+  visited: ReadonlySet<number>,
 ): TypeDescriptor {
   const properties: ObjectProperty[] = [];
   const indexSignatures: ObjectIndexSignature[] = [];
@@ -392,10 +401,11 @@ function objectDescriptor(
     const type = walk(member.valueNodeId);
     if (member.memberKind === 1 || member.memberKind === 2 || member.memberKind === 3) {
       // method / get / set — the value node is the callable-object
-      // carrying the signature; `func`-decode it.
+      // carrying the signature; `func`-decode it under the SAME visited
+      // set (a crafted cyclic method value must stop at the guard).
       properties.push({
         name,
-        type: callableDescriptor(view, member.valueNodeId),
+        type: callableDescriptor(view, member.valueNodeId, visited),
         optional: member.optional,
       });
     } else {
@@ -405,7 +415,7 @@ function objectDescriptor(
   for (const index of value.indexSignatures) {
     indexSignatures.push({
       keyName: "key",
-      keyType: primitive(indexKeyName(index.keyKind)),
+      keyType: indexKeyDescriptor(index.keyKind),
       valueType: walk(index.valueNodeId),
       readonly: index.readonly,
     });
@@ -421,55 +431,6 @@ function objectDescriptor(
     ...(callSignatures.length > 0 ? { callSignatures } : {}),
     ...(constructSignatures.length > 0 ? { constructSignatures } : {}),
   });
-}
-
-function spreadProgramDescriptor(
-  view: SemanticTypeGraphView,
-  effects: ReadonlyArray<{
-    kind?: { case?: string; value?: Record<string, unknown> };
-  }>,
-  walk: (id: number) => TypeDescriptor,
-): TypeDescriptor {
-  const properties: ObjectProperty[] = [];
-  const indexSignatures: ObjectIndexSignature[] = [];
-  for (const effect of effects) {
-    const caseName = effect.kind?.case;
-    const payload = (effect.kind?.value ?? {}) as Record<string, unknown>;
-    switch (caseName) {
-      case "directProperty":
-      case "directMethod":
-      case "directGet":
-      case "directSet": {
-        const key = payload.propertyKey as { key?: { case?: string; value?: unknown } } | undefined;
-        const name = keyNameFromOneof(view, key, walk);
-        const valueNodeId = Number(payload.valueNodeId ?? 0);
-        properties.push({
-          name,
-          type:
-            caseName === "directProperty"
-              ? walk(valueNodeId)
-              : callableDescriptor(view, valueNodeId),
-          optional: Boolean(payload.optional),
-        });
-        break;
-      }
-      case "directIndex": {
-        indexSignatures.push({
-          keyName: "key",
-          keyType: primitive("string"),
-          valueType: walk(Number(payload.valueTypeNodeId ?? 0)),
-          readonly: Boolean(payload.readonly),
-        });
-        break;
-      }
-      // Spread operands and bare call/construct effects have no flat
-      // TypeDescriptor member surface — the ordered program stays the
-      // canonical authority on the wire.
-      default:
-        break;
-    }
-  }
-  return object(properties, indexSignatures.length > 0 ? { indexSignatures } : {});
 }
 
 function keyNameFromOneof(
@@ -492,19 +453,29 @@ function keyNameFromOneof(
   }
 }
 
-/** Decode a callable-object node (function / method value) to `func`. */
-function callableDescriptor(view: SemanticTypeGraphView, nodeId: number): TypeDescriptor {
+/** Decode a callable-object node (function / method value) to `func`.
+ *
+ * The signature walk continues under the SAME visited set (extended with
+ * this node) and honors the node-id-0 absent rule: a crafted or
+ * later-cyclic graph whose method value or signature points back at an
+ * enclosing node stops at the cycle guard instead of recursing without
+ * bound. */
+function callableDescriptor(
+  view: SemanticTypeGraphView,
+  nodeId: number,
+  visited: ReadonlySet<number>,
+): TypeDescriptor {
   const node = view.nodes[nodeId];
   const kind = node?.kind;
+  const next = new Set(visited);
+  next.add(nodeId);
+  const walk = (id: number): TypeDescriptor =>
+    id === 0 ? unknown("absent") : graphNodeToDescriptor(view, id, next);
   if (kind?.case === "object" && kind.value.callSignatureRefs.length > 0) {
-    return signatureDescriptor(view, view.signatures[kind.value.callSignatureRefs[0]], (id) =>
-      graphNodeToDescriptor(view, id),
-    );
+    return signatureDescriptor(view, view.signatures[kind.value.callSignatureRefs[0]], walk);
   }
   if (kind?.case === "object" && kind.value.constructSignatureRefs.length > 0) {
-    return signatureDescriptor(view, view.signatures[kind.value.constructSignatureRefs[0]], (id) =>
-      graphNodeToDescriptor(view, id),
-    );
+    return signatureDescriptor(view, view.signatures[kind.value.constructSignatureRefs[0]], walk);
   }
   return unknown("callable without a signature");
 }
@@ -521,11 +492,17 @@ function signatureDescriptor(
     return func([], primitive("unknown"));
   }
   const parameters: FunctionParameter[] = signature.parameters.map(
-    (param, idx): FunctionParameter => ({
-      name: param.nameId !== 0 ? strAt(view, param.nameId) : `arg${idx}`,
-      type: walk(param.typeNodeId),
-      optional: param.optional,
-    }),
+    (param, idx): FunctionParameter => {
+      // Resolve the name THROUGH the table: the producer reserves id 0
+      // as the absent sentinel, so an unnamed parameter resolves to ""
+      // and falls back to the positional spelling.
+      const name = strAt(view, param.nameId);
+      return {
+        name: name !== "" ? name : `arg${idx}`,
+        type: walk(param.typeNodeId),
+        optional: param.optional,
+      };
+    },
   );
   const returnType =
     signature.returnTypeNodeId !== 0 ? walk(signature.returnTypeNodeId) : primitive("void");
@@ -594,14 +571,22 @@ function primitiveName(kind: GraphPrimitiveKind): PrimitiveName {
   }
 }
 
-function indexKeyName(keyKind: number): "string" | "number" | "symbol" {
+/** Decode an index-signature key domain. Exact mapping for the closed
+ * kinds; anything else (including the template pattern, which is not a
+ * flat primitive) is a named `unknown` — never a fabricated `string`
+ * domain the wire did not claim. */
+function indexKeyDescriptor(keyKind: number): TypeDescriptor {
   switch (keyKind) {
+    case 0:
+      return primitive("string");
     case 1:
-      return "number";
+      return primitive("number");
     case 2:
-      return "symbol";
+      return primitive("symbol");
+    case 3:
+      return unknown("template pattern key");
     default:
-      return "string";
+      return unknown(`index key kind ${keyKind}`);
   }
 }
 

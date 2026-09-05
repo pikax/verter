@@ -6,8 +6,7 @@
 //! malformed envelope gets the typed wire `error` arm before any
 //! semantic work), then the ONE shared resolution engine, then the
 //! bounded terminal `TypeExpr` -> `SemanticTypeGraph` export — the
-//! operation-DTO answer that displaces the general `TypeExpr` JSON
-//! transit on this route.
+//! operation-DTO answer graph-protocol consumers bind on this route.
 //!
 //! Discriminating boundaries pinned here:
 //! - validation-first: a malformed envelope answers with the typed
@@ -37,7 +36,8 @@ use verter_protocol::verter::v1::{
 };
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
-const TS_FIXTURE: &str = "export type Foo = { msg: string };\n";
+const TS_FIXTURE: &str =
+    "export type Foo = { msg: string };\nexport type Deep = { mid: { leaf: string } };\n";
 
 fn host_with_fixture() -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
@@ -291,18 +291,32 @@ fn an_unresolved_symbol_is_a_typed_graph_fault_answer() {
     let root = &graph.nodes[root_id as usize];
     match root.kind.as_ref() {
         Some(graph_type_node::Kind::Opaque(opaque)) => {
-            // The fault is the TYPED opaque root; its context is interned
-            // so the answer is self-describing on the wire.
-            let has_typed_error = opaque.error.is_some();
-            assert!(has_typed_error, "the opaque root carries a typed error");
+            // The fault is the TYPED opaque root; its own text rides the
+            // string table at the message id — the answer is
+            // self-describing, and the fault's detail is never swapped
+            // for a generic filler.
+            let Some(verter_protocol::verter::v1::graph_query_error::Kind::Other(other)) =
+                opaque.error.as_ref().and_then(|e| e.kind.as_ref())
+            else {
+                panic!("an unresolved symbol is the text-bearing Other arm");
+            };
             let entries = graph
                 .strings
                 .as_ref()
                 .map(|t| t.entries.as_slice())
                 .unwrap_or(&[] as &[String]);
+            assert_eq!(
+                entries.first().map(String::as_str),
+                Some(""),
+                "string id 0 is the reserved absent sentinel"
+            );
+            let message = entries
+                .get(other.message_name_id as usize)
+                .map(String::as_str)
+                .unwrap_or("");
             assert!(
-                entries.first().is_some_and(|m| !m.is_empty()),
-                "the fault context is interned, got {entries:?}"
+                !message.is_empty(),
+                "the fault's own text is interned at the message id, got {entries:?}"
             );
         }
         other => panic!("a fault degrades to an opaque root, got {other:?}"),
@@ -325,5 +339,124 @@ fn the_audit_payload_carries_the_resolve_symbol_operation_tag() {
             assert!(payload.snapshot_node_count > 0);
         }
         other => panic!("expected a TypeInfoGraph audit payload, got {other:?}"),
+    }
+}
+
+#[test]
+fn include_degraded_is_rejected_as_unsupported() {
+    let host = host_with_fixture();
+    // The flag names behavior the bounded export does not offer: its
+    // degraded markers are structural fail-closed stops, not optional
+    // detail. A request asking to include them is a typed rejection at
+    // validation — never a silently ignored flag.
+    let mut envelope = resolve_envelope("/types.ts", "Foo", ProjectionMode::Expanded);
+    if let Some(type_info_graph_request::Payload::ResolveSymbol(request)) =
+        envelope.payload.as_mut()
+    {
+        request.include_degraded = true;
+    }
+    let (response, _record) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
+    let error = response.expect_err("includeDegraded is a typed validation rejection");
+    match error.kind {
+        Some(type_info_request_error::Kind::MalformedPayload(payload)) => {
+            assert!(
+                payload.detail.contains("includeDegraded"),
+                "the rejection names the flag, got {:?}",
+                payload.detail
+            );
+        }
+        other => panic!("expected the typed malformed rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn unserved_closure_kinds_are_refused_fail_closed() {
+    let host = host_with_fixture();
+    for kind in [
+        wire::ClosurePolicy {
+            kind: Some(graph_closure_policy::Kind::Path(wire::ClosurePath {
+                path: Vec::new(),
+            })),
+        },
+        wire::ClosurePolicy {
+            kind: Some(graph_closure_policy::Kind::ProjectionRequired(
+                wire::ClosureProjectionRequired {
+                    projection: wire::ProjectionKind::Display as i32,
+                },
+            )),
+        },
+    ] {
+        let mut envelope = resolve_envelope("/types.ts", "Foo", ProjectionMode::Expanded);
+        if let Some(type_info_graph_request::Payload::ResolveSymbol(request)) =
+            envelope.payload.as_mut()
+        {
+            request.closure = Some(kind.clone());
+        }
+        let (response, _record) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
+        let error = response.expect_err("an unserved closure kind is a typed refusal, not a dump");
+        match error.kind {
+            Some(type_info_request_error::Kind::MalformedPayload(payload)) => {
+                assert!(
+                    payload.detail.contains("closure"),
+                    "the refusal names the closure gate, got {:?}",
+                    payload.detail
+                );
+            }
+            other => panic!("expected the typed malformed refusal, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_one_level_closure_bounds_the_exported_walk_depth() {
+    let host = host_with_fixture();
+    // `Deep = { mid: { leaf: string } }` under the one-level closure:
+    // the root and its direct members encode; the nested `leaf` value
+    // sits one level past the policy and must surface as the explicit
+    // depth-budget marker — the closure bounds the WALK, never a silent
+    // full dump and never a truncated-looking object.
+    let (response, _record) = host
+        .resolve_symbol_graph_with_audit(resolve_envelope(
+            "/types.ts",
+            "Deep",
+            ProjectionMode::Expanded,
+        ))
+        .into_parts();
+    let response = response.expect("a well-formed resolve answers with the graph arm");
+    let type_info_graph_response::Kind::Graph(graph) = response.kind.expect("graph arm") else {
+        panic!("one-level resolve answers with the graph arm");
+    };
+    let root_id = graph.root_ids.first().copied().expect("one root");
+    let graph_type_node::Kind::Object(root) = graph.nodes[root_id as usize]
+        .kind
+        .as_ref()
+        .expect("root kind")
+    else {
+        panic!("Deep is an object node");
+    };
+    assert_eq!(root.members.len(), 1);
+    let mid = &graph.nodes[root.members[0].value_node_id as usize];
+    let graph_type_node::Kind::Object(mid_object) = mid.kind.as_ref().expect("mid kind") else {
+        panic!("mid is one level inside the closure and encodes fully");
+    };
+    assert_eq!(mid_object.members.len(), 1);
+    let leaf = &graph.nodes[mid_object.members[0].value_node_id as usize];
+    match leaf.kind.as_ref() {
+        Some(graph_type_node::Kind::Opaque(opaque)) => {
+            let Some(verter_protocol::verter::v1::graph_query_error::Kind::BudgetExceeded(
+                exceeded,
+            )) = opaque.error.as_ref().and_then(|e| e.kind.as_ref())
+            else {
+                panic!("the past-closure level is the budget marker");
+            };
+            assert_eq!(
+                exceeded.limit, 2,
+                "the marker carries the one-level depth bound"
+            );
+        }
+        other => panic!(
+            "leaf is past the one-level closure and must be the explicit depth marker, \
+             got {other:?}"
+        ),
     }
 }

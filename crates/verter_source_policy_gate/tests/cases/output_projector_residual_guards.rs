@@ -7520,6 +7520,16 @@ const KNOWN_NON_DTO_OUTPUT_IDENTS: &[(&str, NonAuthorityCategory)] = &[
         "TypeInfoGraphResponse",
         NonAuthorityCategory::ExternalNonAuthority(&["verter_protocol::typeinfo::graph"]),
     ),
+    // `SemanticTypeGraph` — the bounded graph-export WIRE answer (proto
+    // nodes / symbols / signatures / interned strings), the same class as
+    // the framework-surface wire DTO above it: a prost message generated
+    // into OUT_DIR (no readable seed home), carrying graph nodes, NOT the
+    // Rust `verter_type_expr::TypeExpr`. Returned by the graph-protocol
+    // raise sink `project_node_to_semantic_type_graph`.
+    (
+        "SemanticTypeGraph",
+        NonAuthorityCategory::ExternalNonAuthority(&["verter_protocol::typeinfo::graph"]),
+    ),
     (
         "TypeInfoRequestError",
         NonAuthorityCategory::ExternalNonAuthority(&["verter_protocol::typeinfo::graph"]),
@@ -12449,6 +12459,15 @@ const HOT_TERMINAL_PASSTHROUGH_IDENTS: &[&str] = &[
     // form): capturing the output wire-graph snapshot at the output boundary
     // is publication — the JSDoc producer discards the `TypeExpr` after it.
     "node_id",
+    // The pure bounded wire-graph encoder
+    // (`fn(&TypeExpr, &GraphExportBudgets) -> SemanticTypeGraph`): encoding a
+    // sink-minted value into its wire DTO IS publication — the same class as
+    // `render_type_expr_display` (a pure projection, result leaves the typed
+    // domain); the raise sink `project_node_to_semantic_type_graph` discards
+    // the `TypeExpr` after it. NOT a `returns_typeexpr` transformer and not
+    // in `HOT_SERIALIZER_PUBLISH_IDENTS` (the prost message is not bytes /
+    // string / writer shaped), hence this list.
+    "encode_type_expr_graph",
     "push",
     "insert",
     "extend",
@@ -12539,6 +12558,14 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ("macro_output_expansion.rs", "expand_slot_binding_output"),
     ("typeinfo/raise.rs", "project_node_to_type_expr_json_bytes"),
     ("typeinfo/raise.rs", "render_node_display_with_ctx"),
+    // The graph-protocol raise terminal: materialises the resolved node
+    // ONCE through the sealed output capability and hands the terminal
+    // `TypeExpr` straight to the pure bounded wire-graph encoder
+    // (`encode_type_expr_graph`, a registered passthrough publication).
+    // The budgets are request-carried, the miss is decided on the
+    // OPTION, and nothing branches on the materialised value; it takes
+    // no `TypeExpr` param, so the self-policing rail seeds nothing.
+    ("typeinfo/raise.rs", "project_node_to_semantic_type_graph"),
     // The hover-boundary synthetic slot-binding deepen entry: raises the
     // published source arm under the terminal demand, decides the carrier
     // fallback in NODE DOMAIN (`node_is_synthetic_binding_carrier`, BEFORE
