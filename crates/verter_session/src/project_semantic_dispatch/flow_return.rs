@@ -2184,8 +2184,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 })
             })
             .filter(|spec| match spec.basis() {
-                FlowObligationBasis::FamilyCoverage { .. }
-                | FlowObligationBasis::DemandRoot { .. } => whole_selection_executed,
+                // A contract-DOMAIN obligation of a product-bearing domain
+                // additionally requires the frame's own product evidence:
+                // the evaluation must have produced a product in that
+                // domain. A frame that never computed one has nothing to
+                // discharge the domain with, so the demand cannot seal and
+                // finalizes unproven — a complete flow result always rests
+                // on product evidence.
+                FlowObligationBasis::DemandRoot { .. } => {
+                    whole_selection_executed
+                        && domain_product_evidence(spec.requirement(), witness.products)
+                }
+                FlowObligationBasis::FamilyCoverage { .. } => whole_selection_executed,
                 FlowObligationBasis::Site { node, .. }
                 | FlowObligationBasis::Binding { node, .. }
                 | FlowObligationBasis::Guard { node, .. }
@@ -3859,6 +3869,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let implicit_undefined_seen;
         let mut call_evidence;
         let mut executed_walk;
+        let product_budget_exceeded;
+        let frame_products;
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
@@ -3869,6 +3881,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             implicit_undefined_seen = evaluator.implicit_undefined_seen;
             call_evidence = std::mem::take(&mut evaluator.call_evidence);
             executed_walk = evaluator.executed_walk;
+            product_budget_exceeded = evaluator.product_budget_exceeded;
+            frame_products = std::mem::take(&mut evaluator.products);
             (outcome, body_falls_through)
         };
         // A call the lowering DECIDED ABOVE (folded into a surviving
@@ -3928,14 +3942,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // A tripped budget also SHORTENS the walk ledger: positions past
         // the trip degraded under the resource edge, so the run must not
         // claim a completed structural walk.
-        let contributors = match self.connected_demand_trip() {
-            Some(_) => {
+        //
+        // The PRODUCT budget is the same class of edge and rides the same
+        // exit: a frame merge that exhausted the demand plan's own
+        // convergence policy or obligation frontier has no joined state,
+        // so the frame's remaining products are not the ones a converged
+        // solve would have produced. It reports the typed budget failure
+        // and shortens the walk ledger exactly as the connected-demand
+        // trip does — a budget-exhausted frame is never admitted warm.
+        let contributors = match (self.connected_demand_trip(), product_budget_exceeded) {
+            (Some(_), _) | (None, Some(_)) => {
                 executed_walk.aborted = true;
                 Err(FlowReturnFailure::Budget(
                     verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
                 ))
             }
-            None => contributors,
+            (None, None) => contributors,
         };
         #[cfg(any(test, feature = "test-support"))]
         if self
@@ -3958,6 +3980,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             skeleton: &skeleton,
             anchor: frame_anchor,
             calls: &call_evidence,
+            products: &frame_products,
         };
         let contributors = match contributors {
             Ok(contributors) => contributors,
@@ -4998,6 +5021,11 @@ struct FlowExecutionWitness<'w> {
     skeleton: &'w verter_semantic::analysis::flow::FunctionBodySkeleton,
     anchor: u32,
     calls: &'w [FlowCallEvidence],
+    /// The frame's converged product state — the evidence a
+    /// product-bearing contract domain is discharged from. An obligation
+    /// whose domain carries a product but whose frame produced none is
+    /// never claimed, so a demand cannot seal without product evidence.
+    products: &'w FlowProductStore,
 }
 
 /// One return-site contribution: the evaluated node plus whether it came
@@ -5098,6 +5126,29 @@ struct FlowLayerState {
 /// One entry of a narrowing-overlay snapshot: the subject's guard facts
 /// as they stood at the mark.
 type NarrowingSnapshot = Vec<(FlowProductSubject, Option<NarrowingProduct>)>;
+
+/// Whether the frame's product state carries the evidence a contract
+/// DOMAIN obligation discharges on.
+///
+/// A domain the product lattice carries (`flow_product_kind` is `Some`)
+/// discharges only from a real product the evaluation computed in that
+/// domain — a store with no product there proves nothing about it. A
+/// domain the lattice carries no product for discharges on the
+/// enumeration evidence alone, exactly as it did before the value path
+/// moved onto the products, and a fact-family requirement is not a domain
+/// obligation at all.
+fn domain_product_evidence(
+    requirement: &super::flow_solve::FlowRequirement,
+    products: &FlowProductStore,
+) -> bool {
+    let super::flow_solve::FlowRequirementKind::Domain(domain) = requirement.requirement else {
+        return true;
+    };
+    if super::flow_products::flow_product_kind(domain).is_none() {
+        return true;
+    }
+    !products.subjects_in(domain).is_empty()
+}
 
 /// Every guard fact `products` holds, in canonical subject order.
 fn narrowing_facts_of(products: &FlowProductStore) -> Vec<FlowNarrowingFact> {

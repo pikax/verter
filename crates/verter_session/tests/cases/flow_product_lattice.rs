@@ -20,11 +20,11 @@
 
 use verter_session::for_tests::{
     flow_graph_fixture_for_tests, join_product, solve_flow_products, DeclaredTypeProduct,
-    DefiniteAssignment, FlowDomain, FlowNarrowingFact, FlowProductBudget, FlowProductBudgetAxis,
-    FlowProductContext, FlowProductInputs, FlowProductKey, FlowProductKeyError, FlowProductSeeds,
-    FlowProductSolveOutcome, FlowProductValue, FlowSemanticAlgebra, FlowTransferOutcome,
-    GraphSemanticAlgebra, NarrowingProduct, ReachingTypeProduct, ReachingValueProduct,
-    SemanticGraphStore,
+    DefiniteAssignment, DefiniteAssignmentProduct, FlowDomain, FlowNarrowingFact,
+    FlowProductBudget, FlowProductBudgetAxis, FlowProductContext, FlowProductInputs,
+    FlowProductKey, FlowProductKeyError, FlowProductSeeds, FlowProductSolveOutcome,
+    FlowProductValue, FlowSemanticAlgebra, FlowTransferOutcome, GraphSemanticAlgebra,
+    NarrowingProduct, ReachingTypeProduct, ReachingValueProduct, SemanticGraphStore,
 };
 use verter_session::semantic_query::{PrimitiveKind, SemanticNodeData, SemanticNodeId};
 
@@ -84,7 +84,8 @@ fn narrowing_fact(
 ) -> FlowNarrowingFact {
     let key = binding_key(inputs, FlowDomain::Narrowing, ordinal);
     FlowNarrowingFact {
-        binding: key.binding().expect("a binding-node key").clone(),
+        subject: key.subject().clone(),
+        path: std::sync::Arc::from([]),
         narrowed_to: to,
     }
 }
@@ -140,7 +141,10 @@ fn binding_domain_joins_are_domain_specific() {
     );
 
     // ── Reaching types: contributors aggregate here, the composite is the
-    // canonical algebra's. Contributor order must not reach the algebra.
+    // canonical algebra's. Contributor order is FIRST CONTRIBUTION: it is
+    // the arm list the algebra unions, and arm order is observable in the
+    // composite it constructs, so the substrate must hand the algebra the
+    // order the flow produced rather than a re-sorted one.
     let left = FlowProductValue::ReachingType(ReachingTypeProduct::of(ids[1]));
     let right = FlowProductValue::ReachingType(ReachingTypeProduct::of(ids[0]));
     let union = joined(&algebra, &left, &right);
@@ -149,21 +153,27 @@ fn binding_domain_joins_are_domain_specific() {
     };
     assert_eq!(
         product.contributors(),
-        &[ids[0], ids[1]],
-        "reaching-type contributors canonicalize as a sorted, deduplicated set"
+        &[ids[1], ids[0]],
+        "reaching-type contributors aggregate in first-contribution order, \
+         deduplicated"
     );
-    let canonical = algebra.union(&[ids[0], ids[1]]);
+    let canonical = algebra.union(&[ids[1], ids[0]]);
     assert!(!canonical.incomplete);
     assert_eq!(
         product.united(),
         Some(canonical.node),
-        "the united reaching type IS the canonical algebra's composite, not a \
-         flow-private union"
+        "the united reaching type IS the canonical algebra's composite over \
+         exactly the aggregated contributor list, not a flow-private union"
     );
+    let mirrored = joined(&algebra, &right, &left);
+    let FlowProductValue::ReachingType(mirrored) = &mirrored else {
+        panic!("the reaching-type join stays in its domain")
+    };
     assert_eq!(
-        union,
-        joined(&algebra, &right, &left),
-        "the reaching-type join is permutation-stable"
+        mirrored.contributors(),
+        &[ids[0], ids[1]],
+        "swapping the incoming edges hands the algebra the mirrored arm \
+         order — the substrate never silently re-sorts what the algebra sees"
     );
     assert_eq!(
         join_product(&algebra, &budget, &union, &union),
@@ -172,11 +182,13 @@ fn binding_domain_joins_are_domain_specific() {
     );
 
     // ── Definite assignment: the declared lattice, not a set union.
-    let unassigned = FlowProductValue::DefiniteAssignment(DefiniteAssignment::Unassigned);
-    let assigned = FlowProductValue::DefiniteAssignment(DefiniteAssignment::Assigned);
+    let unassigned = FlowProductValue::DefiniteAssignment(DefiniteAssignmentProduct::default());
+    let assigned = FlowProductValue::DefiniteAssignment(DefiniteAssignmentProduct::assigned());
     assert_eq!(
         joined(&algebra, &unassigned, &assigned),
-        FlowProductValue::DefiniteAssignment(DefiniteAssignment::MaybeAssigned),
+        FlowProductValue::DefiniteAssignment(
+            DefiniteAssignmentProduct::default().with_state(DefiniteAssignment::MaybeAssigned)
+        ),
         "one assigning and one non-assigning edge join to MaybeAssigned"
     );
     assert_eq!(
@@ -254,21 +266,24 @@ fn binding_domain_joins_are_domain_specific() {
     assert_eq!(
         binding,
         inputs
-            .key(FlowDomain::ReachingValue, binding.node())
+            .key(
+                FlowDomain::ReachingValue,
+                binding.node().expect("a graph key")
+            )
             .expect("the same node mints the same key"),
         "a product key is a function of its domain and node alone"
     );
     assert_ne!(
         binding,
         inputs
-            .key(FlowDomain::Narrowing, binding.node())
+            .key(FlowDomain::Narrowing, binding.node().expect("a graph key"))
             .expect("the same node in another domain"),
         "the domain is part of the slot identity"
     );
 
     // A productless registry domain has no key at all.
     assert_eq!(
-        inputs.key(FlowDomain::Effects, binding.node()),
+        inputs.key(FlowDomain::Effects, binding.node().expect("a graph key")),
         Err(FlowProductKeyError::DomainCarriesNoProduct)
     );
 }
@@ -296,7 +311,9 @@ fn flow_product_worklist_is_permutation_deterministic() {
         let value_key = binding_key(&inputs, FlowDomain::ReachingValue, ordinal);
         described.push((
             value_key.clone(),
-            FlowProductValue::ReachingValue(ReachingValueProduct::new([value_key.node()])),
+            FlowProductValue::ReachingValue(ReachingValueProduct::new([value_key
+                .node()
+                .expect("a graph key")])),
         ));
         described.push((
             binding_key(&inputs, FlowDomain::ReachingType, ordinal),
@@ -305,9 +322,9 @@ fn flow_product_worklist_is_permutation_deterministic() {
         described.push((
             binding_key(&inputs, FlowDomain::DefiniteAssignment, ordinal),
             FlowProductValue::DefiniteAssignment(if ordinal % 2 == 0 {
-                DefiniteAssignment::Assigned
+                DefiniteAssignmentProduct::assigned()
             } else {
-                DefiniteAssignment::Unassigned
+                DefiniteAssignmentProduct::default()
             }),
         ));
         described.push((
@@ -403,7 +420,9 @@ fn flow_product_budget_boundary_is_exact_and_never_warm() {
         seeds
             .insert(
                 key.clone(),
-                FlowProductValue::ReachingValue(ReachingValueProduct::new([key.node()])),
+                FlowProductValue::ReachingValue(ReachingValueProduct::new([key
+                    .node()
+                    .expect("a graph key")])),
             )
             .expect("a seed matches its domain");
         seeds
