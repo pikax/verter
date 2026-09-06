@@ -3853,7 +3853,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let product_budget = self
             .flow_demand_carrier_of(key)
             .map_or_else(FlowProductBudget::default, |carrier| {
-                FlowProductBudget::for_demand_plan(&carrier.plan)
+                FlowProductBudget::for_demand_plan(&carrier.plan, params.len())
             });
         #[cfg(any(test, feature = "test-support"))]
         let product_budget = if self
@@ -4913,10 +4913,8 @@ struct FlowEvaluator<'d, 'b> {
     /// The guard facts this frame has WRITTEN, in write order — the
     /// establishment ledger a scoped guard's mark truncates and a
     /// union-of-facts guard reads its per-disjunct contribution from.
-    narrowing_writes: Vec<(
-        crate::flow_slice_content::SliceNarrowSubject,
-        SemanticNodeId,
-    )>,
+    /// Append-only within a mark's window, so a mark stays an index.
+    narrowing_writes: Vec<NarrowingLedgerEntry>,
     /// Every subject this evaluation ESTABLISHED a binding-domain product
     /// for. The live product store is a point-in-time state — a
     /// block-scoped binding's products are dropped when its scope closes
@@ -5207,12 +5205,21 @@ struct FlowLayerState {
 }
 
 /// A mark in the narrowing overlay: the facts every subject held, plus how
-/// many guard writes the frame had performed. The WRITE COUNT is
-/// load-bearing and not derivable from the facts: a guard that re-narrows
-/// a position to the type it already held ESTABLISHED that fact on its
-/// edge, and a state diff cannot tell that from an untouched position — a
-/// union-of-facts guard that read the diff would drop the disjunct's
-/// contribution and publish a narrower type than every edge proves.
+/// many guard writes the frame had performed.
+///
+/// The WRITE COUNT is what makes a scope's contribution READABLE rather
+/// than inferred. A guard that re-narrows a position to the type it
+/// already held ESTABLISHED that fact on its edge, and comparing the
+/// overlay against the mark cannot tell that from an untouched position:
+/// the residue says what survived, the count says what the edge did.
+///
+/// On the published type the two agree, for a structural reason rather
+/// than by luck — every alternative of a union-of-facts guard is
+/// evaluated from the SAME restored mark, so an alternative pinned at the
+/// mark's own value can only union the result back to that value. The
+/// count is still what the window is READ through, and it is what keeps
+/// the per-alternative overlay in WRITE order, which the newest-wins fold
+/// below depends on.
 struct NarrowingSnapshot {
     facts: Vec<(FlowProductSubject, Option<NarrowingProduct>)>,
     writes: usize,
@@ -5225,6 +5232,29 @@ impl Clone for NarrowingSnapshot {
             writes: self.writes,
         }
     }
+}
+
+/// One movement of the frame's guard overlay, in write order.
+///
+/// A kill is RECORDED rather than pruned, because a mark IS an index into
+/// this ledger: removing an established entry would shift every
+/// outstanding mark. Recording it keeps the ledger append-only while
+/// still letting a window report only the facts STILL standing at its
+/// end — a fact established and then invalidated inside one window proves
+/// nothing about that edge, so an establishment-only ledger would hand a
+/// union-of-facts guard a fact its own disjunct had killed.
+#[derive(Debug, Clone)]
+enum NarrowingLedgerEntry {
+    /// `subject` narrowed to `node`; `root` is the resolved product
+    /// subject the fact is filed under, which is what a kill names.
+    Established {
+        root: FlowProductSubject,
+        subject: crate::flow_slice_content::SliceNarrowSubject,
+        node: SemanticNodeId,
+    },
+    /// Every fact rooted at `root` was dropped — what a write to the
+    /// binding does to the facts about the value it replaced.
+    Cleared { root: FlowProductSubject },
 }
 
 /// Whether the frame's product state carries the binding-domain evidence
@@ -5835,7 +5865,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     ) {
         let root = self.narrow_subject(&subject.root);
         push_narrowing_into(&mut self.products, &root, &subject.path, node);
-        self.narrowing_writes.push((subject.clone(), node));
+        self.narrowing_writes
+            .push(NarrowingLedgerEntry::Established {
+                root,
+                subject: subject.clone(),
+                node,
+            });
     }
 
     /// Drop every guard fact rooted at `root` — what a write to the
@@ -5844,14 +5879,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if let Some(subject) = self.resolved_narrow_subject(root) {
             self.products
                 .remove(super::flow_solve::FlowDomain::Narrowing, &subject);
+            self.narrowing_writes
+                .push(NarrowingLedgerEntry::Cleared { root: subject });
         }
     }
 
-    /// The guard facts established since `mark`, as authored narrowing
-    /// subjects, in write order — the per-disjunct overlay a
-    /// union-of-facts guard folds. Read from the frame's own write ledger
-    /// rather than from a state diff, so a disjunct that re-narrows a
-    /// position to the type it already held still contributes its fact.
+    /// The guard facts established since `mark` and STILL standing at
+    /// the end of that window, as authored narrowing subjects, in write
+    /// order — the per-disjunct overlay a union-of-facts guard folds.
+    ///
+    /// Read from the frame's own write ledger rather than from a state
+    /// diff, so a disjunct that re-narrows a position to the type it
+    /// already held still contributes its fact, in the order it wrote it.
+    /// A fact the same window then invalidated is dropped again: the
+    /// disjunct's edge does not prove a fact it killed, so
+    /// `narrowed_in_all` must not count it.
     fn narrowings_since(
         &self,
         mark: &NarrowingSnapshot,
@@ -5859,7 +5901,30 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         crate::flow_slice_content::SliceNarrowSubject,
         SemanticNodeId,
     )> {
-        self.narrowing_writes[mark.writes.min(self.narrowing_writes.len())..].to_vec()
+        let window = &self.narrowing_writes[mark.writes.min(self.narrowing_writes.len())..];
+        let mut standing: Vec<(
+            FlowProductSubject,
+            crate::flow_slice_content::SliceNarrowSubject,
+            SemanticNodeId,
+        )> = Vec::with_capacity(window.len());
+        for entry in window {
+            match entry {
+                NarrowingLedgerEntry::Established {
+                    root,
+                    subject,
+                    node,
+                } => {
+                    standing.push((root.clone(), subject.clone(), *node));
+                }
+                NarrowingLedgerEntry::Cleared { root } => {
+                    standing.retain(|(candidate, _, _)| candidate != root);
+                }
+            }
+        }
+        standing
+            .into_iter()
+            .map(|(_, subject, node)| (subject, node))
+            .collect()
     }
 
     /// Join two frame states through the ONE frame join route. A merge

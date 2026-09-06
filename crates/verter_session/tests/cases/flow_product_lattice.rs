@@ -376,6 +376,8 @@ fn frame_join_folds_every_domain_by_its_own_rule() {
             && !baseline
                 .subjects_in(FlowDomain::Narrowing)
                 .contains(&right_only),
-        "a guard fact only the incoming edge established survives nowhere, \n         and clearing its already-absent slot converges rather than \n         re-readying the subject"
+        "a guard fact only the incoming edge established survives nowhere, \
+         and clearing its already-absent slot converges rather than \
+         re-readying the subject"
     );
 }

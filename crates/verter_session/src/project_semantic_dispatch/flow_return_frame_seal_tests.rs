@@ -473,12 +473,43 @@ export function scBoundB(c: boolean) {
 }
 "#;
 
+/// Two frames with the SAME body and different signature ARITY.
+///
+/// The body returns out of a `try`, so the `finally` boundary merges the
+/// pending return edge into the entering state through the frame join —
+/// and completing a return-edge snapshot's parameter layer files one
+/// product per SIGNATURE parameter, read or unread. The wide frame
+/// therefore reaches that merge holding far more subjects than the demand
+/// plan's selection names, while the narrow one does not. Generated
+/// rather than written out because the arity is the whole variable: the
+/// two bodies must be identical for the comparison to mean anything.
+const WIDE_SIGNATURE_ARITY: usize = 256;
+
+fn signature_arity_fixtures() -> String {
+    let mut source = String::new();
+    // bounded-loop: the two declared fixture arities.
+    for (name, arity) in [
+        ("narrowSignatureJoin", 2),
+        ("wideSignatureJoin", WIDE_SIGNATURE_ARITY),
+    ] {
+        let mut params = String::from("c: boolean");
+        // bounded-loop: the fixture's own declared arity.
+        for ordinal in 1..arity {
+            params.push_str(&format!(", p{ordinal}: string"));
+        }
+        source.push_str(&format!(
+            "\nexport function {name}({params}) {{\n  const k = 1;\n  try {{\n    if (c) {{\n      return k;\n    }}\n  }} finally {{\n    c;\n  }}\n  return 2;\n}}\n"
+        ));
+    }
+    source
+}
+
 fn make_product_host() -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(PRODUCT_CANONICAL.to_string()),
         input_id: PRODUCT_CANONICAL.to_string(),
-        source: Arc::from(PRODUCT_FIXTURE),
+        source: Arc::from(format!("{PRODUCT_FIXTURE}{}", signature_arity_fixtures())),
         file_language: crate::LanguageRegistry::global()
             .classify_static(PRODUCT_CANONICAL)
             .static_resolution(),
@@ -743,5 +774,53 @@ fn flow_product_budget_boundary_is_exact_and_never_warm() {
         exhausted.cold_computes, 2,
         "a budget-exhausted demand recomputes cold rather than serving a \
          retained partial"
+    );
+}
+
+/// The frame's product budget counts BOTH subject spaces, and the
+/// parameter space is not selection-bound.
+///
+/// `max_products` is derived from the demand plan, so it must cover every
+/// subject the frame can hold. A binding subject is minted at a
+/// slice-selected site, but a PARAMETER subject is not: completing a
+/// return-edge snapshot's parameter layer files one product per signature
+/// parameter whether the body reads it or not. A budget derived from the
+/// selection alone therefore exhausts at the first merge that sees a
+/// completed parameter layer, and the frame stops producing a value at
+/// all: the typed budget failure is what refuses its admission, so the
+/// demand recomputes it cold and fails again on every request.
+///
+/// Both frames here have the SAME body; only the arity differs. The wide
+/// one must converge, serve the same value, and warm exactly like the
+/// narrow one.
+#[test]
+fn a_wide_signature_frame_converges_within_its_own_product_budget() {
+    let narrow_host = make_product_host();
+    let narrow = run_product(&narrow_host, "narrowSignatureJoin", 2);
+    let wide_host = make_product_host();
+    let wide = run_product(&wide_host, "wideSignatureJoin", 2);
+
+    assert!(
+        narrow.served.is_some(),
+        "the narrow control frame converges and serves a value"
+    );
+    assert_eq!(
+        wide.served, narrow.served,
+        "the unread parameters do not change the value the frame serves"
+    );
+    assert_eq!(
+        narrow.candidates, 1,
+        "the narrow control warm-admits exactly one candidate"
+    );
+    assert_eq!(
+        wide.candidates, narrow.candidates,
+        "a frame whose parameter subjects outnumber its selection still \
+         converges and warm-admits exactly one candidate"
+    );
+    assert_eq!(
+        wide.cold_computes, narrow.cold_computes,
+        "the second demand of the wide frame is a warm hit, exactly like \
+         the control's — a budget that ignored the parameter space exhausts \
+         at this frame's merge, and nothing it produces can be admitted"
     );
 }

@@ -853,26 +853,33 @@ impl FlowProductBudget {
     /// policies, never a private constant:
     ///
     /// - `max_iterations` IS the plan's [`FlowConvergencePolicy`];
-    /// - `max_products` IS the plan's own subject universe, one slot per
-    ///   frame domain: the selected obligation frontier PLUS the slice
-    ///   sites that frontier does not name. A binding obligation is not
-    ///   the frame's only product subject — a parameter retype and a name
-    ///   resolved in both scope layers hold products no obligation counts
-    ///   — and every such subject is minted at a slice-SELECTED site, so
-    ///   the selection size is the plan's own bound on them. A frame that
-    ///   accumulates more slots than both together has left the plan's
-    ///   work universe;
+    /// - `max_products` IS the frame's own subject universe, one slot per
+    ///   frame domain, over BOTH the spaces a frame subject can come from:
+    ///   the selected obligation frontier plus the slice sites that
+    ///   frontier does not name (every BINDING subject is minted at a
+    ///   slice-selected site — a binding obligation is not the only one,
+    ///   a name resolved in both scope layers holds products no obligation
+    ///   counts), and `signature_params`, because the PARAMETER space is
+    ///   not selection-bound at all: completing a snapshot's parameter
+    ///   layer mints one product per SIGNATURE parameter, read or unread,
+    ///   so a wide signature under a narrow demand holds parameter slots
+    ///   the selection never names. A frame that accumulates more slots
+    ///   than the two spaces together has left the plan's work universe;
     /// - `max_product_width` IS the slice budget's selected-node ceiling
     ///   (a subject cannot accumulate more contributors than the slice
     ///   selected sites to contribute them).
     #[must_use]
-    pub fn for_demand_plan(plan: &super::flow_solve::FlowDemandPlan) -> Self {
+    pub fn for_demand_plan(
+        plan: &super::flow_solve::FlowDemandPlan,
+        signature_params: usize,
+    ) -> Self {
         Self {
             max_iterations: plan.convergence().max_iterations,
             max_products: u32::try_from(
                 plan.work_order().len()
                     + plan.structural_selection().value_nodes.len()
-                    + plan.structural_selection().effect_only_nodes.len(),
+                    + plan.structural_selection().effect_only_nodes.len()
+                    + signature_params,
             )
             .unwrap_or(u32::MAX)
             .saturating_mul(FLOW_FRAME_DOMAINS.len() as u32),
@@ -1044,14 +1051,16 @@ impl FlowProductStore {
     }
 }
 
-/// The domains a frame's product state is held in, in the plan's own
-/// tie-break rank order. TOTAL over the product vocabulary the evaluator
-/// populates — the join below iterates exactly this list, so a domain
-/// cannot be silently skipped at a merge point.
+/// The domains a frame's product state is held in, in the SAME domain
+/// rank [`key_order`] sorts by — the module has one canonical order, so
+/// a reader of the join's fold order and a reader of the store's own
+/// subject enumeration see the same sequence. TOTAL over the product
+/// vocabulary the evaluator populates: the join below iterates exactly
+/// this list, so a domain cannot be silently skipped at a merge point.
 pub const FLOW_FRAME_DOMAINS: [FlowDomain; 4] = [
     FlowDomain::ReachingType,
-    FlowDomain::DeclaredType,
     FlowDomain::Narrowing,
+    FlowDomain::DeclaredType,
     FlowDomain::DefiniteAssignment,
 ];
 
