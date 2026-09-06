@@ -413,9 +413,10 @@ const FLOW_WORK_ORDER_TIE_BREAK: FlowTieBreak = FlowTieBreak::DomainNodeEdgeSlot
 
 // Explicit stable discriminants for the canonical result-contract
 // encoding, and the SOLE domain-rank authority for the dispatch module:
-// the product lattice's canonical key order, canonical bytes, and solve
-// visitation rank all read this one table rather than restating it. The
-// numeric value of each variant is identity schema: adding, removing, or
+// the product lattice's canonical key order reads this one table rather
+// than restating it, so the order a frame's products enumerate in cannot
+// drift from the rank the result contract encodes. The numeric value of
+// each variant is identity schema: adding, removing, or
 // renumbering a variant requires bumping the domain tag.
 #[rustfmt::skip]
 pub(super) const fn domain_discriminant(domain: FlowDomain) -> u32 {
