@@ -1920,6 +1920,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     function mappedCompletionInsertionAnchor(
       runtime: ProcessEditorProjectRuntime,
+      program: tsModule.Program | undefined,
       companion: string,
       generatedOffset: number,
     ): { fileName: string; offset: number } | null {
@@ -1942,9 +1943,26 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       const product = raw?.x_verter_mapping_product;
       if (product?.schema_version !== 1 || !Array.isArray(product.insertion_anchors)) return null;
 
+      // The completion query can race a store publication: its edit position
+      // belongs to the Program companion that produced the response, while the
+      // insertion anchor belongs to the current manifest/map pair. Do not map
+      // across those revisions.
+      const companionFile = program?.getSourceFile(companion);
+      if (companionFile === undefined) return null;
       const companionText = runtime.readCompanion(companion);
       const sourceText = runtime.readSource(owned.source_uri);
       if (companionText === undefined || sourceText === undefined) return null;
+      const publishedVersion = `${ready.version}:${ready.content_hash}`;
+      const companionVersion = (
+        companionFile as tsModule.SourceFile & { readonly version?: unknown }
+      ).version;
+      if (typeof companionVersion === "string") {
+        if (companionVersion !== publishedVersion) return null;
+      } else if (companionFile.text !== companionText) {
+        // Some test and third-party hosts do not expose SourceFile.version.
+        // In that case, matching the current published bytes is the fallback.
+        return null;
+      }
       for (const candidate of product.insertion_anchors) {
         if (
           !Array.isArray(candidate) ||
@@ -1966,6 +1984,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     function remapEditorCompletionChanges(
       runtime: ProcessEditorProjectRuntime,
+      program: tsModule.Program | undefined,
       changes: readonly tsModule.FileTextChanges[],
     ): tsModule.FileTextChanges[] {
       const store = runtime.getStore();
@@ -1989,7 +2008,12 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             sourceFileName = undefined;
             break;
           }
-          const anchor = mappedCompletionInsertionAnchor(runtime, change.fileName, edit.span.start);
+          const anchor = mappedCompletionInsertionAnchor(
+            runtime,
+            program,
+            change.fileName,
+            edit.span.start,
+          );
           if (
             anchor === null ||
             (sourceFileName !== undefined && !sameStorePath(store, sourceFileName, anchor.fileName))
@@ -2657,6 +2681,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (usesEditorCarrierRouting(fileName)) {
         const routed = editorCarrierPosition(fileName, position);
         if (routed === null) return undefined;
+        const program = routed.runtime.languageService.getProgram?.();
         const result = routed.runtime.languageService.getCompletionEntryDetails(
           routed.companion,
           routed.position,
@@ -2668,7 +2693,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         );
         if (result?.codeActions && responseRemap) {
           for (const action of result.codeActions) {
-            action.changes = remapEditorCompletionChanges(routed.runtime, action.changes);
+            action.changes = remapEditorCompletionChanges(routed.runtime, program, action.changes);
           }
         }
         return result;

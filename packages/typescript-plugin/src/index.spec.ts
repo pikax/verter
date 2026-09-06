@@ -4284,6 +4284,17 @@ describe("editor-owned source diagnostic routing", () => {
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
       [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
+    const companionFile = ts.createSourceFile(
+      companionPath,
+      companionText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    (companionFile as ts.SourceFile & { version: string }).version = "1:a1";
+    info.languageService.getProgram = () => ({
+      getSourceFile: (fileName: string) => (fileName === companionPath ? companionFile : undefined),
+    });
     info.languageService.__lsImpl = {
       getCompletionEntryDetails: (fileName: string, position: number) => {
         expect({ fileName, position }).toEqual({
@@ -4385,6 +4396,16 @@ describe("editor-owned source diagnostic routing", () => {
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
       [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
+    const companionFile = ts.createSourceFile(
+      companionPath,
+      companionText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    info.languageService.getProgram = () => ({
+      getSourceFile: (fileName: string) => (fileName === companionPath ? companionFile : undefined),
+    });
     info.languageService.__lsImpl = {
       getCompletionEntryDetails: (fileName: string, position: number) => {
         expect({ fileName, position }).toEqual({
@@ -4491,6 +4512,85 @@ describe("editor-owned source diagnostic routing", () => {
                     newText: "generated edit",
                   },
                 ],
+              },
+            ],
+          },
+        ],
+      }),
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const details = info.languageService.getCompletionEntryDetails(
+      sourcePath,
+      sourceText.indexOf("value"),
+      "value",
+      {},
+      undefined,
+      {},
+      undefined,
+    );
+
+    expect(details?.codeActions?.[0].changes).toEqual([]);
+  });
+
+  // @ai-generated - Verifies that completion insertion anchors never remap a
+  // response produced by a Program companion from an older published revision.
+  it("drops an anchored completion edit from a stale Program companion", () => {
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
+    const sourceText = '<script setup lang="ts">\nconst value = 1;\n</script>\n';
+    const companionText = "/** generated preamble */\nconst value = 1;\n";
+    const manifest = mappableManifest();
+    const ready = manifest.projects["/ws/tsconfig.json"].ready_files[companionPath];
+    ready.blob_rel = "blobs/A.vue.tsx";
+    ready.map_hash = "auto-import-synthesized-refusal";
+    const dir = track(
+      writeStore(manifest, {
+        ...mappableBlobs(),
+        "blobs/A.vue.tsx": companionText,
+        "maps/A.vue.json": JSON.stringify({
+          version: 3,
+          sources: [sourcePath],
+          names: [],
+          x_verter_mapping_product: {
+            schema_version: 1,
+            insertion_anchors: [[0, sourceText.indexOf("\n") + 1]],
+          },
+          mappings: ";AACA",
+        }),
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    const staleCompanionFile = ts.createSourceFile(
+      companionPath,
+      companionText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    (staleCompanionFile as ts.SourceFile & { version: string }).version = "0:old";
+    info.languageService.getProgram = () => ({
+      getSourceFile: (fileName: string) =>
+        fileName === companionPath ? staleCompanionFile : undefined,
+    });
+    info.languageService.__lsImpl = {
+      getCompletionEntryDetails: () => ({
+        name: "value",
+        kind: ts.ScriptElementKind.alias,
+        kindModifiers: "export",
+        displayParts: [],
+        codeActions: [
+          {
+            description: "generated edit",
+            changes: [
+              {
+                fileName: companionPath,
+                textChanges: [{ span: { start: 0, length: 0 }, newText: "generated edit" }],
               },
             ],
           },
