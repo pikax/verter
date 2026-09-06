@@ -27,13 +27,13 @@ Every source file the candidate changes, measured against the branch base:
 
 | file | added raw lines | code lines (blank/`//`-only excluded) |
 | --- | --- | --- |
-| `crates/verter_session/src/project_semantic_dispatch/flow_products.rs` | 1490 | 981 |
+| `crates/verter_session/src/project_semantic_dispatch/flow_products.rs` | 1552 | 1005 |
 | `crates/verter_session/src/project_semantic_dispatch/flow_solve.rs` | 24 | 8 |
 | `crates/verter_semantic/src/analysis/flow/flow_graph.rs` | 9 | 4 |
 | `crates/verter_session/src/for_tests.rs` | 8 | 4 |
 | `crates/verter_session/src/project_semantic_dispatch/mod.rs` | 5 | 1 |
 | `crates/verter_session/src/flow_gap_retraction_tests.rs` | 3 | 0 |
-| **total** | **1539** | **998** |
+| **total** | **1601** | **1022** |
 
 Six files against `max_production_files = 8` and `rescope_files = 12`; two crates
 against `max_related_packages = 2`. Two of the six are not production paths at
@@ -42,8 +42,8 @@ all: `for_tests.rs` is the crate's test-support re-export surface, and
 text. The file and package axes are inside every declared line either way.
 
 The LOC axis straddles the numeric signal depending on the counting convention:
-998 under a code-line count (inside `rescope_loc = 1500`, above the 800 planning
-reference); 1539 under a raw added-line count (across `rescope_loc` by 39 lines).
+1022 under a code-line count (inside `rescope_loc = 1500`, above the 800 planning
+reference); 1601 under a raw added-line count (across `rescope_loc` by 101 lines).
 `contracts/sizing.md` fixes no convention, so this record investigates rather than
 assuming the favourable one.
 
@@ -82,10 +82,11 @@ its own scope and its own review.
    would land dark with no consumer at all rather than dark with a driven test surface.
 
 2. **A third of the module is the ownership contract the charter's evidence policy
-   asks for.** 509 of the 1490 lines are blank or comment; the module header alone
+   asks for.** 547 of the 1552 lines are blank or comment; the module header alone
    states five load-bearing ownership boundaries (product-state algebra versus semantic
    type algebra, the one domain registry, the one store with a module-private write
-   surface, the structurally-unwarmable degraded arm, and stable binding identity).
+   surface, the structurally-unwarmable degraded arm, and binding identity that is both
+   stable and injective).
    Deleting that prose would move the candidate under any convention's line while making
    it harder to review, which is the outcome `contracts/sizing.md` explicitly forbids
    ("do not split or pad a coherent change merely to hit a number").
