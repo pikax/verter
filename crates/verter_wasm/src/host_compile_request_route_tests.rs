@@ -289,12 +289,11 @@ struct ExpectedNode {
 }
 
 /// A real compile of `/src/App.vue` (`VUE_SFC`) through this typed route,
-/// captured once and pinned here. There is no legacy route left to read the
-/// same demand from a second time — this route is the ONLY WASM path that
-/// produces these bytes — so the golden is the byte-preservation oracle:
+/// captured once and pinned here. This route is the ONLY WASM path that
+/// produces these bytes, so the golden is the byte-preservation oracle:
 /// established independently of any assertion in this file, from an actual
-/// build, the same way the deleted `assert_runtime_nodes_match_legacy`
-/// helper's second read once was.
+/// build. Regenerate it from a fresh build whenever the addressed node set
+/// or its published fields intentionally change.
 const VUE_APP_GOLDEN: &str = include_str!("host_compile_request_route_golden/vue_app.json");
 
 /// The Svelte counterpart of [`VUE_APP_GOLDEN`], captured from a real
