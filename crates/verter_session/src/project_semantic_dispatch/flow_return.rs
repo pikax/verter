@@ -5257,6 +5257,51 @@ enum NarrowingLedgerEntry {
     Cleared { root: FlowProductSubject },
 }
 
+/// The guard facts a ledger WINDOW leaves standing, in write order.
+///
+/// Total over the ledger vocabulary and independent of any frame state,
+/// so the two rules a union-of-facts guard rests on are decided here and
+/// nowhere else:
+///
+/// - an establishment CONTRIBUTES even when it re-writes the value the
+///   position already held — the edge proved that fact whether or not the
+///   overlay's shape changed, and a reader that diffed the overlay
+///   instead could not tell that from an untouched position, so it would
+///   drop the disjunct and publish a type narrower than every edge
+///   proves;
+/// - a kill inside the window RETRACTS the establishments it covers — an
+///   edge does not prove a fact it invalidated — while leaving facts the
+///   window never established alone, since those belong to whichever
+///   outstanding mark still holds them.
+fn standing_narrowings(
+    window: &[NarrowingLedgerEntry],
+) -> Vec<(
+    crate::flow_slice_content::SliceNarrowSubject,
+    SemanticNodeId,
+)> {
+    let mut standing: Vec<(
+        &FlowProductSubject,
+        &crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )> = Vec::with_capacity(window.len());
+    for entry in window {
+        match entry {
+            NarrowingLedgerEntry::Established {
+                root,
+                subject,
+                node,
+            } => standing.push((root, subject, *node)),
+            NarrowingLedgerEntry::Cleared { root } => {
+                standing.retain(|(candidate, _, _)| *candidate != root);
+            }
+        }
+    }
+    standing
+        .into_iter()
+        .map(|(_, subject, node)| (subject.clone(), node))
+        .collect()
+}
+
 /// Whether the frame's product state carries the binding-domain evidence
 /// one planned binding obligation discharges on.
 ///
@@ -5891,9 +5936,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Read from the frame's own write ledger rather than from a state
     /// diff, so a disjunct that re-narrows a position to the type it
     /// already held still contributes its fact, in the order it wrote it.
-    /// A fact the same window then invalidated is dropped again: the
-    /// disjunct's edge does not prove a fact it killed, so
-    /// `narrowed_in_all` must not count it.
+    /// A member-path guard is exactly where that happens: its subject's
+    /// current node is the ROOT's narrow projected down the path, never
+    /// the path's own standing fact, so the same test applied twice under
+    /// one enclosing conjunct writes the same value twice and only the
+    /// ledger can tell the second write from an untouched position.
+    ///
+    /// Both rules — a re-establishment counts, a kill inside the window
+    /// retracts — belong to [`standing_narrowings`], which decides them
+    /// over the ledger vocabulary alone. Establishment and kill are
+    /// separated there rather than here because a window's own state
+    /// diff cannot express either one.
     fn narrowings_since(
         &self,
         mark: &NarrowingSnapshot,
@@ -5901,30 +5954,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         crate::flow_slice_content::SliceNarrowSubject,
         SemanticNodeId,
     )> {
-        let window = &self.narrowing_writes[mark.writes.min(self.narrowing_writes.len())..];
-        let mut standing: Vec<(
-            FlowProductSubject,
-            crate::flow_slice_content::SliceNarrowSubject,
-            SemanticNodeId,
-        )> = Vec::with_capacity(window.len());
-        for entry in window {
-            match entry {
-                NarrowingLedgerEntry::Established {
-                    root,
-                    subject,
-                    node,
-                } => {
-                    standing.push((root.clone(), subject.clone(), *node));
-                }
-                NarrowingLedgerEntry::Cleared { root } => {
-                    standing.retain(|(candidate, _, _)| candidate != root);
-                }
-            }
-        }
-        standing
-            .into_iter()
-            .map(|(_, subject, node)| (subject, node))
-            .collect()
+        standing_narrowings(&self.narrowing_writes[mark.writes.min(self.narrowing_writes.len())..])
     }
 
     /// Join two frame states through the ONE frame join route. A merge
@@ -12464,5 +12494,110 @@ mod plan_refusal_class_tests {
             flow_partial_reason_class(&FlowPartialReason::DegradedValue, None),
             PartialReasonSet::FLOW_RETURN_UNVERIFIED,
         );
+    }
+}
+
+#[cfg(test)]
+mod narrowing_ledger_tests {
+    use super::*;
+
+    fn param(ordinal: u32) -> FlowProductSubject {
+        FlowProductSubject::FrameParam(ordinal)
+    }
+
+    fn authored(ordinal: u32, path: &[&str]) -> crate::flow_slice_content::SliceNarrowSubject {
+        crate::flow_slice_content::SliceNarrowSubject {
+            root: crate::flow_slice_content::SliceNarrowRoot::Param(ordinal),
+            path: Arc::from(
+                path.iter()
+                    .map(|segment| Arc::from(*segment))
+                    .collect::<Vec<Arc<str>>>()
+                    .into_boxed_slice(),
+            ),
+        }
+    }
+
+    fn established(ordinal: u32, path: &[&str], node: u64) -> NarrowingLedgerEntry {
+        NarrowingLedgerEntry::Established {
+            root: param(ordinal),
+            subject: authored(ordinal, path),
+            node: SemanticNodeId(node),
+        }
+    }
+
+    /// A window whose only movement RE-WRITES the value the position
+    /// already held still reports that fact. The union-of-facts guard
+    /// asks a disjunct "what did your edge prove", and an edge that
+    /// re-establishes a fact proved it; an overlay diff cannot see the
+    /// write at all, so the disjunct would drop out of `narrowed_in_all`
+    /// and the guard would publish a narrower type than any edge proves.
+    ///
+    /// Mutation: skipping an establishment whose node equals the value
+    /// the position already held (the overlay-diff reading) empties the
+    /// reported window and fails this.
+    #[test]
+    fn a_re_established_fact_is_reported_as_the_windows_contribution() {
+        let window = [established(0, &["v"], 7)];
+        assert_eq!(
+            standing_narrowings(&window),
+            vec![(authored(0, &["v"]), SemanticNodeId(7))],
+        );
+    }
+
+    /// Write ORDER is the report's order, and a position written twice
+    /// reports both writes: the union guard's per-disjunct fold keeps the
+    /// LAST write for a position, so collapsing the pair here (or
+    /// reporting them reversed) would hand it the wrong alternative.
+    #[test]
+    fn a_position_written_twice_reports_both_writes_in_order() {
+        let window = [
+            established(0, &["v"], 7),
+            established(1, &[], 9),
+            established(0, &["v"], 8),
+        ];
+        assert_eq!(
+            standing_narrowings(&window),
+            vec![
+                (authored(0, &["v"]), SemanticNodeId(7)),
+                (authored(1, &[]), SemanticNodeId(9)),
+                (authored(0, &["v"]), SemanticNodeId(8)),
+            ],
+        );
+    }
+
+    /// A kill inside the window RETRACTS every fact the window
+    /// established under that root — a write to the binding invalidates
+    /// the facts about the value it replaced, and an edge does not prove
+    /// a fact it invalidated. Facts under OTHER roots survive, and a
+    /// later establishment under the killed root stands again.
+    ///
+    /// Mutation: dropping the retraction (treating a kill as no
+    /// movement) reports the invalidated `v` fact and fails this.
+    #[test]
+    fn a_kill_retracts_only_the_facts_its_own_root_established() {
+        let window = [
+            established(0, &["v"], 7),
+            established(1, &[], 9),
+            NarrowingLedgerEntry::Cleared { root: param(0) },
+            established(0, &["w"], 11),
+        ];
+        assert_eq!(
+            standing_narrowings(&window),
+            vec![
+                (authored(1, &[]), SemanticNodeId(9)),
+                (authored(0, &["w"]), SemanticNodeId(11)),
+            ],
+        );
+    }
+
+    /// A kill reports nothing about facts the window never established:
+    /// those belong to whichever outstanding mark still holds them, and
+    /// a window that claimed them would let one disjunct inherit an
+    /// enclosing scope's facts as its own contribution.
+    #[test]
+    fn a_kill_alone_reports_an_empty_contribution() {
+        let window = [NarrowingLedgerEntry::Cleared { root: param(0) }];
+        assert!(standing_narrowings(&window).is_empty());
+        assert!(standing_narrowings(&[]).is_empty());
     }
 }

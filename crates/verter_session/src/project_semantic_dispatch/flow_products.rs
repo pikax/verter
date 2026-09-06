@@ -1033,6 +1033,17 @@ impl FlowProductStore {
 
     /// Every subject holding a product in ANY domain, in canonical key
     /// order and deduplicated — the pointwise join's subject universe.
+    ///
+    /// The order is minted HERE rather than held by the container: the
+    /// store is a hash map because every other access is a point lookup
+    /// by slot, and only the two enumerations need a sequence. The sort
+    /// is therefore the price of determinism at a merge point, and it is
+    /// bounded by the same axis the merge itself is — a join whose store
+    /// grows past [`FlowProductBudget::max_products`] fails at the end of
+    /// the pass that grew it, so the universe this walks stays within one
+    /// pass of the frame's capped subject space. It reads no cache,
+    /// resolves nothing, and enters no dispatch: the only work is over
+    /// keys the frame already holds.
     #[must_use]
     pub fn subjects(&self) -> Vec<FlowProductSubject> {
         let mut keys: Vec<&FlowProductKey> = self.entries.keys().collect();

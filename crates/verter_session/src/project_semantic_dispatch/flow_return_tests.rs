@@ -4444,6 +4444,40 @@ fn flow_return_guard_union_omits_impossible_conjunction_alternative() {
     );
 }
 
+/// A disjunct that RE-ESTABLISHES the fact its position already holds
+/// still contributes its edge to the union. A member-path guard is where
+/// that is reachable: the subject's current node is the root's narrow
+/// projected down the path, never the path's own standing fact, so the
+/// enclosing conjunct's `typeof x.v === "string"` and the disjunct's
+/// identical test both write `string` at `x.v`. The disjunction's edges
+/// prove `string` and `number`, so `x.v` reads `string | number` inside
+/// it.
+///
+/// Reading each disjunct's contribution as a before/after diff of the
+/// overlay instead cannot see the second write at all: the `string`
+/// alternative comes out empty, `x.v` fails "narrowed in every
+/// alternative", and the branch publishes the enclosing `string` — a
+/// type NO edge of the disjunction proves on its own.
+#[test]
+fn flow_return_guard_union_counts_a_disjunct_that_re_establishes_a_held_fact() {
+    let expr = expect_clean_flow_value(
+        "function makeProps(x: { v: string | number }) { if (typeof x.v === \"string\" && (typeof x.v === \"string\" || typeof x.v === \"number\")) return { r: x.v }; throw 0 }",
+    );
+    assert_eq!(
+        member_types(&expr, "r"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        ])]
+    );
+    assert_ne!(
+        member_types(&expr, "r"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String,
+        )]
+    );
+}
+
 #[test]
 fn flow_return_declared_authority_is_seeded_before_forward_reads_and_writes() {
     let forward = expect_clean_flow_value(
