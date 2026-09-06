@@ -288,19 +288,56 @@ struct ExpectedNode {
     block_type: Option<&'static str>,
 }
 
+/// A real compile of `/src/App.vue` (`VUE_SFC`) through this typed route,
+/// captured once and pinned here. There is no legacy route left to read the
+/// same demand from a second time — this route is the ONLY WASM path that
+/// produces these bytes — so the golden is the byte-preservation oracle:
+/// established independently of any assertion in this file, from an actual
+/// build, the same way the deleted `assert_runtime_nodes_match_legacy`
+/// helper's second read once was.
+const VUE_APP_GOLDEN: &str = include_str!("host_compile_request_route_golden/vue_app.json");
+
+/// The Svelte counterpart of [`VUE_APP_GOLDEN`], captured from a real
+/// compile of `/src/Widget.svelte` (`SVELTE_SFC`).
+const SVELTE_WIDGET_GOLDEN: &str =
+    include_str!("host_compile_request_route_golden/svelte_widget.json");
+
+/// One golden entry's `{code, sourceMap}` pair, keyed by `kind` for a
+/// module node or `{kind}_{index}` for an indexed one (`style_0`,
+/// `custom_0`) — the same addressing `runtime_nodes` reports.
+#[track_caller]
+fn golden_node<'a>(golden: &'a Value, kind: &str, index: Option<u64>) -> &'a Value {
+    let key = match index {
+        Some(index) => format!("{kind}_{index}"),
+        None => kind.to_string(),
+    };
+    let entry = &golden[&key];
+    assert!(
+        entry.is_object(),
+        "no golden fixture entry for `{key}` — the fixture must be regenerated for a new node"
+    );
+    entry
+}
+
 /// The runtime row publishes exactly this node set, and every published node
 /// carries real compiled content matching its pinned expectation exactly.
 ///
 /// Both directions of the set comparison matter: iterating only the
 /// published list would let the route silently stop publishing a node and
 /// still read as green. The per-node surface is pinned alongside the set:
-/// `code` is never empty, a published `sourceMap` is always a parseable v3
-/// map with mappings (never an empty or corrupt string), `lang`/`meta` match
-/// their expected value EXACTLY (not merely "present"), every module node
-/// (`index: null` — main/script/template) carries a map exactly when the
-/// request asked for maps, and no node carries a map when none was asked.
+/// `code` and (when requested) `sourceMap` must equal the golden fixture's
+/// bytes EXACTLY — not merely "non-empty" or "a parseable v3 map" — so a
+/// wrong-but-plausible byte-for-byte regression fails here. `lang`/`meta`
+/// match their expected value EXACTLY too, every module node (`index: null`
+/// — main/script/template) carries a map exactly when the request asked for
+/// maps, and no node carries a map when none was asked.
 #[track_caller]
-fn assert_published_node_set(response: &Value, expected: &[ExpectedNode], want_source_map: bool) {
+fn assert_published_node_set(
+    response: &Value,
+    expected: &[ExpectedNode],
+    want_source_map: bool,
+    golden: &Value,
+) {
     let nodes = runtime_nodes(response);
     let mut published: Vec<(String, Option<u64>)> = nodes
         .iter()
@@ -318,35 +355,26 @@ fn assert_published_node_set(response: &Value, expected: &[ExpectedNode], want_s
     );
 
     for (kind, index, node) in nodes {
-        assert!(
-            node["code"].as_str().is_some_and(|code| !code.is_empty()),
-            "{kind}/{index:?} must carry compiled code"
-        );
-
         let want = expected
             .iter()
             .find(|w| w.kind == kind && w.index == index)
             .unwrap_or_else(|| panic!("{kind}/{index:?} has no matching expectation entry"));
+
+        let golden_entry = golden_node(golden, &kind, index);
+        assert_eq!(
+            node["code"], golden_entry["code"],
+            "{kind}/{index:?} bytes must match the pinned golden exactly"
+        );
 
         assert_eq!(
             node["lang"].as_str(),
             want.lang,
             "{kind}/{index:?} `lang` must be exactly the expected value"
         );
-        if let Some(map) = node["sourceMap"].as_str() {
-            assert!(
-                !map.is_empty(),
-                "{kind}/{index:?} `sourceMap` must be null or a non-empty string"
-            );
-            let map: Value = serde_json::from_str(map)
-                .unwrap_or_else(|_| panic!("{kind}/{index:?} `sourceMap` must be a JSON map"));
+        if want_source_map {
             assert_eq!(
-                map["version"], 3,
-                "{kind}/{index:?} `sourceMap` must be a v3 source map"
-            );
-            assert!(
-                map["mappings"].as_str().is_some_and(|m| !m.is_empty()),
-                "{kind}/{index:?} `sourceMap` must carry mappings"
+                node["sourceMap"], golden_entry["sourceMap"],
+                "{kind}/{index:?} source map must match the pinned golden exactly"
             );
         }
 
@@ -720,7 +748,19 @@ fn the_vue_runtime_row_publishes_the_carriers_full_node_set() {
         ])),
     );
 
-    assert_published_node_set(&response, &vue_app_expected_nodes(), true);
+    let golden: Value =
+        serde_json::from_str(VUE_APP_GOLDEN).expect("the Vue golden fixture is valid JSON");
+    assert_published_node_set(&response, &vue_app_expected_nodes(), true, &golden);
+    let ide = product_row(&response, "ideCompanion");
+    let ide_golden = golden_node(&golden, "ideCompanion", None);
+    assert_eq!(
+        ide["code"], ide_golden["code"],
+        "the IDE row's bytes must match the pinned golden exactly"
+    );
+    assert_eq!(
+        ide["sourceMap"], ide_golden["sourceMap"],
+        "the IDE row's source map must match the pinned golden exactly"
+    );
 
     // The same demand without maps publishes the same node set with every
     // node map-less: a route that fabricated maps nobody asked for, or kept
@@ -730,7 +770,7 @@ fn the_vue_runtime_row_publishes_the_carriers_full_node_set() {
         "/src/App.vue",
         vue_route_request(json!([runtime_client_product(false)])),
     );
-    assert_published_node_set(&no_map_response, &vue_app_expected_nodes(), false);
+    assert_published_node_set(&no_map_response, &vue_app_expected_nodes(), false, &golden);
 }
 
 /// The Svelte carrier's own node set. Its published set differs from Vue's,
@@ -751,6 +791,8 @@ fn the_svelte_runtime_row_publishes_the_carriers_full_node_set() {
         ])),
     );
 
+    let golden: Value = serde_json::from_str(SVELTE_WIDGET_GOLDEN)
+        .expect("the Svelte golden fixture is valid JSON");
     assert_published_node_set(
         &response,
         &[
@@ -770,6 +812,17 @@ fn the_svelte_runtime_row_publishes_the_carriers_full_node_set() {
             },
         ],
         true,
+        &golden,
+    );
+    let ide = product_row(&response, "ideCompanion");
+    let ide_golden = golden_node(&golden, "ideCompanion", None);
+    assert_eq!(
+        ide["code"], ide_golden["code"],
+        "the IDE row's bytes must match the pinned golden exactly"
+    );
+    assert_eq!(
+        ide["sourceMap"], ide_golden["sourceMap"],
+        "the IDE row's source map must match the pinned golden exactly"
     );
 }
 
