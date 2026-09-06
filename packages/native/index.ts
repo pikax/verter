@@ -266,7 +266,7 @@ export interface CompileBatchRenderProfile {
   /**
    * Codegen filename override (component-name extraction, scope-id
    * derivation, source-map source/file). Omit to fall back to the canonical
-   * id — same semantics as `HostCompileProfile.filename`.
+   * id.
    */
   filename?: string;
   isProduction: boolean;
@@ -278,9 +278,8 @@ export interface CompileBatchRenderProfile {
   sourceMap: boolean;
   /**
    * Preserve template comments. TRI-STATE: omit to keep the compiler
-   * default (`!isProduction` — dev preserves, prod strips), same semantics
-   * as an omitted `HostCompileProfile.comments`. Do NOT collapse an omitted
-   * value to `false`.
+   * default (`!isProduction` — dev preserves, prod strips). Do NOT collapse
+   * an omitted value to `false`.
    */
   comments?: boolean;
   hmrStrategy: "none" | "vite" | "webpack";
@@ -466,7 +465,6 @@ export type {
   HostBlockContentCapturedEcho,
   HostBlockContentCapturedEchoFields,
   HostConfig,
-  HostCompileProfile,
   HostIdeResponse,
   HostDestructuredBinding,
   HostDestructuredBlockMeta,
@@ -534,7 +532,6 @@ import type {
   BlockContentHashToken,
   BlockContentSourceSpaceToken,
   HostBlockContentCapturedEchoFields,
-  HostCompileProfile,
   HostDiagnostic,
 } from "./host-types";
 
@@ -564,7 +561,6 @@ export interface NativeBlockOverrideEntry extends HostBlockContentCapturedEchoFi
 
 export interface NativeBlockOverrideRequest {
   canonicalId: string;
-  compileProfile?: HostCompileProfile;
   overrides: NativeBlockOverrideEntry[];
 }
 
@@ -859,12 +855,9 @@ export declare class VerterHost {
   compileMany(files: CompileBatchInput[], options?: CompileBatchOptions): CompileBatchEntry[];
   applyBlockOverrides(request: NativeBlockOverrideRequest): import("./host-types").HostUpdateResult;
   getPublicApi(canonicalId: string, mode?: HostPublicApiMode): HostPublicApiResult;
-  getIde(
-    canonicalId: string,
-    profile?: import("./host-types").HostCompileProfile,
-  ): import("./host-types").HostIdeResponse | null;
+  getIde(canonicalId: string): import("./host-types").HostIdeResponse | null;
   /**
-   * Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
+   * Ensure the IDE (`CachedTsx`) projection exists for a file.
    *
    * The explicit IDE-ensure path — it compiles the carrier's IDE surface
    * without requesting the runtime `Main` node, so a Main-less carrier
@@ -873,10 +866,7 @@ export declare class VerterHost {
    * projection now exists, `false` when the file has no IDE surface (a
    * non-carrier); a real failure throws.
    */
-  ensureIdeCompiled(
-    canonicalId: string,
-    profile?: import("./host-types").HostCompileProfile,
-  ): boolean;
+  ensureIdeCompiled(canonicalId: string): boolean;
   getVirtualFile(
     query: import("./host-types").HostVirtualQuery,
   ): import("./host-types").HostVirtualFileResponse | null;

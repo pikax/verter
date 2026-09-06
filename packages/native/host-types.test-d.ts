@@ -12,6 +12,9 @@ import type {
   HostBlockOverrideEntry,
   HostExternalSourceRequest,
   HostPreprocessorRequest,
+  HostVirtualQuery,
+  NativeBlockOverrideRequest,
+  VerterHost,
 } from "./index";
 
 type Equal<Left, Right> =
@@ -425,4 +428,57 @@ export {
   unknownIdentityKey,
   unknownNestedOptionKey,
   vueRequest,
+};
+
+// ---------------------------------------------------------------------------
+// The binding states no caller compile shape
+//
+// A compile shape is stated ONLY through the typed framework-discriminated
+// `compileRequest`. The cached read routes (`getVirtualFile` / `getIde` /
+// `ensureIdeCompiled`) and the preprocessor handshake (`applyBlockOverrides`)
+// compile under the host default and declare no profile channel, so a caller
+// that still passes one is a type error rather than a value the boundary
+// silently drops. These legs discriminate a re-introduced profile field or
+// positional profile parameter on the published declarations.
+// ---------------------------------------------------------------------------
+
+declare const boundHost: VerterHost;
+
+const virtualQueryWithProfile: HostVirtualQuery = {
+  rawId: "/App.vue",
+  // @ts-expect-error — a virtual-file query states no compile profile
+  compileProfile: { isProduction: true },
+};
+
+const blockOverrideRequestWithProfile: NativeBlockOverrideRequest = {
+  canonicalId: "/App.vue",
+  // @ts-expect-error — a block-override request states no compile profile
+  compileProfile: { isProduction: true },
+  overrides: [],
+};
+
+// @ts-expect-error — `getIde` takes the canonical id alone
+const ideWithProfile = boundHost.getIde("/App.vue", { target: "ide" });
+
+// @ts-expect-error — `ensureIdeCompiled` takes the canonical id alone
+const ensuredWithProfile = boundHost.ensureIdeCompiled("/App.vue", { target: "ide" });
+
+// Positive control: the same routes accept their published shapes.
+const virtualQuery: HostVirtualQuery = { rawId: "/App.vue" };
+const blockOverrideRequest: NativeBlockOverrideRequest = {
+  canonicalId: "/App.vue",
+  overrides: [],
+};
+const ide = boundHost.getIde("/App.vue");
+const ensured = boundHost.ensureIdeCompiled("/App.vue");
+
+export {
+  blockOverrideRequest,
+  blockOverrideRequestWithProfile,
+  ensured,
+  ensuredWithProfile,
+  ide,
+  ideWithProfile,
+  virtualQuery,
+  virtualQueryWithProfile,
 };

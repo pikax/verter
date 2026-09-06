@@ -969,21 +969,22 @@ const NAPI_EXECUTED: &[&str] = &[
 /// probe's route choice, not the method's product — each name IS a live
 /// product route a per-keystroke consumer is steered toward. The rows make
 /// NO coverage claim over them: this probe neither executes them nor
-/// verifies that any other suite does.
-const NAPI_LEGACY_CACHED_ROUTES_NOT_DRIVEN: &[(&str, &str)] = &[
+/// verifies that any other suite does. Their own behavioural coverage lives
+/// in the binding suite `packages/native/index.spec.ts`.
+const NAPI_CACHED_ROUTES_NOT_DRIVEN: &[(&str, &str)] = &[
     (
         "ensureIdeCompiled",
-        "legacy cached IDE-compile route; this probe demands IDE products through the typed \
+        "cached IDE-compile route; this probe demands IDE products through the typed \
          `compileRequest` instead",
     ),
     (
         "getIde",
-        "legacy cached IDE read; this probe demands IDE products through the typed \
+        "cached IDE read; this probe demands IDE products through the typed \
          `compileRequest` instead",
     ),
     (
         "getVirtualFile",
-        "legacy cached per-node read; this probe demands runtime products through the typed \
+        "cached per-node read; this probe demands runtime products through the typed \
          `compileRequest` instead",
     ),
 ];
@@ -1370,7 +1371,7 @@ fn every_exported_napi_spelling_is_executed_or_classified_out_of_scope() {
         &methods,
         NAPI_EXECUTED,
         NAPI_OUT_OF_SCOPE,
-        &[NAPI_LEGACY_CACHED_ROUTES_NOT_DRIVEN],
+        &[NAPI_CACHED_ROUTES_NOT_DRIVEN],
     );
 
     // The module-level exports are accounted for too.

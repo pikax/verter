@@ -1058,153 +1058,6 @@ fn scheduler_config_from_napi(
 
 #[napi(object)]
 #[derive(Default, Clone)]
-pub struct NapiCompileProfile {
-    pub filename: Option<String>,
-    pub isProduction: Option<bool>,
-    pub customElement: Option<bool>,
-    pub ssr: Option<bool>,
-    /// SSR asset-collection module id registered on `ssrContext.modules`.
-    /// Vite's ssr-manifest keys are ROOT-RELATIVE — the plugin supplies
-    /// `normalizePath(relative(root, filename))`; absent falls back to the
-    /// canonical id. Already honored on the `compile_many` runtime-render
-    /// batch lane (`NapiCompileBatchRenderProfile.ssrModuleId`); this is
-    /// the same field for the per-file lane (`get`/`getIde`/
-    /// `compileWithAudit`/etc.), which previously had no channel for it.
-    pub ssrModuleId: Option<String>,
-    pub hmrStrategy: Option<String>,
-    pub componentId: Option<String>,
-    pub delimiters: Option<Vec<String>>,
-    pub customElements: Option<Vec<String>>,
-    pub comments: Option<bool>,
-    pub runtimeModuleName: Option<String>,
-    pub typesModuleName: Option<String>,
-    pub forceVapor: Option<bool>,
-    pub forceJs: Option<bool>,
-    pub sourceMap: Option<bool>,
-    /// Compilation target preset: "bundler" (default), "ide", or "analysis".
-    pub target: Option<String>,
-    /// Inline the render function inside `setup()` (Vue production topology;
-    /// absent resolves to isProduction).
-    pub inline: Option<bool>,
-    /// Experimental: strict slot children type checking.
-    pub strictSlots: Option<bool>,
-    /// Requested compile cache mode: "stateless", "content", or
-    /// "session" (default).
-    pub requestedMode: Option<String>,
-}
-
-impl From<NapiCompileProfile> for FfiCompileProfile {
-    fn from(n: NapiCompileProfile) -> Self {
-        Self {
-            filename: n.filename,
-            is_production: n.isProduction,
-            custom_element: n.customElement,
-            ssr: n.ssr,
-            ssr_module_id: n.ssrModuleId,
-            hmr_strategy: n.hmrStrategy,
-            component_id: n.componentId,
-            delimiters: n.delimiters,
-            custom_elements: n.customElements,
-            comments: n.comments,
-            runtime_module_name: n.runtimeModuleName,
-            types_module_name: n.typesModuleName,
-            force_vapor: n.forceVapor,
-            force_js: n.forceJs,
-            source_map: n.sourceMap,
-            target: n.target,
-            inline: n.inline,
-            strict_slots: n.strictSlots,
-            requested_mode: n.requestedMode,
-        }
-    }
-}
-
-/// The exact camelCase key set `NapiCompileProfile`'s 19 declared fields
-/// use. `#[napi(object)]`'s derived `FromNapiValue` only reads THESE
-/// declared property names off a JS object — it never enumerates the
-/// object's own keys — so an unrecognized property (e.g. a caller typo
-/// like `compatConfig`) is silently dropped before any Rust-side
-/// validation ever runs. This is the NAPI-side counterpart to the FFI/WASM
-/// boundary's `#[serde(deny_unknown_fields)]` fix on `FfiCompileProfile`:
-/// a fresh JS-object key-enumeration check via `Object::keys()`, since
-/// napi-rs's `#[napi(object)]` derive has no `deny_unknown_fields`-
-/// equivalent attribute.
-const NAPI_COMPILE_PROFILE_KNOWN_KEYS: &[&str] = &[
-    "filename",
-    "isProduction",
-    "customElement",
-    "ssr",
-    "ssrModuleId",
-    "hmrStrategy",
-    "componentId",
-    "delimiters",
-    "customElements",
-    "comments",
-    "runtimeModuleName",
-    "typesModuleName",
-    "forceVapor",
-    "forceJs",
-    "sourceMap",
-    "target",
-    "inline",
-    "strictSlots",
-    "requestedMode",
-];
-
-/// Refuse a `compileProfile`-shaped JS object carrying any key outside
-/// [`NAPI_COMPILE_PROFILE_KNOWN_KEYS`].
-fn reject_unknown_compile_profile_keys(obj: &Object) -> Result<()> {
-    for key in Object::keys(obj)? {
-        if !NAPI_COMPILE_PROFILE_KNOWN_KEYS.contains(&key.as_str()) {
-            return Err(Error::new(
-                Status::InvalidArg,
-                format!(
-                    "unrecognized compileProfile field '{key}'; expected one of: {}",
-                    NAPI_COMPILE_PROFILE_KNOWN_KEYS.join(", ")
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Validate a raw `compileProfile` JS object's keys, then convert it to the
-/// typed `NapiCompileProfile` via the SAME derived `FromNapiValue` codegen
-/// napi-rs would otherwise call automatically at the argument boundary —
-/// this is not a second conversion path, only a validation step inserted
-/// before the existing one runs.
-fn napi_compile_profile_from_object(obj: Object) -> Result<NapiCompileProfile> {
-    reject_unknown_compile_profile_keys(&obj)?;
-    // SAFETY: `obj` is a live `Object` obtained from a valid napi_env/
-    // napi_value pair (either napi-rs's own argument extraction, or —
-    // for the nested case in `reconstruct_with_validated_compile_profile`
-    // — `Object::get::<Object>` over one, which napi-rs already validated
-    // as an object). `NapiCompileProfile::from_napi_value` is the exact
-    // conversion napi-rs's own derive would run for this argument
-    // position; only the unknown-key check above is new.
-    unsafe { NapiCompileProfile::from_napi_value(obj.value().env, obj.raw()) }
-}
-
-/// For an outer `#[napi(object)]` struct `T` with a nested
-/// `compileProfile: Option<NapiCompileProfile>` field (`NapiVirtualQuery`,
-/// `NapiBlockOverrideRequest`): validate that nested object's keys, THEN
-/// reconstruct the full typed `T` via its normal derived conversion. The
-/// outer struct's OWN fields are unaffected — only `compileProfile`'s keys
-/// are checked, matching the review's scoped finding.
-fn reconstruct_with_validated_compile_profile<T: FromNapiValue>(obj: Object) -> Result<T> {
-    if let Some(profile_obj) = obj.get::<Object>("compileProfile")? {
-        reject_unknown_compile_profile_keys(&profile_obj)?;
-    }
-    // SAFETY: `obj` is a live `Object` obtained from napi-rs's own argument
-    // extraction (the caller received it in place of the typed `T` napi
-    // would otherwise have bound directly). `T::from_napi_value` is the
-    // exact conversion napi-rs's own derive would run for this argument
-    // position; only the nested unknown-key check above is new.
-    unsafe { T::from_napi_value(obj.value().env, obj.raw()) }
-}
-
-#[napi(object)]
-#[derive(Default, Clone)]
 pub struct NapiIdeProjectConfig {
     pub root: String,
     pub workspaceRoot: String,
@@ -1285,7 +1138,6 @@ pub struct NapiVirtualQuery {
     pub rawId: Option<String>,
     pub canonicalId: Option<String>,
     pub nodeKind: Option<NapiVirtualNodeKind>,
-    pub compileProfile: Option<NapiCompileProfile>,
 }
 
 impl From<NapiVirtualQuery> for FfiVirtualQuery {
@@ -1294,7 +1146,7 @@ impl From<NapiVirtualQuery> for FfiVirtualQuery {
             raw_id: n.rawId,
             canonical_id: n.canonicalId,
             node_kind: n.nodeKind.map(Into::into),
-            compile_profile: n.compileProfile.map(Into::into),
+            compile_profile: None,
         }
     }
 }
@@ -1407,7 +1259,6 @@ pub struct NapiBlockOverrideEntry {
 #[napi(object)]
 pub struct NapiBlockOverrideRequest {
     pub canonicalId: String,
-    pub compileProfile: Option<NapiCompileProfile>,
     pub overrides: Vec<NapiBlockOverrideEntry>,
 }
 
@@ -2974,9 +2825,10 @@ impl NapiVerterHost {
     ///
     /// Returns the same changeset structure as [`upsert`](Self::upsert).
     #[napi(js_name = "applyBlockOverrides")]
-    pub fn apply_block_overrides(&self, request: Object) -> Result<NapiUpdateResult> {
-        let request: NapiBlockOverrideRequest =
-            reconstruct_with_validated_compile_profile(request)?;
+    pub fn apply_block_overrides(
+        &self,
+        request: NapiBlockOverrideRequest,
+    ) -> Result<NapiUpdateResult> {
         let canonical_for_source = request.canonicalId.clone();
         let overrides = request
             .overrides
@@ -3022,7 +2874,7 @@ impl NapiVerterHost {
             .collect::<Result<Vec<_>>>()?;
         let ffi_req = FfiBlockOverrideRequest {
             canonical_id: request.canonicalId,
-            compile_profile: request.compileProfile.map(Into::into),
+            compile_profile: None,
             overrides,
         };
         let host_req = ffi_block_override_to_host(ffi_req).map_err(ffi_err)?;
@@ -3037,8 +2889,9 @@ impl NapiVerterHost {
     /// Retrieves a single compiled virtual file (script, template, or style).
     ///
     /// The query can identify the file by raw import ID or by canonical ID +
-    /// node kind. A compile profile may be provided to control production
-    /// mode, SSR, source maps, etc.
+    /// node kind. The compile shape is the host default; a caller that needs
+    /// to state production mode, SSR, source maps, or a target explicitly
+    /// uses the typed `compileRequest` route instead.
     ///
     /// Returns the compiled code, optional source map, language hint, and
     /// any compilation diagnostics.
@@ -3046,8 +2899,10 @@ impl NapiVerterHost {
     /// Returns `null` if the virtual node does not exist (e.g. no `<script>` block).
     /// Returns an error if the query is invalid or the source file is not found.
     #[napi(js_name = "getVirtualFile")]
-    pub fn get_virtual_file(&self, query: Object) -> Result<Option<NapiVirtualFileResponse>> {
-        let query: NapiVirtualQuery = reconstruct_with_validated_compile_profile(query)?;
+    pub fn get_virtual_file(
+        &self,
+        query: NapiVirtualQuery,
+    ) -> Result<Option<NapiVirtualFileResponse>> {
         let canonical_for_source = if let Some(canonical) = query.canonicalId.as_ref() {
             Some(canonical.clone())
         } else if let Some(raw_id) = query.rawId.as_ref() {
@@ -3201,15 +3056,8 @@ impl NapiVerterHost {
     ///
     /// Returns `{ code, sourceMap?, isJsx }` or `null` if no IDE output is available.
     #[napi(js_name = "getIde")]
-    pub fn get_ide(
-        &self,
-        canonical_id: String,
-        profile: Option<Object>,
-    ) -> Result<Option<NapiIdeResponse>> {
-        let profile = profile.map(napi_compile_profile_from_object).transpose()?;
-        let ffi_profile: Option<FfiCompileProfile> = profile.map(Into::into);
-        let host_profile = ffi_profile_to_host(ffi_profile)
-            .map_err(|e| Error::new(Status::InvalidArg, format!("invalid profile: {e}")))?;
+    pub fn get_ide(&self, canonical_id: String) -> Result<Option<NapiIdeResponse>> {
+        let host_profile = verter_session::CompileProfile::default();
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.get_ide(&canonical_id, &host_profile)
         }))?;
@@ -3217,34 +3065,21 @@ impl NapiVerterHost {
         Ok(result.map(|response| host_ide_to_napi(response, sfc_source.as_deref().unwrap_or(""))))
     }
 
-    /// Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
+    /// Ensure the IDE (`CachedTsx`) projection exists for a file.
     ///
     /// The explicit IDE-ensure path: it compiles the carrier's IDE surface
     /// (never requesting the runtime `Main` node), so a Main-less carrier
     /// (Svelte) populates its `CachedTsx` and a subsequent `getIde` succeeds.
     /// `getIde` itself stays a pure cached read.
     ///
-    /// The caller profile is OPTIONAL and is normalized to an IDE/TSX-bearing
-    /// target INTERNALLY, so a default / bundler profile (no TSX bit) still
-    /// produces the IDE surface. Returns `true` when the carrier HAS an IDE
-    /// surface, and `false` ONLY for a genuine no-IDE-surface file (a
-    /// non-carrier / plain script).
-    ///
-    /// A profile that ALSO asks for a runtime product makes this a COMBINED
-    /// request identity: if the carrier fail-closes on that runtime surface the
-    /// transaction publishes nothing, and this rejects the typed runtime-surface
-    /// refusal rather than reporting a missing IDE surface. A real failure
-    /// (missing source / compile error) rejects too.
+    /// The default compile shape is normalized to an IDE/TSX-bearing target
+    /// INTERNALLY, so the bundler default (no TSX bit) still produces the IDE
+    /// surface. Returns `true` when the carrier HAS an IDE surface, and
+    /// `false` ONLY for a genuine no-IDE-surface file (a non-carrier / plain
+    /// script). A real failure (missing source / compile error) rejects.
     #[napi(js_name = "ensureIdeCompiled")]
-    pub fn ensure_ide_compiled(
-        &self,
-        canonical_id: String,
-        profile: Option<Object>,
-    ) -> Result<bool> {
-        let profile = profile.map(napi_compile_profile_from_object).transpose()?;
-        let ffi_profile: Option<FfiCompileProfile> = profile.map(Into::into);
-        let host_profile = ffi_profile_to_host(ffi_profile)
-            .map_err(|e| Error::new(Status::InvalidArg, format!("invalid profile: {e}")))?;
+    pub fn ensure_ide_compiled(&self, canonical_id: String) -> Result<bool> {
+        let host_profile = verter_session::CompileProfile::default();
         catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.ensure_ide_compiled(&canonical_id, &host_profile)
         }))?
@@ -4543,9 +4378,9 @@ pub struct NapiCompileBatchInput {
 /// The batch-level render profile for a public RuntimeRender request (JS
 /// mirror of [`host_compile::CompileBatchRenderProfile`]). Every field is
 /// output-affecting and uniform across a single bundler build. This carries
-/// the full output-affecting projection of the JS `HostCompileProfile`: Vue's
-/// private render worker reproduces the `getVirtualFile` output byte-for-byte,
-/// while Svelte keeps the effective host-backed path.
+/// the full output-affecting projection a bundler render states: Vue's
+/// private render worker reproduces the host-backed runtime output
+/// byte-for-byte, while Svelte keeps the effective host-backed path.
 #[napi(object)]
 pub struct NapiCompileBatchRenderProfile {
     /// Style stages owned by this render: `"complete"` (default) or
@@ -4554,7 +4389,7 @@ pub struct NapiCompileBatchRenderProfile {
     pub styleProcessing: Option<String>,
     /// Codegen filename override (component-name extraction, scope-id
     /// derivation, source-map `source`/`file`). Absent falls back to the
-    /// canonical id — same semantics as `HostCompileProfile.filename`.
+    /// canonical id.
     pub filename: Option<String>,
     pub isProduction: bool,
     /// Vue custom-element script policy. Independent of `customElements`.
@@ -4564,8 +4399,7 @@ pub struct NapiCompileBatchRenderProfile {
     pub forceVapor: bool,
     pub sourceMap: bool,
     /// Preserve template comments. TRI-STATE: absent keeps the compiler
-    /// default (`!isProduction` — dev preserves, prod strips), same
-    /// semantics as an absent `HostCompileProfile.comments`. Do NOT
+    /// default (`!isProduction` — dev preserves, prod strips). Do NOT
     /// collapse an omitted value to `false`.
     pub comments: Option<bool>,
     /// HMR strategy: "none" | "vite" | "webpack".
@@ -4911,122 +4745,6 @@ mod tests {
                 "compileMany must never enter the lint subsystem; found `{forbidden}`"
             );
         }
-    }
-
-    /// The per-file `ssrModuleId` used to have no channel on
-    /// `NapiCompileProfile` at all — honored on the batch `runtime-render`
-    /// lane (`NapiCompileBatchRenderProfile.ssrModuleId`) but silently
-    /// dropped for every per-file call (`get`/`getIde`/`compileWithAudit`).
-    /// This is the exact `NapiCompileProfile` -> `FfiCompileProfile` hop the
-    /// route-inventory named as the fix site.
-    #[test]
-    fn per_file_ssr_module_id_survives_the_napi_to_ffi_hop() {
-        let napi_profile = NapiCompileProfile {
-            ssrModuleId: Some("assets/Comp.vue".to_string()),
-            ..Default::default()
-        };
-        let ffi_profile: FfiCompileProfile = napi_profile.into();
-        assert_eq!(
-            ffi_profile.ssr_module_id,
-            Some("assets/Comp.vue".to_string())
-        );
-    }
-
-    #[test]
-    fn absent_ssr_module_id_stays_none() {
-        let napi_profile = NapiCompileProfile::default();
-        let ffi_profile: FfiCompileProfile = napi_profile.into();
-        assert_eq!(ffi_profile.ssr_module_id, None);
-    }
-
-    /// Boundary-decode equivalence: the SAME logical compile intent
-    /// expressed through NAPI's `NapiCompileProfile -> FfiCompileProfile`
-    /// hop (this crate's `From` impl) and through WASM's route (a
-    /// `FfiCompileProfile` decoded directly from JSON — simulated here by
-    /// constructing it by hand, since `serde_wasm_bindgen`'s decode is
-    /// itself a straight field-for-field `Deserialize`, not a second
-    /// conversion authority) must converge on the EXACT SAME
-    /// `verter_session::CompileProfile` once both reach the shared
-    /// `ffi_profile_to_host` convergence point. A field the NAPI `From`
-    /// impl silently dropped, or mapped to a different host field than the
-    /// WASM-shaped input would, surfaces here as a `CompileProfile`
-    /// inequality — not a per-field spot check.
-    #[test]
-    fn napi_and_wasm_boundary_decode_converge_on_the_same_compile_profile() {
-        let napi_profile = NapiCompileProfile {
-            filename: Some("Comp.vue".to_string()),
-            isProduction: Some(true),
-            customElement: Some(true),
-            ssr: Some(true),
-            ssrModuleId: Some("assets/Comp.vue".to_string()),
-            hmrStrategy: Some("vite".to_string()),
-            componentId: Some("comp-id".to_string()),
-            delimiters: Some(vec!["[[".to_string(), "]]".to_string()]),
-            customElements: Some(vec!["my-".to_string()]),
-            comments: Some(true),
-            runtimeModuleName: Some("vue".to_string()),
-            typesModuleName: Some("$verter/types".to_string()),
-            forceVapor: Some(true),
-            forceJs: Some(true),
-            sourceMap: Some(true),
-            target: Some("ide".to_string()),
-            inline: Some(true),
-            strictSlots: Some(true),
-            requestedMode: Some("content".to_string()),
-        };
-        // Same logical intent, expressed as the raw `FfiCompileProfile`
-        // WASM's `serde_wasm_bindgen` decode would produce from the
-        // equivalent JS object.
-        let wasm_shaped_ffi_profile = FfiCompileProfile {
-            filename: Some("Comp.vue".to_string()),
-            is_production: Some(true),
-            custom_element: Some(true),
-            ssr: Some(true),
-            ssr_module_id: Some("assets/Comp.vue".to_string()),
-            hmr_strategy: Some("vite".to_string()),
-            component_id: Some("comp-id".to_string()),
-            delimiters: Some(vec!["[[".to_string(), "]]".to_string()]),
-            custom_elements: Some(vec!["my-".to_string()]),
-            comments: Some(true),
-            runtime_module_name: Some("vue".to_string()),
-            types_module_name: Some("$verter/types".to_string()),
-            force_vapor: Some(true),
-            force_js: Some(true),
-            source_map: Some(true),
-            target: Some("ide".to_string()),
-            inline: Some(true),
-            strict_slots: Some(true),
-            requested_mode: Some("content".to_string()),
-        };
-
-        let via_napi: FfiCompileProfile = napi_profile.into();
-        let napi_host_profile =
-            ffi_profile_to_host(Some(via_napi)).expect("NAPI-shaped profile must decode");
-        let wasm_host_profile = ffi_profile_to_host(Some(wasm_shaped_ffi_profile))
-            .expect("WASM-shaped profile must decode");
-
-        assert_eq!(
-            napi_host_profile, wasm_host_profile,
-            "NAPI and WASM boundary decode must converge on an identical CompileProfile \
-             for the same logical compile intent"
-        );
-        // Discriminating: a regression that silently drops a field in
-        // either hop would still pass a bare equality check if BOTH sides
-        // drop it identically (both regress to the same default). Assert
-        // representative fields explicitly reached their non-default
-        // values so the test cannot pass by both sides going quietly to
-        // `CompileProfile::default()`.
-        assert!(napi_host_profile.ssr);
-        assert!(napi_host_profile.force_vapor);
-        assert_eq!(napi_host_profile.component_id.as_deref(), Some("comp-id"));
-        assert_eq!(
-            napi_host_profile.delimiters,
-            Some(("[[".to_string(), "]]".to_string()))
-        );
-        assert_eq!(
-            napi_host_profile.requested_mode,
-            verter_session::CompileCacheMode::Content
-        );
     }
 
     #[test]

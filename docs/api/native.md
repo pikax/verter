@@ -342,12 +342,6 @@ Get a compiled virtual file from the host. Triggers compilation if needed.
 ```ts
 const file = host.getVirtualFile({
   rawId: "App.vue",
-  compileProfile: {
-    isProduction: true,
-    ssr: false,
-    hmrStrategy: "none",
-    sourceMap: true,
-  },
 });
 // file.code — compiled output
 // file.sourceMap — source map JSON string
@@ -422,14 +416,12 @@ returned surface rather than depending on an internal virtual filename.
 
 **Returns:** `HostPublicApiResult`
 
-#### `host.getIde(canonicalId, profile?)`
+#### `host.getIde(canonicalId)`
 
-Get the IDE representation of a file for type checking. Used by the LSP and provider integration.
+Get the IDE representation of a file for type checking. Used by the LSP and provider integration. This is a pure cached read; call `host.ensureIdeCompiled(canonicalId)` first to populate the projection.
 
 ```ts
-const ide = host.getIde("/path/to/App.vue", {
-  target: "ide",
-});
+const ide = host.getIde("/path/to/App.vue");
 // ide.code — valid TSX or JSX code
 // ide.sourceMap — source map JSON string
 // ide.isJsx — true for JSX, false for TSX
@@ -629,45 +621,6 @@ interface HostConfig {
   resolveExtensions?: string[];
   /** Static analysis level during upsert(). Default: "full" */
   analysisLevel?: "full" | "essential" | "none";
-}
-```
-
-### `HostCompileProfile`
-
-Controls how a file is compiled. Different profiles produce different outputs (e.g., dev vs. prod, SSR vs. client).
-
-```ts
-interface HostCompileProfile {
-  /** Override filename for the compilation */
-  filename?: string;
-  /** Production mode optimizations */
-  isProduction?: boolean;
-  /** Vue custom-element script policy; independent of customElements */
-  customElement?: boolean;
-  /** Server-side rendering mode */
-  ssr?: boolean;
-  /** HMR strategy: "none", "vite", or "webpack" */
-  hmrStrategy?: "none" | "vite" | "webpack";
-  /** Component scope ID */
-  componentId?: string;
-  /** Custom template delimiters */
-  delimiters?: [string, string];
-  /** Custom element tag names */
-  customElements?: string[];
-  /** Preserve HTML comments in output */
-  comments?: boolean;
-  /** Custom Vue runtime module name */
-  runtimeModuleName?: string;
-  /** Custom types module name */
-  typesModuleName?: string;
-  /** Force Vapor mode output */
-  forceVapor?: boolean;
-  /** Force JavaScript output (strip TypeScript) */
-  forceJs?: boolean;
-  /** Generate source maps */
-  sourceMap?: boolean;
-  /** Compilation target preset */
-  target?: "bundler" | "ide" | "analysis";
 }
 ```
 

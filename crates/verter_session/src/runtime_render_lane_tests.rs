@@ -167,9 +167,9 @@ fn render_with_profile(
     entries.pop().unwrap()
 }
 
-/// The CURRENT unplugin Main-render path oracle: upsert the file and call
-/// `get_virtual_file(Main)` with the EXACT `CompileProfile` unplugin would
-/// pass to `getVirtualFile({ compileProfile })`. This is the byte-parity
+/// The bundler Main-render path oracle: upsert the file and call
+/// `get_virtual_file(Main)` under the EXACT `CompileProfile` a bundler
+/// render states. This is the byte-parity
 /// target the RuntimeRender lane must match — NOT `compile_many(HostBacked)`
 /// (whose profile is the frozen bundler preset). Returns
 /// `(code, source_map, lang)`.
