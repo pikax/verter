@@ -60,6 +60,11 @@ function applyTextEdits(
   const lineEditsByLine = new Map<number, LineColumnEdit[]>();
 
   for (const edit of sorted) {
+    // Edits must be non-overlapping and non-duplicate. A duplicate/overlapping
+    // edit (e.g. the same component name listed twice) would otherwise splice
+    // its replacement in twice, producing invalid output — skip it instead.
+    if (edit.start < cursor) continue;
+
     newCode += code.slice(cursor, edit.start);
 
     // Advance the line cursor to the line containing this edit.
@@ -98,15 +103,22 @@ function applyTextEdits(
  * inside a replaced span is clamped to the replacement's new start column —
  * the token it named no longer exists, and the closest still-meaningful
  * position is where its replacement begins.
+ *
+ * An unparseable map is dropped (`undefined`) rather than passed through
+ * unshifted: a stale map describing pre-rewrite positions is worse than no
+ * map at all, since it silently mispoints instead of visibly disappearing.
  */
-function shiftMapColumns(mapJson: string, lineEditsByLine: Map<number, LineColumnEdit[]>): string {
+function shiftMapColumns(
+  mapJson: string,
+  lineEditsByLine: Map<number, LineColumnEdit[]>,
+): string | undefined {
   let parsed: { mappings?: unknown; [key: string]: unknown };
   try {
     parsed = JSON.parse(mapJson);
   } catch {
-    return mapJson;
+    return undefined;
   }
-  if (typeof parsed.mappings !== "string") return mapJson;
+  if (typeof parsed.mappings !== "string") return undefined;
 
   const decoded = decode(parsed.mappings);
   for (const [lineIndex, rawEdits] of lineEditsByLine) {
@@ -194,7 +206,7 @@ export function stripComponents(
   if (componentNames.length === 0) return { code, map };
 
   const edits: TextEdit[] = [];
-  for (const name of componentNames) {
+  for (const name of new Set(componentNames)) {
     const pattern = `_resolveComponent("${name}")`;
     const replacement = `(() => ({ __name: "${name}", render: () => null }))()`;
     for (const [start, end] of findAllOccurrences(code, pattern)) {

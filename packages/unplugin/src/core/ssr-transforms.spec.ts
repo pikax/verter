@@ -1,4 +1,4 @@
-import { encode } from "@jridgewell/sourcemap-codec";
+import { decode, encode } from "@jridgewell/sourcemap-codec";
 import { describe, expect, it } from "vitest";
 import { replaceImportMetaSsr, stripComponents } from "./ssr-transforms.js";
 
@@ -70,9 +70,9 @@ describe("replaceImportMetaSsr", () => {
   });
 
   it("shifts a later token's mapped column by the length the rewrite removed", () => {
-    // `import.meta.server` (19 chars) → `false` (5 chars): a 14-byte shrink.
+    // `import.meta.server` (18 chars) → `false` (5 chars): a 13-byte shrink.
     // A mapping naming a source position at generated column 30 — right
-    // after the rewritten token — must land 14 columns earlier post-rewrite.
+    // after the rewritten token — must land 13 columns earlier post-rewrite.
     const code = "const a = import.meta.server; const later = 1";
     const beforeCol = code.indexOf("later"); // column of `later` in the ORIGINAL code
     const mappings = encode([
@@ -92,11 +92,17 @@ describe("replaceImportMetaSsr", () => {
     expect(result.code).toBe("const a = false; const later = 1");
 
     const decodedMap = JSON.parse(result.map!);
-    // `later`'s new generated column should have shrunk by the same 14 bytes
+    // `later`'s new generated column should have shrunk by the same 13 bytes
     // the replacement removed, not stayed at its stale pre-rewrite column.
     expect(decodedMap.mappings).not.toBe(mappings);
     const newCol = beforeCol - ("import.meta.server".length - "false".length);
     expect(result.code.slice(newCol, newCol + 5)).toBe("later");
+
+    // Assert the shift amount directly against the decoded map, not just the
+    // code: a wrong-delta shift could still coincidentally leave the code
+    // slice correct while the map segment points elsewhere.
+    const decodedSegments = decode(decodedMap.mappings);
+    expect(decodedSegments[0][1][0]).toBe(newCol);
   });
 });
 
@@ -130,5 +136,11 @@ describe("stripComponents", () => {
     const code = 'const x = _resolveComponent("Foo")';
     const result = stripComponents(code, []).code;
     expect(result).toBe(code);
+  });
+
+  it("applies a single replacement even when a name is listed twice", () => {
+    const code = 'const a = _resolveComponent("GoogleMap")';
+    const result = stripComponents(code, ["GoogleMap", "GoogleMap"]).code;
+    expect(result).toBe('const a = (() => ({ __name: "GoogleMap", render: () => null }))()');
   });
 });
