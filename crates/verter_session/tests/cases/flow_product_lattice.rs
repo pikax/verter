@@ -381,3 +381,94 @@ fn frame_join_folds_every_domain_by_its_own_rule() {
          re-readying the subject"
     );
 }
+
+/// The frame's subject vocabulary is a NAMING, not a hint: one subject per
+/// `(scope layer, name)`, and the binding space never collides with the
+/// parameter space.
+///
+/// Every product here is subject-keyed — a guard fact carries its
+/// subject's identity and the narrowing kill rule compares by it — so a
+/// subject two binders answered to would let one binder's write erase the
+/// other's facts. The mint is what makes that unrepresentable, and the
+/// legs below are the two ways it could stop being injective: folding the
+/// two scope layers onto one key (a `var` and a `let` of the same name
+/// would then share products across a block restore), and letting a
+/// parameter ordinal land on a binding slot of the same number.
+#[test]
+fn a_frame_subject_never_names_two_binders() {
+    let mut bindings = FlowFrameBindings::new();
+
+    let lexical = bindings.subject(FlowBindingLayer::Lexical, "x");
+    let function = bindings.subject(FlowBindingLayer::Function, "x");
+    assert_ne!(
+        lexical, function,
+        "the two scope layers are disjoint subject spaces: a hoisted `x` \
+         and a lexical `x` are two binders and must never share a slot"
+    );
+
+    assert_eq!(
+        bindings.subject(FlowBindingLayer::Lexical, "x"),
+        lexical,
+        "one binder resolves to ONE subject for the whole frame: a second \
+         resolution of the same name in the same layer is the same slot, \
+         not a fresh one"
+    );
+    assert_ne!(
+        bindings.subject(FlowBindingLayer::Lexical, "y"),
+        lexical,
+        "two names in one layer are two subjects"
+    );
+
+    // The read-side mint never grows the table, so a name no declaration
+    // or read ever resolved has no slot at all — an unresolved name
+    // cannot be answered with some other binder's products.
+    assert_eq!(
+        bindings.resolved(FlowBindingLayer::Lexical, "x"),
+        Some(match &lexical {
+            FlowProductSubject::FrameBinding(slot) => *slot,
+            FlowProductSubject::FrameParam(_) => panic!("a binding mints a binding subject"),
+        }),
+        "the read-side mint answers with the slot the write-side allocated"
+    );
+    assert!(
+        bindings
+            .resolved(FlowBindingLayer::Lexical, "neverDeclared")
+            .is_none(),
+        "a name nothing resolved has no slot, so a pure read never grows \
+         the subject vocabulary"
+    );
+
+    // The parameter space is separate: ordinal 0 is not binding slot 0,
+    // even though both are the first identity their space hands out.
+    let first_binding = bindings.subject(FlowBindingLayer::Lexical, "first");
+    let mut fresh = FlowFrameBindings::new();
+    let slot_zero = fresh.subject(FlowBindingLayer::Lexical, "first");
+    assert_ne!(
+        FlowFrameBindings::param(0),
+        slot_zero,
+        "a parameter ordinal and a binding slot of the same number are two \
+         subjects: the spaces are disjoint by construction"
+    );
+    assert_ne!(FlowFrameBindings::param(0), first_binding);
+    assert_ne!(
+        FlowFrameBindings::param(0),
+        FlowFrameBindings::param(1),
+        "two parameter ordinals are two subjects"
+    );
+
+    // The keying is what the store observes: distinct subjects hold
+    // distinct products in the same domain, and neither write moves the
+    // other.
+    let mut store = FlowProductStore::new();
+    store.set_declared_type(&lexical, Some(SemanticNodeId(1)));
+    store.set_declared_type(&function, Some(SemanticNodeId(2)));
+    store.set_declared_type(&FlowFrameBindings::param(0), Some(SemanticNodeId(3)));
+    assert_eq!(store.declared_type(&lexical), Some(SemanticNodeId(1)));
+    assert_eq!(store.declared_type(&function), Some(SemanticNodeId(2)));
+    assert_eq!(
+        store.declared_type(&FlowFrameBindings::param(0)),
+        Some(SemanticNodeId(3)),
+        "three distinct subjects hold three products: a shared key would \
+         have left one write standing for all of them"
+    );
+}
