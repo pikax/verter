@@ -1,7 +1,7 @@
 <!-- unified-charter-v2
 id=EPR3
 name=Bundled sidecar shipping and distribution channel
-predecessors=EPR1
+predecessors=EPR1,EPR4
 phase=expansion
 train=expansion.engine-provisioning
 product=engine_provisioning
@@ -66,6 +66,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 ## Exact predecessor contracts
 
 - **EPR1:** implemented ledger row for “Engine artifact identity, compatibility, integrity, and cache contract”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **EPR4:** supplies the production artifact types and shared compatibility/integrity/origin validator specified by EPR1. This channel consumes that implementation and adds no parallel candidate-validation authority. Its implemented ledger row satisfies the predecessor; commit metadata remains a locator hint only.
 - **External requirement maintainer_bundled_engine_shipping:** agents obtain the maintainer decision; tooling does not validate it.
 
 ## Source-specific scope
@@ -77,7 +78,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 - The shipped bytes and manifest are validated after packaging/extraction, not only before staging.
 - Package whitelists/guards are amended deliberately to allow only exact authorized paths/digests/layouts.
 - SBOM, license, provenance, size, update cadence, rollback, and security response are release acceptance inputs.
-- Runtime sees the bundled candidate through the same EPR1 descriptor/validation as other sources.
+- Runtime sees the bundled candidate through the same EPR4 descriptor/validator implementation, governed by the EPR1 contract, as other sources.
 - Unavailable platform rows remain explicit; no package claims a bundle that it does not contain.
 - Bundled presence never overrides EPR0 source policy or EPR4 selection rules implicitly.
 
@@ -116,7 +117,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 **Expected changes:**
 
 - Implement deterministic staging input process and cached release receipt.
-- Reuse EPR1 validation before staging.
+- Reuse the EPR4 validator under the EPR1 contract before staging; build-time evidence collection does not introduce a parallel candidate-validation authority.
 
 **Discriminating proof:**
 

@@ -7,7 +7,7 @@ product=cli
 kind=adapter
 semantic_role=delivery
 class=successor
-predecessors=CLI1,TIF0
+predecessors=CLI1,TIF0,PM4
 owner=expansion.cli:one `verter` application service with thin command adapters
 conflict_domains=cli_application
 resource_class=ts-heavy
@@ -53,6 +53,7 @@ Verter-native `typecheck` command. The current owner is **separate package launc
 
 - **CLI1:** implemented ledger row for “Shared application services, selection, invocation, reporters”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **TIF0:** implemented ledger row for “TypeInfo query/selector and authority-composition contract”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **PM4:** implemented ledger row for “Project-model consumer cutover and convergence”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope
@@ -60,7 +61,7 @@ Verter-native `typecheck` command. The current owner is **separate package launc
 - **Revision:** 4 — supersedes the 251-charter all-verticals proposal
 - **Prepared:** 2026-08-26
 - **Repository basis:** program/architecture-lock at d1f3d50a948597f036868543b9bb21acacd730ff
-- **Current-program condition:** maintainer work freeze; TCM0 = RESCOPE_REQUIRED; TCM1–TCM4 = LOCKED
+- **Current-program condition:** readiness follows the current DAG and implemented ledger; historical source-plan freeze/lock labels are not active dispatch instructions.
 
 ## Acceptance IDs and discriminating proof
 
@@ -86,7 +87,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Target ceiling: 300 production LOC, 3 production files, 1 related crates/packages.
 - Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
 - Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
-- Performance budget: when preflight identifies touched authority or a hot path, equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance remains 0.0% unless an owning-authority amendment supplies exact replacement thresholds. Otherwise performance evidence is not applicable; do not create counters or a 100-request retention soak solely to satisfy this charter.
+- Performance acceptance: use the exact applicable metric rows and methodology from performance-gates.toml, the applicable MEM0 budget, or the owning ratified product catalog, under contracts/resource-and-finalization.md (L2). Exact work invariants, latency/allocation/RSS limits under their owning methodology, and bounded new-capability budgets are distinct. New capabilities and deliberate pressure policies declare bounded new work and replacement SLOs before measurement. Missing required coverage needs an owning-contract amendment before measurement; no implicit 0.0% threshold or post-hoc rebaseline applies.
 
 ## Abort conditions
 
@@ -110,7 +111,7 @@ Before squashing or review, the implementation patch transitions this node's pre
 ## Reconciled source-plan contract
 
 **Intent:** expose the composed Verter diagnostic plan as a non-emitting command distinct from the TypeScript-compatible driver.
-**Predecessors:** `CLI1`, `TIF0`.
+**Predecessors:** `CLI1`, `TIF0`, `PM4`.
 **Subblocks:** (1) select exact carrier/framework/project profiles; (2) compose only native/framework type diagnostics and certified TypeScript observations according to their owners; (3) return provenance/completeness/NeedInputs; (4) enforce zero filesystem writes and exclude lint/formatting; (5) project/reference/watch inputs; (6) incremental/fresh/differential/performance tests.
 **Acceptance:** `verter typecheck` means Verter’s composed native/framework/TS diagnostic plan and writes nothing; it is not an alias for `tsc --noEmit`; unavailable owners produce truthful partial/NeedInputs results.
 **Forbidden:** emit, CLI-owned diagnostics, creating a second TS program, silently selecting the first project, or collapsing partiality to success.
@@ -120,3 +121,7 @@ Before squashing or review, the implementation patch transitions this node's pre
 
 The recovery candidate mechanically split this source-owned atomic node into the following labels: `CLI2-A`, `CLI2-B`, `CLI2-C`, `CLI2-D`, `CLI2-E`, `CLI2-F`. They have no separate dispatch, lease, receipt, migration manifest, deletion ownership, or review standing. Their useful source-described concerns are internal RED/GREEN checklist items of **CLI2**; CLI2 alone owns the complete migration population, exactly one final deletion/cutover, and atomic acceptance. Any quoted “suggested subblock” wording in transferred source text is non-authoritative planning context.
 
+
+## Required contract contribution
+
+- **PM4:** Project/reference selection for typecheck consumes the converged project service; no first-project or CLI-private resolver fallback is allowed. Its implemented ledger row supplies this predecessor; locator hints remain non-authoritative.

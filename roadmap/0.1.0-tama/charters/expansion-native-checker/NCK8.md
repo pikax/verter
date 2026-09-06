@@ -1,7 +1,7 @@
 <!-- unified-charter-v2
 id=NCK8
 name=Native checker terminal and displaced-authority deletion
-predecessors=NCK7,NCKF0,PER0,UAO0,UAP0,BR0
+predecessors=NCK7,NCKF0,PER0,UAO0,UAP0,BR0,PM4
 phase=expansion
 train=expansion.native-checker
 product=native_checker
@@ -69,6 +69,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 - **UAO0:** implemented ledger row for “Activation, observation, TypeInfo, index, and performance contract lock”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **UAP0:** implemented ledger row for “Capability, coexistence, rule/action, formatter, and public contract lock”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **BR0:** implemented ledger row for “Post-L4 successor product promotion”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **PM4:** implemented ledger row for “Project-model consumer cutover and convergence”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope
@@ -304,3 +305,7 @@ Apply `architecture-3`: 3 fresh distinct harness tasks covering exactly `adversa
 ## Trusted implementation ledger
 
 Before squashing or review, the implementation patch transitions this node's predeclared row in `authority/state/implemented.toml` from `status = "pending"` to `status = "implemented"` with the planned squash commit message, approximate date with timezone, and optional pull-request number. The transitioned row is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
+
+## Required contract contribution
+
+- **PM4:** Native checker promotion requires the sole project authority to be used by all public project-sensitive consumers. Its implemented ledger row supplies this predecessor; locator hints remain non-authoritative.

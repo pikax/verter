@@ -36,6 +36,7 @@ max_related_packages = 0
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.0.4"
 
 [[node]]
 id = "PM1"
@@ -72,6 +73,7 @@ max_related_packages = 2
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.0.4"
 
 [[node]]
 id = "PM2"
@@ -108,6 +110,7 @@ max_related_packages = 2
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.0.4"
 
 [[node]]
 id = "PM3"
@@ -144,6 +147,7 @@ max_related_packages = 2
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.0.4"
 
 [[node]]
 id = "PM4"
@@ -180,3 +184,4 @@ max_related_packages = 1
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.0.4"

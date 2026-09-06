@@ -259,7 +259,7 @@ export const LIVE_UNIVERSE = Object.freeze({
     "control:CTL-authority-edge.mutation": "d9361439d4f8d039",
     "control:CTL-authority-edge.observed": "6c63fa6cfd680cf6",
     "control:CTL-ledger-row.mutation": "a943296a6da74117",
-    "control:CTL-ledger-row.observed": "72baa0833e3f7798",
+    "control:CTL-ledger-row.observed": "edd96f2740b2f6e5",
     "control:CTL-register-status.mutation": "5fdac66ab9b1e9cd",
     "control:CTL-register-status.observed": "e8260c5fc2be6583",
     "control:CTL-contract-section.mutation": "a06e1efd6b603f29",
