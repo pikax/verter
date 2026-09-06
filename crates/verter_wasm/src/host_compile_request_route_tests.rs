@@ -761,6 +761,14 @@ fn the_vue_runtime_row_publishes_the_carriers_full_node_set() {
         ide["sourceMap"], ide_golden["sourceMap"],
         "the IDE row's source map must match the pinned golden exactly"
     );
+    assert_eq!(
+        ide["isJsx"], ide_golden["isJsx"],
+        "the IDE row's `isJsx` flag must match the pinned golden exactly"
+    );
+    assert_eq!(
+        response["diagnostics"], golden["diagnostics"],
+        "the clean fixture's complete diagnostics envelope must match the pinned golden exactly"
+    );
 
     // The same demand without maps publishes the same node set with every
     // node map-less: a route that fabricated maps nobody asked for, or kept
@@ -823,6 +831,14 @@ fn the_svelte_runtime_row_publishes_the_carriers_full_node_set() {
     assert_eq!(
         ide["sourceMap"], ide_golden["sourceMap"],
         "the IDE row's source map must match the pinned golden exactly"
+    );
+    assert_eq!(
+        ide["isJsx"], ide_golden["isJsx"],
+        "the IDE row's `isJsx` flag must match the pinned golden exactly"
+    );
+    assert_eq!(
+        response["diagnostics"], golden["diagnostics"],
+        "the clean fixture's complete diagnostics envelope must match the pinned golden exactly"
     );
 }
 
