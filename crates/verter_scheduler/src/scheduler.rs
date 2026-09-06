@@ -17581,9 +17581,9 @@ mod tests {
     /// `pump_ready` is the cooperative-pump primitive: it drains the
     /// inbox and dispatches every currently-ready job. A driver-led
     /// pump with a fresh submission must report progress on both
-    /// the drain AND the dispatch counters; a follow-up pump with
-    /// no fresh submissions must report no progress (so the driver
-    /// can safely park).
+    /// the drain AND the dispatch counters; a pump run against a
+    /// scheduler that has settled must report no progress (so the
+    /// driver can safely park).
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn pump_ready_drains_inbox_and_dispatches_ready_jobs() {
@@ -17593,7 +17593,7 @@ mod tests {
         let sched = test_scheduler_with_loader(loader);
 
         // Submit a request — lands in the inbox.
-        let _handle = sched.submit_request(Request {
+        let handle = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
             target: TargetStage::Source,
             priority: Priority::Interactive,
@@ -17617,23 +17617,55 @@ mod tests {
         );
         assert!(stats.made_progress(), "non-zero counters imply progress");
 
-        // Second pump immediately: no fresh submission, the
-        // dispatched job is in-flight on the pool. Progress must
-        // be reported as false so the driver can park.
+        // The dispatched job runs on the pool and posts its OWN stage
+        // completion back into the inbox, so the pump immediately
+        // after dispatch has real work waiting — draining that
+        // completion is genuine progress, not a spurious counter.
+        // Idleness is only well-defined once the request has reached a
+        // terminal state, and this scheduler carries no driver thread,
+        // so the test owns the pump that gets it there. Bounded: a
+        // scheduler that never carries the request to terminal fails
+        // here rather than looping forever.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let state = loop {
+            if let Some(state) = handle.try_get() {
+                break state;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "request never reached a terminal state under a test-owned pump",
+            );
+            sched.pump_ready(PumpReason::DriverLoop, CallerKind::Driver);
+            std::thread::yield_now();
+        };
+        assert!(
+            matches!(state, CompletionState::Ready(_)),
+            "the Source request must complete Ready, got {state:?}",
+        );
+
+        // Settled: the stage completion that resolved the handle was
+        // drained by the pump that resolved it, nothing is admitted,
+        // nothing is ready. Every counter must be zero so the driver
+        // parks instead of spinning.
         let idle = sched.pump_ready(PumpReason::DriverLoop, CallerKind::Driver);
         assert_eq!(
             idle.drained, 0,
-            "idle pump drained={}, expected 0",
+            "settled pump drained={}, expected 0",
             idle.drained
         );
         assert_eq!(
             idle.dispatched, 0,
-            "idle pump dispatched={}, expected 0",
+            "settled pump dispatched={}, expected 0",
             idle.dispatched,
+        );
+        assert_eq!(
+            idle.executed_inline, 0,
+            "settled pump executed_inline={}, expected 0",
+            idle.executed_inline,
         );
         assert!(
             !idle.made_progress(),
-            "idle pump with no work must NOT report progress, got {idle:?}",
+            "settled pump with no work must NOT report progress, got {idle:?}",
         );
     }
 
