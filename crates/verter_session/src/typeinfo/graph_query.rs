@@ -11,7 +11,8 @@
 //!    ([`validate_type_info_graph_request`]) runs before any semantic
 //!    work: a malformed envelope (op/payload mismatch, schema-echo
 //!    divergence, missing closure / display policy, out-of-range
-//!    expansion budgets, an unsupported `includeDegraded` flag) answers
+//!    expansion budgets, unsupported `includeProvenance` /
+//!    `includeDegraded` flags) answers
 //!    with the typed wire `error` arm and never reaches resolution.
 //!    Unbounded export is therefore structurally rejected: an expanded
 //!    closure without explicit in-range budgets cannot pass validation.

@@ -288,6 +288,15 @@ pub fn validate_resolve_symbol_graph_request(
     if request.name.is_empty() {
         return Err(malformed_payload_error_with_detail("missing symbol name")());
     }
+    // This route raises through TypeExpr before encoding the graph, so it
+    // no longer has the stable declaration-slot identities required to
+    // populate node_id_map / symbol_id_map. Refuse the flag rather than
+    // emit a graph that claims provenance while carrying empty maps.
+    if request.include_provenance {
+        return Err(malformed_payload_error_with_detail(
+            "includeProvenance is not supported by the resolve-symbol graph export",
+        )());
+    }
     // `includeDegraded` is rejected rather than ignored: the bounded
     // graph export's degraded markers are structural fail-closed stops,
     // not optional detail this operation could admit or withhold, so a

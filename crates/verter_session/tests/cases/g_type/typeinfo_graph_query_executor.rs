@@ -372,6 +372,23 @@ fn include_degraded_is_rejected_as_unsupported() {
 }
 
 #[test]
+fn include_provenance_is_rejected_before_graph_construction() {
+    let host = host_with_fixture();
+    let mut envelope = resolve_envelope("/types.ts", "Foo", ProjectionMode::Expanded);
+    if let Some(type_info_graph_request::Payload::ResolveSymbol(request)) =
+        envelope.payload.as_mut()
+    {
+        request.include_provenance = true;
+    }
+    let (response, _record) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
+    let error = response.expect_err("unsupported provenance is rejected before graph export");
+    assert!(matches!(
+        error.kind,
+        Some(type_info_request_error::Kind::MalformedPayload(_))
+    ));
+}
+
+#[test]
 fn unserved_closure_kinds_are_refused_fail_closed() {
     let host = host_with_fixture();
     for kind in [

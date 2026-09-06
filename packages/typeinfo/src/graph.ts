@@ -17,6 +17,8 @@
  * is rejected client-side before it ever reaches the wire. The
  * producer-side walk is budget-bounded and fail-closed (a budget
  * marker is an `opaque` node, decoded here as `unknown(raw)`).
+ * Resolve-symbol provenance is rejected because this TypeExpr export
+ * cannot populate the stable declaration-slot identity maps.
  *
  * **String-table identity.** The bounded export reserves string id 0 as
  * the absent sentinel (mirroring node id 0): a 0 in a name-bearing
@@ -29,7 +31,12 @@
 import { create, fromBinary } from "@bufbuild/protobuf";
 import {
   GraphClosurePolicySchema,
+  GraphDisplayBranding,
+  GraphDisplayQualification,
+  GraphOperation,
   GraphPrimitiveKind,
+  GraphProjectionMode,
+  GraphReductionDemand,
   TypeInfoGraphRequestSchema,
   TypeInfoGraphResponseSchema,
   type GraphClosurePolicy,
@@ -104,19 +111,18 @@ export interface ResolveSymbolGraphQuery {
   /** Closure policy; defaults to the bounded one-level policy. */
   closure?: GraphClosureSpec;
   /**
-   * Ask the host to populate the graph's provenance maps
-   * (`nodeIdMap` / `symbolIdMap` — snapshot-local ids to stable
-   * decl-slot identities); defaults to `false`.
+   * Reserved for a graph export that can populate stable declaration-slot
+   * provenance. The resolve-symbol TypeExpr export currently rejects `true`.
    */
   includeProvenance?: boolean;
 }
 
-const MODE_TAGS: Record<GraphProjectionModeTag, number> = {
-  identity: 0,
-  navigate: 1,
-  shallow: 2,
-  expanded: 3,
-  skeleton: 4,
+const MODE_TAGS: Record<GraphProjectionModeTag, GraphProjectionMode> = {
+  identity: GraphProjectionMode.IDENTITY,
+  navigate: GraphProjectionMode.NAVIGATE,
+  shallow: GraphProjectionMode.SHALLOW,
+  expanded: GraphProjectionMode.EXPANDED,
+  skeleton: GraphProjectionMode.SKELETON,
 };
 
 /**
@@ -133,23 +139,31 @@ export function buildTypeInfoRequest(query: ResolveSymbolGraphQuery): WireTypeIn
   if (!query.name) {
     throw new TypeError("buildTypeInfoRequest: name is required");
   }
+  if (query.includeProvenance) {
+    throw new TypeError(
+      "buildTypeInfoRequest: provenance is not supported by the resolve-symbol graph export",
+    );
+  }
   const closure = closureInit(query.closure ?? { kind: "oneLevel" });
   return create(TypeInfoGraphRequestSchema, {
     schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
-    operation: 0, // GraphOperation.RESOLVE_SYMBOL
+    operation: GraphOperation.RESOLVE_SYMBOL,
     payload: {
       case: "resolveSymbol",
       value: {
         canonicalId: query.canonicalId,
         name: query.name,
-        context: { mode: MODE_TAGS[query.mode ?? "expanded"], demand: 0 },
+        context: {
+          mode: MODE_TAGS[query.mode ?? "expanded"],
+          demand: GraphReductionDemand.PUBLISHED,
+        },
         closure,
         displayPolicy: {
-          qualification: 1,
-          branding: 1,
+          qualification: GraphDisplayQualification.SHORT,
+          branding: GraphDisplayBranding.ON,
           budgets: { maxStringLength: 4096, maxDepth: 16 },
         },
-        includeProvenance: query.includeProvenance ?? false,
+        includeProvenance: false,
         includeDiagnostics: true,
         includeProjection: [],
         includeDegraded: false,
@@ -298,8 +312,20 @@ export function graphNodeToDescriptor(
   nodeId: number,
   visited: ReadonlySet<number> = new Set(),
 ): TypeDescriptor {
+  return graphNodeToDescriptorWithBudget(view, nodeId, visited, { visits: 0 });
+}
+
+function graphNodeToDescriptorWithBudget(
+  view: SemanticTypeGraphView,
+  nodeId: number,
+  visited: ReadonlySet<number>,
+  budget: DecodeBudget,
+): TypeDescriptor {
   if (visited.has(nodeId)) {
     return unknown("[cycle]");
+  }
+  if (!consumeDecodeVisit(budget)) {
+    return unknown("decode budget exceeded");
   }
   const node = view.nodes[nodeId];
   const kind = node?.kind;
@@ -311,7 +337,7 @@ export function graphNodeToDescriptor(
   const next = new Set(visited);
   next.add(nodeId);
   const walk = (id: number): TypeDescriptor =>
-    id === 0 ? unknown("absent") : graphNodeToDescriptor(view, id, next);
+    id === 0 ? unknown("absent") : graphNodeToDescriptorWithBudget(view, id, next, budget);
 
   switch (kind.case) {
     case "primitive":
@@ -386,7 +412,7 @@ export function graphNodeToDescriptor(
       return recursiveRef(name, args, []);
     }
     case "object":
-      return objectDescriptor(view, kind.value, walk, next);
+      return objectDescriptor(view, kind.value, walk, next, budget);
     case "objectSpreadProgram":
       // An ordered construction program is not a flat member surface:
       // its spread operands and bare call/construct effects have no
@@ -424,28 +450,38 @@ interface WireObjectMemberShape {
   propertyKey?: { key?: { case?: string; value?: unknown } };
 }
 
+interface DecodeBudget {
+  visits: number;
+}
+
+function consumeDecodeVisit(budget: DecodeBudget): boolean {
+  if (budget.visits >= MAX_EXPANSION_NODE_BUDGET) return false;
+  budget.visits += 1;
+  return true;
+}
+
 function objectDescriptor(
   view: SemanticTypeGraphView,
   value: WireObjectShape,
   walk: (id: number) => TypeDescriptor,
   visited: ReadonlySet<number>,
+  budget: DecodeBudget,
 ): TypeDescriptor {
   const properties: ObjectProperty[] = [];
   const indexSignatures: ObjectIndexSignature[] = [];
   for (const member of value.members) {
     const name = keyNameFromOneof(view, member.propertyKey, walk);
-    const type = walk(member.valueNodeId);
     if (member.memberKind === 1 || member.memberKind === 2 || member.memberKind === 3) {
       // method / get / set — the value node is the callable-object
       // carrying the signature; `func`-decode it under the SAME visited
       // set (a crafted cyclic method value must stop at the guard).
       properties.push({
         name,
-        type: callableDescriptor(view, member.valueNodeId, visited),
+        type: callableDescriptor(view, member.valueNodeId, visited, budget),
         optional: member.optional,
       });
     } else {
-      properties.push({ name, type, optional: member.optional });
+      properties.push({ name, type: walk(member.valueNodeId), optional: member.optional });
     }
   }
   for (const index of value.indexSignatures) {
@@ -500,13 +536,20 @@ function callableDescriptor(
   view: SemanticTypeGraphView,
   nodeId: number,
   visited: ReadonlySet<number>,
+  budget: DecodeBudget,
 ): TypeDescriptor {
+  if (visited.has(nodeId)) {
+    return unknown("[cycle]");
+  }
+  if (!consumeDecodeVisit(budget)) {
+    return unknown("decode budget exceeded");
+  }
   const node = view.nodes[nodeId];
   const kind = node?.kind;
   const next = new Set(visited);
   next.add(nodeId);
   const walk = (id: number): TypeDescriptor =>
-    id === 0 ? unknown("absent") : graphNodeToDescriptor(view, id, next);
+    id === 0 ? unknown("absent") : graphNodeToDescriptorWithBudget(view, id, next, budget);
   if (kind?.case === "object" && kind.value.callSignatureRefs.length > 0) {
     return signatureDescriptor(view, view.signatures[kind.value.callSignatureRefs[0]], walk);
   }

@@ -111,21 +111,20 @@ describe("buildTypeInfoRequest", () => {
     expect(() => buildTypeInfoRequest({ canonicalId: "/types.ts", name: "" })).toThrow();
   });
 
-  it("carries the provenance request flag (default off, explicit on)", () => {
+  // @ai-generated - Pins rejection of provenance that this operation cannot populate.
+  it("rejects unavailable provenance requests", () => {
     // Default: no provenance maps are requested.
     const off = buildTypeInfoRequest({ canonicalId: "/types.ts", name: "Foo" });
     const offPayload = off.payload;
     if (offPayload.case !== "resolveSymbol") throw new Error("resolve payload expected");
     expect(offPayload.value.includeProvenance).toBe(false);
-    // Explicit: the host populates nodeIdMap / symbolIdMap on the answer.
-    const on = buildTypeInfoRequest({
-      canonicalId: "/types.ts",
-      name: "Foo",
-      includeProvenance: true,
-    });
-    const onPayload = on.payload;
-    if (onPayload.case !== "resolveSymbol") throw new Error("resolve payload expected");
-    expect(onPayload.value.includeProvenance).toBe(true);
+    expect(() =>
+      buildTypeInfoRequest({
+        canonicalId: "/types.ts",
+        name: "Foo",
+        includeProvenance: true,
+      }),
+    ).toThrow(/provenance/i);
   });
 });
 
@@ -508,6 +507,53 @@ describe("decodeTypeInfoResult", () => {
     expect(method?.kind).toBe("function");
     if (method?.kind !== "function") throw new Error("method decodes to a function");
     expect(method.parameters[0].type.kind).toBe("unknown");
+  });
+
+  // @ai-generated - Pins one shared monotonic decode budget across callable walks.
+  it("bounds repeated DAG decode work across callable signatures", () => {
+    const methodCount = 9_000;
+    const response = encodeGraphResponse({
+      schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+      strings: { entries: ["", "m"] },
+      nodes: [
+        {},
+        {
+          kind: {
+            case: "object",
+            value: {
+              members: Array.from({ length: methodCount }, () => methodMember(1, 2)),
+            },
+          },
+        },
+        { kind: { case: "object", value: { callSignatureRefs: [0] } } },
+        { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.STRING } } },
+      ],
+      symbols: [],
+      signatures: [
+        {
+          typeParameterNodeIds: [],
+          parameters: [
+            { nameId: 0, typeNodeId: 3, optional: false, rest: false, inferencePolicy: 0 },
+          ],
+          returnTypeNodeId: 3,
+          overloadIndex: 0,
+          isConstruct: false,
+          isImplementation: false,
+          isAbstract: false,
+          flags: 0,
+        },
+      ],
+      rootIds: [1],
+    });
+    const result = decodeTypeInfoResult(response);
+    if (result.kind !== "graph") throw new Error("graph arm expected");
+    if (result.root.kind !== "object") throw new Error("object root expected");
+    expect(
+      result.root.properties.some(
+        (property) =>
+          property.type.kind === "unknown" && property.type.rawType === "decode budget exceeded",
+      ),
+    ).toBe(true);
   });
 
   it("decodes an object spread program as a named shell, not a closed member list", () => {

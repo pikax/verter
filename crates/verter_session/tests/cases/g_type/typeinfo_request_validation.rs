@@ -146,6 +146,14 @@ fn resolve_symbol_request_well_formed_passes() {
         .expect("a well-formed resolve-symbol request must validate");
 }
 
+#[test]
+fn resolve_symbol_request_rejects_unavailable_provenance() {
+    let mut request = valid_resolve_symbol_request();
+    request.include_provenance = true;
+    let err = validate_resolve_symbol_graph_request(&request).unwrap_err();
+    assert_eq!(err_variant_label(&err), "MalformedPayload");
+}
+
 // ───────── EvaluateTypeExpressionGraph ─────────
 
 fn valid_evaluate_type_expression_request() -> wire::EvaluateTypeExpressionGraphRequest {
