@@ -439,10 +439,8 @@ impl FlowProductValue {
 
 // ── Keys and subjects ──────────────────────────────────────────────────
 
-/// Why a product key could not be minted: the node is outside the bound
-/// graph's index space, the graph node is a binding the frame's inventory
-/// cannot name (so no stable cross-frame identity exists), or the domain
-/// carries no product in this substrate.
+/// Why a product key could not be minted: the domain carries no product in
+/// this substrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowProductKeyError {
     /// A registry domain this substrate carries no product for.
@@ -584,9 +582,9 @@ impl FlowFrameBindings {
     }
 }
 
-/// The product key of `domain` at `subject` — the mint frame-subject
-/// callers use. A productless domain is a typed error, exactly as it is
-/// on the graph mint.
+/// The product key of `domain` at `subject` — the SOLE key construction.
+/// A productless domain is a typed error rather than a slot nothing could
+/// ever hold a value for.
 pub fn frame_product_key(
     domain: FlowDomain,
     subject: FlowProductSubject,
@@ -597,7 +595,7 @@ pub fn frame_product_key(
     Ok(FlowProductKey { domain, subject })
 }
 
-// ── Store, seeds, budget ───────────────────────────────────────────────
+// ── Store and budget ───────────────────────────────────────────────────
 
 /// The ONE product store: computed products keyed by [`FlowProductKey`].
 ///
@@ -621,7 +619,7 @@ impl FlowProductStore {
     }
 }
 
-/// The axis a product solve exhausted.
+/// The axis a product fold exhausted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlowProductBudgetAxis {
     /// Fixed-point iterations.
@@ -649,10 +647,10 @@ pub struct FlowProductBudgetExceeded {
     pub observed: u32,
 }
 
-/// The resource policy one product solve runs under.
+/// The resource policy one product fold runs under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FlowProductBudget {
-    /// The maximum number of fixed-point iterations. A solve that
+    /// The maximum number of fixed-point iterations. A fold that
     /// stabilizes WITHIN this many iterations completes; one that would
     /// need another iteration is budget-exhausted.
     pub max_iterations: u32,
