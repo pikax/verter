@@ -11,7 +11,8 @@ use super::*;
 /// import (or blank).
 #[test]
 fn ide_source_map_publishes_helper_preamble_boundary_for_empty_setup() {
-    let (code, json) = gen_tsx_script_with_sourcemap("<script setup lang=\"ts\">\n</script>\n");
+    let source = "<script setup lang=\"ts\">\n</script>\n";
+    let (code, json) = gen_tsx_script_with_sourcemap(source);
 
     let map: serde_json::Value = serde_json::from_str(&json).expect("valid source map JSON");
     let boundary = &map["x_verter_helper_preamble_end"];
@@ -28,6 +29,16 @@ fn ide_source_map_publishes_helper_preamble_boundary_for_empty_setup() {
     assert!(
         line >= 1,
         "at least one helper-import line precedes the boundary"
+    );
+    let anchors = map["x_verter_mapping_product"]["insertion_anchors"]
+        .as_array()
+        .expect("mapping product insertion anchors");
+    assert_eq!(anchors.len(), 1);
+    assert_eq!(anchors[0][0], 0, "the provider inserts at output start");
+    assert_eq!(
+        anchors[0][1],
+        source.find('\n').expect("script content boundary") as u64 + 1,
+        "the insertion anchor is the authored script-content start"
     );
 
     let lines: Vec<&str> = code.lines().collect();

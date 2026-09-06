@@ -278,26 +278,45 @@ pub(super) fn collect_builtin_components(
 pub(super) fn emit_helper_imports(
     out: &mut CodeGenOutput<'_>,
     pos: u32,
+    carrier_anchor: Option<u32>,
     options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
     template_ast: Option<&crate::ast::types::TemplateAst>,
 ) {
-    emit_helper_imports_inner(out, pos, options, builtin_components, template_ast, false);
+    emit_helper_imports_inner(
+        out,
+        pos,
+        carrier_anchor,
+        options,
+        builtin_components,
+        template_ast,
+        false,
+    );
 }
 
 pub(super) fn emit_helper_imports_with_define_component(
     out: &mut CodeGenOutput<'_>,
     pos: u32,
+    carrier_anchor: Option<u32>,
     options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
     template_ast: Option<&crate::ast::types::TemplateAst>,
 ) {
-    emit_helper_imports_inner(out, pos, options, builtin_components, template_ast, true);
+    emit_helper_imports_inner(
+        out,
+        pos,
+        carrier_anchor,
+        options,
+        builtin_components,
+        template_ast,
+        true,
+    );
 }
 
 fn emit_helper_imports_inner(
     out: &mut CodeGenOutput<'_>,
     pos: u32,
+    carrier_anchor: Option<u32>,
     options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
     template_ast: Option<&crate::ast::types::TemplateAst>,
@@ -386,7 +405,7 @@ fn emit_helper_imports_inner(
     // the transform remembers this insertion so source-map generation can publish the typed
     // preamble-end boundary (the generated-TSX position immediately after these imports) that the
     // LSP auto-import classifier gates on.
-    out.prepend_helper_preamble(pos, &imports);
+    out.prepend_helper_preamble(pos, carrier_anchor, &imports);
 }
 
 /// Emit all type constructs to the `buf` string (no sourcemap).

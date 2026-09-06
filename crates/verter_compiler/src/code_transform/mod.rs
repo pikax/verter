@@ -37,6 +37,7 @@ mod chunk;
 #[allow(clippy::module_inception)] // CodeTransform struct lives in code_transform module
 mod code_transform;
 mod fallible;
+mod mapping_product;
 mod segmented;
 mod source_map;
 
@@ -54,6 +55,13 @@ pub(crate) use code_transform::{
 // module is private, so this is its only public path).
 #[allow(unused_imports)] // consumed by tests and by out-of-module callers
 pub use fallible::CodeTransformError;
+// The dual-surface mapping product. Geometry's owner is the transform that
+// emitted the bytes, so the product is minted here and nowhere else; see
+// `mapping_product`'s module doc for the totality and one-to-many contracts.
+pub use mapping_product::{
+    CarrierClass, CarrierRegion, InsertionAnchor, MappingProduct, ProjectedClass, ProjectedRegion,
+    Span,
+};
 pub use source_map::{advance_generated_position, SourceMapOptions};
 // The additive, opt-in segmented-overwrite primitive's plain data carrier.
 // `pub` only because it rides inside otherwise-`pub` types elsewhere in the
@@ -64,5 +72,7 @@ pub use segmented::SegmentAnchor;
 
 #[cfg(test)]
 mod edit_semantics_tests;
+#[cfg(test)]
+mod mapping_product_tests;
 #[cfg(test)]
 mod tests;

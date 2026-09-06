@@ -295,6 +295,12 @@ jobs:
               # surface — and a root is only covered by its own subtree pattern.
               - 'crates/verter_identity/**'
               - 'crates/verter_session/**'
+              # The mapping-product geometry the instrument cites at file
+              # granularity: one record's evidence anchor and negative-control
+              # subject, plus the case file that record executes.
+              - 'crates/verter_compiler/Cargo.toml'
+              - 'crates/verter_compiler/src/code_transform/mapping_product.rs'
+              - 'crates/verter_compiler/src/code_transform/mapping_product_tests.rs'
               - 'crates/verter_compile_contracts/Cargo.toml'
               - 'crates/verter_type_runtime/Cargo.toml'
               - 'crates/verter_type_runtime/tests/main.rs'
