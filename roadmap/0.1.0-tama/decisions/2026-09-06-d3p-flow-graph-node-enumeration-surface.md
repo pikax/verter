@@ -84,3 +84,30 @@ What follows from that:
 - **Ratification amends this record's `Status` line only.** No charter field,
   budget, or ledger row changes with it; the amendment's content is fixed
   above.
+- **Only the maintainer can clear it.** No implementer or reviewer pass can:
+  writing "accepted" here without the maintainer's decision is the
+  back-dating this record already refuses. So the gate stays open, and stays
+  visible, until that decision is taken.
+
+### Precedent
+
+This is the second CROSS-CRATE production-surface amendment in the stacked
+chain, and the first was ratified.
+`2026-09-02-d3r-typeof-carrier-mint-site-and-test-home.md` amends the same
+charter sentence — D3R's "production surface is `crates/verter_session/src`
+ONLY" — for a deviation into the same crate this one enters. D3R's ratified
+ask is the larger of the two: its candidate changes four files under
+`crates/verter_semantic/src` (+178 / -8), and its ratification section names
+the deviation as cross-crate explicitly rather than folding it into the
+package count. The maintainer ratified it on 2026-09-05, and it carries
+`Status: accepted (ratified by the maintainer, 2026-09-05)`.
+
+The precedent is context for the decision, not a substitute for it. It does not
+make this record ratified, and a reviewer should read the `Status` line above
+rather than this section. What it establishes is that the question in front of
+the maintainer is narrow and has been answered once for this chain: whether a
+read-only accessor on the flow substrate the charter itself names as the
+owner's substrate is inside D3P's declared `max_related_packages = 2`, or
+whether the "`crates/verter_session/src` only" sentence binds ahead of that
+field. This candidate's answer to it is one file, +9 / -0, and no executable
+behaviour outside `crates/verter_session/src`.

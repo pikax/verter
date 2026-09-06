@@ -9,10 +9,29 @@
 ## How the footprint was derived
 
 From the COMPLETE candidate diff rather than from the module inventory, so the
-count cannot omit a file the patch touched:
+count cannot omit a file the patch touched. `<branch-base>` is this candidate's
+own base — the tip of the stacked predecessor it builds on, not the merge base
+with the default branch, which would fold the predecessors' footprints into
+this node's.
+
+The table has two columns and therefore two commands, and BOTH are stated. An
+earlier revision named only the first, so its code-line column could not be
+reproduced at all and both columns had drifted from the tree by the time they
+were read: a record whose numbers cannot be re-derived from the commands it
+prints is a transcription, not a derivation.
+
+Raw added lines, per file:
 
 ```
 git diff --numstat <branch-base>..HEAD -- 'crates/**/src/**'
+```
+
+Code lines — the same added lines with blank and `//`-only lines excluded:
+
+```
+git diff <branch-base>..HEAD -- <file> \
+  | grep '^+' | grep -v '^+++' | sed 's/^+//' \
+  | grep -vE '^[[:space:]]*$' | grep -vE '^[[:space:]]*//' | wc -l
 ```
 
 An earlier revision of this record enumerated the module inventory instead and
@@ -27,13 +46,13 @@ Every source file the candidate changes, measured against the branch base:
 
 | file | added raw lines | code lines (blank/`//`-only excluded) |
 | --- | --- | --- |
-| `crates/verter_session/src/project_semantic_dispatch/flow_products.rs` | 1552 | 1005 |
+| `crates/verter_session/src/project_semantic_dispatch/flow_products.rs` | 1550 | 1001 |
 | `crates/verter_session/src/project_semantic_dispatch/flow_solve.rs` | 24 | 8 |
 | `crates/verter_semantic/src/analysis/flow/flow_graph.rs` | 9 | 4 |
 | `crates/verter_session/src/for_tests.rs` | 8 | 4 |
 | `crates/verter_session/src/project_semantic_dispatch/mod.rs` | 5 | 1 |
 | `crates/verter_session/src/flow_gap_retraction_tests.rs` | 3 | 0 |
-| **total** | **1601** | **1022** |
+| **total** | **1599** | **1018** |
 
 Six files against `max_production_files = 8` and `rescope_files = 12`; two crates
 against `max_related_packages = 2`. Two of the six are not production paths at
@@ -42,8 +61,8 @@ all: `for_tests.rs` is the crate's test-support re-export surface, and
 text. The file and package axes are inside every declared line either way.
 
 The LOC axis straddles the numeric signal depending on the counting convention:
-1022 under a code-line count (inside `rescope_loc = 1500`, above the 800 planning
-reference); 1601 under a raw added-line count (across `rescope_loc` by 101 lines).
+1018 under a code-line count (inside `rescope_loc = 1500`, above the 800 planning
+reference); 1599 under a raw added-line count (across `rescope_loc` by 99 lines).
 `contracts/sizing.md` fixes no convention, so this record investigates rather than
 assuming the favourable one.
 
@@ -82,7 +101,7 @@ its own scope and its own review.
    would land dark with no consumer at all rather than dark with a driven test surface.
 
 2. **A third of the module is the ownership contract the charter's evidence policy
-   asks for.** 547 of the 1552 lines are blank or comment; the module header alone
+   asks for.** 549 of the 1550 lines are blank or comment; the module header alone
    states five load-bearing ownership boundaries (product-state algebra versus semantic
    type algebra, the one domain registry, the one store with a module-private write
    surface, the structurally-unwarmable degraded arm, and binding identity that is both
