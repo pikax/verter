@@ -48,7 +48,9 @@ export function applyTextEdits(
   map: string | undefined,
   edits: TextEdit[],
 ): SsrRewriteResult {
-  if (edits.length === 0) return { code, map };
+  if (edits.length === 0) {
+    return { code, map: map === undefined || parseSourceMap(map) ? map : undefined };
+  }
 
   const sorted = [...edits].sort((a, b) => a.start - b.start);
 
@@ -112,13 +114,8 @@ function shiftMapColumns(
   mapJson: string,
   lineEditsByLine: Map<number, LineColumnEdit[]>,
 ): string | undefined {
-  let parsed: { mappings?: unknown; [key: string]: unknown };
-  try {
-    parsed = JSON.parse(mapJson);
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed.mappings !== "string") return undefined;
+  const parsed = parseSourceMap(mapJson);
+  if (!parsed || typeof parsed.mappings !== "string") return undefined;
 
   const decoded = decode(parsed.mappings);
   for (const [lineIndex, rawEdits] of lineEditsByLine) {
@@ -146,6 +143,20 @@ function shiftMapColumns(
 
   parsed.mappings = encode(decoded);
   return JSON.stringify(parsed);
+}
+
+/** Parse a source map JSON value only when it is safe to access object properties. */
+function parseSourceMap(
+  mapJson: string,
+): { mappings?: unknown; [key: string]: unknown } | undefined {
+  try {
+    const parsed: unknown = JSON.parse(mapJson);
+    return parsed !== null && typeof parsed === "object"
+      ? (parsed as { mappings?: unknown; [key: string]: unknown })
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Find every non-overlapping occurrence of a literal string, as `[start, end)` ranges. */

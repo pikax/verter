@@ -153,6 +153,18 @@ describe("stripComponents", () => {
 });
 
 describe("applyTextEdits", () => {
+  // @ai-generated - Tests that invalid JSON source-map values are dropped on both edit paths.
+  it("drops a parsed null source map whether or not text changes", () => {
+    expect(applyTextEdits("before", "null", [{ start: 0, end: 6, replacement: "after" }])).toEqual({
+      code: "after",
+      map: undefined,
+    });
+    expect(applyTextEdits("unchanged", "null", [])).toEqual({
+      code: "unchanged",
+      map: undefined,
+    });
+  });
+
   it("skips an edit whose range is properly contained in a prior edit's range, not just a plain duplicate", () => {
     // The second edit's [start, end) range (2, 8) falls entirely inside the
     // first edit's (0, 10) — a real containment overlap, not the same range
