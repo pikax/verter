@@ -2836,27 +2836,13 @@ const msg = 'hello'
     }
   });
 
-  // CHARACTERIZED, NOT FIXED — a defect in a different owner.
-  //
   // `replaceImportMetaSsr` / `stripComponents` (`src/core/ssr-transforms.ts`,
   // applied in the carrier transform of `src/index.ts`) rewrite the compiled
-  // module with plain string replacement AFTER the host produced it. The
-  // replacements change byte offsets — `import.meta.server` → `false` is 13
-  // bytes shorter — while the map the host published for that module is
-  // handed on unchanged, so the published pair describes two different texts.
-  //
-  // Measured on the fixture below: the host places `later` at generated line 7
-  // column 39 and the map names that position; `import.meta.server` → `false`
-  // shortens the line from 48 bytes to 35 and moves `later` to column 26, so
-  // the published map points past the end of the line it describes.
-  //
-  // This is NOT introduced by publishing the map on the inline product: the
-  // Vite branch has always cached the SAME rewritten code beside the SAME host
-  // map for the script sub-request. The fix belongs to the SSR
-  // dead-code-elimination pass, which must apply its rewrites through a
-  // map-aware mechanism instead of `String.replaceAll`, and is out of scope
-  // here.
-  it.skip("maps a token that the SSR rewrite moved to its new generated column", async () => {
+  // module's text. Each rewrite changes byte offsets — `import.meta.server` →
+  // `false` is 13 bytes shorter — so the rewrite carries the in-flight map
+  // through the same call and shifts its generated columns to match, instead
+  // of handing the pre-rewrite map on unchanged beside the rewritten text.
+  it("maps a token that the SSR rewrite moved to its new generated column", async () => {
     // `later` sits AFTER the rewritten expression on the same line, so the
     // rewrite moves it left. Every mapping at or beyond that point is then off
     // by the length the replacement removed.
