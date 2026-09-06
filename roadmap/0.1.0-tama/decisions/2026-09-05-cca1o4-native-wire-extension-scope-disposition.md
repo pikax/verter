@@ -73,11 +73,100 @@ Ratify ONE of:
 
 - **(a) Accept the expansion as scoped here** (recommended). The three
   fields and two enums are the minimum the preservation invariant requires;
-  each is additive, optional, and fail-closed. CCA1O4's charter gains the
-  pointer section below.
+  each is additive, optional, and fail-closed. CCA1O4's charter already
+  carries the pointer section naming this record.
 - **(b) Reject.** Then the wire extension reverts, the unplugin migration
   cannot meet its own acceptance, and CCA1O4 needs a rescope that sequences
   a wire-extension node ahead of it.
 
 Until the ruling, this record stands as the disclosure; it is not itself an
 approval.
+
+## Complete inventory of the rule- and evidence-bearing changes
+
+An earlier inventory for this candidate classified three files and reached
+none of the governance-bearing paths under `roadmap/`, which left the
+operator without a whole-candidate view. The complete set of rule-bearing or
+evidence-bearing paths this candidate touches, over its whole base-to-head
+range, is enumerated here so the ruling above can be taken on the whole
+footprint rather than on the wire extension alone.
+
+Nothing in this set softens, removes, or exempts a rule. The two rule TEXTS
+the candidate touches — the charter section and this record — only ADD
+disclosure.
+
+1. `authority/state/implemented.toml` — the trusted ledger. Two deltas.
+   (a) This node's own predeclared `"CCA1O4"` line transitions
+   `pending` → `implemented` with its commit message and date: the mandated
+   transition, and the only status change in the file. (b) The `"MEM0"` and
+   `"MEM1"` rows move from between `"G4"` and `"G5"` to their sorted position
+   after `"MDXR0"`. Both rows arrived on the base while this branch was open,
+   at a non-canonical offset; `serializeLedger` in `tools/ledger.mjs` declares
+   the file canonical as "nodes sorted by id", and the merge resolution
+   restored that order. Their payloads are byte-identical
+   `{ status = "pending" }`, so no other node's implementation fact changes.
+2. `charters/compiler-compiler-bridge/CCA1O4.md` — this node's own charter.
+   Appends a "Recorded deviation" section pointing at this record. It deletes
+   and rewords no normative clause; the "Native/NAPI signatures … are
+   excluded" exclusion stands verbatim, and the appended text says so
+   explicitly.
+3. `decisions/2026-09-05-cca1o4-native-wire-extension-scope-disposition.md` —
+   this record, new. It amends no charter budget, no DAG edge, and no other
+   node's ledger row; its status is `proposed`.
+4. `closure/typescript-mapper/register.toml` and
+   `closure/typescript-mapper/closure.md` — the typescript-mapper closure
+   instrument's recorded `P-targeted-domain` proof and its
+   `CTL-targeted-selector` control. Five counts move (selected 9504 → 9510,
+   executed and passed 8957 → 8963, skipped unchanged at 547) and the
+   transcribed terminal summary is re-transcribed. Cause: this candidate and
+   the base each added `#[test]` cases inside the three packages that proof's
+   command selects, so the previously recorded counts no longer describe the
+   tree. This is the instrument's freshness obligation, not an evidence
+   relaxation — the comparison grammar, the skip basis, the declared 547
+   expected skips and the control's refusal semantics are unchanged, and
+   `node roadmap/0.1.0-tama/tools/closure-register.mjs --check` PASSES at the
+   candidate head. An intermediate commit on this branch briefly replaced the
+   transcribed duration with a "not transcribed" allowance; the allowance was
+   dropped and the literal summary re-transcribed before this head, so the
+   field is verbatim again.
+5. `tools/closure-register.pins.mjs` — one pin digest,
+   `control:CTL-targeted-selector.observed`, recomputed because entry 4
+   rewrote the sentence it pins. No executable pin machinery changes.
+6. `docs/api/unplugin.md` (outside `roadmap/`) — public API documentation,
+   not a rule: it documents the optional `sass` peer dependency the non-Vite
+   preprocessing path needs.
+
+Explicit account of what is NOT touched, so the exclusions are stated rather
+than inferred from silence:
+
+- No `CLAUDE.md`, no `AGENTS.md`, no skill under `.claude/`, no architecture
+  document, and no protocol document.
+- No guard, assertion, exemption list, allowlist, or portability-marker
+  manifest entry is added, relaxed, or removed.
+- No DAG module, catalog, schema, train register, or other node's charter.
+- The ignore/skip inventory is unchanged: the 547 expected skips the proof
+  declares are the same 547 the base declares.
+
+## Verification beyond the node's declared gate
+
+CCA1O4's declared `targeted-domain` gate selects `verter_type_runtime`,
+`verter_session` and `verter_protocol`. This candidate also changes
+`verter_compiler`, `verter_ffi` and `verter_napi` — the latter two owning the
+wire-conversion contract and the byte-pin freshness guard that is the only
+proof the regenerated TypeScript mirror still matches the Rust schema this
+candidate extends. A self-declared universe that excludes a changed surface
+is not a pass, so those three packages were executed as well.
+
+Developer-host receipts accompanying this candidate (a Windows x64
+workstation; the whole-workspace lane in CI remains the merge-authoritative
+one):
+
+- `cargo nextest run --locked -p verter_compiler -p verter_ffi -p verter_napi`
+  — 7350 run, 7350 passed, 6 skipped.
+- The `@verter/unplugin` unit suite plus its bundler exit-regression harness —
+  238 passed, 5 skipped across 12 files, and the SCSS virtual-style and Vite
+  lib-build repros PASS.
+- `tsc --noEmit` over the package’s own `tsconfig.json`: the style-preprocessing
+  failure path reports no error there. The remaining errors in that projection
+  are the base tree’s (an `ES2020` target against `String.replaceAll`, and the
+  unplugin context typings) and no gate consumes it.
