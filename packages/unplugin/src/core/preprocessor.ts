@@ -177,10 +177,15 @@ export async function preprocessStyle(
       // were swallowed to `null` the host would later refuse the block as
       // `ProcessedContentRequired`, burying the compiler's own message.
       // Surface it instead so a broken SCSS block fails the build saying why.
-      throw new Error(
+      const failure = new Error(
         `[verter] Failed to preprocess style lang="${lang}" in ${filename}: ${message}`,
-        { cause: e },
       );
+      // Attach the originating error after construction rather than through
+      // the options bag: this package's own tsconfig targets ES2020, whose
+      // `Error` constructor declares no second parameter, and the cause chain
+      // has to survive for a caller that inspects it.
+      (failure as Error & { cause?: unknown }).cause = e;
+      throw failure;
     }
   }
   console.warn(
