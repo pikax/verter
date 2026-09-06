@@ -15,8 +15,8 @@
 //! included — which a source scanner could never fully model.
 //!
 //! SCOPE (future carriers). This BY-CONSTRUCTION guarantee, and these
-//! tripwires, cover the three CURRENT carriers only — they inspect just the
-//! hardcoded `CARRIER_VARIANTS` names. The wildcard-free
+//! tripwires, cover the CURRENT carrier variants only — they inspect just
+//! the hardcoded `CARRIER_VARIANTS` names. The wildcard-free
 //! `carrier_type_args` / `map_carrier_type_args` fences make a new variant
 //! fail to compile until classified, but CLASSIFICATION ≠ OPAQUE
 //! ENCAPSULATION: a future named-struct carrier could compile while exposing a
@@ -316,7 +316,7 @@ fn parse(rel: &str) -> syn::File {
     syn::parse_file(&src).unwrap_or_else(|e| panic!("{rel} must parse as Rust: {e}"))
 }
 
-/// TRIPWIRE 1 (DISCRIMINATING). The three carrier variants on
+/// TRIPWIRE 1 (DISCRIMINATING). Every carrier variant on
 /// `SemanticNodeData` must be OPAQUE single-field tuple payloads
 /// (`TypeOf(carrier::TypeOfCarrier)`), never named-struct variants
 /// (`TypeOf { value_root, path, type_args }`). A named-struct variant
@@ -430,7 +430,7 @@ fn variant_exposes_named_type_args_field(variant: &syn::Variant) -> bool {
 /// `file` and return the names of any that expose a directly bindable named
 /// `type_args` field ([`variant_exposes_named_type_args_field`]). This is the
 /// enum-WIDE generalisation of [`carrier_variants_are_opaque_tuple_payloads`]'s
-/// hardcoded three-variant check: the self-test
+/// hardcoded name-keyed check: the self-test
 /// [`no_named_type_args_field_outside_opaque_carrier_discriminates`] feeds it a
 /// synthetic enum carrying a fourth, violating variant and the production guard
 /// feeds it the real source — both share this single parse + scan, so neither
@@ -454,23 +454,24 @@ fn enum_variants_with_named_type_args(file: &syn::File) -> Vec<String> {
 /// TRIPWIRE 1b (DISCRIMINATING, ENUM-WIDE). The enum-wide generalisation of
 /// [`carrier_variants_are_opaque_tuple_payloads`]: that tripwire inspects only
 /// the HARDCODED [`CARRIER_VARIANTS`] names, so a FUTURE
-/// `SemanticNodeData` variant — added beside the three carriers — that exposes a
-/// directly bindable named `type_args` field would re-open the anti-tail
+/// `SemanticNodeData` variant — added beside the named carriers — that exposes
+/// a directly bindable named `type_args` field would re-open the anti-tail
 /// `node.type_args` bind this whole confinement closes, while the hardcoded
-/// three-variant check looked elsewhere.
+/// name-keyed check looked elsewhere.
 ///
 /// THE RULE: ANY variant on `SemanticNodeData` that carries a named `type_args`
 /// field (a `syn::Fields::Named` variant with a `type_args` member) is REJECTED.
 /// The ONLY sanctioned home for `type_args`-bearing data is an OPAQUE tuple
 /// carrier — a single-unnamed-field `Variant(carrier::SomethingCarrier)` whose
 /// `type_args` is PRIVATE on the payload and reachable only through the sole
-/// descent accessor [`SemanticNodeData::carrier_type_args`]. The three real
-/// carriers (`TypeOf` / `BareRef` / `ImportType`) are exactly that shape, so
-/// they expose no named `type_args` field and pass; the scan covers ALL
-/// variants, not the hardcoded three, and fails if ANY variant grows one.
+/// descent accessor [`SemanticNodeData::carrier_type_args`]. Every real
+/// carrier (`TypeOf` / `BareRef` / `ImportType` / `TypeOfNominal`) is exactly
+/// that shape, so none exposes a named `type_args` field and all pass; the
+/// scan covers ALL variants, not the hardcoded names, and fails if ANY
+/// variant grows one.
 ///
 /// This is ADDITIVE beside `carrier_variants_are_opaque_tuple_payloads` (which
-/// stays the explicit three-carrier opaque-payload check); together they keep
+/// stays the explicit named-carrier opaque-payload check); together they keep
 /// the anti-tail bind unrepresentable as the enum grows. Discrimination is
 /// proven by [`no_named_type_args_field_outside_opaque_carrier_discriminates`].
 #[test]
@@ -491,20 +492,21 @@ fn no_named_type_args_field_outside_opaque_carrier() {
 /// SELF-TEST (DISCRIMINATING, ENUM-WIDE). Proves
 /// [`enum_variants_with_named_type_args`] — the classifier
 /// [`no_named_type_args_field_outside_opaque_carrier`] runs over the real source
-/// — genuinely REJECTS a synthetic violating variant and does NOT flag the three
-/// real opaque carriers. A SYNTHETIC `SemanticNodeData` enum carries the three
-/// real carrier shapes (`TypeOf(carrier::TypeOfCarrier)` …) PLUS a fourth
+/// — genuinely REJECTS a synthetic violating variant and does NOT flag the
+/// real opaque carriers. A SYNTHETIC `SemanticNodeData` enum carries EVERY
+/// real carrier shape (`TypeOf(carrier::TypeOfCarrier)` …) PLUS one extra
 /// variant `FutureCarrier { type_args: Arc<[SemanticNodeId]> }` with a directly
 /// bindable named `type_args` field. The synthetic-reject + real-accept pair is
 /// the anti-rogue proof: weakening the classifier to ignore named `type_args`
 /// fields makes the REJECT assertion fail (it would return no offenders).
 #[test]
 fn no_named_type_args_field_outside_opaque_carrier_discriminates() {
-    // SYNTHETIC source: the three real opaque carriers (accepted) + a fourth
+    // SYNTHETIC source: every real opaque carrier (accepted) + one extra
     // named-struct variant exposing a bindable `type_args` field (rejected).
     let synthetic_src = "\
         enum SemanticNodeData {\n\
         \x20   TypeOf(carrier::TypeOfCarrier),\n\
+        \x20   TypeOfNominal(carrier::TypeOfNominalCarrier),\n\
         \x20   BareRef(carrier::BareRefCarrier),\n\
         \x20   ImportType(carrier::ImportTypeCarrier),\n\
         \x20   FutureCarrier { name: Arc<str>, type_args: Arc<[SemanticNodeId]> },\n\
@@ -518,7 +520,7 @@ fn no_named_type_args_field_outside_opaque_carrier_discriminates() {
         vec!["FutureCarrier".to_string()],
         "DISCRIMINATION: the enum-wide classifier must REJECT the synthetic \
          `FutureCarrier {{ … type_args }}` variant (a directly bindable named `type_args` field) — \
-         and ONLY it. The three opaque tuple carriers (`TypeOf(carrier::TypeOfCarrier)` …) must NOT \
+         and ONLY it. The opaque tuple carriers (`TypeOf(carrier::TypeOfCarrier)` …) must NOT \
          be flagged: their `type_args` is PRIVATE on the carrier payload, exposing no named field. \
          If the classifier ignored named `type_args` fields it would return no offenders and this \
          assertion would fail."
@@ -527,13 +529,15 @@ fn no_named_type_args_field_outside_opaque_carrier_discriminates() {
     // Direct per-variant proof: each real carrier ACCEPTS (not flagged); the
     // synthetic violating variant REJECTS.
     let typeof_c = parse_variant("TypeOf(carrier::TypeOfCarrier)");
+    let nominal_c = parse_variant("TypeOfNominal(carrier::TypeOfNominalCarrier)");
     let bare_c = parse_variant("BareRef(carrier::BareRefCarrier)");
     let import_c = parse_variant("ImportType(carrier::ImportTypeCarrier)");
     assert!(
         !variant_exposes_named_type_args_field(&typeof_c)
+            && !variant_exposes_named_type_args_field(&nominal_c)
             && !variant_exposes_named_type_args_field(&bare_c)
             && !variant_exposes_named_type_args_field(&import_c),
-        "the three opaque tuple carriers expose NO named `type_args` field and must be ACCEPTED"
+        "every opaque tuple carrier exposes NO named `type_args` field and must be ACCEPTED"
     );
     let future =
         parse_variant("FutureCarrier { name: Arc<str>, type_args: Arc<[SemanticNodeId]> }");
@@ -1150,7 +1154,7 @@ fn carrier_module_shape_violations(file: &syn::File) -> Vec<String> {
             // `syn::Item` variant all land here. ──
             other => v.push(format!(
                 "a `{}` is forbidden in carrier.rs — the module may contain ONLY the two sanctioned \
-                 `use` imports, the three head-view aliases, the three carrier structs, their \
+                 `use` imports, the three head-view aliases, the four carrier structs, their \
                  private inherent impls, and the `impl SemanticNodeData` accessor block",
                 item_kind_name(other)
             )),
@@ -1262,7 +1266,7 @@ fn check_head_alias(t: &syn::ItemType, seen: &mut BTreeSet<String>, v: &mut Vec<
     }
 }
 
-/// Each `struct` must be one of the three carriers, with the EXACT private field
+/// Each `struct` must be one of the four carriers, with the EXACT private field
 /// set and EXACTLY the five built-in derives. A non-carrier (helper) struct is a
 /// deviation — even one that itself exposes a `type_args` field.
 fn check_struct(s: &syn::ItemStruct, seen: &mut BTreeSet<String>, v: &mut Vec<String>) {
@@ -1362,7 +1366,7 @@ fn check_struct_fields(s: &syn::ItemStruct, spec: &CarrierSpec, v: &mut Vec<Stri
     }
 }
 
-/// Each `impl` must be an inherent impl on one of the three carriers or on
+/// Each `impl` must be an inherent impl on one of the four carriers or on
 /// `SemanticNodeData`. A trait impl (which would hand the raw args out through a
 /// crate-wide trait method), an impl on an unrelated type, or a duplicate impl
 /// is a deviation. The self-ty is UNWRAPPED first so a reference self-ty
@@ -1882,7 +1886,7 @@ fn carrier_exact_shape_allowlist_discriminates() {
                 .push(parse_item("struct ArgsHead { type_args: Arc<[SemanticNodeId]> }"));
         }),
         "DISCRIMINATION (POINT 4): a non-carrier helper `struct ArgsHead {{ type_args: … }}` must be \
-         REJECTED — only the three carrier structs may exist."
+         REJECTED — only the four carrier structs may exist."
     );
 
     // Bypass 2 (POINT 5) — a RENAMED import `use super::SemanticNodeId as NodeId;`.
