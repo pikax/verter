@@ -17581,19 +17581,90 @@ mod tests {
     /// `pump_ready` is the cooperative-pump primitive: it drains the
     /// inbox and dispatches every currently-ready job. A driver-led
     /// pump with a fresh submission must report progress on both
-    /// the drain AND the dispatch counters; a follow-up pump with
-    /// no fresh submissions must report no progress (so the driver
-    /// can safely park).
+    /// the drain AND the dispatch counters; a pump that finds no
+    /// drainable submission and no ready job must report no progress
+    /// so the driver parks instead of spinning.
+    ///
+    /// Idleness is a property of the available pump work, NOT of the
+    /// request state: a pump run while a dispatched job is still in
+    /// flight has nothing to drain and nothing ready, and must report
+    /// no progress — reporting progress there is exactly the
+    /// regression that makes a driver loop burn a core against a
+    /// long-running job.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn pump_ready_drains_inbox_and_dispatches_ready_jobs() {
         use crate::caller_kind::CallerKind;
-        let loader = Arc::new(MemorySourceLoader::new());
-        loader.insert("/a.vue".to_string(), Arc::from("<template>x</template>"));
-        let sched = test_scheduler_with_loader(loader);
+        use std::time::{Duration, Instant};
+
+        /// One-shot latch. Every wait is bounded so a scheduler that
+        /// never reaches the awaited point fails the test rather than
+        /// hanging it.
+        #[derive(Default)]
+        struct Latch {
+            opened: parking_lot::Mutex<bool>,
+            changed: parking_lot::Condvar,
+        }
+        impl Latch {
+            fn open(&self) {
+                *self.opened.lock() = true;
+                self.changed.notify_all();
+            }
+            /// `true` when the latch is open, `false` on timeout.
+            fn wait(&self, budget: Duration) -> bool {
+                let deadline = Instant::now() + budget;
+                let mut opened = self.opened.lock();
+                while !*opened {
+                    if self.changed.wait_until(&mut opened, deadline).timed_out() {
+                        return *opened;
+                    }
+                }
+                true
+            }
+        }
+
+        /// Parks the dispatched Source job inside the loader seam until
+        /// the test releases it, so "the job is still in flight" is a
+        /// fact the test establishes rather than a race it hopes to
+        /// win. Ungated, the job posts its own stage completion straight
+        /// back into the inbox and the next pump legitimately drains 1.
+        struct GatedLoader {
+            inner: MemorySourceLoader,
+            entered: Arc<Latch>,
+            release: Arc<Latch>,
+        }
+        impl SourceLoader for GatedLoader {
+            fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
+                self.entered.open();
+                self.release.wait(Duration::from_secs(30));
+                self.inner.load(canonical_id)
+            }
+            fn exists(&self, canonical_id: &str) -> bool {
+                self.inner.exists(canonical_id)
+            }
+            fn classify(&self, canonical_id: &str) -> FileLanguage {
+                self.inner.classify(canonical_id)
+            }
+            fn realpath(&self, canonical_id: &str) -> Option<String> {
+                self.inner.realpath(canonical_id)
+            }
+        }
+
+        let inner = MemorySourceLoader::new();
+        inner.insert("/a.vue".to_string(), Arc::from("<template>x</template>"));
+        let entered = Arc::new(Latch::default());
+        let release = Arc::new(Latch::default());
+        let sched = Scheduler::test_new_sync(
+            SchedulerConfig::default(),
+            Arc::new(GatedLoader {
+                inner,
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }) as Arc<dyn SourceLoader>,
+        );
 
         // Submit a request — lands in the inbox.
-        let _handle = sched.submit_request(Request {
+        let handle = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
             target: TargetStage::Source,
             priority: Priority::Interactive,
@@ -17617,23 +17688,86 @@ mod tests {
         );
         assert!(stats.made_progress(), "non-zero counters imply progress");
 
-        // Second pump immediately: no fresh submission, the
-        // dispatched job is in-flight on the pool. Progress must
-        // be reported as false so the driver can park.
+        // In flight: the dispatched job is parked in the loader seam,
+        // so it cannot have posted a completion. Nothing is drainable,
+        // nothing is ready — every counter must be zero and the driver
+        // must be told to park rather than re-poll the running job.
+        assert!(
+            entered.wait(Duration::from_secs(30)),
+            "the dispatched Source job never reached the loader seam, so this test would \
+             prove nothing about a pump with work in flight",
+        );
+        assert!(
+            handle.try_get().is_none(),
+            "precondition: the request must still be in flight while the loader is held",
+        );
+        let in_flight = sched.pump_ready(PumpReason::DriverLoop, CallerKind::Driver);
+        assert_eq!(
+            in_flight.drained, 0,
+            "in-flight pump drained={}, expected 0",
+            in_flight.drained,
+        );
+        assert_eq!(
+            in_flight.dispatched, 0,
+            "in-flight pump dispatched={}, expected 0",
+            in_flight.dispatched,
+        );
+        assert_eq!(
+            in_flight.executed_inline, 0,
+            "in-flight pump executed_inline={}, expected 0",
+            in_flight.executed_inline,
+        );
+        assert!(
+            !in_flight.made_progress(),
+            "a pump with nothing drainable and nothing ready must NOT report progress just \
+             because a job is in flight, got {in_flight:?}",
+        );
+
+        // Release the worker. This scheduler carries no driver thread,
+        // so the test owns the pump that carries the completion to a
+        // terminal state. Bounded: a scheduler that never completes
+        // fails here rather than looping forever.
+        release.open();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let state = loop {
+            if let Some(state) = handle.try_get() {
+                break state;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "request never reached a terminal state under a test-owned pump",
+            );
+            sched.pump_ready(PumpReason::DriverLoop, CallerKind::Driver);
+            std::thread::yield_now();
+        };
+        assert!(
+            matches!(state, CompletionState::Ready(_)),
+            "the Source request must complete Ready, got {state:?}",
+        );
+
+        // Settled: the stage completion that resolved the handle was
+        // drained by the pump that resolved it, nothing is admitted,
+        // nothing is ready. Every counter must be zero so the driver
+        // parks instead of spinning.
         let idle = sched.pump_ready(PumpReason::DriverLoop, CallerKind::Driver);
         assert_eq!(
             idle.drained, 0,
-            "idle pump drained={}, expected 0",
+            "settled pump drained={}, expected 0",
             idle.drained
         );
         assert_eq!(
             idle.dispatched, 0,
-            "idle pump dispatched={}, expected 0",
+            "settled pump dispatched={}, expected 0",
             idle.dispatched,
+        );
+        assert_eq!(
+            idle.executed_inline, 0,
+            "settled pump executed_inline={}, expected 0",
+            idle.executed_inline,
         );
         assert!(
             !idle.made_progress(),
-            "idle pump with no work must NOT report progress, got {idle:?}",
+            "settled pump with no work must NOT report progress, got {idle:?}",
         );
     }
 
