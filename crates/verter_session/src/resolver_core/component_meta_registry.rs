@@ -2053,7 +2053,6 @@ fn collect_registry_member_surface_refs_node(
         _ => {}
     }
 }
-
 /// Collect every reference-head NAME reachable from `node` (bounded,
 /// visited-guarded). Used for seeded-dependency-name accounting over
 /// raised registry sources in the host registry BFS.
@@ -2061,6 +2060,72 @@ pub(crate) fn collect_node_ref_names(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
     names: &mut rustc_hash::FxHashSet<String>,
+) {
+    walk_reference_carriers(ctx, node, &mut |_, data, head_name| {
+        if let Some(name) = head_name {
+            names.insert(name.to_string());
+            return;
+        }
+        // A `typeof` carrier RENDERS its head, so a surface that splices
+        // the rendered text needs the head's binding in scope exactly as
+        // it needs a type reference's. Only the LEXICAL ROOT name is
+        // nameable — the dotted member segments are projections of it,
+        // not bindings — and a namespace-qualified root stores the JOINED
+        // spelling (`Ns.A_KIND`) in the head, so the recorded name is the
+        // segment BEFORE the first dot: that is the local binding (`import
+        // * as Ns`) an import-retention lookup resolves, and recording the
+        // joined string would strand the rendered reference on a binding
+        // no file declares.
+        if matches!(
+            data,
+            SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_)
+        ) {
+            if let Some((value_root, _)) = data.typeof_head() {
+                let lexical_root = value_root
+                    .name
+                    .split('.')
+                    .next()
+                    .unwrap_or(value_root.name.as_ref());
+                names.insert(lexical_root.to_string());
+            }
+        }
+    });
+}
+
+/// Every distinct NOMINAL `typeof` carrier reachable from `node` whose
+/// declaring identity lives in `canonical`, in visit order.
+///
+/// Shares [`walk_reference_carriers`] with [`collect_node_ref_names`] by
+/// construction, so the two answers cannot disagree: a carrier whose head
+/// name a rendered surface must have in scope is exactly a carrier this
+/// returns, and a shape the walk does not descend contributes neither a
+/// name nor a carrier.
+pub(crate) fn collect_owner_local_nominal_carriers(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+    canonical: &str,
+    carriers: &mut Vec<SemanticNodeId>,
+) {
+    walk_reference_carriers(ctx, node, &mut |reached, data, _| {
+        if data
+            .typeof_nominal_identity()
+            .is_some_and(|identity| identity.canonical_id.as_ref() == canonical)
+            && !carriers.contains(&reached)
+        {
+            carriers.push(reached);
+        }
+    });
+}
+
+/// The ONE bounded, visited-guarded walk over the reference carriers
+/// reachable from `node`. `visit` sees every reached node together with its
+/// reference-head name when it has one; descent stays the walk's own
+/// decision, so two consumers can never disagree about what the rendered
+/// surface reaches.
+fn walk_reference_carriers(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+    visit: &mut dyn FnMut(SemanticNodeId, &SemanticNodeData, Option<&str>),
 ) {
     let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
     let mut worklist: Vec<SemanticNodeId> = vec![node];
@@ -2072,10 +2137,11 @@ pub(crate) fn collect_node_ref_names(
             continue;
         };
         if let Some((name, args)) = component_meta_registry_node_ref_head(ctx, node) {
-            names.insert(name);
+            visit(node, data.as_ref(), Some(name.as_str()));
             worklist.extend(args);
             continue;
         }
+        visit(node, data.as_ref(), None);
         match data.as_ref() {
             SemanticNodeData::Alias(target) => worklist.push(*target),
             SemanticNodeData::Array { element, .. } | SemanticNodeData::KeyOf { base: element } => {
@@ -2130,25 +2196,10 @@ pub(crate) fn collect_node_ref_names(
             SemanticNodeData::MergedDecl { contributors } => {
                 worklist.extend(contributors.iter().copied());
             }
-            // A `typeof` carrier RENDERS its head, so a surface that splices
-            // the rendered text needs the head's binding in scope exactly as
-            // it needs a type reference's. Only the LEXICAL ROOT name is
-            // nameable — the dotted member segments are projections of it,
-            // not bindings — and a namespace-qualified root stores the JOINED
-            // spelling (`Ns.A_KIND`) in the head, so the recorded name is the
-            // segment BEFORE the first dot: that is the local binding (`import
-            // * as Ns`) an import-retention lookup resolves, and recording the
-            // joined string would strand the rendered reference on a binding
-            // no file declares.
+            // A `typeof` carrier's own head is not a further node — the
+            // visitor records what a rendered surface needs from it — but
+            // its type arguments are, so the walk descends into them.
             typeof_carrier @ (SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_)) => {
-                if let Some((value_root, _)) = typeof_carrier.typeof_head() {
-                    let lexical_root = value_root
-                        .name
-                        .split('.')
-                        .next()
-                        .unwrap_or(value_root.name.as_ref());
-                    names.insert(lexical_root.to_string());
-                }
                 worklist.extend(typeof_carrier.carrier_type_args().iter().copied());
             }
             _ => {}

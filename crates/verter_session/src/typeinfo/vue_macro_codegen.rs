@@ -1192,7 +1192,12 @@ impl VerterHost {
                         ) {
                         (TscSpliceText::new(import_form), None)
                     } else {
-                        match render_tsc_testing_node(ctx, member.value, counters) {
+                        match render_tsc_testing_node(
+                            ctx,
+                            dispatch
+                                .widen_owner_local_nominal_typeofs(member.value, owner_canonical),
+                            counters,
+                        ) {
                             Ok(rendered) => rendered,
                             Err(failure) => return failure.tsc(),
                         }
@@ -1299,6 +1304,10 @@ impl VerterHost {
                 }))
             }
             AnalyzedMacroKind::DefineModel => {
+                // Same render-boundary fail-close as every other splice
+                // site: an owner-local nominal carrier is not nameable by
+                // the generated declaration surface, at any position.
+                let payload = dispatch.widen_owner_local_nominal_typeofs(payload, owner_canonical);
                 let value_type = match render_tsc_node(ctx, payload, counters) {
                     Ok(text) => text,
                     Err(failure) => return failure.tsc(),
@@ -1390,29 +1399,18 @@ impl VerterHost {
                             // identifier into the declaration. Fail closed
                             // to the widened `symbol` primitive — the
                             // honest structural inhabitant, with no phantom
-                            // reference and no fresh nominal identity. A
-                            // carrier declared in ANOTHER module keeps its
-                            // precise `typeof` spelling; its lexical root
-                            // joins the reference set and the surface
-                            // imports it, exactly as any other cross-file
-                            // `typeof` reference does.
-                            let render_node = {
-                                let local_nominal = dispatch
-                                    .graph()
-                                    .node_data(reduced.node_id())
-                                    .as_deref()
-                                    .and_then(|data| data.typeof_nominal_identity())
-                                    .is_some_and(|identity| {
-                                        identity.canonical_id.as_ref() == owner_canonical
-                                    });
-                                if local_nominal {
-                                    dispatch
-                                        .widened_nominal_typeof(reduced.node_id())
-                                        .unwrap_or_else(|| reduced.node_id())
-                                } else {
-                                    reduced.node_id()
-                                }
-                            };
+                            // reference and no fresh nominal identity — at
+                            // EVERY position that holds one, not only the
+                            // root: `{ inner: typeof K }` renders the same
+                            // unnameable identifier. A carrier declared in
+                            // ANOTHER module keeps its precise `typeof`
+                            // spelling; its lexical root joins the reference
+                            // set and the surface imports it, exactly as any
+                            // other cross-file `typeof` reference does.
+                            let render_node = dispatch.widen_owner_local_nominal_typeofs(
+                                reduced.node_id(),
+                                owner_canonical,
+                            );
                             // `render_tsc_node` itself fails closed (typed
                             // `Err`) on a NESTED resolver degradation baked
                             // into the rendered text — see its doc comment.

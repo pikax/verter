@@ -16,7 +16,7 @@
 //!
 //! SCOPE (future carriers). This BY-CONSTRUCTION guarantee, and these
 //! tripwires, cover the three CURRENT carriers only — they inspect just the
-//! three hardcoded `CARRIER_VARIANTS` names. The wildcard-free
+//! hardcoded `CARRIER_VARIANTS` names. The wildcard-free
 //! `carrier_type_args` / `map_carrier_type_args` fences make a new variant
 //! fail to compile until classified, but CLASSIFICATION ≠ OPAQUE
 //! ENCAPSULATION: a future named-struct carrier could compile while exposing a
@@ -84,9 +84,12 @@ fn read_workspace_file(rel: &str) -> String {
 const SEMANTIC_QUERY_RS: &str = "crates/verter_session/src/semantic_query.rs";
 const CARRIER_RS: &str = "crates/verter_session/src/semantic_query/carrier.rs";
 
-/// The three structural carrier variants the anti-tail rule polices
-/// (`Foo<Arg>` / `typeof f<Arg>` / `import("m").G<Arg>`).
-const CARRIER_VARIANTS: [&str; 3] = ["TypeOf", "BareRef", "ImportType"];
+/// The carrier variants the anti-tail rule polices: the three structural
+/// shells (`Foo<Arg>` / `typeof f<Arg>` / `import("m").G<Arg>`) plus the
+/// TERMINAL nominal carrier, which takes no `type_args` but must be an
+/// opaque tuple payload for exactly the same reason — a named-struct
+/// variant re-opens positional field binding at every match site.
+const CARRIER_VARIANTS: [&str; 4] = ["TypeOf", "BareRef", "ImportType", "TypeOfNominal"];
 /// The fourth struct is the TERMINAL nominal carrier: the `unique symbol`
 /// type itself, a different semantic class from the three deferred shells
 /// (its declaring identity is the type, so it carries no `type_args`).
@@ -402,7 +405,7 @@ fn carrier_variants_are_opaque_tuple_payloads() {
             .iter()
             .map(|s| s.to_string())
             .collect::<BTreeSet<_>>(),
-        "all three carrier variants must exist on `SemanticNodeData`; found {found:?}"
+        "every carrier variant must exist on `SemanticNodeData`; found {found:?}"
     );
 }
 
@@ -450,7 +453,7 @@ fn enum_variants_with_named_type_args(file: &syn::File) -> Vec<String> {
 
 /// TRIPWIRE 1b (DISCRIMINATING, ENUM-WIDE). The enum-wide generalisation of
 /// [`carrier_variants_are_opaque_tuple_payloads`]: that tripwire inspects only
-/// the three HARDCODED [`CARRIER_VARIANTS`] names, so a FUTURE
+/// the HARDCODED [`CARRIER_VARIANTS`] names, so a FUTURE
 /// `SemanticNodeData` variant — added beside the three carriers — that exposes a
 /// directly bindable named `type_args` field would re-open the anti-tail
 /// `node.type_args` bind this whole confinement closes, while the hardcoded

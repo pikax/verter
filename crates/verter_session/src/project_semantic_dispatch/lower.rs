@@ -193,6 +193,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
     }
 
+    /// The same widen applied at EVERY position of `node`'s subtree whose
+    /// nominal carrier is declared in `canonical` — the render-boundary
+    /// fail-close for a generated declaration surface that cannot name the
+    /// owner's own script-setup bindings.
+    ///
+    /// A nominal carrier renders its authored head (`typeof K`), and a
+    /// setup binding is not importable, so a surface that splices that text
+    /// would name an identifier it never declares. The ROOT position is not
+    /// the only one that can hold such a carrier: `{ inner: typeof K }`, a
+    /// union arm, and a signature return all reach the same render. Every
+    /// one of them widens to the `symbol` primitive — the honest structural
+    /// inhabitant, with no phantom reference and no fresh nominal identity —
+    /// through the one substitution route, so a carrier declared in ANOTHER
+    /// module keeps its precise spelling wherever it sits.
+    ///
+    /// The carriers come from the SAME walk that decides which reference
+    /// names a rendered surface must have in scope, so a carrier this misses
+    /// is one that walk cannot name either.
+    pub(crate) fn widen_owner_local_nominal_typeofs(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+    ) -> SemanticNodeId {
+        let mut carriers: Vec<SemanticNodeId> = Vec::new();
+        crate::resolver_core::component_meta_registry::collect_owner_local_nominal_carriers(
+            self.ctx,
+            node,
+            canonical,
+            &mut carriers,
+        );
+        if carriers.is_empty() {
+            return node;
+        }
+        let widened = self.graph().intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Symbol,
+        ));
+        let mut result = node;
+        for carrier in carriers {
+            result = self.substitute_semantic_type_param(result, carrier, widened);
+        }
+        result
+    }
+
     /// Intern the terminal nominal `typeof` carrier for one declaration.
     ///
     /// The carrier's HEAD stays the AUTHORED reference — the value root and
