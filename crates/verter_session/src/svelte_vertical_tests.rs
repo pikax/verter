@@ -2176,3 +2176,136 @@ fn svelte_inline_import_type_snippet_prop_resolves_typed_role() {
         label.callable_role
     );
 }
+
+/// A `unique symbol` on the Svelte public declaration surface stays
+/// well-formed AND nominal: the DECLARING export emits the declaration
+/// spelling `unique symbol`, an imported reference keeps its nominal
+/// spelling AND its import.
+///
+/// The surface splices a rendered type annotation into a generated `.d.ts`,
+/// so a nominal `typeof` carrier reaches it as text and both directions of
+/// getting that text wrong are wrong-OPEN failures — spurious errors in the
+/// user's editor over a program that compiles.
+///
+/// * The export that DECLARES the binding cannot name its own identity:
+///   `export declare const TOKEN: typeof TOKEN` is a circular self-reference
+///   the checker rejects. The declaration-context projection is the
+///   authored `unique symbol` — the checker-valid public API for a nominal
+///   export. Widening to `symbol` would also be a wrong API (distinct
+///   exported tokens would become interchangeable), so it is asserted
+///   against, not just self-reference.
+/// * A reference to a DIFFERENT declaration keeps `typeof EXT_TOKEN` — that
+///   is the precise type — so the prelude must carry the binding it names, or
+///   the generated surface references an undeclared identifier. This
+///   includes exports whose NOMINAL type arrives through a carrier rooted
+///   elsewhere: `export const A: typeof EXT_TOKEN = EXT_TOKEN` (tsc emits
+///   `declare const A: typeof EXT_TOKEN`) and `export const k = Tokens.A`
+///   (tsc emits `declare const k: typeof Tokens.A`). Rendering either as
+///   `unique symbol` would mint a FRESH nominal type the source never
+///   declared — breaking `A`-to-`EXT_TOKEN` assignability for consumers —
+///   and drop the import the precise spelling needs.
+#[test]
+fn svelte_public_declaration_keeps_unique_symbol_exports_well_formed() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/tokens.ts",
+        "export declare const EXT_TOKEN: unique symbol;\n\
+         export class Tokens {\n\
+           static readonly A: unique symbol = Symbol();\n\
+         }",
+    );
+    upsert_svelte(
+        &host,
+        "/TokenSurface.svelte",
+        r#"<script context="module" lang="ts">
+  import { EXT_TOKEN, Tokens } from "./tokens";
+  export const TOKEN: unique symbol = Symbol();
+  export const holder: { t: typeof EXT_TOKEN } = { t: EXT_TOKEN };
+  export const ALIAS: typeof EXT_TOKEN = EXT_TOKEN;
+  export const member = Tokens.A;
+</script>
+<script lang="ts">
+  let { label }: { label: string } = $props();
+</script>
+<div>{label}</div>
+"#,
+    );
+    host.set_import_dependencies(
+        "/TokenSurface.svelte",
+        vec![crate::DependencyResolution {
+            specifier: "./tokens".to_owned(),
+            resolved_canonical_id: Some("/tokens.ts".to_owned()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let code = host
+        .get_public_api_with_mode("/TokenSurface.svelte", PublicApiMode::Declaration, None)
+        .expect("Svelte declaration projection")
+        .expect("the component projects a public declaration")
+        .ts_labeled_code()
+        .to_string();
+
+    assert!(
+        code.contains("export declare const TOKEN: unique symbol;"),
+        "the declaring export must publish the declaration-context nominal \
+         spelling — the checker-valid public API for a `unique symbol` export:
+{code}"
+    );
+    assert!(
+        !code.contains("export declare const TOKEN: symbol;"),
+        "widening the declaring export to `symbol` erases the public API's \
+         nominal distinction — distinct exported tokens become interchangeable:
+{code}"
+    );
+    assert!(
+        !code.contains("TOKEN: typeof TOKEN"),
+        "a self-referential annotation is rejected by the checker:
+{code}"
+    );
+    assert!(
+        code.contains("typeof EXT_TOKEN"),
+        "a reference to another declaration keeps its nominal spelling:
+{code}"
+    );
+    assert!(
+        code
+            .lines()
+            .any(|line| line.starts_with("import") && line.contains("EXT_TOKEN")),
+        "the rendered `typeof EXT_TOKEN` needs its binding imported, or the generated          surface names an undeclared identifier:
+{code}"
+    );
+    assert!(
+        code.contains("ALIAS: typeof EXT_TOKEN"),
+        "an export whose nominal type is ANOTHER declaration's (`export const \
+         ALIAS: typeof EXT_TOKEN`) keeps the precise reference spelling — \
+         rendering it `unique symbol` would mint a fresh nominal type and \
+         strand consumers' assignability:
+{code}"
+    );
+    assert!(
+        !code.contains("ALIAS: unique symbol"),
+        "a NON-declaring nominal export must not take the declaration-context \
+         spelling:
+{code}"
+    );
+    assert!(
+        code.contains("member: typeof Tokens.A"),
+        "an inferred member-carrier export (`export const member = Tokens.A`) \
+         keeps the precise member spelling tsc emits:
+{code}"
+    );
+    assert!(
+        !code.contains("member: unique symbol"),
+        "the member-carrier export must not take the declaration-context \
+         spelling either:
+{code}"
+    );
+    assert!(
+        code.lines()
+            .any(|line| line.starts_with("import") && line.contains("Tokens")),
+        "the rendered `typeof Tokens.A` needs the class binding imported:
+{code}"
+    );
+}

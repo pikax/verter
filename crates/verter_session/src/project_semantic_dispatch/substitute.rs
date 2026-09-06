@@ -662,7 +662,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
-            SemanticNodeData::TypeOf(_) => {
+            SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
                 // The value-root + path are opaque to substitution (they are
                 // not node ids). Structural child-integrity requires descending
                 // into the instantiation `type_args` so a `T` inside
@@ -672,7 +672,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // returns unchanged and records the opaque counter, preserving
                 // the dormant-state behaviour. Descent reads the args through
                 // the shared `carrier_type_args` accessor; the rebuild
-                // preserves the head fields via `map_carrier_type_args`.
+                // preserves the head fields via `map_carrier_type_args`. The
+                // nominal terminal carries NO args, so it always takes the
+                // unchanged early return.
                 let type_args = data.carrier_type_args();
                 let mut new_args = Vec::with_capacity(type_args.len());
                 let mut any_changed = false;

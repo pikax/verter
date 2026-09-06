@@ -9,7 +9,7 @@
 //! The structural object/function predicates are METHODS on
 //! [`super::ProjectSemanticDispatch`] (`relate_objects` /
 //! `relate_property_pair` / `relate_function` / … in [`super::relation`]):
-//! every recursive sub-relation re-enters the SAME full-key
+//! every recursive ASSIGNABILITY sub-relation re-enters the SAME full-key
 //! `execute(SemanticQueryKey::Relate)` authority through
 //! `ProjectSemanticDispatch::relate_member` — there is no hidden recursion
 //! path and no private drill-down.

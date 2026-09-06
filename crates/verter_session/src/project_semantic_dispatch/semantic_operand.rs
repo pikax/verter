@@ -1029,7 +1029,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // binder-bearing semantic child to scan. A `DeferredCallable`'s
                 // parts are readable only by its two owning executors, and a
                 // `SyntheticBinding`'s `value_node` is value-side provenance
-                // that never hosts the anchor's header binders.
+                // that never hosts the anchor's header binders. A nominal
+                // `typeof` carrier holds only a value root, a member path, and
+                // the declaring identity — all names, no semantic node — so it
+                // is a true leaf and cannot hide a binder.
                 //
                 // NO `_` wildcard: a new `SemanticNodeData` variant fails to
                 // compile here, forcing its author to classify whether it can
@@ -1043,6 +1046,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | SemanticNodeData::DeclRef { .. }
                 | SemanticNodeData::RawFallback { .. }
                 | SemanticNodeData::DeferredCallable(_)
+                | SemanticNodeData::TypeOfNominal(_)
                 | SemanticNodeData::SyntheticBinding { .. } => {}
                 // A `TypeParam` of a DIFFERENT declaration (the guarded arm
                 // above did not match): its constraint/default carry that

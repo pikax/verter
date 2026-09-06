@@ -153,6 +153,9 @@ pub struct PreparedTypeDecl {
     /// Each member is a narrowed fact: header flags + the content-free locator
     /// of its authored value position + its span-recovery origin.
     pub member_index: FxHashMap<TypePropertyKey, PreparedMemberFact>,
+    /// Statically-named members whose authored annotations are exactly
+    /// `unique symbol`. Copied from the producing type-declaration facts.
+    pub unique_symbol_members: Arc<[String]>,
 
     /// Same-file symbol references needed for local closure.
     pub local_deps: Vec<String>,
@@ -521,6 +524,7 @@ impl PreparedTypeDecl {
             vue_ignored_heritage: Arc::from([]),
             body_facts,
             member_index: FxHashMap::default(),
+            unique_symbol_members: Arc::from([]),
             local_deps: Vec::new(),
             external_deps: Vec::new(),
             name_resolution: empty_name_resolution(),
@@ -1414,6 +1418,7 @@ impl PreparedValueDecl {
             kind,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
+                unique_symbol_members: Arc::from([]),
                 typeof_alias_target: None,
                 classification: ValueAnnotationClass::Absent,
                 annotation: None,

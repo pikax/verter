@@ -491,6 +491,20 @@ pub(crate) fn display_type_node(
             }
             s
         }
+        SemanticNodeData::TypeOfNominal(_) => {
+            // Renders the AUTHORED head (`typeof TOKEN` / `typeof Ns.TOKEN`)
+            // — the local spelling every display consumer reads; the
+            // declaring identity rides the payload and is never spliced into
+            // rendered type text. No instantiation segment: the terminal is
+            // never an instantiation site.
+            let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+            let mut s = format!("typeof {}", value_root.name);
+            for seg in path.iter() {
+                s.push('.');
+                s.push_str(seg);
+            }
+            s
+        }
         SemanticNodeData::TypeParam { display_name, .. } => display_name.to_string(),
         SemanticNodeData::Infer { name, .. } => format!("infer {name}"),
         SemanticNodeData::InferRef { name, .. } => name.to_string(),
@@ -1070,6 +1084,7 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         | SemanticNodeData::TemplateLiteral { .. }
         | SemanticNodeData::Mapped { .. }
         | SemanticNodeData::TypeOf(_)
+        | SemanticNodeData::TypeOfNominal(_)
         | SemanticNodeData::TypeParam { .. }
         | SemanticNodeData::MergedDecl { .. }
         | SemanticNodeData::DeclRef { .. }

@@ -39,10 +39,11 @@
 //!   2. [`carrier_module_has_no_public_type_args_surface`] — the exact-shape
 //!      allowlist. `carrier.rs` is accepted ONLY if it contains EXACTLY: the two
 //!      sanctioned `use` imports (no renames, no extras); the three head-view
-//!      aliases by their exact definition; the three carrier structs with their
+//!      aliases by their exact definition; the four carrier structs (the three
+//!      deferred shells plus the terminal nominal carrier) with their
 //!      EXACT private field sets and the five built-in derives only; one private
 //!      inherent impl per carrier with its EXACT private method signatures; and
-//!      one `impl SemanticNodeData` with EXACTLY the eight sanctioned accessors
+//!      one `impl SemanticNodeData` with EXACTLY the ten sanctioned accessors
 //!      at their exact visibility + signatures. No body may contain a macro
 //!      invocation, and no body outside the sanctioned descent/rebuild set may
 //!      read a carrier's raw `type_args` field / `arg_nodes()`. The
@@ -86,7 +87,15 @@ const CARRIER_RS: &str = "crates/verter_session/src/semantic_query/carrier.rs";
 /// The three structural carrier variants the anti-tail rule polices
 /// (`Foo<Arg>` / `typeof f<Arg>` / `import("m").G<Arg>`).
 const CARRIER_VARIANTS: [&str; 3] = ["TypeOf", "BareRef", "ImportType"];
-const CARRIER_STRUCTS: [&str; 3] = ["TypeOfCarrier", "BareRefCarrier", "ImportTypeCarrier"];
+/// The fourth struct is the TERMINAL nominal carrier: the `unique symbol`
+/// type itself, a different semantic class from the three deferred shells
+/// (its declaring identity is the type, so it carries no `type_args`).
+const CARRIER_STRUCTS: [&str; 4] = [
+    "TypeOfCarrier",
+    "TypeOfNominalCarrier",
+    "BareRefCarrier",
+    "ImportTypeCarrier",
+];
 
 /// The only derives the carrier structs may carry — the exact built-ins. A
 /// custom or qualified derive could synthesise a leaking trait impl a syn
@@ -105,9 +114,10 @@ const ALLOWED_DERIVES: [&str; 5] = ["Clone", "PartialEq", "Eq", "Hash", "Debug"]
 /// The EXACT `use` imports carrier.rs may carry — no renames, no extras, no
 /// fewer. Compared as normalized token strings, so a `use … as …` rename, an
 /// added import, or a removed import is a deviation.
-const EXPECTED_USES: [&str; 2] = [
+const EXPECTED_USES: [&str; 3] = [
     "use std::sync::Arc;",
     "use super::{NodeScopeId, SemanticNodeData, SemanticNodeId, ValueRootKey};",
+    "use verter_type_expr::facts::ValueDeclIdentityPart;",
 ];
 
 /// The EXACT head-view aliases (full definitions, attrs ignored). Pinned by
@@ -139,7 +149,7 @@ struct CarrierSpec {
     methods: &'static [(&'static str, &'static str)],
 }
 
-const CARRIER_SPECS: [CarrierSpec; 3] = [
+const CARRIER_SPECS: [CarrierSpec; 4] = [
     CarrierSpec {
         name: "TypeOfCarrier",
         fields: &[
@@ -159,6 +169,23 @@ const CARRIER_SPECS: [CarrierSpec; 3] = [
                 "with_type_args",
                 "fn with_type_args(&self, type_args: Arc<[SemanticNodeId]>) -> Self",
             ),
+        ],
+    },
+    CarrierSpec {
+        name: "TypeOfNominalCarrier",
+        fields: &[
+            ("value_root", "ValueRootKey"),
+            ("path", "Arc<[Arc<str>]>"),
+            ("identity", "ValueDeclIdentityPart"),
+        ],
+        methods: &[
+            (
+                "new",
+                "fn new(value_root: ValueRootKey, path: Arc<[Arc<str>]>, identity: ValueDeclIdentityPart) -> Self",
+            ),
+            ("value_root", "fn value_root(&self) -> &ValueRootKey"),
+            ("path", "fn path(&self) -> &Arc<[Arc<str>]>"),
+            ("identity", "fn identity(&self) -> &ValueDeclIdentityPart"),
         ],
     },
     CarrierSpec {
@@ -209,14 +236,14 @@ const CARRIER_SPECS: [CarrierSpec; 3] = [
 
 /// The exact shape of one sanctioned accessor on `impl SemanticNodeData`:
 /// its name, expected visibility, and full signature. `impl SemanticNodeData`
-/// must contain EXACTLY these eight and NO other method.
+/// must contain EXACTLY these ten and NO other method.
 struct AccessorSpec {
     name: &'static str,
     vis: &'static str,
     sig: &'static str,
 }
 
-const ACCESSOR_SPECS: [AccessorSpec; 8] = [
+const ACCESSOR_SPECS: [AccessorSpec; 10] = [
     AccessorSpec {
         name: "carrier_type_args",
         vis: "pub(crate)",
@@ -233,6 +260,11 @@ const ACCESSOR_SPECS: [AccessorSpec; 8] = [
         sig: "fn new_typeof(value_root: ValueRootKey, path: Arc<[Arc<str>]>, type_args: Arc<[SemanticNodeId]>) -> Self",
     },
     AccessorSpec {
+        name: "new_nominal_typeof",
+        vis: "pub(crate)",
+        sig: "fn new_nominal_typeof(value_root: ValueRootKey, path: Arc<[Arc<str>]>, nominal_identity: ValueDeclIdentityPart) -> Self",
+    },
+    AccessorSpec {
         name: "new_bare_ref",
         vis: "pub",
         sig: "fn new_bare_ref(name: Arc<str>, scope: NodeScopeId, type_args: Arc<[SemanticNodeId]>) -> Self",
@@ -246,6 +278,11 @@ const ACCESSOR_SPECS: [AccessorSpec; 8] = [
         name: "typeof_head",
         vis: "pub(crate)",
         sig: "fn typeof_head(&self) -> Option<TypeOfHead<'_>>",
+    },
+    AccessorSpec {
+        name: "typeof_nominal_identity",
+        vis: "pub(crate)",
+        sig: "fn typeof_nominal_identity(&self) -> Option<&ValueDeclIdentityPart>",
     },
     AccessorSpec {
         name: "bare_ref_head",
@@ -835,7 +872,7 @@ fn type_path_segments(ty: &syn::Type) -> Option<Vec<String>> {
 /// than private (`Inherited`) or strictly module-local `pub(self)`. `pub(super)`
 /// COUNTS as escaping: re-exposing a carrier method even to the ~6000-line
 /// parent `semantic_query` module is the leak. The carrier PAYLOAD methods must
-/// all be non-escaping; only the eight sanctioned `SemanticNodeData` accessors
+/// all be non-escaping; only the ten sanctioned `SemanticNodeData` accessors
 /// are crate-visible (their exact visibility is pinned separately).
 fn vis_escapes_module(vis: &syn::Visibility) -> bool {
     match vis {
@@ -1158,7 +1195,7 @@ fn carrier_module_shape_violations(file: &syn::File) -> Vec<String> {
     v
 }
 
-/// Each `use` must be EXACTLY one of the two sanctioned imports — no rename
+/// Each `use` must be EXACTLY one of the three sanctioned imports — no rename
 /// (`use … as …`), no extra, no `pub use` re-export.
 fn check_use(u: &syn::ItemUse, seen: &mut Vec<String>, v: &mut Vec<String>) {
     check_attrs(&u.attrs, &["doc"], "a `use` import", v);
@@ -1229,7 +1266,7 @@ fn check_struct(s: &syn::ItemStruct, seen: &mut BTreeSet<String>, v: &mut Vec<St
     let name = s.ident.to_string();
     let Some(spec) = CARRIER_SPECS.iter().find(|c| c.name == name) else {
         v.push(format!(
-            "struct `{name}` is forbidden in carrier.rs — the module defines ONLY the three carrier \
+            "struct `{name}` is forbidden in carrier.rs — the module defines ONLY the four carrier \
              structs ({CARRIER_STRUCTS:?}); a helper struct (e.g. one exposing `type_args`) is a \
              deviation"
         ));
@@ -1447,7 +1484,7 @@ fn check_carrier_impl(im: &syn::ItemImpl, spec: &CarrierSpec, v: &mut Vec<String
     }
 }
 
-/// The `impl SemanticNodeData` accessor block must contain EXACTLY the eight
+/// The `impl SemanticNodeData` accessor block must contain EXACTLY the ten
 /// sanctioned accessors ([`ACCESSOR_SPECS`]) — each at its exact visibility and
 /// exact signature, every body macro-free and (outside the sanctioned set) free
 /// of raw-args reads. An extra / missing / renamed accessor, a visibility drift,
@@ -1485,7 +1522,7 @@ fn check_semantic_impl(im: &syn::ItemImpl, v: &mut Vec<String>) {
                     }
                     None => v.push(format!(
                         "unexpected method `SemanticNodeData::{name}` — the accessor block may carry \
-                         ONLY the eight sanctioned accessors {:?}",
+                         ONLY the ten sanctioned accessors {:?}",
                         accessor_names()
                     )),
                 }
@@ -1497,7 +1534,7 @@ fn check_semantic_impl(im: &syn::ItemImpl, v: &mut Vec<String>) {
                     .to_string(),
             ),
             _ => v.push(
-                "unexpected item inside `impl SemanticNodeData` — only the eight sanctioned methods \
+                "unexpected item inside `impl SemanticNodeData` — only the ten sanctioned methods \
                  may exist"
                     .to_string(),
             ),
@@ -1592,7 +1629,7 @@ fn method_names(spec: &CarrierSpec) -> Vec<&'static str> {
     spec.methods.iter().map(|(n, _)| *n).collect()
 }
 
-/// The eight sanctioned accessor names, for the rejection message.
+/// The ten sanctioned accessor names, for the rejection message.
 fn accessor_names() -> Vec<&'static str> {
     ACCESSOR_SPECS.iter().map(|a| a.name).collect()
 }

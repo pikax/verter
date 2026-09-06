@@ -467,6 +467,31 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
             }
         }
+        // The nominal terminal hashes its DECLARING IDENTITY: the identity
+        // is the node's whole semantic content, so two same-headed carriers
+        // denoting different declarations must hash apart. Tag 29 — a FRESH
+        // tag, because 26 is SyntheticBinding's and the variant tag is this
+        // hasher's domain separation: two unrelated kinds must never share
+        // one.
+        SemanticNodeData::TypeOfNominal(_) => {
+            hasher.write_u8(29);
+            if let Some((value_root, path)) = data.typeof_head() {
+                value_root.hash(hasher);
+                hasher.write_u64(path.len() as u64);
+                for segment in path.iter() {
+                    hasher.write(segment.as_bytes());
+                }
+            }
+            if let Some(identity) = data.typeof_nominal_identity() {
+                identity.canonical_id.hash(hasher);
+                identity.owner.hash(hasher);
+                identity.symbol.hash(hasher);
+                hasher.write_u64(identity.member_path.len() as u64);
+                for segment in identity.member_path.iter() {
+                    hasher.write(segment.as_bytes());
+                }
+            }
+        }
         SemanticNodeData::TypeParam {
             decl, param_index, ..
         } => {

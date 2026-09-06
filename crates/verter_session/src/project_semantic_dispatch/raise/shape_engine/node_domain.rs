@@ -1569,7 +1569,9 @@ pub(super) fn project_root_summary(
             RootOnlySummary::from_summary(summary::reference_leaf())
         }
 
-        SemanticNodeData::TypeOf(_) => RootOnlySummary::from_summary(summary::type_of()),
+        SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
+            RootOnlySummary::from_summary(summary::type_of())
+        }
 
         // Required-edge `?` parity with `fold_node`, SCOPED to the operator
         // operands (KeyOf base, IndexedAccess object/index, the four Conditional

@@ -4692,12 +4692,6 @@ enum PredicateNarrowConsumption {
     Undecided,
 }
 
-#[derive(Default)]
-struct NodeDisjointness {
-    provably_disjoint: bool,
-    nominal_identity_missing: bool,
-}
-
 fn slice_expr_is_exact_subject_read(
     expr: &crate::flow_slice_content::SliceExpr,
     subject: &crate::flow_slice_content::SliceNarrowSubject,
@@ -5477,38 +5471,54 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     crate::semantic_query::PropertyKey::from_js_number(*value),
                 ))
             }
-            // A SYMBOL-valued key is the one nameable form the value
-            // channel cannot carry: a `unique symbol` names exactly one
-            // nominal property, and the evaluator flattens its value to
-            // the bare `symbol` primitive, losing the identity that IS
-            // the name. So the AUTHORED key names it — the same carrier
-            // the whole-literal leaf answer produced, resolved by the
-            // same downstream reader.
-            //
+            // A `unique symbol` key names exactly ONE nominal property, and
+            // the value channel carries that uniqueness: the read keeps the
+            // `typeof` carrier whose DECLARING identity is the name. Name
+            // the member by that identity — and by NOTHING else: a `typeof`
+            // value that carries no nominal identity is an unread key (a
+            // deferred shell the channel did not resolve), which leaves the
+            // key SET unknown exactly like every other unread value, never
+            // over-named from the authored spelling.
+            Some(SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_)) => self
+                .dispatch
+                .unique_symbol_identity_for_typeof_node(node)
+                .map(crate::semantic_query::AuthoredPropertyKey::UniqueSymbol),
             // A NON-unique `symbol` key genuinely provisions an index
             // signature rather than one property, and is over-named here.
             // That is not a new divergence: it is exactly what the leaf
             // answer this replaces already did, and telling the two apart
-            // needs the symbol's uniqueness on the value channel, which
-            // is the same missing fact.
+            // needs the key's own uniqueness, which a bare `symbol` value
+            // does not have.
             Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => {
-                match authored.cloned_known() {
-                    Some(known) => Some(crate::semantic_query::AuthoredPropertyKey::from_known(
-                        known,
-                    )),
-                    None => match authored {
-                        verter_type_expr::AuthoredPropertyKey::Computed(ty) => {
-                            Some(crate::semantic_query::AuthoredPropertyKey::Computed(
-                                self.lower_key_type(ty),
-                            ))
-                        }
-                        _ => None,
-                    },
-                }
+                self.authored_symbol_key(authored)
             }
             // Anything else — an OPEN `string` / `number` key, an
             // unresolved read — leaves the surface's key SET unknown.
             _ => None,
+        }
+    }
+
+    /// Name a symbol-valued member from its AUTHORED key — the same carrier
+    /// the whole-literal leaf answer produced, resolved by the same
+    /// downstream reader. The fallback when the value channel carries no
+    /// nominal identity of its own.
+    fn authored_symbol_key(
+        &self,
+        authored: &verter_type_expr::AuthoredPropertyKey<
+            verter_type_expr::TypeExpr,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
+    ) -> Option<crate::semantic_query::AuthoredPropertyKey> {
+        match authored.cloned_known() {
+            Some(known) => Some(crate::semantic_query::AuthoredPropertyKey::from_known(
+                known,
+            )),
+            None => match authored {
+                verter_type_expr::AuthoredPropertyKey::Computed(ty) => Some(
+                    crate::semantic_query::AuthoredPropertyKey::Computed(self.lower_key_type(ty)),
+                ),
+                _ => None,
+            },
         }
     }
 
@@ -7253,75 +7263,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Whether two nodes have a provably empty intersection. The authority is
-    /// deliberately conservative: concrete primitive/literal tag conflicts,
-    /// or two structural surfaces with the same required member carrying
-    /// conflicting concrete tags. Different object key sets can overlap and
-    /// therefore are never declared disjoint here.
+    /// Whether `a` and `b` can have a common inhabitant, through the SAME
+    /// sole relation authority the assignability question goes to.
     ///
-    /// The tag-level half DELEGATES to the crate's sole proven-disjoint
-    /// authority ([`super::canonical_algebra::tag_level_disjoint`] — TS
-    /// literal identity with SameValueZero numbers, the `undefined`/`void`
-    /// widening pair, conservative `false` for every undecided shape), so
-    /// this consumer cannot drift from the canonical intersection collapse
-    /// and the relation engine. This site adds ONLY the nominal-identity
-    /// axis the authority does not model: a `symbol` operand has no
-    /// tag-level identity to compare, so a narrow over one is undecidable
-    /// here rather than provably anything.
-    fn nodes_provably_disjoint(
+    /// The evaluator owns NO relation classifier of its own. `Disjoint`
+    /// carries the authority's disjointness PROOF (which this consumer then
+    /// applies to the narrow), `Overlaps` means no such proof exists, and
+    /// `Undecided` is no fact at all — the caller records the typed
+    /// nominal-relation gap and never treats it as either answer.
+    fn comparable(
         &self,
-        left: SemanticNodeId,
-        right: SemanticNodeId,
-    ) -> NodeDisjointness {
-        let graph = self.dispatch.graph();
-        let tag_relation = |a: SemanticNodeId, b: SemanticNodeId| -> NodeDisjointness {
-            let is_symbol = |id: SemanticNodeId| {
-                matches!(
-                    graph.node_data(id).as_deref(),
-                    Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol))
-                )
-            };
-            NodeDisjointness {
-                provably_disjoint: super::canonical_algebra::tag_level_disjoint(graph, a, b),
-                nominal_identity_missing: is_symbol(a) || is_symbol(b),
-            }
-        };
-
-        let relation = tag_relation(left, right);
-        if relation.provably_disjoint || relation.nominal_identity_missing {
-            return relation;
-        }
-        let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
-        let (Some(left_view), Some(right_view)) = (
-            self.dispatch.resolve_typeinfo_surface_view(left, context),
-            self.dispatch.resolve_typeinfo_surface_view(right, context),
-        ) else {
-            return NodeDisjointness::default();
-        };
-        let mut relation = NodeDisjointness::default();
-        for left_member in left_view.positive_members() {
-            if left_member.optional {
-                continue;
-            }
-            let Some(key) = left_member.key.cloned_known() else {
-                continue;
-            };
-            let crate::semantic_query::SurfaceKeyProjection::Exact(right_member) =
-                right_view.project_known_key(&key)
-            else {
-                continue;
-            };
-            if right_member.optional {
-                continue;
-            }
-            let member_relation = tag_relation(left_member.value, right_member.value);
-            relation.nominal_identity_missing |= member_relation.nominal_identity_missing;
-            if member_relation.provably_disjoint {
-                relation.provably_disjoint = true;
-                break;
-            }
-        }
-        relation
+        a: SemanticNodeId,
+        b: SemanticNodeId,
+    ) -> super::relation::ComparabilityVerdict {
+        self.dispatch.nodes_comparable(a, b)
     }
 
     /// Apply a guard's facts for one branch (`positive` = the branch the
@@ -8633,14 +8588,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     /// [`Self::narrow_to_predicate_target`] carrying the CONSUMPTION
     /// verdict — whether the evaluator genuinely consumed the predicate
-    /// fact, and whether every relation outcome that consumption asked
-    /// was decided. This is what the guard twin's call evidence is
-    /// recorded from: a fact the evaluator could not consume at all (a
+    /// fact, and whether the narrow-direction obligation it asked was
+    /// decided. This is what the guard twin's call evidence is recorded
+    /// from: a fact the evaluator could not consume at all (a
     /// frame-shadowed target, an unmodelled subject) is
     /// [`PredicateNarrowConsumption::NotConsumed`] — no evidence; a
-    /// consumed fact whose relation oracle answered `None` anywhere is
-    /// [`PredicateNarrowConsumption::Undecided`] — evidence with the
-    /// relation obligation left unclaimed.
+    /// consumed fact whose REVERSE-ASSIGNABILITY ask (the narrow-direction
+    /// obligation above) answered `None` is
+    /// [`PredicateNarrowConsumption::Undecided`] — evidence with that
+    /// obligation left unclaimed. The `Comparable` ask is deliberately NOT
+    /// folded into this verdict: its undecided case is recorded as the
+    /// typed `NominalRelation` gap (and cannot warm) but does not un-consume
+    /// the predicate — the evaluator did read and apply the checker's
+    /// intersection rule either way.
     fn narrow_to_predicate_target_consuming(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
@@ -8691,8 +8651,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Consumption::Decided,
                 );
             }
-            let relation = self.nodes_provably_disjoint(current, target_node);
-            if relation.nominal_identity_missing {
+            // Disjointness is not decided here. The evaluator owns no
+            // relation classifier: it asks the shared authority whether the
+            // subject and the predicate target can overlap, and consumes the
+            // authority's disjointness PROOF. An undecided verdict is a typed
+            // gap, never a guessed direction.
+            use super::relation::ComparabilityVerdict;
+            let comparable = self.comparable(current, target_node);
+            if matches!(comparable, ComparabilityVerdict::Undecided) {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
                     crate::semantic_query::FlowGap::NominalRelation,
                 ));
@@ -8706,7 +8672,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             } else {
                 Consumption::Decided
             };
-            if !relation.provably_disjoint {
+            let ComparabilityVerdict::Disjoint(ref proof) = comparable else {
+                let intersection = self
+                    .dispatch
+                    .intern_normalized_union_or_intersection(&[current, target_node], false);
+                return (
+                    GuardNarrowing::Narrowed(subject.clone(), intersection),
+                    consumption,
+                );
+            };
+            // The pair is PROVED disjoint, and the proof carries the
+            // CHECKER'S intersection-reduction answer for exactly this
+            // pair. A unit-discriminant conflict (disjoint tags, distinct
+            // `unique symbol` identities, a conflicting shared REQUIRED
+            // member whose values are both unit types) reduces the
+            // intersection to `never`; a conflict reachable only through
+            // non-unit member values keeps `A & B`, and the checker-kept
+            // intersection is the value this narrow must publish. The
+            // collapse class is the authority's payload on its own proof —
+            // the evaluator decides nothing about which disjoint pairs
+            // reduce.
+            if !proof.checker_reduces_intersection_to_never() {
                 let intersection = self
                     .dispatch
                     .intern_normalized_union_or_intersection(&[current, target_node], false);
@@ -8715,11 +8701,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     consumption,
                 );
             }
-            // The target is PROVED disjoint from the whole subject — the
-            // checker's intersection reduces to `never`, so the subject
-            // reads `never` on the positive edge while the edge stays
-            // alive: a contributor there that reads a different binding
-            // keeps its own type.
+            // The target is PROVED disjoint from the whole subject through a
+            // checker collapse criterion — the intersection reduces to
+            // `never`, so the subject reads `never` on the positive edge
+            // while the edge stays alive: a contributor there that reads a
+            // different binding keeps its own type.
             return (
                 GuardNarrowing::Narrowed(subject.clone(), self.never_node()),
                 consumption,

@@ -98,6 +98,9 @@ pub(crate) fn node_contains_reducible_operator(
         SemanticNodeData::IndexedAccess { .. }
         | SemanticNodeData::KeyOf { .. }
         | SemanticNodeData::TypeOf(_)
+        // The nominal terminal raises to the same `typeof …` reference
+        // shape, so it takes the same operator arm.
+        | SemanticNodeData::TypeOfNominal(_)
         | SemanticNodeData::Conditional { .. }
         | SemanticNodeData::Mapped { .. }
         | SemanticNodeData::Infer { .. }

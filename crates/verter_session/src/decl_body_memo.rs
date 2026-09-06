@@ -3004,6 +3004,7 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
         ValueDeclKind::Class,
         verter_type_expr::facts::ValueTypeAnnotationFact {
             is_unique_symbol: false,
+            unique_symbol_members: Arc::from([]),
             typeof_alias_target: None,
             classification: ValueAnnotationClass::Direct,
             annotation: Some(instance),

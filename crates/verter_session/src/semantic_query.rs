@@ -6733,22 +6733,39 @@ impl Default for ContextualTypingKey {
 ///
 /// The relation kind is part of relation IDENTITY: `S` assignable-to `T` is a
 /// genuinely different question from `S` identical-to `T`, and the two must
-/// occupy distinct memo slots. SHAPE only — the per-kind relation algorithm is
-/// the relation-inference reducer (not yet implemented). The current
-/// `relate_nodes` engine computes [`RelationKind::Assignable`].
+/// occupy distinct memo slots.
+///
+/// THREE kinds are live and reduce through the ONE shared relation authority
+/// (`ProjectSemanticDispatch::execute_relate` → `reduce_relation`):
+/// [`Assignable`](Self::Assignable) (the full structural lattice),
+/// [`Identity`](Self::Identity) (bounded to the NOMINAL axis), and
+/// [`Comparable`](Self::Comparable) (the overlap oracle). The remaining two —
+/// [`Subtype`](Self::Subtype) / [`StrictSubtype`](Self::StrictSubtype) — are
+/// declared but REFUSED by the reducer: they return undecided / `ReturnOnly`
+/// rather than borrowing another kind's lattice, because an unimplemented
+/// relation answered through a neighbouring one publishes a false verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RelationKind {
     /// `S` is assignable to `T` — the default relation TS checks at
     /// assignments / argument passing.
     Assignable,
-    /// `S` is a subtype of `T`.
+    /// `S` is a subtype of `T`. REFUSED by the reducer (undecided).
     Subtype,
     /// `S` is a strict subtype of `T` (no `any`/`unknown` widening).
+    /// REFUSED by the reducer (undecided).
     StrictSubtype,
-    /// `S` and `T` are mutually identical.
+    /// `S` and `T` are mutually identical. LIVE, bounded to the NOMINAL
+    /// axis: a `unique symbol` subject decides against another one by its
+    /// DECLARING identity, and every other subject is undecided.
+    /// Scope-insensitive STRUCTURAL constituent identity belongs to the
+    /// canonical type algebra's own comparator, not to this relation.
     Identity,
     /// `S` and `T` are comparable (the bidirectional relation behind
-    /// `switch` / `===`).
+    /// `switch` / `===`). LIVE: the overlap oracle a narrowing consumer
+    /// asks before intersecting. A NEGATIVE outcome is a PROOF of empty
+    /// overlap — a disjointness proof the consumer may act on; a POSITIVE
+    /// outcome means the oracle found no such proof; undecided means an
+    /// unresolved nominal subject left even the negative proof unavailable.
     Comparable,
 }
 
@@ -7182,10 +7199,41 @@ impl RelateMemoKey {
         target: SemanticNodeId,
         context: RelationContext,
     ) -> Self {
+        Self::for_kind(source, target, RelationKind::Assignable, context)
+    }
+
+    /// The kind-aware constructor used for every relation kind: default
+    /// [`RelationPolicy`], regular (widened)
+    /// [`FreshnessKey`], NO inference context, under `context`. Keeping one
+    /// constructor means a new non-identity axis cannot be defaulted
+    /// differently per relation kind.
+    ///
+    /// SYMMETRIC kinds — [`RelationKind::Identity`] and
+    /// [`RelationKind::Comparable`] — store their pair CANONICALLY (the
+    /// lesser node first): both judgements are answer-symmetric in the
+    /// operands, so the forward and reversed ask of one pair share a single
+    /// memo slot instead of minting two reversed entries that can never
+    /// disagree. [`RelationKind::Assignable`] and the strict-subtype kinds
+    /// are DIRECTIONAL and keep the caller's order verbatim.
+    #[must_use]
+    pub fn for_kind(
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        relation: RelationKind,
+        context: RelationContext,
+    ) -> Self {
+        let (source, target) =
+            if matches!(relation, RelationKind::Identity | RelationKind::Comparable)
+                && source > target
+            {
+                (target, source)
+            } else {
+                (source, target)
+            };
         Self {
             source,
             target,
-            relation: RelationKind::Assignable,
+            relation,
             policy: RelationPolicy::default(),
             source_freshness: FreshnessKey::default(),
             inference_context: None,
@@ -7328,6 +7376,13 @@ pub enum SemanticQueryKey {
     /// envs). Version-rooting lives on the cached value's
     /// `ReadSetSignature.facts` + `self_root_canonicals` (R6).
     ///
+    /// `path` is the remaining member path of the authored `typeof`
+    /// (`typeof Tokens.A` is `value_root = Tokens`, `path = ["A"]`). An
+    /// empty path is a declaration-root `typeof`. The path is content-free
+    /// (R6) and is family identity so a member query never warm-hits the
+    /// root. `build_typeof` is the SOLE mint of a nominal `unique symbol`
+    /// member carrier; consumers never project a unique member themselves.
+    ///
     /// `context.projection_reduction` carries the caller's
     /// projection-reduction demand: `build_typeof` lowers the value's
     /// annotation / object shape / signature surface / enum surface AT
@@ -7340,6 +7395,7 @@ pub enum SemanticQueryKey {
     /// poison the publication slot.
     TypeOf {
         value_root: ValueRootSlotIdentity,
+        path: Arc<[Arc<str>]>,
         context: TypeOfContext,
     },
     NormalizeUnion {
@@ -8547,7 +8603,11 @@ pub enum SemanticNodeData {
     },
     /// Deferred `typeof` shell used when the bridge needs to carry a
     /// value-rooted lookup plus any remaining member path segments as a
-    /// first-class semantic node.
+    /// first-class semantic node. ALWAYS unresolved: a resolved `typeof`
+    /// whose root denotes a `unique symbol` declaration is the TERMINAL
+    /// [`Self::TypeOfNominal`] variant, never this one — the two are
+    /// distinct semantic classes and every exhaustive match over this enum
+    /// must classify them.
     ///
     /// The fields live on the opaque [`carrier::TypeOfCarrier`] payload
     /// (private, so `node.type_args` cannot be hand-bound outside the
@@ -8557,6 +8617,22 @@ pub enum SemanticNodeData {
     /// [`carrier_type_args`](Self::carrier_type_args) /
     /// [`map_carrier_type_args`](Self::map_carrier_type_args).
     TypeOf(carrier::TypeOfCarrier),
+    /// TERMINAL nominal `typeof` node — the `unique symbol` type itself,
+    /// carrying its declaring
+    /// [`verter_type_expr::facts::ValueDeclIdentityPart`] in the payload.
+    /// TypeScript's only nominal type: two declarations denote DIFFERENT
+    /// types though both widen to the shared `symbol` primitive, and one
+    /// declaration denotes ONE type however many aliases, imports, or
+    /// re-exports a reference travelled through. The node has no content to
+    /// resolve and no `type_args` to apply — a consumer asking a NOMINAL
+    /// question reads it as terminal, and a consumer asking a STRUCTURAL
+    /// question takes the widened `symbol` inhabitant. The head stays the
+    /// AUTHORED reference; the identity rides the payload. Fields live on
+    /// the opaque [`carrier::TypeOfNominalCarrier`] payload. Construct via
+    /// [`new_nominal_typeof`](Self::new_nominal_typeof); read the identity
+    /// via [`typeof_nominal_identity`](Self::typeof_nominal_identity) and
+    /// the head via [`typeof_head`](Self::typeof_head).
+    TypeOfNominal(carrier::TypeOfNominalCarrier),
     TypeParam {
         /// Declaration identity. Distinguishes cross-declaration
         /// same-name parameters (`type A<T>` vs `type B<T>` in the
@@ -8860,12 +8936,13 @@ impl SemanticNodeData {
             Self::IndexedAccess { .. } => 11,
             Self::Mapped { .. } => 12,
             Self::TypeOf(_) => 13,
+            Self::TypeOfNominal(_) => 18,
             Self::TypeParam { .. } => 14,
             Self::Infer { .. } => 15,
             Self::InferRef { .. } => 28,
             Self::MergedDecl { .. } => 16,
             Self::Conditional { .. } => 17,
-            // Indices 18, 19, and 26 are intentionally unused so the
+            // Indices 19 and 26 are intentionally unused so the
             // surviving variants keep stable bucket indices independent of
             // declaration order.
             Self::Signature { .. } => 29,
@@ -8895,7 +8972,10 @@ impl SemanticNodeData {
             Self::TypeOf(_) | Self::BareRef(_) | Self::ImportType(_) | Self::RawFallback { .. } => {
                 true
             }
-            Self::Alias(_)
+            // The nominal terminal IS a known type — the declaring identity
+            // it carries is the whole type.
+            Self::TypeOfNominal(_)
+            | Self::Alias(_)
             | Self::Object(_)
             | Self::ObjectSpreadProgram(_)
             | Self::Union(_)
@@ -9008,6 +9088,11 @@ impl PartialEq for SemanticNodeData {
             // (every field, incl `type_args`) — same identity as the prior
             // hand-written field-by-field arms.
             (Self::TypeOf(a), Self::TypeOf(b)) => a == b,
+            // The nominal terminal compares by its WHOLE payload — head and
+            // declaring identity — so two authored spellings of one
+            // declaration intern as distinct nodes while two structurally
+            // identical carriers alias.
+            (Self::TypeOfNominal(a), Self::TypeOfNominal(b)) => a == b,
             (
                 Self::TypeParam {
                     decl: ad,
@@ -9185,6 +9270,10 @@ impl std::hash::Hash for SemanticNodeData {
             // hand-written arms; the discriminant tag was already mixed in
             // above.
             Self::TypeOf(c) => c.hash(state),
+            // The nominal terminal hashes its WHOLE payload (head and
+            // declaring identity), so hash/equality agree with the derived
+            // `PartialEq` above and the identity participates in interning.
+            Self::TypeOfNominal(c) => c.hash(state),
             Self::TypeParam {
                 decl,
                 param_index,
