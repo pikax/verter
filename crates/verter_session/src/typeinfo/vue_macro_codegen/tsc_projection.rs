@@ -9,12 +9,34 @@ use super::runtime::{
 };
 use super::*;
 
+/// The ONE nameability fail-close every splice site inherits: a NOMINAL
+/// `typeof` carrier whose declaring identity is a script-setup local of
+/// `owner_canonical` renders an identifier the generated declaration
+/// surface never declares, so it widens to the `symbol` primitive at
+/// EVERY position of the subtree before the text is produced.
+///
+/// It lives on the render funnel rather than at the call sites because a
+/// splice site that forgets it splices an undeclared identifier: the emit
+/// payload parameters reach the render through two further hops and had
+/// no widen at all. A carrier declared in ANOTHER module is nameable and
+/// keeps its precise `typeof` spelling at every depth.
+fn nameable_render_node(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: crate::semantic_query::SemanticNodeId,
+    owner_canonical: &str,
+) -> crate::semantic_query::SemanticNodeId {
+    dispatch.widen_owner_local_nominal_typeofs(node, owner_canonical)
+}
+
 pub(super) fn render_tsc_node(
     ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
     node: crate::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     counters.tsc_materializations += 1;
+    let node = nameable_render_node(dispatch, node, owner_canonical);
     let rendered = crate::typeinfo::raise::render_node_display_with_ctx(ctx, node);
     if macro_projection_faulted(MacroProjectionLane::Tsc) {
         return Err(partial_failure());
@@ -68,10 +90,13 @@ pub(super) fn render_tsc_node(
 /// node at all) still fails closed, matching every other caller.
 pub(super) fn render_tsc_testing_node(
     ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
     node: crate::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<(TscSpliceText, Option<TscDeclarationFailureReason>), ProjectionFailure> {
     counters.tsc_materializations += 1;
+    let node = nameable_render_node(dispatch, node, owner_canonical);
     let rendered = crate::typeinfo::raise::render_node_display_with_ctx(ctx, node);
     if macro_projection_faulted(MacroProjectionLane::Tsc) {
         return Err(partial_failure());
@@ -1231,6 +1256,7 @@ pub(super) fn cross_file_namespace_import_type(
 pub(super) fn tsc_emit_rows(
     ctx: &dyn ResolverContext,
     dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
     surface: &TypeInfoSurface,
     mac: &AnalyzedMacro,
     payload_index: usize,
@@ -1264,7 +1290,13 @@ pub(super) fn tsc_emit_rows(
         let Some(signature) = callable.signature(context) else {
             continue;
         };
-        let parameters = render_function_parameters(ctx, &signature.raw_params()[1..], counters)?;
+        let parameters = render_function_parameters(
+            ctx,
+            dispatch,
+            owner_canonical,
+            &signature.raw_params()[1..],
+            counters,
+        )?;
         for name in names {
             push_tsc_emit(
                 &mut rows,
@@ -1283,7 +1315,8 @@ pub(super) fn tsc_emit_rows(
         let Some(name) = member.published_name() else {
             continue;
         };
-        let parameters = render_emit_payload_parameters(ctx, dispatch, member.value, counters)?;
+        let parameters =
+            render_emit_payload_parameters(ctx, dispatch, owner_canonical, member.value, counters)?;
         push_tsc_emit(
             &mut rows,
             name.as_ref(),
@@ -1328,6 +1361,7 @@ fn push_tsc_emit(
 fn render_emit_payload_parameters(
     ctx: &dyn ResolverContext,
     dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
     node: crate::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
@@ -1346,7 +1380,7 @@ fn render_emit_payload_parameters(
     };
     match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).as_deref() {
         Some(SemanticNodeData::Tuple { elements, .. }) => {
-            render_tuple_parameters(ctx, elements, counters)
+            render_tuple_parameters(ctx, dispatch, owner_canonical, elements, counters)
         }
         // CALL kind only: an emit payload replays a callback's parameters;
         // a construct signature is not a callback shape and degrades to the
@@ -1355,19 +1389,21 @@ fn render_emit_payload_parameters(
             kind: crate::semantic_query::SignatureKind::Call,
             params,
             ..
-        }) => render_function_parameters(ctx, params, counters),
+        }) => render_function_parameters(ctx, dispatch, owner_canonical, params, counters),
         _ => Ok(TscSpliceText::new("...args: unknown[]")),
     }
 }
 
 fn render_tuple_parameters(
     ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
     elements: &[crate::semantic_query::TupleElement],
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     let mut rendered = Vec::with_capacity(elements.len());
     for (index, element) in elements.iter().enumerate() {
-        let ty = render_tsc_node(ctx, element.value, counters)?;
+        let ty = render_tsc_node(ctx, dispatch, owner_canonical, element.value, counters)?;
         let name = element
             .label
             .as_deref()
@@ -1387,12 +1423,14 @@ fn render_tuple_parameters(
 
 fn render_function_parameters(
     ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
     params: &[crate::semantic_query::FunctionParam],
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     let mut rendered = Vec::with_capacity(params.len());
     for (index, param) in params.iter().enumerate() {
-        let ty = render_tsc_node(ctx, param.ty, counters)?;
+        let ty = render_tsc_node(ctx, dispatch, owner_canonical, param.ty, counters)?;
         let name = param
             .name
             .as_deref()

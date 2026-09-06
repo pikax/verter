@@ -1194,8 +1194,9 @@ impl VerterHost {
                     } else {
                         match render_tsc_testing_node(
                             ctx,
-                            dispatch
-                                .widen_owner_local_nominal_typeofs(member.value, owner_canonical),
+                            dispatch,
+                            owner_canonical,
+                            member.value,
                             counters,
                         ) {
                             Ok(rendered) => rendered,
@@ -1262,6 +1263,7 @@ impl VerterHost {
                 let events = match tsc_emit_rows(
                     ctx,
                     dispatch,
+                    owner_canonical,
                     &surface,
                     mac,
                     payload_index,
@@ -1304,14 +1306,11 @@ impl VerterHost {
                 }))
             }
             AnalyzedMacroKind::DefineModel => {
-                // Same render-boundary fail-close as every other splice
-                // site: an owner-local nominal carrier is not nameable by
-                // the generated declaration surface, at any position.
-                let payload = dispatch.widen_owner_local_nominal_typeofs(payload, owner_canonical);
-                let value_type = match render_tsc_node(ctx, payload, counters) {
-                    Ok(text) => text,
-                    Err(failure) => return failure.tsc(),
-                };
+                let value_type =
+                    match render_tsc_node(ctx, dispatch, owner_canonical, payload, counters) {
+                        Ok(text) => text,
+                        Err(failure) => return failure.tsc(),
+                    };
                 let name = mac.model_name.as_deref().unwrap_or("modelValue").to_owned();
                 let optional = mac
                     .prop_fields
@@ -1391,22 +1390,16 @@ impl VerterHost {
                             if reduced.result_is_partial() {
                                 crate::request_context::mark_request_result_partial();
                             }
-                            // A NOMINAL carrier whose declaring identity is
-                            // a script-setup LOCAL of this owner cannot be
-                            // named by the generated surface: the setup
-                            // closure's bindings are not importable, so a
-                            // `typeof K` render would splice an undeclared
-                            // identifier into the declaration. Fail closed
-                            // to the widened `symbol` primitive — the
-                            // honest structural inhabitant, with no phantom
-                            // reference and no fresh nominal identity — at
-                            // EVERY position that holds one, not only the
-                            // root: `{ inner: typeof K }` renders the same
-                            // unnameable identifier. A carrier declared in
-                            // ANOTHER module keeps its precise `typeof`
-                            // spelling; its lexical root joins the reference
-                            // set and the surface imports it, exactly as any
-                            // other cross-file `typeof` reference does.
+                            // The render funnel widens an owner-local
+                            // NOMINAL carrier — unnameable by the generated
+                            // surface — to `symbol` at every position of
+                            // the subtree. This site needs the widened node
+                            // itself as well, because the reference set it
+                            // collects must describe the text that was
+                            // spliced: recording `K` for a position that
+                            // rendered `symbol` demands a setup binding the
+                            // declaration surface cannot satisfy, which
+                            // fails the whole macro rather than one member.
                             let render_node = dispatch.widen_owner_local_nominal_typeofs(
                                 reduced.node_id(),
                                 owner_canonical,
@@ -1418,7 +1411,13 @@ impl VerterHost {
                             // masquerading as `Ok` text, so it needs no
                             // second, textual screen of its own; a genuinely
                             // resolved member is the only `Ok` outcome.
-                            match render_tsc_node(ctx, render_node, counters) {
+                            match render_tsc_node(
+                                ctx,
+                                dispatch,
+                                owner_canonical,
+                                render_node,
+                                counters,
+                            ) {
                                 Ok(text) => {
                                     crate::resolver_core::component_meta_registry::collect_node_ref_names(
                                         ctx,

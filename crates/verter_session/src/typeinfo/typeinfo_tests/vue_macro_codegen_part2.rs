@@ -1230,3 +1230,118 @@ fn runtime_props_shape(
     };
     props
 }
+
+/// A generated declaration surface can only splice an identifier it also
+/// declares, so the SPLICE TEXT of a macro row and the SCOPE BLOCK beside
+/// it are one answer: a row that renders `typeof K` over a script-setup
+/// binding must demand `K` as an owner value dependency, and a row that
+/// renders no such reference must demand none. The two are derived
+/// SEPARATELY — the text from the resolved node, the scope from the
+/// macro's own references — so nothing but this contract keeps them
+/// aligned: applying a render-boundary widen at one of these positions
+/// without re-deriving its scope produces a row that says `symbol` beside
+/// a block still demanding a binding, and dropping a scope entry without
+/// widening produces the reverse.
+///
+/// The same pairing holds for an IMPORTED carrier, whose reference IS
+/// nameable: the row keeps its precise `typeof` spelling and the binding
+/// stays retained for the surface to import.
+#[test]
+fn macro_splice_text_and_scope_agree_on_the_bindings_they_name() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(
+        &host,
+        "/src/token.ts",
+        "export declare const EXT_TOKEN: unique symbol",
+    );
+    upsert(
+        &host,
+        "/src/Splices.vue",
+        r#"<script setup lang="ts">
+import { EXT_TOKEN } from './token'
+const K: unique symbol = Symbol()
+defineProps<{ local: { inner: typeof K }; imported: { inner: typeof EXT_TOKEN } }>()
+defineEmits<{ pick: [value: { inner: typeof K }] }>()
+defineModel<{ inner: typeof K }>('picked')
+</script>"#,
+    );
+
+    let output = produce(&host, "/src/Splices.vue", VueMacroCodegenDemand::Tsc);
+    let bundle = output.tsc.expect("TSC bundle");
+    assert_eq!(
+        bundle.entries.len(),
+        3,
+        "props, emits and model: {bundle:?}"
+    );
+
+    /// One splice position: what its text says, and what its scope demands.
+    #[track_caller]
+    fn assert_agrees(where_: &str, text: &str, scope: &verter_macro_dto::TscScopeRequirements) {
+        let names_setup_local = text.contains("typeof K");
+        let demands_setup_local = scope
+            .owner_value_dependencies
+            .iter()
+            .any(|dependency| dependency.name == "K");
+        assert_eq!(
+            names_setup_local, demands_setup_local,
+            "{where_}: the spliced text {text:?} names the script-setup binding `K` \
+             ({names_setup_local}) but its scope block demands it ({demands_setup_local}) — \
+             a generated surface may only splice an identifier it declares: {scope:?}"
+        );
+    }
+
+    let MacroTscOutcome::Complete(MacroTscProjection::Props(props)) = &bundle.entries[0].outcome
+    else {
+        panic!("expected a complete props projection: {bundle:?}");
+    };
+    let row = |name: &str| {
+        props
+            .testing_rows
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("props row `{name}`: {props:?}"))
+            .type_text
+            .as_str()
+            .to_owned()
+    };
+    assert_agrees("the props testing row", &row("local"), &props.scope);
+    assert_eq!(
+        row("imported").trim(),
+        "{ inner: typeof EXT_TOKEN }",
+        "an IMPORTED carrier is nameable and keeps its precise spelling: {props:?}"
+    );
+    assert!(
+        props
+            .scope
+            .retained_bindings
+            .iter()
+            .any(|binding| binding.local_name == "EXT_TOKEN"),
+        "the imported reference the row splices must stay retained: {:?}",
+        props.scope
+    );
+
+    let MacroTscOutcome::Complete(MacroTscProjection::Emits(emits)) = &bundle.entries[1].outcome
+    else {
+        panic!("expected a complete emits projection: {bundle:?}");
+    };
+    let payload = emits
+        .events
+        .iter()
+        .find(|event| event.name == "pick")
+        .unwrap_or_else(|| panic!("emit row `pick`: {emits:?}"))
+        .emit_parameters
+        .as_str()
+        .to_owned();
+    assert_agrees("the emit payload parameters", &payload, &emits.scope);
+
+    let MacroTscOutcome::Complete(MacroTscProjection::Model(model)) = &bundle.entries[2].outcome
+    else {
+        panic!("expected a complete model projection: {bundle:?}");
+    };
+    assert_eq!(model.name, "picked");
+    assert_agrees(
+        "the model value type",
+        model.value_type.as_str(),
+        &model.scope,
+    );
+}
