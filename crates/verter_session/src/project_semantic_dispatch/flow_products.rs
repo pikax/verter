@@ -639,7 +639,13 @@ pub struct FlowProductBudgetExceeded {
     pub axis: FlowProductBudgetAxis,
     /// The axis limit.
     pub limit: u32,
-    /// The observed value that exceeded it.
+    /// The measurement that forced the refusal, per axis: for
+    /// [`FlowProductBudgetAxis::Products`] the number of stored products,
+    /// for [`FlowProductBudgetAxis::Width`] the carrier's element count,
+    /// and for [`FlowProductBudgetAxis::Iterations`] the product slots
+    /// STILL OUTSTANDING when the cap was reached — the fold refuses
+    /// before running the extra pass, so there is no `limit + 1` iteration
+    /// to have observed.
     pub observed: u32,
 }
 
@@ -1129,10 +1135,15 @@ pub fn join_frame_products(
     let mut iterations = 0u32;
     loop {
         if iterations == budget.max_iterations {
+            // The refusal happens BEFORE the extra pass runs, so the honest
+            // observation is the outstanding work that forced it — one pass
+            // over the subject universe in every frame domain — not a
+            // `limit + 1` iteration nothing measured.
             return FlowFrameJoinOutcome::BudgetExceeded(FlowProductBudgetExceeded {
                 axis: FlowProductBudgetAxis::Iterations,
                 limit: budget.max_iterations,
-                observed: budget.max_iterations.saturating_add(1),
+                observed: u32::try_from(subjects.len().saturating_mul(FLOW_FRAME_DOMAINS.len()))
+                    .unwrap_or(u32::MAX),
             });
         }
         iterations += 1;
