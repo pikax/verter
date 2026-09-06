@@ -21,7 +21,7 @@ pub use capability::{CapabilityCell, CapabilityDisposition, ALL_CAPABILITY_CELLS
 pub use product::{
     unroutable_host_request_axis, AnalysisProductRequest, CompileProduct,
     DeclarationProductRequest, IdeProductRequest, ProductKind, PublicApiProductRequest,
-    RuntimeProductRequest, RuntimeStyleProcessing, UnroutableHostRequestAxis,
+    RuntimeHmrStrategy, RuntimeProductRequest, RuntimeStyleProcessing, UnroutableHostRequestAxis,
 };
 pub use svelte::{
     SvelteCompileRequest, SvelteOption, SvelteOptionAttempt, SvelteOptionClass,
@@ -410,6 +410,12 @@ pub struct CompileRequest {
     component_id: Option<String>,
     is_production: bool,
     force_js: bool,
+    /// The `ssrContext.modules` manifest key form for the host Main
+    /// assembly; `None` falls back to the canonical id.
+    ssr_module_id: Option<String>,
+    /// Dev-server tooling flavour gating the host Main assembly's
+    /// `__file` and hot-accept trailer decoration.
+    hmr_strategy: RuntimeHmrStrategy,
 }
 
 impl CompileRequest {
@@ -530,7 +536,39 @@ impl CompileRequest {
             component_id,
             is_production,
             force_js,
+            ssr_module_id: None,
+            hmr_strategy: RuntimeHmrStrategy::default(),
         })
+    }
+
+    /// State the host Main-assembly decoration axes: the SSR-manifest key
+    /// form (`ssrContext.modules` registration — root-relative under Vite;
+    /// `None` falls back to the canonical id) and the dev-server tooling
+    /// flavour gating the natively composed `__file` and hot-accept
+    /// trailer.
+    ///
+    /// These are host build knobs, not framework options; the legacy
+    /// `CompileProfile` carries the same pair and treats them as inert
+    /// for Svelte, which this request preserves.
+    pub fn with_host_assembly_axes(
+        mut self,
+        ssr_module_id: Option<String>,
+        hmr_strategy: RuntimeHmrStrategy,
+    ) -> Self {
+        self.ssr_module_id = ssr_module_id;
+        self.hmr_strategy = hmr_strategy;
+        self
+    }
+
+    /// The SSR-manifest key form stated by the caller, if any.
+    pub fn ssr_module_id(&self) -> Option<&str> {
+        self.ssr_module_id.as_deref()
+    }
+
+    /// The dev-server tooling flavour stated by the caller (`None` = no
+    /// decoration).
+    pub fn hmr_strategy(&self) -> RuntimeHmrStrategy {
+        self.hmr_strategy
     }
 
     pub fn products(&self) -> &[CompileProduct] {

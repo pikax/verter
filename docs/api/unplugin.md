@@ -269,6 +269,16 @@ This ensures downstream plugins (`@vitejs/plugin-vue-jsx`, external globals, etc
 
 For non-Vite bundlers (webpack, Rspack, esbuild, Rollup, Rolldown, Farm), the plugin inlines everything into a single module and handles TypeScript stripping internally via the `forceJs` compile profile flag.
 
+### Style preprocessing outside Vite
+
+Under Vite, style preprocessing (SCSS/Sass/Less) belongs to Vite's CSS pipeline. On every other bundler the plugin preprocesses `<style lang="scss">` and `<style lang="sass">` blocks itself through the [`sass`](https://www.npmjs.com/package/sass) package, declared as an optional peer dependency — install it alongside the plugin when a non-Vite build uses SCSS/Sass:
+
+```bash
+pnpm add -D sass
+```
+
+Without `sass`, such a block warns and compiles as unavailable; a genuine SCSS syntax error fails the build with the Sass compiler's own message.
+
 ## HMR
 
 Hot Module Replacement strategy is auto-detected from the bundler framework:

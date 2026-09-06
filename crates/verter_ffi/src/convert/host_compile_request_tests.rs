@@ -12,7 +12,8 @@ use verter_compiler::compile_request::vue::{
 };
 use verter_compiler::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest, FrameworkOption,
-    ProductKind, SvelteOption, VueBackendRequest, VueOption,
+    ProductKind, RuntimeHmrStrategy, RuntimeStyleProcessing, SvelteOption, VueBackendRequest,
+    VueOption,
 };
 
 use crate::convert::{ffi_host_compile_request_to_compile_request, HostResolvedCompileProfiles};
@@ -35,6 +36,8 @@ fn identity() -> FfiHostCompileIdentity {
         component_id: Some("c-1".to_string()),
         is_production: false,
         force_js: false,
+        ssr_module_id: None,
+        hmr_strategy: None,
     }
 }
 
@@ -106,6 +109,7 @@ fn runtime_product() -> FfiRuntimeProductRequest {
     FfiRuntimeProductRequest {
         inline: None,
         runtime_source_map: false,
+        style_processing: None,
     }
 }
 
@@ -281,6 +285,7 @@ fn per_product_options_survive_the_conversion() {
                 FfiRequestedProduct::RuntimeClient(FfiRuntimeProductRequest {
                     inline: Some(false),
                     runtime_source_map: true,
+                    style_processing: None,
                 }),
                 FfiRequestedProduct::IdeCompanion(FfiIdeProductRequest {
                     want_source_map: false,
@@ -981,6 +986,8 @@ fn identity_flags_round_trip_in_both_polarities() {
                         component_id: Some("c-1".to_string()),
                         is_production,
                         force_js,
+                        ssr_module_id: None,
+                        hmr_strategy: None,
                     },
                     products: vec![FfiRequestedProduct::Analysis(analysis_product())],
                     options: vue_options(),
@@ -1014,6 +1021,8 @@ fn identity_names_are_carried_both_present_and_absent() {
                 component_id: None,
                 is_production: false,
                 force_js: false,
+                ssr_module_id: None,
+                hmr_strategy: None,
             },
             products: vec![FfiRequestedProduct::Analysis(analysis_product())],
             options: vue_options(),
@@ -1025,6 +1034,85 @@ fn identity_names_are_carried_both_present_and_absent() {
     assert_eq!(absent.component_id(), None);
 }
 
+// ── host Main-assembly axes and the style cascade ────────────────────────
+
+/// `styleProcessing` crosses onto the runtime product it was stated on:
+/// `"authored-only"` reaches the canonical `AuthoredOnly`, an absent slot
+/// resolves to the compiler-owned `Complete` cascade.
+#[test]
+fn runtime_product_style_processing_maps_both_stated_and_absent() {
+    let stated = ffi_host_compile_request_to_compile_request(
+        vue(
+            vec![FfiRequestedProduct::RuntimeClient(
+                FfiRuntimeProductRequest {
+                    inline: None,
+                    runtime_source_map: false,
+                    style_processing: Some(FfiRuntimeStyleProcessing::AuthoredOnly),
+                },
+            )],
+            vue_options(),
+        ),
+        &no_profiles(),
+    )
+    .expect("converts");
+    assert_eq!(
+        stated.runtime_style_processing(),
+        RuntimeStyleProcessing::AuthoredOnly
+    );
+
+    let absent = ffi_host_compile_request_to_compile_request(
+        vue(
+            vec![FfiRequestedProduct::RuntimeClient(runtime_product())],
+            vue_options(),
+        ),
+        &no_profiles(),
+    )
+    .expect("converts");
+    assert_eq!(
+        absent.runtime_style_processing(),
+        RuntimeStyleProcessing::Complete,
+        "an absent styleProcessing slot selects the complete cascade"
+    );
+}
+
+/// The identity's `ssrModuleId` / `hmrStrategy` reach the canonical
+/// request's host-assembly axes when stated, and stay `None`/`None` when
+/// absent.
+#[test]
+fn identity_assembly_axes_map_both_stated_and_absent() {
+    for (wire, expected) in [
+        (FfiHmrStrategy::None, RuntimeHmrStrategy::None),
+        (FfiHmrStrategy::Vite, RuntimeHmrStrategy::Vite),
+        (FfiHmrStrategy::Webpack, RuntimeHmrStrategy::Webpack),
+    ] {
+        let mut stated_identity = identity();
+        stated_identity.ssr_module_id = Some("src/App.vue".to_string());
+        stated_identity.hmr_strategy = Some(wire);
+        let request = ffi_host_compile_request_to_compile_request(
+            FfiHostCompileRequest::Vue(FfiVueHostCompileRequest {
+                identity: stated_identity,
+                products: vec![FfiRequestedProduct::RuntimeClient(runtime_product())],
+                options: vue_options(),
+            }),
+            &no_profiles(),
+        )
+        .expect("converts");
+        assert_eq!(request.ssr_module_id(), Some("src/App.vue"));
+        assert_eq!(request.hmr_strategy(), expected);
+    }
+
+    let absent = ffi_host_compile_request_to_compile_request(
+        vue(
+            vec![FfiRequestedProduct::RuntimeClient(runtime_product())],
+            vue_options(),
+        ),
+        &no_profiles(),
+    )
+    .expect("converts");
+    assert_eq!(absent.ssr_module_id(), None);
+    assert_eq!(absent.hmr_strategy(), RuntimeHmrStrategy::None);
+}
+
 #[test]
 fn every_product_flag_round_trips_in_both_polarities() {
     for value in [true, false] {
@@ -1034,6 +1122,7 @@ fn every_product_flag_round_trips_in_both_polarities() {
                     FfiRuntimeProductRequest {
                         inline: Some(value),
                         runtime_source_map: value,
+                        style_processing: None,
                     },
                 )],
                 vue_options(),
@@ -1108,6 +1197,7 @@ fn an_inline_runtime_product_on_a_svelte_request_is_refused() {
                 FfiRuntimeProductRequest {
                     inline: Some(true),
                     runtime_source_map: false,
+                    style_processing: None,
                 },
             )],
             svelte_options(),
@@ -1124,6 +1214,7 @@ fn an_inline_runtime_product_on_a_svelte_request_is_refused() {
                 FfiRuntimeProductRequest {
                     inline: Some(false),
                     runtime_source_map: false,
+                    style_processing: None,
                 },
             )],
             svelte_options(),
@@ -1461,6 +1552,7 @@ fn an_inline_server_product_is_refused_rather_than_silently_demoted() {
                 FfiRuntimeProductRequest {
                     inline: Some(true),
                     runtime_source_map: false,
+                    style_processing: None,
                 },
             )],
             options,
