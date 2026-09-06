@@ -3115,8 +3115,35 @@ pub(crate) enum InstantiateBodySource {
     NonFile,
 }
 
+/// The authored-arm instantiate source payload: the sealed operand
+/// identity plus the force request's projection demand.
+///
+/// Both axes are content-free. The demand distinguishes force families
+/// whose VALUES differ — a whole-surface force answers the empty-path
+/// projection, a residual-path force answers the path projection, a
+/// key-domain force answers `keyof` — so two forces of the same operand
+/// at different precisions never alias onto one warm entry, and neither
+/// may a selective precision alias onto the declaration-source
+/// `Instantiate` family the compiler dispatches (only the whole-surface
+/// precision converges there).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct InstantiateSource(Option<Box<operand::AuthoredOperandQueryIdentity>>);
+pub(crate) struct AuthoredOperandSource {
+    identity: operand::AuthoredOperandQueryIdentity,
+    projection: operand::SemanticOperandForceProjection,
+}
+
+impl AuthoredOperandSource {
+    pub(crate) fn identity(&self) -> &operand::AuthoredOperandQueryIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn projection(&self) -> &operand::SemanticOperandForceProjection {
+        &self.projection
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct InstantiateSource(Option<Box<AuthoredOperandSource>>);
 
 impl InstantiateSource {
     fn declaration() -> Self {
@@ -3126,12 +3153,18 @@ impl InstantiateSource {
     // Reachable only from the operand forcing boundary. Armed under
     // `cfg(test)`.
     #[cfg_attr(not(test), allow(dead_code))]
-    fn authored(identity: operand::AuthoredOperandQueryIdentity) -> Self {
-        Self(Some(Box::new(identity)))
+    fn authored(source: AuthoredOperandSource) -> Self {
+        Self(Some(Box::new(source)))
     }
 
+    /// The authored force source, when this key is force-owned. The
+    /// declaration source has NONE — it is the whole-surface declaration
+    /// `Instantiate` family, whose value IS the whole-body projection —
+    /// so projection demand is readable only through the returned
+    /// [`AuthoredOperandSource`], never defaulted: a force that names no
+    /// precision is spelled `WholeSurface` at construction.
     #[must_use]
-    pub(crate) fn authored_identity(&self) -> Option<&operand::AuthoredOperandQueryIdentity> {
+    pub(crate) fn authored_source(&self) -> Option<&AuthoredOperandSource> {
         self.0.as_deref()
     }
 }
@@ -3435,8 +3468,8 @@ impl InstantiateKey {
     /// Token-gated authored-source builder: the sole caller is the operand
     /// forcing boundary
     /// (`ProjectSemanticDispatch::force_semantic_operand`), which combines a
-    /// sealed authored operand identity with the request-owned context. The
-    /// unforgeable
+    /// sealed authored operand identity with the request-owned context and
+    /// the force's projection demand. The unforgeable
     /// [`SemanticOperandAuthority`](crate::project_semantic_dispatch::SemanticOperandAuthority)
     /// keeps every other internal consumer from keying an authored-locator
     /// instantiate.
@@ -3447,12 +3480,16 @@ impl InstantiateKey {
         identity: operand::AuthoredOperandQueryIdentity,
         args: Arc<[SemanticNodeId]>,
         context: InstantiateContext,
+        projection: operand::SemanticOperandForceProjection,
         _authority: crate::project_semantic_dispatch::SemanticOperandAuthority,
     ) -> Self {
         Self {
             base,
             args,
-            source: InstantiateSource::authored(identity),
+            source: InstantiateSource::authored(AuthoredOperandSource {
+                identity,
+                projection,
+            }),
             context,
         }
     }

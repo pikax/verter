@@ -28,7 +28,13 @@ fn main() {
     let _ = SemanticOperand {
         kind: todo!(),
     };
+    // Both private fields are named: rustc's cannot-construct error for a
+    // partially-provided private-field literal suppresses the per-field
+    // E0451 reports of the OTHER literals in this fixture on the pinned
+    // toolchain, so this literal provides every field and keeps the
+    // per-field privacy evidence for all five carriers.
     let _ = SemanticOperandForceRequest {
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+        demand: todo!(),
     };
 }

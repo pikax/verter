@@ -1413,10 +1413,6 @@ const WASM_BUILD: &str = "CARGO_BUILD_JOBS=4 cargo build -p verter_wasm --target
 /// NAPI: WASM exports a different surface and executes `analyzeWithAudit`.
 const WASM_OUT_OF_SCOPE: &[(&str, &str)] = &[
     (
-        "applyBlockOverrides",
-        "block-content override input, not a product route",
-    ),
-    (
         "auditWorkspaceOp",
         "workspace audit op, not a framework product",
     ),
@@ -1453,37 +1449,6 @@ const WASM_OUT_OF_SCOPE: &[(&str, &str)] = &[
     ("resolveSymbolWithAudit", "type-resolution product"),
     ("resolveTypeWithAudit", "type-resolution product"),
     ("setImportDependencies", "dependency-resolution input"),
-];
-
-/// Legacy cached-route spellings this probe does not drive: it demands
-/// every product through the typed `compileRequest`, and these exports are
-/// the binding-local cached route that route supersedes.
-///
-/// A separate class from [`WASM_OUT_OF_SCOPE`] because the reason is this
-/// probe's route choice, not the method's product — each name IS a live
-/// product route a per-keystroke consumer is steered toward. The rows make
-/// NO coverage claim over them: this probe neither executes them nor
-/// verifies that any other suite does. A wasm-bindgen-test suite drives
-/// them on a different JS host than this Node web probe, and deleting its
-/// `legacy_ide` / `legacy_virtual_file` tests leaves this enumeration
-/// green — that is this classification's honest limit, stated here rather
-/// than papered over with a cross-suite coverage claim nothing enforces.
-const WASM_LEGACY_CACHED_ROUTES_NOT_DRIVEN: &[(&str, &str)] = &[
-    (
-        "ensureIdeCompiled",
-        "legacy cached IDE-compile route; this probe demands IDE products through the typed \
-         `compileRequest` instead",
-    ),
-    (
-        "getIde",
-        "legacy cached IDE read; this probe demands IDE products through the typed \
-         `compileRequest` instead",
-    ),
-    (
-        "getVirtualFile",
-        "legacy cached per-node read; this probe demands runtime products through the typed \
-         `compileRequest` instead",
-    ),
 ];
 
 /// wasm-bindgen's own memory-management members on every generated class.
@@ -1562,7 +1527,7 @@ fn every_exported_wasm_spelling_is_executed_or_classified_out_of_scope() {
         &methods,
         WASM_EXECUTED,
         WASM_OUT_OF_SCOPE,
-        &[WASM_BINDING_RUNTIME, WASM_LEGACY_CACHED_ROUTES_NOT_DRIVEN],
+        &[WASM_BINDING_RUNTIME],
     );
 }
 

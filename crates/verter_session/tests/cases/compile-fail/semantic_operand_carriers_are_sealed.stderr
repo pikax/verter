@@ -28,6 +28,17 @@ warning: unreachable expression
 30 | |     };
    | |_____^ unreachable expression
 
+warning: unreachable expression
+  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:36:13
+   |
+36 |       let _ = SemanticOperandForceRequest {
+   |  _____________^
+37 | |         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+38 | |         demand: todo!(),
+   | |                 ------- any code following this expression is unreachable
+39 | |     };
+   | |_____^ unreachable expression
+
 error[E0451]: fields `canonical_id` and `owner` of struct `OperandLexicalScope` are private
   --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:15:9
    |
@@ -70,16 +81,24 @@ error[E0451]: field `kind` of struct `SemanticOperand` is private
 29 |         kind: todo!(),
    |         ^^^^ private field
 
-error[E0451]: field `context` of struct `SemanticOperandForceRequest` is private
-  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:32:9
+error[E0451]: fields `context` and `demand` of struct `SemanticOperandForceRequest` are private
+  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:37:9
    |
-31 |     let _ = SemanticOperandForceRequest {
+36 |     let _ = SemanticOperandForceRequest {
    |             --------------------------- in this type
-32 |         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+37 |         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
    |         ^^^^^^^ private field
+38 |         demand: todo!(),
+   |         ^^^^^^ private field
 
 error: type `operand::SemanticOperandKind` is private
   --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:29:15
    |
 29 |         kind: todo!(),
    |               ^^^^^^^ private type
+
+error: type `operand::SemanticOperandForceDemand` is private
+  --> tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs:38:17
+   |
+38 |         demand: todo!(),
+   |                 ^^^^^^^ private type

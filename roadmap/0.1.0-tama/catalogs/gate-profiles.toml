@@ -4,6 +4,10 @@ id = "targeted-domain"
 iteration = true
 final = ["node scripts/gate.mjs"]
 [[profile]]
+id = "typeinfo-domain"
+iteration = true
+final = ["node scripts/gate.mjs", "pnpm build:native", "pnpm build:ts", "pnpm --filter @verter/typeinfo exec vitest run --passWithNoTests=false"]
+[[profile]]
 id = "ts-domain"
 iteration = true
 final = ["pnpm -r test"]

@@ -752,12 +752,12 @@ adapter = "node-tool"
 argv_tail = ["roadmap/0.1.0-tama/tools/validate-program-dag.mjs", "--strict"]
 fixtures = ["roadmap/0.1.0-tama/authority/dag/rev11-typescript-mapper.toml", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM0R.md"]
 covers = ["A-authority-consistent"]
-selected = 408
-executed = 408
-passed = 408
+selected = 411
+executed = 411
+passed = 411
 failed = 0
 skipped = 0
-terminal_summary = "validate-program-dag: PASS nodes=408 edges=1024 modules=52 charters=408 critical_path=112 max_width=36"
+terminal_summary = "validate-program-dag: PASS nodes=411 edges=1044 modules=52 charters=411 critical_path=113 max_width=36"
 count_key = "nodes"
 control = "CTL-authority-edge"
 
@@ -767,12 +767,12 @@ adapter = "node-test"
 argv_tail = ["roadmap/0.1.0-tama/tools/implementation-ledger.test.mjs"]
 fixtures = ["roadmap/0.1.0-tama/authority/state/implemented.toml", "roadmap/0.1.0-tama/schemas/implementation-ledger.schema.json"]
 covers = ["A-ledger-model-intact"]
-selected = 26
-executed = 26
-passed = 26
+selected = 30
+executed = 30
+passed = 30
 failed = 0
 skipped = 0
-terminal_summary = "tests 26 | pass 26 | fail 0 | cancelled 0 | skipped 0 | todo 0"
+terminal_summary = "tests 30 | pass 30 | fail 0 | cancelled 0 | skipped 0 | todo 0"
 control = "CTL-ledger-row"
 
 [[proof]]
@@ -810,14 +810,14 @@ adapter = "cargo-nextest"
 argv_tail = ["-p", "verter_type_runtime", "-p", "verter_session", "-p", "verter_protocol"]
 fixtures = ["crates/verter_type_runtime/tests/main.rs", "crates/verter_session/tests/cases/mod.rs", "crates/verter_protocol/tests/cases/typeinfo_proto_roundtrip.rs"]
 covers = ["A-targeted-domain-green"]
-selected = 9537
-executed = 8990
-passed = 8990
+selected = 9557
+executed = 9010
+passed = 9010
 failed = 0
 skipped = 547
 expected_skips = 547
 skip_basis = "the command applies no filter expression, so nextest counts a test as skipped only for being marked #[ignore]: the 547 are the three packages' opt-in real-provider, corpus, and soak cases, and the clean half of the control lane's re-application re-derives executed and skipped live against this transcript. The selection is shaped by the lane's CI platform — unix-gated and windows-gated cases compile on different hosts, so the five counts are the linux selection's, and a lane run on a platform that compiles a different cfg set fails the clean-run comparison by exactly those cases rather than being tolerated"
-terminal_summary = "Summary [ 131.004s] 8990 tests run: 8990 passed (2 slow), 547 skipped"
+terminal_summary = "Summary [ 203.404s] 9010 tests run: 9010 passed (9 slow), 547 skipped"
 control = "CTL-targeted-selector"
 
 # ---------------------------------------------------------------------------
@@ -914,7 +914,7 @@ subject = "roadmap/0.1.0-tama/authority/state/implemented.toml"
 reverted = "\"TCM1\" = { status = \"pending\" }\n\"TCM2\" = { status = \"pending\" }"
 applied = "\"TCM1\" = { status = \"landed\" }\n\"TCM2\" = { status = \"pending\" }"
 uniqueness = "unique-new-occurrence"
-observed = "node exit 1\ntests 26 | pass 19 | fail 7 | cancelled 0 | skipped 0 | todo 0\nseven cases reported `implementation ledger: TCM1: status must be pending or implemented` beside the schema error `authority.implementation-ledger.implementation.TCM1.status: expected one of pending, implemented`"
+observed = "node exit 1\ntests 30 | pass 22 | fail 8 | cancelled 0 | skipped 0 | todo 0\neight cases reported `implementation ledger: TCM1: status must be pending or implemented` beside the schema error `authority.implementation-ledger.implementation.TCM1.status: expected one of pending, implemented`"
 
 [[control]]
 id = "CTL-register-status"
@@ -942,7 +942,7 @@ kind = "command"
 mutation = "Re-run the recorded command with an added filter expression that matches no test in the three packages."
 argv_delta = ["-E", "test(zzz_selector_matches_nothing)"]
 uniqueness = "unique-new-occurrence"
-observed = "nextest exit 4, error: no tests to run; Summary [   0.011s] 0 tests run: 0 passed, 9537 skipped — a record transcribed from that run is refused twice over, for zero selected work and for 9537 skips against 547 declared"
+observed = "nextest exit 4, error: no tests to run; Summary [   0.016s] 0 tests run: 0 passed, 9557 skipped — a record transcribed from that run is refused twice over, for zero selected work and for 9557 skips against 547 declared"
 
 # ---------------------------------------------------------------------------
 # Findings. Every entry is routed to exactly one claim or one residue; the

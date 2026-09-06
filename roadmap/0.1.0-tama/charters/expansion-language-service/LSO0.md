@@ -47,7 +47,7 @@ The current owner is **feature-specific LSP handlers, generated-TSX mapping bran
 
 ## Concrete surfaces and APIs
 
-- Production surfaces: `crates/verter_identity/src`, `crates/verter_protocol`, `crates/verter_session`, `crates/verter_span`, `crates/verter_lsp`.
+- Future production-owner inventory (read-only in this contract): `crates/verter_identity/src`, `crates/verter_protocol`, `crates/verter_session`, `crates/verter_span`, `crates/verter_lsp`.
 - Pack production inventory:
 - `crates/verter_identity/src` for stable operation, target, occurrence, and transaction identities
 - `crates/verter_protocol` for versioned request/result/outcome and capability contracts
@@ -235,7 +235,7 @@ These are expected ownership surfaces, not permission to touch all listed paths.
 
 Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
 
-- **LSO0-AC1 — sole-owner outcome:** the named final owner must be sole and every displaced route named below must be deleted or structurally rejected. Add a negative or mutation test only for a plausible critical fail-closed/correctness boundary or reproduced defect that existing evidence does not discriminate.
+- **LSO0-AC1 — sole-owner outcome:** the contract artifacts establish the named ownership rules and inventory every displaced production route with its later production-capable deletion owner; this zero-production node performs no runtime migration. Add a negative or mutation test only for a plausible critical fail-closed/correctness boundary or reproduced defect that existing evidence does not discriminate.
 - **LSO0-AC2 — positive contract:** the named API/data boundary preserves exact identities, provenance, completeness, and deterministic ordering. Reuse existing coverage or extend/table-drive one test before creating a new test.
 - **LSO0-AC3 — incremental equivalence:** when the changed scope owns or affects incremental, cache, cancellation, stale-publication, or partial-result authority, prove incremental equals fresh and degraded outcomes cannot warm; otherwise bind a terse not-applicable rationale.
 - **LSO0-AC4 — bounded work:** when the changed scope owns or affects a hot path, prove no hidden duplicate parse, resolve, plan, emit, provider, filesystem, network, allocation, copy, or retained-candidate work; otherwise bind a terse not-applicable rationale.
@@ -260,7 +260,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Delete proposed per-feature mapping tables, raw-edit authorities, and provider-specific core DTO designs from live authority.
 - Delete claims that V3/source maps alone are semantic target identity.
 
-Deletion ownership is exact. This block may delete only the routes and artifacts named above after their replacement is proven on the same candidate. Neighboring legacy deletion remains with its owning node.
+This contract may remove superseded authority prose after preserving its durable clauses. Every production deletion listed here is an inventory obligation: bind it to an exact later production-capable owner and acceptance criterion before completing this contract. It authorizes no runtime route deletion.
 
 - LSP or provider DTOs in the core operation API.
 - Feature-specific target identity, mapper fallback, or edit application engines.
@@ -270,7 +270,7 @@ Deletion ownership is exact. This block may delete only the routes and artifacts
 
 The program-wide prohibitions also apply: no dual-running semantic authority, compatibility fallback, string or regex semantic recovery, test-only production bypass, sleep or polling readiness, resource-capacity predecessor, unqualified cache identity, or hidden whole-workspace eager work.
 
-- Delete or structurally reject every compatibility path that would preserve a second owner after cutover.
+- Inventory and assign a later deletion owner for every compatibility path that would preserve a second production owner after cutover.
 - Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
 
 ## Budgets and mandatory rescope

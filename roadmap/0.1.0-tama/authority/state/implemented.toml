@@ -108,10 +108,10 @@ schema = 2
 "CCA1O3C" = { status = "implemented", commit_message = "feat(ci): execute the wasm JavaScript-boundary tests in the canonical gate", commit_date = "2026-09-01T02:10:00+01:00" }
 "CCA1O3D" = { status = "implemented", commit_message = "feat(wasm): expose a callable typed compile request on the browser host", commit_date = "2026-09-02T12:00:00+01:00", pull_request = 469 }
 "CCA1O3E" = { status = "implemented", commit_message = "test(*): check the committed carrier fixtures against the built wasm host", commit_date = "2026-09-01T09:00:00+01:00" }
-"CCA1O4" = { status = "pending" }
+"CCA1O4" = { status = "implemented", commit_message = "refactor(unplugin): converge native host requests onto the typed compile request", commit_date = "2026-09-05T01:05:00+01:00" }
 "CCA1O4D" = { status = "pending" }
 "CCA1O5" = { status = "implemented", commit_message = "feat(play): migrate playground compile onto the typed WASM host request", commit_date = "2026-09-04T02:15:00+01:00", pull_request = 484 }
-"CCA1O5D" = { status = "pending" }
+"CCA1O5D" = { status = "implemented", commit_message = "refactor(wasm): delete the legacy compile-profile routes", commit_date = "2026-09-05T11:10:48+01:00", pull_request = 504 }
 "CCA1T1" = { status = "pending" }
 "CCA1T2" = { status = "pending" }
 "CCA1T2S" = { status = "pending" }
@@ -175,7 +175,7 @@ schema = 2
 "D2C" = { status = "implemented", commit_message = "feat(session): explain flow-return partiality in the audit payload", commit_date = "2026-09-02T09:00:00+01:00" }
 "D2D" = { status = "implemented", commit_message = "feat(session): make every surface producer return a typed resolution outcome", commit_date = "2026-09-01T19:15:00+01:00" }
 "D3C" = { status = "implemented", commit_message = "feat(session): flow product worklist cutover", commit_date = "2026-09-05T20:00:00+01:00" }
-"D3I" = { status = "pending" }
+"D3I" = { status = "implemented", commit_message = "feat(flowslice): complete stable binding identity", commit_date = "2026-09-05T11:21:01Z", pull_request = 503 }
 "D3P" = { status = "implemented", commit_message = "feat(session): flow product lattice substrate", commit_date = "2026-09-05T12:00:00+01:00" }
 "D3R" = { status = "implemented", commit_message = "feat(session): nominal relation authority for unique-symbol identity and comparability", commit_date = "2026-09-04T02:30:00+01:00" }
 "D4" = { status = "pending" }
@@ -296,6 +296,8 @@ schema = 2
 "LSO9" = { status = "pending" }
 "MDXP" = { status = "pending" }
 "MDXR0" = { status = "pending" }
+"MEM0" = { status = "pending" }
+"MEM1" = { status = "pending" }
 "NCF-AT-CYCLE" = { status = "pending" }
 "NCF-AT-QUERY" = { status = "pending" }
 "NCF-AT-REDUCE" = { status = "pending" }
@@ -367,6 +369,7 @@ schema = 2
 "SCP5" = { status = "pending" }
 "SCP6" = { status = "pending" }
 "SCP7" = { status = "pending" }
+"SG0" = { status = "pending" }
 "SKL0" = { status = "pending" }
 "SKL1" = { status = "pending" }
 "SKL2" = { status = "pending" }
@@ -394,7 +397,7 @@ schema = 2
 "TCM4" = { status = "pending" }
 "TE1" = { status = "implemented", commit_message = "feat: sealed semantic operands and forcing boundary", commit_date = "2026-09-04T01:30:00+01:00", pull_request = 474 }
 "TE2" = { status = "pending" }
-"TE3" = { status = "pending" }
+"TE3" = { status = "implemented", commit_message = "feat(core): demand-selected projection precision at the operand forcing boundary", commit_date = "2026-09-05T12:00:00+01:00" }
 "TE4" = { status = "pending" }
 "TE5" = { status = "pending" }
 "TIF0" = { status = "pending" }
