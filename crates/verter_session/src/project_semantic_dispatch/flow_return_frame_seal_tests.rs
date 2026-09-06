@@ -670,7 +670,8 @@ fn flow_product_worklist_is_permutation_deterministic() {
     for (order, run) in [("forward", &forward_first), ("reverse", &reverse_first)] {
         let Some(verter_type_expr::TypeExpr::Union(arms)) = run.served.as_ref() else {
             panic!(
-                "{order}: the merging frame serves the union of both dispatch                  edges, got {:?}",
+                "{order}: the merging frame serves the union of both dispatch \
+                 edges, got {:?}",
                 run.served
             );
         };
