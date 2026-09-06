@@ -241,8 +241,9 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
             let type_args = data.carrier_type_args();
             let mut segments = value_root
-                .name_segments()
-                .map(str::to_string)
+                .name
+                .split('.')
+                .map(|segment| segment.to_string())
                 .collect::<Vec<_>>();
             segments.extend(path.iter().map(|segment| segment.as_ref().to_string()));
             let raised_args: Vec<A::Out> = type_args

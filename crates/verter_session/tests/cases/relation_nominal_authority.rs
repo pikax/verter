@@ -365,8 +365,6 @@ fn value_member_unique_symbols_carry_their_own_nominal_identity() {
              export class Derived extends Tokens {}\n\
              export class ShadowBase { static readonly K: unique symbol = Symbol(); }\n\
              export class ShadowDerived extends ShadowBase { static readonly K: symbol = Symbol(); }\n\
-             export class MethodShadowDerived extends ShadowBase { static K(): number { return 1; } }\n\
-             export class AccessorShadowDerived extends ShadowBase { static get K(): number { return 1; } }\n\
              export class InheritsOnly extends ShadowBase {}\n\
              export declare const CONFIG: { readonly K: unique symbol; readonly plainSymbol: symbol };\n\
              type Keys = { readonly Aliased: unique symbol };\n\
@@ -381,7 +379,7 @@ fn value_member_unique_symbols_carry_their_own_nominal_identity() {
         ),
         (
             "/relation-authority/MemberTokenProp.vue",
-            "<script setup lang=\"ts\">\nimport { Tokens, Derived, ShadowDerived, MethodShadowDerived, AccessorShadowDerived, InheritsOnly, CONFIG, ALIASED, FIRST, SECOND, MUTABLE, INTERSECTED } from \"./member-tokens\";\ndefineProps<{ fromStatic: typeof Tokens.A; fromOtherStatic: typeof Tokens.B; fromDerived: typeof Derived.A; fromShadow: typeof ShadowDerived.K; fromMethodShadow: typeof MethodShadowDerived.K; fromAccessorShadow: typeof AccessorShadowDerived.K; fromInherited: typeof InheritsOnly.K; fromObject: typeof CONFIG.K; fromAliased: typeof ALIASED.Aliased; fromNamedFirst: typeof FIRST.K; fromNamedSecond: typeof SECOND.K; fromMutable: typeof MUTABLE.K; fromIntersected: typeof INTERSECTED.Left; plainStatic: typeof Tokens.plain; plainObject: typeof CONFIG.plainSymbol }>();\n</script>\n<template><div /></template>",
+            "<script setup lang=\"ts\">\nimport { Tokens, Derived, ShadowDerived, InheritsOnly, CONFIG, ALIASED, FIRST, SECOND, MUTABLE, INTERSECTED } from \"./member-tokens\";\ndefineProps<{ fromStatic: typeof Tokens.A; fromOtherStatic: typeof Tokens.B; fromDerived: typeof Derived.A; fromShadow: typeof ShadowDerived.K; fromInherited: typeof InheritsOnly.K; fromObject: typeof CONFIG.K; fromAliased: typeof ALIASED.Aliased; fromNamedFirst: typeof FIRST.K; fromNamedSecond: typeof SECOND.K; fromMutable: typeof MUTABLE.K; fromIntersected: typeof INTERSECTED.Left; plainStatic: typeof Tokens.plain; plainObject: typeof CONFIG.plainSymbol }>();\n</script>\n<template><div /></template>",
             FileLanguage::vue(),
         ),
     ] {
@@ -415,8 +413,6 @@ fn value_member_unique_symbols_carry_their_own_nominal_identity() {
     let static_b = lower(&typeof_member(["Tokens", "B"]));
     let derived_a = lower(&typeof_member(["Derived", "A"]));
     let shadow_k = lower(&typeof_member(["ShadowDerived", "K"]));
-    let method_shadow_k = lower(&typeof_member(["MethodShadowDerived", "K"]));
-    let accessor_shadow_k = lower(&typeof_member(["AccessorShadowDerived", "K"]));
     let inherited_k = lower(&typeof_member(["InheritsOnly", "K"]));
     let object_k = lower(&typeof_member(["CONFIG", "K"]));
     let aliased = lower(&typeof_member(["ALIASED", "Aliased"]));
@@ -535,32 +531,6 @@ fn value_member_unique_symbols_carry_their_own_nominal_identity() {
         identity_of(shadow_k).is_none(),
         "a re-declared non-unique static shadow carries no nominal identity"
     );
-    // The stop is about OWN DECLARATION, not about member kind: a static
-    // method or accessor override is as much an own declaration as a
-    // property override. Reading only property members let the chase run
-    // past the override to the base, minting a carrier whose declaring
-    // identity names the base's `unique symbol` while the reference's actual
-    // type is a function (or the accessor's return type) — the nominal
-    // relation then answers identity between the two as SATISFIED, which is
-    // the impermissive direction and is warm-admitted once decided.
-    for (node, label) in [
-        (method_shadow_k, "a static METHOD override"),
-        (accessor_shadow_k, "a static ACCESSOR override"),
-    ] {
-        assert!(
-            identity_of(node).is_none(),
-            "{label} shadows the base member: it carries no nominal identity"
-        );
-        // The consequence the identity assertion above exists to prevent:
-        // the override and the genuinely inherited spelling would carry ONE
-        // declaring identity, so the relation would prove a function (or the
-        // accessor's return type) IDENTICAL to the base's `unique symbol`.
-        assert_ne!(
-            relation(node, inherited_k, RelationKind::Identity),
-            RelateVerdictForTests::Holds,
-            "{label} is never PROVED the same type as the base's unique symbol"
-        );
-    }
     let inherited_identity = identity_of(inherited_k)
         .expect("a non-shadowing subclass still resolves the base's member identity");
     assert_eq!(

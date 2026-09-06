@@ -740,7 +740,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Arc::clone(&effective_symbol),
             Arc::clone(&prepared),
         );
-        if let Some(nominal) = self.member_nominal_typeof(value_root, path, &effective_root, &scope)
+        if let Some(nominal) =
+            self.member_nominal_typeof(value_root, path, &effective_root, Some(scope.clone()))
         {
             return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                 QueryResult::Value(nominal),

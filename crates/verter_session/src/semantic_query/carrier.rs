@@ -283,7 +283,7 @@ impl ImportTypeCarrier {
     }
 }
 
-/// The sanctioned crate-visible carrier accessor surface. These ten methods
+/// The sanctioned crate-visible carrier accessor surface. These eight methods
 /// are the ONLY `pub`/`pub(crate)` methods in this module; every carrier
 /// payload method above is PRIVATE, so this block
 /// is the SOLE reachable path to construct a carrier, descend / rebuild its

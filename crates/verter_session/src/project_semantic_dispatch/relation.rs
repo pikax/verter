@@ -4583,16 +4583,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Pair descent, union alternatives, and member enumeration share one
         // iterative envelope; descendants never open a fresh relation budget.
         let graph = self.graph();
-        // The strict-family regime this comparison runs under — the SAME
-        // snapshot the relation key folds in. The overlap oracle consumes
-        // it, so a loose-null-checks program never receives a
-        // strict-regime disjointness proof.
-        let strict = self
-            .dispatch_txn
-            .borrow()
-            .relation
-            .strict
-            .unwrap_or(StrictFamilyConfig::TS_STRICT);
         let budget_limit = if self
             .ctx
             .host_for_fact_tracer_install()
@@ -4673,7 +4663,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !matches!(&*source_data, SemanticNodeData::Union(_))
                     && !matches!(&*target_data, SemanticNodeData::Union(_))
                     && (super::canonical_algebra::tag_level_disjoint(graph, source, target)
-                        || comparable_root_kinds_disjoint(strict, &source_data, &target_data))
+                        || comparable_root_kinds_disjoint(&source_data, &target_data))
                 {
                     return RelationResult::NotAssignable;
                 }
@@ -4700,14 +4690,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     results.push(combined);
                 }
                 Work::Finish(pair) => {
-                    // Every `Eval` arm publishes exactly one result per
-                    // `Finish` it pushes (a retry's nested `Eval` publishes the
-                    // result the outer `Finish` pops), so an empty stack here
-                    // is unreachable. It fails CLOSED rather than panicking:
-                    // an arm that ever stopped publishing would answer
-                    // "undecided" — which suppresses admission — instead of
-                    // taking down a production request.
-                    let result = results.pop().unwrap_or(RelationResult::Unknown);
+                    let result = results
+                        .pop()
+                        .expect("a comparable pair must publish one result");
                     active.remove(&pair);
                     memo.insert(pair, result.clone());
                     results.push(result);
@@ -4803,7 +4788,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         continue;
                     }
                     if super::canonical_algebra::tag_level_disjoint(graph, source, target)
-                        || comparable_root_kinds_disjoint(strict, &source_data, &target_data)
+                        || comparable_root_kinds_disjoint(&source_data, &target_data)
                     {
                         results.push(RelationResult::NotAssignable);
                         continue;
@@ -7734,12 +7719,6 @@ enum ComparableRootKind {
     Literal,
     Nominal,
     Object,
-    /// An object surface that CONSTRAINS nothing — no member, no call or
-    /// construct signature, no index signature. A weak surface like `{}`
-    /// is inhabited by every non-nullish value, primitives included
-    /// (`string & {}` is `string`), so it is disjoint from nothing and is
-    /// kept apart from a constraining `Object`.
-    WeakObject,
     ArrayLike,
     Callable,
     Template,
@@ -7753,14 +7732,9 @@ fn comparable_root_kind(data: &SemanticNodeData) -> Option<ComparableRootKind> {
         },
         SemanticNodeData::Literal(_) => Some(ComparableRootKind::Literal),
         SemanticNodeData::TypeOfNominal(_) => Some(ComparableRootKind::Nominal),
-        SemanticNodeData::Object(view) => Some(if surface_constrains_nothing(view) {
-            ComparableRootKind::WeakObject
-        } else {
-            ComparableRootKind::Object
-        }),
-        SemanticNodeData::ObjectSpreadProgram(_) | SemanticNodeData::MergedDecl { .. } => {
-            Some(ComparableRootKind::Object)
-        }
+        SemanticNodeData::Object(_)
+        | SemanticNodeData::ObjectSpreadProgram(_)
+        | SemanticNodeData::MergedDecl { .. } => Some(ComparableRootKind::Object),
         SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. } => {
             Some(ComparableRootKind::ArrayLike)
         }
@@ -7789,73 +7763,23 @@ fn comparable_root_kind(data: &SemanticNodeData) -> Option<ComparableRootKind> {
     }
 }
 
-/// Whether an object surface constrains nothing at all — the weak-type
-/// shape (`{}`) every non-nullish value inhabits.
-fn surface_constrains_nothing(view: &crate::semantic_query::SurfaceView) -> bool {
-    view.closed().is_empty()
-        && view.call_signatures.is_empty()
-        && view.construct_signatures.is_empty()
-        && view.index_signatures.is_empty()
-}
-
-/// Whether a root kind is the nullish pair whose overlap answer depends on
-/// the strict-null-checks regime.
-fn comparable_root_is_nullish(kind: ComparableRootKind) -> bool {
-    matches!(
-        kind,
-        ComparableRootKind::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)
-    )
-}
-
-/// Whether two root kinds cannot share an inhabitant, under the strict
-/// family configuration `strict` the relation key already folds in.
-///
-/// Two things this oracle deliberately does NOT do:
-///
-/// - **Assume the strict regime.** With `strictNullChecks` OFF, `null` and
-///   `undefined` inhabit every remaining type, so no pair naming one of
-///   them is disjoint. Answering with the strict-regime verdict in a
-///   loose-mode program would mint a warm disjointness proof the
-///   configured relation contradicts.
-/// - **Prove disjointness against a weak surface.** `{}` constrains
-///   nothing, so `string & {}` is `string` and `typeof TOKEN & {}` is the
-///   symbol: a [`ComparableRootKind::WeakObject`] is disjoint from
-///   nothing and always falls through to the structural answer.
-///
-/// A CONSTRAINING object surface stays proven-disjoint from the primitive
-/// tags, which is what keeps `typeof A_KIND` out of `{ x: number }`: the
-/// structural walker cannot enumerate a primitive's apparent members, so
-/// withdrawing that proof would answer "overlaps" for a pair that has no
-/// inhabitant. The residual over-proof is a surface whose required members
-/// a primitive's APPARENT type does supply (`{ length: number }` versus
-/// `string`); deciding that needs the apparent-type surface, which is the
-/// structural walker's job rather than a root-kind oracle's.
-fn comparable_root_kinds_disjoint(
-    strict: StrictFamilyConfig,
-    a: &SemanticNodeData,
-    b: &SemanticNodeData,
-) -> bool {
+fn comparable_root_kinds_disjoint(a: &SemanticNodeData, b: &SemanticNodeData) -> bool {
     let (Some(left), Some(right)) = (comparable_root_kind(a), comparable_root_kind(b)) else {
         return false;
     };
     if left == right {
         return false;
     }
-    if !strict.strict_null_checks
-        && (comparable_root_is_nullish(left) || comparable_root_is_nullish(right))
-    {
-        return false;
-    }
-    // A weak surface constrains nothing, so it is disjoint from nothing.
-    if matches!(left, ComparableRootKind::WeakObject)
-        || matches!(right, ComparableRootKind::WeakObject)
-    {
-        return false;
-    }
     match (left, right) {
-        // Two DIFFERENT concrete primitive tags cannot share an
-        // inhabitant, except for the `undefined` / `void` widening pair.
         (ComparableRootKind::Primitive(x), ComparableRootKind::Primitive(y)) => {
+            // KNOWN DIVERGENCE, inherited from the shared tag oracle: the
+            // checker's disjointness answer for `null` / `undefined`
+            // participates depends on the strict-null-checks regime, and a
+            // `Comparable` key never reads the strict snapshot the
+            // assignability engine applies. The oracle answers with the
+            // canonical tag algebra — the same answer in every regime — so
+            // a loose-mode program where `null` overlaps everything still
+            // gets the strict-regime verdict here.
             let widening_pair = matches!(
                 (x, y),
                 (PrimitiveKind::Undefined, PrimitiveKind::Void)

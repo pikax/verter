@@ -1066,33 +1066,12 @@ pub fn audit_key_for_node(
         SemanticNodeData::Mapped { source, .. } => format!("Mapped(source={})", source.0),
         SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
             let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
-            // The declaring identity is what makes a nominal terminal a
-            // DISTINCT type: two carriers can share an authored head and name
-            // two declarations. Rendering both as `TypeOf(head,path[n])` gave
-            // them one trace key, so a trace could not tell the deferred shell
-            // from the terminal, nor two terminals apart. The identity rides
-            // the key for exactly the nodes that carry one.
-            match data.typeof_nominal_identity() {
-                Some(identity) => format!(
-                    "TypeOfNominal({}::{},path[{}],decl={}::{}{})",
-                    value_root.scope.canonical_id,
-                    value_root.name,
-                    path.len(),
-                    identity.canonical_id,
-                    identity.symbol,
-                    identity
-                        .member_path
-                        .iter()
-                        .map(|segment| format!(".{segment}"))
-                        .collect::<String>()
-                ),
-                None => format!(
-                    "TypeOf({}::{},path[{}])",
-                    value_root.scope.canonical_id,
-                    value_root.name,
-                    path.len()
-                ),
-            }
+            format!(
+                "TypeOf({}::{},path[{}])",
+                value_root.scope.canonical_id,
+                value_root.name,
+                path.len()
+            )
         }
         SemanticNodeData::TypeParam {
             decl,

@@ -811,15 +811,11 @@ pub(crate) fn resolve_macro_payload(
     // than a pre-resolved `DeclRef`. The structural probe below resolves it ONE
     // Navigate hop through the shared dispatch (which records the value-root
     // `ImportRoute` / `FileWholeHash` facts) and discriminates a genuine miss.
-    // A NOMINAL `typeof` terminal is excluded: it self-resolves by design
-    // (the Navigate probe hands back the same carrier), so treating it as
-    // unresolved would report a fully resolvable program as a missing
-    // declaration.
     let payload_is_unresolved_ref_carrier = matches!(
         payload_data.as_deref(),
         Some(data) if data.bare_ref_head().is_some()
             || data.import_type_head().is_some()
-            || (data.typeof_head().is_some() && data.typeof_nominal_identity().is_none())
+            || data.typeof_head().is_some()
     );
     drop(payload_data);
     if (payload_is_empty_surface
@@ -902,14 +898,11 @@ pub(crate) fn resolve_macro_payload(
                         // `BareRef` / `ImportType` / `TypeOf` shape is the
                         // carrier-preserving counterpart of the pre-carrier
                         // `Opaque(Miss)` terminal — same silent-miss
-                        // contract, one diagnostic. A NOMINAL `typeof`
-                        // terminal is excluded: it SELF-resolves, so
-                        // surviving the retry is its answer, not a miss.
+                        // contract, one diagnostic.
                         Some(data)
                             if data.bare_ref_head().is_some()
                                 || data.import_type_head().is_some()
-                                || (data.typeof_head().is_some()
-                                    && data.typeof_nominal_identity().is_none()) =>
+                                || data.typeof_head().is_some() =>
                         {
                             Some("unresolved reference carrier".to_string())
                         }

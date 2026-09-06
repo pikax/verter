@@ -2132,12 +2132,22 @@ pub(crate) fn collect_node_ref_names(
             }
             // A `typeof` carrier RENDERS its head, so a surface that splices
             // the rendered text needs the head's binding in scope exactly as
-            // it needs a type reference's. Only the head's LEXICAL ROOT is
+            // it needs a type reference's. Only the LEXICAL ROOT name is
             // nameable — the dotted member segments are projections of it,
-            // not bindings — and the root key owns that distinction.
+            // not bindings — and a namespace-qualified root stores the JOINED
+            // spelling (`Ns.A_KIND`) in the head, so the recorded name is the
+            // segment BEFORE the first dot: that is the local binding (`import
+            // * as Ns`) an import-retention lookup resolves, and recording the
+            // joined string would strand the rendered reference on a binding
+            // no file declares.
             typeof_carrier @ (SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_)) => {
                 if let Some((value_root, _)) = typeof_carrier.typeof_head() {
-                    names.insert(value_root.lexical_root().to_string());
+                    let lexical_root = value_root
+                        .name
+                        .split('.')
+                        .next()
+                        .unwrap_or(value_root.name.as_ref());
+                    names.insert(lexical_root.to_string());
                 }
                 worklist.extend(typeof_carrier.carrier_type_args().iter().copied());
             }
