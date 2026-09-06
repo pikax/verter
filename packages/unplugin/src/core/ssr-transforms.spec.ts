@@ -1,6 +1,6 @@
 import { decode, encode } from "@jridgewell/sourcemap-codec";
 import { describe, expect, it } from "vitest";
-import { replaceImportMetaSsr, stripComponents } from "./ssr-transforms.js";
+import { applyTextEdits, replaceImportMetaSsr, stripComponents } from "./ssr-transforms.js";
 
 describe("replaceImportMetaSsr", () => {
   describe("SSR build (isSSR = true)", () => {
@@ -71,8 +71,8 @@ describe("replaceImportMetaSsr", () => {
 
   it("shifts a later token's mapped column by the length the rewrite removed", () => {
     // `import.meta.server` (18 chars) → `false` (5 chars): a 13-byte shrink.
-    // A mapping naming a source position at generated column 30 — right
-    // after the rewritten token — must land 13 columns earlier post-rewrite.
+    // A mapping naming a source position at `beforeCol` — right after the
+    // rewritten token — must land 13 columns earlier post-rewrite.
     const code = "const a = import.meta.server; const later = 1";
     const beforeCol = code.indexOf("later"); // column of `later` in the ORIGINAL code
     const mappings = encode([
@@ -103,6 +103,13 @@ describe("replaceImportMetaSsr", () => {
     // slice correct while the map segment points elsewhere.
     const decodedSegments = decode(decodedMap.mappings);
     expect(decodedSegments[0][1][0]).toBe(newCol);
+  });
+
+  it("drops an unparseable map instead of passing it through unshifted", () => {
+    const code = "const a = import.meta.server";
+    const result = replaceImportMetaSsr(code, false, "not json");
+    expect(result.code).toBe("const a = false");
+    expect(result.map).toBeUndefined();
   });
 });
 
@@ -142,5 +149,21 @@ describe("stripComponents", () => {
     const code = 'const a = _resolveComponent("GoogleMap")';
     const result = stripComponents(code, ["GoogleMap", "GoogleMap"]).code;
     expect(result).toBe('const a = (() => ({ __name: "GoogleMap", render: () => null }))()');
+  });
+});
+
+describe("applyTextEdits", () => {
+  it("skips an edit whose range is properly contained in a prior edit's range, not just a plain duplicate", () => {
+    // The second edit's [start, end) range (2, 8) falls entirely inside the
+    // first edit's (0, 10) — a real containment overlap, not the same range
+    // listed twice. The cursor guard (`edit.start < cursor`) must reject it
+    // on range containment alone, independent of the duplicate-Set dedupe
+    // that only stripComponents' caller performs.
+    const code = "0123456789";
+    const result = applyTextEdits(code, undefined, [
+      { start: 0, end: 10, replacement: "FIRST" },
+      { start: 2, end: 8, replacement: "SECOND" },
+    ]);
+    expect(result.code).toBe("FIRST");
   });
 });

@@ -20,7 +20,7 @@ export interface SsrRewriteResult {
 }
 
 /** A single literal-text replacement, expressed as an offset range in the ORIGINAL code. */
-interface TextEdit {
+export interface TextEdit {
   start: number;
   end: number;
   replacement: string;
@@ -43,7 +43,7 @@ interface LineColumnEdit {
  * edit only ever needs to shift columns later on the SAME generated line —
  * no line renumbering is required.
  */
-function applyTextEdits(
+export function applyTextEdits(
   code: string,
   map: string | undefined,
   edits: TextEdit[],
