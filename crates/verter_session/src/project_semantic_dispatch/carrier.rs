@@ -1400,6 +1400,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Test-support view of the carrier-normalization prelude's
+    /// classification: normalize the key's carrier subject exactly as the
+    /// prelude does, then classify the NORMALIZED key. Both halves are
+    /// required — the classifier judges the post-normalization subject, so
+    /// classifying the raw key would judge a shape the prelude never sees.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn normalized_carrier_partial_reasons_for_tests(
+        &self,
+        key: SemanticQueryKey,
+    ) -> PartialReasonSet {
+        let normalized = self.normalize_carrier_subject_key(key);
+        self.carrier_normalization_partial_reasons(&normalized)
+    }
+
     /// Classify a failed carrier rewrite at the Vue runtime publication
     /// boundary.
     ///
@@ -1425,20 +1439,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// publication boundary, so `keyof typeof KIND` (and the empty-path /
     /// mapped-source shapes that reach here with `deferred_typeof == false`)
     /// would never warm.
-    /// Test-support view of the carrier-normalization prelude's
-    /// classification: normalize the key's carrier subject exactly as the
-    /// prelude does, then classify the NORMALIZED key. Both halves are
-    /// required — the classifier judges the post-normalization subject, so
-    /// classifying the raw key would judge a shape the prelude never sees.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn normalized_carrier_partial_reasons_for_tests(
-        &self,
-        key: SemanticQueryKey,
-    ) -> PartialReasonSet {
-        let normalized = self.normalize_carrier_subject_key(key);
-        self.carrier_normalization_partial_reasons(&normalized)
-    }
-
     pub(super) fn carrier_normalization_partial_reasons(
         &self,
         key: &SemanticQueryKey,

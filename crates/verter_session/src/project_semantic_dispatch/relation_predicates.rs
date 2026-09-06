@@ -204,6 +204,20 @@ pub(super) fn index_domains_overlap(
             source_key,
             &crate::semantic_query::PropertyKey::from_js_number(*n),
         ),
+        // A nominal `typeof` target key names ONE declared symbol, so the
+        // question is whether the source signature covers that exact
+        // property key — the same delegation the literal arms make.
+        SemanticNodeData::TypeOfNominal(_) => {
+            let Some(identity) = target_data.typeof_nominal_identity().cloned() else {
+                return false;
+            };
+            drop(target_data);
+            index_signature_applies_to_property(
+                graph,
+                source_key,
+                &crate::semantic_query::PropertyKey::UniqueSymbol(identity),
+            )
+        }
         SemanticNodeData::Union(members) => {
             let members = members.members_arc();
             drop(target_data);
@@ -238,6 +252,17 @@ pub(super) fn index_signature_applies_to_property(
                 crate::semantic_query::PropertyKey::UniqueSymbol(_)
             )
         }
+        // A NOMINAL `typeof` key type names ONE declared `unique symbol`,
+        // so the signature covers exactly that symbol's property key.
+        // Reading it through the `symbol` arm above would make a
+        // `[k: typeof A]` signature apply to every unique-symbol key.
+        SemanticNodeData::TypeOfNominal(_) => match property_key {
+            crate::semantic_query::PropertyKey::UniqueSymbol(identity) => {
+                data.typeof_nominal_identity() == Some(identity)
+            }
+            crate::semantic_query::PropertyKey::String(_)
+            | crate::semantic_query::PropertyKey::Number(_) => false,
+        },
         SemanticNodeData::Primitive(PrimitiveKind::Number) => match property_key {
             crate::semantic_query::PropertyKey::Number(_) => true,
             crate::semantic_query::PropertyKey::String(name) => is_numeric_literal_name(name),
