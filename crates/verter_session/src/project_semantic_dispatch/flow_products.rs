@@ -37,11 +37,18 @@
 //!   gapped or budget-exhausted step has nothing a store could admit, and
 //!   the solve returns the degraded arm WITHOUT its partially-populated
 //!   store. Warmability is structurally unreachable, not policed.
-//! - **Binding subjects carry stable cross-frame identity.** A binding
-//!   node's key mints ONLY with the frame's resolved
-//!   [`FlowBindingIdentity`], resolved through the demand planner's own
-//!   single slot-numbering authority; a binding the frame's inventory
-//!   cannot name is a typed key error, never a fabricated slot.
+//! - **Binding subjects carry stable cross-frame identity, and it names
+//!   ONE binder.** A binding node's key mints ONLY with the frame's
+//!   resolved [`FlowBindingIdentity`], resolved through the demand
+//!   planner's own single slot-numbering authority; a binding the frame's
+//!   inventory cannot name is a typed key error, never a fabricated slot.
+//!   An identity TWO of the frame's bindings answer to is a typed key
+//!   error as well: products here are subject-keyed — a guard fact carries
+//!   its subject's identity and the narrowing kill rule compares by it —
+//!   so a shared subject would let one binder's write erase another
+//!   binder's facts. The mint refuses both, so an aliased subject is
+//!   unrepresentable in a key rather than a wrong product a reader has to
+//!   catch.
 //!
 //! Determinism is structural rather than incidental: the worklist is an
 //! ORDERED ready set keyed by `(domain rank, node index)` — a `BTreeSet`,
@@ -407,14 +414,19 @@ impl FlowProductValue {
 
 /// Why a product key could not be minted: the node is outside the bound
 /// graph's index space, the graph node is a binding the frame's inventory
-/// cannot name (so no stable cross-frame identity exists), or the domain
-/// carries no product in this substrate.
+/// cannot name (so no stable cross-frame identity exists), the binding
+/// shares its identity with another binding of the same frame (so the
+/// identity names no ONE subject), or the domain carries no product in
+/// this substrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowProductKeyError {
     /// The node index is outside the bound graph.
     NodeOutOfRange,
     /// A binding node with no stable cross-frame identity.
     UnmodeledBinding,
+    /// Two binding nodes of ONE frame resolved the SAME cross-frame
+    /// identity, so neither key would name a single subject.
+    AliasedBindingIdentity,
     /// A registry domain this substrate carries no product for.
     DomainCarriesNoProduct,
 }
@@ -426,7 +438,8 @@ pub enum FlowProductKeyError {
 ///
 /// Fields are private and the sole constructor is
 /// [`FlowProductInputs::key`]: a key naming a binding node WITHOUT its
-/// resolved identity, a key over a node outside the graph, and a key on a
+/// resolved identity, a key whose identity is shared with another binding
+/// of the same frame, a key over a node outside the graph, and a key on a
 /// productless domain are all unrepresentable rather than rejected later.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlowProductKey {
@@ -462,15 +475,57 @@ impl FlowProductKey {
     }
 }
 
+/// Which of `identities` are shared by more than one binding of the frame,
+/// in the same order.
+///
+/// The frame's binding identities are its subject vocabulary, and a
+/// vocabulary is only a naming if it is injective. Whatever produced a
+/// collision — an inventory that cannot separate two same-name same-kind
+/// declarations, a slot domain narrower than the frame's real binder set —
+/// the collision is observable HERE, so the substrate answers it rather
+/// than trusting its input, and answers it for the class rather than for
+/// one known producer.
+fn aliased_identities(identities: &[Option<FlowBindingIdentity>]) -> Arc<[bool]> {
+    let mut occurrences: FxHashMap<&FlowBindingIdentity, u32> = FxHashMap::default();
+    for identity in identities.iter().flatten() {
+        *occurrences.entry(identity).or_default() += 1;
+    }
+    let flags: Vec<bool> = identities
+        .iter()
+        .map(|identity| {
+            identity
+                .as_ref()
+                .is_some_and(|identity| occurrences.get(identity).copied().unwrap_or_default() > 1)
+        })
+        .collect();
+    Arc::from(flags.into_boxed_slice())
+}
+
 /// The pure inputs one product solve runs over: the bound graph and the
 /// frame's resolved binding identities, in skeleton binding order. Built
 /// ONCE from a store-bound graph plus the frame's binding inventory
 /// through the demand planner's own binding-identity resolution — never a
 /// second slot-numbering authority.
+///
+/// The identity table is checked for INJECTIVITY when the inputs are
+/// built: an identity two of the frame's bindings share names no single
+/// subject, and this substrate's products are subject-keyed (a narrowing
+/// fact carries its subject's identity, and the kill rule compares by it),
+/// so a shared identity would let one binding's write erase another
+/// binding's facts. Those bindings are recorded here and REFUSED at the
+/// mint, which is why an aliased subject is unrepresentable in a product
+/// key rather than something a consumer has to notice.
+///
+/// The table itself is NOT published: [`Self::key`] is the only way out of
+/// it, so there is no accessor a consumer could take an unchecked subject
+/// from and rebuild the aliasing the mint refuses.
 #[derive(Debug, Clone)]
 pub struct FlowProductInputs {
     graph: Arc<FunctionFlowGraph>,
     identities: Arc<[Option<FlowBindingIdentity>]>,
+    /// Per skeleton binding: whether its resolved identity is shared with
+    /// another binding of the same frame.
+    aliased: Arc<[bool]>,
 }
 
 impl FlowProductInputs {
@@ -485,9 +540,11 @@ impl FlowProductInputs {
             inventory,
             &bound.key().function,
         );
+        let aliased = aliased_identities(&identities);
         Self {
             graph: Arc::clone(&bundle.graph),
             identities: Arc::from(identities.into_boxed_slice()),
+            aliased,
         }
     }
 
@@ -497,16 +554,12 @@ impl FlowProductInputs {
         &self.graph
     }
 
-    /// The frame's resolved binding identities, in skeleton binding order.
-    #[must_use]
-    pub fn identities(&self) -> &[Option<FlowBindingIdentity>] {
-        &self.identities
-    }
-
     /// Mint the product key of `domain` at `node` — the SOLE key
     /// construction. A binding node resolves its stable identity here; a
-    /// binding the frame cannot name is a typed error, never a key with a
-    /// fabricated slot.
+    /// binding the frame cannot name, and a binding whose identity another
+    /// binding of the same frame also answers to, are typed errors —
+    /// never a key with a fabricated slot, never a key over a subject two
+    /// bindings share.
     pub fn key(
         &self,
         domain: FlowDomain,
@@ -520,7 +573,12 @@ impl FlowProductInputs {
         }
         let binding = match self.graph.node_kind(node) {
             FlowNodeKind::Binding(binding) => match self.identities.get(binding.index()) {
-                Some(Some(identity)) => Some(identity.clone()),
+                Some(Some(identity)) => {
+                    if self.aliased.get(binding.index()).copied().unwrap_or(true) {
+                        return Err(FlowProductKeyError::AliasedBindingIdentity);
+                    }
+                    Some(identity.clone())
+                }
                 Some(None) | None => return Err(FlowProductKeyError::UnmodeledBinding),
             },
             FlowNodeKind::ExprSite(_) | FlowNodeKind::ReturnSite(_) | FlowNodeKind::Region(_) => {
@@ -1154,8 +1212,10 @@ pub fn solve_flow_products(
     }
 
     // The key universe, minted once. A binding the frame cannot name has
-    // no stable identity, so the whole solve fails closed rather than
-    // computing products over a fabricated slot.
+    // no stable identity, and a binding whose identity another binding of
+    // the frame also answers to names no single subject, so the whole
+    // solve fails closed rather than computing products over a fabricated
+    // slot or a shared one.
     let mut keys: BTreeMap<(u32, u32), FlowProductKey> = BTreeMap::new();
     for (rank, domain) in domains.iter().enumerate() {
         let rank = u32::try_from(rank).unwrap_or(u32::MAX);

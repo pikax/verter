@@ -943,3 +943,90 @@ fn transfer_product_applies_the_domains_own_node_local_rule() {
         Err(FlowProductKeyError::DomainCarriesNoProduct)
     );
 }
+
+/// A frame whose two `dup` declarations live in different lexical scopes:
+/// two distinct binders sharing one name and one kind. Whether the frame's
+/// slot domain can separate them is a property of the identity authority,
+/// not of this substrate — which is exactly why the substrate must not
+/// assume it.
+const SHADOWED_BINDERS: &str = r#"
+function shadowed(flag) {
+  if (flag) {
+    const dup = 1;
+    return dup;
+  }
+  const dup = 2;
+  return dup;
+}
+"#;
+
+/// A binding subject names ONE binder. Products here are subject-keyed —
+/// a guard fact carries its subject's identity and the narrowing kill rule
+/// compares by it — so two binders answering to one identity would let one
+/// binder's write erase the other's facts, silently and completely.
+///
+/// The boundary is therefore not "the identities happen to be distinct"
+/// but "an identity is never shared": either the frame separates its
+/// binders, or the mint refuses them and the solve fails closed with
+/// nothing retained. A mint that hands out a shared subject fails the
+/// first leg; a mint that refuses one while the solve still converges over
+/// the rest fails the second.
+#[test]
+fn a_binding_subject_never_names_two_binders() {
+    for (source, tag) in [(FIXTURE, 41), (SHADOWED_BINDERS, 44)] {
+        let inputs = flow_graph_fixture_for_tests(source, tag).product_inputs();
+        let graph = inputs.graph();
+
+        let mut subjects: Vec<verter_semantic::analysis::function_program::FlowBindingIdentity> =
+            Vec::new();
+        let mut refused = 0usize;
+        for index in 0..graph.node_count() {
+            let node = graph.node_at(index).expect("dense node space");
+            match inputs.key(FlowDomain::Narrowing, node) {
+                Ok(key) => {
+                    let Some(subject) = key.binding() else {
+                        continue;
+                    };
+                    assert!(
+                        !subjects.contains(subject),
+                        "two binder nodes of one frame minted the same product subject \
+                         ({subject:?}); one binder's write would erase the other's facts"
+                    );
+                    subjects.push(subject.clone());
+                }
+                Err(FlowProductKeyError::AliasedBindingIdentity) => refused += 1,
+                Err(other) => panic!("an ordinary binding node must mint, got {other:?}"),
+            }
+        }
+
+        // The refusal is whole-solve, not per-slot: a frame with a shared
+        // subject computes no products at all and retains no store, and a
+        // frame whose binders are all separable converges.
+        let (semantic, _) = graph_with(1);
+        let algebra = GraphSemanticAlgebra(&semantic);
+        let seeds = FlowProductSeeds::new();
+        let ctx = FlowProductContext::new(&inputs, &seeds);
+        let outcome = solve_flow_products(
+            &ctx,
+            &[FlowDomain::Narrowing],
+            &algebra,
+            &FlowProductBudget::default(),
+        );
+        if refused > 0 {
+            let FlowProductSolveOutcome::Rejected(FlowProductKeyError::AliasedBindingIdentity) =
+                &outcome
+            else {
+                panic!("a frame with a shared subject must refuse the whole solve, got {outcome:?}")
+            };
+            assert!(
+                outcome.solution().is_none(),
+                "a refused solve retains no store"
+            );
+        } else {
+            assert!(
+                outcome.solution().is_some(),
+                "a frame whose binders are all separable solves normally, got {outcome:?}"
+            );
+        }
+    }
+}
