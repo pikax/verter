@@ -30,6 +30,13 @@ export interface HostAnalysisProductOptions {
 }
 
 /**
+ * Dev-server tooling flavour for Main-assembly decoration. Wire spellings
+ * are all-lowercase, matching the legacy `FfiCompileProfile.hmr_strategy`
+ * vocabulary (`"none"` / `"vite"` / `"webpack"`).
+ */
+export type HostHmrStrategy = "none" | "vite" | "webpack";
+
+/**
  * Source identity and dev/prod profile shared by every product requested
  * in one compile.
  */
@@ -38,6 +45,19 @@ export interface HostCompileIdentity {
   componentId?: string | null;
   isProduction: boolean;
   forceJs: boolean;
+  /**
+   * The `ssrContext.modules` manifest key form — root-relative under
+   * Vite; absent falls back to the canonical id. Exactly the legacy
+   * `FfiCompileProfile.ssr_module_id` semantics.
+   */
+  ssrModuleId?: string | null;
+  /**
+   * Dev-server tooling flavour gating the natively composed `__file`
+   * and hot-accept trailer; absent = no decoration. The Svelte Main
+   * assembly has no decoration consumer, matching the legacy profile
+   * where the field is inert for Svelte.
+   */
+  hmrStrategy?: HostHmrStrategy | null;
 }
 
 export interface HostIdeProductOptions {
@@ -49,6 +69,15 @@ export interface HostIdeProductOptions {
   ideChunkBoundaries: boolean;
 }
 
+/**
+ * Which part of Vue's style cascade a runtime product owns. Wire spellings
+ * match the legacy profile route's `styleProcessing` and the canonical
+ * [`verter_compiler::compile_request::RuntimeStyleProcessing::wire_name`]:
+ * kebab-case, so `AuthoredOnly` is `"authored-only"`, not the `camelCase`
+ * container default's `authoredOnly`.
+ */
+export type HostRuntimeStyleProcessing = "complete" | "authored-only";
+
 export interface HostRuntimeProductOptions {
   /**
    * Absent resolves to the request's own `isProduction` — the framework's
@@ -57,6 +86,12 @@ export interface HostRuntimeProductOptions {
    */
   inline?: boolean | null;
   runtimeSourceMap: boolean;
+  /**
+   * Style-pipeline ownership for this runtime product. Absent selects the
+   * compiler-owned complete authored-to-published cascade; the
+   * bundler-owned style lane states `"authored-only"`.
+   */
+  styleProcessing?: HostRuntimeStyleProcessing | null;
 }
 
 /**

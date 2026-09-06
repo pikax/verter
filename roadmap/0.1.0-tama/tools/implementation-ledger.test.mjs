@@ -31,6 +31,121 @@ function smallAuthority(implemented = []) {
   };
 }
 
+test("contract consumers require their producer through a transitive DAG path", async () => {
+  const { validateContractDependencies } = await import("./lib.mjs");
+  const authority = {
+    nodes: [
+      { id: "OWNER", predecessors: [] },
+      { id: "BRIDGE", predecessors: ["OWNER"] },
+      { id: "CONSUMER", predecessors: ["BRIDGE"] },
+    ],
+  };
+  const catalog = {
+    schema: 1,
+    contract: [
+      {
+        id: "project-proof",
+        producer: "OWNER",
+        consumers: ["CONSUMER"],
+        outcome: "Coherent resolution proof",
+        acceptance: "OWNER-AC1",
+        evidence: "Resolver contract suite",
+      },
+    ],
+  };
+  assert.deepEqual(validateContractDependencies(authority, catalog), []);
+  authority.nodes[1].predecessors = [];
+  assert.ok(
+    validateContractDependencies(authority, catalog).some(
+      (error) => error.includes("CONSUMER") && error.includes("OWNER"),
+    ),
+  );
+  authority.nodes[1].predecessors = ["CONSUMER"];
+  assert.doesNotThrow(() => validateContractDependencies(authority, catalog));
+  catalog.contract[0].producer = "MISSING";
+  assert.ok(
+    validateContractDependencies(authority, catalog).some((error) => error.includes("MISSING")),
+  );
+});
+
+test("product reporting distinguishes implemented foundations from pending acceptance", async () => {
+  const { productReport } = await import("./lib.mjs");
+  const authority = {
+    nodes: [
+      {
+        id: "BASE",
+        product: "editor",
+        predecessors: [],
+        dispatchable: true,
+        gh_milestone: "1.0",
+        release_gating: "none",
+      },
+      {
+        id: "FINAL",
+        product: "editor",
+        predecessors: ["BASE"],
+        dispatchable: true,
+        release_gating: "product",
+      },
+    ],
+    ledger: { implemented: [{ node_id: "BASE" }] },
+  };
+  const [product] = productReport(authority, deriveState(authority));
+  assert.equal(product.implemented, 1);
+  assert.deepEqual(product.acceptance_gates, [
+    { id: "FINAL", status: "READY", missing_ancestors: [] },
+  ]);
+  assert.deepEqual(product.pending_without_release, ["FINAL"]);
+  assert.equal(product.evidence_status, "not_inspected");
+  assert.equal(product.product, "editor");
+});
+
+test("checker and architecture terminals remain blocked without their contract owners", async () => {
+  const { validateContractDependencies } = await import("./lib.mjs");
+  const authority = loadAuthority();
+  const catalog = readToml(path.join(PACKAGE_ROOT, "catalogs", "contract-dependencies.toml"));
+  assert.deepEqual(validateContractDependencies(authority, catalog), []);
+  authority.ledger.implemented = authority.nodes
+    .filter((node) => !["PM0", "PM1", "PM2", "PM3", "PM4", "NCK8", "SG0", "L4"].includes(node.id))
+    .map((node) => ({ node_id: node.id }));
+  const state = deriveState(authority);
+  assert.equal(state.states.get("NCK8").status, "BLOCKED");
+  assert.ok(state.states.get("NCK8").missing_ancestors.includes("PM4"));
+  assert.equal(state.states.get("L4").status, "BLOCKED");
+  assert.ok(state.states.get("L4").missing_ancestors.includes("SG0"));
+  authority.nodes.find((node) => node.id === "NCF-MP-MODULE").predecessors = ["NCK4"];
+  assert.ok(
+    validateContractDependencies(authority, catalog).some(
+      (error) => error.includes("NCF-MP-MODULE") && error.includes("PM3"),
+    ),
+  );
+  assert.ok(
+    validateAuthority(authority).some(
+      (error) =>
+        error.includes("contract coherent-project-snapshot") && error.includes("NCF-MP-MODULE"),
+    ),
+    "the normal authority validator must execute the contract dependency check",
+  );
+});
+
+test("product command emits acceptance state and refuses unknown products", () => {
+  const cli = path.join(PACKAGE_ROOT, "tools", "programctl.mjs");
+  const result = spawnSync(process.execPath, [cli, "products", "rev11"], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const [product] = JSON.parse(result.stdout);
+  assert.equal(product.product, "rev11");
+  assert.equal(
+    product.acceptance_gates.find((gate) => gate.id === "L4")?.status,
+    deriveState(loadAuthority()).states.get("L4").status,
+  );
+  assert.equal(product.evidence_status, "not_inspected");
+  const unknown = spawnSync(process.execPath, [cli, "products", "missing-product"], {
+    encoding: "utf8",
+  });
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /unknown product missing-product/);
+});
+
 test("frontier is derived only from implemented ancestors", () => {
   const initial = deriveState(smallAuthority());
   assert.equal(initial.states.get("ORC0").status, "READY");

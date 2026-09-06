@@ -4,7 +4,7 @@ module = "compiler-validation-observability"
 [[node]]
 id = "CVO0"
 name = "Probe outcome taxonomy and probe-state manifest contract"
-predecessors = ["CMP0"]
+predecessors = ["CCA0","CCA1O1"]
 phase = "compiler"
 train = "compiler.validation-observability"
 product = "validation_observability"

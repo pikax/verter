@@ -13,7 +13,6 @@ import type {
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
 import type {
   BlockContentHashToken,
-  HostCompileProfile,
   HostUpdateResult,
   NativeBlockOverrideEntry,
   HostDependencyResolution,
@@ -26,6 +25,13 @@ import {
   peekHost,
   transformVueStyle,
   resetHost,
+  typedRenderRequest,
+  requireRuntimeMain,
+  runtimeNodeMatching,
+  runtimeStyleArtifacts,
+  forwardTypedDiagnostics,
+  type VerterRenderProfile,
+  type BundlerWarn,
 } from "./core/compiler";
 import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
 import { evictHydratedPath, hydrateMacroTypeDeps } from "./core/macro-type-hydration";
@@ -53,117 +59,79 @@ interface CompiledStyleArtifact {
   lang: string;
 }
 
-function readCompiledStyleArtifacts(
-  host: VerterHost,
-  filename: string,
-  profile: HostCompileProfile,
-): CompiledStyleArtifact[] {
-  const artifacts: CompiledStyleArtifact[] = [];
-  const indices = host
-    .listVirtualFiles(filename)
-    .filter((node) => node.kind === "style" && node.index != null)
-    .map((node) => node.index as number)
-    .sort((a, b) => a - b);
-  for (const index of indices) {
-    const style = host.getVirtualFile({
-      rawId: `${filename}?verter&type=style&index=${index}`,
-      compileProfile: profile,
-    });
-    artifacts[index] = {
-      code: style.code,
-      map: style.sourceMap ?? undefined,
-      lang: style.lang ?? "css",
-    };
-  }
-  return artifacts;
-}
-
 /**
- * Render a carrier file's runtime Main module through the render-only
- * bundler lane (`host.compileMany([input], { target: "runtime-render" })`) —
- * the single shared compile substrate. The batch render profile + per-input
- * `componentId` are taken from the SAME `HostCompileProfile` the bundler
- * would have passed to `getVirtualFile({ compileProfile })`, so the Main
- * output is byte-identical to the previous path.
+ * Render a carrier file's runtime Main module through the native host.
  *
- * A fatal compile surfaces as a thrown error (mirroring `getVirtualFile`'s
- * throw). Non-fatal (warning-severity) diagnostics from the lane's
- * soft-macro contract are forwarded to the bundler via `warn` (preserving
- * code/message/source id); they never become build errors.
+ * ONE typed `compileRequest` against the already-registered source — the
+ * same demand translated once by `typedRenderRequest`. The typed response
+ * carries the style nodes of the same compile, so no second native call
+ * ever re-reads them. The published module is exactly what the typed route
+ * composed, including the dev-server decoration the request's identity
+ * states.
+ *
+ * A fatal compile surfaces as a thrown error (fail-closed). Non-fatal
+ * (warning-severity) diagnostics are forwarded to the bundler via `warn`
+ * (preserving code/message/source id); they never become build errors.
+ * Error-severity diagnostics on a completed typed response throw.
+ * Info-severity is dropped.
  */
 function renderMainRuntime(
   host: VerterHost,
   canonicalId: string,
-  source: string,
-  profile: HostCompileProfile,
+  profile: VerterRenderProfile,
+  framework: RuntimeFramework,
   authoredOnlyStyleProcessing: boolean,
-  warn?: (w: { message: string; id?: string }) => void,
-): RenderedMain {
-  const [entry] = host.compileMany(
-    [
-      {
-        canonicalId,
-        source,
-        componentId: profile.componentId,
-      },
-    ],
-    {
-      target: "runtime-render",
-      compileProfile: {
-        styleProcessing: authoredOnlyStyleProcessing ? "authored-only" : "complete",
-        // Required render-profile fields default to the same values the
-        // `CompileProfile` default / FFI conversion applies for an absent
-        // `HostCompileProfile` field, so a caller that omitted a field
-        // renders EXACTLY as `getVirtualFile` would have. Optional fields
-        // (`filename`, `comments`, ...) pass through UNTOUCHED — `comments`
-        // is a tri-state (absent = compiler default `!isProduction`;
-        // collapsing it to `false` would strip comments from dev builds)
-        // and `filename` feeds component-name/scope-id/source-map codegen.
-        // Every output-affecting field is forwarded so the render output
-        // stays byte-identical (omitting one — e.g. sourceMap — would
-        // silently drop it from the build).
-        filename: profile.filename,
-        isProduction: profile.isProduction ?? false,
-        customElement: profile.customElement ?? false,
-        ssr: profile.ssr ?? false,
-        ssrModuleId: profile.ssrModuleId,
-        forceJs: profile.forceJs ?? false,
-        forceVapor: profile.forceVapor ?? false,
-        sourceMap: profile.sourceMap ?? false,
-        comments: profile.comments,
-        // `HostCompileProfile.hmrStrategy` is already "none" | "vite" |
-        // "webpack"; map it faithfully (default "none").
-        hmrStrategy: profile.hmrStrategy ?? "none",
-        runtimeModuleName: profile.runtimeModuleName,
-        typesModuleName: profile.typesModuleName,
-        delimiterOpen: profile.delimiters?.[0],
-        delimiterClose: profile.delimiters?.[1],
-        customElements: profile.customElements,
-      },
-    },
+  needStyles: boolean,
+  warn?: BundlerWarn,
+): RenderedMain & { styles: CompiledStyleArtifact[] } {
+  const response = executeTypedCompile(
+    host,
+    canonicalId,
+    profile,
+    framework,
+    authoredOnlyStyleProcessing,
+    warn,
   );
-
-  // Fatal errors abort exactly like `getVirtualFile` did (fail-closed).
-  if (entry.errors.length > 0) {
-    throw new Error(`[verter] ${canonicalId}: ${entry.errors.join("; ")}`);
-  }
-
-  // Forward soft (warning-severity) diagnostics as bundler warnings.
-  if (warn) {
-    for (const d of entry.diagnostics) {
-      warn({ message: `[verter] ${d.code}: ${d.message}`, id: canonicalId });
-    }
-  } else {
-    for (const d of entry.diagnostics) {
-      console.warn(`[verter] ${d.code}: ${d.message} (${canonicalId})`);
-    }
-  }
+  const main = requireRuntimeMain(response, profile.ssr, canonicalId);
 
   return {
-    code: entry.code,
-    sourceMap: entry.sourceMap ?? undefined,
-    lang: entry.lang ?? undefined,
+    code: main.code,
+    sourceMap: main.sourceMap,
+    lang: main.lang ?? undefined,
+    // Style artifacts are read only when a consumer exists (the Vite flow
+    // serves raw authored style content through its own CSS pipeline and
+    // never reads compiled style nodes).
+    styles: needStyles ? runtimeStyleArtifacts(response, profile.ssr) : [],
   };
+}
+
+/**
+ * One typed compile against an already-registered carrier. Admission/decode
+ * refusals and error-severity diagnostics fail closed; warning-severity is
+ * forwarded. Shared by the main render path and the cross-file recompile.
+ */
+function executeTypedCompile(
+  host: VerterHost,
+  canonicalId: string,
+  profile: VerterRenderProfile,
+  framework: RuntimeFramework,
+  authoredOnlyStyleProcessing: boolean,
+  warn?: BundlerWarn,
+) {
+  let response;
+  try {
+    response = host.compileRequest(
+      canonicalId,
+      typedRenderRequest(profile, framework, {
+        authoredOnlyStyles: authoredOnlyStyleProcessing,
+      }),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`[verter] ${canonicalId}: ${message}`);
+  }
+  forwardTypedDiagnostics(canonicalId, response, warn);
+  return response;
 }
 
 /** Normalize Windows backslashes to forward slashes for the workspace API. */
@@ -362,12 +330,16 @@ async function resolveUpsertDependencies(
  * For each non-native block (e.g., Pug template, SCSS style), invokes the
  * appropriate preprocessor and sends the results back to the host via
  * `applyBlockOverrides`.
+ *
+ * No compile profile is named: the host buckets supplied block content
+ * under the profile-less bucket, which is exactly the bucket the typed
+ * compile route reads — so the override the plugin applies here is visible
+ * to the render that follows.
  */
 async function applyPreprocessorRequests(
   host: VerterHost,
   filename: string,
   upsertResult: HostUpdateResult,
-  profile: HostCompileProfile | undefined,
   viteConfig: unknown | null,
   customBlocks?: Record<string, BlockPreprocessor>,
 ): Promise<void> {
@@ -394,7 +366,6 @@ async function applyPreprocessorRequests(
   if (overrides.length > 0) {
     host.applyBlockOverrides({
       canonicalId: filename,
-      compileProfile: profile,
       overrides,
     });
   }
@@ -606,10 +577,9 @@ function createFrameworkFactory(
     let isNuxt = false;
     let projectRoot = "";
 
-    // Store compile profiles from transform() so load() can reuse the same profile.
-    // This ensures virtual file requests (style, template) use the same componentId
-    // and other profile fields as the initial compilation.
-    const profileCache = new Map<string, HostCompileProfile>();
+    // Store render profiles from transform() so load() can reuse the same
+    // componentId and other demand fields for virtual file requests.
+    const profileCache = new Map<string, VerterRenderProfile>();
 
     // Cache per-style-block scoped flags from the SFC source.
     // Key: filename, Value: array of booleans (one per style block, in order).
@@ -698,12 +668,19 @@ function createFrameworkFactory(
           }
         }
 
+        // Style sub-requests of a transformed carrier are served from the
+        // same compile transform() already ran — no second native read.
+        if (query.type === "style") {
+          const compiled = compiledStyleCache.get(filename)?.[query.index ?? 0];
+          if (compiled) return { code: compiled.code, map: compiled.map ?? undefined };
+        }
+
         const host = loadHost();
 
-        // Reuse the compile profile from transform() to ensure the same componentId
+        // Reuse the render profile from transform() to ensure the same componentId
         // and other fields are used. Fall back to a basic profile if not cached.
         const cachedProfile = profileCache.get(filename);
-        const compileProfile: HostCompileProfile =
+        const renderProfile: VerterRenderProfile =
           cachedProfile ??
           (() => {
             const isProd = viteConfig
@@ -714,24 +691,42 @@ function createFrameworkFactory(
               isProduction: isProd,
               customElement: false,
               ssr,
-              hmrStrategy: (isProd ? "none" : hmrStrategy) as HostCompileProfile["hmrStrategy"],
+              forceJs: false,
+              sourceMap: false,
+              hmrStrategy: isProd ? "none" : hmrStrategy,
             };
           })();
 
         try {
           const lt0 = timing ? performance.now() : 0;
-          const file = host.getVirtualFile({
-            rawId: id,
-            compileProfile,
-          });
+          const loadFramework = frameworkForFilename(filename, frameworkSelection);
+          // One typed compile and pick the requested node — the same single
+          // native route every other read of this carrier uses. The read
+          // inherits the fail-closed disposition the profile-bearing virtual
+          // read had: an error-severity compile throws (the catch below turns
+          // that into "no module") instead of publishing recovery output as
+          // if it were a good module. Warnings are swallowed rather than
+          // re-forwarded — the carrier's transform already reported them, and
+          // a sub-request must not duplicate a build warning.
+          const response = executeTypedCompile(
+            host,
+            filename,
+            renderProfile,
+            loadFramework,
+            // Vite's CSS pipeline owns style preprocessing for Vue carriers;
+            // the authored-only cascade keeps authored bytes intact for it.
+            Boolean(viteConfig) && loadFramework === "vue",
+            () => {},
+          );
+          const node = runtimeNodeMatching(response, renderProfile.ssr, query);
           if (timing) {
             tLoadMs += performance.now() - lt0;
             tLoadFileCount++;
           }
-
+          if (!node) return undefined;
           return {
-            code: file.code,
-            map: file.sourceMap ?? undefined,
+            code: node.code,
+            map: node.sourceMap ?? undefined,
           };
         } catch {
           // File not yet in host (shouldn't happen in normal flow)
@@ -773,17 +768,14 @@ function createFrameworkFactory(
           const carrierFramework = frameworkForFilename(filename, frameworkSelection);
           const componentId = componentIdFn(filename, source, isProd, viteConfig?.root);
 
-          const profile: HostCompileProfile = {
+          const profile: VerterRenderProfile = {
             filename,
             customElement: false,
             ssr,
             ssrModuleId: ssrModuleIdFor(ssr, projectRoot, filename),
             isProduction: isProd,
             componentId,
-            hmrStrategy:
-              carrierFramework === "sveltejs"
-                ? "none"
-                : ((isProd ? "none" : hmrStrategy) as HostCompileProfile["hmrStrategy"]),
+            hmrStrategy: carrierFramework === "sveltejs" ? "none" : isProd ? "none" : hmrStrategy,
             sourceMap: true,
             forceJs: !viteConfig || meta.framework !== "vite",
           };
@@ -817,7 +809,6 @@ function createFrameworkFactory(
             host,
             filename,
             upsertResult,
-            profile,
             viteConfig,
             opts.customBlocks,
           );
@@ -825,9 +816,10 @@ function createFrameworkFactory(
           const main = renderMainRuntime(
             host,
             filename,
-            source,
             profile,
+            carrierFramework,
             Boolean(viteConfig) && carrierFramework === "vue",
+            carrierFramework === "sveltejs" || !viteConfig,
             typeof (this as { warn?: unknown })?.warn === "function"
               ? (this as unknown as { warn: (w: { message: string }) => void }).warn.bind(this)
               : undefined,
@@ -838,12 +830,15 @@ function createFrameworkFactory(
               code: main.code,
               map: main.sourceMap ?? null,
             });
-            compiledStyleCache.set(filename, readCompiledStyleArtifacts(host, filename, profile));
+            compiledStyleCache.set(filename, main.styles);
           } else if (viteConfig) {
             scriptCache.set(filename, {
               code: main.code,
               map: main.sourceMap ?? null,
             });
+          } else {
+            // Non-Vite style sub-requests are served from this same compile.
+            compiledStyleCache.set(filename, main.styles);
           }
         }
 
@@ -856,10 +851,18 @@ function createFrameworkFactory(
             if (frameworkForFilename(file, frameworkSelection) !== "vue") continue;
             const cachedProfile = profileCache.get(file);
             if (cachedProfile) {
-              const recompiled = host.getVirtualFile({
-                rawId: file,
-                compileProfile: cachedProfile,
-              });
+              const response = executeTypedCompile(
+                host,
+                file,
+                cachedProfile,
+                "vue",
+                Boolean(viteConfig),
+                typeof (this as { warn?: unknown })?.warn === "function"
+                  ? (this as unknown as { warn: BundlerWarn }).warn.bind(this)
+                  : undefined,
+              );
+              const main = requireRuntimeMain(response, cachedProfile.ssr, file);
+              const recompiled = { code: main.code, sourceMap: main.sourceMap ?? null };
               if (viteConfig) {
                 scriptCache.set(file, {
                   code: recompiled.code,
@@ -896,7 +899,18 @@ function createFrameworkFactory(
             return applyViteStyleLane(code, filename, profile?.componentId ?? "", isScoped);
           }
 
-          // Non-Vite: use Rust transformVueStyle for CSS scoping.
+          // Non-Vite: use Rust transformVueStyle for CSS scoping — but not on
+          // bytes this plugin's own compile already produced. load() serves a
+          // carrier's style sub-request from compiledStyleCache, preprocessed
+          // AND scoped, so a second pass over those same bytes would
+          // double-scope the moment an id ever carries `&scoped` or
+          // styleScopedCache gains a non-Vite entry. Byte identity, not id
+          // identity: a bundler passing authored bytes for the same id still
+          // gets the scoping pass.
+          const served = compiledStyleCache.get(filename)?.[query.index ?? 0];
+          if (served && served.code === code) {
+            return { code: served.code, map: served.map ?? null };
+          }
           let css = code;
           const profile = profileCache.get(filename);
           if (profile) {
@@ -918,7 +932,7 @@ function createFrameworkFactory(
           const ssr = opts.ssr?.enabled ?? (viteConfig ? Boolean(viteConfig.build?.ssr) : false);
           const componentIdFn = opts.componentId || generateComponentId;
           const componentId = componentIdFn(filename, code, isProd, viteConfig?.root);
-          const profile: HostCompileProfile = {
+          const profile: VerterRenderProfile = {
             filename,
             customElement: false,
             ssr,
@@ -946,7 +960,6 @@ function createFrameworkFactory(
             host,
             filename,
             upsertResult,
-            profile,
             viteConfig,
             opts.customBlocks,
           );
@@ -954,9 +967,10 @@ function createFrameworkFactory(
           const main = renderMainRuntime(
             host,
             filename,
-            code,
             profile,
+            "sveltejs",
             false,
+            true,
             typeof (this as { warn?: unknown })?.warn === "function"
               ? (this as unknown as { warn: (w: { message: string }) => void }).warn.bind(this)
               : undefined,
@@ -968,7 +982,7 @@ function createFrameworkFactory(
             map: main.sourceMap ?? null,
           });
 
-          const styleArtifacts = readCompiledStyleArtifacts(host, filename, profile);
+          const styleArtifacts = main.styles;
           compiledStyleCache.set(filename, styleArtifacts);
 
           if (timing) {
@@ -1011,14 +1025,14 @@ function createFrameworkFactory(
         const componentIdFn = opts.componentId || generateComponentId;
         const componentId = componentIdFn(filename, code, isProd, viteConfig?.root);
 
-        const profile: HostCompileProfile = {
+        const profile: VerterRenderProfile = {
           filename,
           customElement: false,
           ssr,
           ssrModuleId: ssrModuleIdFor(ssr, projectRoot, filename),
           isProduction: isProd,
           componentId,
-          hmrStrategy: (isProd ? "none" : hmrStrategy) as HostCompileProfile["hmrStrategy"],
+          hmrStrategy: isProd ? "none" : hmrStrategy,
           sourceMap: true,
           // Only Vite itself strips TS via vite:esbuild on script sub-requests.
           // Rolldown/tsdown sets viteConfig (via Vite's API) but lacks vite:esbuild,
@@ -1039,12 +1053,13 @@ function createFrameworkFactory(
 
         // Project authored inline styles from the registered inventory. External
         // content is unavailable on this structure-only surface.
+        let styleEntries: StyleBlockEntry[] | null = null;
         if (viteConfig) {
-          const entries = styleEntriesFromStructure(host, upsertResult.canonicalId, code);
-          styleBlockCache.set(filename, entries);
+          styleEntries = styleEntriesFromStructure(host, upsertResult.canonicalId, code);
+          styleBlockCache.set(filename, styleEntries);
           styleScopedCache.set(
             filename,
-            entries.map((entry) => entry.scoped),
+            styleEntries.map((entry) => entry.scoped),
           );
         }
 
@@ -1069,30 +1084,31 @@ function createFrameworkFactory(
           host,
           filename,
           upsertResult,
-          profile,
           viteConfig,
           opts.customBlocks,
         );
         const t2 = timing ? performance.now() : 0;
 
-        // Render the main module through the render-only bundler lane
-        // (`compileMany(RuntimeRender)`) — the single shared substrate, no
-        // parallel render API. The batch render profile + per-input
-        // componentId reproduce EXACTLY the `getVirtualFile({ compileProfile })`
-        // values this transform used before, so the Main output is
-        // byte-identical. Soft (warning-severity) diagnostics are forwarded as
-        // bundler warnings below.
+        // Render the main module: one typed compile request against the
+        // registered source. Soft (warning-severity) diagnostics are
+        // forwarded as bundler warnings.
         const main = renderMainRuntime(
           host,
           filename,
-          code,
           profile,
+          "vue",
           Boolean(viteConfig) && carrierFramework === "vue",
+          !viteConfig,
           typeof (this as { warn?: unknown })?.warn === "function"
             ? (this as unknown as { warn: (w: { message: string }) => void }).warn.bind(this)
             : undefined,
         );
         const t3 = timing ? performance.now() : 0;
+
+        // Non-Vite style sub-requests are served from this same compile.
+        if (!viteConfig) {
+          compiledStyleCache.set(filename, main.styles);
+        }
 
         if (timing) {
           tUpsertMs += t1 - t0;

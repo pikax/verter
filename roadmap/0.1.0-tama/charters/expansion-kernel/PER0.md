@@ -62,13 +62,13 @@ Cache/backend identity, cancellation, budgets, and zero work. The current owner 
 
 - **Normative intent:** make performance and reuse correctness explicit across every future capability.
 - **Atomic boundary:** the production surfaces and named API/data boundaries above form this source-owned node's exclusive acceptance subset; this node owns its complete named migration population and exactly one deletion/cutover disposition.
-- **Cutover evidence:** prove removal or structural rejection of **central framework switch**, **untagged coordinate/public identity**, **duplicate component information authority** and satisfy the node-specific acceptance IDs below. A newly independent outcome requires an amendment and a new node before mutation.
+- **Inventory evidence:** enumerate every in-scope outcome, consumer and displaced production route. Bind each to its existing owning ancestor and receiving acceptance criterion, and verify the required implementation/deletion evidence is already complete. Missing mechanisms or residual required routes return to their predecessor owner; this verification node grants no future-deletion deferral and performs no production migration.
 
 ## Acceptance IDs and discriminating proof
 
 Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
 
-- **PER0-AC1 — sole-owner outcome:** the named final owner must be sole and every displaced route named below must be deleted or structurally rejected. Prefer existing type, capability, dependency, compiler, or static enforcement. Add a negative or mutation test only for a plausible critical fail-closed/correctness boundary or a reproduced defect that existing evidence does not discriminate.
+- **PER0-AC1 — sole-owner outcome:** every required outcome and consumer is covered by its implemented owning ancestor, and each required displaced route is already deleted or structurally rejected by that owner. Check the complete inventory, ancestor paths, acceptance criteria and executed evidence; missing, conflicting or residual ownership fails this verifier and returns to the predecessor owner. A named future owner cannot satisfy closure, and this node adds no missing production mechanism.
 - **PER0-AC2 — positive contract:** the named API/data boundary must preserve exact identities, provenance, completeness, and deterministic ordering. Reuse existing coverage or extend/table-drive one test before creating a new test.
 - **PER0-AC3 — incremental equivalence:** when the changed scope owns or affects incremental, cache, cancellation, stale-publication, or partial-result authority, prove incremental equals fresh and degraded outcomes cannot warm. Otherwise record a terse not-applicable rationale tied to the untouched authority.
 - **PER0-AC4 — bounded work:** when the changed scope owns or affects a hot path, prove no hidden duplicate parse, resolve, plan, emit, copy, allocation, or retained candidate using applicable existing counters, inspection, or benchmarks. Otherwise record a terse not-applicable rationale; do not add counters or a soak by default.
@@ -77,9 +77,9 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 
 ## Deletions and forbidden designs
 
-- Delete or structurally reject: **central framework switch**.
-- Delete or structurally reject: **untagged coordinate/public identity**.
-- Delete or structurally reject: **duplicate component information authority**.
+- Verify the owning predecessor has deleted or structurally rejected: **central framework switch**. This node changes no production route.
+- Verify the owning predecessor has deleted or structurally rejected: **untagged coordinate/public identity**. This node changes no production route.
+- Verify the owning predecessor has deleted or structurally rejected: **duplicate component information authority**. This node changes no production route.
 - Never add a dual-running authority, compatibility fallback, string/regex semantic recovery, test-only production bypass, resource-capacity predecessor, sleep/poll readiness, or unqualified cache/public identity.
 - Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
 
@@ -88,7 +88,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Target ceiling: 0 production LOC, 0 production files, 0 related crates/packages.
 - Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
 - Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
-- Performance budget: when preflight identifies touched authority or a hot path, equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance remains 0.0% unless an owning-authority amendment supplies exact replacement thresholds. Otherwise performance evidence is not applicable; do not create counters or a 100-request retention soak solely to satisfy this charter.
+- Performance acceptance: use the exact applicable metric rows and methodology from performance-gates.toml, the applicable MEM0 budget, or the owning ratified product catalog, under contracts/resource-and-finalization.md (L2). Exact work invariants, latency/allocation/RSS limits under their owning methodology, and bounded new-capability budgets are distinct. New capabilities and deliberate pressure policies declare bounded new work and replacement SLOs before measurement. Missing required coverage needs an owning-contract amendment before measurement; no implicit 0.0% threshold or post-hoc rebaseline applies.
 
 ## Abort conditions
 
@@ -116,5 +116,5 @@ Before squashing or review, the implementation patch transitions this node's pre
 **Subblocks:** (1) consume Rev11/TCM1 plus `VID0/PAR0` prepared-artifact identities and the accepted generic observation identity with `TIF0` operation descriptors; (2) keep snapshot-independent `QueryIdentity` candidate lookup, G2-owned `(QueryIdentity, InputBasisId)` flight identity, and value-side candidate/result basis provenance as three distinct contracts; (3) validate/benchmark backend/artifact/process/project/snapshot/map/parser invalidation by revalidating candidate provenance without redefining any identity; (4) cancellation/stale-generation publication law; (5) per-operation budgets and audit events; (6) equivalent-work benchmark and RSS-soak harness.
 **Acceptance:** candidate lookup remains snapshot-independent; same reported TS version with a different artifact cannot pass value-side reuse validation; process restart, source/map/profile epoch change, cancellation, and overflow reject stale admission; native no-projection artifacts survive backend changes; disabled profiles show zero attributable work.
 **Forbidden:** backend-free type caches, sleep/idle completion inference, per-vertical singleflight, unbounded candidate collection, or performance claims without result equivalence.
-**Deletion/abort:** delete only successor-local duplicate cache/coalescer paths proven displaced; never delete or shadow TCM1/G2 authority; abort when candidate/result provenance cannot carry and revalidate the complete observation basis—never enlarge `QueryIdentity` to make its lookup key reconstruct that basis.
+**Deletion/abort:** verify the owning predecessor deleted successor-local duplicate cache/coalescer paths proven displaced; reopen that owner if any required deletion remains. This verification node neither implements deletion nor deletes or shadows TCM1/G2 authority; abort when candidate/result provenance cannot carry and revalidate the complete observation basis—never enlarge `QueryIdentity` to make its lookup key reconstruct that basis.
 

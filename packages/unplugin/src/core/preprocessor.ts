@@ -11,10 +11,15 @@ interface PreprocessResult {
  *
  * - **template**: dynamic import of lang compiler (e.g., `pug`)
  * - **script**: dynamic import of lang compiler (e.g., `coffeescript`)
- * - **style**: delegates to Vite's `preprocessCSS()` when available
+ * - **style**: delegates to Vite's `preprocessCSS()` when available;
+ *   otherwise compiles SCSS/Sass through the optional `sass` package
  * - **custom**: checks user-provided `customBlocks` map, falls back to auto-detect by lang
  *
  * @returns Preprocessed `{ code, sourceMap? }`, or `null` if no preprocessor is available.
+ * @throws When an available preprocessor rejects the block (e.g. an SCSS
+ *   syntax error) — that is a broken input, not a missing tool, so the
+ *   compiler's message surfaces instead of the host's opaque
+ *   `ProcessedContentRequired` refusal.
  */
 export async function preprocessBlock(
   req: HostPreprocessorRequest,
@@ -136,9 +141,56 @@ export async function preprocessStyle(
       return null;
     }
   }
+  // Outside Vite no bundler CSS pipeline runs, so the plugin owns SCSS/Sass
+  // preprocessing itself: the compiler's style cascade scopes plain CSS
+  // only, and a supplied (preprocessed) artifact is the only way authored
+  // non-CSS bytes can reach it.
+  const lower = lang.toLowerCase();
+  if (lower === "scss" || lower === "sass") {
+    let sass: typeof import("sass");
+    try {
+      sass = await import("sass");
+    } catch (e: unknown) {
+      if (e !== null && typeof e === "object" && "code" in e && e.code === "ERR_MODULE_NOT_FOUND") {
+        console.warn(
+          `[verter] Style preprocessing for lang="${lang}" requires the "sass" package. ` +
+            `Install it to compile ${lower} blocks outside Vite.`,
+        );
+        return null;
+      }
+      throw e;
+    }
+
+    try {
+      const result = sass.compileString(content, {
+        syntax: lower === "sass" ? "indented" : "scss",
+        sourceMap: true,
+        sourceMapIncludeSources: true,
+      });
+      return {
+        code: result.css,
+        sourceMap: result.sourceMap ? JSON.stringify(result.sourceMap) : undefined,
+      };
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      // A genuine compile failure is not "no preprocessor available": if it
+      // were swallowed to `null` the host would later refuse the block as
+      // `ProcessedContentRequired`, burying the compiler's own message.
+      // Surface it instead so a broken SCSS block fails the build saying why.
+      const failure = new Error(
+        `[verter] Failed to preprocess style lang="${lang}" in ${filename}: ${message}`,
+      );
+      // Attach the originating error after construction rather than through
+      // the options bag: this package's own tsconfig targets ES2020, whose
+      // `Error` constructor declares no second parameter, and the cause chain
+      // has to survive for a caller that inspects it.
+      (failure as Error & { cause?: unknown }).cause = e;
+      throw failure;
+    }
+  }
   console.warn(
-    `[verter] Style preprocessing for lang="${lang}" requires Vite. ` +
-      `Other bundlers are not yet supported for style preprocessing.`,
+    `[verter] No preprocessor available for style lang="${lang}" outside Vite. ` +
+      `Install the "${lang}" preprocessor or build through Vite.`,
   );
   return null;
 }

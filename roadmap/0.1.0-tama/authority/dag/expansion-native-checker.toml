@@ -300,7 +300,7 @@ rescope_unrelated_packages = 3
 [[node]]
 id = "NCK8"
 name = "Native checker terminal and displaced-authority deletion"
-predecessors = ["NCK7", "NCKF0", "PER0", "UAO0", "UAP0", "BR0"]
+predecessors = ["NCK7","NCKF0","PER0","UAO0","UAP0","BR0","PM4"]
 phase = "expansion"
 train = "expansion.native-checker"
 product = "native_checker"
@@ -308,7 +308,7 @@ kind = "terminal"
 semantic_role = "delivery"
 class = "successor"
 owner = "expansion.native-checker:sole native semantic diagnostic authority and certified-family cutover"
-conflict_domains = ["semantic_authority", "diagnostic_action_service", "performance_evidence", "program_authority"]
+conflict_domains = ["semantic_authority","diagnostic_action_service","performance_evidence","program_authority"]
 resource_class = "rust-mixed"
 gate_profile = "targeted-domain"
 review_profile = "architecture-3"
