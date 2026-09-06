@@ -4700,9 +4700,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     results.push(combined);
                 }
                 Work::Finish(pair) => {
-                    let result = results
-                        .pop()
-                        .expect("a comparable pair must publish one result");
+                    // Every `Eval` arm publishes exactly one result per
+                    // `Finish` it pushes (a retry's nested `Eval` publishes the
+                    // result the outer `Finish` pops), so an empty stack here
+                    // is unreachable. It fails CLOSED rather than panicking:
+                    // an arm that ever stopped publishing would answer
+                    // "undecided" — which suppresses admission — instead of
+                    // taking down a production request.
+                    let result = results.pop().unwrap_or(RelationResult::Unknown);
                     active.remove(&pair);
                     memo.insert(pair, result.clone());
                     results.push(result);

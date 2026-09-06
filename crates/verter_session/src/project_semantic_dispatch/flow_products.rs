@@ -54,11 +54,17 @@
 //! solution encodes to canonical bytes, so "same answer" is byte-checkable
 //! rather than field-by-field.
 
-// Every item below is part of the product-lattice surface the flow product
-// suites drive; the module is a single coherent API rather than a set of
-// independently-used helpers, so the allowance is module-scoped rather
-// than repeated on each item.
-#![allow(dead_code)]
+// The substrate is complete but is not yet the evaluator's value path, so an
+// ORDINARY build reaches none of it and every item below would read as rot.
+// The allowance is module-scoped rather than repeated on each item because
+// the module is one coherent API, not a set of independently-used helpers —
+// but it is scoped to `not(test)` on purpose. Under the test cfg the
+// substrate's whole named surface is re-exported to the product suites, so
+// only a helper with NO consumer at all is still dead there, and one fails
+// `clippy --tests -D warnings` instead of hiding behind the allowance. The
+// attribute retires entirely once the flow evaluator's value path reads this
+// store, at which point production consumers make it redundant.
+#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

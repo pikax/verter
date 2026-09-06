@@ -2288,7 +2288,33 @@ pub enum SemanticRef {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ValueRootKey {
     pub scope: ScopeId,
+    /// The authored value reference, JOINED: a namespace-qualified root is
+    /// stored as one dotted spelling (`Ns.A_KIND`) rather than as segments,
+    /// because the key's identity is the reference a consumer wrote. Read it
+    /// through [`lexical_root`](Self::lexical_root) and
+    /// [`name_segments`](Self::name_segments) rather than re-deriving the
+    /// split at a consumer — the join is this key's convention to own.
     pub name: Arc<str>,
+}
+
+impl ValueRootKey {
+    /// The one NAMEABLE binding behind this root: the segment before the
+    /// first dot. A namespace-qualified root (`Ns.A_KIND`) is a projection
+    /// of the local `import * as Ns` binding, so the root is `Ns`; the
+    /// trailing segments name no binding any file declares, and treating the
+    /// joined spelling as one would strand an import-retention lookup on a
+    /// name that does not exist.
+    #[must_use]
+    pub fn lexical_root(&self) -> &str {
+        self.name.split('.').next().unwrap_or(self.name.as_ref())
+    }
+
+    /// The authored reference's segments in order — `["Ns", "A_KIND"]` for a
+    /// namespace-qualified root, one segment for a bare one. The inverse of
+    /// the join [`name`](Self::name) stores.
+    pub fn name_segments(&self) -> impl Iterator<Item = &str> {
+        self.name.split('.')
+    }
 }
 
 /// Optionality modifier for mapped-type `[K in ...]?` rewrites.
