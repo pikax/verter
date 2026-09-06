@@ -840,12 +840,12 @@ adapter = "cargo-test"
 argv_tail = ["-p", "verter_compiler", "--lib", "--", "code_transform::mapping_product_tests"]
 fixtures = ["crates/verter_compiler/src/code_transform/mapping_product.rs", "crates/verter_compiler/src/code_transform/mapping_product_tests.rs"]
 covers = ["A-mapping-product-total", "A-mapping-product-complete"]
-selected = 10
-executed = 10
-passed = 10
+selected = 11
+executed = 11
+passed = 11
 failed = 0
 skipped = 0
-terminal_summary = "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 6350 filtered out"
+terminal_summary = "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 6350 filtered out"
 control = "CTL-mapping-product-elision"
 
 # ---------------------------------------------------------------------------
