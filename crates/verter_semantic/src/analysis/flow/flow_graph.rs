@@ -209,15 +209,6 @@ impl FunctionFlowGraph {
         )
     }
 
-    /// The node at dense index `index`, or `None` past the node space.
-    /// The node ids are dense and contiguous across the four families, so
-    /// this is the enumeration accessor of the graph's own index space —
-    /// a consumer never fabricates an id.
-    #[must_use]
-    pub fn node_at(&self, index: usize) -> Option<FlowNodeId> {
-        (index < self.node_count()).then_some(FlowNodeId(index as u32))
-    }
-
     /// What `node` stands for.
     #[must_use]
     pub fn node_kind(&self, node: FlowNodeId) -> FlowNodeKind {

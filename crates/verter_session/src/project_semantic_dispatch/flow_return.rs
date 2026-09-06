@@ -4615,6 +4615,13 @@ impl FlowBinderEnv {
     }
 }
 
+/// The TYPE-PARAMETER lowering environment a frame's signature positions
+/// are lowered against. It is not evaluator dataflow state: the frame's
+/// semantic state lives entirely in the typed-subject `FlowProductStore`,
+/// and nothing here is keyed by an authored VALUE name. `env` is keyed by
+/// binder NAME because that is the vocabulary `lower_type_expr` resolves a
+/// type reference against — a binder is named, not slotted — so a reader
+/// should not mistake it for a surviving name-keyed value layer.
 struct FlowBinderEnv {
     /// The file scope the binders declare into.
     scope: crate::semantic_query::NodeScopeId,
@@ -5287,7 +5294,7 @@ fn store_param_ordinals(store: &FlowProductStore) -> Vec<u32> {
         .into_iter()
         .filter_map(|subject| match subject {
             FlowProductSubject::FrameParam(ordinal) => Some(ordinal),
-            FlowProductSubject::FrameBinding(_) | FlowProductSubject::GraphNode { .. } => None,
+            FlowProductSubject::FrameBinding(_) => None,
         })
         .collect()
 }
@@ -5868,10 +5875,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             &b.products,
         ) {
             FlowFrameJoinOutcome::Joined(products) => products,
-            FlowFrameJoinOutcome::Gap(_) => {
-                self.record_degradation(
-                    crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
-                );
+            FlowFrameJoinOutcome::Gap(gap) => {
+                // The join's OWN typed gap, not a generic unresolved
+                // marker: a declared-type conflict, an unproven canonical
+                // union and a kind mismatch are three different reasons a
+                // merge could not be modelled, and the audit payload keeps
+                // them apart.
+                self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(gap));
                 a.products.clone()
             }
             FlowFrameJoinOutcome::BudgetExceeded(exceeded) => {
@@ -6541,8 +6551,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn restore_arm_entry(&mut self, entry: &FlowProductStore) {
         use super::flow_solve::FlowDomain;
         let mut subjects: Vec<FlowProductSubject> = self.products.subjects();
+        let mut seen: rustc_hash::FxHashSet<FlowProductSubject> =
+            subjects.iter().cloned().collect();
         for subject in entry.subjects() {
-            if !subjects.contains(&subject) {
+            if seen.insert(subject.clone()) {
                 subjects.push(subject);
             }
         }
@@ -6581,7 +6593,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 let name = Arc::clone(self.bindings.name(*slot)?);
                 Some(self.subject(FlowBindingLayer::Lexical, name.as_ref()))
             }
-            FlowProductSubject::GraphNode { .. } => None,
         }
     }
 

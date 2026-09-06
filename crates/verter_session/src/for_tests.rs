@@ -815,13 +815,6 @@ impl FlowGraphFixtureForTests {
     pub fn build_plan_with_retained(&self, request: FlowDemandRequest, retained: &PlannedFlowSlice) -> Result<FlowDemandPlan, FlowDemandPlanError> {
         crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, retained, &self.inventory)
     }
-
-    /// The product-lattice inputs over this fixture's store-bound graph:
-    /// the graph plus the frame's binding identities, resolved through the
-    /// SAME single slot-numbering authority the demand planner uses.
-    pub fn product_inputs(&self) -> FlowProductInputs {
-        FlowProductInputs::for_bound_graph(&self.bound, &self.inventory)
-    }
 }
 
 /// Parse `source`, build the skeleton + graph of its first function
