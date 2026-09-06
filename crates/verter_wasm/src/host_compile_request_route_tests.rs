@@ -234,12 +234,6 @@ fn svelte_route_request(products: Value) -> Value {
     }})
 }
 
-/// The legacy demand that matches the typed requests below: every runtime
-/// node, the IDE projection, template data, and maps on.
-fn legacy_profile() -> Value {
-    json!({ "target": "full", "sourceMap": true, "isProduction": false })
-}
-
 #[track_caller]
 fn product_row<'response>(response: &'response Value, kind: &str) -> &'response Value {
     response["products"]
@@ -259,8 +253,8 @@ fn product_kinds(response: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The runtime row's node rows with their addressing, so a comparison
-/// against the legacy per-node reads is order-independent.
+/// The runtime row's node rows with their addressing, so the published set
+/// can be compared order-independently.
 #[track_caller]
 fn runtime_nodes(response: &Value) -> Vec<(String, Option<u64>, &Value)> {
     product_row(response, "runtimeClient")["nodes"]
@@ -280,60 +274,68 @@ fn runtime_nodes(response: &Value) -> Vec<(String, Option<u64>, &Value)> {
         .collect()
 }
 
-/// The legacy per-node read for the same demand.
-#[track_caller]
-fn legacy_virtual_file(
-    host: &JsValue,
-    canonical_id: &str,
-    kind: &str,
+/// One published node's full expected surface, beside its addressing. There
+/// is no second read of the same demand to check bytes against, so these
+/// are independently pinned literal expectations: `lang`, `scopeId` and
+/// `blockType` are exact per-kind values, not merely "present" — an
+/// incorrect but non-empty `scopeId` (or a node that silently gained/lost a
+/// `blockType`) must fail here.
+struct ExpectedNode {
+    kind: &'static str,
     index: Option<u64>,
-) -> Value {
-    let mut node_kind = json!({ "kind": kind });
-    if let Some(index) = index {
-        node_kind["index"] = json!(index);
-    }
-    let query = js(json!({
-        "canonicalId": canonical_id,
-        "nodeKind": node_kind,
-        "compileProfile": legacy_profile(),
-    }));
-    let raw = method(host, "getVirtualFile")
-        .call1(host, &query)
-        .unwrap_or_else(|error| {
-            panic!(
-                "the legacy read of {kind}/{index:?} failed: {}",
-                error.as_string().unwrap_or_default()
-            )
-        });
+    lang: Option<&'static str>,
+    scope_id: Option<String>,
+    block_type: Option<&'static str>,
+}
+
+/// A real compile of `/src/App.vue` (`VUE_SFC`) through this typed route,
+/// captured once and pinned here. This route is the ONLY WASM path that
+/// produces these bytes, so the golden is the byte-preservation oracle:
+/// established independently of any assertion in this file, from an actual
+/// build. Regenerate it from a fresh build whenever the addressed node set
+/// or its published fields intentionally change.
+const VUE_APP_GOLDEN: &str = include_str!("host_compile_request_route_golden/vue_app.json");
+
+/// The Svelte counterpart of [`VUE_APP_GOLDEN`], captured from a real
+/// compile of `/src/Widget.svelte` (`SVELTE_SFC`).
+const SVELTE_WIDGET_GOLDEN: &str =
+    include_str!("host_compile_request_route_golden/svelte_widget.json");
+
+/// One golden entry's `{code, sourceMap}` pair, keyed by `kind` for a
+/// module node or `{kind}_{index}` for an indexed one (`style_0`,
+/// `custom_0`) — the same addressing `runtime_nodes` reports.
+#[track_caller]
+fn golden_node<'a>(golden: &'a Value, kind: &str, index: Option<u64>) -> &'a Value {
+    let key = match index {
+        Some(index) => format!("{kind}_{index}"),
+        None => kind.to_string(),
+    };
+    let entry = &golden[&key];
     assert!(
-        !raw.is_null(),
-        "the legacy route publishes no {kind}/{index:?} node to compare against"
+        entry.is_object(),
+        "no golden fixture entry for `{key}` — the fixture must be regenerated for a new node"
     );
-    from_js(&raw)
+    entry
 }
 
-/// The legacy IDE read, through its ensure-then-read pair.
+/// The runtime row publishes exactly this node set, and every published node
+/// carries real compiled content matching its pinned expectation exactly.
+///
+/// Both directions of the set comparison matter: iterating only the
+/// published list would let the route silently stop publishing a node and
+/// still read as green. The per-node surface is pinned alongside the set:
+/// `code` and (when requested) `sourceMap` must equal the golden fixture's
+/// bytes EXACTLY — not merely "non-empty" or "a parseable v3 map" — so a
+/// wrong-but-plausible byte-for-byte regression fails here. `lang`/`meta`
+/// match their expected value EXACTLY too, every module node (`index: null`
+/// — main/script/template) carries a map exactly when the request asked for
+/// maps, and no node carries a map when none was asked.
 #[track_caller]
-fn legacy_ide(host: &JsValue, canonical_id: &str) -> Value {
-    let profile = js(legacy_profile());
-    method(host, "ensureIdeCompiled")
-        .call2(host, &JsValue::from_str(canonical_id), &profile)
-        .expect("the legacy IDE ensure succeeds");
-    let raw = method(host, "getIde")
-        .call2(host, &JsValue::from_str(canonical_id), &profile)
-        .expect("the legacy IDE read succeeds");
-    assert!(!raw.is_null(), "the legacy route published no IDE surface");
-    from_js(&raw)
-}
-
-/// Every published runtime node's bytes, map, language and metadata against
-/// the legacy per-node read of the same demand.
-#[track_caller]
-fn assert_runtime_nodes_match_legacy(
-    host: &JsValue,
-    canonical_id: &str,
+fn assert_published_node_set(
     response: &Value,
-    expected: &[(&str, Option<u64>)],
+    expected: &[ExpectedNode],
+    want_source_map: bool,
+    golden: &Value,
 ) {
     let nodes = runtime_nodes(response);
     let mut published: Vec<(String, Option<u64>)> = nodes
@@ -343,34 +345,67 @@ fn assert_runtime_nodes_match_legacy(
     published.sort();
     let mut wanted: Vec<(String, Option<u64>)> = expected
         .iter()
-        .map(|(kind, index)| ((*kind).to_string(), *index))
+        .map(|node| (node.kind.to_string(), node.index))
         .collect();
     wanted.sort();
-    // Both directions: iterating only the published list would let the route
-    // silently stop publishing a node and still read as green.
     assert_eq!(
         published, wanted,
         "the runtime row must publish exactly this node set"
     );
 
     for (kind, index, node) in nodes {
-        let legacy = legacy_virtual_file(host, canonical_id, &kind, index);
+        let want = expected
+            .iter()
+            .find(|w| w.kind == kind && w.index == index)
+            .unwrap_or_else(|| panic!("{kind}/{index:?} has no matching expectation entry"));
+
+        let golden_entry = golden_node(golden, &kind, index);
         assert_eq!(
-            node["code"], legacy["code"],
-            "{kind}/{index:?} bytes must match the legacy route"
+            node["code"], golden_entry["code"],
+            "{kind}/{index:?} bytes must match the pinned golden exactly"
+        );
+
+        assert_eq!(
+            node["lang"].as_str(),
+            want.lang,
+            "{kind}/{index:?} `lang` must be exactly the expected value"
+        );
+        if want_source_map {
+            assert_eq!(
+                node["sourceMap"], golden_entry["sourceMap"],
+                "{kind}/{index:?} source map must match the pinned golden exactly"
+            );
+        }
+
+        assert_eq!(
+            object_keys(&node["meta"]),
+            vec!["blockType", "scopeId"],
+            "{kind}/{index:?} `meta` must be the declared two-key shape"
         );
         assert_eq!(
-            node["sourceMap"], legacy["sourceMap"],
-            "{kind}/{index:?} source map must match the legacy route"
+            node["meta"]["scopeId"].as_str(),
+            want.scope_id.as_deref(),
+            "{kind}/{index:?} `meta.scopeId` must be exactly the expected value"
         );
         assert_eq!(
-            node["lang"], legacy["lang"],
-            "{kind}/{index:?} output language must match the legacy route"
+            node["meta"]["blockType"].as_str(),
+            want.block_type,
+            "{kind}/{index:?} `meta.blockType` must be exactly the expected value"
         );
-        assert_eq!(
-            node["meta"], legacy["meta"],
-            "{kind}/{index:?} metadata must match the legacy route"
-        );
+
+        if index.is_none() {
+            assert_eq!(
+                node["sourceMap"].is_string(),
+                want_source_map,
+                "{kind} is a module node: it must carry a source map exactly when the request \
+                 asks for maps"
+            );
+        } else if !want_source_map {
+            assert!(
+                node["sourceMap"].is_null(),
+                "{kind}/{index:?} must not gain a source map when the request asked for none"
+            );
+        }
     }
 }
 
@@ -640,13 +675,66 @@ fn one_registration_and_one_typed_call_produce_every_requested_svelte_product() 
     );
 }
 
-// ── equivalence with the legacy route ────────────────────────────────────
+// ── published node set ───────────────────────────────────────────────────
 
-/// Same demand, same bytes: every runtime node and the IDE projection match
-/// what the legacy profile-bearing pair produces for the same registration,
-/// through the same JavaScript boundary.
+/// The `/src/App.vue` fixture's expected node set. `main`'s `scopeId` is the
+/// same `data-v-{hash}` a scoped-style compile derives from the component
+/// name (`App`, from the canonical id) via the compiler's own hashing
+/// helper — independently established from the compile pipeline, not
+/// copied off a prior run's output — and every other node carries no
+/// scope id. The lone `<i18n>` custom block is the only node with a
+/// `blockType`.
+fn vue_app_expected_nodes() -> Vec<ExpectedNode> {
+    let main_scope_id = format!(
+        "data-v-{}",
+        verter_compiler::compile::get_hash(&verter_compiler::compile::extract_component_name(
+            "/src/App.vue"
+        ))
+    );
+    vec![
+        ExpectedNode {
+            kind: "main",
+            index: None,
+            lang: Some("ts"),
+            scope_id: Some(main_scope_id),
+            block_type: None,
+        },
+        ExpectedNode {
+            kind: "script",
+            index: None,
+            lang: Some("ts"),
+            scope_id: None,
+            block_type: None,
+        },
+        ExpectedNode {
+            kind: "template",
+            index: None,
+            lang: Some("tsx"),
+            scope_id: None,
+            block_type: None,
+        },
+        ExpectedNode {
+            kind: "style",
+            index: Some(0),
+            lang: Some("css"),
+            scope_id: None,
+            block_type: None,
+        },
+        ExpectedNode {
+            kind: "custom",
+            index: Some(0),
+            lang: None,
+            scope_id: None,
+            block_type: Some("i18n"),
+        },
+    ]
+}
+
+/// The runtime row publishes exactly one node per script/template/style/
+/// custom block the carrier's structure implies — the full set a bundler
+/// needs, in one call, with no separate per-node read.
 #[wasm_bindgen_test]
-fn the_vue_route_is_equivalent_to_the_legacy_pair_for_the_same_demand() {
+fn the_vue_runtime_row_publishes_the_carriers_full_node_set() {
     let host = js_host();
     register(&host, "/src/App.vue", VUE_SFC, "vue");
 
@@ -659,36 +747,45 @@ fn the_vue_route_is_equivalent_to_the_legacy_pair_for_the_same_demand() {
         ])),
     );
 
-    assert_runtime_nodes_match_legacy(
-        &host,
-        "/src/App.vue",
-        &response,
-        &[
-            ("main", None),
-            ("script", None),
-            ("template", None),
-            ("style", Some(0)),
-            ("custom", Some(0)),
-        ],
+    let golden: Value =
+        serde_json::from_str(VUE_APP_GOLDEN).expect("the Vue golden fixture is valid JSON");
+    assert_published_node_set(&response, &vue_app_expected_nodes(), true, &golden);
+    let ide = product_row(&response, "ideCompanion");
+    let ide_golden = golden_node(&golden, "ideCompanion", None);
+    assert_eq!(
+        ide["code"], ide_golden["code"],
+        "the IDE row's bytes must match the pinned golden exactly"
+    );
+    assert_eq!(
+        ide["sourceMap"], ide_golden["sourceMap"],
+        "the IDE row's source map must match the pinned golden exactly"
+    );
+    assert_eq!(
+        ide["isJsx"], ide_golden["isJsx"],
+        "the IDE row's `isJsx` flag must match the pinned golden exactly"
+    );
+    assert_eq!(
+        response["diagnostics"], golden["diagnostics"],
+        "the clean fixture's complete diagnostics envelope must match the pinned golden exactly"
     );
 
-    let legacy = legacy_ide(&host, "/src/App.vue");
-    let ide = product_row(&response, "ideCompanion");
-    assert_eq!(ide["code"], legacy["code"]);
-    assert_eq!(ide["sourceMap"], legacy["sourceMap"]);
-    assert_eq!(ide["isJsx"], legacy["isJsx"]);
-
-    // Diagnostics are named in the equivalence contract beside the bytes and
-    // the maps, so the whole set — codes, messages and spans — is compared
-    // against the legacy compile's rather than assumed to match.
-    let legacy_main = legacy_virtual_file(&host, "/src/App.vue", "main", None);
-    assert_eq!(response["diagnostics"], legacy_main["diagnostics"]);
+    // The same demand without maps publishes the same node set with every
+    // node map-less: a route that fabricated maps nobody asked for, or kept
+    // answering maps after the demand dropped them, surfaces here.
+    let no_map_response = compile_request(
+        &host,
+        "/src/App.vue",
+        vue_route_request(json!([runtime_client_product(false)])),
+    );
+    assert_published_node_set(&no_map_response, &vue_app_expected_nodes(), false, &golden);
 }
 
-/// The Svelte carrier's own equivalence. Its published node set differs
-/// from Vue's, which is exactly why it is asserted rather than assumed.
+/// The Svelte carrier's own node set. Its published set differs from Vue's,
+/// which is exactly why it is asserted rather than assumed — including its
+/// `main` node carrying no `scopeId`: Vue's `data-v-` scoping scheme is not
+/// this carrier's.
 #[wasm_bindgen_test]
-fn the_svelte_route_is_equivalent_to_the_legacy_pair_for_the_same_demand() {
+fn the_svelte_runtime_row_publishes_the_carriers_full_node_set() {
     let host = js_host();
     register(&host, "/src/Widget.svelte", SVELTE_SFC, "svelte");
 
@@ -701,30 +798,56 @@ fn the_svelte_route_is_equivalent_to_the_legacy_pair_for_the_same_demand() {
         ])),
     );
 
-    assert_runtime_nodes_match_legacy(
-        &host,
-        "/src/Widget.svelte",
+    let golden: Value = serde_json::from_str(SVELTE_WIDGET_GOLDEN)
+        .expect("the Svelte golden fixture is valid JSON");
+    assert_published_node_set(
         &response,
-        &[("main", None), ("style", Some(0))],
+        &[
+            ExpectedNode {
+                kind: "main",
+                index: None,
+                lang: Some("js"),
+                scope_id: None,
+                block_type: None,
+            },
+            ExpectedNode {
+                kind: "style",
+                index: Some(0),
+                lang: Some("css"),
+                scope_id: None,
+                block_type: None,
+            },
+        ],
+        true,
+        &golden,
     );
-
-    let legacy = legacy_ide(&host, "/src/Widget.svelte");
     let ide = product_row(&response, "ideCompanion");
-    assert_eq!(ide["code"], legacy["code"]);
-    assert_eq!(ide["sourceMap"], legacy["sourceMap"]);
-    assert_eq!(ide["isJsx"], legacy["isJsx"]);
-
-    let legacy_main = legacy_virtual_file(&host, "/src/Widget.svelte", "main", None);
-    assert_eq!(response["diagnostics"], legacy_main["diagnostics"]);
+    let ide_golden = golden_node(&golden, "ideCompanion", None);
+    assert_eq!(
+        ide["code"], ide_golden["code"],
+        "the IDE row's bytes must match the pinned golden exactly"
+    );
+    assert_eq!(
+        ide["sourceMap"], ide_golden["sourceMap"],
+        "the IDE row's source map must match the pinned golden exactly"
+    );
+    assert_eq!(
+        ide["isJsx"], ide_golden["isJsx"],
+        "the IDE row's `isJsx` flag must match the pinned golden exactly"
+    );
+    assert_eq!(
+        response["diagnostics"], golden["diagnostics"],
+        "the clean fixture's complete diagnostics envelope must match the pinned golden exactly"
+    );
 }
 
 /// IDE offsets retain their distinct coordinate spaces: binding spans index
 /// the registered source, while block bounds index the generated IDE code.
-/// Both use UTF-16 code units and remain the legacy route's own.
+/// Both use UTF-16 code units.
 ///
-/// Legacy equality alone cannot prove either meaning. The binding start is
-/// checked against distinct UTF-8 and UTF-16 source indices; the block start
-/// is beyond the source string and inside the generated code.
+/// The binding start is checked against distinct UTF-8 and UTF-16 source
+/// indices; the block start is beyond the source string and inside the
+/// generated code.
 #[wasm_bindgen_test]
 fn published_ide_offsets_use_their_own_utf16_coordinate_spaces() {
     let host = js_host();
@@ -770,20 +893,11 @@ fn published_ide_offsets_use_their_own_utf16_coordinate_spaces() {
         "blockStart must index the generated IDE code, not the registered source"
     );
 
-    let legacy = legacy_ide(&host, "/src/Offsets.vue");
-    assert_eq!(
-        *published, legacy["destructuredBlock"],
-        "the published offsets must be the legacy route's own"
-    );
-
-    // Every other response shape this route publishes reuses a shared
-    // declaration, so a Rust-side field change breaks the legacy binding's
-    // declaration too. The destructured block is the exception — the shared
-    // IDE response does not name it, so the package declares it locally and
-    // nothing else holds that copy to the struct being serialised. These are
-    // the keys the local declaration states; a field added, removed or
-    // renamed in Rust fails here rather than reaching a consumer whose type
-    // says otherwise.
+    // The destructured block's shape is declared locally on the TypeScript
+    // side (the shared IDE response type does not name it), and nothing else
+    // holds that copy to the struct being serialised. These are the keys the
+    // local declaration states; a field added, removed or renamed in Rust
+    // fails here rather than reaching a consumer whose type says otherwise.
     assert_eq!(
         object_keys(published),
         vec!["bindings", "blockEnd", "blockStart"],
@@ -810,22 +924,19 @@ fn object_keys(value: &Value) -> Vec<&str> {
     keys
 }
 
-/// Published diagnostic spans are UTF-16 code units, and they are the
-/// legacy route's own.
+/// Published diagnostics — code, message, severity, and UTF-16 spans — are
+/// pinned exactly, not merely present.
 ///
-/// The clean fixtures above publish an EMPTY diagnostic set, so their
-/// legacy-equivalence assertion compares nothing. This one publishes a real
-/// spanned warning and closes both halves of the contract:
-///
-/// - **Encoding.** Two carriers that differ only in a prefix of equal
-///   UTF-16 length and unequal byte length must report the SAME span. A
-///   byte-indexed span would differ by the five-byte gap; comparing only
-///   against the legacy route would pass if both published bytes.
-/// - **Equivalence.** The multi-byte carrier's set must equal what the
-///   legacy per-node read publishes for the same demand — non-empty, so the
-///   comparison discriminates.
+/// The clean fixtures above publish an EMPTY diagnostic set, so they cannot
+/// discriminate an encoding defect. This one publishes a real spanned
+/// warning: two carriers that differ only in a prefix of equal UTF-16 length
+/// and unequal byte length must report the SAME diagnostic payload,
+/// comparing every field rather than only the span — a span-only comparison
+/// would let a changed warning code or message pass unnoticed as long as
+/// the two carriers still agreed with EACH OTHER. A byte-indexed span would
+/// also differ by the five-byte gap.
 #[wasm_bindgen_test]
-fn published_diagnostic_spans_are_utf16_and_match_the_legacy_route() {
+fn published_diagnostic_spans_are_utf16_code_units() {
     let multi_byte = diagnostic_carrier(MULTI_BYTE_PREFIX);
     let ascii = diagnostic_carrier(ASCII_PREFIX);
     assert_eq!(
@@ -847,13 +958,25 @@ fn published_diagnostic_spans_are_utf16_and_match_the_legacy_route() {
     let multi_byte_response = compile_request(&host, "/src/Warn.vue", demand());
     let ascii_response = compile_request(&host, "/src/WarnAscii.vue", demand());
 
-    let spans = |response: &Value| -> Vec<(u64, u64)> {
+    // The complete published diagnostic payload — code, message, severity,
+    // and span — not just the span: a span-only read would let a changed
+    // warning code or message pass so long as both carriers still agreed.
+    let diagnostics = |response: &Value| -> Vec<(String, String, String, u64, u64)> {
         response["diagnostics"]["diagnostics"]
             .as_array()
             .expect("the response carries a diagnostic list")
             .iter()
             .map(|diagnostic| {
                 (
+                    diagnostic["code"].as_str().expect("a code").to_string(),
+                    diagnostic["message"]
+                        .as_str()
+                        .expect("a message")
+                        .to_string(),
+                    diagnostic["severity"]
+                        .as_str()
+                        .expect("a severity")
+                        .to_string(),
                     diagnostic["spanStart"].as_u64().expect("a start offset"),
                     diagnostic["spanEnd"].as_u64().expect("an end offset"),
                 )
@@ -861,27 +984,25 @@ fn published_diagnostic_spans_are_utf16_and_match_the_legacy_route() {
             .collect()
     };
 
-    let multi_byte_spans = spans(&multi_byte_response);
-    assert!(
-        !multi_byte_spans.is_empty(),
-        "fixture drift: the malformed interpolation must publish a spanned diagnostic, got {:?}",
+    let multi_byte_diagnostics = diagnostics(&multi_byte_response);
+    assert_eq!(
+        multi_byte_diagnostics,
+        vec![(
+            "XDuplicateDirective".to_string(),
+            "Duplicate built-in directive on the same element.".to_string(),
+            "warning".to_string(),
+            95,
+            99,
+        )],
+        "fixture drift: expected exactly one pinned duplicate-directive warning, got {:?}",
         multi_byte_response["diagnostics"]
     );
-    assert!(
-        multi_byte_spans.iter().any(|(start, _)| *start > 0),
-        "a zero-only span set cannot distinguish the two encodings"
-    );
     assert_eq!(
-        multi_byte_spans,
-        spans(&ascii_response),
-        "diagnostic offsets must be UTF-16 code units: a byte-indexed span moves when the \
-         multi-byte prefix does"
-    );
-
-    let legacy_main = legacy_virtual_file(&host, "/src/Warn.vue", "main", None);
-    assert_eq!(
-        multi_byte_response["diagnostics"], legacy_main["diagnostics"],
-        "the published diagnostics must be the legacy route's own"
+        multi_byte_diagnostics,
+        diagnostics(&ascii_response),
+        "diagnostic payloads (code, message, severity, and UTF-16 offsets) must match exactly \
+         between the two same-length carriers: a byte-indexed span moves when the multi-byte \
+         prefix does"
     );
 }
 
@@ -1042,6 +1163,30 @@ fn an_unregistered_canonical_id_throws_rather_than_answering_empty() {
     assert!(
         message.contains("/src/Missing.vue") && lowered.contains("missingsource"),
         "the refusal must name the missing carrier and say the source is absent, got: {message}"
+    );
+}
+
+/// A standalone `.svelte.ts` rune module owns no component compile surface:
+/// the typed route refuses it rather than publishing an empty or fabricated
+/// component node set. A response — an empty node set, a lone fabricated
+/// component node — is a failure here, and so is a refusal that does not
+/// name the module.
+#[wasm_bindgen_test]
+fn a_standalone_svelte_ts_rune_module_has_no_component_compile_surface() {
+    const RUNE_MODULE: &str = "export function createCounter() {\n  let v = $state(0)\n  return \
+                               { get value() { return v } }\n}\n";
+
+    let host = js_host();
+    register(&host, "counter.svelte.ts", RUNE_MODULE, "svelte");
+
+    let message = compile_request_refusal(
+        &host,
+        "counter.svelte.ts",
+        svelte_route_request(json!([runtime_client_product(false)])),
+    );
+    assert!(
+        message.contains("counter.svelte.ts"),
+        "the refusal must name the rune module, got: {message}"
     );
 }
 

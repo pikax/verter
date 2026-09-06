@@ -111,7 +111,7 @@ schema = 2
 "CCA1O4" = { status = "pending" }
 "CCA1O4D" = { status = "pending" }
 "CCA1O5" = { status = "implemented", commit_message = "feat(play): migrate playground compile onto the typed WASM host request", commit_date = "2026-09-04T02:15:00+01:00", pull_request = 484 }
-"CCA1O5D" = { status = "pending" }
+"CCA1O5D" = { status = "implemented", commit_message = "refactor(wasm): delete the legacy compile-profile routes", commit_date = "2026-09-05T11:10:48+01:00", pull_request = 504 }
 "CCA1T1" = { status = "pending" }
 "CCA1T2" = { status = "pending" }
 "CCA1T2S" = { status = "pending" }
@@ -241,8 +241,6 @@ schema = 2
 "G2" = { status = "pending" }
 "G3" = { status = "pending" }
 "G4" = { status = "pending" }
-"MEM0" = { status = "pending" }
-"MEM1" = { status = "pending" }
 "G5" = { status = "pending" }
 "GH0" = { status = "implemented", commit_message = "docs(ci): ratify local GitHub issue mapping", commit_date = "2026-08-28T21:45:48+01:00" }
 "GH1" = { status = "implemented", commit_message = "feat(ci): add a structured GitHub adapter and deterministic fake", commit_date = "2026-08-28T23:08:16+01:00" }
@@ -298,6 +296,8 @@ schema = 2
 "LSO9" = { status = "pending" }
 "MDXP" = { status = "pending" }
 "MDXR0" = { status = "pending" }
+"MEM0" = { status = "pending" }
+"MEM1" = { status = "pending" }
 "NCF-AT-CYCLE" = { status = "pending" }
 "NCF-AT-QUERY" = { status = "pending" }
 "NCF-AT-REDUCE" = { status = "pending" }
