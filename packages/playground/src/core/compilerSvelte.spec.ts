@@ -78,6 +78,11 @@ function createMockHost(opts?: {
   class MockHost {
     upsert = upsert;
     listVirtualFiles = vi.fn(() => [{ kind: "main" }]);
+    getVirtualFile = vi.fn(() => ({
+      code: virtualFileCode,
+      sourceMap: "",
+      diagnostics: { diagnostics: [], hasErrors: false },
+    }));
     compileRequest = vi.fn((canonicalId: string) => ({
       canonicalId,
       diagnostics: { diagnostics: [], hasErrors: false },
@@ -94,6 +99,10 @@ function createMockHost(opts?: {
       ],
     }));
     getAnalysis = vi.fn(() => null);
+    getIde = vi.fn(() => ({
+      code: ideCode,
+      sourceMap: '{"version":3,"mappings":""}',
+    }));
     // Mode-aware: the DECLARATION surface is a distinct output from the
     // public API surface (mirrors the WASM host's getPublicApi(id, mode)).
     getPublicApi = vi.fn((_id: string, mode?: string) => {
@@ -467,6 +476,8 @@ describe("compileFile — descriptor-driven framework dispatch", () => {
         aliases: [],
       });
       expect(host.compileRequest).toHaveBeenCalledTimes(1);
+      expect(host.getVirtualFile).not.toHaveBeenCalled();
+      expect(host.getIde).not.toHaveBeenCalled();
 
       const [canonicalId, request] = host.compileRequest.mock.calls[0];
       expect(canonicalId).toBe("App.vue");
@@ -549,6 +560,8 @@ function createTypedCompileHost(options?: {
       parseDurationMs: 0,
     }));
     compileRequest = compileRequest;
+    getVirtualFile = vi.fn();
+    getIde = vi.fn();
     getAnalysis = vi.fn(() => null);
     getPublicApi = vi.fn(() => ({ value: null, error: null }));
     lint = vi.fn(() => []);
@@ -636,6 +649,8 @@ describe("compileFile typed host request", () => {
         aliases: [],
       });
       expect(instance.compileRequest).toHaveBeenCalledTimes(1);
+      expect(instance.getVirtualFile).not.toHaveBeenCalled();
+      expect(instance.getIde).not.toHaveBeenCalled();
       expect(instance.getAnalysis).toHaveBeenCalledWith("App.vue");
 
       const [, request] = host.compileRequest.mock.calls[0];
@@ -744,6 +759,8 @@ describe("compileFile typed host request", () => {
           options: {},
         },
       });
+      expect(instance.getVirtualFile).not.toHaveBeenCalled();
+      expect(instance.getIde).not.toHaveBeenCalled();
       expect(file.compiled.js).toBe("export default class App {}");
       expect(file.compiled.js).not.toContain("__sfc__");
       expect(file.compiled.css).toBe(".action { color: red }");
@@ -896,6 +913,8 @@ describe("compileFile typed host request", () => {
       await compileFile(file, { isProduction: false, ssr: false, strictSlots: false });
 
       expect(instance.compileRequest).toHaveBeenCalledTimes(1);
+      expect(instance.getVirtualFile).not.toHaveBeenCalled();
+      expect(instance.getIde).not.toHaveBeenCalled();
 
       const [canonicalId, request] = host.compileRequest.mock.calls[0];
       expect(canonicalId, "typed ts arm").toBe("counter.vue");
