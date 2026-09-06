@@ -205,6 +205,12 @@ export function stripComponents(
 ): SsrRewriteResult {
   if (componentNames.length === 0) return { code, map };
 
+  // Deduplicate requested names before scanning: a name listed twice would
+  // otherwise run findAllOccurrences (and thus this whole edit-construction
+  // loop) twice over the same pattern. `applyTextEdits`'s cursor guard is
+  // what actually keeps duplicate/overlapping edits from ever being spliced
+  // in — this Set is a redundant-scan avoidance, not a second correctness
+  // gate; removing either one alone still leaves the other holding the line.
   const edits: TextEdit[] = [];
   for (const name of new Set(componentNames)) {
     const pattern = `_resolveComponent("${name}")`;
