@@ -1237,6 +1237,38 @@ fn flow_result_contract_is_exact_identity() {
             "the result-contract identity must change when the {name} semantics change"
         );
     }
+
+    // The DOMAIN VOCABULARY the identity ranks over is identity schema in
+    // its own right: adding, removing, or renumbering a `FlowDomain`
+    // variant changes what every contract's encoded domain rank means,
+    // even when no individual contract row was edited. The versioned
+    // domain tag is what carries that, and it rides in the minted bytes —
+    // so a registry change that forgot to bump it, or a bump that was
+    // later reverted, is visible here. The column cases above cannot see
+    // it: they derive both compared identities from the same descriptor,
+    // so the tag cancels out.
+    let bytes = base_id.canonical_bytes();
+    let carries = |tag: &str| {
+        bytes
+            .windows(tag.len())
+            .any(|window| window == tag.as_bytes())
+    };
+    assert!(
+        carries("verter.session.flow.result_contract.v4"),
+        "the minted contract identity carries the domain tag of the registry revision \
+         it ranks over"
+    );
+    for superseded in [
+        "result_contract.v1",
+        "result_contract.v2",
+        "result_contract.v3",
+    ] {
+        assert!(
+            !carries(superseded),
+            "a superseded domain tag ({superseded}) must not survive in a minted identity: \
+             it would reuse a previous registry revision's identity space"
+        );
+    }
 }
 
 /// The central report applicator: a complete report discharges every

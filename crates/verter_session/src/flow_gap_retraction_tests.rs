@@ -398,9 +398,9 @@ fn nominal_relation_gap_retracts_only_when_decided() {
     assert_partial(&unresolved, FlowGap::NominalRelation);
 }
 
-/// AC3 same-host evidence: editing the unique-symbol DECLARATION on one
-/// live host must flip a flow-level nominal narrow — the decided warm
-/// result is retracted, never served stale.
+/// Same-host incremental evidence: editing the unique-symbol DECLARATION
+/// on one live host must flip a flow-level nominal narrow — the decided
+/// warm result is retracted, never served stale.
 ///
 /// Before the edit: both kinds are declared `unique symbol`, so the inner
 /// `isB` branch is provably disjoint after `isA` and `v` decides to `string`

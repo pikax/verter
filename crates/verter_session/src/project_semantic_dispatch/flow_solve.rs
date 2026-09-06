@@ -91,11 +91,13 @@ pub enum FlowDomain {
     Freshness, Effects, CallResolution, Relation, ContextualTyping,
     // Declaration-fact and definite-assignment products of the flow
     // product lattice. Registered in the ONE domain registry (there is no
-    // second domain enum) and carried by
-    // [`super::flow_products::flow_product_kind`]; no operation contract
-    // declares them, so no demand plan installs an obligation for them
-    // until an operation's closure names them.
-    DeclaredType, DefiniteAssignment,
+    // second domain enum) and projected onto their products by
+    // [`super::flow_products::domain_carries_product`]. No operation
+    // contract declares them, so no demand plan installs an obligation for
+    // them until an operation's closure names them — but the evaluator's
+    // own frame state is held in them, so they are live registry rows.
+    DeclaredType,
+    DefiniteAssignment,
     // Deliberately declared by NO contract: the gap-installation tests
     // assert an undeclared domain becomes a typed gap.
     #[allow(dead_code)]
@@ -410,10 +412,13 @@ const FLOW_FIXED_POINT_MAX_ITERATIONS: u32 = 16;
 const FLOW_WORK_ORDER_TIE_BREAK: FlowTieBreak = FlowTieBreak::DomainNodeEdgeSlot;
 
 // Explicit stable discriminants for the canonical result-contract
-// encoding. The numeric value of each variant is identity schema: adding,
-// removing, or renumbering a variant requires bumping the domain tag.
+// encoding, and the SOLE domain-rank authority for the dispatch module:
+// the product lattice's canonical key order, canonical bytes, and solve
+// visitation rank all read this one table rather than restating it. The
+// numeric value of each variant is identity schema: adding, removing, or
+// renumbering a variant requires bumping the domain tag.
 #[rustfmt::skip]
-const fn domain_discriminant(domain: FlowDomain) -> u32 {
+pub(super) const fn domain_discriminant(domain: FlowDomain) -> u32 {
     match domain {
         FlowDomain::ReachingValue => 1, FlowDomain::ReachingType => 2, FlowDomain::Narrowing => 3,
         FlowDomain::Completion => 4, FlowDomain::ClosureCapture => 5, FlowDomain::Freshness => 6,

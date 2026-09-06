@@ -19,11 +19,13 @@
 //!   ([`FlowSemanticAlgebra`], whose sole production implementor forwards
 //!   to the dispatch's canonical union authority) to construct the
 //!   result. There is no flow-private union or intersection reducer.
-//! - **One domain registry.** The domains are the closed
-//!   [`FlowDomain`] registry; there is no second domain enum.
-//!   [`flow_product_kind`] is the total, wildcard-free projection of that
-//!   registry onto the domains this substrate carries a product for — a
-//!   domain with no product is a typed `None`, never a fallthrough.
+//! - **One domain registry.** The domains ARE the closed [`FlowDomain`]
+//!   registry — this substrate declares no product-kind enum of its own,
+//!   so a product slot, a product value and a join arm all name the same
+//!   registry variant. [`domain_carries_product`] is the total,
+//!   wildcard-free projection of that registry onto the domains this
+//!   substrate carries a product for — a domain with no product is a
+//!   typed refusal, never a fallthrough.
 //! - **One store, no public product query.** [`FlowProductStore`] is the
 //!   only product storage, and the evaluator reaches its own through the
 //!   frame subject mints. There is no second store and no standalone
@@ -49,7 +51,12 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::flow_solve::FlowDomain;
+// The domain rank is the registry's OWN stable discriminant
+// (`flow_solve::domain_discriminant`), imported rather than restated: a
+// second copy could number a future variant differently and silently
+// desynchronise this store's canonical key order from the result-contract
+// identity that ranks over the same registry.
+use super::flow_solve::{domain_discriminant, FlowDomain};
 use crate::semantic_query::{FlowGap, SemanticNodeId};
 
 // ── The canonical semantic-type algebra seam ───────────────────────────
@@ -108,35 +115,24 @@ impl FlowSemanticAlgebra for GraphSemanticAlgebra<'_> {
 
 // ── The product vocabulary ─────────────────────────────────────────────
 
-/// The product kind one flow domain carries in this substrate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum FlowProductKind {
-    /// Reaching types: the semantic contributors reaching the subject.
-    ReachingType,
-    /// The subject's declared (annotation) type.
-    DeclaredType,
-    /// The guard facts that hold at the subject.
-    Narrowing,
-    /// The subject's definite-assignment state.
-    DefiniteAssignment,
-}
-
-/// The product kind of `domain`, or `None` when the closed domain registry
-/// declares a domain this substrate carries no product for. TOTAL over the
-/// registry by construction — a wildcard-free match, so a new registry
-/// domain must decide its product route deliberately.
+/// Whether `domain` carries a product in this substrate.
+///
+/// This is the ONE projection of the domain registry onto the product
+/// lattice — there is no second product-kind enum to keep in step with it,
+/// so a product slot, a product value and a join arm all name the same
+/// registry variant. TOTAL over the registry by construction (a
+/// wildcard-free match), so a new registry domain must decide its product
+/// route deliberately.
 #[rustfmt::skip]
-pub const fn flow_product_kind(domain: FlowDomain) -> Option<FlowProductKind> {
+pub const fn domain_carries_product(domain: FlowDomain) -> bool {
     match domain {
-        FlowDomain::ReachingType => Some(FlowProductKind::ReachingType),
-        FlowDomain::DeclaredType => Some(FlowProductKind::DeclaredType),
-        FlowDomain::Narrowing => Some(FlowProductKind::Narrowing),
-        FlowDomain::DefiniteAssignment => Some(FlowProductKind::DefiniteAssignment),
+        FlowDomain::ReachingType | FlowDomain::DeclaredType
+        | FlowDomain::Narrowing | FlowDomain::DefiniteAssignment => true,
         // Declared by the registry, carried by no product lattice: these
         // domains discharge on evidence, not on a lattice value.
         FlowDomain::ReachingValue | FlowDomain::Completion | FlowDomain::ClosureCapture
         | FlowDomain::Freshness | FlowDomain::Effects | FlowDomain::CallResolution
-        | FlowDomain::Relation | FlowDomain::ContextualTyping | FlowDomain::Coverage => None,
+        | FlowDomain::Relation | FlowDomain::ContextualTyping | FlowDomain::Coverage => false,
     }
 }
 
@@ -396,8 +392,8 @@ impl DefiniteAssignmentProduct {
     }
 }
 
-/// One product value. Exactly one arm per [`FlowProductKind`]; the store
-/// refuses a value whose arm does not match its key's domain.
+/// One product value. Exactly one arm per product-bearing [`FlowDomain`];
+/// the store refuses a value whose arm does not match its key's domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowProductValue {
     /// Reaching types.
@@ -411,28 +407,32 @@ pub enum FlowProductValue {
 }
 
 impl FlowProductValue {
-    /// The value's product kind.
+    /// The registry domain this value is the product of.
     #[must_use]
-    pub fn kind(&self) -> FlowProductKind {
+    pub fn domain(&self) -> FlowDomain {
         match self {
-            Self::ReachingType(_) => FlowProductKind::ReachingType,
-            Self::DeclaredType(_) => FlowProductKind::DeclaredType,
-            Self::Narrowing(_) => FlowProductKind::Narrowing,
-            Self::DefiniteAssignment(_) => FlowProductKind::DefiniteAssignment,
+            Self::ReachingType(_) => FlowDomain::ReachingType,
+            Self::DeclaredType(_) => FlowDomain::DeclaredType,
+            Self::Narrowing(_) => FlowDomain::Narrowing,
+            Self::DefiniteAssignment(_) => FlowDomain::DefiniteAssignment,
         }
     }
 
-    /// The kind's bottom element — the value at a subject no edge has
-    /// reached yet. TOTAL over the product vocabulary.
+    /// The domain's bottom element — the value at a subject no edge has
+    /// reached yet. `None` for a registry domain carrying no product.
+    #[rustfmt::skip]
     #[must_use]
-    pub fn bottom(kind: FlowProductKind) -> Self {
-        match kind {
-            FlowProductKind::ReachingType => Self::ReachingType(ReachingTypeProduct::default()),
-            FlowProductKind::DeclaredType => Self::DeclaredType(DeclaredTypeProduct::default()),
-            FlowProductKind::Narrowing => Self::Narrowing(NarrowingProduct::default()),
-            FlowProductKind::DefiniteAssignment => {
-                Self::DefiniteAssignment(DefiniteAssignmentProduct::default())
+    pub fn bottom(domain: FlowDomain) -> Option<Self> {
+        match domain {
+            FlowDomain::ReachingType => Some(Self::ReachingType(ReachingTypeProduct::default())),
+            FlowDomain::DeclaredType => Some(Self::DeclaredType(DeclaredTypeProduct::default())),
+            FlowDomain::Narrowing => Some(Self::Narrowing(NarrowingProduct::default())),
+            FlowDomain::DefiniteAssignment => {
+                Some(Self::DefiniteAssignment(DefiniteAssignmentProduct::default()))
             }
+            FlowDomain::ReachingValue | FlowDomain::Completion | FlowDomain::ClosureCapture
+            | FlowDomain::Freshness | FlowDomain::Effects | FlowDomain::CallResolution
+            | FlowDomain::Relation | FlowDomain::ContextualTyping | FlowDomain::Coverage => None,
         }
     }
 }
@@ -507,12 +507,6 @@ impl FlowProductKey {
     #[must_use]
     pub fn domain(&self) -> FlowDomain {
         self.domain
-    }
-
-    /// The key's product kind (total: a key mints only on a product domain).
-    #[must_use]
-    pub fn kind(&self) -> FlowProductKind {
-        flow_product_kind(self.domain).expect("a product key mints only on a product domain")
     }
 
     /// The subject the slot is held for.
@@ -597,7 +591,7 @@ pub fn frame_product_key(
     domain: FlowDomain,
     subject: FlowProductSubject,
 ) -> Result<FlowProductKey, FlowProductKeyError> {
-    if flow_product_kind(domain).is_none() {
+    if !domain_carries_product(domain) {
         return Err(FlowProductKeyError::DomainCarriesNoProduct);
     }
     Ok(FlowProductKey { domain, subject })
@@ -717,7 +711,7 @@ pub fn join_product(
     a: &FlowProductValue,
     b: &FlowProductValue,
 ) -> FlowTransferOutcome {
-    if a.kind() != b.kind() {
+    if a.domain() != b.domain() {
         return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
     }
     let joined = match (a, b) {
@@ -817,18 +811,7 @@ fn width_exceeded(budget: &FlowProductBudget, width: usize) -> Option<FlowProduc
     None
 }
 
-// ── Canonical encoding ─────────────────────────────────────────────────
-
-#[rustfmt::skip]
-const fn domain_discriminant(domain: FlowDomain) -> u32 {
-    match domain {
-        FlowDomain::ReachingValue => 1, FlowDomain::ReachingType => 2, FlowDomain::Narrowing => 3,
-        FlowDomain::Completion => 4, FlowDomain::ClosureCapture => 5, FlowDomain::Freshness => 6,
-        FlowDomain::Effects => 7, FlowDomain::CallResolution => 8, FlowDomain::Relation => 9,
-        FlowDomain::ContextualTyping => 10, FlowDomain::Coverage => 11,
-        FlowDomain::DeclaredType => 12, FlowDomain::DefiniteAssignment => 13,
-    }
-}
+// ── Canonical ordering ─────────────────────────────────────────────────
 
 /// The subject-space rank and ordinal: frame bindings first, then frame
 /// parameters. A total order over the two disjoint spaces.
@@ -1108,6 +1091,12 @@ pub enum FlowFrameJoinOutcome {
     BudgetExceeded(FlowProductBudgetExceeded),
 }
 
+/// The bottom element of one frame domain. Every [`FLOW_FRAME_DOMAINS`]
+/// entry carries a product, so the registry projection is total here.
+fn bottom_of(domain: FlowDomain) -> FlowProductValue {
+    FlowProductValue::bottom(domain).expect("every frame domain carries a product")
+}
+
 /// Join two frame product states at a merge point — the ONE frame join
 /// route, driven entirely by the per-domain [`join_product`] rules.
 ///
@@ -1154,17 +1143,16 @@ pub fn join_frame_products(
                 let held = joined.entries.get(&key).cloned();
                 let incoming = b.entries.get(&key).cloned();
                 let bottom_missing = missing_edge_is_bottom(domain);
-                let kind = key.kind();
                 let (left, right) = match (held, incoming) {
                     (None, None) => continue,
                     (Some(_), None) if !bottom_missing => continue,
-                    (Some(left), None) => (left, FlowProductValue::bottom(kind)),
+                    (Some(left), None) => (left, bottom_of(domain)),
                     (None, Some(right)) if !bottom_missing => {
                         joined.entries.insert(key, right);
                         moved = true;
                         continue;
                     }
-                    (None, Some(right)) => (FlowProductValue::bottom(kind), right),
+                    (None, Some(right)) => (bottom_of(domain), right),
                     (Some(left), Some(right)) => (left, right),
                 };
                 match join_product(algebra, budget, &left, &right) {
