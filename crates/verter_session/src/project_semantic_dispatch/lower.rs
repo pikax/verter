@@ -144,6 +144,30 @@ enum UniqueSymbolMemberCertification {
     NamedType(Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>),
 }
 
+/// The member name a shape fact DECLARES, when it declares one.
+///
+/// Exhaustive over [`verter_type_expr::facts::ObjectMemberFact`] on purpose:
+/// the heritage shadow stop asks "does this declaration declare `K` itself",
+/// and every member kind that carries a name answers yes — a static method or
+/// accessor override shadows a base's property of that name exactly as a
+/// property override does. Reading only properties let `class D extends B
+/// { static K() {} }` inherit `B`'s member identity for `typeof D.K`, minting
+/// a nominal carrier whose declaring anchor names a declaration whose type the
+/// reference does not have. The four unnamed kinds (call, construct and index
+/// signatures, and object-literal spreads) declare no name to shadow with;
+/// adding a named member kind must decide here rather than fall through.
+fn declared_member_name(fact: &verter_type_expr::facts::ObjectMemberFact) -> Option<&str> {
+    use verter_type_expr::facts::ObjectMemberFact as Member;
+    match fact {
+        Member::Property(property) => property.string_name(),
+        Member::Method(method) => method.string_name(),
+        Member::CallSignature(_)
+        | Member::ConstructSignature(_)
+        | Member::IndexSignature(_)
+        | Member::Spread(_) => None,
+    }
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     /// The declaring identity a terminal nominal (`unique symbol`) carrier
     /// records, or `None` for any other node. A single O(1) graph read: the
@@ -220,9 +244,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// The member-level nominal carrier for a member-qualified
     /// `typeof Root.Member` — the ONE rail a member reference reaches its
-    /// declaring identity through, shared by every typeof resolution arm
-    /// (the evaluator, the path walker, the raising reducer) so no arm
-    /// projects past a nominal member the carrier exists to preserve.
+    /// declaring identity through. Every typeof resolution arm (the
+    /// evaluator, the path walker, the raising reducer) converges on the
+    /// keyed `TypeOf` query whose builder calls this, so no arm projects
+    /// past a nominal member the carrier exists to preserve.
     ///
     /// Qualifies exactly when a certification exists for the member as an
     /// authored `unique symbol` (the `unique_symbol_members` declaration
@@ -254,7 +279,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         value_root: &ValueRootKey,
         segments: &[Arc<str>],
         root: &EffectivePreparedValueDecl,
-        authored_scope: Option<NodeScopeId>,
+        authored_scope: &NodeScopeId,
     ) -> Option<SemanticNodeId> {
         let [segment] = segments else {
             return None;
@@ -311,24 +336,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     symbol: id_symbol,
                     member_path: Arc::from(vec![segment.to_string()].into_boxed_slice()),
                 };
-                return Some(match authored_scope {
-                    Some(scope) => self.intern_nominal_typeof(
-                        value_root.clone(),
-                        Arc::from(segments.to_vec().into_boxed_slice()),
-                        identity,
-                        scope,
-                    ),
-                    // No authored scope to anchor the carrier under — intern
-                    // scope-free; the head still carries the authored
-                    // reference every display consumer reads.
-                    None => self
-                        .graph()
-                        .intern_node(SemanticNodeData::new_nominal_typeof(
-                            value_root.clone(),
-                            Arc::from(segments.to_vec().into_boxed_slice()),
-                            identity,
-                        )),
-                });
+                return Some(self.intern_nominal_typeof(
+                    value_root.clone(),
+                    Arc::from(segments.to_vec().into_boxed_slice()),
+                    identity,
+                    authored_scope.clone(),
+                ));
             }
             // A class that DECLARES the member itself — any annotation at
             // all — is the member's declaring site for this reference: an
@@ -393,24 +406,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
     }
 
-    /// Whether a value declaration's OWN static surface declares a property
-    /// with this name (any annotation) — the heritage shadow stop for the
-    /// member nominal rail. Reads the constructor-shape fact a class
-    /// declaration already carries; non-class values have no heritage bases
-    /// to shadow, so an absent shape answers `false` and costs nothing.
+    /// Whether a value declaration's OWN static surface declares a member
+    /// with this name (any member kind, any annotation) — the heritage
+    /// shadow stop for the member nominal rail. Reads the constructor-shape
+    /// fact a class declaration already carries; non-class values have no
+    /// heritage bases to shadow, so an absent shape answers `false` and
+    /// costs nothing.
     fn value_decl_declares_own_member(
         &self,
         prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
         member: &str,
     ) -> bool {
         prepared.object_shape.as_ref().is_some_and(|shape| {
-            shape.members.iter().any(|fact| {
-                matches!(
-                    fact,
-                    verter_type_expr::facts::ObjectMemberFact::Property(property)
-                        if property.string_name() == Some(member)
-                )
-            })
+            shape
+                .members
+                .iter()
+                .any(|fact| declared_member_name(fact) == Some(member))
         })
     }
 
