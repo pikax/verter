@@ -6,26 +6,69 @@
   `max_production_files = 8`, `rescope_files = 12`
 - Scope: D3P only; no charter field, budget, or ledger row changes
 
+## How the footprint was derived
+
+From the COMPLETE candidate diff rather than from the module inventory, so the
+count cannot omit a file the patch touched:
+
+```
+git diff --numstat <branch-base>..HEAD -- 'crates/**/src/**'
+```
+
+An earlier revision of this record enumerated the module inventory instead and
+therefore missed every file the candidate touched outside it. That revision's
+file-axis conclusion was drawn from incomplete evidence; the table below is the
+whole diff, and the mutation-boundary section states what happened to the files
+the earlier count omitted.
+
 ## What was measured
 
-Production files D3P owns, measured against the branch base:
+Every source file the candidate changes, measured against the branch base:
 
 | file | added raw lines | code lines (blank/`//`-only excluded) |
 | --- | --- | --- |
-| `crates/verter_session/src/project_semantic_dispatch/flow_products.rs` | 1484 | 981 |
-| `crates/verter_session/src/project_semantic_dispatch/flow_solve.rs` | 24 | ~20 |
-| `crates/verter_session/src/project_semantic_dispatch/mod.rs` | 22 | ~18 |
-| `crates/verter_semantic/src/analysis/flow/flow_graph.rs` | 9 | ~7 |
-| **total** | **1539** | **~1026** |
+| `crates/verter_session/src/project_semantic_dispatch/flow_products.rs` | 1490 | 981 |
+| `crates/verter_session/src/project_semantic_dispatch/flow_solve.rs` | 24 | 8 |
+| `crates/verter_semantic/src/analysis/flow/flow_graph.rs` | 9 | 4 |
+| `crates/verter_session/src/for_tests.rs` | 8 | 4 |
+| `crates/verter_session/src/project_semantic_dispatch/mod.rs` | 5 | 1 |
+| `crates/verter_session/src/flow_gap_retraction_tests.rs` | 3 | 0 |
+| **total** | **1539** | **998** |
 
-Four production files against `max_production_files = 8`; two crates against
-`max_related_packages = 2`. The file and package axes are not in question.
+Six files against `max_production_files = 8` and `rescope_files = 12`; two crates
+against `max_related_packages = 2`. Two of the six are not production paths at
+all: `for_tests.rs` is the crate's test-support re-export surface, and
+`flow_gap_retraction_tests.rs` is a test module whose only change is comment
+text. The file and package axes are inside every declared line either way.
 
 The LOC axis straddles the numeric signal depending on the counting convention:
-~1026 under a code-line count (inside `rescope_loc = 1500`, above the 800 planning
+998 under a code-line count (inside `rescope_loc = 1500`, above the 800 planning
 reference); 1539 under a raw added-line count (across `rescope_loc` by 39 lines).
 `contracts/sizing.md` fixes no convention, so this record investigates rather than
 assuming the favourable one.
+
+## Mutation boundary
+
+The charter's mutation boundary admits the named production surfaces only, and
+excludes sibling ownership. Measured over the same complete diff, every changed
+source path is inside it, with one recorded exception:
+
+- `flow_products.rs`, `flow_solve.rs`, `mod.rs` — charter-named production files.
+- `for_tests.rs` — the crate's existing test-support surface, re-exporting the
+  new module for the charter's own discriminating test legs.
+- `flow_gap_retraction_tests.rs` — comment text only, inside the acquired
+  `flowslice` conflict domain; no executable line changes.
+- `flow_graph.rs` — the one cross-crate line, a read-only graph accessor,
+  recorded separately in
+  `2026-09-06-d3p-flow-graph-node-enumeration-surface.md`.
+
+An earlier revision of the candidate also carried changes to the nominal
+relation, member lowering, carrier, semantic-query, component-meta audit and
+component-meta registry surfaces. Those are a sibling authority's files, none of
+them is required by the product lattice, and they have been restored to their
+pre-candidate content so that the sibling's reviewed surface is unchanged by
+this candidate. The correctness work they contained is not carried here; it needs
+its own scope and its own review.
 
 ## Finding: the patch is one reviewable outcome
 
@@ -39,7 +82,7 @@ assuming the favourable one.
    would land dark with no consumer at all rather than dark with a driven test surface.
 
 2. **A third of the module is the ownership contract the charter's evidence policy
-   asks for.** 503 of the 1484 lines are blank or comment; the module header alone
+   asks for.** 509 of the 1490 lines are blank or comment; the module header alone
    states five load-bearing ownership boundaries (product-state algebra versus semantic
    type algebra, the one domain registry, the one store with a module-private write
    surface, the structurally-unwarmable degraded arm, and stable binding identity).

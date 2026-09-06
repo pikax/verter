@@ -1,6 +1,7 @@
 # D3P flow-graph node-enumeration surface amendment (rev11.flow)
 
-- Status: proposed (awaiting maintainer ratification)
+- Status: proposed — maintainer ratification is a LANDING GATE for this candidate (see
+  "Ratification status" below)
 - Date: 2026-09-06
 - Amends: `charters/rev11-flow/D3P.md` production-surface statement and production-file
   list
@@ -60,3 +61,26 @@ substrate's key contract forbids.
 - **Enumerate only binding nodes.** The product lattice is defined over the whole node
   space (expression sites and return sites carry reaching values; regions carry guard
   facts), so a binding-only enumeration would answer a different, smaller problem.
+
+## Ratification status
+
+The accessor is implemented in the candidate while this record is still
+`proposed`, which is the wrong order: the record is the authority the code
+depends on, so it should have been ratified first. Recorded rather than
+quietly reordered, because the alternatives are worse — deleting the accessor
+would leave the product solve unable to enumerate the node space it is defined
+over (there is no reachable substitute; see "Alternatives rejected"), and
+back-dating the record would assert a ratification that did not happen.
+
+What follows from that:
+
+- **Ratifying this record is a gate on accepting the candidate**, not a
+  follow-up. A reviewer who reaches the accessor and finds this record still
+  `proposed` is looking at an unratified charter deviation, and should say so.
+- **The gate is small and read-only.** The whole deviation is one
+  allocation-free accessor returning an id the four existing family
+  constructors can already produce. It adds no engine, no representation, no
+  resolution surface, and no mutation path.
+- **Ratification amends this record's `Status` line only.** No charter field,
+  budget, or ledger row changes with it; the amendment's content is fixed
+  above.
