@@ -1244,8 +1244,14 @@ pub fn solve_flow_products(
     // that cannot change anything.
     let mut predecessors: Vec<Vec<Vec<u32>>> = Vec::with_capacity(domains.len());
     for domain in &domains {
-        let classes =
-            product_route(*domain).expect("the key universe minted only product-bearing domains");
+        // The minting loop above refuses a productless requested domain —
+        // but only when it runs at least once. A zero-node graph is
+        // representable, mints nothing, and reaches this lookup with the
+        // domain unrefused; an unreachable productless route is a typed
+        // refusal here exactly as it is at the mint, never a panic.
+        let Some(classes) = product_route(*domain) else {
+            return FlowProductSolveOutcome::Rejected(FlowProductKeyError::DomainCarriesNoProduct);
+        };
         let mut per_node: Vec<Vec<u32>> = vec![Vec::new(); node_count];
         for edge in graph.edges() {
             if !classes.contains(&edge.kind.class()) {
