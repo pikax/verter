@@ -26,6 +26,8 @@ description: "Cross-file type resolution: type solver, ShallowFileState, Externa
 
 Dep-signature semantics: every reusable cache read returns a `CacheRead<T>` carrying the touched fact fragment. Callers merge those into the active `CompletionFence`, which bounds retries at 3 and publishes `UnstableState` when mid-flight invalidation persists.
 
+Runtime alias declaration groups are prepared once on `FlowBindingMap::runtime_declarations` and borrowed in source order. Graph reads, writes and capture subjects target one canonical runtime binding hub; that hub links each distinct authored declaration once so alias fanout never multiplies access edges. `FunctionProgramIndex` retains exact key and nested-position ordinal indexes; keyed retrieval and stable-hash remapping reuse those indexes without scanning unrelated functions.
+
 ## Canonical Dependency Cache Rule
 
 Host-backed type/import resolution must treat the canonical file ID as cache identity. Contract:

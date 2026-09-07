@@ -2395,28 +2395,34 @@ fn a_no_capture_closure_proves_the_family_empty() {
     );
 }
 
-/// A captured binding whose kind is outside the cross-frame identity
-/// vocabulary (a class declaration) installs the family's accepted typed
-/// gap — anchored on the resolved lexical binding — never silence.
+/// A captured class has an exact lexical identity. Planning that subject
+/// creates a pending evidence obligation; naming it does not establish
+/// that class-value evaluation is supported or authorize warm admission.
 #[test]
-fn unnameable_captured_binding_installs_the_family_typed_gap() {
+fn captured_class_identity_installs_a_pending_evidence_obligation() {
     let fixture = flow_graph_fixture_for_tests(CLASS_CAPTURE_FIXTURE_SOURCE, 25);
     let plan = fixture
         .build_plan(request_named("class_capture"))
         .expect("the class-capture fixture plans");
-    let gaps: Vec<&FlowObligationSpec> = plan
+    let captures: Vec<&FlowObligationSpec> = plan
         .obligation_specs()
         .iter()
-        .filter(|spec| matches!(spec.basis(), FlowObligationBasis::Capture { .. }))
+        .filter(|spec| matches!(spec.basis(), FlowObligationBasis::CapturedBinding { .. }))
         .collect();
-    assert_eq!(gaps.len(), 1, "exactly the class-capture gap");
-    let FlowObligationBasis::Capture { identity, .. } = gaps[0].basis() else {
+    assert_eq!(captures.len(), 1, "exactly the class capture");
+    let FlowObligationBasis::CapturedBinding { identity, .. } = captures[0].basis() else {
         unreachable!()
     };
-    assert!(
-        identity.is_none(),
-        "a class binding has no cross-frame identity"
+    assert_eq!(identity.name.as_ref(), "C");
+    assert_eq!(
+        identity.kind,
+        verter_semantic::analysis::function_program::FunctionBindingKind::Class
     );
+    assert_eq!(
+        identity.defining_function.declaration.name.as_ref(),
+        "class_capture"
+    );
+    assert_eq!(identity.binding_slot, 0);
 
     let mut runtime = ObligationRuntime::default();
     let handle = runtime.install_flow_demand(&plan);
@@ -2424,12 +2430,12 @@ fn unnameable_captured_binding_installs_the_family_typed_gap() {
         .flow_obligations(handle)
         .expect("the demand is installed")
         .iter()
-        .find(|record| record.spec.id() == gaps[0].id())
+        .find(|record| record.spec.id() == captures[0].id())
         .expect("installed");
     assert_eq!(
         record.state,
-        ObligationState::Gap(FlowGap::ClosureCapture),
-        "the unnameable captured binding installs the family's accepted typed gap"
+        ObligationState::Pending,
+        "exact identity still requires actual capture evidence"
     );
 }
 

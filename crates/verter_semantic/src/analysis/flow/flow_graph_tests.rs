@@ -240,6 +240,45 @@ fn captured_member_reads_compose_projection_before_selecting_write_members() {
 }
 
 #[test]
+fn hoisted_runtime_aliases_keep_access_edges_linear() {
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    let edges_for = |count| {
+        let mut source = String::from("function f(value) {");
+        for _ in 0..count {
+            source.push_str("var value;");
+        }
+        for ordinal in 0..count {
+            source.push_str(&format!("value={ordinal}; const read{ordinal}=value;"));
+        }
+        source.push_str("return value; }");
+        let skeleton = skeleton_of(&source);
+        let graph = build_function_flow_graph(&skeleton);
+        let plan = ReturnPathPeeker::new(&graph)
+            .plan(
+                &SliceDemand::for_return_projection(&skeleton, &[]),
+                &FlowSliceBudget::default(),
+            )
+            .unwrap();
+        let name = skeleton.name_id("value").unwrap();
+        let declarations: Vec<_> = skeleton.bindings_named(name).collect();
+        assert_eq!(declarations.len(), count + 1);
+        for declaration in declarations {
+            assert!(
+                plan.is_value(graph.binding_node(declaration)),
+                "each exact authored declaration remains selected evidence"
+            );
+        }
+        graph.edges().len()
+    };
+    let small = edges_for(32);
+    let large = edges_for(64);
+    assert!(
+        large <= small * 2 + 8,
+        "runtime alias access edges must be linear: {small} -> {large}"
+    );
+}
+
+#[test]
 fn captured_binding_hubs_keep_many_reads_and_writes_linear() {
     let graph_for = |count| {
         let mut source = String::from("function root(x) { return () => {");
@@ -651,18 +690,34 @@ fn flow_graph_root_read_unions_parameter_with_hoisted_var_redeclaration() {
     let bindings: Vec<SkeletonBindingId> = skeleton.bindings_named(x_name).collect();
     assert_eq!(bindings.len(), 2, "the parameter and the `var` both bind x");
     let read_site = skeleton.return_sites[0].argument.expect("argument");
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(
+            &SliceDemand::for_return_projection(&skeleton, &[]),
+            &FlowSliceBudget::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        out_edges_of_class(
+            &graph,
+            graph.expr_site_node(read_site),
+            FlowEdgeClass::ValueDef
+        )
+        .len(),
+        1,
+        "one read names one runtime variable"
+    );
     for binding in bindings {
         assert!(
-            has_edge_class(
-                &graph,
-                graph.expr_site_node(read_site),
-                graph.binding_node(binding),
-                FlowEdgeClass::ValueDef
-            ),
-            "the root read binds {:?} — a `var` redeclaring a parameter \
-             shares the parameter's function-scope slot",
-            skeleton.binding(binding).kind
+            plan.is_value(graph.binding_node(binding)),
+            "the parameter and authored var declaration both retain their evidence"
         );
+        if let Some(initializer) = skeleton.binding(binding).initializer {
+            assert!(
+                plan.is_value(graph.expr_site_node(initializer)),
+                "the hoisted var's definition remains a value dependency"
+            );
+        }
     }
     // The block-scoped shadowing rail is untouched: an inner `let` of a
     // DIFFERENT name in a sibling block still resolves exactly.

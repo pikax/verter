@@ -337,6 +337,14 @@ fn flow_binding_map_is_bijective_for_value_bindings() {
         .unwrap();
     assert_ne!(map.identity(parameter), map.identity(redeclaration));
     assert_eq!(map.canonical_local(redeclaration), parameter);
+    assert_eq!(
+        map.runtime_declarations(parameter),
+        &[parameter, redeclaration]
+    );
+    assert_eq!(
+        map.runtime_declarations(redeclaration),
+        &[parameter, redeclaration]
+    );
     let twins: Vec<_> = skeleton
         .bindings
         .iter()
@@ -345,6 +353,8 @@ fn flow_binding_map_is_bijective_for_value_bindings() {
         .map(|(ordinal, _)| SkeletonBindingId::from_index(ordinal as u32))
         .collect();
     assert_ne!(map.canonical_local(twins[0]), map.canonical_local(twins[1]));
+    assert_eq!(map.runtime_declarations(twins[0]), &[twins[0]]);
+    assert_eq!(map.runtime_declarations(twins[1]), &[twins[1]]);
     let mut slots = std::collections::HashSet::new();
     for (ordinal, binding) in skeleton.bindings.iter().enumerate() {
         let local = SkeletonBindingId::from_index(ordinal as u32);
@@ -1391,5 +1401,28 @@ namespace N {
     assert_eq!(
         resolved_start(member_entry_of(&index, "N.K", 0)),
         offset("m() { return 111 }") + 1
+    );
+}
+
+#[test]
+fn exact_function_key_lookup_does_not_scan_sibling_functions() {
+    let source: String = (0..128)
+        .map(|ordinal| format!("function value{ordinal}() {{ return {ordinal}; }}"))
+        .collect();
+    let index = index_of(&source);
+    let keys: Vec<_> = index
+        .entries
+        .iter()
+        .map(|entry| entry.key.clone())
+        .collect();
+    super::FUNCTION_KEY_LOOKUP_VISITS.with(|visits| visits.set(0));
+    for key in &keys {
+        assert_eq!(index.get(key).unwrap().key(), key);
+    }
+    let visits = super::FUNCTION_KEY_LOOKUP_VISITS.with(|visits| visits.get());
+    assert!(
+        visits <= keys.len() * 2,
+        "exact lookup must index keys once, not scan siblings: {visits} for {} keys",
+        keys.len()
     );
 }

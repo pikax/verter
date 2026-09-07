@@ -34,6 +34,8 @@ pub struct FlowBindingMap {
     identities: Arc<[Option<FlowBindingIdentity>]>,
     locals: Arc<[SkeletonBindingId]>,
     runtime_locals: Arc<[SkeletonBindingId]>,
+    runtime_declarations: Arc<[SkeletonBindingId]>,
+    declaration_offsets: Arc<[u32]>,
 }
 
 impl FlowBindingMap {
@@ -96,11 +98,31 @@ impl FlowBindingMap {
                 )
             })
             .collect();
+        let mut offsets = vec![0_u32; skeleton.bindings.len() + 1];
+        for (ordinal, runtime) in runtime_locals.iter().enumerate() {
+            if identities[ordinal].is_some() {
+                offsets[runtime.index() + 1] += 1;
+            }
+        }
+        for ordinal in 1..offsets.len() {
+            offsets[ordinal] += offsets[ordinal - 1];
+        }
+        let mut positions = offsets.clone();
+        let mut groups = vec![SkeletonBindingId::from_index(0); inventory.len()];
+        for (ordinal, runtime) in runtime_locals.iter().enumerate() {
+            if identities[ordinal].is_some() {
+                let position = &mut positions[runtime.index()];
+                groups[*position as usize] = SkeletonBindingId::from_index(ordinal as u32);
+                *position += 1;
+            }
+        }
         Ok(Self {
             function: function.clone(),
             identities: identities.into(),
             locals: locals.into(),
             runtime_locals: runtime_locals.into(),
+            runtime_declarations: groups.into(),
+            declaration_offsets: offsets.into(),
         })
     }
 
@@ -129,6 +151,14 @@ impl FlowBindingMap {
     /// evidence still uses `identity(binding)`, which remains bijective.
     pub fn canonical_local(&self, binding: SkeletonBindingId) -> SkeletonBindingId {
         self.runtime_locals[binding.index()]
+    }
+
+    /// Exact authored declarations of this runtime variable, in source order.
+    /// The shared immutable slice is prepared once; lexical shadows never join it.
+    pub fn runtime_declarations(&self, binding: SkeletonBindingId) -> &[SkeletonBindingId] {
+        let runtime = self.canonical_local(binding).index();
+        &self.runtime_declarations[self.declaration_offsets[runtime] as usize
+            ..self.declaration_offsets[runtime + 1] as usize]
     }
 
     pub fn runtime_identity(&self, binding: SkeletonBindingId) -> Option<&FlowBindingIdentity> {

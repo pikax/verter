@@ -346,22 +346,13 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
         }
     }
 
-    let mut runtime_bindings: FxHashMap<SkeletonBindingId, Vec<SkeletonBindingId>> =
-        FxHashMap::default();
-    for (ordinal, binding) in skeleton.bindings.iter().enumerate() {
-        if let Some(runtime) = binding.runtime_binding {
-            runtime_bindings
-                .entry(runtime)
-                .or_default()
-                .push(SkeletonBindingId::from_index(ordinal as u32));
+    // Prepared local occurrences already name the canonical runtime variable.
+    // Source declaration nodes are linked once below, never multiplied per access.
+    let local_target = |binding: Option<&FlowBindingRef>| match binding {
+        Some(FlowBindingRef::Local(binding)) => {
+            skeleton.binding(*binding).runtime_binding.map(binding_node)
         }
-    }
-    let local_targets = |binding: Option<&FlowBindingRef>| match binding {
-        Some(FlowBindingRef::Local(binding)) => runtime_bindings
-            .get(binding)
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        Some(FlowBindingRef::Captured(_)) | None => &[],
+        Some(FlowBindingRef::Captured(_)) | None => None,
     };
     let capture_offset = binding_count + expr_site_count + return_site_count + region_count;
     let mut captured_bindings = Vec::new();
@@ -431,6 +422,11 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
             region_node(binding.region),
             FlowEdgeKind::ControlRegion,
         ));
+        if let Some(runtime) = binding.runtime_binding {
+            if runtime.index() != index {
+                edges.push((binding_node(runtime), node, FlowEdgeKind::ValueDef));
+            }
+        }
         if let Some(initializer) = binding.initializer {
             edges.push((node, site_node(initializer), FlowEdgeKind::ValueDef));
         }
@@ -445,23 +441,12 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
         // Retaining a captured cell is a subject dependency even when the
         // nested callable only writes it. It does not read the cell's value.
         for capture in site.capture_bindings.iter() {
-            let targets: &[SkeletonBindingId] = match capture {
-                FlowBindingRef::Local(binding) => runtime_bindings
-                    .get(binding)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                FlowBindingRef::Captured(_) => &[],
-            };
+            let target = local_target(Some(capture));
             let captured_node = match capture {
                 FlowBindingRef::Captured(identity) => capture_nodes.get(identity).copied(),
                 FlowBindingRef::Local(_) => None,
             };
-            for to in targets
-                .iter()
-                .copied()
-                .map(binding_node)
-                .chain(captured_node)
-            {
+            for to in target.into_iter().chain(captured_node) {
                 if seen.insert((node.0, to.0, FlowEdgeClass::EvalEffect)) {
                     edges.push((node, to, FlowEdgeKind::EvalEffect));
                 }
@@ -478,10 +463,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                 .collect::<Option<Vec<_>>>()
                 .unwrap_or_default()
                 .into();
-            let local_nodes = local_targets(read.binding.as_ref())
-                .iter()
-                .copied()
-                .map(binding_node);
+            let local_nodes = local_target(read.binding.as_ref()).into_iter();
             let captured_node = if let Some(FlowBindingRef::Captured(identity)) = &read.binding {
                 capture_nodes.get(identity).copied()
             } else {
@@ -505,10 +487,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
             }
         }
         for call in site.calls.iter() {
-            let locals = local_targets(call.binding.as_ref())
-                .iter()
-                .copied()
-                .map(binding_node);
+            let locals = local_target(call.binding.as_ref()).into_iter();
             let captured = match &call.binding {
                 Some(FlowBindingRef::Captured(identity)) => capture_nodes.get(identity).copied(),
                 _ => None,
@@ -583,10 +562,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
             continue;
         };
         let provider = site_node(write.value.unwrap_or(write.site));
-        let local_nodes = local_targets(write.binding.as_ref())
-            .iter()
-            .copied()
-            .map(binding_node);
+        let local_nodes = local_target(write.binding.as_ref()).into_iter();
         let captured_node = if let Some(FlowBindingRef::Captured(identity)) = &write.binding {
             capture_nodes.get(identity).copied()
         } else {
