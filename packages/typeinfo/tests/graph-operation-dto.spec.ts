@@ -588,6 +588,31 @@ describe("decodeTypeInfoResult", () => {
     expect(accessor.returnType.kind).toBe("primitive");
   });
 
+  it("bounds descriptor recursion depth independently of the visit budget", () => {
+    // An acyclic array chain deeper than the host depth budget stays well
+    // inside the visit budget, so only a depth stop ends the walk before
+    // the JavaScript stack would.
+    const chain = MAX_EXPANSION_DEPTH_BUDGET + 64;
+    const nodes: Record<string, unknown>[] = [{}];
+    for (let id = 1; id <= chain; id += 1) {
+      nodes.push({ kind: { case: "array", value: { elementNodeId: id + 1 } } });
+    }
+    nodes.push({ kind: { case: "primitive", value: { kind: GraphPrimitiveKind.NUMBER } } });
+    const response = encodeGraphResponse({
+      schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+      strings: { entries: [""] },
+      nodes,
+      symbols: [],
+      signatures: [],
+      rootIds: [1],
+    });
+    const result = decodeTypeInfoResult(response);
+    if (result.kind !== "graph") throw new Error("graph arm expected");
+    const rendered = JSON.stringify(result.root);
+    expect(rendered).toContain("decode depth exceeded");
+    expect(rendered).not.toContain("decode budget exceeded");
+  });
+
   // @ai-generated - Pins one shared monotonic decode budget across callable walks.
   it("bounds repeated DAG decode work across callable signatures", () => {
     const methodCount = 9_000;

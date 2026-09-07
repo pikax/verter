@@ -327,6 +327,9 @@ function graphNodeToDescriptorWithBudget(
   if (!consumeDecodeVisit(budget)) {
     return unknown("decode budget exceeded");
   }
+  if (!withinDecodeDepth(visited)) {
+    return unknown("decode depth exceeded");
+  }
   const node = view.nodes[nodeId];
   const kind = node?.kind;
   if (!kind || kind.case === undefined) {
@@ -454,6 +457,17 @@ interface DecodeBudget {
   visits: number;
 }
 
+/**
+ * The visit budget bounds total decode WORK, not stack depth: an acyclic
+ * chain of in-budget nodes still recurses once per node. `visited` is
+ * the current path, so its size is the recursion depth; descent stops at
+ * the host's depth budget — the producer's own walk never exceeds it, so
+ * only a malformed response reaches this stop.
+ */
+function withinDecodeDepth(visited: ReadonlySet<number>): boolean {
+  return visited.size < MAX_EXPANSION_DEPTH_BUDGET;
+}
+
 function consumeDecodeVisit(budget: DecodeBudget): boolean {
   if (budget.visits >= MAX_EXPANSION_NODE_BUDGET) return false;
   budget.visits += 1;
@@ -543,6 +557,9 @@ function callableDescriptor(
   }
   if (!consumeDecodeVisit(budget)) {
     return unknown("decode budget exceeded");
+  }
+  if (!withinDecodeDepth(visited)) {
+    return unknown("decode depth exceeded");
   }
   const node = view.nodes[nodeId];
   const kind = node?.kind;
