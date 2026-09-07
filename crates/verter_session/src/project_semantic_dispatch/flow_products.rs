@@ -724,13 +724,14 @@ pub fn join_product(
             // IS the arm list the canonical algebra unions, and arm order
             // is observable in the constructed composite.
             let mut contributors: Vec<SemanticNodeId> = Vec::new();
+            let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
             for node in left
                 .contributors()
                 .iter()
                 .chain(right.contributors().iter())
                 .copied()
             {
-                if !contributors.contains(&node) {
+                if seen.insert(node) {
                     contributors.push(node);
                 }
             }
