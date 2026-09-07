@@ -40,6 +40,9 @@ pub struct ReturnSlicePlan {
     /// Effect-only nodes (evaluation effects survive; value is never
     /// materialized), sorted ascending, disjoint from `value_nodes`.
     pub effect_only_nodes: Arc<[FlowNodeId]>,
+    /// Combined value visits and interned projection tails charged by planning.
+    /// Retained-plan admission compares this count with the caller's budget.
+    pub value_states: u32,
 }
 
 impl ReturnSlicePlan {

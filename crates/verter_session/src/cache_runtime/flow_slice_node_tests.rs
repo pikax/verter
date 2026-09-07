@@ -186,6 +186,64 @@ fn parse_key_and_language_are_function_key_axes() {
     );
 }
 
+#[test]
+fn enclosing_binding_changes_split_unchanged_child_body_bundles() {
+    fn child_key(
+        source: &str,
+    ) -> (
+        FlowSliceFunctionKey,
+        verter_semantic::analysis::function_program::FlowBindingIdentity,
+    ) {
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(parsed.errors.is_empty());
+        let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+        let index = build_function_program_index(
+            &parsed.program,
+            source,
+            &owners,
+            Arc::from("/capture.ts"),
+        );
+        let root = index.matches_named("root").next().unwrap().entry();
+        let child = index
+            .nested_at(
+                &root.key,
+                verter_span::Span::new(
+                    source.find("() =>").unwrap() as u32,
+                    source.rfind("; }").unwrap() as u32,
+                ),
+            )
+            .unwrap()
+            .entry();
+        let key = FlowSliceFunctionKey {
+            function: child.key.clone(),
+            flow_body_stable_hash: child.flow_body_stable_hash,
+            flow_body_exact_hash: child.flow_body_exact_hash.unwrap(),
+            ..function_key("/capture.ts", "root", 0, source)
+        };
+        (key, child.captures.0[0].clone())
+    }
+    let (before, old_capture) = child_key("function root() { let x = 0; return () => x; }");
+    let (after, new_capture) =
+        child_key("function root() { let unused = 1; let x = 0; return () => x; }");
+    assert_eq!(before.function, after.function);
+    assert_eq!(before.flow_body_stable_hash, after.flow_body_stable_hash);
+    assert_eq!(before.flow_body_exact_hash, after.flow_body_exact_hash);
+    assert_ne!(
+        old_capture, new_capture,
+        "the ancestor declaration slot changed"
+    );
+    assert_ne!(
+        before.parse_key, after.parse_key,
+        "the served lexical source context is pinned"
+    );
+    assert_ne!(
+        before, after,
+        "an unchanged child body cannot reuse stale captured identities"
+    );
+}
+
 /// The production skeleton source verifies the exact parse identity and
 /// the runtime language row in addition to the body hashes: a key whose
 /// parse key or language row does not match the serving artifact is a
@@ -696,6 +754,7 @@ fn budget_exceeded_admits_nothing_at_any_layer() {
     let tiny = FlowSliceBudget {
         max_return_sites: 256,
         max_selected_nodes: 1,
+        ..FlowSliceBudget::default()
     };
     let rig = rig(vec![(function.clone(), MYTYPE_FIXTURE)], tiny);
     let ctx: &dyn ResolverContext = &rig.host;

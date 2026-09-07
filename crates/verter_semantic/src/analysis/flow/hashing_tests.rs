@@ -50,6 +50,21 @@ fn slice_hash_is_deterministic() {
     assert_eq!(slice_hash_of(source, &["b"]), slice_hash_of(source, &["b"]));
 }
 
+#[test]
+fn slice_hash_preserves_composed_read_paths_and_ignores_disjoint_members() {
+    let before = "function f() { let x = {a: {b: 1}, c: {b: 2}, unused: 3}; return x.a; }";
+    let disjoint = "function f() { let x = {a: {b: 1}, c: {b: 2}, renamed: 4}; return x.a; }";
+    let projected = "function f() { let x = {a: {b: 1}, c: {b: 2}, unused: 3}; return x.c; }";
+    assert_eq!(
+        slice_hash_of(before, &["b"]),
+        slice_hash_of(disjoint, &["b"])
+    );
+    assert_ne!(
+        slice_hash_of(before, &["b"]),
+        slice_hash_of(projected, &["b"])
+    );
+}
+
 /// Two demands over one body select different subgraphs and hash
 /// unequal; the demanded key text itself is identity (a Foreign demand
 /// differs from a matched demand).

@@ -113,6 +113,31 @@ inventories must never initialize a cached map. A correspondence error remains a
 typed source/store error, publishes nothing, and follows failed non-admission at
 the hash/lower nodes; it is never cached as absence or replaced by an empty map.
 
+`DeclBodyMemo::function_flow_structure` invokes the indexed current-frame
+builder under the retained parse lease and returns `PreparedFunctionBodySkeleton`
+(skeleton and binding map together). Nested capture paths come from the pinned
+index; this ingress never recursively constructs child skeletons. The source
+derives the graph from that prepared skeleton and publishes all three artifacts
+atomically.
+
+Static member reads carry `ReadProjection` edges that prepend the authored path
+to the demand suffix. A real `CapturedBinding` graph node owns each exact captured
+identity, with the same definition, path-write, and execution adjacency as a
+local hub; captured read/write construction remains linear and never fabricates
+a local declaration. Only `PathWriteSource::ObjectLiteralEntry` can suppress an
+earlier definite duplicate property; mutable assignments remain candidates until
+control flow executes them. `ControlInput` edges keep the value
+that governs an executed region selected. The planner interns projection tails
+and bounds their count plus value visits with `max_value_states`; a growing
+projection cycle returns typed `ValueStates` non-admission. Selected projection
+payloads are content-bearing slice-hash inputs.
+
+The graph key includes the serving `ParseKey`, whose content digest pins the
+whole lexical source context. Inserting an ancestor declaration can change an
+unchanged child's captured binding slot; the changed parse key prevents reusing
+that child's old skeleton, map, or graph. An unrelated edit may preserve a narrow
+slice hash while still producing a distinct graph artifact key.
+
 ## Architectural rules (R1–R31)
 
 ### Mutation semantics

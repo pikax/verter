@@ -2786,6 +2786,7 @@ fn demand_planner_rejects_an_out_of_range_selection_node() {
             demand_path: Arc::clone(&own.selection().demand_path),
             value_nodes: Arc::from(vec![out_of_range].into_boxed_slice()),
             effect_only_nodes: Arc::from([]),
+            value_states: own.selection().value_states,
         },
     );
     assert!(
@@ -2868,6 +2869,7 @@ fn demand_planner_rejects_a_selection_over_the_requests_slice_budget() {
     tighter.resources.slice_budget = FlowSliceBudget {
         max_return_sites: 2,
         max_selected_nodes: u32::try_from(selected).expect("in range"),
+        ..FlowSliceBudget::default()
     };
     assert!(
         fixture.build_plan_with_retained(tighter, &loose).is_ok(),
