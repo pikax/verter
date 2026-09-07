@@ -19,6 +19,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 use verter_semantic::analysis::flow::flow_graph::{FlowNodeId, FlowNodeKind, FunctionFlowGraph};
+use verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan;
 use verter_semantic::analysis::flow::{FlowBindingMap, FlowBindingRef};
 use verter_semantic::analysis::function_program::{FlowBindingIdentity, FunctionProgramKey};
 
@@ -66,7 +67,6 @@ pub struct FlowProductInputs {
     graph: Arc<FunctionFlowGraph>,
     scope: FlowSliceFunctionKey,
     bindings: Arc<FlowBindingMap>,
-    captures: Vec<(FlowBindingIdentity, FlowNodeId)>,
 }
 
 impl FlowProductInputs {
@@ -75,24 +75,48 @@ impl FlowProductInputs {
             graph: Arc::clone(&bound.bundle().graph),
             scope: bound.key().clone(),
             bindings: Arc::clone(&bound.bundle().bindings),
-            captures: Vec::new(),
         }
     }
 
-    /// Resolved captured references from the child's content lowering, each
-    /// anchored to its real read site. Selection is checked at attachment.
-    pub(crate) fn with_captures(
-        mut self,
-        captures: impl IntoIterator<Item = (FlowBindingIdentity, FlowNodeId)>,
-    ) -> Self {
-        self.captures.extend(captures);
-        self
+    /// Graph-owned captured subjects in stable selected-node order. This can
+    /// encode selected inputs before the execution basis is sealed, without
+    /// rebuilding capture inventory or minting caller-supplied reference sites.
+    pub(crate) fn selected_captures<'a>(
+        &'a self,
+        selection: &'a ReturnSlicePlan,
+    ) -> impl Iterator<Item = &'a FlowBindingIdentity> + 'a {
+        selected_nodes(selection).filter_map(|node| match self.graph.node_kind(node) {
+            FlowNodeKind::CapturedBinding(binding) => Some(self.graph.captured_binding(binding)),
+            FlowNodeKind::Binding(_)
+            | FlowNodeKind::ExprSite(_)
+            | FlowNodeKind::ReturnSite(_)
+            | FlowNodeKind::Region(_) => None,
+        })
     }
 
     #[must_use]
     pub fn graph(&self) -> &FunctionFlowGraph {
         &self.graph
     }
+}
+
+/// Merge the owner's sorted disjoint selected arrays without allocation.
+fn selected_nodes(selection: &ReturnSlicePlan) -> impl Iterator<Item = FlowNodeId> + '_ {
+    let mut values = selection.value_nodes.iter().peekable();
+    let mut effects = selection.effect_only_nodes.iter().peekable();
+    std::iter::from_fn(move || {
+        let values_first = match (values.peek(), effects.peek()) {
+            (Some(a), Some(b)) => a.index() < b.index(),
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        (if values_first {
+            values.next()
+        } else {
+            effects.next()
+        })
+        .copied()
+    })
 }
 
 #[derive(Debug)]
@@ -111,7 +135,6 @@ struct ProductLayout {
     inputs: FlowProductInputs,
     selection: Arc<FlowExecutionSelection>,
     subjects: Box<[ProductSubject]>,
-    node_subjects: usize,
     representatives: Box<[usize]>,
     captures: FxHashMap<FlowBindingIdentity, usize>,
     // Authored facts have execution lifetime, independent of branch snapshots.
@@ -121,7 +144,7 @@ struct ProductLayout {
 
 impl ProductLayout {
     fn subject_at(&self, node: FlowNodeId) -> Result<usize, FlowProductKeyError> {
-        self.subjects[..self.node_subjects]
+        self.subjects
             .binary_search_by_key(&node.index(), |subject| subject.node.index())
             .map_err(|_| FlowProductKeyError::UnselectedNode)
     }
@@ -455,25 +478,12 @@ impl FlowProductExecution {
         {
             return Err(FlowProductKeyError::SelectionBudget);
         }
-        // Both owner arrays are sorted and disjoint. Merge them once; do not
-        // rebuild graph adjacency or a whole-graph node/domain cross product.
-        let mut values = structural.value_nodes.iter().peekable();
-        let mut effects = structural.effect_only_nodes.iter().peekable();
-        let mut subjects = Vec::with_capacity(values.len() + effects.len());
+        let mut subjects =
+            Vec::with_capacity(structural.value_nodes.len() + structural.effect_only_nodes.len());
         let mut representatives = Vec::new();
         let mut local_storage = FxHashMap::default();
-        while values.peek().is_some() || effects.peek().is_some() {
-            let from_values = match (values.peek(), effects.peek()) {
-                (Some(a), Some(b)) => a.index() < b.index(),
-                (Some(_), None) => true,
-                (None, _) => false,
-            };
-            let node = *if from_values {
-                values.next()
-            } else {
-                effects.next()
-            }
-            .expect("a selected node");
+        let mut captures = FxHashMap::default();
+        for node in selected_nodes(structural) {
             let subject = subjects.len();
             let (binding, binding_ref, existing_storage) = match inputs.graph.node_kind(node) {
                 FlowNodeKind::Binding(binding) => {
@@ -494,6 +504,18 @@ impl FlowProductExecution {
                         Some(storage),
                     )
                 }
+                FlowNodeKind::CapturedBinding(binding) => {
+                    let identity = inputs.graph.captured_binding(binding).clone();
+                    if identity.defining_function == inputs.scope.function {
+                        return Err(FlowProductKeyError::InvalidCapture);
+                    }
+                    captures.insert(identity.clone(), subject);
+                    (
+                        Some(identity.clone()),
+                        Some(FlowBindingRef::Captured(identity)),
+                        None,
+                    )
+                }
                 FlowNodeKind::ExprSite(_)
                 | FlowNodeKind::ReturnSite(_)
                 | FlowNodeKind::Region(_) => (None, None, None),
@@ -507,51 +529,6 @@ impl FlowProductExecution {
                 node,
                 binding,
                 binding_ref,
-                storage,
-            });
-        }
-        let node_subjects = subjects.len();
-        let mut capture_sites: FxHashMap<&FlowBindingIdentity, FlowNodeId> = FxHashMap::default();
-        for (identity, node) in &inputs.captures {
-            if !structural.is_selected(*node) {
-                continue;
-            }
-            if let Some(held) = capture_sites.get_mut(identity) {
-                if node.index() < held.index() {
-                    *held = *node;
-                }
-            } else {
-                if capture_sites.len() >= plan.resources().slice_budget.max_selected_nodes as usize
-                {
-                    return Err(FlowProductKeyError::SelectionBudget);
-                }
-                capture_sites.insert(identity, *node);
-            }
-        }
-        let mut selected_captures: Vec<_> = capture_sites.into_iter().collect();
-        selected_captures.sort_by(|(a, an), (b, bn)| {
-            (&a.defining_function, a.binding_slot, an.index()).cmp(&(
-                &b.defining_function,
-                b.binding_slot,
-                bn.index(),
-            ))
-        });
-        let mut captures = FxHashMap::default();
-        for (identity, node) in selected_captures {
-            if identity.defining_function == inputs.scope.function {
-                return Err(FlowProductKeyError::InvalidCapture);
-            }
-            if captures.contains_key(identity) {
-                continue;
-            }
-            let subject = subjects.len();
-            let storage = representatives.len();
-            representatives.push(subject);
-            captures.insert(identity.clone(), subject);
-            subjects.push(ProductSubject {
-                node,
-                binding: Some(identity.clone()),
-                binding_ref: Some(FlowBindingRef::Captured(identity.clone())),
                 storage,
             });
         }
@@ -570,7 +547,6 @@ impl FlowProductExecution {
                 inputs: inputs.clone(),
                 selection,
                 subjects: subjects.into(),
-                node_subjects,
                 representatives: representatives.into(),
                 captures,
                 declarations,
@@ -613,7 +589,7 @@ impl FlowProductExecution {
     /// Enumerate already scoped selected sites; callers cannot supply a naked id
     /// and silently relabel a site belonging to another execution or graph.
     pub fn selected_sites(&self) -> impl ExactSizeIterator<Item = SelectedFlowSite> + '_ {
-        (0..self.scope.node_subjects).map(|subject| SelectedFlowSite {
+        (0..self.scope.subjects.len()).map(|subject| SelectedFlowSite {
             scope: Rc::clone(&self.scope),
             subject,
         })
@@ -1491,14 +1467,12 @@ impl FlowProductBudget {
     #[must_use]
     pub fn for_execution_selection(plan: &FlowExecutionSelection) -> Self {
         let selection = plan.structural_selection();
-        // One expression can mention many captured bindings. The structural
-        // policy separately caps their imported subject inventory; proof
-        // obligations never determine value-execution capacity.
+        // Captured bindings are real selected graph nodes and therefore use
+        // the same structural limit as every other product subject.
         let subjects = selection
             .value_nodes
             .len()
-            .saturating_add(selection.effect_only_nodes.len())
-            .saturating_add(plan.resources().slice_budget.max_selected_nodes as usize);
+            .saturating_add(selection.effect_only_nodes.len());
         let subjects = u32::try_from(subjects).unwrap_or(u32::MAX);
         Self {
             max_iterations: plan.convergence().max_iterations,

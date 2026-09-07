@@ -727,7 +727,8 @@ fn flow_graph_enumerates_every_node_family_and_empty_graphs() {
         return_sites: Arc::from([]),
         writes: Arc::from([]),
     };
-    for skeleton in [populated, empty] {
+    let captured = indexed_returned_arrow("function root() { const x = 1; return () => x; }");
+    for (skeleton, captures) in [(populated, 0), (empty, 0), (captured, 1)] {
         let graph = build_function_flow_graph(&skeleton);
         let mut nodes = graph.nodes();
         let expected = [
@@ -735,10 +736,11 @@ fn flow_graph_enumerates_every_node_family_and_empty_graphs() {
             skeleton.expr_sites.len(),
             skeleton.return_sites.len(),
             skeleton.regions.len(),
+            captures,
         ];
         let total: usize = expected.iter().sum();
         assert_eq!(nodes.len(), total);
-        let mut families = [0usize; 4];
+        let mut families = [0usize; 5];
         for index in 0..total {
             let node = nodes.next().expect("every structural node is enumerated");
             assert_eq!(node.index(), index, "enumeration is unique and ordered");
@@ -759,6 +761,11 @@ fn flow_graph_enumerates_every_node_family_and_empty_graphs() {
                 FlowNodeKind::Region(id) => {
                     families[3] += 1;
                     graph.region_node(id)
+                }
+                FlowNodeKind::CapturedBinding(id) => {
+                    families[4] += 1;
+                    assert_eq!(graph.captured_binding(id).name.as_ref(), "x");
+                    graph.captured_binding_node(id)
                 }
             };
             assert_eq!(node, reminted);

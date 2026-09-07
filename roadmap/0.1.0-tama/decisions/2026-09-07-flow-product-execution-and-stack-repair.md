@@ -38,7 +38,7 @@ or repeated idempotence checks over unchanged predecessor snapshots.
 - Preserve already-supported nested callable forms by extending the existing function
   index and locator owner. A child obtains its own graph and sealed demand from shared
   cache/planning owners. Captured inputs are imported by exact identity at selected
-  reference sites into that child scope; parent keys and transient narrowing do not
+  captured-binding nodes into that child scope; parent keys and transient narrowing do not
   cross the boundary.
 - Use compact slots over selected subjects, with immutable metadata shared by execution
   snapshots. Keys, inputs, snapshots, and evidence are bound to the graph content,

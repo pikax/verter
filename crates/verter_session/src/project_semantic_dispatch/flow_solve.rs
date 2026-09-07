@@ -51,7 +51,7 @@ use verter_semantic::analysis::flow::peeker::{
     DemandSegment, FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded, SliceDemand,
     SliceOrigin,
 };
-use verter_semantic::analysis::flow::{SkeletonBindingId, SkeletonBindingKind};
+use verter_semantic::analysis::flow::{FlowBindingRef, SkeletonBindingKind};
 
 use super::dispatch_txn::flow_obligation_state::{
     FlowBindingBasis, FlowConvergenceEvidence, FlowDemandHandle, FlowObligationBasis,
@@ -899,9 +899,8 @@ fn require_query_names_bound_graph(
 /// is runtime configuration, never identity): a selection retained under
 /// a permissive budget served against a stricter request would otherwise
 /// pass every provenance axis unchanged, so the planner re-derives the
-/// two budget axes the demand planner enforces — demand-origin return
-/// sites and selected (value + effect-only) nodes — from the retained
-/// selection and fails closed on the typed budget error.
+/// demand-origin return sites, selected (value + effect-only) nodes, and
+/// retained value-state work against the incoming resource policy.
 fn require_retained_selection_of_bound_graph(
     bound: &BoundFlowGraph,
     subject: &FlowDemandSubject,
@@ -949,7 +948,7 @@ fn require_retained_selection_of_bound_graph(
     // The selection must satisfy the REQUEST's slice budget: the retained
     // plan was minted under the budget armed at planning time, so a
     // stricter incoming request revalidates the selection's observable
-    // counts — the same two axes `ReturnPathPeeker::plan` enforces —
+    // counts — the same axes `ReturnPathPeeker::plan` enforces —
     // against its own budget. The final selection's node sets are
     // disjoint by construction, so the lengths ARE the selected count.
     let return_sites = selection
@@ -970,6 +969,13 @@ fn require_retained_selection_of_bound_graph(
             axis: FlowSliceBudgetAxis::SelectedNodes,
             limit: budget.max_selected_nodes,
             observed: u32::try_from(selected_nodes).unwrap_or(u32::MAX),
+        }));
+    }
+    if selection.value_states > budget.max_value_states {
+        return Err(FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
+            axis: FlowSliceBudgetAxis::ValueStates,
+            limit: budget.max_value_states,
+            observed: selection.value_states,
         }));
     }
     Ok(())
@@ -1173,15 +1179,24 @@ pub(crate) fn build_flow_demand_plan_from_execution(
             F::GraphEdge(_) => {} // edges expand last — they anchor on node obligations
             F::BindingSlot => {
                 for node in &selected {
-                    let FlowNodeKind::Binding(binding) = graph.node_kind(*node) else { continue };
-                    let basis = match identities.identity(binding) {
-                        Some(identity) => FlowObligationBasis::Binding {
-                            node: *node,
-                            slot: FlowBindingBasis { binding, identity: identity.clone() },
+                    let basis = match graph.node_kind(*node) {
+                        FlowNodeKind::Binding(binding) => match identities.identity(binding) {
+                            Some(identity) => FlowObligationBasis::Binding {
+                                node: *node,
+                                slot: FlowBindingBasis { binding: FlowBindingRef::Local(binding), identity: identity.clone() },
+                            },
+                            None => FlowObligationBasis::UnmodeledBinding {
+                                node: *node, binding, kind: bundle.skeleton.binding(binding).kind,
+                            },
                         },
-                        None => FlowObligationBasis::UnmodeledBinding {
-                            node: *node, binding, kind: bundle.skeleton.binding(binding).kind,
+                        FlowNodeKind::CapturedBinding(binding) => {
+                            let identity = graph.captured_binding(binding);
+                            FlowObligationBasis::Binding {
+                                node: *node,
+                                slot: FlowBindingBasis { binding: FlowBindingRef::Captured(identity.clone()), identity: identity.clone() },
+                            }
                         },
+                        FlowNodeKind::ExprSite(_) | FlowNodeKind::ReturnSite(_) | FlowNodeKind::Region(_) => continue,
                     };
                     let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::BindingSlot) }, FlowObligationOrigin::Expansion(E::BindingSlot), basis, Arc::from([]), Arc::from([]))?;
                     note_node_obligation(&mut node_obligations, *node, id);
@@ -1256,49 +1271,44 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                     expanded.push(id);
                 }
                 // Closure EXPRESSIONS (arrow / function expression sites):
-                // the skeleton authority records the exact captured names
+                // the skeleton authority records exact captured subjects
                 // on the closure's own site — one concrete capture
                 // obligation per (closure site, captured binding),
-                // resolved through the frame's lexical binding authority
-                // and carrying the binding's real cross-frame identity. A
-                // captured name the frame does not bind is a free/global
-                // read, not a capture; a captured binding the cross-frame
-                // inventory cannot name (a destructured parameter)
-                // installs the family's accepted typed gap — never
-                // silence.
+                // carrying the binding's real cross-frame identity. Display
+                // names never resolve these subjects: an outer binding need
+                // not have any local declaration in this frame.
                 for node in &selected {
                     let FlowNodeKind::ExprSite(site) = graph.node_kind(*node) else { continue };
                     let site_record = bundle.skeleton.expr_site(site);
-                    let mut seen: Vec<SkeletonBindingId> = Vec::new();
-                    for name in site_record.captures.iter() {
-                        for binding in bundle.skeleton.bindings_of_name_in_scope(*name, site_record.region) {
-                            if seen.contains(&binding) { continue; }
-                            seen.push(binding);
-                            let (basis, dischargeable) = match identities.identity(binding) {
+                    for capture in site_record.capture_bindings.iter() {
+                        let (basis, dischargeable) = match capture {
+                            FlowBindingRef::Local(binding) => match identities.identity(*binding) {
                                 Some(identity) => (
                                     FlowObligationBasis::CapturedBinding { node: *node, site, identity: identity.clone() },
                                     true,
                                 ),
                                 None => (
-                                    FlowObligationBasis::Capture { node: *node, binding, identity: None },
+                                    FlowObligationBasis::Capture { node: *node, binding: *binding, identity: None },
                                     false,
                                 ),
-                            };
-                            let id = push(
-                                FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
-                                FlowObligationOrigin::Expansion(E::Capture),
-                                basis,
-                                Arc::from([]), Arc::from([]),
-                            )?;
-                            // A concrete capture subject discharges, so it
-                            // may anchor the node's out-edge facts; the
-                            // gap path never anchors (a gap discharges
-                            // nothing a dependent could wait on).
-                            if dischargeable {
-                                note_node_obligation(&mut node_obligations, *node, id);
-                            }
-                            expanded.push(id);
+                            },
+                            FlowBindingRef::Captured(identity) => (
+                                FlowObligationBasis::CapturedBinding { node: *node, site, identity: identity.clone() },
+                                true,
+                            ),
+                        };
+                        let id = push(
+                            FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
+                            FlowObligationOrigin::Expansion(E::Capture),
+                            basis,
+                            Arc::from([]), Arc::from([]),
+                        )?;
+                        // A concrete capture subject may anchor the node's
+                        // out-edge facts; a typed gap discharges nothing.
+                        if dischargeable {
+                            note_node_obligation(&mut node_obligations, *node, id);
                         }
+                        expanded.push(id);
                     }
                 }
             }
