@@ -84,11 +84,11 @@ fn selection_for(
     let bound = memo.flow_bound_graph_for_tests(entry);
     let skeleton = &bound.bundle().skeleton;
     let graph = &bound.bundle().graph;
-    let demand = SliceDemand::for_return_projection(&skeleton, path);
-    let plan = ReturnPathPeeker::new(&graph)
+    let demand = SliceDemand::for_return_projection(skeleton, path);
+    let plan = ReturnPathPeeker::new(graph)
         .plan(&demand, &FlowSliceBudget::default())
         .expect("the default budget admits these fixtures");
-    let ir = lower_slice_plan(&plan, &graph, &skeleton);
+    let ir = lower_slice_plan(&plan, graph, skeleton);
     (FlowSliceSelection::from_slice_ir(&ir), bound)
 }
 

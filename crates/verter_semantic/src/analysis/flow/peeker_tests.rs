@@ -26,11 +26,58 @@ fn names(path: &[&str]) -> Vec<Arc<str>> {
 
 #[test]
 fn planner_composes_member_reads_with_the_demanded_suffix() {
-    let source = "function f() { let x = {a: {b: 'wanted'}, b: 'sibling'}; return x.a; }";
+    for expression in ["x.a", "(0, x.a)", "x.a || x.a", "true ? x.a : x.a"] {
+        let source = format!(
+            "function f() {{ let x = {{a: {{b: 'wanted'}}, b: 'sibling'}}; return {expression}; }}"
+        );
+        let skeleton = skeleton_of(&source);
+        let graph = build_function_flow_graph(&skeleton);
+        let plan = plan_return(&skeleton, &graph, &["b"]);
+        for (literal, selected) in [("'wanted'", true), ("'sibling'", false)] {
+            let start = source.find(literal).unwrap() as u32;
+            let span = crate::analysis::flow::FrameSpan::rebase(
+                0,
+                verter_span::Span::new(start, start + literal.len() as u32),
+            );
+            let site = skeleton
+                .expr_sites
+                .iter()
+                .position(|site| site.span == span)
+                .unwrap();
+            assert_eq!(
+                plan.is_value(graph.expr_site_node(SkeletonExprSiteId::from_index(site as u32))),
+                selected,
+                "{literal}"
+            );
+        }
+    }
+}
+
+#[test]
+fn planner_consumed_inputs_do_not_grow_result_projection_cycles() {
+    for source in [
+        "function f(u) { let v=u; if(typeof v==='string') v=v.trim(); return {label:typeof v==='string'?v:'z'}; }",
+        "function f(v) { v = v.length + 1; return {label:v}; }",
+        "function f(v) { v = !v.flag; return {label:v}; }",
+    ] {
+        let skeleton = skeleton_of(source);
+        let graph = build_function_flow_graph(&skeleton);
+        let budget = FlowSliceBudget { max_value_states: 128, ..FlowSliceBudget::default() };
+        let plan = ReturnPathPeeker::new(&graph)
+            .plan(&SliceDemand::for_return_projection(&skeleton, &names(&["label"])), &budget)
+            .unwrap_or_else(|error| panic!("consumed inputs must not inherit result projections: {source}: {error:?}"));
+        assert!(plan.is_value(binding_node(&skeleton, &graph, "v")));
+    }
+}
+
+#[test]
+fn planner_consumed_member_input_keeps_its_path_without_the_result_suffix() {
+    let source =
+        "function f() { const x={a:{nested:'input'}, b:'unrelated'}; return consume(x.a); }";
     let skeleton = skeleton_of(source);
     let graph = build_function_flow_graph(&skeleton);
-    let plan = plan_return(&skeleton, &graph, &["b"]);
-    for (literal, selected) in [("'wanted'", true), ("'sibling'", false)] {
+    let plan = plan_return(&skeleton, &graph, &["result"]);
+    for (literal, selected) in [("'input'", true), ("'unrelated'", false)] {
         let start = source.find(literal).unwrap() as u32;
         let span = crate::analysis::flow::FrameSpan::rebase(
             0,

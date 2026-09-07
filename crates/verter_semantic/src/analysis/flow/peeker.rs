@@ -408,12 +408,21 @@ impl<'g> ReturnPathPeeker<'g> {
         // Value-def edges thread the remaining demand unchanged: return
         // argument, reaching definition, binding read.
         for edge in edges {
-            let projection = match &edge.kind {
-                FlowEdgeKind::ValueDef => &[][..],
-                FlowEdgeKind::ReadProjection { path } => path.as_ref(),
+            let (projection, suffix) = match &edge.kind {
+                FlowEdgeKind::ValueDef => (&[][..], path),
+                FlowEdgeKind::ReadProjection {
+                    path: projection,
+                    kind,
+                } => (
+                    projection.as_ref(),
+                    match kind {
+                        super::FlowReadKind::Result => path,
+                        super::FlowReadKind::Input => 0,
+                    },
+                ),
                 _ => continue,
             };
-            let projected = state.project(projection, path, budget)?;
+            let projected = state.project(projection, suffix, budget)?;
             state.worklist.push(WorkItem::Value {
                 node: edge.to,
                 path: projected,
