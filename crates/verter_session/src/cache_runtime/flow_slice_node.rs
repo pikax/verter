@@ -115,10 +115,9 @@ pub(crate) struct FlowSliceFunctionKey {
     /// This is NOT a file-offset axis, and deliberately so: it covers
     /// the function's OWN bytes only, so an edit anywhere else in the
     /// file — a leading blank line, a sibling function's body — leaves
-    /// it (and every anchor-relative position in the artifacts) intact,
-    /// and the untouched function stays warm. The two halves are what
-    /// make these artifacts genuinely content-addressed; either alone
-    /// leaves one direction unsound.
+    /// it (and every anchor-relative position in the artifacts) intact.
+    /// Reuse also requires the serving ParseKey below: that key pins the
+    /// lexical source context of exact captured binding identities.
     pub flow_body_exact_hash: Hash16,
     /// Parse-domain env hash.
     pub parse_env_hash: Hash16,

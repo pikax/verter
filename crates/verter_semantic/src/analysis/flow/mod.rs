@@ -1372,10 +1372,8 @@ impl SkeletonBuilder {
     /// frame reads. Record those free reads on the function-value site so the
     /// value frontier selects the reaching outer definitions that seed the
     /// nested evaluator. Reads resolved by the nested frame remain there.
-    /// The captured NAME roots are ALSO recorded on the site's `captures`
-    /// (deduplicated by name), so a consumer can enumerate the closure's
-    /// captured-binding subjects without re-deriving them from the read
-    /// footprint.
+    /// Exact subjects are retained in `capture_bindings`; `captures`
+    /// keeps their interned display names as diagnostic metadata.
     fn push_nested_capture_reads(&mut self, span: verter_span::Span) {
         let Some(reads) = self.nested_captures.get(&span).cloned() else {
             return;

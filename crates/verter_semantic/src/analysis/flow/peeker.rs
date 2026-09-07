@@ -306,7 +306,11 @@ impl<'g> ReturnPathPeeker<'g> {
         let mut effect_only: Vec<FlowNodeId> = state
             .effect_nodes
             .into_iter()
-            .filter(|node| !value.iter().any(|selected| selected == node))
+            .filter(|node| {
+                value
+                    .binary_search_by_key(&node.index(), |selected| selected.index())
+                    .is_err()
+            })
             .collect();
         effect_only.sort_by_key(|node| node.index());
 
@@ -419,9 +423,9 @@ impl<'g> ReturnPathPeeker<'g> {
         Ok(())
     }
 
-    /// Effect-frontier step: select `node` for effect and follow ONLY
-    /// the effect-family out-edges (eval-effect + control-region). Value
-    /// materialization never enters through this frontier.
+    /// Effect-frontier step: select `node` for effect and follow the
+    /// effect-family edges. A typed ControlInput edge alone crosses to
+    /// a whole-value demand for the expression governing execution.
     fn process_effect(
         &self,
         state: &mut PlanState,
