@@ -6577,9 +6577,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     );
                 }
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local {
-                name: _, binding, ..
-            } => {
+            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
                 let kind = if self.binding_layer(binding) == FlowBindingLayer::Lexical {
                     crate::flow_slice_content::SliceBindingKind::Let
                 } else {
@@ -7450,16 +7448,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             node
         } else {
             match &subject.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param {
-                    ordinal,
-                    binding: _,
-                    ..
-                } => self
+                crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_write(*ordinal)
                     .or_else(|| self.params.get(*ordinal as usize).copied())?,
-                crate::flow_slice_content::SliceNarrowRoot::Local {
-                    name: _, binding, ..
-                } => self.read_local(binding)?,
+                crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                    self.read_local(binding)?
+                }
             }
         };
         if subject.path.is_empty() {
@@ -8454,11 +8448,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             node
         } else {
             match &subject.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param {
-                    ordinal,
-                    binding: _,
-                    ..
-                } => self
+                crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_write(*ordinal)
                     .or_else(|| self.params.get(*ordinal as usize).copied())?,
                 crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
@@ -9260,10 +9250,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// 1` — unannotated, no const assertion). `as const` / annotated
     /// literals, parameters, and non-local reads are never widening.
     fn reads_widening_literal_local(&self, expr: &crate::flow_slice_content::SliceExpr) -> bool {
-        let crate::flow_slice_content::SliceExpr::Local {
-            binding, name: _, ..
-        } = expr
-        else {
+        let crate::flow_slice_content::SliceExpr::Local { binding, .. } = expr else {
             return false;
         };
         self.widening_of(binding)
@@ -9312,10 +9299,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             return widen_values_within(self.dispatch, node, &call.values);
         }
-        if let crate::flow_slice_content::SliceExpr::Local {
-            binding, name: _, ..
-        } = expr
-        {
+        if let crate::flow_slice_content::SliceExpr::Local { binding, .. } = expr {
             match self.membership_of(binding) {
                 Some(WideningMembership::All) => {
                     return widen_fresh_read_node(self.dispatch, node);

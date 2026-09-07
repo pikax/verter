@@ -624,7 +624,6 @@ impl FlowFrameProducts {
     pub fn subjects_in(&self, domain: FlowDomain) -> Vec<FlowBindingRef> {
         self.state
             .ordered_entries()
-            .into_iter()
             .filter_map(|(key, _)| {
                 if key.domain() != domain {
                     return None;
@@ -638,7 +637,6 @@ impl FlowFrameProducts {
         let mut seen = rustc_hash::FxHashSet::default();
         self.state
             .ordered_entries()
-            .into_iter()
             .filter_map(|(key, _)| {
                 let subject = key.binding_ref()?.clone();
                 seen.insert(subject.clone()).then_some(subject)
