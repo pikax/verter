@@ -101,6 +101,31 @@ fn nested_value_frames_have_exact_indexed_locators() {
 }
 
 #[test]
+fn captures_exclude_local_shadows_and_share_hoisted_runtime_slots() {
+    let index = index_of("function root(value) { var value; return [(value) => value, () => { const value = 2; return value; }, () => value]; }");
+    let root = entry_of(&index, "root");
+    let children: Vec<_> = index
+        .entries
+        .iter()
+        .filter(|entry| entry.lexical_parent.as_deref() == Some(&root.key))
+        .collect();
+    assert_eq!(children.len(), 3);
+    assert!(
+        children[0].captures.0.is_empty(),
+        "a child parameter shadows the outer variable"
+    );
+    assert!(
+        children[1].captures.0.is_empty(),
+        "a child local shadows the outer variable"
+    );
+    assert_eq!(children[2].captures.0.len(), 1);
+    assert_eq!(
+        children[2].captures.0[0].binding_slot, 0,
+        "the parameter is the shared runtime identity of its var redeclaration"
+    );
+}
+
+#[test]
 fn flow_binding_map_is_bijective_for_value_bindings() {
     use crate::analysis::flow::{
         build_function_body_skeleton, FlowBindingMap, FlowBindingMapError, FunctionBodySource,

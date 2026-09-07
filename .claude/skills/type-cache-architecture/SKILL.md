@@ -101,6 +101,18 @@ subset. The plan in `.claude/skills/type-cache-architecture/SKILL.md` names the
 additional guards and discriminating tests that must land with each implementation
 block before the corresponding rule becomes executable policy.
 
+### Flow graph binding authority
+
+`FlowGraphBundle` owns the immutable skeleton, dependence graph, and
+`Arc<FlowBindingMap>` for one `FlowSliceFunctionKey` content version. The retained
+snapshot source checks the indexed entry's body hashes and the served parse and
+language identity before building the exact binding map from that entry's full
+declaration inventory. The graph store publishes the complete bundle once; every
+demand and selected-content lowering shares those artifacts. Caller-provided
+inventories must never initialize a cached map. A correspondence error remains a
+typed source/store error, publishes nothing, and follows failed non-admission at
+the hash/lower nodes; it is never cached as absence or replaced by an empty map.
+
 ## Architectural rules (R1–R31)
 
 ### Mutation semantics

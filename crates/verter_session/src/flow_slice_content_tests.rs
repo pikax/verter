@@ -122,7 +122,7 @@ fn slice_binding_references_preserve_shadowed_capture_frames() {
     let mut identities = Vec::new();
     let mut functions = Vec::new();
     for region in [consequent, alternate] {
-        let mut region = region;
+        let mut region: &SliceRegion = region;
         while let [SliceStatement::Block(block)] = region.statements.as_ref() {
             region = block;
         }
