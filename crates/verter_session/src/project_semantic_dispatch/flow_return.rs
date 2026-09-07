@@ -2035,6 +2035,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     E::BasisKeyMismatch
                     | E::SelectionOutOfRange
                     | E::SelectionDemandMismatch
+                    | E::BindingInventoryMismatch(_)
                     | E::SelectionProvenanceMismatch => FlowPlanRefusal::TornView,
                     E::UnregisteredOperation | E::NotAnEnabledRoot | E::UnrepresentableDemand => {
                         FlowPlanRefusal::Unplannable
@@ -3441,6 +3442,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             demanded_member,
             inventory: super::flow_solve::FlowBindingInventory {
                 bindings: Arc::clone(&entry.bindings),
+                anchor: entry.span.start,
             },
         })
     }
@@ -4701,13 +4703,19 @@ fn slice_expr_is_exact_subject_read(
     }
     match (expr, &subject.root) {
         (
-            crate::flow_slice_content::SliceExpr::Param { ordinal },
-            crate::flow_slice_content::SliceNarrowRoot::Param(subject_ordinal),
-        ) => ordinal == subject_ordinal,
+            crate::flow_slice_content::SliceExpr::Param { binding, .. },
+            crate::flow_slice_content::SliceNarrowRoot::Param {
+                binding: subject_binding,
+                ..
+            },
+        ) => binding == subject_binding,
         (
-            crate::flow_slice_content::SliceExpr::Local { name, .. },
-            crate::flow_slice_content::SliceNarrowRoot::Local(subject_name),
-        ) => name == subject_name,
+            crate::flow_slice_content::SliceExpr::Local { binding, .. },
+            crate::flow_slice_content::SliceNarrowRoot::Local {
+                binding: subject_binding,
+                ..
+            },
+        ) => binding == subject_binding,
         _ => false,
     }
 }
@@ -5537,6 +5545,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// conditional-arm nesting additionally enters the
     /// conditional-definition set; an unconditional rebind of the same
     /// name clears it.
+    fn parameter_narrow_root(
+        &self,
+        ordinal: u32,
+    ) -> Option<crate::flow_slice_content::SliceNarrowRoot> {
+        let binding = self.param_names.get(ordinal as usize)?.binding?;
+        Some(crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, binding })
+    }
+
+    fn existing_local_narrow_root(
+        &self,
+        name: &str,
+    ) -> Option<crate::flow_slice_content::SliceNarrowRoot> {
+        self.narrowings
+            .iter()
+            .find_map(|(subject, _)| match &subject.root {
+                crate::flow_slice_content::SliceNarrowRoot::Local {
+                    name: candidate, ..
+                } if candidate.as_ref() == name => Some(subject.root.clone()),
+                _ => None,
+            })
+    }
     fn bind_local(
         &mut self,
         name: &str,
@@ -5583,8 +5612,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // A (re)binding replaces the binding's value: every narrow fact a
         // guard established about the OLD value — at the root or under
         // any member path — dies with it.
-        let root = crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(name));
-        self.narrowings.retain(|(subject, _)| subject.root != root);
+        let root = self.existing_local_narrow_root(name);
+        self.narrowings
+            .retain(|(subject, _)| Some(&subject.root) != root.as_ref());
     }
 
     /// Record the authored declared type of a declaration separately from its
@@ -5618,7 +5648,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         target: &crate::flow_slice_content::SliceNarrowSubject,
     ) -> Option<SemanticNodeId> {
-        if let crate::flow_slice_content::SliceNarrowRoot::Local(name) = &target.root {
+        if let crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } = &target.root {
             if !self.locals.contains_key(name.as_ref())
                 && !self.var_locals.contains_key(name.as_ref())
             {
@@ -5626,10 +5656,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
         }
         match &target.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
+            crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => {
                 self.params.get(*ordinal as usize).copied()
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+            crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } => {
                 if self.locals.contains_key(name.as_ref()) {
                     self.declared_locals.get(name.as_ref()).copied()
                 } else {
@@ -5659,12 +5689,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // manufacture `number | number` instead of deduplicating the
             // assignment path.
             let current = match &target.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => self
+                crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_writes
                     .get(ordinal)
                     .copied()
                     .or_else(|| self.params.get(*ordinal as usize).copied()),
-                crate::flow_slice_content::SliceNarrowRoot::Local(name) => self
+                crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } => self
                     .locals
                     .get(name.as_ref())
                     .copied()
@@ -5962,7 +5992,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.assignment_node_for_target(target, node)
         };
         match &target.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
+            crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => {
                 let ordinal = *ordinal;
                 self.narrowings
                     .retain(|(subject, _)| subject.root != target.root);
@@ -5973,7 +6003,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     );
                 }
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+            crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } => {
                 let kind = if self.locals.contains_key(name.as_ref()) {
                     crate::flow_slice_content::SliceBindingKind::Let
                 } else {
@@ -6819,10 +6849,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // segments from it, so a guarded member read can never see the
         // pre-narrow union.
         let overlay_root = param_ordinal
-            .map(crate::flow_slice_content::SliceNarrowRoot::Param)
+            .and_then(|ordinal| self.parameter_narrow_root(ordinal))
             .or_else(|| {
                 (self.locals.contains_key(head) || self.var_locals.contains_key(head))
-                    .then(|| crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(head)))
+                    .then(|| self.existing_local_narrow_root(head))
+                    .flatten()
             });
         if let Some(root) = overlay_root {
             let segments: Vec<Arc<str>> = value_ref.path[1..]
@@ -7062,12 +7093,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             node
         } else {
             match &subject.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => self
+                crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_writes
                     .get(ordinal)
                     .copied()
                     .or_else(|| self.params.get(*ordinal as usize).copied())?,
-                crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+                crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } => {
                     self.read_local(name.as_ref())?
                 }
             }
@@ -7994,10 +8025,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return;
         }
         match &subject.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
+            crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => {
                 state.param_writes.insert(*ordinal, node);
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+            crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } => {
                 if let Some(slot) = state.locals.get_mut(name.as_ref()) {
                     *slot = node;
                 } else if let Some(slot) = state.var_locals.get_mut(name.as_ref()) {
@@ -8045,12 +8076,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             node
         } else {
             match &subject.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => self
+                crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_writes
                     .get(ordinal)
                     .copied()
                     .or_else(|| self.params.get(*ordinal as usize).copied())?,
-                crate::flow_slice_content::SliceNarrowRoot::Local(name) => self
+                crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } => self
                     .locals
                     .get(name.as_ref())
                     .or_else(|| self.var_locals.get(name.as_ref()))
@@ -9744,27 +9775,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 // killed — and the clause-write flags lose
                                 // their reason: no path past the statement
                                 // can have skipped those writes.
-                                let mut killed: rustc_hash::FxHashSet<
-                                    crate::flow_slice_content::SliceNarrowRoot,
-                                > = rustc_hash::FxHashSet::default();
-                                for name in finally_written.0.iter().chain(finally_written.1.iter())
-                                {
-                                    killed.insert(
-                                        crate::flow_slice_content::SliceNarrowRoot::Local(
-                                            Arc::from(name.as_str()),
-                                        ),
-                                    );
-                                }
-                                for ordinal in &finally_written.2 {
-                                    killed.insert(
-                                        crate::flow_slice_content::SliceNarrowRoot::Param(*ordinal),
-                                    );
-                                }
                                 let restored: Vec<_> = try_narrowings
                                     .iter()
                                     .filter(|fact| {
-                                        !entry.narrowings.contains(fact)
-                                            && !killed.contains(&fact.0.root)
+                                        !entry.narrowings.contains(fact) && !match &fact.0.root {
+                                            crate::flow_slice_content::SliceNarrowRoot::Local {
+                                                name,
+                                                ..
+                                            } => finally_written
+                                                .0
+                                                .iter()
+                                                .chain(&finally_written.1)
+                                                .any(|written| written == name.as_ref()),
+                                            crate::flow_slice_content::SliceNarrowRoot::Param {
+                                                ordinal,
+                                                ..
+                                            } => finally_written.2.contains(ordinal),
+                                        }
                                     })
                                     .cloned()
                                     .collect();
@@ -9963,6 +9990,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     init,
                     declared,
                     freshness,
+                    ..
                 } => {
                     // A lexical declaration shadows any outer same-named
                     // binding for the extent of its block scope: record
@@ -10871,11 +10899,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // carry: the slice and the signature disagree about this
             // frame's arity. That is a fact about this REFERENCE, not
             // about the body around it.
-            crate::flow_slice_content::SliceExpr::Param { ordinal } => {
+            crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => {
                 // A guard narrow (or an applied write) substitutes the
                 // parameter's CURRENT value positionally.
                 let subject = crate::flow_slice_content::SliceNarrowSubject {
-                    root: crate::flow_slice_content::SliceNarrowRoot::Param(*ordinal),
+                    root: crate::flow_slice_content::SliceNarrowRoot::Param {
+                        ordinal: *ordinal,
+                        binding: *binding,
+                    },
                     path: Arc::from(Vec::new().into_boxed_slice()),
                 };
                 if let Some(node) = self.narrowed_read(&subject) {
@@ -10918,6 +10949,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 name,
                 param,
                 captured,
+                binding,
             } => {
                 // The READ folds the binding's membership flags into this
                 // evaluation's degradation channel. A plain unbound local
@@ -10927,9 +10959,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // parameter is still the reaching value.
                 if !captured {
                     let subject = crate::flow_slice_content::SliceNarrowSubject {
-                        root: crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(
-                            name.as_ref(),
-                        )),
+                        root: crate::flow_slice_content::SliceNarrowRoot::Local {
+                            name: Arc::clone(name),
+                            binding: binding.clone(),
+                        },
                         path: Arc::from(Vec::new().into_boxed_slice()),
                     };
                     if let Some(node) = self.narrowed_read(&subject) {
@@ -10967,6 +11000,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 declared_return,
                 body,
                 can_fall_through,
+                ..
             } => {
                 if let Some(gap) = gap {
                     self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
@@ -11106,17 +11140,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .iter()
                 .position(|param| param.name.as_deref() == Some(name))
                 .map(|ordinal| ordinal as u32);
-            let local_subject = crate::flow_slice_content::SliceNarrowSubject {
-                root: crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(name)),
-                path: Arc::from(Vec::new().into_boxed_slice()),
-            };
-            if let Some(node) = self.narrowed_read(&local_subject) {
-                return Some(node);
+            if let Some(root) = self.existing_local_narrow_root(name) {
+                let subject = crate::flow_slice_content::SliceNarrowSubject {
+                    root,
+                    path: Arc::from([]),
+                };
+                if let Some(node) = self.narrowed_read(&subject) {
+                    return Some(node);
+                }
             }
             if let Some(node) = param_ordinal.and_then(|ordinal| {
+                let root = self.parameter_narrow_root(ordinal)?;
                 self.narrowed_read(&crate::flow_slice_content::SliceNarrowSubject {
-                    root: crate::flow_slice_content::SliceNarrowRoot::Param(ordinal),
-                    path: Arc::from(Vec::new().into_boxed_slice()),
+                    root,
+                    path: Arc::from([]),
                 })
             }) {
                 return Some(node);
@@ -11718,6 +11755,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 param,
                 name,
                 captured,
+                ..
             } => {
                 // A call on a function-typed binding: the call's value is
                 // the binding's signature return. Calling an `any`-typed

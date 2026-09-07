@@ -865,6 +865,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     let declaration = FunctionDeclarationRef { owner: verter_type_expr::TopLevelOwnerId::ordinary_file(), name: std::sync::Arc::from(name), space: verter_semantic::facts::SymbolSpace::Value };
     let function = FunctionProgramKey { declaration, part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody, overload_ordinal: 0 };
     let inventory = FlowBindingInventory {
+        anchor: index.get(&function).expect("the fixture function is indexed").entry().span.start,
         bindings: std::sync::Arc::clone(&index.get(&function).expect("the fixture function is indexed").entry().bindings),
     };
     let key = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {

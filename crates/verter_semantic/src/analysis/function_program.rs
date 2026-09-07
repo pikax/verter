@@ -92,6 +92,8 @@ pub enum FunctionDescentStep {
     /// (source order) when that callee is itself a function / arrow
     /// expression — an immediately-invoked function expression.
     CallCallee { call_ordinal: u32 },
+    /// A directly nested callable in the shared source-order inventory.
+    NestedCallable { ordinal: u32 },
 }
 
 /// Arena-free locator for one function's body inside the retained parse
@@ -143,6 +145,16 @@ pub enum FunctionBindingKind {
     Var,
     /// A nested function declaration's name.
     NestedFunction,
+    /// A local class declaration.
+    Class,
+    /// A catch parameter, including pattern elements.
+    CatchParam,
+    /// A local enum declaration.
+    Enum,
+    /// A local namespace declaration.
+    Namespace,
+    /// A local import-equals declaration.
+    ImportEquals,
 }
 
 /// One local binding (parameter, variable declarator, nested function name).
@@ -165,6 +177,48 @@ pub struct FunctionBindingRecord {
     /// `var`. A reference resolves to the same-name binding whose scope
     /// CONTAINS the reference and is innermost among those.
     pub scope_span: verter_span::Span,
+}
+
+/// Runtime-variable equivalence over exact declaration slots. Hoisted
+/// redeclarations share their authored scope; block lexicals remain distinct.
+pub(crate) fn canonical_runtime_binding_slots(bindings: &[FunctionBindingRecord]) -> Vec<u32> {
+    let mut groups = rustc_hash::FxHashMap::default();
+    let hoists = |kind| {
+        matches!(
+            kind,
+            FunctionBindingKind::Param
+                | FunctionBindingKind::Var
+                | FunctionBindingKind::NestedFunction
+        )
+    };
+    for (slot, binding) in bindings.iter().enumerate() {
+        if hoists(binding.kind) {
+            let key = (
+                binding.name.as_ref(),
+                binding.scope_span.start,
+                binding.scope_span.end,
+            );
+            let canonical = groups.entry(key).or_insert(slot as u32);
+            if binding.kind == FunctionBindingKind::Param {
+                *canonical = slot as u32;
+            }
+        }
+    }
+    bindings
+        .iter()
+        .enumerate()
+        .map(|(slot, binding)| {
+            if hoists(binding.kind) {
+                groups[&(
+                    binding.name.as_ref(),
+                    binding.scope_span.start,
+                    binding.scope_span.end,
+                )]
+            } else {
+                slot as u32
+            }
+        })
+        .collect()
 }
 
 /// One identifier reference in the current function body (nested function
@@ -276,7 +330,7 @@ pub struct ProgramExpressionRecord {
 /// per-capture-list ordinal) can distinguish. NEVER a node id, a type, a
 /// content hash, or a span — capture types rehydrate from indexed binding /
 /// reaching-definition facts under the final type substitution.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct FlowBindingIdentity {
     /// The binding name.
     pub name: Arc<str>,
@@ -286,6 +340,21 @@ pub struct FlowBindingIdentity {
     pub defining_function: FunctionProgramKey,
     /// The binding's source-order slot in that frame's binding inventory.
     pub binding_slot: u32,
+}
+
+impl PartialEq for FlowBindingIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.defining_function == other.defining_function && self.binding_slot == other.binding_slot
+    }
+}
+
+impl Eq for FlowBindingIdentity {}
+
+impl std::hash::Hash for FlowBindingIdentity {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.defining_function, state);
+        std::hash::Hash::hash(&self.binding_slot, state);
+    }
 }
 
 /// The content-free capture environment of a nested function position:
@@ -564,6 +633,17 @@ pub struct FunctionProgramIndex {
 }
 
 impl FunctionProgramIndex {
+    /// Locate one exact child position in the retained file inventory.
+    pub fn nested_at(
+        &self,
+        parent: &FunctionProgramKey,
+        span: verter_span::Span,
+    ) -> Option<FunctionProgramMatch<'_>> {
+        self.entries
+            .iter()
+            .find(|entry| entry.lexical_parent.as_deref() == Some(parent) && entry.span == span)
+            .map(|entry| FunctionProgramMatch { entry })
+    }
     /// The entry for `key`, when the position is served by this file.
     #[must_use]
     pub fn get(&self, key: &FunctionProgramKey) -> Option<FunctionProgramMatch<'_>> {
@@ -829,6 +909,10 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
     for (position, entry) in entries.iter().enumerate() {
         position_of.entry(entry.key.clone()).or_insert(position);
     }
+    let runtime_slots: Vec<_> = frame_bindings
+        .iter()
+        .map(|bindings| canonical_runtime_binding_slots(bindings))
+        .collect();
     for index in 0..entries.len() {
         let Some(parent) = parents[index].clone() else {
             continue;
@@ -852,6 +936,7 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
             else {
                 continue;
             };
+            let slot = runtime_slots[frame][slot as usize];
             if seen.contains(&(frame, slot)) {
                 continue;
             }
@@ -1400,7 +1485,10 @@ fn link_callback_return_sources(
         .filter(|entry| {
             matches!(
                 entry.locator.descent.last(),
-                Some(FunctionDescentStep::CallArgument { .. })
+                Some(
+                    FunctionDescentStep::CallArgument { .. }
+                        | FunctionDescentStep::NestedCallable { .. }
+                )
             )
         })
         .map(|entry| {
@@ -2362,83 +2450,62 @@ fn discover_arrow_inner(
     discover_nested_positions(&arrow.body.statements, &key, &locator, ctx);
 }
 
-/// Discover the nested served positions inside one function body:
-/// hoisted nested function declarations (their own frames) and function /
-/// arrow expressions in call-argument position (callback positions).
-/// Each nested position gets an exact `FunctionProgramKey` (the parent's
-/// declaration identity with part `Other { ordinal }` — source-order
-/// among nested positions in the file), a body locator (the parent's
-/// descent + the nested step), and its lexical parent. Nested positions
-/// recurse: a callback's own body is discovered under the callback's key.
+/// Visit each directly nested callable once, without entering its frame.
+/// Discovery and locator dereference share this exact ordinal walk.
+fn for_each_nested_callable<'a>(
+    statements: &'a [Statement<'a>],
+    mut visit: impl FnMut(FunctionNode<'a>),
+) {
+    struct CallableVisitor<'f, F>(&'f mut F);
+    impl<'a, F: FnMut(FunctionNode<'a>)> Visit<'a> for CallableVisitor<'_, F> {
+        fn visit_function(
+            &mut self,
+            function: &Function<'a>,
+            _flags: oxc_syntax::scope::ScopeFlags,
+        ) {
+            let function = self.alloc(function);
+            (self.0)(FunctionNode::Function(function));
+        }
+        fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+            let arrow = self.alloc(arrow);
+            (self.0)(FunctionNode::Arrow(arrow));
+        }
+        fn visit_class(&mut self, _class: &Class<'a>) {}
+        fn visit_ts_type(&mut self, _ty: &oxc_ast::ast::TSType<'a>) {}
+    }
+    let mut visitor = CallableVisitor(&mut visit);
+    for statement in statements {
+        visitor.visit_statement(statement);
+    }
+}
+
+/// Index every directly nested callable under its exact lexical parent.
 fn discover_nested_positions(
     statements: &[Statement<'_>],
     parent_key: &FunctionProgramKey,
     parent_locator: &FunctionBodyLocator,
     ctx: &mut DiscoveryCtx<'_>,
 ) {
-    let mut call_ordinal: u32 = 0;
-    for (statement_ordinal, stmt) in statements.iter().enumerate() {
-        if let Statement::FunctionDeclaration(func) = stmt {
-            if func.id.is_some() {
-                let ordinal = ctx.next_nested_ordinal;
-                ctx.next_nested_ordinal += 1;
-                let mut descent = parent_locator.descent.to_vec();
-                descent.push(FunctionDescentStep::BodyStatement {
-                    statement_ordinal: u32::try_from(statement_ordinal).unwrap_or(u32::MAX),
-                });
-                discover_nested_function(
-                    func,
-                    parent_key,
-                    parent_locator.contributor,
-                    descent,
-                    ordinal,
-                    ctx,
-                );
-            }
-            continue;
-        }
-        discover_call_positions(stmt, parent_key, parent_locator, &mut call_ordinal, ctx);
-    }
+    let mut local_ordinal = 0;
+    for_each_nested_callable(statements, |node| {
+        let ordinal = ctx.next_nested_ordinal;
+        ctx.next_nested_ordinal += 1;
+        let mut descent = parent_locator.descent.to_vec();
+        descent.push(FunctionDescentStep::NestedCallable {
+            ordinal: local_ordinal,
+        });
+        local_ordinal += 1;
+        discover_nested_callable(
+            node,
+            node.span().into(),
+            parent_key,
+            parent_locator,
+            descent,
+            ordinal,
+            ctx,
+        );
+    });
 }
-
-/// One hoisted nested function declaration, discovered under its lexical
-/// parent's key.
-fn discover_nested_function(
-    func: &Function<'_>,
-    parent_key: &FunctionProgramKey,
-    contributor: DeclContributorAnchor,
-    descent: Vec<FunctionDescentStep>,
-    ordinal: u32,
-    ctx: &mut DiscoveryCtx<'_>,
-) {
-    let Some(body) = func.body.as_ref() else {
-        return;
-    };
-    let params = formal_params(&func.params);
-    let key = FunctionProgramKey {
-        declaration: parent_key.declaration.clone(),
-        part: FunctionPartIdentity::Other { ordinal },
-        overload_ordinal: 0,
-    };
-    let locator = FunctionBodyLocator {
-        contributor,
-        descent: Arc::from(descent.into_boxed_slice()),
-    };
-    let mut entry = build_entry(
-        ctx.source,
-        key.clone(),
-        locator.clone(),
-        params,
-        &body.statements,
-        func.span.start,
-        FunctionNode::Function(func),
-    );
-    entry.lexical_parent = Some(Box::new(parent_key.clone()));
-    entry.nested_declaration_name = func.id.as_ref().map(|id| Arc::from(id.name.as_str()));
-    ctx.push(entry);
-    discover_nested_positions(&body.statements, &key, &locator, ctx);
-}
-
 /// One function / arrow expression in call-argument position, discovered
 /// under its lexical parent's key.
 fn discover_nested_callable(
@@ -2478,80 +2545,14 @@ fn discover_nested_callable(
         node,
     );
     entry.lexical_parent = Some(Box::new(parent_key.clone()));
+    if let FunctionNode::Function(function) = node {
+        if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration {
+            entry.nested_declaration_name =
+                function.id.as_ref().map(|id| Arc::from(id.name.as_str()));
+        }
+    }
     ctx.push(entry);
     discover_nested_positions(statements, &key, &locator, ctx);
-}
-
-/// Walk one statement for the function values a call site binds — its
-/// callee when that callee is an immediately-invoked function expression,
-/// and every function / arrow ARGUMENT (callback positions) — without
-/// entering nested frames (each nested frame discovers its own call
-/// sites). The call ordinal comes from the ONE shared call-site walk
-/// ([`for_each_call_expression`]) — the locator deref resolves ordinals
-/// through the same walk.
-fn discover_call_positions(
-    stmt: &Statement<'_>,
-    parent_key: &FunctionProgramKey,
-    parent_locator: &FunctionBodyLocator,
-    call_ordinal: &mut u32,
-    ctx: &mut DiscoveryCtx<'_>,
-) {
-    for_each_call_expression(std::slice::from_ref(stmt), |call| {
-        let ordinal = *call_ordinal;
-        *call_ordinal += 1;
-        if let Some(node) = match &call.callee {
-            Expression::ArrowFunctionExpression(arrow) => Some(FunctionNode::Arrow(arrow)),
-            Expression::FunctionExpression(func) => Some(FunctionNode::Function(func)),
-            Expression::ParenthesizedExpression(paren) => match &paren.expression {
-                Expression::ArrowFunctionExpression(arrow) => Some(FunctionNode::Arrow(arrow)),
-                Expression::FunctionExpression(func) => Some(FunctionNode::Function(func)),
-                _ => None,
-            },
-            _ => None,
-        } {
-            let nested_ordinal = ctx.next_nested_ordinal;
-            ctx.next_nested_ordinal += 1;
-            let mut descent = parent_locator.descent.to_vec();
-            descent.push(FunctionDescentStep::CallCallee {
-                call_ordinal: ordinal,
-            });
-            discover_nested_callable(
-                node,
-                call.callee.span().into(),
-                parent_key,
-                parent_locator,
-                descent,
-                nested_ordinal,
-                ctx,
-            );
-        }
-        for (arg_ordinal, argument) in call.arguments.iter().enumerate() {
-            let Some(expression) = argument.as_expression() else {
-                continue;
-            };
-            let node = match expression {
-                Expression::ArrowFunctionExpression(arrow) => FunctionNode::Arrow(arrow),
-                Expression::FunctionExpression(func) => FunctionNode::Function(func),
-                _ => continue,
-            };
-            let nested_ordinal = ctx.next_nested_ordinal;
-            ctx.next_nested_ordinal += 1;
-            let mut descent = parent_locator.descent.to_vec();
-            descent.push(FunctionDescentStep::CallArgument {
-                call_ordinal: ordinal,
-                arg_ordinal: u32::try_from(arg_ordinal).unwrap_or(u32::MAX),
-            });
-            discover_nested_callable(
-                node,
-                expression.span().into(),
-                parent_key,
-                parent_locator,
-                descent,
-                nested_ordinal,
-                ctx,
-            );
-        }
-    });
 }
 
 fn formal_params(params: &oxc_ast::ast::FormalParameters<'_>) -> Arc<[FunctionParamRecord]> {
@@ -2748,21 +2749,24 @@ fn build_entry(
         ..InventoryVisitor::default()
     };
     // Parameters bind first in source order, before any body statement.
-    for param in params.iter() {
-        if let Some(name) = param.name.as_ref() {
-            inventory.bindings.push(FunctionBindingRecord {
-                name: Arc::clone(name),
-                kind: FunctionBindingKind::Param,
-                span: verter_span::Span::new(0, 0),
-                scope_span: frame_span,
-            });
+    if let FunctionNode::Function(function) = node {
+        if function.r#type == oxc_ast::ast::FunctionType::FunctionExpression {
+            if let Some(id) = &function.id {
+                inventory.record_binding(id, FunctionBindingKind::NestedFunction, frame_span);
+            }
         }
+    }
+    for param in &node.params().items {
+        inventory.record_pattern(&param.pattern, FunctionBindingKind::Param, frame_span);
+    }
+    if let Some(rest) = &node.params().rest {
+        inventory.record_pattern(&rest.rest.argument, FunctionBindingKind::Param, frame_span);
     }
     for stmt in statements {
         inventory.visit_statement(stmt);
     }
     let InventoryVisitor {
-        mut bindings,
+        bindings,
         references,
         return_sites,
         writes,
@@ -2779,7 +2783,6 @@ fn build_entry(
     for_each_call_expression(statements, |call| {
         call_sites.push(call_site_record(call));
     });
-    bindings.dedup_by(|left, right| left.name == right.name && left.kind == right.kind);
 
     let parameter_occurrences = TypeParamOccurrences::of(&node);
     let type_parameters: Vec<FunctionProgramTypeParam> = node
@@ -2902,6 +2905,50 @@ struct InventoryVisitor {
 }
 
 impl InventoryVisitor {
+    fn record_binding(
+        &mut self,
+        id: &oxc_ast::ast::BindingIdentifier<'_>,
+        kind: FunctionBindingKind,
+        scope_span: verter_span::Span,
+    ) {
+        self.bindings.push(FunctionBindingRecord {
+            name: Arc::from(id.name.as_str()),
+            kind,
+            span: id.span.into(),
+            scope_span,
+        });
+    }
+
+    fn record_pattern(
+        &mut self,
+        pattern: &BindingPattern<'_>,
+        kind: FunctionBindingKind,
+        scope: verter_span::Span,
+    ) {
+        match pattern {
+            BindingPattern::BindingIdentifier(id) => self.record_binding(id, kind, scope),
+            BindingPattern::ObjectPattern(object) => {
+                for property in &object.properties {
+                    self.record_pattern(&property.value, kind, scope);
+                }
+                if let Some(rest) = &object.rest {
+                    self.record_pattern(&rest.argument, kind, scope);
+                }
+            }
+            BindingPattern::ArrayPattern(array) => {
+                for element in array.elements.iter().flatten() {
+                    self.record_pattern(element, kind, scope);
+                }
+                if let Some(rest) = &array.rest {
+                    self.record_pattern(&rest.argument, kind, scope);
+                }
+            }
+            BindingPattern::AssignmentPattern(assignment) => {
+                self.record_pattern(&assignment.left, kind, scope)
+            }
+        }
+    }
+
     /// The innermost open block-like scope, else the whole frame.
     fn block_scope(&self) -> verter_span::Span {
         self.scope_stack.last().copied().unwrap_or(self.frame_span)
@@ -2919,7 +2966,41 @@ impl<'a> Visit<'a> for InventoryVisitor {
 
     fn visit_class(&mut self, _it: &Class<'a>) {}
 
+    fn visit_catch_clause(&mut self, clause: &oxc_ast::ast::CatchClause<'a>) {
+        self.scope_stack.push(clause.span.into());
+        if let Some(param) = &clause.param {
+            self.record_pattern(
+                &param.pattern,
+                FunctionBindingKind::CatchParam,
+                clause.span.into(),
+            );
+        }
+        walk::walk_catch_clause(self, clause);
+        self.scope_stack.pop();
+    }
+
     fn visit_statement(&mut self, it: &Statement<'a>) {
+        let named = match it {
+            Statement::ClassDeclaration(class) => {
+                class.id.as_ref().map(|id| (id, FunctionBindingKind::Class))
+            }
+            Statement::TSEnumDeclaration(declaration) => {
+                Some((&declaration.id, FunctionBindingKind::Enum))
+            }
+            Statement::TSModuleDeclaration(module) => match &module.id {
+                oxc_ast::ast::TSModuleDeclarationName::Identifier(id) => {
+                    Some((id, FunctionBindingKind::Namespace))
+                }
+                _ => None,
+            },
+            Statement::TSImportEqualsDeclaration(declaration) => {
+                Some((&declaration.id, FunctionBindingKind::ImportEquals))
+            }
+            _ => None,
+        };
+        if let Some((id, kind)) = named {
+            self.record_binding(id, kind, self.block_scope());
+        }
         if let Statement::FunctionDeclaration(func) = it {
             if let Some(id) = func.id.as_ref() {
                 let scope_span = self.block_scope();
@@ -2985,14 +3066,7 @@ impl<'a> Visit<'a> for InventoryVisitor {
             self.block_scope()
         };
         for declarator in &it.declarations {
-            if let BindingPattern::BindingIdentifier(id) = &declarator.id {
-                self.bindings.push(FunctionBindingRecord {
-                    name: Arc::from(id.name.as_str()),
-                    kind,
-                    span: id.span.into(),
-                    scope_span,
-                });
-            }
+            self.record_pattern(&declarator.id, kind, scope_span);
         }
         walk::walk_variable_declaration(self, it);
     }
@@ -3090,6 +3164,7 @@ fn collect_static_member_path(
 /// The function node a [`FunctionBodyLocator`] descent lands on — the ONE
 /// authored-position view every per-function body product (skeleton
 /// build, lazy body lowering) reads from the retained snapshot.
+#[derive(Clone, Copy)]
 pub enum FunctionNode<'a> {
     /// A `function` declaration / expression or a class/object method.
     Function(&'a Function<'a>),
@@ -3240,7 +3315,7 @@ pub fn resolve_function_node<'a>(
     // IIFE callee). `None` while the descent is still navigating
     // declarations from the contributor statement.
     let mut current_body: Option<&'a oxc_ast::ast::FunctionBody<'a>> = None;
-    let mut steps = locator.descent.iter();
+    let mut steps = locator.descent.iter().peekable();
     loop {
         match steps.next()? {
             FunctionDescentStep::NamespaceMember { statement_ordinal } => {
@@ -3279,7 +3354,7 @@ pub fn resolve_function_node<'a>(
                     _ => None,
                 };
                 let init = declarator.init.as_ref()?;
-                match steps.next() {
+                match steps.peek().copied() {
                     None => {
                         return Some(ResolvedFunctionNode {
                             node: function_from_expression(init)?,
@@ -3288,6 +3363,7 @@ pub fn resolve_function_node<'a>(
                         });
                     }
                     Some(FunctionDescentStep::ObjectMember { member_ordinal }) => {
+                        steps.next();
                         let Expression::ObjectExpression(obj) = init else {
                             return None;
                         };
@@ -3369,6 +3445,32 @@ pub fn resolve_function_node<'a>(
                 // Only valid immediately after a VariableInitializer step
                 // (handled there).
                 return None;
+            }
+            FunctionDescentStep::NestedCallable { ordinal } => {
+                let body = current_body?;
+                let mut position = 0;
+                let mut selected = None;
+                for_each_nested_callable(&body.statements, |node| {
+                    if position == *ordinal {
+                        selected = Some(node);
+                    }
+                    position += 1;
+                });
+                let node = selected?;
+                if steps.len() == 0 {
+                    let self_name = match node {
+                        FunctionNode::Function(function) => {
+                            function.id.as_ref().map(|id| Arc::from(id.name.as_str()))
+                        }
+                        FunctionNode::Arrow(_) => None,
+                    };
+                    return Some(ResolvedFunctionNode {
+                        node,
+                        self_name,
+                        enclosing_type_parameters: None,
+                    });
+                }
+                current_body = node.body();
             }
             FunctionDescentStep::BodyStatement { statement_ordinal } => {
                 // The statement at `statement_ordinal` inside the enclosing

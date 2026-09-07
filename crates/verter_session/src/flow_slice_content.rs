@@ -136,6 +136,7 @@ impl FlowSliceSelection {
 /// reachability result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceContent {
+    pub bindings: verter_semantic::analysis::flow::FlowBindingMap,
     /// Formal parameters in source order (rest parameter last).
     pub params: Arc<[SliceParam]>,
     /// The function's OWN type parameters (the root signature's binders —
@@ -190,6 +191,7 @@ pub struct SliceContent {
 /// One formal parameter.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceParam {
+    pub binding: Option<SkeletonBindingId>,
     /// The binding name (`None` for a destructured parameter).
     pub name: Option<Arc<str>>,
     /// Whether the parameter is optional (`?`).
@@ -212,6 +214,7 @@ pub struct SliceParam {
 /// One modelled element of a destructured object-pattern parameter.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceDestructuredElement {
+    pub binding: SkeletonBindingId,
     /// The binding name the body reads.
     pub name: Arc<str>,
     /// The annotation member whose value the element binds — equal to
@@ -392,6 +395,7 @@ pub enum SliceStatement {
     },
     /// A `const` / `let` / `var` declarator with an identifier binding.
     Binding {
+        binding: verter_semantic::analysis::flow::SkeletonBindingId,
         /// The binding name.
         name: Arc<str>,
         /// The declaration kind.
@@ -479,6 +483,7 @@ pub enum SliceSwitchTest {
 /// destructured catch parameter binds nothing here) and its body region.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceCatchClause {
+    pub binding: Option<SkeletonBindingId>,
     /// The catch parameter's binding name, when authored as a plain
     /// identifier.
     pub param: Option<Arc<str>>,
@@ -506,12 +511,57 @@ pub enum SliceBindingKind {
 /// A guard only ever narrows a frame-owned binding — a free (module- /
 /// outer-scope) name is never a narrowable root, because the evaluator
 /// cannot substitute it positionally.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub enum SliceNarrowRoot {
     /// A simple formal parameter, by ordinal in source order.
-    Param(u32),
+    Param {
+        ordinal: u32,
+        binding: verter_semantic::analysis::flow::SkeletonBindingId,
+    },
     /// A modelable same-frame local (`const` / `let` / `var`), by name.
-    Local(Arc<str>),
+    Local {
+        name: Arc<str>,
+        binding: verter_semantic::analysis::flow::FlowBindingRef,
+    },
+}
+
+impl PartialEq for SliceNarrowRoot {
+    fn eq(&self, other: &Self) -> bool {
+        use verter_semantic::analysis::flow::FlowBindingRef;
+        match (self, other) {
+            (Self::Param { binding: a, .. }, Self::Param { binding: b, .. }) => a == b,
+            (Self::Local { binding: a, .. }, Self::Local { binding: b, .. }) => a == b,
+            (
+                Self::Param { binding: a, .. },
+                Self::Local {
+                    binding: FlowBindingRef::Local(b),
+                    ..
+                },
+            )
+            | (
+                Self::Local {
+                    binding: FlowBindingRef::Local(a),
+                    ..
+                },
+                Self::Param { binding: b, .. },
+            ) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SliceNarrowRoot {}
+
+impl std::hash::Hash for SliceNarrowRoot {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Param { binding, .. } => std::hash::Hash::hash(
+                &verter_semantic::analysis::flow::FlowBindingRef::Local(*binding),
+                state,
+            ),
+            Self::Local { binding, .. } => std::hash::Hash::hash(binding, state),
+        }
+    }
 }
 
 /// A narrowable reference: a binding root plus a static member path under
@@ -756,6 +806,7 @@ pub enum SliceExpr {
     },
     /// A parameter reference, substituted by the evaluator.
     Param {
+        binding: SkeletonBindingId,
         /// The parameter's ordinal in source order (rest last).
         ordinal: u32,
     },
@@ -775,6 +826,7 @@ pub enum SliceExpr {
     /// widen, the freshness classification) covers both by construction
     /// rather than by remembering to name a second carrier.
     Local {
+        binding: verter_semantic::analysis::flow::FlowBindingRef,
         /// The binding name.
         name: Arc<str>,
         /// The ordinal of a parameter this binding REDECLARES (a hoisted
@@ -808,6 +860,8 @@ pub enum SliceExpr {
     /// body-derived return through the same flow evaluation, never a body
     /// scan and never a leaf fallback.
     NestedFunctionValue {
+        bindings: verter_semantic::analysis::flow::FlowBindingMap,
+        skeleton: Arc<FunctionBodySkeleton>,
         gap: Option<crate::semantic_query::FlowGap>,
         /// The nested function's formal parameters (rest last).
         params: Arc<[SliceParam]>,
@@ -922,6 +976,7 @@ pub enum SliceCaptureAuthoritySource {
 /// One mutable closure capture's authored declaration authority.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceCaptureAuthority {
+    pub binding: verter_semantic::analysis::function_program::FlowBindingIdentity,
     pub name: Arc<str>,
     pub declared: GatedType,
     pub source: SliceCaptureAuthoritySource,
@@ -1034,6 +1089,7 @@ pub enum SliceCall {
     /// the call's value is the binding's signature return (a shadowed
     /// name is never a flow obligation edge).
     OnBinding {
+        binding: verter_semantic::analysis::flow::FlowBindingRef,
         /// The parameter ordinal (when the callee is a parameter).
         param: Option<u32>,
         /// The binding name.
@@ -1568,6 +1624,7 @@ pub(crate) fn build_function_type_param_clause(
 pub(crate) fn build_flow_slice_content(
     program: &Program<'_>,
     source: &str,
+    index: &verter_semantic::analysis::function_program::FunctionProgramIndex,
     entry: &FunctionProgramEntry,
     selection: &FlowSliceSelection,
     skeleton: &FunctionBodySkeleton,
@@ -1604,6 +1661,13 @@ pub(crate) fn build_flow_slice_content(
     );
     let type_param_names = slice_type_param_names(&node);
     let anchor = node_span(&node).start;
+    let bindings = verter_semantic::analysis::flow::FlowBindingMap::build(
+        skeleton,
+        &entry.bindings,
+        &entry.key,
+        anchor,
+    )
+    .ok()?;
     let params = match lower_params(
         node.params(),
         source,
@@ -1614,6 +1678,7 @@ pub(crate) fn build_flow_slice_content(
         Ok(params) => params,
         Err(reason) => {
             return Some(SliceContent {
+                bindings,
                 can_fall_through: false,
                 params: Arc::from(Vec::new().into_boxed_slice()),
                 type_parameters: Arc::from(Vec::new().into_boxed_slice()),
@@ -1648,6 +1713,8 @@ pub(crate) fn build_flow_slice_content(
     // environment only.
     let captures = CaptureScope::default();
     let mut lowerer = Lowerer {
+        bindings: &bindings,
+        index,
         source,
         anchor,
         selection: Some(selection),
@@ -1726,6 +1793,7 @@ pub(crate) fn build_flow_slice_content(
     let inert_write_spans = lowerer.inert_write_spans;
     let decided_above_call_spans = lowerer.decided_above_call_spans;
     Some(SliceContent {
+        bindings,
         can_fall_through: region.can_fall_through,
         params: Arc::from(params.into_boxed_slice()),
         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
@@ -2560,14 +2628,14 @@ fn lower_params(
                         }
                         _ => return None,
                     };
-                    let (binding, has_default) = match &property.value {
+                    let (binding, binding_span, has_default) = match &property.value {
                         BindingPattern::BindingIdentifier(id) => {
-                            (Arc::from(id.name.as_str()), false)
+                            (Arc::from(id.name.as_str()), id.span, false)
                         }
                         BindingPattern::AssignmentPattern(assignment) => {
                             match &assignment.left {
                                 BindingPattern::BindingIdentifier(id) => {
-                                    (Arc::from(id.name.as_str()), true)
+                                    (Arc::from(id.name.as_str()), id.span, true)
                                 }
                                 // A default over an ALIASED / nested
                                 // pattern is not modelled.
@@ -2577,6 +2645,8 @@ fn lower_params(
                         _ => return None,
                     };
                     Some(SliceDestructuredElement {
+                        binding: skeleton
+                            .binding_at_span(FrameSpan::rebase(anchor, binding_span.into()))?,
                         name: binding,
                         key,
                         has_default,
@@ -2623,6 +2693,12 @@ fn lower_params(
             ty
         };
         out.push(SliceParam {
+            binding: match &param.pattern {
+                BindingPattern::BindingIdentifier(id) => {
+                    skeleton.binding_at_span(FrameSpan::rebase(anchor, id.span.into()))
+                }
+                _ => None,
+            },
             name,
             optional: param.optional || param.initializer.is_some(),
             rest: false,
@@ -2644,6 +2720,12 @@ fn lower_params(
         let extra = parameter_list_shadowed(ty.ty(), &parameter_bindings, None);
         ty.add_shadowed(extra);
         out.push(SliceParam {
+            binding: match &rest.rest.argument {
+                BindingPattern::BindingIdentifier(id) => {
+                    skeleton.binding_at_span(FrameSpan::rebase(anchor, id.span.into()))
+                }
+                _ => None,
+            },
             name,
             optional: false,
             rest: true,
@@ -2737,6 +2819,8 @@ enum CapturedBinding {
 /// Empty for the root frame.
 #[derive(Default)]
 struct CaptureScope {
+    identities:
+        FxHashMap<Arc<str>, verter_semantic::analysis::function_program::FlowBindingIdentity>,
     names: FxHashMap<Arc<str>, CapturedBinding>,
     mutable_declared: FxHashMap<Arc<str>, SliceCaptureAuthority>,
     /// The captured names an enclosing frame binds in TYPE meaning — a
@@ -2815,6 +2899,8 @@ impl CaptureScope {
 /// planned edge and a lowered read can never disagree about which slot a
 /// name denotes.
 struct Lowerer<'a> {
+    bindings: &'a verter_semantic::analysis::flow::FlowBindingMap,
+    index: &'a verter_semantic::analysis::function_program::FunctionProgramIndex,
     source: &'a str,
     /// The function's own start offset — the anchor the frame's
     /// [`FunctionBodySkeleton`] (and the plan derived from it) stores
@@ -3466,8 +3552,8 @@ impl Lowerer<'_> {
         bindings: &mut Vec<SkeletonBindingId>,
     ) {
         let name = match &subject.root {
-            SliceNarrowRoot::Local(name) => Some(name.as_ref()),
-            SliceNarrowRoot::Param(ordinal) => self
+            SliceNarrowRoot::Local { name, .. } => Some(name.as_ref()),
+            SliceNarrowRoot::Param { ordinal, .. } => self
                 .params
                 .get(*ordinal as usize)
                 .and_then(|param| param.name.as_deref()),
@@ -3674,6 +3760,47 @@ impl Lowerer<'_> {
         self.classify_bindings(name, &bindings)
     }
 
+    /// Resolve lexical spelling once; consumers retain only the resulting ID.
+    fn binding_ref(
+        &self,
+        name: &str,
+        span: oxc_span::Span,
+    ) -> Option<verter_semantic::analysis::flow::FlowBindingRef> {
+        use verter_semantic::analysis::flow::FlowBindingRef;
+        if let Some(name) = self.skeleton.name_id(name) {
+            let region = self.skeleton.innermost_region_containing(self.rebase(span));
+            let resolved = self.skeleton.bindings_of_name_in_scope(name, region);
+            if let Some(binding) = resolved.first() {
+                return Some(FlowBindingRef::Local(
+                    self.bindings.canonical_local(*binding),
+                ));
+            }
+        }
+        self.captures
+            .identities
+            .get(name)
+            .cloned()
+            .map(FlowBindingRef::Captured)
+    }
+
+    fn narrow_root(
+        &self,
+        name: &str,
+        span: oxc_span::Span,
+        ordinal: Option<u32>,
+    ) -> Option<SliceNarrowRoot> {
+        let binding = self.binding_ref(name, span)?;
+        match (ordinal, binding) {
+            (Some(ordinal), verter_semantic::analysis::flow::FlowBindingRef::Local(binding)) => {
+                Some(SliceNarrowRoot::Param { ordinal, binding })
+            }
+            (_, binding) => Some(SliceNarrowRoot::Local {
+                name: Arc::from(name),
+                binding,
+            }),
+        }
+    }
+
     /// Whether this frame binds `name` in `meaning` at `span`.
     ///
     /// The TYPE-space twin of [`Self::resolve_name`], over the SAME
@@ -3858,8 +3985,10 @@ impl Lowerer<'_> {
     fn mutable_declared_authority(
         &self,
         name: &str,
-        binding: &verter_semantic::analysis::flow::SkeletonBinding,
+        binding_id: SkeletonBindingId,
     ) -> Option<SliceCaptureAuthority> {
+        let binding = self.skeleton.binding(binding_id);
+        let identity = self.bindings.runtime_identity(binding_id)?.clone();
         if binding.kind == SkeletonBindingKind::Param {
             let (param, key, has_default) = if binding.destructured {
                 self.params.iter().find_map(|param| {
@@ -3879,6 +4008,7 @@ impl Lowerer<'_> {
                 )
             };
             return Some(SliceCaptureAuthority {
+                binding: identity,
                 name: Arc::from(name),
                 declared: param.ty.clone(),
                 source: SliceCaptureAuthoritySource::Parameter { key, has_default },
@@ -3898,6 +4028,7 @@ impl Lowerer<'_> {
         };
         finder.visit_program(self.program);
         finder.found.map(|ty| SliceCaptureAuthority {
+            binding: identity,
             name: Arc::from(name),
             declared: self.gate(ty, target, &[]),
             source: SliceCaptureAuthoritySource::Local(kind),
@@ -3917,6 +4048,7 @@ impl Lowerer<'_> {
             names.insert(Arc::clone(name), *binding);
         }
         let mut mutable_declared = self.captures.mutable_declared.clone();
+        let mut identities = self.captures.identities.clone();
         let mut type_names = self.captures.type_names.clone();
         let mut namespace_names = self.captures.namespace_names.clone();
         // This frame's OWN type parameters join every enclosing frame's
@@ -3982,6 +4114,12 @@ impl Lowerer<'_> {
             if resolved.is_empty() {
                 continue;
             }
+            if let Some(identity) = resolved
+                .first()
+                .and_then(|id| self.bindings.runtime_identity(*id))
+            {
+                identities.insert(Arc::from(text), identity.clone());
+            }
             let captured = match self.classify_bindings(text, &resolved) {
                 NameBinding::Param(_) => CapturedBinding::Local { mutable: true },
                 NameBinding::Local(_) => CapturedBinding::Local {
@@ -4005,7 +4143,7 @@ impl Lowerer<'_> {
             };
             if let Some(declared) = resolved
                 .iter()
-                .find_map(|id| self.mutable_declared_authority(text, self.skeleton.binding(*id)))
+                .find_map(|id| self.mutable_declared_authority(text, *id))
             {
                 mutable_declared.insert(Arc::from(text), declared);
             } else {
@@ -4016,6 +4154,7 @@ impl Lowerer<'_> {
             names.insert(Arc::from(text), captured);
         }
         CaptureScope {
+            identities,
             names,
             mutable_declared,
             type_names,
@@ -4286,6 +4425,15 @@ impl Lowerer<'_> {
                             SliceFreshness::Pinned
                         };
                         out.push(SliceStatement::Binding {
+                            binding: match self.skeleton.binding_at_span(self.rebase(id.span)) {
+                                Some(binding) => binding,
+                                None => {
+                                    out.push(SliceStatement::Gap(
+                                        crate::semantic_query::FlowGap::UnmodeledExpression,
+                                    ));
+                                    continue;
+                                }
+                            },
                             name: Arc::from(id.name.as_str()),
                             kind,
                             init,
@@ -4539,6 +4687,14 @@ impl Lowerer<'_> {
                         hit_unsupported |= region.hit_unsupported;
                         clause_may_break.extend(region.may_break);
                         Box::new(SliceCatchClause {
+                            binding: handler.param.as_ref().and_then(|param| {
+                                match &param.pattern {
+                                    BindingPattern::BindingIdentifier(id) => {
+                                        self.skeleton.binding_at_span(self.rebase(id.span))
+                                    }
+                                    _ => None,
+                                }
+                            }),
                             param,
                             region: region.region,
                         })
@@ -5268,11 +5424,11 @@ impl Lowerer<'_> {
     /// nor the siblings, so the relation degrades.
     fn subject_root_carries_an_unmentioned_narrowing(&self, subject: &SliceNarrowSubject) -> bool {
         match &subject.root {
-            SliceNarrowRoot::Local(name) => {
+            SliceNarrowRoot::Local { name, .. } => {
                 self.narrowing_alias_locals.contains(name)
                     || self.destructured_element_may_correlate(name)
             }
-            SliceNarrowRoot::Param(_) => false,
+            SliceNarrowRoot::Param { .. } => false,
         }
     }
 
@@ -5939,11 +6095,11 @@ impl Lowerer<'_> {
         let name = identifier.name.as_str();
         match self.resolve_name(name, identifier.span) {
             NameBinding::Param(ordinal) => Some(SliceNarrowSubject {
-                root: SliceNarrowRoot::Param(ordinal),
+                root: self.narrow_root(name, identifier.span, Some(ordinal))?,
                 path,
             }),
             NameBinding::Local(_) => Some(SliceNarrowSubject {
-                root: SliceNarrowRoot::Local(Arc::from(name)),
+                root: self.narrow_root(name, identifier.span, None)?,
                 path,
             }),
             NameBinding::Free
@@ -6086,9 +6242,11 @@ impl Lowerer<'_> {
         };
         let name = identifier.name.as_str();
         let root = match self.resolve_name(name, identifier.span) {
-            NameBinding::Param(ordinal) => SliceNarrowRoot::Param(ordinal),
-            NameBinding::Local(_) => SliceNarrowRoot::Local(Arc::from(name)),
-            NameBinding::Captured => SliceNarrowRoot::Local(Arc::from(name)),
+            NameBinding::Param(ordinal) => {
+                self.narrow_root(name, identifier.span, Some(ordinal))?
+            }
+            NameBinding::Local(_) => self.narrow_root(name, identifier.span, None)?,
+            NameBinding::Captured => self.narrow_root(name, identifier.span, None)?,
             NameBinding::Free | NameBinding::NestedFunction | NameBinding::Unmodeled => {
                 return None
             }
@@ -6227,6 +6385,10 @@ impl Lowerer<'_> {
                         NameBinding::Param(ordinal) => {
                             return SliceExpr::Call(
                                 SliceCall::OnBinding {
+                                    binding: match self.binding_ref(name, callee.span) {
+                                        Some(binding) => binding,
+                                        None => return SliceExpr::UnmodeledBinding,
+                                    },
                                     param: Some(ordinal),
                                     name: Arc::from(name),
                                     captured: false,
@@ -6237,6 +6399,10 @@ impl Lowerer<'_> {
                         NameBinding::Local(param) => {
                             return SliceExpr::Call(
                                 SliceCall::OnBinding {
+                                    binding: match self.binding_ref(name, callee.span) {
+                                        Some(binding) => binding,
+                                        None => return SliceExpr::UnmodeledBinding,
+                                    },
                                     param,
                                     name: Arc::from(name),
                                     captured: false,
@@ -6247,6 +6413,10 @@ impl Lowerer<'_> {
                         NameBinding::Captured => {
                             return SliceExpr::Call(
                                 SliceCall::OnBinding {
+                                    binding: match self.binding_ref(name, callee.span) {
+                                        Some(binding) => binding,
+                                        None => return SliceExpr::UnmodeledBinding,
+                                    },
                                     param: None,
                                     name: Arc::from(name),
                                     captured: true,
@@ -6457,13 +6627,28 @@ impl Lowerer<'_> {
     ) -> SliceExpr {
         let name = identifier.name.as_str();
         match self.resolve_name(name, identifier.span) {
-            NameBinding::Param(ordinal) => SliceExpr::Param { ordinal },
+            NameBinding::Param(ordinal) => match self
+                .params
+                .get(ordinal as usize)
+                .and_then(|param| param.binding)
+            {
+                Some(binding) => SliceExpr::Param { ordinal, binding },
+                None => SliceExpr::UnmodeledBinding,
+            },
             NameBinding::Local(param) => SliceExpr::Local {
+                binding: match self.binding_ref(name, identifier.span) {
+                    Some(binding) => binding,
+                    None => return SliceExpr::UnmodeledBinding,
+                },
                 name: Arc::from(name),
                 param,
                 captured: false,
             },
             NameBinding::Captured => SliceExpr::Local {
+                binding: match self.binding_ref(name, identifier.span) {
+                    Some(binding) => binding,
+                    None => return SliceExpr::UnmodeledBinding,
+                },
                 name: Arc::from(name),
                 param: None,
                 captured: true,
@@ -6784,15 +6969,22 @@ impl Lowerer<'_> {
                 Vec::new()
             }
         };
-        // A nested function value has no index entry of its own — its
-        // control regions come from the SAME single inventory walk over
-        // its own body, and its lexical authority is its own skeleton
-        // over the same positions.
-        let inventory = node
-            .body()
-            .map(|body| inventory_statement_list(&body.statements))
-            .unwrap_or_default();
-        let control: Arc<[FunctionControlRegion]> = Arc::from(inventory.control);
+        let Some(entry) = self
+            .index
+            .nested_at(self.bindings.function(), node_span(node).into())
+        else {
+            return SliceExpr::UnmodeledBinding;
+        };
+        let entry = entry.entry();
+        let Ok(bindings) = verter_semantic::analysis::flow::FlowBindingMap::build(
+            &nested_skeleton,
+            &entry.bindings,
+            &entry.key,
+            nested_anchor,
+        ) else {
+            return SliceExpr::UnmodeledBinding;
+        };
+        let control = Arc::clone(&entry.control);
         let captures = self.capture_scope_for(node_span(node));
         let mut mutable_capture_authorities = captures
             .mutable_declared
@@ -6808,6 +7000,8 @@ impl Lowerer<'_> {
         mutable_capture_authorities.sort_by(|a, b| a.name.cmp(&b.name));
         let mutable_capture_authorities = Arc::from(mutable_capture_authorities.into_boxed_slice());
         let mut nested = Lowerer {
+            bindings: &bindings,
+            index: self.index,
             source: self.source,
             anchor: nested_anchor,
             selection: None,
@@ -6913,6 +7107,8 @@ impl Lowerer<'_> {
         self.decided_above_call_spans
             .append(&mut nested.decided_above_call_spans);
         SliceExpr::NestedFunctionValue {
+            bindings,
+            skeleton: Arc::new(nested_skeleton),
             gap,
             params: Arc::from(params.into_boxed_slice()),
             type_parameters: Arc::from(type_parameters.into_boxed_slice()),

@@ -1132,6 +1132,7 @@ impl DeclBodyMemo {
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
         let entry = entry.clone();
+        let index = self.function_program_index();
         // A carrier's script block (`.vue` / `.svelte`) compiles to a
         // module by construction; a plain script file proves module scope
         // only through its own top-level syntax.
@@ -1141,6 +1142,7 @@ impl DeclBodyMemo {
                 crate::flow_slice_content::build_flow_slice_content(
                     p.borrow_dependent(),
                     p.source_str(),
+                    &index,
                     &entry,
                     &selection,
                     &skeleton,
@@ -1229,7 +1231,13 @@ impl DeclBodyMemo {
                 };
                 let resolved = resolve_function_node(p.borrow_dependent(), &entry.locator)?;
                 let source = match &resolved.node {
-                    FunctionNode::Function(func) => FunctionBodySource::from_function(func)?,
+                    FunctionNode::Function(func) => {
+                        if func.r#type == oxc_ast::ast::FunctionType::FunctionExpression {
+                            FunctionBodySource::from_function_expression(func)?
+                        } else {
+                            FunctionBodySource::from_function(func)?
+                        }
+                    }
                     FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
                 };
                 Some(build_function_body_skeleton(&source))
