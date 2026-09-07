@@ -160,6 +160,48 @@ pub(crate) struct CanonicalEvidence {
     seen_nodes: FxHashSet<SemanticNodeId>,
 }
 
+/// Read-only top-level literal inspection for provenance consumers. Union
+/// shells are flattened under the algebra's existing bounded evidence rail;
+/// intersections and nonliteral types do not carry widening membership.
+pub(crate) fn inspect_literal_arms(
+    graph: &SemanticGraphStore,
+    root: SemanticNodeId,
+) -> (
+    Vec<(SemanticNodeId, crate::semantic_query::LiteralValue)>,
+    CanonicalEvidence,
+) {
+    let mut evidence = CanonicalEvidence::default();
+    let mut pending = vec![root];
+    let mut visited = FxHashSet::default();
+    let mut literals = Vec::new();
+    while let Some(node) = pending.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        if visited.len() > COMPARE_WORK_BUDGET as usize {
+            evidence.incomplete = true;
+            break;
+        }
+        evidence.record_file_root(graph, node);
+        match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Literal(value)) => literals.push((node, value.clone())),
+            Some(SemanticNodeData::Union(members)) => {
+                if pending.len().saturating_add(members.len()) > COMPARE_WORK_BUDGET as usize {
+                    evidence.incomplete = true;
+                    break;
+                }
+                pending.extend(members.iter().rev().copied());
+            }
+            None => {
+                evidence.incomplete = true;
+                break;
+            }
+            Some(_) => {}
+        }
+    }
+    (literals, evidence)
+}
+
 impl CanonicalEvidence {
     /// Fold another canonicalization's evidence into this one — the
     /// threading primitive for helpers that run several canonical

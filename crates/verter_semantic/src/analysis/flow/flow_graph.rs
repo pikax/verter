@@ -209,13 +209,11 @@ impl FunctionFlowGraph {
         )
     }
 
-    /// The node at dense index `index`, or `None` past the node space.
-    /// The node ids are dense and contiguous across the four families, so
-    /// this is the enumeration accessor of the graph's own index space —
-    /// a consumer never fabricates an id.
+    /// Every node, exactly once in ascending graph-local index order.
+    /// Iteration covers all node families and allocates nothing.
     #[must_use]
-    pub fn node_at(&self, index: usize) -> Option<FlowNodeId> {
-        (index < self.node_count()).then_some(FlowNodeId(index as u32))
+    pub fn nodes(&self) -> impl ExactSizeIterator<Item = FlowNodeId> + '_ {
+        (0..self.node_count()).map(|index| FlowNodeId(index as u32))
     }
 
     /// What `node` stands for.

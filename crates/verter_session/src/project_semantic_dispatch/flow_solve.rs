@@ -88,7 +88,7 @@ pub enum FlowDomain {
     // Declaration-fact and definite-assignment products of the flow
     // product lattice. Registered in the ONE domain registry (there is no
     // second domain enum) and routed by
-    // [`super::flow_products::product_route`]. Like `Coverage` below, they
+    // [`super::flow_products::domain_carries_product`]. Like `Coverage` below, they
     // are declared by NO operation contract, so nothing constructs them
     // outside the product suites — the attribute keeps a registry row that
     // is deliberately contract-less from reading as rot.
