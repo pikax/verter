@@ -52,7 +52,6 @@ use verter_semantic::analysis::flow::peeker::{
     SliceOrigin,
 };
 use verter_semantic::analysis::flow::{SkeletonBindingId, SkeletonBindingKind};
-use verter_semantic::analysis::function_program::FunctionBindingRecord;
 
 use super::dispatch_txn::flow_obligation_state::{
     FlowBindingBasis, FlowConvergenceEvidence, FlowDemandHandle, FlowObligationBasis,
@@ -600,20 +599,10 @@ pub struct FlowDemandBasis {
 
 /// The subject of one flow demand: the demanded return-projection path in
 /// authored key text (empty = the whole return). DERIVED from the query's
-/// demand axis by [`build_flow_demand_plan`] — never caller-supplied.
+/// demand axis by [`prepare_flow_execution`] — never caller-supplied.
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowDemandSubject { pub projection_path: Arc<[Arc<str>]> }
-
-/// The frame's binding-inventory authority the planner resolves each
-/// binding obligation's cross-frame identity against: the
-/// `FunctionProgramIndex` entry's FULL binding list. Its slot numbering
-/// is the stable cross-frame slot domain. The planner validates an exact
-/// declaration-span/kind bijection against the skeleton, rebased using the
-/// inventory's live anchor. A mismatch refuses planning as a torn view.
-#[rustfmt::skip]
-#[derive(Debug, Clone)]
-pub struct FlowBindingInventory { pub bindings: Arc<[FunctionBindingRecord]>, pub anchor: u32 }
 
 /// The tie-break rule the work order is built with: domain rank, then
 /// ascending graph-node index, then edge class and source ordinal, then
@@ -638,6 +627,39 @@ impl Default for FlowResourcePolicy {
     fn default() -> Self { Self { slice_budget: FlowSliceBudget::default(), max_obligations: 1024 } }
 }
 
+/// The validated structural work of one execution. This capability carries
+/// no obligations and cannot authorize a completeness proof on its own.
+/// Preparing it checks the retained selection against the query and bound
+/// graph without re-planning. A proof plan retains this SAME allocation, so
+/// an independently prepared execution cannot supply that plan's evidence.
+///
+/// Fields are private and only [`prepare_flow_execution`] constructs it.
+/// Cloning an `Arc` preserves the capability; descriptive basis equality
+/// alone never substitutes for sharing it.
+#[derive(Debug)]
+pub struct FlowExecutionSelection {
+    basis: FlowDemandBasis,
+    subject: FlowDemandSubject,
+    structural_selection: ReturnSlicePlan,
+    convergence: FlowConvergencePolicy,
+    resources: FlowResourcePolicy,
+}
+
+#[rustfmt::skip]
+impl FlowExecutionSelection {
+    /// The full query, body, observation, and result-contract identity.
+    pub fn basis(&self) -> &FlowDemandBasis { &self.basis }
+    /// The projection derived from the query's own demand axis.
+    pub fn subject(&self) -> &FlowDemandSubject { &self.subject }
+    /// The retained structural selection, validated without re-planning.
+    pub fn structural_selection(&self) -> &ReturnSlicePlan { &self.structural_selection }
+    /// The execution's convergence ceiling.
+    pub fn convergence(&self) -> FlowConvergencePolicy { self.convergence }
+    /// The request's resource limits. Obligation capacity applies only to
+    /// proof expansion, never to structural execution or product capacity.
+    pub fn resources(&self) -> FlowResourcePolicy { self.resources }
+}
+
 /// The demand plan over one store-bound graph: the obligation and
 /// completeness authority a solve installs, discharges, and finalizes
 /// against. Not an alias of [`ReturnSlicePlan`] (graph reachability
@@ -645,8 +667,8 @@ impl Default for FlowResourcePolicy {
 /// expand from. `obligation_specs` enters a runtime only through
 /// `install_flow_demand`.
 ///
-/// SEALED: every field is private and the sole constructor is
-/// [`build_flow_demand_plan`]. Consumers get immutable views only — no
+/// SEALED: every field is private and the sole obligation constructor is
+/// [`build_flow_demand_plan_from_execution`]. Consumers get immutable views only — no
 /// mutable slices, no setters, no `DerefMut`, no public struct literal,
 /// and no caller-supplied work order. The plan carries its own registry
 /// closure (the contract's exact domain→family mapping) and required
@@ -655,13 +677,7 @@ impl Default for FlowResourcePolicy {
 #[rustfmt::skip]
 #[derive(Debug, Clone)]
 pub struct FlowDemandPlan {
-    basis: FlowDemandBasis,
-    // Read by the test surface through the getter; production planning
-    // consumes it during construction.
-    #[allow(dead_code)]
-    subject: FlowDemandSubject,
-    /// The structural selection (graph reachability result, planned once).
-    structural_selection: ReturnSlicePlan,
+    execution: Arc<FlowExecutionSelection>,
     /// The contract-required domains, in domain-rank order.
     required_domains: Arc<[FlowDomain]>,
     /// The contract's required fact families, deduplicated in
@@ -680,7 +696,7 @@ pub struct FlowDemandPlan {
     expanded_obligations: Arc<[FlowObligationId]>,
     /// The deterministic work order over all obligations.
     work_order: Arc<[FlowObligationId]>,
-    tie_break: FlowTieBreak, convergence: FlowConvergencePolicy, resources: FlowResourcePolicy,
+    tie_break: FlowTieBreak,
     obligation_specs: Vec<FlowObligationSpec>,
 }
 
@@ -690,12 +706,19 @@ pub struct FlowDemandPlan {
 #[allow(dead_code)]
 #[rustfmt::skip]
 impl FlowDemandPlan {
+    /// The exact structural execution capability this plan expands from.
+    pub fn execution_selection(&self) -> &Arc<FlowExecutionSelection> { &self.execution }
+    /// Evidence attaches only to this shared execution capability, even
+    /// when another preparation has an equal descriptive basis.
+    pub fn matches_execution(&self, execution: &Arc<FlowExecutionSelection>) -> bool {
+        Arc::ptr_eq(&self.execution, execution)
+    }
     /// The exact basis the demand was planned against.
-    pub fn basis(&self) -> &FlowDemandBasis { &self.basis }
+    pub fn basis(&self) -> &FlowDemandBasis { self.execution.basis() }
     /// The demand subject derived from the query's own demand axis.
-    pub fn subject(&self) -> &FlowDemandSubject { &self.subject }
+    pub fn subject(&self) -> &FlowDemandSubject { self.execution.subject() }
     /// The structural selection the obligations expand from.
-    pub fn structural_selection(&self) -> &ReturnSlicePlan { &self.structural_selection }
+    pub fn structural_selection(&self) -> &ReturnSlicePlan { self.execution.structural_selection() }
     /// The contract-required domains, in domain-rank order.
     pub fn required_domains(&self) -> &[FlowDomain] { &self.required_domains }
     /// The contract's required fact families, deduplicated in
@@ -715,9 +738,9 @@ impl FlowDemandPlan {
     /// The tie-break rule the work order was built with.
     pub fn tie_break(&self) -> FlowTieBreak { self.tie_break }
     /// The fixed-point convergence policy of this solve.
-    pub fn convergence(&self) -> FlowConvergencePolicy { self.convergence }
+    pub fn convergence(&self) -> FlowConvergencePolicy { self.execution.convergence() }
     /// The resource policy this demand planned under.
-    pub fn resources(&self) -> FlowResourcePolicy { self.resources }
+    pub fn resources(&self) -> FlowResourcePolicy { self.execution.resources() }
     /// The obligation specifications, in work order.
     pub fn obligation_specs(&self) -> &[FlowObligationSpec] {
         &self.obligation_specs
@@ -748,7 +771,6 @@ pub enum FlowDemandPlanError {
     /// The retained selection's minted slice identity does not recompute
     /// over the bound graph — a selection retained for ANOTHER graph.
     SelectionProvenanceMismatch,
-    BindingInventoryMismatch(verter_semantic::analysis::flow::FlowBindingMapError),
 }
 
 /// Derive the demand subject EXHAUSTIVELY from the operation-specific
@@ -789,6 +811,35 @@ pub fn derive_demand_subject(
     }
     Ok(FlowDemandSubject {
         projection_path: Arc::from(path.into_boxed_slice()),
+    })
+}
+
+/// Structural execution also serves the existing single string-member
+/// navigation rail, whose finalizer is separate from the flow proof contract.
+/// Accept only the exact navigation preset; changing any other demand axis
+/// remains an unrepresentable execution request.
+fn derive_execution_subject(
+    query: &SemanticQueryKey,
+) -> Result<FlowDemandSubject, FlowDemandPlanError> {
+    match derive_demand_subject(query) {
+        Ok(subject) => return Ok(subject),
+        Err(FlowDemandPlanError::UnrepresentableDemand) => {}
+        Err(error) => return Err(error),
+    }
+    let SemanticQueryKey::FlowReturn(key) = query else {
+        return Err(FlowDemandPlanError::NotAnEnabledRoot);
+    };
+    let point = &key.demand.point;
+    if *point != Demand::navigate(point.projection.path.clone()) {
+        return Err(FlowDemandPlanError::UnrepresentableDemand);
+    }
+    let name = match point.projection.path.as_slice() {
+        [PathSegment::Member(crate::semantic_query::PropertyKey::String(name))]
+        | [PathSegment::Index(crate::semantic_query::IndexKey::String(name))] => Arc::clone(name),
+        _ => return Err(FlowDemandPlanError::UnrepresentableDemand),
+    };
+    Ok(FlowDemandSubject {
+        projection_path: Arc::from([name]),
     })
 }
 
@@ -924,7 +975,49 @@ fn require_retained_selection_of_bound_graph(
     Ok(())
 }
 
-/// Build the demand plan of `request` over the store-minted `bound` graph,
+/// Validate the execution's structural capability independently of proof
+/// expansion. An exhausted obligation budget leaves this capability usable
+/// for cold value evaluation; a foreign graph, demand, or retained selection
+/// still refuses before any execution can begin.
+#[rustfmt::skip]
+pub(crate) fn prepare_flow_execution(
+    request: &FlowDemandRequest,
+    bound: &BoundFlowGraph,
+    retained: &PlannedFlowSlice,
+) -> Result<Arc<FlowExecutionSelection>, FlowDemandPlanError> {
+    let subject = derive_execution_subject(&request.query)?;
+    require_query_names_bound_graph(&request.query, bound.key())?;
+    require_retained_selection_of_bound_graph(bound, &subject, &request.resources.slice_budget, retained)?;
+    let SemanticQueryKey::FlowReturn(key) = &request.query else {
+        return Err(FlowDemandPlanError::NotAnEnabledRoot);
+    };
+    Ok(Arc::new(FlowExecutionSelection {
+        basis: FlowDemandBasis {
+            graph_body: bound.key().clone(),
+            query: request.query.clone(),
+            input_basis: request.input_basis.clone(),
+            result_contract: key.result_contract.clone(),
+        },
+        subject,
+        structural_selection: retained.selection().clone(),
+        convergence: FlowConvergencePolicy { max_iterations: FLOW_FIXED_POINT_MAX_ITERATIONS },
+        resources: request.resources,
+    }))
+}
+
+/// Prepare and expand a demand in one call. Callers that also evaluate cold
+/// values after proof refusal retain [`prepare_flow_execution`]'s capability
+/// and call [`build_flow_demand_plan_from_execution`] separately.
+pub(crate) fn build_flow_demand_plan(
+    request: FlowDemandRequest,
+    bound: &BoundFlowGraph,
+    retained: &PlannedFlowSlice,
+) -> Result<FlowDemandPlan, FlowDemandPlanError> {
+    let execution = prepare_flow_execution(&request, bound, retained)?;
+    build_flow_demand_plan_from_execution(execution, bound, request.additional_requirements)
+}
+
+/// Build the demand plan over the store-minted `bound` graph,
 /// assembling obligations from the ALREADY-PLANNED structural selection —
 /// the one plan the hash node's cold compute produced and retained
 /// ([`PlannedFlowSlice`]); this function never builds or reacquires a graph
@@ -945,30 +1038,26 @@ fn require_retained_selection_of_bound_graph(
 /// excess returns the typed budget error and the remaining population is
 /// never constructed or scanned.
 #[rustfmt::skip]
-pub(crate) fn build_flow_demand_plan(
-    request: FlowDemandRequest,
+pub(crate) fn build_flow_demand_plan_from_execution(
+    execution: Arc<FlowExecutionSelection>,
     bound: &BoundFlowGraph,
-    retained: &PlannedFlowSlice,
-    inventory: &FlowBindingInventory,
+    additional_requirements: Arc<[FlowRequirement]>,
 ) -> Result<FlowDemandPlan, FlowDemandPlanError> {
-    let tag = request.query.tag();
+    if &execution.basis().graph_body != bound.key() {
+        return Err(FlowDemandPlanError::BasisKeyMismatch);
+    }
+    let tag = execution.basis().query.tag();
     let contract = require_flow_operation_contract(tag).map_err(|_| FlowDemandPlanError::UnregisteredOperation)?;
     if contract.role != R::Root || contract.status != S::Enabled {
         return Err(FlowDemandPlanError::NotAnEnabledRoot);
     }
-    let subject = derive_demand_subject(&request.query)?;
-    require_query_names_bound_graph(&request.query, bound.key())?;
-    require_retained_selection_of_bound_graph(bound, &subject, &request.resources.slice_budget, retained)?;
-    let structural_selection = retained.selection();
-    let SemanticQueryKey::FlowReturn(key) = &request.query else {
-        return Err(FlowDemandPlanError::NotAnEnabledRoot);
-    };
-    // The result contract is the KEY's — derived by the single production
-    // key constructor from the closed registry row; the request carries no
-    // caller-selected contract axis.
-    let result_contract = key.result_contract.clone();
+    // The execution-only navigation rail does not broaden the proof root's
+    // registered demand contract.
+    derive_demand_subject(&execution.basis().query)?;
+    let structural_selection = execution.structural_selection();
+    let subject = execution.subject();
     let bundle = bound.bundle();
-    let max_obligations = request.resources.max_obligations;
+    let max_obligations = execution.resources().max_obligations;
 
     let mut specs: Vec<FlowObligationSpec> = Vec::new();
     let mut push = |requirement: FlowRequirement, origin: FlowObligationOrigin, basis: FlowObligationBasis,
@@ -1002,7 +1091,7 @@ pub(crate) fn build_flow_demand_plan(
     // The counted base also includes the family-coverage obligations (one
     // per required family) — the registry-closure population is part of
     // the initial budget, planned before any concrete expansion.
-    let additional_count = request.additional_requirements.iter()
+    let additional_count = additional_requirements.iter()
         .filter(|requirement| !(requirement.operation == tag && matches!(&requirement.requirement, RK::Domain(domain) if domains.contains(domain))))
         .count() as u64;
     let counted_base = families.len() as u64 + domains.len() as u64 + additional_count;
@@ -1049,16 +1138,15 @@ pub(crate) fn build_flow_demand_plan(
     // already-planned contract domain of this root collapses onto it; every
     // other requirement — registered or not — gets its own obligation (the
     // runtime installs undeclared ones directly in `Gap` state).
-    for requirement in request.additional_requirements.iter() {
+    for requirement in additional_requirements.iter() {
         let duplicate = matches!(&requirement.requirement, RK::Domain(domain) if domains.contains(domain));
         if requirement.operation == tag && duplicate { continue; }
         let basis = FlowObligationBasis::DemandRoot { subject: subject.clone() };
         initial.push(push(requirement.clone(), FlowObligationOrigin::Additional, basis, Arc::from([]), Arc::from([]))?);
     }
 
-    // The cross-frame binding identities, resolved once against the
-    // frame's binding inventory (the ONE slot-numbering authority).
-    let identities = verter_semantic::analysis::flow::FlowBindingMap::build(&bundle.skeleton, &inventory.bindings, &bound.key().function, inventory.anchor).map_err(FlowDemandPlanError::BindingInventoryMismatch)?;
+    // Validated once by the content-pinned graph owner.
+    let identities = &bundle.bindings;
 
     let graph = &bundle.graph;
     let mut selected: Vec<_> = structural_selection.value_nodes.iter()
@@ -1257,12 +1345,8 @@ pub(crate) fn build_flow_demand_plan(
     let mut work_order = coverage.clone();
     work_order.extend(initial.iter().copied());
     work_order.extend(expanded.iter().copied());
-    let basis = FlowDemandBasis {
-        graph_body: bound.key().clone(), query: request.query,
-        input_basis: request.input_basis, result_contract,
-    };
     Ok(FlowDemandPlan {
-        basis, subject, structural_selection: structural_selection.clone(),
+        execution,
         required_domains: Arc::from(domains.into_boxed_slice()),
         required_fact_families: Arc::from(families.into_boxed_slice()),
         registry_closure: Arc::from(contract.closures.to_vec().into_boxed_slice()),
@@ -1271,8 +1355,7 @@ pub(crate) fn build_flow_demand_plan(
         expanded_obligations: Arc::from(expanded.into_boxed_slice()),
         work_order: Arc::from(work_order.into_boxed_slice()),
         tie_break: FLOW_WORK_ORDER_TIE_BREAK,
-        convergence: FlowConvergencePolicy { max_iterations: FLOW_FIXED_POINT_MAX_ITERATIONS },
-        resources: request.resources, obligation_specs: specs,
+        obligation_specs: specs,
     })
 }
 

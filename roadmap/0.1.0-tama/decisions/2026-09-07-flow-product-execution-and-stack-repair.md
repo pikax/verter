@@ -44,6 +44,25 @@ or repeated idempotence checks over unchanged predecessor snapshots.
   snapshots. Keys, inputs, snapshots, and evidence are bound to the graph content,
   demand basis, and execution. Unrelated graph inventory does not allocate products
   or consume the product budget.
+- Keep continuation values in a persistent ordered store. Snapshot cloning shares the
+  tree; writes copy only changed paths, and iteration and joins visit materialized cells
+  in domain then selected-subject order. Retained declarations use exact source cells
+  in one append-only execution authority bank. Hoisted aliases share runtime state,
+  while each authored annotation retains its own identity and explicit lookup fallback.
+  `max_products` bounds runtime cells in one continuation; `max_declared_products`
+  separately bounds source facts over the execution lifetime. Their sum bounds all
+  cells visible through any snapshot. Sharing a declaration bank must not silently
+  invalidate a previously admitted continuation's runtime budget.
+  Execution capabilities are thread-local (`Rc`); immutable graph and selection
+  artifacts remain shareable (`Arc`). Atomic publication performs no callbacks,
+  suspension, or interpreter reentry, and execution handles cannot cross workers.
+- Separate validated structural execution from obligation expansion. The sealed
+  `FlowExecutionSelection` retains the original content and selected demand. A proof
+  plan wraps that same capability; only the exact matching plan can obtain product
+  discharge evidence. Value-only execution after a proof refusal preserves the existing
+  cold-result finalizer and cannot manufacture a successful proof plan.
+- Admit numeric node and binding addresses only at the content interpreter's pinned
+  graph attachment. Public product handles retain their originating execution scope.
 - Apply explicit executed transfers transactionally. Binding writes invalidate their
   matching narrowing facts; the presence of a write dependency elsewhere is not an
   executed write. Successful unchanged work contributes exact domain/subject evidence.
@@ -51,6 +70,18 @@ or repeated idempotence checks over unchanged predecessor snapshots.
   joins and the canonical semantic algebra. Preserve reaching definitions, declared
   types, definite-assignment metadata, member-path narrowing, and canonical widening
   provenance. A failure exposes no partially accepted result or completion evidence.
+- Inspect literal widening provenance in one bounded canonical-owner operation with
+  shared payload reads, semantic literal hashing, and inspection-root evidence. Pinned
+  occurrences win; surviving all-fresh literals use the compact `All` representation.
+  Actual multiway reaching-type joins aggregate source-ordered contributors once and
+  make one canonical union/provenance operation. The inspection budget applies to
+  that actual join, rather than resetting at each temporary binary prefix. Semantic
+  literal hashes are computed once per inspected payload within the operation.
+- Represent captured binding dependencies with real graph-owned captured-binding
+  hubs. Exact captured identities are distinct from local skeleton binder IDs; hubs
+  avoid a read-by-write cross product. Static read paths compose with write paths in
+  the shared peeker, including captured writes and their governing control inputs.
+  Bound projection states explicitly so growing paths terminate with typed refusal.
 
 ## Legacy deletions
 
@@ -67,3 +98,6 @@ isolation, atomic failure, successful unchanged evidence, nested function scope,
 widening provenance. Run the relevant semantic and live flow suites, then the owning
 repository gates and independent architecture, adversarial, and performance reviews
 against the integrated stack. Existing unsupported capabilities keep their typed gaps.
+Measure snapshot, write, iteration, and join allocations across increasing selected
+capacity and fixed materialized-product counts. Snapshot clones must allocate nothing;
+unused selected capacity must not increase continuation-operation allocation cost.

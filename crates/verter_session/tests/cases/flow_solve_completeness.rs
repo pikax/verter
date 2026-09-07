@@ -1554,6 +1554,109 @@ fn obligation_budget_trips_at_first_excess() {
     );
 }
 
+/// Exhausting proof obligations must not revoke the already validated
+/// structural work needed to produce an unproven cold value.
+#[test]
+fn execution_selection_survives_obligation_budget_refusal() {
+    let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
+    let mut request = base_request();
+    request.resources.max_obligations = 0;
+    let retained = fixture.retained_plan(&request).expect("structural plan");
+    let execution = fixture
+        .prepare_execution_with_retained(&request, &retained)
+        .expect("proof capacity does not limit structural execution");
+    assert_eq!(execution.structural_selection(), retained.selection());
+    assert_eq!(execution.basis().input_basis, request.input_basis);
+    assert!(matches!(
+        fixture.build_plan_from_execution(Arc::clone(&execution), Arc::from([])),
+        Err(FlowDemandPlanError::ObligationBudget { limit: 0, .. })
+    ));
+    assert!(!execution.structural_selection().value_nodes.is_empty());
+
+    request.resources.slice_budget.max_selected_nodes = 0;
+    assert!(matches!(
+        fixture.prepare_execution_with_retained(&request, &retained),
+        Err(FlowDemandPlanError::SliceBudget(_))
+    ));
+}
+
+/// Member-value navigation has its own finalizer. Its exact supported demand
+/// may execute structurally without entering the whole-return proof contract.
+#[test]
+fn member_navigation_executes_without_expanding_the_proof_contract() {
+    use verter_session::semantic_query::demand::Demand;
+    let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
+    let member = PathSegment::Member(PropertyKey::String(Arc::from("value")));
+    let mut projected = base_request();
+    let SemanticQueryKey::FlowReturn(key) = &mut projected.query else {
+        unreachable!()
+    };
+    key.demand.point.projection.path = ProjectionPath::from_segments([member.clone()]);
+    let retained = fixture
+        .retained_plan(&projected)
+        .expect("retained member selection");
+    for segment in [
+        member,
+        PathSegment::Index(verter_session::semantic_query::IndexKey::String(Arc::from(
+            "value",
+        ))),
+    ] {
+        let mut request = base_request();
+        let SemanticQueryKey::FlowReturn(key) = &mut request.query else {
+            unreachable!()
+        };
+        key.demand.point = Demand::navigate(ProjectionPath::from_segments([segment]));
+        let execution = fixture
+            .prepare_execution_with_retained(&request, &retained)
+            .expect("the existing string-member navigation may execute");
+        assert_eq!(
+            execution.subject().projection_path.as_ref(),
+            &[Arc::<str>::from("value")]
+        );
+        assert!(matches!(
+            fixture.build_plan_from_execution(execution, Arc::from([])),
+            Err(FlowDemandPlanError::UnrepresentableDemand)
+        ));
+        let SemanticQueryKey::FlowReturn(key) = &mut request.query else {
+            unreachable!()
+        };
+        key.demand.point.projection.call_signatures = true;
+        assert!(matches!(
+            fixture.prepare_execution_with_retained(&request, &retained),
+            Err(FlowDemandPlanError::UnrepresentableDemand)
+        ));
+    }
+}
+
+/// Equal descriptive bases do not authorize attaching a separately prepared
+/// execution's product evidence to an installed proof plan.
+#[test]
+fn demand_plan_retains_its_exact_execution_capability() {
+    let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
+    let request = base_request();
+    let retained = fixture.retained_plan(&request).expect("structural plan");
+    let execution = fixture
+        .prepare_execution_with_retained(&request, &retained)
+        .expect("validated execution");
+    let other = fixture
+        .prepare_execution_with_retained(&request, &retained)
+        .expect("independently validated execution");
+    let plan = fixture
+        .build_plan_from_execution(Arc::clone(&execution), Arc::from([]))
+        .expect("proof plan");
+    assert!(Arc::ptr_eq(plan.execution_selection(), &execution));
+    assert!(plan.matches_execution(&execution));
+    assert_eq!(execution.basis(), other.basis());
+    assert!(!plan.matches_execution(&other));
+
+    let foreign =
+        flow_graph_fixture_for_tests("function solve_me(x) { return { different: x }; }", 7);
+    assert!(matches!(
+        foreign.build_plan_from_execution(execution, Arc::from([])),
+        Err(FlowDemandPlanError::BasisKeyMismatch)
+    ));
+}
+
 /// The no-flow allocation contract, at BOTH levels: a default runtime
 /// reserves no demand storage, and REAL production dispatch — an ordinary
 /// non-flow query and each pending typed-gap root — installs zero demands
@@ -2428,28 +2531,34 @@ fn a_no_capture_closure_proves_the_family_empty() {
     );
 }
 
-/// A captured binding whose kind is outside the cross-frame identity
-/// vocabulary (a class declaration) installs the family's accepted typed
-/// gap — anchored on the resolved lexical binding — never silence.
+/// A captured class has an exact lexical identity. Planning that subject
+/// creates a pending evidence obligation; naming it does not establish
+/// that class-value evaluation is supported or authorize warm admission.
 #[test]
-fn unnameable_captured_binding_installs_the_family_typed_gap() {
+fn captured_class_identity_installs_a_pending_evidence_obligation() {
     let fixture = flow_graph_fixture_for_tests(CLASS_CAPTURE_FIXTURE_SOURCE, 25);
     let plan = fixture
         .build_plan(request_named("class_capture"))
         .expect("the class-capture fixture plans");
-    let gaps: Vec<&FlowObligationSpec> = plan
+    let captures: Vec<&FlowObligationSpec> = plan
         .obligation_specs()
         .iter()
-        .filter(|spec| matches!(spec.basis(), FlowObligationBasis::Capture { .. }))
+        .filter(|spec| matches!(spec.basis(), FlowObligationBasis::CapturedBinding { .. }))
         .collect();
-    assert_eq!(gaps.len(), 1, "exactly the class-capture gap");
-    let FlowObligationBasis::Capture { identity, .. } = gaps[0].basis() else {
+    assert_eq!(captures.len(), 1, "exactly the class capture");
+    let FlowObligationBasis::CapturedBinding { identity, .. } = captures[0].basis() else {
         unreachable!()
     };
-    assert!(
-        identity.is_none(),
-        "a class binding has no cross-frame identity"
+    assert_eq!(identity.name.as_ref(), "C");
+    assert_eq!(
+        identity.kind,
+        verter_semantic::analysis::function_program::FunctionBindingKind::Class
     );
+    assert_eq!(
+        identity.defining_function.declaration.name.as_ref(),
+        "class_capture"
+    );
+    assert_eq!(identity.binding_slot, 0);
 
     let mut runtime = ObligationRuntime::default();
     let handle = runtime.install_flow_demand(&plan);
@@ -2457,12 +2566,12 @@ fn unnameable_captured_binding_installs_the_family_typed_gap() {
         .flow_obligations(handle)
         .expect("the demand is installed")
         .iter()
-        .find(|record| record.spec.id() == gaps[0].id())
+        .find(|record| record.spec.id() == captures[0].id())
         .expect("installed");
     assert_eq!(
         record.state,
-        ObligationState::Gap(FlowGap::ClosureCapture),
-        "the unnameable captured binding installs the family's accepted typed gap"
+        ObligationState::Pending,
+        "exact identity still requires actual capture evidence"
     );
 }
 

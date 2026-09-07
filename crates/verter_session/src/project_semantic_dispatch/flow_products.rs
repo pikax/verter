@@ -4,14 +4,19 @@
 //! snapshots. The function graph and sealed demand own selection; dependence
 //! edges never stand in for control-flow predecessors. All mutable product
 //! state lives here. Semantic composites use the canonical type algebra.
+//! Execution capabilities and snapshots are thread-local: a control interpreter
+//! cannot share partially published source authority with another worker.
+//! Immutable graph/selection artifacts remain shared across independent executions.
 
 #![cfg_attr(not(test), allow(dead_code))]
 
-use super::flow_solve::{FlowBindingInventory, FlowDemandBasis, FlowDemandPlan, FlowDomain};
+use super::flow_solve::{FlowDemandBasis, FlowDemandPlan, FlowDomain, FlowExecutionSelection};
 use crate::cache_runtime::flow_slice_node::{BoundFlowGraph, FlowSliceFunctionKey};
 use crate::semantic_query::{FlowGap, SemanticNodeId};
 use rustc_hash::FxHashMap;
+use std::cell::{OnceCell, RefCell};
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::Arc;
 use verter_semantic::analysis::flow::flow_graph::{FlowNodeId, FlowNodeKind, FunctionFlowGraph};
 use verter_semantic::analysis::flow::{FlowBindingMap, FlowBindingRef};
@@ -60,25 +65,16 @@ pub enum FlowProductKeyError {
 pub struct FlowProductInputs {
     graph: Arc<FunctionFlowGraph>,
     scope: FlowSliceFunctionKey,
-    bindings: Option<FlowBindingMap>,
+    bindings: Arc<FlowBindingMap>,
     captures: Vec<(FlowBindingIdentity, FlowNodeId)>,
 }
 
 impl FlowProductInputs {
-    pub(crate) fn for_bound_graph(
-        bound: &BoundFlowGraph,
-        inventory: &FlowBindingInventory,
-    ) -> Self {
+    pub(crate) fn for_bound_graph(bound: &BoundFlowGraph) -> Self {
         Self {
             graph: Arc::clone(&bound.bundle().graph),
             scope: bound.key().clone(),
-            bindings: FlowBindingMap::build(
-                &bound.bundle().skeleton,
-                &inventory.bindings,
-                &bound.key().function,
-                inventory.anchor,
-            )
-            .ok(),
+            bindings: Arc::clone(&bound.bundle().bindings),
             captures: Vec::new(),
         }
     }
@@ -113,11 +109,14 @@ struct ProductSubject {
 #[derive(Debug)]
 struct ProductLayout {
     inputs: FlowProductInputs,
-    basis: FlowDemandBasis,
+    selection: Arc<FlowExecutionSelection>,
     subjects: Box<[ProductSubject]>,
     node_subjects: usize,
     representatives: Box<[usize]>,
     captures: FxHashMap<FlowBindingIdentity, usize>,
+    // Authored facts have execution lifetime, independent of branch snapshots.
+    declarations: Box<[OnceCell<Box<FlowProductValue>>]>,
+    declared_active: RefCell<imbl::OrdSet<usize>>,
 }
 
 impl ProductLayout {
@@ -127,13 +126,13 @@ impl ProductLayout {
             .map_err(|_| FlowProductKeyError::UnselectedNode)
     }
     fn key(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         domain: FlowDomain,
         subject: usize,
     ) -> Result<FlowProductKey, FlowProductKeyError> {
         let offset = product_offset(domain).ok_or(FlowProductKeyError::DomainCarriesNoProduct)?;
         Ok(FlowProductKey {
-            scope: Arc::clone(self),
+            scope: Rc::clone(self),
             subject,
             offset,
         })
@@ -143,14 +142,14 @@ impl ProductLayout {
 /// A selected domain/subject address, bound to one execution.
 #[derive(Debug, Clone)]
 pub struct FlowProductKey {
-    scope: Arc<ProductLayout>,
+    scope: Rc<ProductLayout>,
     subject: usize,
     offset: usize,
 }
 
 impl PartialEq for FlowProductKey {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.scope, &other.scope)
+        Rc::ptr_eq(&self.scope, &other.scope)
             && self.subject == other.subject
             && self.offset == other.offset
     }
@@ -158,7 +157,7 @@ impl PartialEq for FlowProductKey {
 impl Eq for FlowProductKey {}
 impl Hash for FlowProductKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        Arc::as_ptr(&self.scope).hash(state);
+        Rc::as_ptr(&self.scope).hash(state);
         self.subject.hash(state);
         self.offset.hash(state);
     }
@@ -185,17 +184,19 @@ impl FlowProductKey {
     #[must_use]
     pub fn runtime_binding(&self) -> Option<&FlowBindingIdentity> {
         match self.binding_ref()? {
-            FlowBindingRef::Local(binding) => self
-                .scope
-                .inputs
-                .bindings
-                .as_ref()?
-                .runtime_identity(*binding),
+            FlowBindingRef::Local(binding) => self.scope.inputs.bindings.runtime_identity(*binding),
             FlowBindingRef::Captured(identity) => Some(identity),
         }
     }
-    fn storage(&self) -> usize {
-        self.scope.subjects[self.subject].storage * PRODUCT_DOMAINS.len() + self.offset
+    fn storage(&self) -> (usize, usize) {
+        (
+            self.offset,
+            if self.domain() == FlowDomain::DeclaredType {
+                self.subject
+            } else {
+                self.scope.subjects[self.subject].storage
+            },
+        )
     }
     fn evidence(&self) -> usize {
         self.subject * PRODUCT_DOMAINS.len() + self.offset
@@ -205,52 +206,158 @@ impl FlowProductKey {
 /// A real selected site. The control interpreter decides when it executes.
 #[derive(Debug, Clone)]
 pub struct SelectedFlowSite {
-    scope: Arc<ProductLayout>,
+    scope: Rc<ProductLayout>,
     subject: usize,
 }
 
-/// One snapshot of the only product store. The backing vector covers selected
-/// runtime subjects; source declaration aliases share storage, not evidence.
+/// Persistent continuation state. Cloning shares the ordered tree; writes
+/// copy only a tree path. Empty selected capacity never enters snapshots.
+/// Source-declaration facts live in the shared append-only authority bank.
 #[derive(Debug, Clone)]
 pub struct FlowProductStore {
-    scope: Arc<ProductLayout>,
-    values: Vec<Option<FlowProductValue>>,
-    active: usize,
+    scope: Rc<ProductLayout>,
+    values: imbl::OrdMap<(usize, usize), FlowProductValue>,
 }
+
+// Immutable structural artifacts can cross workers; mutable execution and its
+// publication-observing handles cannot. This is an architectural contract in
+// every profile, not a convention left to the current caller.
+static_assertions::assert_impl_all!(FlowProductInputs: Send, Sync);
+static_assertions::assert_not_impl_any!(FlowProductStore: Send, Sync);
+static_assertions::assert_not_impl_any!(FlowProductExecution: Send, Sync);
+static_assertions::assert_not_impl_any!(FlowProductKey: Send, Sync);
+static_assertions::assert_not_impl_any!(SelectedFlowSite: Send, Sync);
 
 impl FlowProductStore {
     #[must_use]
     pub fn get(&self, key: &FlowProductKey) -> Option<&FlowProductValue> {
-        if !Arc::ptr_eq(&self.scope, &key.scope) {
+        if !Rc::ptr_eq(&self.scope, &key.scope) {
             return None;
         }
-        self.values[key.storage()].as_ref()
+        self.get_at(key.storage())
+    }
+    fn get_at(&self, address: (usize, usize)) -> Option<&FlowProductValue> {
+        if address.0 == product_offset(FlowDomain::DeclaredType).unwrap() {
+            self.scope.declarations[address.1].get().map(Box::as_ref)
+        } else {
+            self.values.get(&address)
+        }
     }
     #[must_use]
     pub fn len(&self) -> usize {
-        self.active
+        self.values.len() + self.scope.declared_active.borrow().len()
     }
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.active == 0
+        self.values.is_empty() && self.scope.declared_active.borrow().is_empty()
     }
-    /// Deterministic domain/selected-subject order, without sorting or cloning values.
+    /// Visits only materialized cells, in domain then selected-subject order.
     pub fn ordered_entries(&self) -> impl Iterator<Item = (FlowProductKey, &FlowProductValue)> {
-        PRODUCT_DOMAINS
-            .into_iter()
-            .enumerate()
-            .flat_map(move |(offset, domain)| {
-                self.scope.representatives.iter().enumerate().filter_map(
-                    move |(storage, subject)| {
-                        let value =
-                            self.values[storage * PRODUCT_DOMAINS.len() + offset].as_ref()?;
-                        Some((
-                            self.scope.key(domain, *subject).expect("a product domain"),
-                            value,
-                        ))
-                    },
+        let declarations = self.scope.declared_active.borrow().clone();
+        let runtime = move |(&(offset, storage), value)| {
+            (
+                self.scope
+                    .key(PRODUCT_DOMAINS[offset], self.scope.representatives[storage])
+                    .expect("a product domain"),
+                value,
+            )
+        };
+        self.values
+            .range(..(3, 0))
+            .map(runtime)
+            .chain(declarations.into_iter().map(move |subject| {
+                (
+                    self.scope
+                        .key(FlowDomain::DeclaredType, subject)
+                        .expect("a product domain"),
+                    self.scope.declarations[subject]
+                        .get()
+                        .expect("published authored fact")
+                        .as_ref(),
                 )
-            })
+            }))
+            .chain(self.values.range((4, 0)..).map(runtime))
+    }
+    /// Structural sharing is observable only to the hermetic performance proof.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn shares_continuation_storage(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.scope, &other.scope) && self.values.ptr_eq(&other.values)
+    }
+}
+
+/// Scoped attachment held only by the content interpreter after matching its
+/// retained structural owner. Raw local node/binding ids never cross the public
+/// product API; returned keys and definition sites retain this execution scope.
+#[derive(Debug, Clone)]
+pub(crate) struct FlowProductContent {
+    scope: Rc<ProductLayout>,
+}
+
+impl FlowProductContent {
+    pub(crate) fn site(&self, node: FlowNodeId) -> Result<SelectedFlowSite, FlowProductKeyError> {
+        Ok(SelectedFlowSite {
+            scope: Rc::clone(&self.scope),
+            subject: self.scope.subject_at(node)?,
+        })
+    }
+    pub(crate) fn key(
+        &self,
+        domain: FlowDomain,
+        node: FlowNodeId,
+    ) -> Result<FlowProductKey, FlowProductKeyError> {
+        self.scope.key(domain, self.scope.subject_at(node)?)
+    }
+    pub(crate) fn key_for_binding(
+        &self,
+        domain: FlowDomain,
+        binding: &FlowBindingRef,
+    ) -> Result<FlowProductKey, FlowProductKeyError> {
+        let subject = match binding {
+            FlowBindingRef::Local(local) => {
+                if self.scope.inputs.bindings.identity(*local).is_none() {
+                    return Err(FlowProductKeyError::UnmodeledBinding);
+                }
+                self.scope
+                    .subject_at(self.scope.inputs.graph.binding_node(*local))?
+            }
+            FlowBindingRef::Captured(identity) => *self
+                .scope
+                .captures
+                .get(identity)
+                .ok_or(FlowProductKeyError::UnmodeledBinding)?,
+        };
+        self.scope.key(domain, subject)
+    }
+}
+
+impl FlowProductKey {
+    pub fn site(&self) -> SelectedFlowSite {
+        SelectedFlowSite {
+            scope: Rc::clone(&self.scope),
+            subject: self.subject,
+        }
+    }
+    pub fn for_domain(&self, domain: FlowDomain) -> Result<Self, FlowProductKeyError> {
+        self.scope.key(domain, self.subject)
+    }
+}
+impl SelectedFlowSite {
+    pub fn node(&self) -> FlowNodeId {
+        self.scope.subjects[self.subject].node
+    }
+    pub fn key(&self, domain: FlowDomain) -> Result<FlowProductKey, FlowProductKeyError> {
+        self.scope.key(domain, self.subject)
+    }
+}
+
+/// Successful value execution, with no obligation-discharge capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlowProductStatus {
+    iterations: u32,
+}
+impl FlowProductStatus {
+    pub fn iterations(&self) -> u32 {
+        self.iterations
     }
 }
 
@@ -288,7 +395,7 @@ impl From<FlowProductKeyError> for FlowProductFailure {
 /// Successfully executed domains/subjects, including unchanged operations.
 #[derive(Debug, Clone)]
 pub struct FlowProductEvidence {
-    scope: Arc<ProductLayout>,
+    scope: Rc<ProductLayout>,
     executed: Arc<[bool]>,
     iterations: u32,
 }
@@ -296,7 +403,7 @@ pub struct FlowProductEvidence {
 impl FlowProductEvidence {
     #[must_use]
     pub fn executed(&self, key: &FlowProductKey) -> bool {
-        Arc::ptr_eq(&self.scope, &key.scope) && self.executed[key.evidence()]
+        Rc::ptr_eq(&self.scope, &key.scope) && self.executed[key.evidence()]
     }
     #[must_use]
     pub fn iterations(&self) -> u32 {
@@ -304,7 +411,7 @@ impl FlowProductEvidence {
     }
     #[must_use]
     pub fn basis(&self) -> &FlowDemandBasis {
-        &self.scope.basis
+        self.scope.selection.basis()
     }
 }
 
@@ -312,7 +419,7 @@ impl FlowProductEvidence {
 /// actual transfers and predecessor joins can change stored products.
 #[derive(Debug)]
 pub struct FlowProductExecution {
-    scope: Arc<ProductLayout>,
+    scope: Rc<ProductLayout>,
     budget: FlowProductBudget,
     executed: Vec<bool>,
     iterations: u32,
@@ -324,25 +431,34 @@ impl FlowProductExecution {
     pub fn new(
         inputs: &FlowProductInputs,
         plan: &FlowDemandPlan,
+        budget: FlowProductBudget,
+    ) -> Result<Self, FlowProductKeyError> {
+        Self::new_for_selection(inputs, Arc::clone(plan.execution_selection()), budget)
+    }
+
+    pub fn new_for_selection(
+        inputs: &FlowProductInputs,
+        selection: Arc<FlowExecutionSelection>,
         mut budget: FlowProductBudget,
     ) -> Result<Self, FlowProductKeyError> {
+        let plan = &selection;
         if inputs.scope != plan.basis().graph_body {
             return Err(FlowProductKeyError::GraphMismatch);
         }
         budget.max_iterations = budget.max_iterations.min(plan.convergence().max_iterations);
-        let selection = plan.structural_selection();
-        if selection
+        let structural = plan.structural_selection();
+        if structural
             .value_nodes
             .len()
-            .saturating_add(selection.effect_only_nodes.len())
+            .saturating_add(structural.effect_only_nodes.len())
             > plan.resources().slice_budget.max_selected_nodes as usize
         {
             return Err(FlowProductKeyError::SelectionBudget);
         }
         // Both owner arrays are sorted and disjoint. Merge them once; do not
         // rebuild graph adjacency or a whole-graph node/domain cross product.
-        let mut values = selection.value_nodes.iter().peekable();
-        let mut effects = selection.effect_only_nodes.iter().peekable();
+        let mut values = structural.value_nodes.iter().peekable();
+        let mut effects = structural.effect_only_nodes.iter().peekable();
         let mut subjects = Vec::with_capacity(values.len() + effects.len());
         let mut representatives = Vec::new();
         let mut local_storage = FxHashMap::default();
@@ -361,10 +477,7 @@ impl FlowProductExecution {
             let subject = subjects.len();
             let (binding, binding_ref, existing_storage) = match inputs.graph.node_kind(node) {
                 FlowNodeKind::Binding(binding) => {
-                    let map = inputs
-                        .bindings
-                        .as_ref()
-                        .ok_or(FlowProductKeyError::UnmodeledBinding)?;
+                    let map = &inputs.bindings;
                     let identity = map
                         .identity(binding)
                         .ok_or(FlowProductKeyError::UnmodeledBinding)?
@@ -400,7 +513,7 @@ impl FlowProductExecution {
         let node_subjects = subjects.len();
         let mut capture_sites: FxHashMap<&FlowBindingIdentity, FlowNodeId> = FxHashMap::default();
         for (identity, node) in &inputs.captures {
-            if !selection.is_selected(*node) {
+            if !structural.is_selected(*node) {
                 continue;
             }
             if let Some(held) = capture_sites.get_mut(identity) {
@@ -408,7 +521,8 @@ impl FlowProductExecution {
                     *held = *node;
                 }
             } else {
-                if capture_sites.len() >= plan.resources().max_obligations as usize {
+                if capture_sites.len() >= plan.resources().slice_budget.max_selected_nodes as usize
+                {
                     return Err(FlowProductKeyError::SelectionBudget);
                 }
                 capture_sites.insert(identity, *node);
@@ -441,15 +555,26 @@ impl FlowProductExecution {
                 storage,
             });
         }
+        budget.max_products = budget.max_products.min(
+            u32::try_from(representatives.len())
+                .unwrap_or(u32::MAX)
+                .saturating_mul((PRODUCT_DOMAINS.len() - 1) as u32),
+        );
+        budget.max_declared_products = budget
+            .max_declared_products
+            .min(u32::try_from(subjects.len()).unwrap_or(u32::MAX));
+        let declarations = (0..subjects.len()).map(|_| OnceCell::new()).collect();
         let executed = vec![false; subjects.len() * PRODUCT_DOMAINS.len()];
         Ok(Self {
-            scope: Arc::new(ProductLayout {
+            scope: Rc::new(ProductLayout {
                 inputs: inputs.clone(),
-                basis: plan.basis().clone(),
+                selection,
                 subjects: subjects.into(),
                 node_subjects,
                 representatives: representatives.into(),
                 captures,
+                declarations,
+                declared_active: RefCell::new(imbl::OrdSet::new()),
             }),
             budget,
             executed,
@@ -462,47 +587,46 @@ impl FlowProductExecution {
     #[must_use]
     pub fn empty_state(&self) -> FlowProductStore {
         FlowProductStore {
-            scope: Arc::clone(&self.scope),
-            values: vec![None; self.scope.representatives.len() * PRODUCT_DOMAINS.len()],
-            active: 0,
+            scope: Rc::clone(&self.scope),
+            values: imbl::OrdMap::new(),
         }
     }
     #[must_use]
     pub fn selected_subject_count(&self) -> usize {
         self.scope.subjects.len()
     }
-    pub fn site(&self, node: FlowNodeId) -> Result<SelectedFlowSite, FlowProductKeyError> {
-        Ok(SelectedFlowSite {
-            scope: Arc::clone(&self.scope),
-            subject: self.scope.subject_at(node)?,
+    /// Numeric graph addresses enter only through the pinned content interpreter.
+    /// Both the retained content key and graph allocation must match this execution.
+    pub(crate) fn attach_content(
+        &self,
+        bound: &BoundFlowGraph,
+    ) -> Result<FlowProductContent, FlowProductKeyError> {
+        if bound.key() != &self.scope.inputs.scope
+            || !Arc::ptr_eq(&bound.bundle().graph, &self.scope.inputs.graph)
+        {
+            return Err(FlowProductKeyError::GraphMismatch);
+        }
+        Ok(FlowProductContent {
+            scope: Rc::clone(&self.scope),
         })
     }
-    pub fn key(
-        &self,
-        domain: FlowDomain,
-        node: FlowNodeId,
-    ) -> Result<FlowProductKey, FlowProductKeyError> {
-        self.scope.key(domain, self.scope.subject_at(node)?)
+    /// Enumerate already scoped selected sites; callers cannot supply a naked id
+    /// and silently relabel a site belonging to another execution or graph.
+    pub fn selected_sites(&self) -> impl ExactSizeIterator<Item = SelectedFlowSite> + '_ {
+        (0..self.scope.node_subjects).map(|subject| SelectedFlowSite {
+            scope: Rc::clone(&self.scope),
+            subject,
+        })
     }
-    pub fn key_for_binding(
+    pub fn key_at_site(
         &self,
         domain: FlowDomain,
-        binding: &FlowBindingRef,
+        site: &SelectedFlowSite,
     ) -> Result<FlowProductKey, FlowProductKeyError> {
-        match binding {
-            FlowBindingRef::Local(local) => {
-                let node = self.scope.inputs.graph.binding_node(*local);
-                self.key(domain, node)
-            }
-            FlowBindingRef::Captured(identity) => {
-                let subject = self
-                    .scope
-                    .captures
-                    .get(identity)
-                    .ok_or(FlowProductKeyError::UnmodeledBinding)?;
-                self.scope.key(domain, *subject)
-            }
+        if !Rc::ptr_eq(&self.scope, &site.scope) {
+            return Err(FlowProductKeyError::GraphMismatch);
         }
+        self.scope.key(domain, site.subject)
     }
 
     fn ready(&self) -> Result<(), FlowProductFailure> {
@@ -528,32 +652,35 @@ impl FlowProductExecution {
         transfers: &[FlowProductTransfer],
     ) -> Result<bool, FlowProductFailure> {
         self.ready()?;
-        if !Arc::ptr_eq(&self.scope, &state.scope) || !Arc::ptr_eq(&self.scope, &site.scope) {
+        if !Rc::ptr_eq(&self.scope, &state.scope) || !Rc::ptr_eq(&self.scope, &site.scope) {
             return self.reject(FlowProductFailure::ScopeMismatch);
         }
-        let mut staged: smallvec::SmallVec<[(usize, Option<FlowProductValue>); 5]> =
+        let mut staged: smallvec::SmallVec<[((usize, usize), Option<FlowProductValue>); 5]> =
             smallvec::SmallVec::new();
-        let mut active = state.active;
+        let mut active = state.values.len();
+        let mut declared = self.scope.declared_active.borrow().len();
         for transfer in transfers {
-            if !Arc::ptr_eq(&self.scope, &transfer.key.scope) {
+            if !Rc::ptr_eq(&self.scope, &transfer.key.scope) {
                 return self.reject(FlowProductFailure::ScopeMismatch);
             }
             let slot = transfer.key.storage();
             let prior = staged
                 .iter()
                 .find(|(held, _)| *held == slot)
-                .map(|(_, value)| value)
-                .unwrap_or(&state.values[slot]);
-            let value = match transfer_product(
-                &self.budget,
-                &transfer.key,
-                prior.as_ref(),
-                transfer.value.as_ref(),
-            ) {
-                Ok(value) => value,
-                Err(failure) => return self.reject(failure),
+                .map(|(_, value)| value.as_ref())
+                .unwrap_or_else(|| state.get_at(slot));
+            let value =
+                match transfer_product(&self.budget, &transfer.key, prior, transfer.value.as_ref())
+                {
+                    Ok(value) => value,
+                    Err(failure) => return self.reject(failure),
+                };
+            let count = if transfer.key.domain() == FlowDomain::DeclaredType {
+                &mut declared
+            } else {
+                &mut active
             };
-            active = active - usize::from(prior.is_some()) + usize::from(value.is_some());
+            *count = *count - usize::from(prior.is_some()) + usize::from(value.is_some());
             if let Some((_, held)) = staged.iter_mut().find(|(held, _)| *held == slot) {
                 *held = value;
             } else {
@@ -569,15 +696,41 @@ impl FlowProductExecution {
                 },
             ));
         }
+        if declared > self.budget.max_declared_products as usize {
+            return self.reject(FlowProductFailure::BudgetExceeded(
+                FlowProductBudgetExceeded {
+                    axis: FlowProductBudgetAxis::DeclaredProducts,
+                    limit: self.budget.max_declared_products,
+                    observed: u32::try_from(declared).unwrap_or(u32::MAX),
+                },
+            ));
+        }
+        // The execution capability is thread-local. Publication performs no
+        // callbacks, awaits, or evaluator reentry, so no observer can see only
+        // part of this fully validated bank/continuation transaction.
         let mut changed = false;
         for (slot, value) in staged {
-            changed |= state.values[slot] != value;
-            state.values[slot] = value;
+            if state.get_at(slot) == value.as_ref() {
+                continue;
+            }
+            changed = true;
+            if slot.0 == product_offset(FlowDomain::DeclaredType).unwrap() {
+                if let Some(value) = value {
+                    if self.scope.declarations[slot.1].get().is_none() {
+                        self.scope.declarations[slot.1]
+                            .set(Box::new(value))
+                            .expect("validated install-once authority");
+                        self.scope.declared_active.borrow_mut().insert(slot.1);
+                    }
+                }
+            } else if let Some(value) = value {
+                state.values.insert(slot, value);
+            } else {
+                state.values.remove(&slot);
+            }
         }
-        state.active = active;
         for transfer in transfers {
             self.executed[transfer.key.evidence()] = true;
-            self.executed[site.subject * PRODUCT_DOMAINS.len() + transfer.key.offset] = true;
         }
         Ok(changed)
     }
@@ -592,48 +745,76 @@ impl FlowProductExecution {
     ) -> Result<FlowProductStore, FlowProductFailure> {
         self.ready()?;
         for state in incoming {
-            if !Arc::ptr_eq(&self.scope, &state.scope) {
+            if !Rc::ptr_eq(&self.scope, &state.scope) {
                 return self.reject(FlowProductFailure::ScopeMismatch);
             }
         }
-        let mut result = self.empty_state();
-        for (slot, held) in result.values.iter_mut().enumerate() {
-            let domain = PRODUCT_DOMAINS[slot % PRODUCT_DOMAINS.len()];
-            if incoming.iter().all(|state| state.values[slot].is_none()) {
-                continue;
-            }
-            let mut predecessors = incoming.iter();
-            let bottom = FlowProductValue::bottom(domain).expect("a product domain");
-            let mut value = predecessors
-                .next()
-                .and_then(|state| state.values[slot].as_ref())
-                .unwrap_or(&bottom)
-                .clone();
-            for state in predecessors {
-                let next = state.values[slot].as_ref().unwrap_or(&bottom);
-                match join_product(algebra, &self.budget, &value, next) {
-                    FlowTransferOutcome::Unchanged => {}
-                    FlowTransferOutcome::Changed(joined) => value = joined,
-                    FlowTransferOutcome::Gap(gap) => {
-                        return self.reject(FlowProductFailure::Gap(gap))
+        let mut result = match incoming {
+            [only] => (*only).clone(),
+            _ => self.empty_state(),
+        };
+        if incoming.len() > 1 {
+            let addresses: imbl::OrdSet<(usize, usize)> = incoming
+                .iter()
+                .flat_map(|state| state.values.keys().copied())
+                .collect();
+            // Addresses sort by domain first, then the stable selected runtime
+            // representative. Predecessors retain the interpreter's source order.
+            for address in addresses {
+                let domain = PRODUCT_DOMAINS[address.0];
+                let bottom = FlowProductValue::bottom(domain).expect("a product domain");
+                let value = if domain == FlowDomain::ReachingType {
+                    let mut products: smallvec::SmallVec<[&ReachingTypeProduct; 4]> =
+                        smallvec::SmallVec::new();
+                    for state in incoming {
+                        let FlowProductValue::ReachingType(product) =
+                            state.values.get(&address).unwrap_or(&bottom)
+                        else {
+                            return self
+                                .reject(FlowProductFailure::Gap(FlowGap::UnmodeledExpression));
+                        };
+                        products.push(product);
                     }
-                    FlowTransferOutcome::BudgetExceeded(exceeded) => {
-                        return self.reject(FlowProductFailure::BudgetExceeded(exceeded))
+                    match join_reaching_types(algebra, &self.budget, &products) {
+                        Ok(product) => FlowProductValue::ReachingType(product),
+                        Err(failure) => return self.reject(failure),
                     }
+                } else {
+                    let mut predecessors = incoming.iter();
+                    let mut value = predecessors
+                        .next()
+                        .and_then(|state| state.values.get(&address))
+                        .unwrap_or(&bottom)
+                        .clone();
+                    for state in predecessors {
+                        let next = state.values.get(&address).unwrap_or(&bottom);
+                        match join_product(algebra, &self.budget, &value, next) {
+                            FlowTransferOutcome::Unchanged => {}
+                            FlowTransferOutcome::Changed(joined) => value = joined,
+                            FlowTransferOutcome::Gap(gap) => {
+                                return self.reject(FlowProductFailure::Gap(gap))
+                            }
+                            FlowTransferOutcome::BudgetExceeded(exceeded) => {
+                                return self.reject(FlowProductFailure::BudgetExceeded(exceeded))
+                            }
+                        }
+                    }
+                    value
+                };
+                if let Some(exceeded) = width_exceeded(&self.budget, value.width()) {
+                    return self.reject(FlowProductFailure::BudgetExceeded(exceeded));
+                }
+                if value != bottom {
+                    result.values.insert(address, value);
                 }
             }
-            if let Some(exceeded) = width_exceeded(&self.budget, value.width()) {
-                return self.reject(FlowProductFailure::BudgetExceeded(exceeded));
-            }
-            *held = Some(value);
-            result.active += 1;
         }
-        if result.active > self.budget.max_products as usize {
+        if result.values.len() > self.budget.max_products as usize {
             return self.reject(FlowProductFailure::BudgetExceeded(
                 FlowProductBudgetExceeded {
                     axis: FlowProductBudgetAxis::Products,
                     limit: self.budget.max_products,
-                    observed: u32::try_from(result.active).unwrap_or(u32::MAX),
+                    observed: u32::try_from(result.values.len()).unwrap_or(u32::MAX),
                 },
             ));
         }
@@ -659,11 +840,29 @@ impl FlowProductExecution {
 
     /// Seal successful execution. Later mutation is rejected, and a prior
     /// failure cannot be hidden by finishing an earlier valid snapshot.
-    pub fn finish(&mut self) -> Result<FlowProductEvidence, FlowProductFailure> {
+    pub fn finish(&mut self) -> Result<FlowProductStatus, FlowProductFailure> {
         self.ready()?;
         self.sealed = true;
+        Ok(FlowProductStatus {
+            iterations: self.iterations,
+        })
+    }
+
+    /// Only the exact proof plan expanded from this execution selection can
+    /// obtain discharge evidence. An equal independently minted basis is insufficient.
+    pub fn finish_with_plan(
+        &mut self,
+        plan: &FlowDemandPlan,
+    ) -> Result<FlowProductEvidence, FlowProductFailure> {
+        self.ready()?;
+        if !plan.matches_execution(&self.scope.selection)
+            || plan.basis() != self.scope.selection.basis()
+        {
+            return self.reject(FlowProductFailure::ScopeMismatch);
+        }
+        self.sealed = true;
         Ok(FlowProductEvidence {
-            scope: Arc::clone(&self.scope),
+            scope: Rc::clone(&self.scope),
             executed: std::mem::take(&mut self.executed).into(),
             iterations: self.iterations,
         })
@@ -679,6 +878,9 @@ pub fn transfer_product(
     value: Option<&FlowProductValue>,
 ) -> Result<Option<FlowProductValue>, FlowProductFailure> {
     let Some(value) = value else {
+        if key.domain() == FlowDomain::DeclaredType && incoming.is_some() {
+            return Err(FlowProductFailure::Gap(FlowGap::UnmodeledExpression));
+        }
         return Ok(None);
     };
     if key.domain() != value.domain() {
@@ -692,7 +894,7 @@ pub fn transfer_product(
             if product
                 .scope
                 .as_ref()
-                .is_some_and(|scope| !Arc::ptr_eq(scope, &key.scope))
+                .is_some_and(|scope| !Rc::ptr_eq(scope, &key.scope))
             {
                 return Err(FlowProductFailure::ScopeMismatch);
             }
@@ -709,7 +911,7 @@ pub fn transfer_product(
                 FlowProductValue::DeclaredType(new),
             ) = (incoming, value)
             {
-                if held.declared().is_some() && new.declared().is_some() && held != new {
+                if held.declared().is_some() && held != new {
                     return Err(FlowProductFailure::Gap(FlowGap::UnmodeledExpression));
                 }
             }
@@ -720,29 +922,25 @@ pub fn transfer_product(
             };
             let runtime = key.runtime_binding();
             if product.facts().iter().any(|fact| {
-                let identity = key
-                    .scope
-                    .inputs
-                    .bindings
-                    .as_ref()
-                    .and_then(|map| {
-                        map.local(&fact.binding)
-                            .and_then(|local| map.runtime_identity(local))
-                    })
+                let map = &key.scope.inputs.bindings;
+                let identity = map
+                    .local(&fact.binding)
+                    .and_then(|local| map.runtime_identity(local))
                     .unwrap_or(&fact.binding);
                 Some(identity) != runtime
             }) {
                 return Err(FlowProductFailure::Gap(FlowGap::UnmodeledExpression));
             }
-            if let Some(exceeded) = width_exceeded(budget, value.width()) {
-                return Err(FlowProductFailure::BudgetExceeded(exceeded));
-            }
-            return Ok(Some(FlowProductValue::Narrowing(NarrowingProduct::new(
+            let normalized = FlowProductValue::Narrowing(NarrowingProduct::new(
                 product.facts().iter().cloned().map(|mut fact| {
                     fact.binding = runtime.expect("a fact has a binding").clone();
                     fact
                 }),
-            ))));
+            ));
+            if let Some(exceeded) = width_exceeded(budget, normalized.width()) {
+                return Err(FlowProductFailure::BudgetExceeded(exceeded));
+            }
+            return Ok((normalized.width() != 0).then_some(normalized));
         }
         FlowDomain::Completion
         | FlowDomain::ClosureCapture
@@ -758,7 +956,7 @@ pub fn transfer_product(
     if let Some(exceeded) = width_exceeded(budget, value.width()) {
         return Err(FlowProductFailure::BudgetExceeded(exceeded));
     }
-    Ok(Some(value.clone()))
+    Ok((FlowProductValue::bottom(value.domain()).as_ref() != Some(value)).then(|| value.clone()))
 }
 
 // ── The canonical semantic-type algebra seam ───────────────────────────
@@ -775,6 +973,8 @@ pub struct FlowAlgebraComposite {
     pub incomplete: bool,
 }
 
+pub use super::canonical_algebra::{LiteralFreshness, LiteralProvenance, LiteralProvenanceResult};
+
 /// The canonical semantic-type algebra a product join constructs every
 /// semantic composite through. This substrate never assembles a union or
 /// an intersection itself; the sole production implementor forwards to the
@@ -783,25 +983,28 @@ pub struct FlowAlgebraComposite {
 pub trait FlowSemanticAlgebra {
     /// The canonical union of `members`.
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite;
-    /// Top-level literal constituents, with canonical-owner inspection evidence.
-    fn literal_arms(
+    /// One bounded canonical-owner inspection across both inputs and result.
+    fn literal_provenance(
         &self,
-        node: SemanticNodeId,
-    ) -> Result<Vec<(SemanticNodeId, crate::semantic_query::LiteralValue)>, FlowGap>;
+        inputs: &[LiteralProvenance<'_>],
+        result: SemanticNodeId,
+    ) -> Result<LiteralProvenanceResult, FlowGap>;
 }
 
 impl FlowSemanticAlgebra for super::ProjectSemanticDispatch<'_> {
-    fn literal_arms(
+    fn literal_provenance(
         &self,
-        node: SemanticNodeId,
-    ) -> Result<Vec<(SemanticNodeId, crate::semantic_query::LiteralValue)>, FlowGap> {
-        let (arms, evidence) = super::canonical_algebra::inspect_literal_arms(self.graph(), node);
+        inputs: &[LiteralProvenance<'_>],
+        result: SemanticNodeId,
+    ) -> Result<LiteralProvenanceResult, FlowGap> {
+        let (membership, evidence) =
+            super::canonical_algebra::inspect_literal_provenance(self.graph(), inputs, result);
         let incomplete = evidence.incomplete;
         self.deposit_canonical_evidence(evidence);
         if incomplete {
             Err(FlowGap::UnmodeledExpression)
         } else {
-            Ok(arms)
+            Ok(membership)
         }
     }
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
@@ -824,15 +1027,17 @@ pub struct GraphSemanticAlgebra<'g>(pub &'g crate::semantic_query_memo::Semantic
 
 #[cfg(any(test, feature = "test-support"))]
 impl FlowSemanticAlgebra for GraphSemanticAlgebra<'_> {
-    fn literal_arms(
+    fn literal_provenance(
         &self,
-        node: SemanticNodeId,
-    ) -> Result<Vec<(SemanticNodeId, crate::semantic_query::LiteralValue)>, FlowGap> {
-        let (arms, evidence) = super::canonical_algebra::inspect_literal_arms(self.0, node);
+        inputs: &[LiteralProvenance<'_>],
+        result: SemanticNodeId,
+    ) -> Result<LiteralProvenanceResult, FlowGap> {
+        let (membership, evidence) =
+            super::canonical_algebra::inspect_literal_provenance(self.0, inputs, result);
         if evidence.incomplete {
             Err(FlowGap::UnmodeledExpression)
         } else {
-            Ok(arms)
+            Ok(membership)
         }
     }
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
@@ -859,7 +1064,7 @@ pub fn domain_carries_product(domain: FlowDomain) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct ReachingValueProduct {
     definitions: Arc<[FlowNodeId]>,
-    scope: Option<Arc<ProductLayout>>,
+    scope: Option<Rc<ProductLayout>>,
 }
 
 impl PartialEq for ReachingValueProduct {
@@ -867,7 +1072,7 @@ impl PartialEq for ReachingValueProduct {
         self.definitions == other.definitions
             && match (&self.scope, &other.scope) {
                 (None, None) => true,
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (Some(a), Some(b)) => Rc::ptr_eq(a, b),
                 _ => false,
             }
     }
@@ -880,13 +1085,13 @@ impl ReachingValueProduct {
     pub fn at(site: &SelectedFlowSite) -> Self {
         Self {
             definitions: Arc::from([site.scope.subjects[site.subject].node]),
-            scope: Some(Arc::clone(&site.scope)),
+            scope: Some(Rc::clone(&site.scope)),
         }
     }
 
     fn merged(
         definitions: impl IntoIterator<Item = FlowNodeId>,
-        scope: Option<Arc<ProductLayout>>,
+        scope: Option<Rc<ProductLayout>>,
     ) -> Self {
         let mut sites: Vec<FlowNodeId> = definitions.into_iter().collect();
         sites.sort_by_key(|node| node.index());
@@ -1232,6 +1437,8 @@ pub enum FlowProductBudgetAxis {
     Iterations,
     /// The size of the product universe the solve would store.
     Products,
+    /// Materialized source-declaration facts over the execution lifetime.
+    DeclaredProducts,
     /// The element count of one product's carrier.
     Width,
 }
@@ -1255,9 +1462,13 @@ pub struct FlowProductBudget {
     /// stabilizes WITHIN this many iterations completes; one that would
     /// need another iteration is budget-exhausted.
     pub max_iterations: u32,
-    /// Maximum materialized products in one snapshot. Empty selected
-    /// capacity is separately bounded by the sealed plan's resource policy.
+    /// Maximum materialized runtime products in one continuation snapshot.
+    /// Source authority has its own execution-global cap below; the sum of
+    /// the caps bounds all values visible through any snapshot.
     pub max_products: u32,
+    /// Maximum source-declaration facts in the execution's append-only bank.
+    /// These facts survive every continuation and do not consume its runtime cap.
+    pub max_declared_products: u32,
     /// The maximum element count of one product's carrier. A store
     /// INVARIANT, not a join-local check: every value a transfer or a join
     /// produces is measured against it before it can be stored.
@@ -1269,29 +1480,36 @@ impl Default for FlowProductBudget {
         Self {
             max_iterations: 16,
             max_products: 4096,
+            max_declared_products: 4096,
             max_product_width: 64,
         }
     }
 }
 
 impl FlowProductBudget {
-    /// Product capacity is connected to the selected work and obligation
-    /// frontier. Unread signature parameters add neither work nor slots.
+    /// Capacity follows selected execution, independently of proof obligations.
     #[must_use]
-    pub fn for_demand_plan(plan: &FlowDemandPlan) -> Self {
+    pub fn for_execution_selection(plan: &FlowExecutionSelection) -> Self {
         let selection = plan.structural_selection();
+        // One expression can mention many captured bindings. The structural
+        // policy separately caps their imported subject inventory; proof
+        // obligations never determine value-execution capacity.
         let subjects = selection
             .value_nodes
             .len()
             .saturating_add(selection.effect_only_nodes.len())
-            .saturating_add(plan.work_order().len());
+            .saturating_add(plan.resources().slice_budget.max_selected_nodes as usize);
+        let subjects = u32::try_from(subjects).unwrap_or(u32::MAX);
         Self {
             max_iterations: plan.convergence().max_iterations,
-            max_products: u32::try_from(subjects)
-                .unwrap_or(u32::MAX)
-                .saturating_mul(PRODUCT_DOMAINS.len() as u32),
+            max_products: subjects.saturating_mul((PRODUCT_DOMAINS.len() - 1) as u32),
+            max_declared_products: subjects,
             max_product_width: plan.resources().slice_budget.max_selected_nodes,
         }
+    }
+    #[must_use]
+    pub fn for_demand_plan(plan: &FlowDemandPlan) -> Self {
+        Self::for_execution_selection(plan.execution_selection())
     }
 }
 
@@ -1357,7 +1575,7 @@ pub fn join_product(
                 return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
             };
             if let (Some(a), Some(b)) = (&left.scope, &right.scope) {
-                if !Arc::ptr_eq(a, b) {
+                if !Rc::ptr_eq(a, b) {
                     return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
                 }
             }
@@ -1379,40 +1597,16 @@ pub fn join_product(
             else {
                 return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
             };
-            let mut contributors: Vec<SemanticNodeId> = left
-                .contributors()
-                .iter()
-                .chain(right.contributors().iter())
-                .copied()
-                .collect();
-            let mut seen = rustc_hash::FxHashSet::default();
-            contributors.retain(|node| seen.insert(*node));
-            if let Some(exceeded) = width_exceeded(budget, contributors.len()) {
-                return FlowTransferOutcome::BudgetExceeded(exceeded);
-            }
-            // The product-state algebra ends here: the SEMANTIC composite
-            // over the aggregated contributors is constructed by the
-            // canonical algebra, never assembled in this substrate.
-            let united = match contributors.as_slice() {
-                [] => None,
-                [single] => Some(*single),
-                members => {
-                    let composite = algebra.union(members);
-                    if composite.incomplete {
-                        return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
-                    }
-                    Some(composite.node)
+            match join_reaching_types(algebra, budget, &[left, right]) {
+                Ok(product) => FlowProductValue::ReachingType(product),
+                Err(FlowProductFailure::BudgetExceeded(exceeded)) => {
+                    return FlowTransferOutcome::BudgetExceeded(exceeded)
                 }
-            };
-            let widening = match join_widening(algebra, left, right, united) {
-                Ok(widening) => widening,
-                Err(gap) => return FlowTransferOutcome::Gap(gap),
-            };
-            FlowProductValue::ReachingType(ReachingTypeProduct {
-                contributors: Arc::from(contributors.into_boxed_slice()),
-                united,
-                widening,
-            })
+                Err(FlowProductFailure::Gap(gap)) => return FlowTransferOutcome::Gap(gap),
+                Err(FlowProductFailure::ScopeMismatch | FlowProductFailure::Sealed) => {
+                    return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression)
+                }
+            }
         }
         FlowDomain::DeclaredType => {
             let (FlowProductValue::DeclaredType(left), FlowProductValue::DeclaredType(right)) =
@@ -1509,80 +1703,91 @@ fn width_exceeded(budget: &FlowProductBudget, width: usize) -> Option<FlowProduc
     None
 }
 
-fn same_literal(
-    a: &crate::semantic_query::LiteralValue,
-    b: &crate::semantic_query::LiteralValue,
-) -> bool {
-    match (a, b) {
-        (
-            crate::semantic_query::LiteralValue::Number(a),
-            crate::semantic_query::LiteralValue::Number(b),
-        ) => !super::canonical_algebra::numeric_literal_values_disjoint(*a, *b),
-        _ => a == b,
-    }
-}
-
-/// Freshness joins by literal value with pinned occurrences winning. Result
-/// membership names only surviving canonical literal arms, never an absorbed
-/// input arm or a discarded scoped representative.
-fn join_widening(
+/// One canonical reaching-type operation over the actual incoming paths.
+/// Contributors preserve source/edge order and are deduplicated before the
+/// canonical owner constructs the final type. Temporary binary prefixes never
+/// consume/reset independent provenance budgets or publish intermediate types.
+fn join_reaching_types(
     algebra: &dyn FlowSemanticAlgebra,
-    a: &ReachingTypeProduct,
-    b: &ReachingTypeProduct,
-    result: Option<SemanticNodeId>,
-) -> Result<Option<WideningMembership>, FlowGap> {
-    if a.widening.is_none() && b.widening.is_none() {
-        return Ok(None);
+    budget: &FlowProductBudget,
+    products: &[&ReachingTypeProduct],
+) -> Result<ReachingTypeProduct, FlowProductFailure> {
+    for product in products {
+        let width = product.contributors.len().max(match &product.widening {
+            Some(WideningMembership::Partial(members)) => members.len(),
+            _ => 0,
+        });
+        if let Some(exceeded) = width_exceeded(budget, width) {
+            return Err(FlowProductFailure::BudgetExceeded(exceeded));
+        }
     }
-    let Some(result) = result else {
-        return Ok(None);
+    let Some(first) = products.first() else {
+        return Ok(ReachingTypeProduct::default());
     };
-    let mut fresh = Vec::new();
-    let mut pinned = Vec::new();
-    for product in [a, b] {
-        let Some(node) = product.united else {
-            continue;
-        };
-        let arms = algebra.literal_arms(node)?;
-        let partial = match product.widening() {
-            Some(WideningMembership::Partial(members)) => {
-                let mut values = Vec::new();
-                for member in members.iter() {
-                    values.extend(
-                        algebra
-                            .literal_arms(*member)?
-                            .into_iter()
-                            .map(|(_, value)| value),
-                    );
+    if products.iter().all(|product| *product == *first) {
+        return Ok((*first).clone());
+    }
+    let mut seen = rustc_hash::FxHashSet::default();
+    let mut contributors = Vec::new();
+    for product in products {
+        for contributor in product.contributors.iter().copied() {
+            if seen.insert(contributor) {
+                contributors.push(contributor);
+                if let Some(exceeded) = width_exceeded(budget, contributors.len()) {
+                    return Err(FlowProductFailure::BudgetExceeded(exceeded));
                 }
-                values
-            }
-            _ => Vec::new(),
-        };
-        for (_, value) in arms {
-            let is_fresh = matches!(product.widening(), Some(WideningMembership::All))
-                || partial.iter().any(|member| same_literal(&value, member));
-            if is_fresh {
-                fresh.push(value);
-            } else {
-                pinned.push(value);
             }
         }
     }
-    let surviving: Vec<_> = algebra
-        .literal_arms(result)?
-        .into_iter()
-        .filter(|(_, value)| {
-            fresh.iter().any(|candidate| same_literal(value, candidate))
-                && !pinned
+    let united = match contributors.as_slice() {
+        [] => None,
+        [single] => Some(*single),
+        members => {
+            let composite = algebra.union(members);
+            if composite.incomplete {
+                return Err(FlowProductFailure::Gap(FlowGap::UnmodeledExpression));
+            }
+            Some(composite.node)
+        }
+    };
+    let widening =
+        match united.filter(|_| products.iter().any(|product| product.widening.is_some())) {
+            None => None,
+            Some(result) => {
+                let inputs: smallvec::SmallVec<[LiteralProvenance<'_>; 4]> = products
                     .iter()
-                    .any(|candidate| same_literal(value, candidate))
-        })
-        .map(|(node, _)| node)
-        .collect();
-    if surviving.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(WideningMembership::Partial(surviving.into())))
+                    .map(|product| LiteralProvenance {
+                        root: product.united,
+                        fresh: match product.widening() {
+                            None => LiteralFreshness::Pinned,
+                            Some(WideningMembership::All) => LiteralFreshness::All,
+                            Some(WideningMembership::Partial(members)) => {
+                                LiteralFreshness::Partial(members)
+                            }
+                        },
+                    })
+                    .collect();
+                match algebra
+                    .literal_provenance(&inputs, result)
+                    .map_err(FlowProductFailure::Gap)?
+                {
+                    LiteralProvenanceResult::None => None,
+                    LiteralProvenanceResult::All => Some(WideningMembership::All),
+                    LiteralProvenanceResult::Partial(members) => {
+                        Some(WideningMembership::Partial(members.into()))
+                    }
+                }
+            }
+        };
+    let product = ReachingTypeProduct {
+        contributors: contributors.into(),
+        united,
+        widening,
+    };
+    if let Some(WideningMembership::Partial(members)) = &product.widening {
+        if let Some(exceeded) = width_exceeded(budget, members.len()) {
+            return Err(FlowProductFailure::BudgetExceeded(exceeded));
+        }
     }
+    Ok(product)
 }

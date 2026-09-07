@@ -90,6 +90,194 @@ use crate::semantic_query::{
 };
 use crate::semantic_query_memo::{ObservedGraphSelfRoot, SemanticGraphStore};
 
+#[cfg(test)]
+mod literal_provenance_tests {
+    use super::*;
+
+    thread_local! {
+        pub(super) static PAYLOAD_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static PAYLOAD_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn input(root: Option<SemanticNodeId>, fresh: LiteralFreshness<'_>) -> LiteralProvenance<'_> {
+        LiteralProvenance { root, fresh }
+    }
+
+    fn scoped_literal(
+        graph: &SemanticGraphStore,
+        value: LiteralValue,
+        file: &str,
+    ) -> SemanticNodeId {
+        graph.intern_node_with_scope(
+            SemanticNodeData::Literal(value),
+            NodeScopeId::File {
+                canonical_id: Arc::from(file),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [1; 16],
+                local_scope: None,
+            },
+        )
+    }
+
+    #[test]
+    fn literal_provenance_pins_equal_values_and_observes_both_origins() {
+        for (left, right) in [
+            (LiteralValue::Number(-0.0), LiteralValue::Number(0.0)),
+            (
+                LiteralValue::Number(f64::from_bits(0x7ff8_0000_0000_0001)),
+                LiteralValue::Number(f64::from_bits(0x7ff8_0000_0000_0002)),
+            ),
+            (
+                LiteralValue::String("same".into()),
+                LiteralValue::String("same".into()),
+            ),
+            (
+                LiteralValue::BigInt("123".into()),
+                LiteralValue::BigInt("123".into()),
+            ),
+        ] {
+            let graph = SemanticGraphStore::new();
+            let left = scoped_literal(&graph, left, "/fresh.ts");
+            let right = scoped_literal(&graph, right, "/pinned.ts");
+            let result = canonical_union(&graph, &[left, right]).node;
+            let (membership, evidence) = inspect_literal_provenance(
+                &graph,
+                &[
+                    input(Some(left), LiteralFreshness::All),
+                    input(Some(right), LiteralFreshness::Pinned),
+                ],
+                result,
+            );
+            assert!(!evidence.incomplete);
+            assert_eq!(membership, LiteralProvenanceResult::None);
+            assert_eq!(evidence.inspected_file_roots.len(), 2);
+        }
+    }
+
+    #[test]
+    fn literal_provenance_batches_partial_roots_and_normalizes_survivors() {
+        let graph = SemanticGraphStore::new();
+        let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("a".into())));
+        let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("b".into())));
+        let c = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("c".into())));
+        let root = canonical_union(&graph, &[c, b, a]).node;
+        let partial = canonical_union(&graph, &[c, a]).node;
+        let members = [partial; 32];
+        let (membership, evidence) = inspect_literal_provenance(
+            &graph,
+            &[input(Some(root), LiteralFreshness::Partial(&members))],
+            root,
+        );
+        assert!(!evidence.incomplete);
+        assert_eq!(membership, LiteralProvenanceResult::Partial(vec![a, c]));
+        assert_eq!(
+            evidence.seen_nodes.len(),
+            5,
+            "shared roots are inspected once"
+        );
+
+        let (membership, evidence) = inspect_literal_provenance(
+            &graph,
+            &[input(Some(root), LiteralFreshness::Partial(&[root]))],
+            root,
+        );
+        assert!(!evidence.incomplete);
+        assert_eq!(membership, LiteralProvenanceResult::All);
+    }
+
+    #[test]
+    fn literal_provenance_budget_is_shared_by_inputs_and_result() {
+        let graph = SemanticGraphStore::new();
+        let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Boolean(true)));
+        let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Boolean(false)));
+        let result = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let (_, evidence) = inspect_literal_provenance_with_budget(
+            &graph,
+            &[
+                input(Some(a), LiteralFreshness::All),
+                input(Some(b), LiteralFreshness::Pinned),
+            ],
+            result,
+            2,
+        );
+        assert!(
+            evidence.incomplete,
+            "three disjoint roots share a two-visit cap"
+        );
+        let (membership, evidence) = inspect_literal_provenance_with_budget(
+            &graph,
+            &[
+                input(Some(a), LiteralFreshness::All),
+                input(Some(b), LiteralFreshness::Pinned),
+            ],
+            result,
+            3,
+        );
+        assert!(!evidence.incomplete);
+        assert_eq!(
+            membership,
+            LiteralProvenanceResult::None,
+            "primitive absorption removes literals"
+        );
+    }
+
+    #[test]
+    fn literal_provenance_hashes_shared_payloads_once_per_operation() {
+        let graph = SemanticGraphStore::new();
+        let string = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "s".repeat(4096),
+        )));
+        let bigint = graph.intern_node(SemanticNodeData::Literal(LiteralValue::BigInt(
+            "7".repeat(4096),
+        )));
+        let root = canonical_union(&graph, &[string, bigint]).node;
+        let partial = [string];
+        let inputs: Vec<_> = (0..32)
+            .map(|index| {
+                input(
+                    Some(root),
+                    match index % 3 {
+                        0 => LiteralFreshness::All,
+                        1 => LiteralFreshness::Partial(&partial),
+                        _ => LiteralFreshness::Pinned,
+                    },
+                )
+            })
+            .collect();
+        PAYLOAD_HASHES.set(0);
+        PAYLOAD_COMPARISONS.set(0);
+        let (membership, evidence) = inspect_literal_provenance(&graph, &inputs, root);
+        assert!(!evidence.incomplete);
+        assert_eq!(membership, LiteralProvenanceResult::None);
+        assert_eq!(evidence.seen_nodes.len(), 3);
+        assert_eq!(
+            PAYLOAD_HASHES.get(),
+            2,
+            "shared literal bytes are hashed only on first inspection"
+        );
+        assert_eq!(
+            PAYLOAD_COMPARISONS.get(),
+            0,
+            "shared payload handles need no byte comparison"
+        );
+    }
+
+    #[test]
+    fn literal_provenance_hash_collision_still_compares_exact_values() {
+        let left = LiteralValueIdentity::new(Arc::new(SemanticNodeData::Literal(
+            LiteralValue::String("left".into()),
+        )));
+        let mut right = LiteralValueIdentity::new(Arc::new(SemanticNodeData::Literal(
+            LiteralValue::String("right".into()),
+        )));
+        // A hash is only a candidate filter. Force the rare collision without
+        // relying on particular hash output or a source fingerprint.
+        right.semantic_hash = left.semantic_hash;
+        let distinct: FxHashSet<_> = [left, right].into_iter().collect();
+        assert_eq!(distinct.len(), 2);
+    }
+}
+
 /// The witness that a [`CompositeList`](crate::semantic_query::composite::CompositeList)
 /// member list was produced by THIS module's canonical builders. Its fields
 /// are private and no constructor is exported: only the canonical algebra
@@ -160,46 +348,259 @@ pub(crate) struct CanonicalEvidence {
     seen_nodes: FxHashSet<SemanticNodeId>,
 }
 
-/// Read-only top-level literal inspection for provenance consumers. Union
-/// shells are flattened under the algebra's existing bounded evidence rail;
-/// intersections and nonliteral types do not carry widening membership.
-pub(crate) fn inspect_literal_arms(
-    graph: &SemanticGraphStore,
-    root: SemanticNodeId,
-) -> (
-    Vec<(SemanticNodeId, crate::semantic_query::LiteralValue)>,
-    CanonicalEvidence,
-) {
-    let mut evidence = CanonicalEvidence::default();
-    let mut pending = vec![root];
-    let mut visited = FxHashSet::default();
-    let mut literals = Vec::new();
-    while let Some(node) = pending.pop() {
-        if !visited.insert(node) {
-            continue;
+/// Fresh literal values contributed by one input. Partial roots may themselves
+/// be unions; the canonical owner inspects their literal constituents.
+#[derive(Debug, Clone, Copy)]
+pub enum LiteralFreshness<'a> {
+    /// Every literal occurrence in the input is pinned.
+    Pinned,
+    /// Every literal occurrence in the input is fresh.
+    All,
+    /// Only literal values named by these roots are fresh.
+    Partial(&'a [SemanticNodeId]),
+}
+
+/// One input to a canonical literal-provenance join.
+#[derive(Debug, Clone, Copy)]
+pub struct LiteralProvenance<'a> {
+    /// The input type; absent inputs contribute no literal occurrences.
+    pub root: Option<SemanticNodeId>,
+    /// Freshness of that input's literal occurrences.
+    pub fresh: LiteralFreshness<'a>,
+}
+
+/// Freshness of the surviving canonical literal representatives.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LiteralProvenanceResult {
+    /// No surviving literal value is fresh.
+    None,
+    /// Every surviving literal value is fresh.
+    All,
+    /// Sorted, unique canonical representatives of the fresh literal values.
+    Partial(Vec<SemanticNodeId>),
+}
+
+/// A shared literal payload with semantic value identity. Holding the node's
+/// Arc avoids copying string and bigint contents into membership sets. The
+/// operation-local inventory computes its semantic hash only on first read.
+#[derive(Clone)]
+struct LiteralValueIdentity {
+    data: Arc<SemanticNodeData>,
+    semantic_hash: u64,
+}
+
+impl LiteralValueIdentity {
+    fn new(data: Arc<SemanticNodeData>) -> Self {
+        use std::hash::{Hash, Hasher};
+        #[cfg(test)]
+        literal_provenance_tests::PAYLOAD_HASHES.with(|count| count.set(count.get() + 1));
+        let mut state = rustc_hash::FxHasher::default();
+        match data.as_ref() {
+            SemanticNodeData::Literal(LiteralValue::Number(value)) => {
+                0u8.hash(&mut state);
+                // Hash exactly the SameValueZero equality rule: all zeros
+                // share one key and every NaN payload shares another.
+                let bits = if *value == 0.0 {
+                    0
+                } else if value.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    value.to_bits()
+                };
+                bits.hash(&mut state);
+            }
+            SemanticNodeData::Literal(LiteralValue::String(value)) => {
+                1u8.hash(&mut state);
+                value.hash(&mut state);
+            }
+            SemanticNodeData::Literal(LiteralValue::BigInt(value)) => {
+                2u8.hash(&mut state);
+                value.hash(&mut state);
+            }
+            SemanticNodeData::Literal(LiteralValue::Boolean(value)) => {
+                3u8.hash(&mut state);
+                value.hash(&mut state);
+            }
+            _ => unreachable!("literal identity only wraps literal payloads"),
         }
-        if visited.len() > COMPARE_WORK_BUDGET as usize {
+        Self {
+            data,
+            semantic_hash: state.finish(),
+        }
+    }
+}
+
+impl PartialEq for LiteralValueIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        if Arc::ptr_eq(&self.data, &other.data) {
+            return true;
+        }
+        if self.semantic_hash != other.semantic_hash {
+            return false;
+        }
+        #[cfg(test)]
+        literal_provenance_tests::PAYLOAD_COMPARISONS.with(|count| count.set(count.get() + 1));
+        // Hashes only narrow candidates. Different payload handles still need
+        // exact semantic comparison, including the SameValueZero number rule.
+        match (self.data.as_ref(), other.data.as_ref()) {
+            (
+                SemanticNodeData::Literal(LiteralValue::Number(a)),
+                SemanticNodeData::Literal(LiteralValue::Number(b)),
+            ) => !numeric_literal_values_disjoint(*a, *b),
+            (SemanticNodeData::Literal(a), SemanticNodeData::Literal(b)) => a == b,
+            _ => unreachable!("literal identity only wraps literal payloads"),
+        }
+    }
+}
+impl Eq for LiteralValueIdentity {}
+
+impl std::hash::Hash for LiteralValueIdentity {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.semantic_hash.hash(state);
+    }
+}
+
+/// Join literal provenance in one operation-local inspection. All inputs,
+/// partial-member roots, and the result share one work budget and payload
+/// inventory. Union shells carry input roles to their children; intersections
+/// and other nonliteral types contribute no literal membership.
+pub(crate) fn inspect_literal_provenance(
+    graph: &SemanticGraphStore,
+    inputs: &[LiteralProvenance<'_>],
+    result: SemanticNodeId,
+) -> (LiteralProvenanceResult, CanonicalEvidence) {
+    inspect_literal_provenance_with_budget(graph, inputs, result, COMPARE_WORK_BUDGET as usize)
+}
+
+fn inspect_literal_provenance_with_budget(
+    graph: &SemanticGraphStore,
+    inputs: &[LiteralProvenance<'_>],
+    result: SemanticNodeId,
+    budget: usize,
+) -> (LiteralProvenanceResult, CanonicalEvidence) {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum Role {
+        Input(usize),
+        Fresh(usize),
+        Result,
+    }
+    enum InspectedPayload {
+        Literal(LiteralValueIdentity),
+        Nonliteral(Arc<SemanticNodeData>),
+    }
+    const PRESENT: u8 = 1;
+    const FRESH: u8 = 2;
+    const PINNED: u8 = 1;
+    let mut evidence = CanonicalEvidence::default();
+    if inputs.len() > budget {
+        evidence.incomplete = true;
+        return (LiteralProvenanceResult::None, evidence);
+    }
+    let mut pending = vec![(result, Role::Result)];
+    for (index, input) in inputs.iter().enumerate().rev() {
+        let Some(root) = input.root else { continue };
+        if let LiteralFreshness::Partial(members) = input.fresh {
+            if pending
+                .len()
+                .saturating_add(members.len())
+                .saturating_add(1)
+                > budget
+            {
+                evidence.incomplete = true;
+                return (LiteralProvenanceResult::None, evidence);
+            }
+            pending.extend(members.iter().rev().map(|node| (*node, Role::Fresh(index))));
+        }
+        pending.push((root, Role::Input(index)));
+    }
+    let mut inspected: FxHashMap<SemanticNodeId, InspectedPayload> = FxHashMap::default();
+    let mut visited_roles = FxHashSet::default();
+    let mut literals: FxHashMap<(LiteralValueIdentity, usize), u8> = FxHashMap::default();
+    let mut representatives = Vec::new();
+    let mut visits = 0usize;
+    while let Some((node, role)) = pending.pop() {
+        if visits == budget {
             evidence.incomplete = true;
             break;
         }
-        evidence.record_file_root(graph, node);
-        match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Literal(value)) => literals.push((node, value.clone())),
-            Some(SemanticNodeData::Union(members)) => {
-                if pending.len().saturating_add(members.len()) > COMPARE_WORK_BUDGET as usize {
+        visits += 1;
+        if !visited_roles.insert((node, role)) {
+            continue;
+        }
+        let data = match inspected.entry(node) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                evidence.record_file_root(graph, node);
+                let Some(data) = graph.node_data(node) else {
                     evidence.incomplete = true;
                     break;
+                };
+                entry.insert(if matches!(data.as_ref(), SemanticNodeData::Literal(_)) {
+                    InspectedPayload::Literal(LiteralValueIdentity::new(data))
+                } else {
+                    InspectedPayload::Nonliteral(data)
+                })
+            }
+        };
+        match data {
+            InspectedPayload::Literal(identity) => {
+                let identity = identity.clone();
+                match role {
+                    Role::Input(index) => {
+                        let flags = if matches!(inputs[index].fresh, LiteralFreshness::All) {
+                            PRESENT | FRESH
+                        } else {
+                            PRESENT
+                        };
+                        *literals.entry((identity, index)).or_default() |= flags;
+                    }
+                    Role::Fresh(index) => {
+                        *literals.entry((identity, index)).or_default() |= FRESH;
+                    }
+                    Role::Result => representatives.push((node, identity)),
                 }
-                pending.extend(members.iter().rev().copied());
             }
-            None => {
-                evidence.incomplete = true;
-                break;
+            InspectedPayload::Nonliteral(data) => {
+                if let SemanticNodeData::Union(members) = data.as_ref() {
+                    if visits
+                        .saturating_add(pending.len())
+                        .saturating_add(members.len())
+                        > budget
+                    {
+                        evidence.incomplete = true;
+                        break;
+                    }
+                    pending.extend(members.iter().rev().map(|child| (*child, role)));
+                }
             }
-            Some(_) => {}
         }
     }
-    (literals, evidence)
+    if evidence.incomplete {
+        return (LiteralProvenanceResult::None, evidence);
+    }
+    let mut states: FxHashMap<LiteralValueIdentity, u8> = FxHashMap::default();
+    for ((identity, _), flags) in literals {
+        if flags & PRESENT != 0 {
+            *states.entry(identity).or_default() |= if flags & FRESH != 0 { FRESH } else { PINNED };
+        }
+    }
+    let literal_count = representatives.len();
+    let mut surviving = Vec::new();
+    for (node, identity) in representatives {
+        if states.get(&identity).copied() == Some(FRESH) {
+            surviving.push(node);
+        }
+    }
+    let membership = if surviving.is_empty() {
+        LiteralProvenanceResult::None
+    } else if surviving.len() == literal_count {
+        LiteralProvenanceResult::All
+    } else {
+        surviving.sort_unstable();
+        surviving.dedup();
+        LiteralProvenanceResult::Partial(surviving)
+    };
+    (membership, evidence)
 }
 
 impl CanonicalEvidence {

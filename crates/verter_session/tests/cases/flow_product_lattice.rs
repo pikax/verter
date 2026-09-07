@@ -11,6 +11,51 @@ use verter_session::semantic_query::{
 };
 
 const SOURCE: &str = "function products(x) { const y = x; return y; }";
+
+// Numeric addresses are fixture-local conveniences. Production consumers can
+// only obtain scoped handles or enter through the pinned content interpreter.
+trait FixtureAddresses {
+    fn site(&self, node: FlowNodeId) -> Result<SelectedFlowSite, FlowProductKeyError>;
+    fn key(
+        &self,
+        domain: FlowDomain,
+        node: FlowNodeId,
+    ) -> Result<FlowProductKey, FlowProductKeyError>;
+}
+impl FixtureAddresses for FlowProductExecution {
+    fn site(&self, node: FlowNodeId) -> Result<SelectedFlowSite, FlowProductKeyError> {
+        self.selected_sites()
+            .find(|site| site.node() == node)
+            .ok_or(FlowProductKeyError::UnselectedNode)
+    }
+    fn key(
+        &self,
+        domain: FlowDomain,
+        node: FlowNodeId,
+    ) -> Result<FlowProductKey, FlowProductKeyError> {
+        self.key_at_site(domain, &self.site(node)?)
+    }
+}
+struct TestExecution {
+    execution: FlowProductExecution,
+    plan: FlowDemandPlan,
+}
+impl std::ops::Deref for TestExecution {
+    type Target = FlowProductExecution;
+    fn deref(&self) -> &Self::Target {
+        &self.execution
+    }
+}
+impl std::ops::DerefMut for TestExecution {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.execution
+    }
+}
+impl TestExecution {
+    fn finish(&mut self) -> Result<FlowProductEvidence, FlowProductFailure> {
+        self.execution.finish_with_plan(&self.plan)
+    }
+}
 struct Basis(u8);
 impl CanonicalEncode for Basis {
     const DOMAIN_TAG: &'static str = "verter.session.product_execution.test_basis.v1";
@@ -56,12 +101,12 @@ fn execution(
     source: &str,
     version: u8,
     budget: FlowProductBudget,
-) -> (FlowProductInputs, FlowProductExecution) {
+) -> (FlowProductInputs, TestExecution) {
     let fixture = flow_graph_fixture_for_tests(source, version);
     let plan = fixture.build_plan(request(0)).unwrap();
     let inputs = fixture.product_inputs();
     let execution = FlowProductExecution::new(&inputs, &plan, budget).unwrap();
-    (inputs, execution)
+    (inputs, TestExecution { execution, plan })
 }
 fn binding(
     execution: &FlowProductExecution,
@@ -95,7 +140,7 @@ fn put(
 ) -> Result<bool, FlowProductFailure> {
     execution.apply_transfers(
         store,
-        &execution.site(key.node()).unwrap(),
+        &key.site(),
         &[FlowProductTransfer {
             key: key.clone(),
             value: Some(value),
@@ -246,7 +291,7 @@ fn writes_replace_reaching_state_and_kill_only_explicit_narrowing() {
     execution
         .apply_transfers(
             &mut state,
-            &execution.site(key.node()).unwrap(),
+            &key.site(),
             &[
                 FlowProductTransfer {
                     key: key.clone(),
@@ -285,7 +330,7 @@ fn failed_transfer_bundles_preserve_prior_state_and_never_seal_evidence() {
     });
     let result = execution.apply_transfers(
         &mut store,
-        &execution.site(key.node()).unwrap(),
+        &key.site(),
         &[
             FlowProductTransfer {
                 key: key.clone(),
@@ -375,10 +420,7 @@ fn continuation_joins_use_actual_predecessors_and_preserve_domain_rules() {
             DefiniteAssignmentProduct::default().with_state(DefiniteAssignment::MaybeAssigned)
         ))
     );
-    assert_eq!(
-        merge.get(&narrowing),
-        Some(&FlowProductValue::Narrowing(NarrowingProduct::default()))
-    );
+    assert_eq!(merge.get(&narrowing), None);
     let surviving = execution.join_products(&[&right], &algebra).unwrap();
     assert_eq!(surviving.get(&key), right.get(&key));
     let mut later_right = execution.empty_state();
@@ -517,11 +559,11 @@ fn product_domains_refuse_conflicts_mismatches_and_unproven_algebra() {
                 incomplete: true,
             }
         }
-        fn literal_arms(
+        fn literal_provenance(
             &self,
+            _: &[LiteralProvenance<'_>],
             _: SemanticNodeId,
-        ) -> Result<Vec<(SemanticNodeId, LiteralValue)>, verter_session::semantic_query::FlowGap>
-        {
+        ) -> Result<LiteralProvenanceResult, verter_session::semantic_query::FlowGap> {
             unreachable!()
         }
     }
@@ -620,4 +662,489 @@ fn narrowing_facts_follow_runtime_aliases_without_rewriting_declaration_evidence
     let evidence = execution.finish().unwrap();
     assert!(!evidence.executed(&keys[0]));
     assert!(evidence.executed(&keys[1]));
+}
+
+#[test]
+fn executing_a_transfer_does_not_credit_the_unrelated_execution_site() {
+    let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
+    let (_, number, _) = types();
+    let x = binding(&execution, &inputs, "x", FlowDomain::ReachingType);
+    let y = binding(&execution, &inputs, "y", FlowDomain::ReachingType);
+    let mut state = execution.empty_state();
+    execution
+        .apply_transfers(
+            &mut state,
+            &y.site(),
+            &[FlowProductTransfer {
+                key: x.clone(),
+                value: Some(reaching(number)),
+            }],
+        )
+        .unwrap();
+    let evidence = execution.finish().unwrap();
+    assert!(evidence.executed(&x));
+    assert!(!evidence.executed(&y));
+}
+
+#[test]
+fn declared_authority_survives_snapshot_restore_and_cannot_be_erased() {
+    for erase in [
+        None,
+        Some(FlowProductValue::DeclaredType(
+            DeclaredTypeProduct::default(),
+        )),
+    ] {
+        let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
+        let (_, number, string) = types();
+        let key = binding(&execution, &inputs, "y", FlowDomain::DeclaredType);
+        let mut before = execution.empty_state();
+        let mut branch = before.clone();
+        let authored = FlowProductValue::DeclaredType(DeclaredTypeProduct::of(number));
+        put(&mut execution, &mut branch, &key, authored.clone()).unwrap();
+        assert_eq!(
+            before.get(&key),
+            Some(&authored),
+            "source authority outlives a branch snapshot"
+        );
+        assert!(execution
+            .apply_transfers(
+                &mut branch,
+                &key.site(),
+                &[FlowProductTransfer {
+                    key: key.clone(),
+                    value: erase
+                }]
+            )
+            .is_err());
+        assert_eq!(branch.get(&key), Some(&authored));
+        assert!(put(
+            &mut execution,
+            &mut before,
+            &key,
+            FlowProductValue::DeclaredType(DeclaredTypeProduct::of(string))
+        )
+        .is_err());
+        assert!(execution.finish().is_err());
+    }
+}
+
+#[test]
+fn declared_types_belong_to_source_declarations_even_when_runtime_bindings_alias() {
+    let (inputs, mut execution) = execution(
+        "function products(x: number) { var x: number = 1; return x; }",
+        1,
+        FlowProductBudget::default(),
+    );
+    let (_, number, string) = types();
+    let keys: Vec<_> = inputs
+        .graph()
+        .nodes()
+        .filter_map(|node| execution.key(FlowDomain::DeclaredType, node).ok())
+        .filter(|key| key.binding().is_some())
+        .collect();
+    assert_eq!(keys.len(), 2);
+    let mut state = execution.empty_state();
+    let first = FlowProductValue::DeclaredType(DeclaredTypeProduct::of(number));
+    let second = FlowProductValue::DeclaredType(DeclaredTypeProduct::of(string));
+    put(&mut execution, &mut state, &keys[0], first.clone()).unwrap();
+    put(&mut execution, &mut state, &keys[1], second.clone()).unwrap();
+    assert_eq!(state.get(&keys[0]), Some(&first));
+    assert_eq!(state.get(&keys[1]), Some(&second));
+}
+
+#[test]
+fn alias_normalization_precedes_narrowing_width_accounting() {
+    let (inputs, mut execution) = execution(
+        "function products(x) { var x = 1; return x; }",
+        1,
+        FlowProductBudget {
+            max_product_width: 1,
+            ..FlowProductBudget::default()
+        },
+    );
+    let (_, number, _) = types();
+    let keys: Vec<_> = inputs
+        .graph()
+        .nodes()
+        .filter_map(|node| execution.key(FlowDomain::Narrowing, node).ok())
+        .filter(|key| key.binding().is_some())
+        .collect();
+    let facts = keys.iter().map(|key| FlowNarrowingFact {
+        binding: key.binding().unwrap().clone(),
+        path: Arc::from([]),
+        narrowed_to: number,
+    });
+    let mut state = execution.empty_state();
+    put(
+        &mut execution,
+        &mut state,
+        &keys[0],
+        FlowProductValue::Narrowing(NarrowingProduct::new(facts)),
+    )
+    .unwrap();
+    let Some(FlowProductValue::Narrowing(product)) = state.get(&keys[0]) else {
+        panic!("narrowing")
+    };
+    assert_eq!(product.facts().len(), 1);
+}
+
+#[test]
+fn all_fresh_identity_join_does_not_expand_membership_or_exceed_width() {
+    let graph = SemanticGraphStore::new();
+    let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(1.0)));
+    let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(2.0)));
+    let algebra = GraphSemanticAlgebra(&graph);
+    let union = algebra.union(&[a, b]).node;
+    let value = FlowProductValue::ReachingType(
+        ReachingTypeProduct::of(union).with_widening(Some(WideningMembership::All)),
+    );
+    let bottom = FlowProductValue::ReachingType(ReachingTypeProduct::default());
+    let outcome = join_product(
+        &algebra,
+        &FlowProductBudget {
+            max_product_width: 1,
+            ..FlowProductBudget::default()
+        },
+        &value,
+        &bottom,
+    );
+    assert_eq!(outcome, FlowTransferOutcome::Unchanged);
+}
+
+#[test]
+fn a_foreign_selected_site_cannot_be_reattached_to_an_execution() {
+    let (_, first) = execution(SOURCE, 1, FlowProductBudget::default());
+    let site = first.selected_sites().next().unwrap();
+    for version in [1, 2] {
+        let (_, other) = execution(SOURCE, version, FlowProductBudget::default());
+        assert_eq!(
+            other.key_at_site(FlowDomain::ReachingValue, &site),
+            Err(FlowProductKeyError::GraphMismatch)
+        );
+    }
+}
+
+#[test]
+fn execution_evidence_requires_the_exact_attached_plan_and_cold_completion_seals() {
+    let fixture = flow_graph_fixture_for_tests(SOURCE, 1);
+    let mut request = request(0);
+    request.resources.max_obligations = 0;
+    let retained = fixture.retained_plan(&request).unwrap();
+    let cap = fixture
+        .prepare_execution_with_retained(&request, &retained)
+        .unwrap();
+    assert!(fixture
+        .build_plan_from_execution(Arc::clone(&cap), Arc::from([]))
+        .is_err());
+    let inputs = fixture.product_inputs();
+    let mut cold = FlowProductExecution::new_for_selection(
+        &inputs,
+        Arc::clone(&cap),
+        FlowProductBudget::for_execution_selection(&cap),
+    )
+    .unwrap();
+    let key = cold
+        .selected_sites()
+        .next()
+        .unwrap()
+        .key(FlowDomain::ReachingType)
+        .unwrap();
+    let (_, number, _) = types();
+    let mut store = cold.empty_state();
+    put(&mut cold, &mut store, &key, reaching(number)).unwrap();
+    assert_eq!(cold.finish().unwrap().iterations(), 0);
+    assert_eq!(
+        put(&mut cold, &mut store, &key, reaching(number)),
+        Err(FlowProductFailure::Sealed)
+    );
+
+    request.resources.max_obligations = 1024;
+    let first = fixture.build_plan(request.clone()).unwrap();
+    let independent = fixture.build_plan(request).unwrap();
+    let mut execution =
+        FlowProductExecution::new(&inputs, &first, FlowProductBudget::default()).unwrap();
+    assert_eq!(
+        execution.finish_with_plan(&independent).unwrap_err(),
+        FlowProductFailure::ScopeMismatch
+    );
+    assert!(
+        execution.finish_with_plan(&first).is_err(),
+        "failed evidence attachment cannot be retried as success"
+    );
+}
+
+#[test]
+fn snapshots_share_runtime_storage_and_writes_preserve_other_continuations() {
+    let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
+    let (_, number, string) = types();
+    let key = binding(&execution, &inputs, "x", FlowDomain::ReachingType);
+    let mut state = execution.empty_state();
+    put(&mut execution, &mut state, &key, reaching(number)).unwrap();
+    let mut branch = state.clone();
+    assert!(state.shares_continuation_storage(&branch));
+    put(&mut execution, &mut branch, &key, reaching(string)).unwrap();
+    assert_eq!(state.get(&key), Some(&reaching(number)));
+    assert_eq!(branch.get(&key), Some(&reaching(string)));
+    assert_eq!(state.ordered_entries().count(), 1);
+}
+
+#[test]
+fn predecessor_joins_follow_domain_order_and_a_failure_permanently_seals_evidence() {
+    struct Refusing(std::cell::Cell<usize>);
+    impl FlowSemanticAlgebra for Refusing {
+        fn union(&self, _: &[SemanticNodeId]) -> FlowAlgebraComposite {
+            self.0.set(self.0.get() + 1);
+            FlowAlgebraComposite {
+                node: SemanticNodeId(0),
+                incomplete: true,
+            }
+        }
+        fn literal_provenance(
+            &self,
+            _: &[LiteralProvenance<'_>],
+            _: SemanticNodeId,
+        ) -> Result<LiteralProvenanceResult, verter_session::semantic_query::FlowGap> {
+            unreachable!()
+        }
+    }
+    let algebra = Refusing(std::cell::Cell::new(0));
+    let (inputs, mut execution) = execution(
+        SOURCE,
+        1,
+        FlowProductBudget {
+            max_product_width: 1,
+            ..FlowProductBudget::default()
+        },
+    );
+    let (_, number, string) = types();
+    let early = binding(&execution, &inputs, "x", FlowDomain::ReachingType);
+    let late = binding(&execution, &inputs, "y", FlowDomain::ReachingValue);
+    assert!(early.node().index() < late.node().index());
+    let mut left = execution.empty_state();
+    let mut right = execution.empty_state();
+    put(&mut execution, &mut left, &early, reaching(number)).unwrap();
+    put(&mut execution, &mut right, &early, reaching(string)).unwrap();
+    put(
+        &mut execution,
+        &mut left,
+        &late,
+        FlowProductValue::ReachingValue(ReachingValueProduct::at(&early.site())),
+    )
+    .unwrap();
+    put(
+        &mut execution,
+        &mut right,
+        &late,
+        FlowProductValue::ReachingValue(ReachingValueProduct::at(&late.site())),
+    )
+    .unwrap();
+    assert!(matches!(
+        execution.join_products(&[&left, &right], &algebra),
+        Err(FlowProductFailure::BudgetExceeded(
+            FlowProductBudgetExceeded {
+                axis: FlowProductBudgetAxis::Width,
+                observed: 2,
+                ..
+            }
+        ))
+    ));
+    assert_eq!(
+        algebra.0.get(),
+        0,
+        "later domain must not run before reaching-value width failure"
+    );
+    assert_eq!(left.get(&early), Some(&reaching(number)));
+    assert!(execution.finish().is_err());
+}
+
+#[test]
+fn declarations_have_an_execution_lifetime_budget_and_publish_bundles_atomically() {
+    let (inputs, mut execution) = execution(
+        SOURCE,
+        1,
+        FlowProductBudget {
+            max_products: 1,
+            max_declared_products: 1,
+            ..FlowProductBudget::default()
+        },
+    );
+    let (_, number, _) = types();
+    let x = binding(&execution, &inputs, "x", FlowDomain::DeclaredType);
+    let y = binding(&execution, &inputs, "y", FlowDomain::DeclaredType);
+    let mut old = execution.empty_state();
+    let mut branch = old.clone();
+    let reaching_y = y.for_domain(FlowDomain::ReachingType).unwrap();
+    put(&mut execution, &mut old, &reaching_y, reaching(number)).unwrap();
+    let declared = FlowProductValue::DeclaredType(DeclaredTypeProduct::of(number));
+    assert!(matches!(
+        execution.apply_transfers(
+            &mut branch,
+            &x.site(),
+            &[
+                FlowProductTransfer {
+                    key: x.clone(),
+                    value: Some(declared.clone())
+                },
+                FlowProductTransfer {
+                    key: y.clone(),
+                    value: Some(declared)
+                },
+            ]
+        ),
+        Err(FlowProductFailure::BudgetExceeded(
+            FlowProductBudgetExceeded {
+                axis: FlowProductBudgetAxis::DeclaredProducts,
+                limit: 1,
+                observed: 2
+            }
+        ))
+    ));
+    assert_eq!(old.get(&x), None);
+    assert_eq!(old.get(&y), None);
+    assert_eq!(old.get(&reaching_y), Some(&reaching(number)));
+    assert!(branch.is_empty());
+    assert!(execution.finish().is_err());
+}
+
+#[test]
+fn source_authority_cannot_be_replaced_through_an_old_healthy_snapshot() {
+    let (inputs, mut execution) = execution(
+        SOURCE,
+        1,
+        FlowProductBudget {
+            max_products: 1,
+            max_declared_products: 1,
+            ..FlowProductBudget::default()
+        },
+    );
+    let (_, number, string) = types();
+    let declared = binding(&execution, &inputs, "x", FlowDomain::DeclaredType);
+    let runtime = declared.for_domain(FlowDomain::ReachingType).unwrap();
+    let mut old = execution.empty_state();
+    let mut branch = old.clone();
+    put(&mut execution, &mut old, &runtime, reaching(number)).unwrap();
+    let authored = FlowProductValue::DeclaredType(DeclaredTypeProduct::of(number));
+    put(&mut execution, &mut branch, &declared, authored.clone()).unwrap();
+    assert_eq!(
+        old.len(),
+        2,
+        "one runtime cell plus one separately bounded source fact"
+    );
+    assert_eq!(old.get(&declared), Some(&authored));
+    assert!(put(
+        &mut execution,
+        &mut old,
+        &declared,
+        FlowProductValue::DeclaredType(DeclaredTypeProduct::of(string))
+    )
+    .is_err());
+    assert_eq!(old.get(&declared), Some(&authored));
+    assert!(execution.finish().is_err());
+}
+
+#[test]
+fn successful_unchanged_transfer_retains_shared_storage_and_still_proves_work() {
+    let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
+    let (_, number, _) = types();
+    let key = binding(&execution, &inputs, "x", FlowDomain::ReachingType);
+    let mut state = execution.empty_state();
+    put(&mut execution, &mut state, &key, reaching(number)).unwrap();
+    let mut branch = state.clone();
+    assert!(!put(&mut execution, &mut branch, &key, reaching(number)).unwrap());
+    assert!(branch.shares_continuation_storage(&state));
+    assert!(execution.finish().unwrap().executed(&key));
+}
+
+#[test]
+fn actual_multiway_type_join_constructs_one_canonical_union_and_one_provenance_batch() {
+    struct Counting<'a> {
+        graph: GraphSemanticAlgebra<'a>,
+        unions: std::cell::Cell<usize>,
+        inputs: std::cell::RefCell<Vec<usize>>,
+    }
+    impl FlowSemanticAlgebra for Counting<'_> {
+        fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
+            self.unions.set(self.unions.get() + 1);
+            self.graph.union(members)
+        }
+        fn literal_provenance(
+            &self,
+            inputs: &[LiteralProvenance<'_>],
+            result: SemanticNodeId,
+        ) -> Result<LiteralProvenanceResult, verter_session::semantic_query::FlowGap> {
+            self.inputs.borrow_mut().push(inputs.len());
+            self.graph.literal_provenance(inputs, result)
+        }
+    }
+    let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
+    let graph = SemanticGraphStore::new();
+    let values = [1.0, 2.0, 3.0]
+        .map(|n| graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(n))));
+    let algebra = Counting {
+        graph: GraphSemanticAlgebra(&graph),
+        unions: std::cell::Cell::new(0),
+        inputs: std::cell::RefCell::new(Vec::new()),
+    };
+    let key = binding(&execution, &inputs, "x", FlowDomain::ReachingType);
+    let mut states: [FlowProductStore; 3] = std::array::from_fn(|_| execution.empty_state());
+    for (i, state) in states.iter_mut().enumerate() {
+        put(
+            &mut execution,
+            state,
+            &key,
+            FlowProductValue::ReachingType(
+                ReachingTypeProduct::of(values[i])
+                    .with_widening((i != 2).then_some(WideningMembership::All)),
+            ),
+        )
+        .unwrap();
+    }
+    let result = execution
+        .join_products(&[&states[0], &states[1], &states[2]], &algebra)
+        .unwrap();
+    assert_eq!(algebra.unions.get(), 1);
+    assert_eq!(algebra.inputs.borrow().as_slice(), &[3]);
+    let Some(FlowProductValue::ReachingType(product)) = result.get(&key) else {
+        panic!("reaching type")
+    };
+    assert_eq!(product.contributors(), &values);
+    assert_eq!(
+        product.widening(),
+        Some(&WideningMembership::Partial(Arc::from(&values[..2])))
+    );
+}
+
+#[test]
+fn actual_multiway_join_cannot_reset_the_canonical_work_budget_for_each_predecessor() {
+    let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
+    let graph = SemanticGraphStore::new();
+    let values: Vec<_> = (0..64)
+        .map(|n| graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(n as f64))))
+        .collect();
+    let algebra = GraphSemanticAlgebra(&graph);
+    let union = algebra.union(&values).node;
+    let key = binding(&execution, &inputs, "x", FlowDomain::ReachingType);
+    let mut states: Vec<_> = (0..128).map(|_| execution.empty_state()).collect();
+    for (i, state) in states.iter_mut().enumerate() {
+        let widening = if i % 2 == 0 {
+            WideningMembership::All
+        } else {
+            WideningMembership::Partial(Arc::from(&values[..32]))
+        };
+        put(
+            &mut execution,
+            state,
+            &key,
+            FlowProductValue::ReachingType(
+                ReachingTypeProduct::of(union).with_widening(Some(widening)),
+            ),
+        )
+        .unwrap();
+    }
+    let predecessors: Vec<_> = states.iter().collect();
+    assert!(matches!(
+        execution.join_products(&predecessors, &algebra),
+        Err(FlowProductFailure::Gap(_))
+    ));
+    assert!(execution.finish().is_err());
 }
