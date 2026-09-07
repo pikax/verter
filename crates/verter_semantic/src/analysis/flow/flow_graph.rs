@@ -32,9 +32,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_no_typeexpr::NoTypeExpr;
 
 use super::{
-    FlowBindingRef, FlowNameId, FunctionBodySkeleton, SkeletonBindingId, SkeletonExprShape,
-    SkeletonExprSiteId, SkeletonObjectEntry, SkeletonObjectKey, SkeletonPathSegment,
-    SkeletonRegionId, SkeletonReturnSiteId, SkeletonWriteCertainty, SkeletonWriteTarget,
+    FlowBindingRef, FlowNameId, FlowReadKind, FunctionBodySkeleton, SkeletonBindingId,
+    SkeletonExprShape, SkeletonExprSiteId, SkeletonObjectEntry, SkeletonObjectKey,
+    SkeletonPathSegment, SkeletonRegionId, SkeletonReturnSiteId, SkeletonWriteCertainty,
+    SkeletonWriteTarget,
 };
 
 #[cfg(test)]
@@ -102,8 +103,12 @@ pub enum FlowEdgeKind {
     /// argument, a binding's initializer / whole-slot definite write
     /// (reaching definition), or an expression site's read of a binding.
     ValueDef,
-    /// Prefix the authored static read projection to the remaining demand.
-    ReadProjection { path: Arc<[FlowNameId]> },
+    /// Follow an authored read path, forwarding a result suffix only when
+    /// the read itself provides the expression result.
+    ReadProjection {
+        path: Arc<[FlowNameId]>,
+        kind: FlowReadKind,
+    },
     /// A write targets a projection path on the source node's value: an
     /// object-literal entry provisioning a key, a member write on a slot,
     /// an optional / unknown write (spread, computed key, logical
@@ -483,15 +488,16 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                 None
             };
             for to in local_nodes.chain(captured_node) {
-                if seen_reads.insert((node.0, to.0, Arc::clone(&projection))) {
+                if seen_reads.insert((node.0, to.0, Arc::clone(&projection), read.kind)) {
                     edges.push((
                         node,
                         to,
-                        if projection.is_empty() {
+                        if projection.is_empty() && read.kind == FlowReadKind::Result {
                             FlowEdgeKind::ValueDef
                         } else {
                             FlowEdgeKind::ReadProjection {
                                 path: Arc::clone(&projection),
+                                kind: read.kind,
                             }
                         },
                     ));

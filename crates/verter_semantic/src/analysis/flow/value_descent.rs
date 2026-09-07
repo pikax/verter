@@ -127,6 +127,13 @@ pub enum ValueDescent<'a, 'ast> {
     /// If those arms were ever removed, failing closed is the safe
     /// default to fall back to.
     UnmodeledCall,
+    /// A direct identifier or static member reference. Its read provides
+    /// the result itself, so a demanded result suffix projects through it.
+    Reference,
+    /// Either logical operand may provide the result.
+    Logical,
+    /// Only the final sequence operand provides the result.
+    Sequence,
     /// No value-structural descent: the form answers as a whole, through
     /// the shared shallow-pass leaf lowering.
     ///
@@ -187,8 +194,12 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
         // half owns six structural call arms and takes them first — and
         // for the PLANNER half `UnmodeledCall` and `Leaf` are the same
         // disposition, so the guard is safe for it either way.
-        Expression::Identifier(_)
-        | Expression::CallExpression(_)
+        Expression::Identifier(_) | Expression::StaticMemberExpression(_) => {
+            ValueDescent::Reference
+        }
+        Expression::LogicalExpression(_) => ValueDescent::Logical,
+        Expression::SequenceExpression(_) => ValueDescent::Sequence,
+        Expression::CallExpression(_)
         | Expression::NewExpression(_)
         | Expression::TaggedTemplateExpression(_)
         | Expression::FunctionExpression(_)
@@ -209,8 +220,6 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
         | Expression::BinaryExpression(_)
         | Expression::ChainExpression(_)
         | Expression::ImportExpression(_)
-        | Expression::LogicalExpression(_)
-        | Expression::SequenceExpression(_)
         | Expression::ThisExpression(_)
         | Expression::UnaryExpression(_)
         | Expression::UpdateExpression(_)
@@ -220,7 +229,6 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
         | Expression::JSXFragment(_)
         | Expression::V8IntrinsicExpression(_)
         | Expression::ComputedMemberExpression(_)
-        | Expression::StaticMemberExpression(_)
         | Expression::PrivateFieldExpression(_) => ValueDescent::Leaf,
     }
 }
