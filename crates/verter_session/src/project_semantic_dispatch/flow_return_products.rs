@@ -104,7 +104,7 @@ mod tests {
                 &request.resources.slice_budget,
             )
             .unwrap();
-        let retained = crate::cache_runtime::flow_slice_node::PlannedFlowSlice::new(
+        let retained = crate::cache_runtime::flow_slice_node::PlannedFlowSlice::for_test(
             compute_flow_slice_hash(&selection, &bundle.graph, &bundle.skeleton),
             selection,
         );

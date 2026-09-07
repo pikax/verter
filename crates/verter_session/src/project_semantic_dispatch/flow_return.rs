@@ -5504,9 +5504,9 @@ fn seed_selected_parameters(
         .collect();
     let selection = execution_selection.structural_selection();
     for node in selection
-        .value_nodes
+        .value_nodes()
         .iter()
-        .chain(selection.effect_only_nodes.iter())
+        .chain(selection.effect_only_nodes().iter())
         .copied()
     {
         let verter_semantic::analysis::flow::flow_graph::FlowNodeKind::Binding(binding) =
@@ -11092,13 +11092,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // structural source locators and never retain semantic state.
         let mut capture_inputs: Vec<_> = inputs
             .selected_captures(planned.selection())
-            .map(|identity| {
+            .map(|(identity, value_demanded)| {
                 let parent = self
                     .bindings
                     .local(identity)
                     .map(FlowProductSubject::Local)
                     .unwrap_or_else(|| FlowProductSubject::Captured(identity.clone()));
-                if self.products.contains_subject(&parent)
+                if value_demanded
+                    && self.products.contains_subject(&parent)
                     && self.products.reaching(&parent).is_none()
                 {
                     self.seed_destructured_param_element(&parent);
@@ -11113,7 +11114,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .collect();
         let mut candidates: Vec<_> = inputs
             .selected_captures(planned.selection())
-            .map(|identity| capture_context.mutable_authorities(identity).into_iter())
+            .map(|(identity, _)| capture_context.mutable_authorities(identity).into_iter())
             .collect();
         let mut unresolved: Vec<_> = (0..capture_inputs.len()).collect();
         while !unresolved.is_empty() {

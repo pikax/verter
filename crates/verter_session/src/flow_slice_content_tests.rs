@@ -228,6 +228,57 @@ fn selected_capture_authority_rejects_a_different_outer_source_snapshot() {
 }
 
 #[test]
+fn selected_capture_locators_skip_known_unannotated_local_declarations() {
+    let source =
+        "function f() { let plain; let typed: 'declared'; return () => ({ plain, typed }); }";
+    let memo = memo_for(source);
+    let content = content_for(source, "f");
+    let (function, context) = content
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Return {
+                argument:
+                    Some(SliceExpr::NestedFunctionValue {
+                        function, context, ..
+                    }),
+                ..
+            } => Some((function, context)),
+            _ => None,
+        })
+        .expect("selected closure");
+    let index = memo.function_program_index();
+    let captures = &index
+        .get(function)
+        .expect("indexed child")
+        .entry()
+        .captures
+        .0;
+    let plain = captures
+        .iter()
+        .find(|identity| identity.name.as_ref() == "plain")
+        .expect("plain capture");
+    let typed = captures
+        .iter()
+        .find(|identity| identity.name.as_ref() == "typed")
+        .expect("typed capture");
+    assert!(
+        context.mutable_authorities(plain).is_empty(),
+        "known annotation absence must never schedule a retained source lookup"
+    );
+    let locators = context.mutable_authorities(typed);
+    assert_eq!(locators.len(), 1);
+    let Some(Some(authority)) = memo.flow_capture_authority(&locators[0]) else {
+        panic!("selected annotation must hydrate");
+    };
+    assert_eq!(
+        authority.declared.ty(),
+        &TypeExpr::Literal(LiteralValue::String("declared".to_string()))
+    );
+}
+
+#[test]
 fn selected_annotation_descent_inspects_logarithmic_siblings() {
     use oxc_span::GetSpan;
     use std::cell::Cell;

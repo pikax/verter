@@ -2934,10 +2934,14 @@ impl NestedFlowContext {
                                     has_default: parameter.has_default,
                                 }
                             }
-                            SkeletonBindingKind::Let if !fact.destructured => {
+                            SkeletonBindingKind::Let
+                                if !fact.destructured && fact.annotation_span.is_some() =>
+                            {
                                 SliceCaptureAuthoritySource::Local(SliceBindingKind::Let)
                             }
-                            SkeletonBindingKind::Var if !fact.destructured => {
+                            SkeletonBindingKind::Var
+                                if !fact.destructured && fact.annotation_span.is_some() =>
+                            {
                                 SliceCaptureAuthoritySource::Local(SliceBindingKind::Var)
                             }
                             _ => return None,
