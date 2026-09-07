@@ -448,6 +448,8 @@ pub struct FlowProductExecution {
     iterations: u32,
     failure: Option<FlowProductFailure>,
     sealed: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    join_product_visits: usize,
 }
 
 impl FlowProductExecution {
@@ -557,6 +559,8 @@ impl FlowProductExecution {
             iterations: 0,
             failure: None,
             sealed: false,
+            #[cfg(any(test, feature = "test-support"))]
+            join_product_visits: 0,
         })
     }
 
@@ -720,6 +724,10 @@ impl FlowProductExecution {
         algebra: &dyn FlowSemanticAlgebra,
     ) -> Result<FlowProductStore, FlowProductFailure> {
         self.ready()?;
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.join_product_visits = 0;
+        }
         for state in incoming {
             if !Rc::ptr_eq(&self.scope, &state.scope) {
                 return self.reject(FlowProductFailure::ScopeMismatch);
@@ -730,40 +738,82 @@ impl FlowProductExecution {
             _ => self.empty_state(),
         };
         if incoming.len() > 1 {
-            let addresses: imbl::OrdSet<(usize, usize)> = incoming
+            // Merge the ordered materialized streams. The heap holds one head
+            // per predecessor, so scratch is O(predecessors), and absent cells
+            // never enter the work stream. Equal addresses retain source order.
+            let mut streams: Vec<_> = incoming
                 .iter()
-                .flat_map(|state| state.values.keys().copied())
+                .map(|state| state.values.iter().peekable())
                 .collect();
-            // Addresses sort by domain first, then the stable selected runtime
-            // representative. Predecessors retain the interpreter's source order.
-            for address in addresses {
+            let mut heads = std::collections::BinaryHeap::with_capacity(streams.len());
+            for (index, stream) in streams.iter_mut().enumerate() {
+                if let Some((address, _)) = stream.peek() {
+                    heads.push(std::cmp::Reverse((**address, index)));
+                }
+            }
+            while let Some(std::cmp::Reverse((address, first))) = heads.pop() {
+                let mut products: smallvec::SmallVec<[&FlowProductValue; 4]> =
+                    smallvec::SmallVec::new();
+                let mut index = first;
+                loop {
+                    let (_, product) = streams[index].next().expect("queued product stream head");
+                    #[cfg(any(test, feature = "test-support"))]
+                    {
+                        self.join_product_visits += 1;
+                    }
+                    products.push(product);
+                    if let Some((next, _)) = streams[index].peek() {
+                        heads.push(std::cmp::Reverse((**next, index)));
+                    }
+                    match heads.peek() {
+                        Some(std::cmp::Reverse((next, _))) if *next == address => {
+                            index = heads.pop().expect("matching queued head").0 .1;
+                        }
+                        _ => break,
+                    }
+                }
                 let domain = PRODUCT_DOMAINS[address.0];
                 let bottom = FlowProductValue::bottom(domain).expect("a product domain");
                 let value = if domain == FlowDomain::ReachingType {
-                    let mut products: smallvec::SmallVec<[&ReachingTypeProduct; 4]> =
+                    let mut reaching: smallvec::SmallVec<[&ReachingTypeProduct; 4]> =
                         smallvec::SmallVec::new();
-                    for state in incoming {
-                        let FlowProductValue::ReachingType(product) =
-                            state.values.get(&address).unwrap_or(&bottom)
-                        else {
+                    for product in &products {
+                        let FlowProductValue::ReachingType(product) = product else {
                             return self
                                 .reject(FlowProductFailure::Gap(FlowGap::UnmodeledExpression));
                         };
-                        products.push(product);
+                        reaching.push(product);
                     }
-                    match join_reaching_types(algebra, &self.budget, &products) {
+                    match join_reaching_types(algebra, &self.budget, &reaching) {
                         Ok(product) => FlowProductValue::ReachingType(product),
                         Err(failure) => return self.reject(failure),
                     }
                 } else {
-                    let mut predecessors = incoming.iter();
-                    let mut value = predecessors
-                        .next()
-                        .and_then(|state| state.values.get(&address))
-                        .unwrap_or(&bottom)
-                        .clone();
-                    for state in predecessors {
-                        let next = state.values.get(&address).unwrap_or(&bottom);
+                    // Missing paths carry no reaching definition/type or source
+                    // fact. They do remove narrowing and contribute Unassigned
+                    // to assignment. One bottom accounts for any number of
+                    // absent paths in these idempotent domain joins.
+                    let missing_matters = match domain {
+                        FlowDomain::Narrowing | FlowDomain::DefiniteAssignment => true,
+                        FlowDomain::ReachingValue
+                        | FlowDomain::ReachingType
+                        | FlowDomain::DeclaredType => false,
+                        FlowDomain::Completion
+                        | FlowDomain::ClosureCapture
+                        | FlowDomain::Freshness
+                        | FlowDomain::Effects
+                        | FlowDomain::CallResolution
+                        | FlowDomain::Relation
+                        | FlowDomain::ContextualTyping
+                        | FlowDomain::Coverage => {
+                            return self
+                                .reject(FlowProductFailure::Gap(FlowGap::UnmodeledExpression));
+                        }
+                    };
+                    let absent =
+                        (missing_matters && products.len() < incoming.len()).then_some(&bottom);
+                    let mut value = products[0].clone();
+                    for next in products.iter().skip(1).copied().chain(absent) {
                         match join_product(algebra, &self.budget, &value, next) {
                             FlowTransferOutcome::Unchanged => {}
                             FlowTransferOutcome::Changed(joined) => value = joined,
@@ -795,6 +845,11 @@ impl FlowProductExecution {
             ));
         }
         Ok(result)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn join_product_visits_for_tests(&self) -> usize {
+        self.join_product_visits
     }
 
     /// Begin one actual fixed-point round, before running its transfers.

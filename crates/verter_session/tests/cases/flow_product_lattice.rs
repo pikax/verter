@@ -12,6 +12,43 @@ use verter_session::semantic_query::{
 
 const SOURCE: &str = "function products(x) { const y = x; return y; }";
 
+#[test]
+fn captured_product_attachment_requires_the_original_pinned_graph() {
+    let source = "function products(x) { function nested() { return x; } return nested; }";
+    let fixture = flow_graph_fixture_for_tests_nested(source, 1, "nested");
+    let mut request = request(0);
+    let SemanticQueryKey::FlowReturn(query) = &mut request.query else {
+        unreachable!()
+    };
+    query.function.function_part = fixture.program_key().part.clone();
+    query.function.overload_ordinal = fixture.program_key().overload_ordinal;
+    let plan = fixture.build_plan(request).unwrap();
+    let inputs = fixture.product_inputs();
+    let execution =
+        FlowProductExecution::new(&inputs, &plan, FlowProductBudget::default()).unwrap();
+    let captures = fixture.selected_capture_identities_for_tests(&plan);
+    assert_eq!(captures.len(), 1);
+    let key = execution
+        .selected_sites()
+        .find_map(|site| {
+            let key = site.key(FlowDomain::ReachingType).unwrap();
+            key.binding()
+                .is_some_and(|identity| identity == &captures[0])
+                .then_some(key)
+        })
+        .unwrap();
+    assert!(matches!(
+        inputs.graph().node_kind(key.node()),
+        FlowNodeKind::CapturedBinding(_)
+    ));
+    assert_eq!(
+        fixture.product_content_key_for_tests(&execution, key.node(), key.binding_ref()),
+        Ok(key.clone())
+    );
+    let foreign = flow_graph_fixture_for_tests_nested(source, 1, "nested");
+    assert_eq!(foreign.product_content_key_for_tests(&execution, key.node(), key.binding_ref()), Err(FlowProductKeyError::GraphMismatch), "identical content in an independently minted graph cannot relabel a raw site into this execution");
+}
+
 // Numeric addresses are fixture-local conveniences. Production consumers can
 // only obtain scoped handles or enter through the pinned content interpreter.
 trait FixtureAddresses {
