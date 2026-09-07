@@ -63,13 +63,9 @@ use verter_semantic::analysis::flow::lower::lower_slice_plan;
 use verter_semantic::analysis::flow::peeker::{
     FlowSliceBudget, FlowSliceBudgetExceeded, ReturnPathPeeker, SliceDemand,
 };
-#[cfg(test)]
-use verter_semantic::analysis::flow::prepare_function_body_skeleton;
 use verter_semantic::analysis::flow::{
     FlowBindingMap, FlowBindingMapError, FunctionBodySkeleton, PreparedFunctionBodySkeleton,
 };
-#[cfg(test)]
-use verter_semantic::analysis::function_program::FunctionProgramEntry;
 use verter_semantic::analysis::function_program::FunctionProgramKey;
 
 use super::admission::{CacheAdmission, CacheEntry, NonAdmissionReason};
@@ -266,21 +262,11 @@ pub(crate) struct FlowGraphBundle {
 }
 
 /// The one bundle construction. Bindings come from the pinned indexed
-/// entry, and the graph derives from the skeleton alone. No demand or
+/// entry, and the graph consumes its sealed prepared structure. No demand or
 /// caller-authored inventory can initialize the cached binding authority.
-#[cfg(test)]
-fn build_bundle(
-    skeleton: FunctionBodySkeleton,
-    entry: &FunctionProgramEntry,
-) -> Result<FlowGraphBundle, FlowBindingMapError> {
-    Ok(build_prepared_bundle(prepare_function_body_skeleton(
-        skeleton, entry,
-    )?))
-}
-
 fn build_prepared_bundle(prepared: PreparedFunctionBodySkeleton) -> FlowGraphBundle {
-    let PreparedFunctionBodySkeleton { skeleton, bindings } = prepared;
-    let graph = build_function_flow_graph(&skeleton);
+    let graph = build_function_flow_graph(&prepared);
+    let (skeleton, bindings) = prepared.into_parts();
     FlowGraphBundle {
         skeleton: Arc::new(skeleton),
         bindings: Arc::new(bindings),
@@ -385,7 +371,7 @@ impl FunctionFlowGraphStore {
     ) -> BoundFlowGraph {
         assert_eq!(
             &key.function,
-            prepared.bindings.function(),
+            prepared.bindings().function(),
             "prepared fixture must match its content key"
         );
         let bundle = match self.entries.entry(key.clone()) {
@@ -448,13 +434,18 @@ pub struct PlannedFlowSlice {
 
 impl PlannedFlowSlice {
     /// Seal a minted slice identity to the selection it was minted from.
-    /// The hash itself is unforgeable (only `compute_flow_slice_hash`
-    /// mints one); pairing an identity with a selection it does not cover
-    /// is exactly the adversarial input the demand planner and the
-    /// lowered node reject.
+    /// Production construction belongs to this cache owner, immediately
+    /// after the peeker produces its sealed selection and the hasher mints
+    /// the identity over that selection.
     #[must_use]
-    pub fn new(hash: FlowSliceHash, selection: ReturnSlicePlan) -> Self {
+    fn new(hash: FlowSliceHash, selection: ReturnSlicePlan) -> Self {
         Self { hash, selection }
+    }
+
+    /// Deliberately mismatched fixture pairs exercise provenance rejection.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(hash: FlowSliceHash, selection: ReturnSlicePlan) -> Self {
+        Self::new(hash, selection)
     }
 
     /// The minted slice identity.

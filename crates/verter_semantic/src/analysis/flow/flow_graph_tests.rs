@@ -3,10 +3,11 @@
 //! value-dead siblings keeping their evaluation-effect edges, region
 //! membership / nesting, arena-freedom, and determinism.
 
+use super::build_function_flow_graph_for_test as build_function_flow_graph;
 use super::*;
 use crate::analysis::flow::{
-    build_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource, SkeletonBindingId,
-    SkeletonPathSegment, SkeletonRegionKind, SkeletonReturnSiteId, SkeletonWriteCertainty,
+    FunctionBodySkeleton, FunctionBodySource, SkeletonBindingId, SkeletonPathSegment,
+    SkeletonRegionKind, SkeletonReturnSiteId, SkeletonWriteCertainty,
 };
 
 fn return_site_id(skeleton: &FunctionBodySkeleton, ordinal: usize) -> SkeletonReturnSiteId {
@@ -62,22 +63,36 @@ fn path_write_path(edge: &FlowEdge) -> Vec<SkeletonPathSegment> {
 }
 
 fn skeleton_of(source: &str) -> FunctionBodySkeleton {
-    let allocator = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::ts();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
-    assert!(
-        ret.errors.is_empty(),
-        "fixture must parse: {:?}",
-        ret.errors
+    crate::analysis::flow::skeleton_tests::indexed_skeleton_of(source)
+}
+
+#[test]
+fn write_only_closure_capture_selects_an_effect_subject_without_a_value_read() {
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    let skeleton = indexed_returned_arrow(
+        "function root(value) { return () => () => { value = 1; return 0; }; }",
     );
-    for statement in &ret.program.body {
-        if let oxc_ast::ast::Statement::FunctionDeclaration(function) = statement {
-            if let Some(body_source) = FunctionBodySource::from_function(function) {
-                return build_function_body_skeleton(&body_source);
-            }
-        }
-    }
-    panic!("fixture must contain a bodied function declaration");
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(
+            &SliceDemand::for_return_projection(&skeleton, &[]),
+            &FlowSliceBudget::default(),
+        )
+        .unwrap();
+    let hub = (0..graph.node_count())
+        .map(|index| FlowNodeId::from_index(index as u32))
+        .find(|node| matches!(graph.node_kind(*node), FlowNodeKind::CapturedBinding(_)))
+        .expect("a captured cell has a graph-owned subject even without a value read");
+    assert!(plan.is_effect_only(hub));
+    assert!(skeleton.expr_sites.iter().all(|site| site.reads.is_empty()));
+    let closure = skeleton
+        .expr_sites
+        .iter()
+        .position(|site| !site.capture_bindings.is_empty())
+        .unwrap();
+    let from = graph.expr_site_node(SkeletonExprSiteId::from_index(closure as u32));
+    assert!(has_edge_class(&graph, from, hub, FlowEdgeClass::EvalEffect));
+    assert!(!has_edge_class(&graph, from, hub, FlowEdgeClass::ValueDef));
 }
 
 #[test]

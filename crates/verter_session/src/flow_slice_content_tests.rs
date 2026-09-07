@@ -82,10 +82,12 @@ fn selection_for(
     FlowSliceSelection,
     Arc<verter_semantic::analysis::flow::FunctionBodySkeleton>,
 ) {
-    let skeleton = memo
-        .function_body_skeleton(entry)
-        .expect("the skeleton must build for an indexed function");
-    let graph = build_function_flow_graph(&skeleton);
+    let prepared = memo
+        .function_flow_structure(entry)
+        .expect("the indexed inventory must match")
+        .expect("the structure must build for an indexed function");
+    let graph = build_function_flow_graph(&prepared);
+    let (skeleton, _) = prepared.into_parts();
     let demand = SliceDemand::for_return_projection(&skeleton, path);
     let plan = ReturnPathPeeker::new(&graph)
         .plan(&demand, &FlowSliceBudget::default())

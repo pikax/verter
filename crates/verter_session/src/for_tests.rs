@@ -791,7 +791,7 @@ impl FlowGraphFixtureForTests {
             .plan(&demand, &request.resources.slice_budget)
             .map_err(FlowDemandPlanError::SliceBudget)?;
         let hash = compute_flow_slice_hash(&selection, &bundle.graph, &bundle.skeleton);
-        Ok(PlannedFlowSlice::new(hash, selection))
+        Ok(PlannedFlowSlice::for_test(hash, selection))
     }
 
     /// Plan `request` over this fixture's store-bound graph and binding

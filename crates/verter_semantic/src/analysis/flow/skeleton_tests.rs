@@ -52,6 +52,57 @@ fn skeleton_of(source: &str) -> FunctionBodySkeleton {
     parse_and_build(source, first_function, |skeleton| skeleton)
 }
 
+pub(super) fn indexed_skeleton_of(source: &str) -> FunctionBodySkeleton {
+    use crate::analysis::function_program::build_function_program_index;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty());
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let index =
+        build_function_program_index(&parsed.program, source, &owners, Arc::from("/graph.ts"));
+    let function = parsed
+        .program
+        .body
+        .iter()
+        .find_map(|statement| match statement {
+            Statement::FunctionDeclaration(function) if function.body.is_some() => Some(function),
+            _ => None,
+        })
+        .expect("fixture function");
+    let entry = index
+        .matches_named(function.id.as_ref().unwrap().name.as_str())
+        .next()
+        .unwrap()
+        .entry();
+    build_indexed_function_body_skeleton(
+        &FunctionBodySource::from_function(function).unwrap(),
+        entry,
+    )
+    .unwrap()
+    .into_parts()
+    .0
+}
+
+#[test]
+fn skeleton_records_whole_declarator_annotation_presence_without_lowering() {
+    let source = "function f() { let marked: Widget; var plain = 1; let {part}: Shape = other; return marked; }";
+    let skeleton = skeleton_of(source);
+    let start = source.find(": Widget").unwrap() as u32;
+    assert_eq!(
+        binding(&skeleton, "marked").annotation_span,
+        Some(FrameSpan::rebase(
+            0,
+            verter_span::Span::new(start, start + 8)
+        ))
+    );
+    assert!(binding(&skeleton, "plain").annotation_span.is_none());
+    assert!(
+        binding(&skeleton, "part").destructured,
+        "pattern captures cannot claim whole-declarator authority"
+    );
+}
+
 #[test]
 fn indexed_skeleton_retains_exact_nested_capture_paths_and_runtime_aliases() {
     use crate::analysis::function_program::build_function_program_index;
@@ -123,6 +174,123 @@ fn indexed_skeleton_retains_exact_nested_capture_paths_and_runtime_aliases() {
         1,
         "nested frame bodies are never walked"
     );
+}
+
+#[test]
+fn prepared_graph_does_not_resolve_free_parameter_inputs_as_body_bindings() {
+    use crate::analysis::function_program::build_function_program_index;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    for source in [
+        "const seed = 'outer'; function f(arg = seed) { const seed = 1; return arg; }",
+        "const seed = 'outer'; function f(arg = seed) { var seed = 1; return arg; }",
+        "const seed = 'outer'; function f(arg = seed()) { const seed = 1; return arg; }",
+        "const seed = 'outer'; function f(arg = seed()) { var seed = 1; return arg; }",
+    ] {
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(parsed.errors.is_empty());
+        let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+        let index = build_function_program_index(
+            &parsed.program,
+            source,
+            &owners,
+            Arc::from("/default.ts"),
+        );
+        let entry = index.matches_named("f").next().unwrap().entry();
+        let reference = entry
+            .references
+            .iter()
+            .find(|read| read.name.as_ref() == "seed")
+            .unwrap_or_else(|| panic!("default read is indexed: {:?}", entry.references));
+        assert!(
+            reference.binding.is_none(),
+            "the default sees the outer environment"
+        );
+        let prepared =
+            build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+        let skeleton = &prepared.skeleton;
+        let seed = skeleton
+            .bindings_named(skeleton.name_id("seed").unwrap())
+            .next()
+            .unwrap();
+        let graph = flow_graph::build_function_flow_graph(&prepared);
+        let plan = peeker::ReturnPathPeeker::new(&graph)
+            .plan(
+                &peeker::SliceDemand::for_return_projection(skeleton, &[]),
+                &peeker::FlowSliceBudget::default(),
+            )
+            .unwrap();
+        assert!(
+            !plan.is_selected(graph.binding_node(seed)),
+            "known-free input must not bind a same-name body declaration"
+        );
+    }
+}
+
+#[test]
+fn indexed_skeleton_retains_write_only_capture_subjects_without_value_reads() {
+    use crate::analysis::function_program::build_function_program_index;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    for (source, captures_outer) in [
+        ("function f(x) { return () => { x = 1; return 0; }; }", true),
+        (
+            "function f(x) { return () => () => { x = 1; return 0; }; }",
+            true,
+        ),
+        (
+            "function f(x) { return () => { let x = 0; return () => { x = 1; return 0; }; }; }",
+            false,
+        ),
+    ] {
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(parsed.errors.is_empty());
+        let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+        let index = build_function_program_index(
+            &parsed.program,
+            source,
+            &owners,
+            Arc::from("/capture.ts"),
+        );
+        let entry = index.matches_named("f").next().unwrap().entry();
+        let prepared =
+            build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+        let skeleton = &prepared.skeleton;
+        let x = skeleton
+            .bindings_named(skeleton.name_id("x").unwrap())
+            .next()
+            .unwrap();
+        let closure = skeleton
+            .expr_sites
+            .iter()
+            .find(|site| !site.capture_bindings.is_empty());
+        if !captures_outer {
+            assert!(
+                closure.is_none(),
+                "an intervening local owns its descendant write"
+            );
+            continue;
+        }
+        let closure = closure.expect("a write-only capture remains an exact closure subject");
+        assert_eq!(
+            closure.capture_bindings.as_ref(),
+            &[FlowBindingRef::Local(x)]
+        );
+        assert!(
+            closure.reads.is_empty(),
+            "writing a cell is not reading its value"
+        );
+        let graph = flow_graph::build_function_flow_graph(&prepared);
+        let plan = peeker::ReturnPathPeeker::new(&graph)
+            .plan(
+                &peeker::SliceDemand::for_return_projection(skeleton, &[]),
+                &peeker::FlowSliceBudget::default(),
+            )
+            .unwrap();
+        assert!(plan.is_effect_only(graph.binding_node(x)));
+    }
 }
 
 fn binding<'a>(skeleton: &'a FunctionBodySkeleton, name: &str) -> &'a SkeletonBinding {

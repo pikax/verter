@@ -16,6 +16,7 @@ fn main() {
     tests.compile_fail(fixture_root.join("flow_solve_plan_and_spec_are_sealed.rs"));
     tests.compile_fail(fixture_root.join("flow_solve_plan_and_spec_no_struct_literal.rs"));
     tests.compile_fail(fixture_root.join("flow_solve_sealed_witnesses_not_constructible.rs"));
+    tests.compile_fail(fixture_root.join("retained_flow_slice_constructor_is_private.rs"));
     // This fixture needs the public test-support constructor, while the
     // reveal accessors it probes must remain private.
     tests.compile_fail(fixture_root.join("instantiate_key_context_not_extractable.rs"));

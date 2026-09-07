@@ -21,7 +21,6 @@ use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
 use verter_language::{FileLanguage, ScriptSourceType};
 use verter_semantic::analysis::flow::flow_graph::FlowEdgeClass;
-use verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan;
 use verter_semantic::analysis::flow::peeker::{
     FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded,
 };
@@ -2626,11 +2625,6 @@ fn demand_planner_rejects_an_out_of_range_selection_node() {
     let rich_retained = richer
         .retained_plan(&base_request())
         .expect("the richer demand plans");
-    let out_of_range = *rich_retained
-        .selection()
-        .value_nodes
-        .last()
-        .expect("the richer selection is non-empty");
 
     let own = fixture
         .retained_plan(&request_named("smaller"))
@@ -2638,16 +2632,7 @@ fn demand_planner_rejects_an_out_of_range_selection_node() {
     // The forged pair carries the OWN selection's minted identity, so only
     // the out-of-range node distinguishes it: the refusal is the bounds
     // check, not the identity check.
-    let forged = PlannedFlowSlice::new(
-        own.hash(),
-        ReturnSlicePlan {
-            origins: Arc::clone(&own.selection().origins),
-            demand_path: Arc::clone(&own.selection().demand_path),
-            value_nodes: Arc::from(vec![out_of_range].into_boxed_slice()),
-            effect_only_nodes: Arc::from([]),
-            value_states: own.selection().value_states,
-        },
-    );
+    let forged = PlannedFlowSlice::for_test(own.hash(), rich_retained.selection().clone());
     assert!(
         matches!(
             fixture.build_plan_with_retained(request_named("smaller"), &forged),
@@ -2673,7 +2658,8 @@ fn demand_planner_rejects_a_selection_over_the_requests_slice_budget() {
     let loose = fixture
         .retained_plan(&request_named("rich"))
         .expect("the rich demand plans under the default budget");
-    let selected = loose.selection().value_nodes.len() + loose.selection().effect_only_nodes.len();
+    let selected =
+        loose.selection().value_nodes().len() + loose.selection().effect_only_nodes().len();
     assert!(selected > 0, "the rich selection is non-empty");
 
     // Matched control: the selection served against the budget it was
@@ -2723,7 +2709,7 @@ fn demand_planner_rejects_a_selection_over_the_requests_slice_budget() {
     );
 
     let mut strict_values = request_named("rich");
-    let value_states = loose.selection().value_states;
+    let value_states = loose.selection().value_states();
     assert!(value_states > 0);
     strict_values.resources.slice_budget.max_value_states = value_states - 1;
     assert_eq!(

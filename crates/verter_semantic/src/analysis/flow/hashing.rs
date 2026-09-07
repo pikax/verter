@@ -107,7 +107,7 @@ pub fn compute_flow_slice_hash(
     buf.extend_from_slice(HASH_SALT);
     buf.push(HASH_SEP);
 
-    for origin in plan.origins.iter() {
+    for origin in plan.origins().iter() {
         match origin {
             SliceOrigin::Return(id) => {
                 buf.push(b'O');
@@ -122,7 +122,7 @@ pub fn compute_flow_slice_hash(
         }
     }
 
-    for segment in plan.demand_path.iter() {
+    for segment in plan.demand_path().iter() {
         match segment {
             DemandSegment::Named(name) => {
                 buf.push(b'D');
@@ -135,11 +135,11 @@ pub fn compute_flow_slice_hash(
         }
     }
 
-    for node in plan.value_nodes.iter() {
+    for node in plan.value_nodes().iter() {
         buf.push(b'V');
         fold_u32(&mut buf, node.index() as u32);
     }
-    for node in plan.effect_only_nodes.iter() {
+    for node in plan.effect_only_nodes().iter() {
         buf.push(b'E');
         fold_u32(&mut buf, node.index() as u32);
     }
@@ -196,8 +196,8 @@ pub fn compute_flow_slice_hash(
             }
         }
     };
-    fold_edges(&plan.value_nodes);
-    fold_edges(&plan.effect_only_nodes);
+    fold_edges(plan.value_nodes());
+    fold_edges(plan.effect_only_nodes());
 
     FlowSliceHash(hash_16(&buf))
 }

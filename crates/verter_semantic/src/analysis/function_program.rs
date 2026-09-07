@@ -462,11 +462,12 @@ pub struct FunctionCapturedRead {
     pub span: verter_span::Span,
 }
 
-/// Read dependencies of one immediately nested callable value.
+/// Exact closure subjects and read dependencies of one immediately nested callable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionNestedCaptures {
     pub function: FunctionProgramKey,
     pub span: verter_span::Span,
+    pub bindings: CanonicalCaptureIdentity,
     pub reads: Arc<[FunctionCapturedRead]>,
 }
 
@@ -572,6 +573,8 @@ pub struct FunctionProgramEntry {
     pub key: FunctionProgramKey,
     /// The authored function node's span.
     pub span: verter_span::Span,
+    /// The body environment, excluding the separate parameter-default environment.
+    pub body_span: verter_span::Span,
     /// Arena-free body locator into the retained snapshot.
     pub locator: FunctionBodyLocator,
     /// Formal parameter facts (source order).
@@ -649,8 +652,8 @@ pub struct FunctionProgramEntry {
     /// content-addressed. It is deliberately per-FUNCTION rather than
     /// per-file: an edit to a sibling function changes neither this hash
     /// nor any anchor-relative position, so the untouched function's
-    /// artifacts stay warm — which is the whole point of not keying on
-    /// the file's content hash.
+    /// own-byte identities stay equal. Graph artifact reuse also requires
+    /// the exact serving parse identity, which pins lexical capture context.
     ///
     /// `None` when the recorded function span does not lie within the
     /// source that produced this entry — a typed MISS, not a hash. It was
@@ -961,12 +964,6 @@ fn scope_contains(scope: verter_span::Span, site: verter_span::Span) -> bool {
     scope.start <= site.start && site.end <= scope.end
 }
 
-/// Whether `inner` is strictly narrower than (or equally narrow as, but
-/// later than) `outer` — the innermost-wins tiebreak of lexical lookup.
-fn scope_is_at_least_as_inner(inner: verter_span::Span, outer: verter_span::Span) -> bool {
-    inner.start >= outer.start && inner.end <= outer.end
-}
-
 /// Compute every nested position's content-free capture identities: the
 /// referenced names that bind in an enclosing frame, resolved LEXICALLY —
 /// innermost enclosing frame first, and within a frame the innermost
@@ -999,6 +996,7 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
         .iter()
         .map(|bindings| canonical_runtime_binding_slots(bindings))
         .collect();
+    let lexical_scopes: Vec<_> = entries.iter().map(LexicalScopeIndex::build).collect();
     let mut descendant_writes = vec![Vec::new(); entries.len()];
     let mut descendant_seen = vec![rustc_hash::FxHashSet::default(); entries.len()];
     for index in 0..entries.len() {
@@ -1015,9 +1013,9 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
         let site = entries[index].span;
         let resolve = |reference: &FunctionReferenceRecord| {
             let (frame, slot) =
-                resolve_lexical_binding(&[index], &frame_bindings, &reference.name, reference.span)
+                resolve_lexical_binding(&[index], &lexical_scopes, &reference.name, reference.span)
                     .or_else(|| {
-                        resolve_lexical_binding(&chain, &frame_bindings, &reference.name, site)
+                        resolve_lexical_binding(&chain, &lexical_scopes, &reference.name, site)
                     })?;
             let slot = runtime_slots[frame][slot as usize];
             Some(FlowBindingIdentity {
@@ -1132,6 +1130,7 @@ fn resolve_nested_capture_reads(entries: &mut [FunctionProgramEntry]) {
             nested.push(FunctionNestedCaptures {
                 function: child.key.clone(),
                 span: child.span,
+                bindings: child.captures.clone(),
                 reads: Arc::clone(&child.captured_reads),
             });
             reads.extend(
@@ -1165,39 +1164,100 @@ fn resolve_nested_capture_reads(entries: &mut [FunctionProgramEntry]) {
     }
 }
 
-/// Resolve one referenced name against the enclosing frame chain: the
-/// first (innermost) frame that binds it in a scope containing `site`
-/// wins, and within that frame the innermost such binding wins (a later
-/// binding wins over an earlier one of the same scope). Returns the
-/// `(frame position, binding slot)` pair.
+/// A lexical scope's declaration table, with source-order ties already resolved.
+struct LexicalScope {
+    span: verter_span::Span,
+    parent: Option<usize>,
+    bindings: rustc_hash::FxHashMap<Arc<str>, u32>,
+}
+
+/// Scope intervals are laminar. A binary lookup finds the innermost possible
+/// scope, then only lexical ancestors are visited; sibling declarations never
+/// participate in one another's name lookup.
+struct LexicalScopeIndex {
+    scopes: Vec<LexicalScope>,
+}
+
+impl LexicalScopeIndex {
+    fn build(entry: &FunctionProgramEntry) -> Self {
+        let mut tables =
+            rustc_hash::FxHashMap::<_, rustc_hash::FxHashMap<Arc<str>, u32>>::default();
+        tables.entry(entry.span).or_default();
+        for (slot, binding) in entry.bindings.iter().enumerate() {
+            // Body declarations can share runtime variables with parameters,
+            // but they do not belong to the parameter-default environment.
+            let scope = if binding.scope_span == entry.span
+                && scope_contains(entry.body_span, binding.span)
+            {
+                entry.body_span
+            } else {
+                binding.scope_span
+            };
+            tables
+                .entry(scope)
+                .or_default()
+                .insert(Arc::clone(&binding.name), slot as u32);
+        }
+        let mut scopes: Vec<_> = tables
+            .into_iter()
+            .map(|(span, bindings)| LexicalScope {
+                span,
+                parent: None,
+                bindings,
+            })
+            .collect();
+        scopes.sort_by_key(|scope| (scope.span.start, std::cmp::Reverse(scope.span.end)));
+        let mut open: Vec<usize> = Vec::new();
+        for index in 0..scopes.len() {
+            while open
+                .last()
+                .is_some_and(|parent| !scope_contains(scopes[*parent].span, scopes[index].span))
+            {
+                open.pop();
+            }
+            scopes[index].parent = open.last().copied();
+            open.push(index);
+        }
+        Self { scopes }
+    }
+
+    fn resolve(&self, name: &str, site: verter_span::Span) -> Option<u32> {
+        let mut index = self
+            .scopes
+            .partition_point(|scope| scope.span.start <= site.start)
+            .checked_sub(1)?;
+        loop {
+            let scope = &self.scopes[index];
+            #[cfg(test)]
+            LEXICAL_CANDIDATE_VISITS.with(|visits| visits.set(visits.get() + 1));
+            if scope_contains(scope.span, site) {
+                if let Some(slot) = scope.bindings.get(name) {
+                    return Some(*slot);
+                }
+            }
+            index = scope.parent?;
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static LEXICAL_CANDIDATE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Resolve against containing scopes, innermost frame first. Runtime variable
+/// canonicalization follows this exact lexical lookup.
 fn resolve_lexical_binding(
     chain: &[usize],
-    frame_bindings: &[Arc<[FunctionBindingRecord]>],
+    frame_scopes: &[LexicalScopeIndex],
     name: &Arc<str>,
     site: verter_span::Span,
 ) -> Option<(usize, u32)> {
-    for &frame in chain {
-        let bindings = &frame_bindings[frame];
-        let mut best: Option<(u32, verter_span::Span)> = None;
-        for (slot, binding) in bindings.iter().enumerate() {
-            if &binding.name != name || !scope_contains(binding.scope_span, site) {
-                continue;
-            }
-            let slot = u32::try_from(slot).unwrap_or(u32::MAX);
-            best = match best {
-                Some((_, best_scope))
-                    if !scope_is_at_least_as_inner(binding.scope_span, best_scope) =>
-                {
-                    best
-                }
-                _ => Some((slot, binding.scope_span)),
-            };
-        }
-        if let Some((slot, _)) = best {
-            return Some((frame, slot));
-        }
-    }
-    None
+    chain.iter().find_map(|frame| {
+        frame_scopes[*frame]
+            .resolve(name, site)
+            .map(|slot| (*frame, slot))
+    })
 }
 
 /// Walk every call expression inside one function body's statement list
@@ -2972,6 +3032,9 @@ fn build_entry(
     for param in &node.params().items {
         inventory.record_pattern(&param.pattern, FunctionBindingKind::Param, frame_span);
         inventory.visit_binding_pattern(&param.pattern);
+        if let Some(initializer) = &param.initializer {
+            inventory.visit_expression(initializer);
+        }
     }
     if let Some(rest) = &node.params().rest {
         inventory.record_pattern(&rest.rest.argument, FunctionBindingKind::Param, frame_span);
@@ -3039,6 +3102,11 @@ fn build_entry(
     FunctionProgramEntry {
         key,
         span: frame_span,
+        body_span: node
+            .body()
+            .expect("indexed functions have a body")
+            .span
+            .into(),
         locator,
         params,
         bindings: Arc::from(bindings.into_boxed_slice()),

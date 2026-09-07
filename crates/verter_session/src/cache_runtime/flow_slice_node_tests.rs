@@ -10,7 +10,7 @@ use std::sync::Arc;
 use verter_semantic::analysis::flow::flow_ir::{FlowExprShape, FlowObjectEntry, FlowObjectKey};
 use verter_semantic::analysis::flow::peeker::{FlowSliceBudget, FlowSliceBudgetAxis};
 use verter_semantic::analysis::flow::{
-    build_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource,
+    build_indexed_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource,
 };
 use verter_semantic::analysis::function_program::{
     build_function_program_index, FunctionDeclarationRef, FunctionProgramKey,
@@ -27,7 +27,7 @@ use crate::semantic_query::SemanticQueryApi as _;
 use crate::types::HostConfig;
 use crate::VerterHost;
 
-fn skeleton_of(source: &str) -> FunctionBodySkeleton {
+fn prepared_of(source: &str) -> PreparedFunctionBodySkeleton {
     let allocator = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::ts();
     let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
@@ -36,14 +36,26 @@ fn skeleton_of(source: &str) -> FunctionBodySkeleton {
         "fixture must parse: {:?}",
         ret.errors
     );
+    let owners = TopLevelOwnerTable::ordinary_file(ret.program.body.len());
+    let index =
+        build_function_program_index(&ret.program, source, &owners, Arc::from("/fixture.ts"));
     for statement in &ret.program.body {
         if let oxc_ast::ast::Statement::FunctionDeclaration(function) = statement {
             if let Some(body_source) = FunctionBodySource::from_function(function) {
-                return build_function_body_skeleton(&body_source);
+                let entry = index
+                    .matches_named(function.id.as_ref().unwrap().name.as_str())
+                    .next()
+                    .unwrap()
+                    .entry();
+                return build_indexed_function_body_skeleton(&body_source, entry).unwrap();
             }
         }
     }
     panic!("fixture must contain a bodied function declaration");
+}
+
+fn skeleton_of(source: &str) -> FunctionBodySkeleton {
+    prepared_of(source).into_parts().0
 }
 
 /// A skeleton source over pinned `(key, source-text)` fixtures, counting
@@ -103,7 +115,24 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
         if self.invalid_bindings.load(Ordering::SeqCst) {
             entry.bindings = entry.bindings[..entry.bindings.len() - 1].into();
         }
-        build_bundle(skeleton_of(source), &entry).map(Some)
+        let function = parsed
+            .program
+            .body
+            .iter()
+            .find_map(|statement| match statement {
+                oxc_ast::ast::Statement::FunctionDeclaration(function)
+                    if function.body.is_some() =>
+                {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .expect("fixture function");
+        let prepared = build_indexed_function_body_skeleton(
+            &FunctionBodySource::from_function(function).unwrap(),
+            &entry,
+        )?;
+        Ok(Some(build_prepared_bundle(prepared)))
     }
 }
 
@@ -1079,7 +1108,8 @@ pub(crate) fn flow_slice_is_graph_reachability_not_procedural_walk() {
     let skeleton = skeleton_of(
         "function f(u: number) { const b = 1; const dead = mystery(u); return { a: dead, b } }",
     );
-    let graph = verter_semantic::analysis::flow::flow_graph::build_function_flow_graph(&skeleton);
+    let graph =
+        verter_semantic::analysis::flow::flow_graph::build_function_flow_graph_for_test(&skeleton);
 
     // Resolve every asserted node id BEFORE the skeleton is dropped.
     let object_site = skeleton.return_sites[0].argument.expect("return argument");
@@ -1166,7 +1196,8 @@ pub(crate) fn flow_graph_effect_edges_stay_live_past_value_writes() {
 
     let skeleton =
         skeleton_of(r#"function f(x: string) { return { a: (x = "s"), b: x.toUpperCase() } }"#);
-    let graph = verter_semantic::analysis::flow::flow_graph::build_function_flow_graph(&skeleton);
+    let graph =
+        verter_semantic::analysis::flow::flow_graph::build_function_flow_graph_for_test(&skeleton);
     let demand = SliceDemand::for_return_projection(&skeleton, &[Arc::<str>::from("b")]);
     let plan = ReturnPathPeeker::new(&graph)
         .plan(&demand, &FlowSliceBudget::default())
@@ -1217,7 +1248,7 @@ pub(crate) fn flow_graph_effect_edges_stay_live_past_value_writes() {
 /// route lookup, or imported-fact observation. Rails:
 ///
 /// - STRUCTURAL: `build_function_body_skeleton(&FunctionBodySource)` and
-///   `build_function_flow_graph(&FunctionBodySkeleton)` take no resolver,
+///   `build_function_flow_graph(&PreparedFunctionBodySkeleton)` take no resolver,
 ///   no store view, and no dispatch handle — resolution is unreachable
 ///   from the build path at compile time; and both artifacts are
 ///   `NoTypeExpr` (asserted below), so no lowered type can be STORED.
@@ -1249,7 +1280,9 @@ pub(crate) fn flow_graph_build_is_shallow_interned_no_lowering_lazy_regions() {
         || {
             let skeleton = skeleton_of(source);
             let graph =
-                verter_semantic::analysis::flow::flow_graph::build_function_flow_graph(&skeleton);
+                verter_semantic::analysis::flow::flow_graph::build_function_flow_graph_for_test(
+                    &skeleton,
+                );
             assert!(graph.node_count() > 0, "the build produced a real graph");
         },
     );

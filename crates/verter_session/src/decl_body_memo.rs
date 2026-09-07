@@ -1219,7 +1219,7 @@ impl DeclBodyMemo {
         self.function_flow_structure(entry)
             .ok()
             .flatten()
-            .map(|prepared| prepared.skeleton)
+            .map(|prepared| prepared.into_parts().0)
     }
 
     /// Build the current frame with the index's retained closure-access facts,
