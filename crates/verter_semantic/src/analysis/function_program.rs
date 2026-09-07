@@ -931,6 +931,11 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
         let mut captures: Vec<FlowBindingIdentity> = Vec::new();
         let mut seen: Vec<(usize, u32)> = Vec::new();
         for reference in entries[index].references.iter() {
+            if resolve_lexical_binding(&[index], &frame_bindings, &reference.name, reference.span)
+                .is_some()
+            {
+                continue;
+            }
             let Some((frame, slot)) =
                 resolve_lexical_binding(&chain, &frame_bindings, &reference.name, site)
             else {
@@ -1489,7 +1494,7 @@ fn link_callback_return_sources(
                     FunctionDescentStep::CallArgument { .. }
                         | FunctionDescentStep::NestedCallable { .. }
                 )
-            )
+            ) && entry.nested_declaration_name.is_none()
         })
         .map(|entry| {
             let source = FunctionReturnSource::Flow(FlowFunctionReturnIdentity {
