@@ -830,6 +830,21 @@ impl FlowGraphFixtureForTests {
     pub fn product_inputs(&self) -> FlowProductInputs {
         FlowProductInputs::for_bound_graph(&self.bound)
     }
+
+    /// Exercise the interpreter-only numeric attachment against the actual
+    /// pinned fixture owner. Returned handles still carry execution scope.
+    pub fn product_content_key_for_tests(&self, execution: &FlowProductExecution, node: verter_semantic::analysis::flow::flow_graph::FlowNodeId, binding: Option<&verter_semantic::analysis::flow::FlowBindingRef>) -> Result<FlowProductKey, FlowProductKeyError> {
+        let content = execution.attach_content(&self.bound)?;
+        let site = content.site(node)?;
+        let key = content.key(FlowDomain::ReachingType, node)?;
+        assert_eq!(key, site.key(FlowDomain::ReachingType)?);
+        if let Some(binding) = binding { assert_eq!(key, content.key_for_binding(FlowDomain::ReachingType, binding)?); }
+        Ok(key)
+    }
+
+    pub fn selected_capture_identities_for_tests(&self, plan: &FlowDemandPlan) -> Vec<verter_semantic::analysis::function_program::FlowBindingIdentity> {
+        self.product_inputs().selected_captures(plan.structural_selection()).cloned().collect()
+    }
 }
 
 /// Parse `source`, build the skeleton + graph of its first function

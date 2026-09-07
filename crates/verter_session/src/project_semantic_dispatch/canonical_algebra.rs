@@ -97,6 +97,28 @@ mod literal_provenance_tests {
     thread_local! {
         pub(super) static PAYLOAD_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static PAYLOAD_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static SUBSUMPTION_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn literal_union_subsumption_reads_each_arm_a_bounded_number_of_times() {
+        let graph = SemanticGraphStore::new();
+        let members: Vec<_> = (0..1024)
+            .map(|n| graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(n as f64))))
+            .collect();
+        SUBSUMPTION_READS.set(0);
+        let result = canonical_union(&graph, &members);
+        assert!(!result.evidence.incomplete);
+        let data = graph.node_data(result.node).unwrap();
+        let SemanticNodeData::Union(arms) = data.as_ref() else {
+            panic!("distinct literal union")
+        };
+        assert_eq!(arms.len(), members.len());
+        assert!(
+            SUBSUMPTION_READS.get() <= members.len() * 2,
+            "primitive subsumption must be linear; observed {} reads",
+            SUBSUMPTION_READS.get()
+        );
     }
 
     fn input(root: Option<SemanticNodeId>, fresh: LiteralFreshness<'_>) -> LiteralProvenance<'_> {
@@ -1010,36 +1032,35 @@ fn canonicalize(
     //    carries adds no inhabitant (`string | "a"` is `string`). Structural
     //    (node-data) — never text — and scope-insensitive by construction.
     if is_union {
-        let carries_primitive = |kind: PrimitiveKind, arms: &[SemanticNodeId]| {
-            arms.iter().any(|member| {
-                matches!(
-                    graph.node_data(*member).as_deref(),
-                    Some(SemanticNodeData::Primitive(primitive)) if *primitive == kind
-                )
-            })
-        };
-        let mut kept: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
-        for member in arms.iter().copied() {
-            let literal_primitive = match graph.node_data(member).as_deref() {
-                Some(SemanticNodeData::Literal(LiteralValue::String(_))) => {
-                    Some(PrimitiveKind::String)
-                }
-                Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => {
-                    Some(PrimitiveKind::Number)
-                }
-                Some(SemanticNodeData::Literal(LiteralValue::BigInt(_))) => {
-                    Some(PrimitiveKind::BigInt)
-                }
-                Some(SemanticNodeData::Literal(LiteralValue::Boolean(_))) => {
-                    Some(PrimitiveKind::Boolean)
-                }
-                _ => None,
+        // Four base primitives can subsume literal arms. Collect their presence
+        // once; a literal-only union must not rescan every other literal.
+        let mut primitives = 0u8;
+        for &member in &arms {
+            #[cfg(test)]
+            literal_provenance_tests::SUBSUMPTION_READS.with(|count| count.set(count.get() + 1));
+            primitives |= match graph.node_data(member).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => 1,
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => 2,
+                Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => 4,
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => 8,
+                _ => 0,
             };
-            if !literal_primitive.is_some_and(|kind| carries_primitive(kind, &arms)) {
-                kept.push(member);
-            }
         }
-        arms = kept;
+        if primitives != 0 {
+            arms.retain(|member| {
+                #[cfg(test)]
+                literal_provenance_tests::SUBSUMPTION_READS
+                    .with(|count| count.set(count.get() + 1));
+                let base = match graph.node_data(*member).as_deref() {
+                    Some(SemanticNodeData::Literal(LiteralValue::String(_))) => 1,
+                    Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => 2,
+                    Some(SemanticNodeData::Literal(LiteralValue::BigInt(_))) => 4,
+                    Some(SemanticNodeData::Literal(LiteralValue::Boolean(_))) => 8,
+                    _ => 0,
+                };
+                base & primitives == 0
+            });
+        }
     }
 
     // 4. Structural `T | T = T` / `T & T = T` — two tiers, both

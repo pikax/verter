@@ -46,7 +46,10 @@ or repeated idempotence checks over unchanged predecessor snapshots.
   or consume the product budget.
 - Keep continuation values in a persistent ordered store. Snapshot cloning shares the
   tree; writes copy only changed paths, and iteration and joins visit materialized cells
-  in domain then selected-subject order. Retained declarations use exact source cells
+  in domain then selected-subject order. Multiway joins merge ordered predecessor
+  streams with one queued head per predecessor; absent cells are accounted for by
+  each domain's bottom rule, without scanning the predecessor-by-subject cross product.
+  Retained declarations use exact source cells
   in one append-only execution authority bank. Hoisted aliases share runtime state,
   while each authored annotation retains its own identity and explicit lookup fallback.
   `max_products` bounds runtime cells in one continuation; `max_declared_products`
@@ -77,6 +80,8 @@ or repeated idempotence checks over unchanged predecessor snapshots.
   make one canonical union/provenance operation. The inspection budget applies to
   that actual join, rather than resetting at each temporary binary prefix. Semantic
   literal hashes are computed once per inspected payload within the operation.
+  Union literal subsumption collects base primitive presence once before filtering;
+  a literal-only union never rescans all members for each literal.
 - Represent captured binding dependencies with real graph-owned captured-binding
   hubs. Exact captured identities are distinct from local skeleton binder IDs; hubs
   avoid a read-by-write cross product. Static read paths compose with write paths in

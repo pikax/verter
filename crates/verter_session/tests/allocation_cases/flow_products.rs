@@ -53,6 +53,67 @@ fn request(basis: u8) -> FlowDemandRequest {
 use super::{alloc_bytes, alloc_count, reset_alloc_counter};
 
 #[test]
+fn sparse_multiway_join_visits_only_materialized_predecessor_cells() {
+    let types = SemanticGraphStore::new();
+    let number = types.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let algebra = GraphSemanticAlgebra(&types);
+    for predecessors in [32, 256] {
+        let names = (0..predecessors)
+            .map(|i| format!("x{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let fixture = flow_graph_fixture_for_tests(
+            &format!("function products({names}) {{ return [{names}]; }}"),
+            1,
+        );
+        let request = request(0);
+        let retained = fixture.retained_plan(&request).unwrap();
+        let cap = fixture
+            .prepare_execution_with_retained(&request, &retained)
+            .unwrap();
+        let inputs = fixture.product_inputs();
+        let mut execution =
+            FlowProductExecution::new_for_selection(&inputs, cap, FlowProductBudget::default())
+                .unwrap();
+        let keys: Vec<_> = execution
+            .selected_sites()
+            .take(predecessors)
+            .map(|site| site.key(FlowDomain::ReachingType).unwrap())
+            .collect();
+        let mut states: Vec<_> = (0..predecessors).map(|_| execution.empty_state()).collect();
+        for (state, key) in states.iter_mut().zip(&keys) {
+            execution
+                .apply_transfers(
+                    state,
+                    &key.site(),
+                    &[FlowProductTransfer {
+                        key: key.clone(),
+                        value: Some(FlowProductValue::ReachingType(ReachingTypeProduct::of(
+                            number,
+                        ))),
+                    }],
+                )
+                .unwrap();
+        }
+        let incoming: Vec<_> = states.iter().collect();
+        reset_alloc_counter();
+        let result = execution.join_products(&incoming, &algebra).unwrap();
+        let allocated = (alloc_count(), alloc_bytes());
+        assert_eq!(result.len(), predecessors);
+        assert!(keys.iter().all(|key| result.get(key)
+            == Some(&FlowProductValue::ReachingType(ReachingTypeProduct::of(
+                number
+            )))));
+        eprintln!("sparse flow join predecessors={predecessors} materialized={predecessors} visits={} allocations={allocated:?}", execution.join_product_visits_for_tests());
+        assert_eq!(
+            execution.join_product_visits_for_tests(),
+            predecessors,
+            "absent predecessor cells must not enter the join work stream"
+        );
+    }
+}
+
+#[test]
 fn continuation_allocation_depends_on_materialized_products_not_selected_capacity() {
     let types = SemanticGraphStore::new();
     let number = types.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
