@@ -3526,7 +3526,7 @@ fn object_return_lowers_a_spread_entry_structurally() {
         panic!("the spread entry precedes the direct member in source order: {entries:?}");
     };
     assert!(
-        matches!(source, SliceExpr::Type(leaf) if matches!(leaf.ty(), TypeExpr::TypeOf(_))),
+        matches!(source.as_ref(), SliceExpr::Type(leaf) if matches!(leaf.ty(), TypeExpr::TypeOf(_))),
         "a FREE spread operand takes the owner-scope leaf lowering: {source:?}"
     );
     assert_eq!(member.key.static_name(), Some("x"));
@@ -3581,7 +3581,7 @@ fn member_demand_selects_the_spread_source_and_elides_the_unrelated_sibling() {
         panic!("the spread entry precedes the direct member: {entries:?}");
     };
     assert!(
-        !matches!(spread, SliceExpr::Elided),
+        !matches!(spread.as_ref(), SliceExpr::Elided),
         "a demand for `a` reaches the SPREAD source (the only entry that can \
          provision it): {spread:?}"
     );
@@ -3610,7 +3610,7 @@ fn member_demand_selects_the_spread_source_and_elides_the_unrelated_sibling() {
         panic!("the spread entry precedes the direct member: {entries:?}");
     };
     assert!(
-        !matches!(spread, SliceExpr::Elided),
+        !matches!(spread.as_ref(), SliceExpr::Elided),
         "a whole-return demand reaches the spread source: {spread:?}"
     );
     assert!(
@@ -3658,7 +3658,7 @@ fn object_return_spread_of_a_frame_binding_reads_the_frame_binding() {
         panic!("the spread entry precedes the direct member in source order: {entries:?}");
     };
     assert_eq!(
-        source,
+        source.as_ref(),
         &SliceExpr::Param {
             ordinal: 0,
             binding: node.params[0].binding.expect("parameter binding")

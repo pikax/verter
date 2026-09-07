@@ -72,6 +72,20 @@ fn indexed_skeleton_retains_exact_nested_capture_paths_and_runtime_aliases() {
         .bindings_named(skeleton.name_id("x").unwrap())
         .collect();
     assert_eq!(xs.len(), 3);
+    let exact = prepared.bindings.identity(xs[0]).unwrap();
+    assert_eq!(prepared.bindings.local(exact), Some(xs[0]));
+    let mut stale_name = exact.clone();
+    stale_name.name = Arc::from("replaced");
+    let mut stale_kind = exact.clone();
+    stale_kind.kind = crate::analysis::function_program::FunctionBindingKind::Let;
+    for stale in [&stale_name, &stale_kind] {
+        assert_eq!(stale, exact, "display metadata is not semantic identity");
+        assert_eq!(
+            prepared.bindings.local(stale),
+            None,
+            "map admission still requires exact indexed metadata"
+        );
+    }
     assert_ne!(
         prepared.bindings.identity(xs[0]),
         prepared.bindings.identity(xs[1])

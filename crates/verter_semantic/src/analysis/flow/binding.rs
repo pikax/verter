@@ -112,7 +112,9 @@ impl FlowBindingMap {
         if identity.defining_function != self.function {
             return None;
         }
-        self.locals.get(identity.binding_slot as usize).copied()
+        let local = self.locals.get(identity.binding_slot as usize).copied()?;
+        let stored = self.identity(local)?;
+        (stored.name == identity.name && stored.kind == identity.kind).then_some(local)
     }
 
     pub fn function(&self) -> &FunctionProgramKey {

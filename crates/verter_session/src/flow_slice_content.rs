@@ -1270,7 +1270,7 @@ pub enum SliceObjectEntry {
     /// what it provisioned.
     Spread {
         /// The spread source's lowered value.
-        source: SliceExpr,
+        source: Box<SliceExpr>,
     },
 }
 
@@ -1963,7 +1963,7 @@ enum NarrowDestination {
 #[derive(Debug, Clone, PartialEq)]
 enum GuardDisposition {
     /// A narrowing fact this half CARRIES to the evaluator.
-    Modeled(SliceGuard),
+    Modeled(Box<SliceGuard>),
     /// PROVED to establish no narrowing at any slot this half models.
     NoNarrowing,
     /// The checker narrows a modeled slot through a form this
@@ -1973,12 +1973,16 @@ enum GuardDisposition {
 }
 
 impl GuardDisposition {
+    fn modeled(guard: SliceGuard) -> Self {
+        Self::Modeled(Box::new(guard))
+    }
+
     /// The negated reading. Negation is total on all three answers: the
     /// negation of a proved-inert test is inert, and the negation of an
     /// unexpressible one is still unexpressible.
     fn negated(self) -> Self {
         match self {
-            Self::Modeled(guard) => Self::Modeled(negate_guard(guard)),
+            Self::Modeled(guard) => Self::modeled(negate_guard(*guard)),
             Self::NoNarrowing => Self::NoNarrowing,
             Self::Unexpressible => Self::Unexpressible,
         }
@@ -1998,7 +2002,7 @@ impl GuardDisposition {
     /// [`Self::Unexpressible`].
     fn into_guard(self) -> SliceGuard {
         match self {
-            Self::Modeled(guard) => guard,
+            Self::Modeled(guard) => *guard,
             Self::NoNarrowing | Self::Unexpressible => SliceGuard::None,
         }
     }
@@ -4977,7 +4981,7 @@ impl Lowerer<'_> {
     /// `ReturnOnly`, never a silently published superset.
     fn lower_guard(&mut self, test: &Expression<'_>) -> SliceGuard {
         match self.classify_guard(test) {
-            GuardDisposition::Modeled(guard) => guard,
+            GuardDisposition::Modeled(guard) => *guard,
             GuardDisposition::NoNarrowing => SliceGuard::None,
             GuardDisposition::Unexpressible => {
                 self.control_test_gap = true;
@@ -5044,7 +5048,7 @@ impl Lowerer<'_> {
                         } else {
                             or_guard(left.into_guard(), right.into_guard())
                         };
-                        GuardDisposition::Modeled(composed)
+                        GuardDisposition::modeled(composed)
                     }
                     // `a ?? b` tests nullishness of `a`, but its result
                     // is the OPERAND's value, not a boolean fact over the
@@ -5071,7 +5075,7 @@ impl Lowerer<'_> {
             // that rail proves silent and destroy the certification.
             Expression::CallExpression(call) => match self.lower_predicate_guard(call) {
                 SliceGuard::None => GuardDisposition::NoNarrowing,
-                guard => GuardDisposition::Modeled(guard),
+                guard => GuardDisposition::modeled(guard),
             },
             // The test's VALUE is one of the branches; this half carries
             // no branch/merge composition for a guard, so a branch that
@@ -5150,7 +5154,7 @@ impl Lowerer<'_> {
                 if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
                     GuardDisposition::Unexpressible
                 } else {
-                    GuardDisposition::Modeled(SliceGuard::Truthy {
+                    GuardDisposition::modeled(SliceGuard::Truthy {
                         subject,
                         negated: false,
                     })
@@ -5192,10 +5196,10 @@ impl Lowerer<'_> {
                 let negated = matches!(binary.operator, BinaryOperator::StrictInequality);
                 // `typeof x === "string"` (either operand order).
                 if let Some(guard) = self.typeof_guard(&binary.left, &binary.right, negated) {
-                    return GuardDisposition::Modeled(guard);
+                    return GuardDisposition::modeled(guard);
                 }
                 if let Some(guard) = self.typeof_guard(&binary.right, &binary.left, negated) {
-                    return GuardDisposition::Modeled(guard);
+                    return GuardDisposition::modeled(guard);
                 }
                 // `subject === literal` (either operand order).
                 for (subject_side, literal_side) in
@@ -5214,7 +5218,7 @@ impl Lowerer<'_> {
                     if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
                         return GuardDisposition::Unexpressible;
                     }
-                    return GuardDisposition::Modeled(SliceGuard::EqLiteral {
+                    return GuardDisposition::modeled(SliceGuard::EqLiteral {
                         subject,
                         literal,
                         negated,
@@ -5254,7 +5258,7 @@ impl Lowerer<'_> {
                     Expression::Identifier(ctor)
                         if self.closed_instanceof_constructor(ctor.name.as_str(), ctor.span) =>
                     {
-                        GuardDisposition::Modeled(SliceGuard::Instanceof {
+                        GuardDisposition::modeled(SliceGuard::Instanceof {
                             subject,
                             ctor: Arc::from(ctor.name.as_str()),
                             negated: false,
@@ -5273,7 +5277,7 @@ impl Lowerer<'_> {
                         if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
                             return GuardDisposition::Unexpressible;
                         }
-                        GuardDisposition::Modeled(SliceGuard::In {
+                        GuardDisposition::modeled(SliceGuard::In {
                             key,
                             subject,
                             negated: false,
@@ -6737,7 +6741,9 @@ impl Lowerer<'_> {
                         self.scan_unmodeled_position_effects(source);
                         SliceExpr::Elided
                     };
-                    entries.push(SliceObjectEntry::Spread { source });
+                    entries.push(SliceObjectEntry::Spread {
+                        source: Box::new(source),
+                    });
                     continue;
                 }
                 ObjectEntryDescent::Property {
