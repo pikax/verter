@@ -421,6 +421,7 @@ returned surface rather than depending on an internal virtual filename.
 Get the IDE representation of a file for type checking. Used by the LSP and provider integration. This is a pure cached read; call `host.ensureIdeCompiled(canonicalId)` first to populate the projection.
 
 ```ts
+host.ensureIdeCompiled("/path/to/App.vue");
 const ide = host.getIde("/path/to/App.vue");
 // ide.code — valid TSX or JSX code
 // ide.sourceMap — source map JSON string
