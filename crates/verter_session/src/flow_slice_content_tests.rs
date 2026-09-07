@@ -81,10 +81,7 @@ fn selection_for(
     FlowSliceSelection,
     crate::cache_runtime::flow_slice_node::BoundFlowGraph,
 ) {
-    let skeleton = memo
-        .function_body_skeleton(entry)
-        .expect("the skeleton must build for an indexed function");
-    let bound = memo.flow_bound_graph_for_tests(entry, skeleton);
+    let bound = memo.flow_bound_graph_for_tests(entry);
     let skeleton = &bound.bundle().skeleton;
     let graph = &bound.bundle().graph;
     let demand = SliceDemand::for_return_projection(&skeleton, path);
@@ -106,6 +103,172 @@ fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceCon
 
 fn content_for(source: &str, name: &str) -> Arc<SliceContent> {
     content_for_path(source, name, &[])
+}
+
+#[test]
+fn nested_descriptor_defers_mutable_capture_annotation_content() {
+    let content = content_for(
+        "function f() { let captured: 'capture-annotation-content-sentinel' = 'value' as any; return (): number => 1; }",
+        "f",
+    );
+    let context = content
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| {
+            let SliceStatement::Return {
+                argument: Some(SliceExpr::NestedFunctionValue { context, .. }),
+                ..
+            } = statement
+            else {
+                return None;
+            };
+            Some(context)
+        })
+        .expect("selected nested descriptor");
+    assert!(
+        !format!("{context:?}").contains("capture-annotation-content-sentinel"),
+        "building a nested descriptor must not lower enclosing mutable annotations"
+    );
+}
+
+#[test]
+fn nested_signature_typeof_uses_lexical_siblings_without_runtime_captures() {
+    let source = "const sibling = 'module'; function f() { const sibling = 1; return (): typeof sibling => 1; }";
+    let memo = memo_for(source);
+    let content = content_for(source, "f");
+    let nested = content
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Return {
+                argument: Some(nested @ SliceExpr::NestedFunctionValue { .. }),
+                ..
+            } => Some(nested),
+            _ => None,
+        })
+        .expect("nested descriptor");
+    let SliceExpr::NestedFunctionValue { function, .. } = nested else {
+        unreachable!()
+    };
+    let index = memo.function_program_index();
+    assert!(
+        index
+            .get(function)
+            .expect("indexed child")
+            .entry()
+            .captures
+            .0
+            .is_empty(),
+        "type syntax is absent from runtime captures"
+    );
+    let child = nested_content(&memo, nested);
+    assert!(child.declared_return.as_ref().expect("declared return").shadowed().iter().any(|name| {
+        matches!(name, crate::flow_slice_content::FrameShadowedName::Value(name) if name.as_ref() == "sibling")
+    }), "the lexical sibling must prevent a module-scope typeof answer");
+}
+
+#[test]
+fn selected_capture_authority_rejects_a_different_outer_source_snapshot() {
+    let source =
+        "const outer = 'one'; function f() { let captured: typeof outer; return () => captured; }";
+    let memo = memo_for(source);
+    let content = content_for(source, "f");
+    let (function, context) = content
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Return {
+                argument:
+                    Some(SliceExpr::NestedFunctionValue {
+                        function, context, ..
+                    }),
+                ..
+            } => Some((function, context)),
+            _ => None,
+        })
+        .expect("nested descriptor");
+    let index = memo.function_program_index();
+    let capture = &index
+        .get(function)
+        .expect("indexed child")
+        .entry()
+        .captures
+        .0[0];
+    let locator = context
+        .mutable_authorities(capture)
+        .into_iter()
+        .next()
+        .expect("exact mutable source locator");
+    assert!(memo
+        .flow_capture_authority(&locator)
+        .is_some_and(|authority| authority.is_some()));
+    let changed = memo_for(&source.replace("'one'", "'two'"));
+    assert!(changed.flow_capture_authority(&locator).is_none(),
+        "unchanged function bytes cannot attach a lexical gate from a different outer source snapshot");
+    let changed_index = changed.function_program_index();
+    let changed_entry = changed_index
+        .get(function)
+        .expect("same indexed child")
+        .entry();
+    let (_, changed_bound) = selection_for(&changed, changed_entry, &[]);
+    assert!(
+        changed
+            .flow_slice_content_with_context(
+                changed_entry,
+                None,
+                &changed_bound,
+                Some(Arc::clone(context)),
+            )
+            .is_none(),
+        "signature-only lowering must reject an older linked lexical gate too"
+    );
+}
+
+#[test]
+fn selected_annotation_descent_inspects_logarithmic_siblings() {
+    use oxc_span::GetSpan;
+    use std::cell::Cell;
+    struct Observed<'a> {
+        span: oxc_span::Span,
+        reads: &'a Cell<usize>,
+    }
+    impl GetSpan for Observed<'_> {
+        fn span(&self) -> oxc_span::Span {
+            self.reads.set(self.reads.get() + 1);
+            self.span
+        }
+    }
+    let mut source = String::new();
+    for index in 0..2048 {
+        source.push_str(&format!(
+            "function sibling{index}() {{ let value: 'unused{index}'; }}\n"
+        ));
+    }
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, &source, oxc_span::SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty());
+    let reads = Cell::new(0);
+    let siblings: Vec<_> = parsed
+        .program
+        .body
+        .iter()
+        .map(|statement| Observed {
+            span: statement.span(),
+            reads: &reads,
+        })
+        .collect();
+    let target = siblings[1900].span;
+    let selected =
+        crate::flow_slice_content::selected_span_child(&siblings, target).expect("target sibling");
+    assert_eq!(selected.span, target);
+    assert!(
+        reads.get() <= 16,
+        "exact source descent inspected {} of 2048 siblings",
+        reads.get()
+    );
 }
 
 #[test]

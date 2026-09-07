@@ -4522,6 +4522,50 @@ fn flow_return_mutable_closures_use_declared_capture_authority() {
 }
 
 #[test]
+fn flow_return_transitive_capture_annotation_uses_its_original_generic_binder() {
+    let late = expect_clean_flow_value(
+        "function makeProps<T extends string>() { const mid = <T extends number>() => () => x; let x: T; return mid; }",
+    );
+    let terminal = match flow_source_probe(
+        "function makeProps<T extends string>() { return <T extends number>() => () => x; var x: T; }",
+    ) {
+        FlowSourceProbe::Value { expr, degradation, candidates } => {
+            assert_eq!(degradation, None);
+            assert_eq!(candidates, 0, "an unexecuted parent declaration supplies no runtime proof");
+            expr
+        }
+        other => panic!("selected capture authority supplies a value: {other:?}"),
+    };
+    for expr in [late, terminal] {
+        let verter_type_expr::TypeExpr::Function(intermediate) = &expr else {
+            panic!("intermediate signature: {expr:?}");
+        };
+        assert_eq!(
+            intermediate.type_parameters[0].constraint.as_deref(),
+            Some(&verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::Number
+            ))
+        );
+        let Some(verter_type_expr::TypeExpr::Function(inner)) = intermediate.return_type.as_deref()
+        else {
+            panic!("inner signature: {expr:?}");
+        };
+        let Some(verter_type_expr::TypeExpr::TypeParameter(captured)) =
+            inner.return_type.as_deref()
+        else {
+            panic!("captured binder: {expr:?}");
+        };
+        assert_eq!(
+            captured.constraint.as_deref(),
+            Some(&verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::String
+            )),
+            "a declaration hydrated later retains original outer T, never the intermediate T"
+        );
+    }
+}
+
+#[test]
 fn flow_return_abrupt_finally_over_pending_break_contributes_undefined() {
     let expected = verter_type_expr::TypeExpr::union(vec![
         string_literal("a"),
@@ -4736,15 +4780,18 @@ fn flow_return_one_expression_imports_a_wide_capture_environment() {
     let expression = (0..16)
         .map(|index| format!("value{index}"))
         .collect::<Vec<_>>()
-        .join(" + ");
+        .join(", ");
     let value = expect_clean_flow_value(&format!(
-        "function makeProps() {{ {declarations} return () => {expression}; }}"
+        "function makeProps() {{ {declarations} return () => ({{ {expression} }}); }}"
     ));
-    assert_eq!(
-        projected_function_return(&value),
-        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
-        "one expression's exact captured inputs fit its execution policy"
-    );
+    let returned = projected_function_return(&value);
+    for index in 0..16 {
+        assert_eq!(
+            object_prop(returned, &format!("value{index}")),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "every exact captured input fits the closure's execution policy"
+        );
+    }
 }
 
 #[test]

@@ -1125,7 +1125,6 @@ impl DeclBodyMemo {
     pub(crate) fn flow_bound_graph_for_tests(
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
-        skeleton: verter_semantic::analysis::flow::FunctionBodySkeleton,
     ) -> crate::cache_runtime::flow_slice_node::BoundFlowGraph {
         let file_language =
             verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts);
@@ -1143,9 +1142,12 @@ impl DeclBodyMemo {
             build_toolchain_fingerprint:
                 crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
         };
-        crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new()
-            .mint_bound_flow_graph(key, skeleton, entry)
+        let prepared = self
+            .function_flow_structure(entry)
             .expect("fixture binding authority")
+            .expect("fixture retained structure");
+        crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new()
+            .mint_bound_flow_graph(key, prepared)
     }
 
     pub(crate) fn flow_slice_content(
@@ -1166,6 +1168,9 @@ impl DeclBodyMemo {
     ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
         if bound.key().function != entry.key
             || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash?
+            || context
+                .as_ref()
+                .is_some_and(|context| !context.matches_snapshot(&self.key))
         {
             return None;
         }
@@ -1181,6 +1186,7 @@ impl DeclBodyMemo {
         // module by construction; a plain script file proves module scope
         // only through its own top-level syntax.
         let carrier_module = self.framework_parse.is_some();
+        let snapshot = self.key.clone();
         let Some(node) = service.run_leased(&self.key, move |program| {
             program.and_then(|p| {
                 crate::flow_slice_content::build_flow_slice_content(
@@ -1192,6 +1198,7 @@ impl DeclBodyMemo {
                     &skeleton,
                     Arc::clone(&bindings),
                     carrier_module,
+                    &snapshot,
                     context.as_deref(),
                 )
             })
@@ -1206,6 +1213,48 @@ impl DeclBodyMemo {
             return None;
         };
         node.map(Arc::new)
+    }
+
+    /// Lower selected missing annotations in one retained-source lease. Slots
+    /// preserve authored absence separately from a source/locator mismatch.
+    pub(crate) fn flow_capture_authorities(
+        &self,
+        locators: &[crate::flow_slice_content::SliceCaptureAuthorityLocator],
+    ) -> Option<Vec<Option<Option<crate::flow_slice_content::SliceCaptureAuthority>>>> {
+        let service = self.service.as_ref()?;
+        let index = self.function_program_index();
+        let snapshot = self.key.clone();
+        let locators = locators.to_vec();
+        self.ensure_lease();
+        service.run_leased(&self.key, move |program| {
+            let program = program?;
+            Some(
+                locators
+                    .iter()
+                    .map(|locator| {
+                        if !locator.matches_snapshot(&snapshot) {
+                            return None;
+                        }
+                        let entry = index.get(&locator.declaration.defining_function)?;
+                        crate::flow_slice_content::build_flow_capture_authority(
+                            program.borrow_dependent(),
+                            program.source_str(),
+                            entry.entry(),
+                            locator,
+                        )
+                    })
+                    .collect(),
+            )
+        })?
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flow_capture_authority(
+        &self,
+        locator: &crate::flow_slice_content::SliceCaptureAuthorityLocator,
+    ) -> Option<Option<crate::flow_slice_content::SliceCaptureAuthority>> {
+        self.flow_capture_authorities(std::slice::from_ref(locator))?
+            .pop()?
     }
 
     /// The OWN type-parameter clause of one indexed function, lowered

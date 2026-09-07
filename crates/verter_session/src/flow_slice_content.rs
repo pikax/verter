@@ -66,7 +66,7 @@ use oxc_ast::ast::{
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
     object_entry_descent, value_descent, FlowBindingRef, FrameSpan, FunctionBodySkeleton,
@@ -944,7 +944,7 @@ pub enum SliceExpr {
 }
 
 /// The source of one mutable closure capture's authored declaration authority.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SliceCaptureAuthoritySource {
     /// A lexical or function-scoped local declaration.
     Local(SliceBindingKind),
@@ -1605,9 +1605,10 @@ pub(crate) fn build_flow_slice_content(
     index: &verter_semantic::analysis::function_program::FunctionProgramIndex,
     entry: &FunctionProgramEntry,
     selection: Option<&FlowSliceSelection>,
-    skeleton: &FunctionBodySkeleton,
+    skeleton: &Arc<FunctionBodySkeleton>,
     bindings: Arc<verter_semantic::analysis::flow::FlowBindingMap>,
     carrier_module: bool,
+    snapshot: &crate::decl_lowering::SnapshotKey,
     context: Option<&NestedFlowContext>,
 ) -> Option<SliceContent> {
     let module_scope = carrier_module || program_has_module_syntax(program);
@@ -1696,7 +1697,41 @@ pub(crate) fn build_flow_slice_content(
     // marking it frame-bound would fail closed on. The class clause
     // therefore reaches the answer through the EVALUATOR's binder
     // environment only.
+    let frame_gate =
+        Arc::new(DefiningFrameGate {
+            skeleton: Arc::clone(skeleton),
+            bindings: Arc::clone(&bindings),
+            type_parameters: Arc::from(type_param_names.clone()),
+            parameters: params
+                .iter()
+                .enumerate()
+                .flat_map(|(ordinal, param)| {
+                    param
+                        .binding
+                        .map(|binding| CaptureParameterLocator {
+                            binding,
+                            ordinal,
+                            key: None,
+                            has_default: false,
+                        })
+                        .into_iter()
+                        .chain(param.destructured.iter().map(move |element| {
+                            CaptureParameterLocator {
+                                binding: element.binding,
+                                ordinal,
+                                key: Some(Arc::clone(&element.key)),
+                                has_default: element.has_default,
+                            }
+                        }))
+                })
+                .collect(),
+            body_hash: entry.flow_body_exact_hash?,
+            snapshot: snapshot.clone(),
+            outer: captures.clone(),
+            anchor,
+        });
     let mut lowerer = Lowerer {
+        frame_gate,
         bindings: &bindings,
         index,
         source,
@@ -2794,107 +2829,136 @@ enum NameBinding {
     Unmodeled,
 }
 
-/// A name an enclosing frame binds, as the ENCLOSING frame's lexical
-/// authority classified it at the nested function value's own position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CapturedBinding {
-    /// A modelable enclosing parameter / local. Mutable captures use authored
-    /// declared authority across the closure boundary; stable captures retain
-    /// their reaching value.
-    Local { mutable: bool },
-    /// An enclosing binding the content half cannot model.
-    Unmodeled,
+/// A shared structural lexical frame. It contains no lowered annotation or
+/// semantic value and is queried only for names the selected content uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DefiningFrameGate {
+    skeleton: Arc<FunctionBodySkeleton>,
+    bindings: Arc<verter_semantic::analysis::flow::FlowBindingMap>,
+    type_parameters: Arc<[Arc<str>]>,
+    parameters: Arc<[CaptureParameterLocator]>,
+    body_hash: [u8; 16],
+    snapshot: crate::decl_lowering::SnapshotKey,
+    outer: CaptureScope,
+    anchor: u32,
 }
 
-/// The names a nested function value captures from its ENCLOSING frames,
-/// resolved once at the position the function value itself occupies.
-/// Empty for the root frame.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CaptureParameterLocator {
+    binding: SkeletonBindingId,
+    ordinal: usize,
+    key: Option<Arc<str>>,
+    has_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedFrame {
+    gate: Arc<DefiningFrameGate>,
+    region: verter_semantic::analysis::flow::SkeletonRegionId,
+}
+
+/// The exact lexical chain at a nested function's authored position.
+/// Shared frame handles avoid enumerating or copying visible declarations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct CaptureScope {
-    identities:
-        FxHashMap<Arc<str>, verter_semantic::analysis::function_program::FlowBindingIdentity>,
-    names: FxHashMap<Arc<str>, CapturedBinding>,
-    mutable_declared: FxHashMap<Arc<str>, SliceCaptureAuthority>,
-    /// The captured names an enclosing frame binds in TYPE meaning — a
-    /// captured `class` / `enum` / `type` / `interface` / `import =`.
-    ///
-    /// A SEPARATE inventory, not a projection of `names`:
-    /// [`CapturedBinding`] collapses every kind into one modelability
-    /// bit, so a captured `class` and a captured `const` are
-    /// indistinguishable there. They are opposites in type space — the
-    /// class shadows an outer type alias, the `const` is invisible to it.
-    type_names: FxHashSet<Arc<str>>,
-    /// The captured names an enclosing frame binds in NAMESPACE meaning
-    /// — a captured `enum` / `namespace` / `import =`.
-    ///
-    /// A THIRD inventory, because the two type-space meanings do not
-    /// nest: a captured `class N` owns `N` but not `N.B`, a captured
-    /// `namespace N` owns `N.B` but not `N`. Collapsing them makes one
-    /// of the two answers wrong in every frame that captures either.
-    namespace_names: FxHashSet<Arc<str>>,
-    /// The TYPE-PARAMETER names an ENCLOSING frame BINDS, accumulated
-    /// across every enclosing frame.
-    ///
-    /// A FOURTH inventory, deliberately not folded into `type_names`: a
-    /// type parameter is not a scope lookup at all in TYPE meaning — the
-    /// composed binder environment interns it, so a captured same-named
-    /// `class` does not shadow it and reporting it frame-bound is a
-    /// spurious fail-closed. In NAMESPACE meaning the binder still WINS
-    /// lexically but denotes no namespace, so `T.B` is unresolvable and
-    /// reporting it frame-bound IS the fail-closed answer. Recording a
-    /// binder as a `type_name` collapses those two opposite verdicts
-    /// into one.
-    binder_names: FxHashSet<Arc<str>>,
+    enclosing: Option<Arc<CapturedFrame>>,
 }
 
-struct DeclaratorAnnotationFinder<'s> {
-    source: &'s str,
-    target: oxc_span::Span,
-    found: Option<TypeExpr>,
-}
-
-impl<'a> Visit<'a> for DeclaratorAnnotationFinder<'_> {
-    fn visit_variable_declarator(&mut self, declarator: &oxc_ast::ast::VariableDeclarator<'a>) {
-        if self.found.is_none()
-            && matches!(&declarator.id, BindingPattern::BindingIdentifier(id) if id.span == self.target)
-        {
-            self.found = declarator
-                .type_annotation
-                .as_ref()
-                .map(|annotation| lower_ts_type(&annotation.type_annotation, self.source));
-            return;
-        }
-        walk::walk_variable_declarator(self, declarator);
-    }
-}
-
-/// Owned lexical facts captured at the exact nested function position.
-#[derive(Debug, Clone, PartialEq)]
+/// Owned content-free lexical context at the exact nested function position.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NestedFlowContext {
     captures: CaptureScope,
 }
 
+/// An exact source declaration eligible to provide a selected capture's type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SliceCaptureAuthorityLocator {
+    pub binding: verter_semantic::analysis::function_program::FlowBindingIdentity,
+    pub declaration: verter_semantic::analysis::function_program::FlowBindingIdentity,
+    pub source: SliceCaptureAuthoritySource,
+    parameter_ordinal: Option<usize>,
+    gate: Arc<DefiningFrameGate>,
+}
+
+impl SliceCaptureAuthorityLocator {
+    pub(crate) fn local_declaration(&self) -> Option<SkeletonBindingId> {
+        self.gate.bindings.local(&self.declaration)
+    }
+
+    pub(crate) fn matches_snapshot(&self, snapshot: &crate::decl_lowering::SnapshotKey) -> bool {
+        &self.gate.snapshot == snapshot
+    }
+}
+
 impl NestedFlowContext {
-    pub(crate) fn mutable_authorities(&self) -> Vec<SliceCaptureAuthority> {
-        let mut authorities: Vec<_> = self
-            .captures
-            .mutable_declared
-            .values()
-            .filter(|authority| {
-                matches!(
-                    self.captures.names.get(authority.name.as_ref()),
-                    Some(CapturedBinding::Local { mutable: true })
-                )
-            })
-            .cloned()
-            .collect();
-        authorities.sort_by(|a, b| {
-            a.binding
-                .defining_function
-                .cmp(&b.binding.defining_function)
-                .then_with(|| a.binding.binding_slot.cmp(&b.binding.binding_slot))
-        });
-        authorities
+    pub(crate) fn matches_snapshot(&self, snapshot: &crate::decl_lowering::SnapshotKey) -> bool {
+        self.captures
+            .enclosing
+            .as_ref()
+            .is_some_and(|frame| &frame.gate.snapshot == snapshot)
+    }
+
+    pub(crate) fn mutable_authorities(
+        &self,
+        identity: &verter_semantic::analysis::function_program::FlowBindingIdentity,
+    ) -> Vec<SliceCaptureAuthorityLocator> {
+        let mut current = self.captures.enclosing.as_deref();
+        while let Some(frame) = current {
+            if frame.gate.bindings.function() == &identity.defining_function {
+                let Some(local) = frame.gate.bindings.local(identity) else {
+                    return Vec::new();
+                };
+                let fact = frame.gate.skeleton.binding(local);
+                let resolved = frame
+                    .gate
+                    .skeleton
+                    .bindings_of_name_in_scope(fact.name, frame.region);
+                let mut authorities: Vec<_> = resolved
+                    .into_iter()
+                    .filter_map(|declaration| {
+                        let fact = frame.gate.skeleton.binding(declaration);
+                        let parameter = frame
+                            .gate
+                            .parameters
+                            .iter()
+                            .find(|param| param.binding == declaration);
+                        let source = match fact.kind {
+                            SkeletonBindingKind::Param => {
+                                let parameter = parameter?;
+                                SliceCaptureAuthoritySource::Parameter {
+                                    key: parameter.key.clone(),
+                                    has_default: parameter.has_default,
+                                }
+                            }
+                            SkeletonBindingKind::Let if !fact.destructured => {
+                                SliceCaptureAuthoritySource::Local(SliceBindingKind::Let)
+                            }
+                            SkeletonBindingKind::Var if !fact.destructured => {
+                                SliceCaptureAuthoritySource::Local(SliceBindingKind::Var)
+                            }
+                            _ => return None,
+                        };
+                        Some(SliceCaptureAuthorityLocator {
+                            binding: identity.clone(),
+                            declaration: frame.gate.bindings.identity(declaration)?.clone(),
+                            source,
+                            parameter_ordinal: parameter.map(|parameter| parameter.ordinal),
+                            gate: Arc::clone(&frame.gate),
+                        })
+                    })
+                    .collect();
+                // The parameter is the declared authority of its runtime alias.
+                authorities.sort_by_key(|authority| {
+                    !matches!(
+                        authority.source,
+                        SliceCaptureAuthoritySource::Parameter { .. }
+                    )
+                });
+                return authorities;
+            }
+            current = frame.gate.outer.enclosing.as_deref();
+        }
+        Vec::new()
     }
 }
 
@@ -2909,14 +2973,15 @@ impl CaptureScope {
         }
         for occurrence in names.type_names {
             let name = occurrence.head.as_str();
-            let binder = binders.iter().any(|binder| binder.as_ref() == name)
-                || self.binder_names.contains(name);
-            let bound = if binder {
-                occurrence.qualified
-            } else if occurrence.qualified {
-                self.namespace_names.contains(name)
+            let meaning = if occurrence.qualified {
+                NameMeaning::Namespace
             } else {
-                self.type_names.contains(name)
+                NameMeaning::Type
+            };
+            let bound = if binders.iter().any(|binder| binder.as_ref() == name) {
+                occurrence.qualified
+            } else {
+                self.name_is_bound(name, meaning)
             };
             let entry = if occurrence.qualified {
                 FrameShadowedName::Namespace(Arc::from(name))
@@ -2933,16 +2998,420 @@ impl CaptureScope {
         }
     }
 
+    fn binding(&self, name: &str) -> Option<(&CapturedFrame, Vec<SkeletonBindingId>)> {
+        let mut current = self.enclosing.as_deref();
+        while let Some(frame) = current {
+            if let Some(name) = frame.gate.skeleton.name_id(name) {
+                let resolved = frame
+                    .gate
+                    .skeleton
+                    .bindings_of_name_in_scope(name, frame.region);
+                if !resolved.is_empty() {
+                    return Some((frame, resolved));
+                }
+            }
+            current = frame.gate.outer.enclosing.as_deref();
+        }
+        None
+    }
+
+    fn identity(
+        &self,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::function_program::FlowBindingIdentity> {
+        let (frame, resolved) = self.binding(name)?;
+        frame
+            .gate
+            .bindings
+            .runtime_identity(*resolved.first()?)
+            .cloned()
+    }
+
     fn lookup(&self, name: &str) -> NameBinding {
-        match self.names.get(name) {
-            // A captured binding is read BY NAME from the evaluator's
-            // seeded snapshot: no parameter ordinal applies (ordinals
-            // index the NESTED frame's own signature).
-            Some(CapturedBinding::Local { .. }) => NameBinding::Captured,
-            Some(CapturedBinding::Unmodeled) => NameBinding::Unmodeled,
-            None => NameBinding::Free,
+        let Some((frame, resolved)) = self.binding(name) else {
+            return NameBinding::Free;
+        };
+        if resolved.iter().all(|id| {
+            let binding = frame.gate.skeleton.binding(*id);
+            (binding.kind == SkeletonBindingKind::Param
+                && frame
+                    .gate
+                    .parameters
+                    .iter()
+                    .any(|param| param.binding == *id))
+                || (!binding.destructured
+                    && matches!(
+                        binding.kind,
+                        SkeletonBindingKind::Const
+                            | SkeletonBindingKind::Let
+                            | SkeletonBindingKind::Var
+                    ))
+        }) {
+            NameBinding::Captured
+        } else {
+            NameBinding::Unmodeled
         }
     }
+
+    fn name_is_bound(&self, name: &str, meaning: NameMeaning) -> bool {
+        let Some(frame) = self.enclosing.as_deref() else {
+            return false;
+        };
+        if frame.gate.skeleton.name_id(name).is_some_and(|name| {
+            frame
+                .gate
+                .skeleton
+                .declares_meaning_in_scope(name, frame.region, meaning)
+        }) {
+            return true;
+        }
+        if frame
+            .gate
+            .type_parameters
+            .iter()
+            .any(|binder| binder.as_ref() == name)
+        {
+            return meaning == NameMeaning::Namespace;
+        }
+        frame.gate.outer.name_is_bound(name, meaning)
+    }
+
+    fn binder_is_visible(&self, name: &str) -> bool {
+        let Some(frame) = self.enclosing.as_deref() else {
+            return false;
+        };
+        if frame.gate.skeleton.name_id(name).is_some_and(|name| {
+            frame
+                .gate
+                .skeleton
+                .declares_meaning_in_scope(name, frame.region, NameMeaning::Type)
+                || frame.gate.skeleton.declares_meaning_in_scope(
+                    name,
+                    frame.region,
+                    NameMeaning::Namespace,
+                )
+        }) {
+            return false;
+        }
+        frame
+            .gate
+            .type_parameters
+            .iter()
+            .any(|binder| binder.as_ref() == name)
+            || frame.gate.outer.binder_is_visible(name)
+    }
+}
+
+impl DefiningFrameGate {
+    fn name_is_bound(
+        &self,
+        name: &str,
+        span: FrameSpan,
+        meaning: NameMeaning,
+        binders: &[Arc<str>],
+    ) -> bool {
+        if binders.iter().any(|binder| binder.as_ref() == name) {
+            return meaning == NameMeaning::Namespace;
+        }
+        let region = self.skeleton.innermost_region_containing(span);
+        if self.skeleton.name_id(name).is_some_and(|name| {
+            self.skeleton
+                .declares_meaning_in_scope(name, region, meaning)
+        }) {
+            return true;
+        }
+        if self
+            .type_parameters
+            .iter()
+            .any(|binder| binder.as_ref() == name)
+        {
+            return meaning == NameMeaning::Namespace;
+        }
+        self.outer.name_is_bound(name, meaning)
+    }
+
+    fn answer_names_frame_bound(
+        &self,
+        ty: &TypeExpr,
+        span: FrameSpan,
+        binders: &[Arc<str>],
+    ) -> Vec<FrameShadowedName> {
+        let names = verter_type_expr::referenced_names(ty);
+        let region = self.skeleton.innermost_region_containing(span);
+        let mut shadowed = Vec::new();
+        for name in names.value_roots {
+            let local = self.skeleton.name_id(&name).is_some_and(|name| {
+                !self
+                    .skeleton
+                    .bindings_of_name_in_scope(name, region)
+                    .is_empty()
+            });
+            if local || !matches!(self.outer.lookup(&name), NameBinding::Free) {
+                shadowed.push(FrameShadowedName::Value(Arc::from(name)));
+            }
+        }
+        for occurrence in names.type_names {
+            let (meaning, entry) = if occurrence.qualified {
+                (
+                    NameMeaning::Namespace,
+                    FrameShadowedName::Namespace(Arc::from(occurrence.head.as_str())),
+                )
+            } else {
+                (
+                    NameMeaning::Type,
+                    FrameShadowedName::Type(Arc::from(occurrence.head.as_str())),
+                )
+            };
+            if self.name_is_bound(&occurrence.head, span, meaning, binders)
+                && !shadowed.contains(&entry)
+            {
+                shadowed.push(entry);
+            }
+        }
+        shadowed
+    }
+}
+
+/// Source-ordered syntax siblings are disjoint; only the one containing the
+/// exact indexed binding can supply its annotation. Each level costs log(N).
+pub(crate) fn selected_span_child<T: GetSpan>(items: &[T], target: oxc_span::Span) -> Option<&T> {
+    let at = items.partition_point(|item| item.span().end <= target.start);
+    items.get(at).filter(|item| {
+        let span = item.span();
+        span.start <= target.start && span.end >= target.end
+    })
+}
+
+fn pattern_has_identifier(pattern: &BindingPattern<'_>, target: oxc_span::Span) -> bool {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => id.span == target,
+        BindingPattern::ObjectPattern(object) => {
+            selected_span_child(&object.properties, target)
+                .is_some_and(|property| pattern_has_identifier(&property.value, target))
+                || object
+                    .rest
+                    .as_ref()
+                    .is_some_and(|rest| pattern_has_identifier(&rest.argument, target))
+        }
+        BindingPattern::ArrayPattern(array) => {
+            array
+                .elements
+                .iter()
+                .flatten()
+                .any(|element| pattern_has_identifier(element, target))
+                || array
+                    .rest
+                    .as_ref()
+                    .is_some_and(|rest| pattern_has_identifier(&rest.argument, target))
+        }
+        BindingPattern::AssignmentPattern(assignment) => {
+            pattern_has_identifier(&assignment.left, target)
+        }
+    }
+}
+
+struct SelectedAnnotationFinder<'s> {
+    source: &'s str,
+    target: oxc_span::Span,
+    locator: &'s SliceCaptureAuthorityLocator,
+    found: Option<Option<GatedType>>,
+}
+
+impl SelectedAnnotationFinder<'_> {
+    fn contains(&self, span: oxc_span::Span) -> bool {
+        self.found.is_none() && span.start <= self.target.start && span.end >= self.target.end
+    }
+
+    fn parameter(
+        &mut self,
+        annotation: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
+        initializer: Option<&Expression<'_>>,
+    ) {
+        let gate = &self.locator.gate;
+        let scope = SignatureScope::Nested {
+            gate: &gate.outer,
+            binders: &gate.type_parameters,
+        };
+        let parameter_bindings = signature_parameter_bindings(&gate.skeleton, gate.anchor);
+        let (mut gated, visible_before) = if let Some(annotation) = annotation {
+            (
+                scope.gate(
+                    lower_ts_type(&annotation.type_annotation, self.source),
+                    &gate.type_parameters,
+                ),
+                None,
+            )
+        } else if let Some(initializer) = initializer {
+            let Ok(ty) = infer_declaration_expression_type(
+                initializer,
+                self.source,
+                TopLevelLiteralPolicy::Widen,
+            ) else {
+                return;
+            };
+            (
+                scope.gate_param_default(
+                    ty,
+                    initializer,
+                    &gate.type_parameters,
+                    &parameter_bindings,
+                ),
+                Some(initializer.span().start),
+            )
+        } else {
+            (
+                GatedType::root_signature(TypeExpr::Primitive(PrimitiveName::Any)),
+                None,
+            )
+        };
+        gated.add_shadowed(parameter_list_shadowed(
+            gated.ty(),
+            &parameter_bindings,
+            visible_before,
+        ));
+        self.found = Some(Some(gated));
+    }
+}
+
+macro_rules! selected_annotation_list {
+    ($list:ident, $item:ident, $visit:ident) => {
+        fn $list(&mut self, items: &oxc_allocator::Vec<'a, oxc_ast::ast::$item<'a>>) {
+            if self.found.is_none() {
+                if let Some(item) = selected_span_child(items, self.target) {
+                    self.$visit(item);
+                }
+            }
+        }
+    };
+}
+
+impl<'a> Visit<'a> for SelectedAnnotationFinder<'_> {
+    selected_annotation_list!(visit_statements, Statement, visit_statement);
+    selected_annotation_list!(
+        visit_variable_declarators,
+        VariableDeclarator,
+        visit_variable_declarator
+    );
+    selected_annotation_list!(
+        visit_object_property_kinds,
+        ObjectPropertyKind,
+        visit_object_property_kind
+    );
+    selected_annotation_list!(visit_class_elements, ClassElement, visit_class_element);
+    selected_annotation_list!(visit_switch_cases, SwitchCase, visit_switch_case);
+    selected_annotation_list!(visit_arguments, Argument, visit_argument);
+    selected_annotation_list!(
+        visit_array_expression_elements,
+        ArrayExpressionElement,
+        visit_array_expression_element
+    );
+    selected_annotation_list!(visit_expressions, Expression, visit_expression);
+    selected_annotation_list!(
+        visit_formal_parameter_list,
+        FormalParameter,
+        visit_formal_parameter
+    );
+    selected_annotation_list!(visit_decorators, Decorator, visit_decorator);
+    selected_annotation_list!(
+        visit_binding_properties,
+        BindingProperty,
+        visit_binding_property
+    );
+
+    fn visit_ts_type(&mut self, _: &TSType<'a>) {}
+
+    fn visit_statement(&mut self, statement: &Statement<'a>) {
+        if self.contains(statement.span()) {
+            walk::walk_statement(self, statement);
+        }
+    }
+
+    fn visit_expression(&mut self, expression: &Expression<'a>) {
+        if self.contains(expression.span()) {
+            walk::walk_expression(self, expression);
+        }
+    }
+
+    fn visit_variable_declarator(&mut self, declarator: &oxc_ast::ast::VariableDeclarator<'a>) {
+        if self.locator.parameter_ordinal.is_none()
+            && matches!(&declarator.id, BindingPattern::BindingIdentifier(id) if id.span == self.target)
+        {
+            self.found = Some(declarator.type_annotation.as_ref().map(|annotation| {
+                let ty = lower_ts_type(&annotation.type_annotation, self.source);
+                let span = FrameSpan::rebase(self.locator.gate.anchor, self.target.into());
+                GatedType {
+                    shadowed: self
+                        .locator
+                        .gate
+                        .answer_names_frame_bound(&ty, span, &[])
+                        .into(),
+                    ty,
+                }
+            }));
+        } else if self.contains(declarator.span) {
+            walk::walk_variable_declarator(self, declarator);
+        }
+    }
+
+    fn visit_formal_parameter(&mut self, parameter: &oxc_ast::ast::FormalParameter<'a>) {
+        if self.locator.parameter_ordinal.is_some()
+            && pattern_has_identifier(&parameter.pattern, self.target)
+        {
+            self.parameter(
+                parameter.type_annotation.as_deref(),
+                parameter.initializer.as_deref(),
+            );
+        } else if self.contains(parameter.span) {
+            walk::walk_formal_parameter(self, parameter);
+        }
+    }
+
+    fn visit_formal_parameter_rest(&mut self, parameter: &oxc_ast::ast::FormalParameterRest<'a>) {
+        if self.locator.parameter_ordinal.is_some()
+            && pattern_has_identifier(&parameter.rest.argument, self.target)
+        {
+            self.parameter(parameter.type_annotation.as_deref(), None);
+        } else if self.contains(parameter.span()) {
+            walk::walk_formal_parameter_rest(self, parameter);
+        }
+    }
+}
+
+/// Hydrate one selected declaration by its exact indexed identifier span.
+/// `Some(None)` is authored absence; `None` is a source/locator mismatch.
+pub(crate) fn build_flow_capture_authority(
+    program: &Program<'_>,
+    source: &str,
+    entry: &FunctionProgramEntry,
+    locator: &SliceCaptureAuthorityLocator,
+) -> Option<Option<SliceCaptureAuthority>> {
+    if entry.key != locator.declaration.defining_function
+        || entry.flow_body_exact_hash != Some(locator.gate.body_hash)
+    {
+        return None;
+    }
+    let binding = locator.gate.bindings.local(&locator.declaration)?;
+    let fact = locator.gate.skeleton.binding(binding);
+    let authored = entry
+        .bindings
+        .get(locator.declaration.binding_slot as usize)?;
+    let absolute = fact.span.to_absolute(locator.gate.anchor);
+    if authored.span != absolute {
+        return None;
+    }
+    let mut finder = SelectedAnnotationFinder {
+        source,
+        target: oxc_span::Span::new(absolute.start, absolute.end),
+        locator,
+        found: None,
+    };
+    finder.visit_program(program);
+    Some(finder.found?.map(|declared| SliceCaptureAuthority {
+        binding: locator.binding.clone(),
+        name: locator.declaration.name.clone(),
+        declared,
+        source: locator.source.clone(),
+    }))
 }
 
 /// The statement/expression lowering state: the demand selection (root
@@ -2955,6 +3424,7 @@ impl CaptureScope {
 /// planned edge and a lowered read can never disagree about which slot a
 /// name denotes.
 struct Lowerer<'a> {
+    frame_gate: Arc<DefiningFrameGate>,
     bindings: &'a verter_semantic::analysis::flow::FlowBindingMap,
     index: &'a verter_semantic::analysis::function_program::FunctionProgramIndex,
     source: &'a str,
@@ -3683,11 +4153,7 @@ impl Lowerer<'_> {
                 ));
             }
         }
-        self.captures
-            .identities
-            .get(name)
-            .cloned()
-            .map(FlowBindingRef::Captured)
+        self.captures.identity(name).map(FlowBindingRef::Captured)
     }
 
     fn narrow_root(
@@ -3765,30 +4231,8 @@ impl Lowerer<'_> {
         meaning: NameMeaning,
         binders: &[Arc<str>],
     ) -> bool {
-        if binders.iter().any(|binder| binder.as_ref() == name) {
-            return meaning == NameMeaning::Namespace;
-        }
-        if let Some(name_id) = self.skeleton.name_id(name) {
-            let region = self.skeleton.innermost_region_containing(self.rebase(span));
-            if self
-                .skeleton
-                .declares_meaning_in_scope(name_id, region, meaning)
-            {
-                return true;
-            }
-        }
-        if self
-            .type_param_names
-            .iter()
-            .any(|binder| binder.as_ref() == name)
-            || self.captures.binder_names.contains(name)
-        {
-            return meaning == NameMeaning::Namespace;
-        }
-        match meaning {
-            NameMeaning::Type => self.captures.type_names.contains(name),
-            NameMeaning::Namespace => self.captures.namespace_names.contains(name),
-        }
+        self.frame_gate
+            .name_is_bound(name, self.rebase(span), meaning, binders)
     }
 
     /// THE gated constructor: lower-then-gate one answer produced at
@@ -3885,188 +4329,16 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Recover one mutable capture's authored annotation by exact binding
-    /// identity. The skeleton supplies the declaration-precise span; the
-    /// retained AST supplies the type syntax. No name-based or source-text
-    /// reconstruction participates.
-    fn mutable_declared_authority(
-        &self,
-        name: &str,
-        binding_id: SkeletonBindingId,
-    ) -> Option<SliceCaptureAuthority> {
-        let binding = self.skeleton.binding(binding_id);
-        let identity = self.bindings.runtime_identity(binding_id)?.clone();
-        if binding.kind == SkeletonBindingKind::Param {
-            let (param, key, has_default) = if binding.destructured {
-                self.params.iter().find_map(|param| {
-                    param
-                        .destructured
-                        .iter()
-                        .find(|element| element.name.as_ref() == name)
-                        .map(|element| (param, Some(Arc::clone(&element.key)), element.has_default))
-                })?
-            } else {
-                (
-                    self.params
-                        .iter()
-                        .find(|param| param.name.as_deref() == Some(name))?,
-                    None,
-                    false,
-                )
-            };
-            return Some(SliceCaptureAuthority {
-                binding: identity,
-                name: Arc::from(name),
-                declared: param.ty.clone(),
-                source: SliceCaptureAuthoritySource::Parameter { key, has_default },
-            });
-        }
-        let kind = match binding.kind {
-            SkeletonBindingKind::Let if !binding.destructured => SliceBindingKind::Let,
-            SkeletonBindingKind::Var if !binding.destructured => SliceBindingKind::Var,
-            _ => return None,
-        };
-        let absolute = binding.span.to_absolute(self.anchor);
-        let target = oxc_span::Span::new(absolute.start, absolute.end);
-        let mut finder = DeclaratorAnnotationFinder {
-            source: self.source,
-            target,
-            found: None,
-        };
-        finder.visit_program(self.program);
-        finder.found.map(|ty| SliceCaptureAuthority {
-            binding: identity,
-            name: Arc::from(name),
-            declared: self.gate(ty, target, &[]),
-            source: SliceCaptureAuthoritySource::Local(kind),
-        })
-    }
-
-    /// The capture scope one nested function value lowers under: every
-    /// name the ENCLOSING frames bind at the function value's own
-    /// position, classified by the enclosing frame's authority. Inner
-    /// frames shadow outer ones.
+    /// Retain the shared defining frame and the exact lexical region only.
+    /// Captured values and annotation locators are selected by the child graph.
     fn capture_scope_for(&self, function_span: oxc_span::Span) -> CaptureScope {
-        let region = self
-            .skeleton
-            .innermost_region_containing(self.rebase(function_span));
-        let mut names = FxHashMap::default();
-        for (name, binding) in self.captures.names.iter() {
-            names.insert(Arc::clone(name), *binding);
-        }
-        let mut mutable_declared = self.captures.mutable_declared.clone();
-        let mut identities = self.captures.identities.clone();
-        let mut type_names = self.captures.type_names.clone();
-        let mut namespace_names = self.captures.namespace_names.clone();
-        // This frame's OWN type parameters join every enclosing frame's
-        // as BINDERS of the nested frame — a separate inventory from the
-        // captured type-space names, because the nested frame's answer
-        // resolves them through the composed binder environment rather
-        // than through any scope lookup.
-        //
-        // NEAREST WINS, in BOTH directions, so this frame's own
-        // contribution REMOVES the name from the opposite inventory: a
-        // `<T>` here shadows an enclosing frame's `class T`, and a
-        // `class T` here shadows an enclosing frame's `<T>`. TS2300
-        // forbids the collision only INSIDE one frame, so the two
-        // inventories are not disjoint by construction across frames —
-        // they are kept disjoint per name here, which is what lets
-        // `name_is_frame_bound` consult them as one unordered step.
-        let mut binder_names = self.captures.binder_names.clone();
-        for binder in self.type_param_names {
-            binder_names.insert(Arc::clone(binder));
-            type_names.remove(binder.as_ref());
-            namespace_names.remove(binder.as_ref());
-        }
-        let mut seen: FxHashSet<verter_semantic::analysis::flow::FlowNameId> = FxHashSet::default();
-        for binding in self.skeleton.bindings.iter() {
-            if !seen.insert(binding.name) {
-                continue;
-            }
-            let text = self.skeleton.name(binding.name);
-            // The TYPE-space bits are resolved SEPARATELY from the value
-            // classification below, and BEFORE the value lookup's
-            // empty-set bail: the spaces disagree on the same region
-            // chain (a `const` is a value capture that shadows no type; a
-            // `class` shadows the bare type but not a qualified head), so
-            // no space may gate another's answer.
-            let mut declares_type_space = false;
-            if self
-                .skeleton
-                .declares_meaning_in_scope(binding.name, region, NameMeaning::Type)
-            {
-                type_names.insert(Arc::from(text));
-                declares_type_space = true;
-            }
-            if self
-                .skeleton
-                .declares_meaning_in_scope(binding.name, region, NameMeaning::Namespace)
-            {
-                namespace_names.insert(Arc::from(text));
-                declares_type_space = true;
-            }
-            // This frame's own type-space declaration is NEARER than any
-            // enclosing frame's binder of the same name. THIS frame's own
-            // clause is a separate question, decided per REFERENCE by
-            // [`Lowerer::name_is_frame_bound`]'s region walk rather than
-            // here: a BODY-level collision is TS2300, but a BLOCK-scoped
-            // one is legal and wins only inside its block, so a
-            // frame-wide inventory could not express it.
-            if declares_type_space {
-                binder_names.remove(text);
-            }
-            let resolved = self
-                .skeleton
-                .bindings_of_name_in_scope(binding.name, region);
-            if resolved.is_empty() {
-                continue;
-            }
-            if let Some(identity) = resolved
-                .first()
-                .and_then(|id| self.bindings.runtime_identity(*id))
-            {
-                identities.insert(Arc::from(text), identity.clone());
-            }
-            let captured = match self.classify_bindings(text, &resolved) {
-                NameBinding::Param(_) => CapturedBinding::Local { mutable: true },
-                NameBinding::Local(_) => CapturedBinding::Local {
-                    mutable: resolved.iter().any(|id| {
-                        matches!(
-                            self.skeleton.binding(*id).kind,
-                            SkeletonBindingKind::Param
-                                | SkeletonBindingKind::Let
-                                | SkeletonBindingKind::Var
-                        )
-                    }),
-                },
-                NameBinding::Captured => self
-                    .captures
-                    .names
-                    .get(text)
-                    .copied()
-                    .unwrap_or(CapturedBinding::Unmodeled),
-                NameBinding::Free => continue,
-                NameBinding::NestedFunction | NameBinding::Unmodeled => CapturedBinding::Unmodeled,
-            };
-            if let Some(declared) = resolved
-                .iter()
-                .find_map(|id| self.mutable_declared_authority(text, *id))
-            {
-                mutable_declared.insert(Arc::from(text), declared);
-            } else {
-                // A nearer binding without a mutable annotation shadows any
-                // inherited authority of the same name.
-                mutable_declared.remove(text);
-            }
-            names.insert(Arc::from(text), captured);
-        }
         CaptureScope {
-            identities,
-            names,
-            mutable_declared,
-            type_names,
-            namespace_names,
-            binder_names,
+            enclosing: Some(Arc::new(CapturedFrame {
+                gate: Arc::clone(&self.frame_gate),
+                region: self
+                    .skeleton
+                    .innermost_region_containing(self.rebase(function_span)),
+            })),
         }
     }
 
@@ -5955,7 +6227,7 @@ impl Lowerer<'_> {
             self.type_param_names
                 .iter()
                 .any(|binder| binder.as_ref() == head)
-                || self.captures.binder_names.contains(head)
+                || self.captures.binder_is_visible(head)
                 || self.name_is_frame_bound(head, site, NameMeaning::Type, &[])
                 || self.name_is_frame_bound(head, site, NameMeaning::Namespace, &[])
         })
@@ -7311,46 +7583,8 @@ impl Lowerer<'_> {
         span: oxc_span::Span,
         binders: &[Arc<str>],
     ) -> Vec<FrameShadowedName> {
-        let names = verter_type_expr::referenced_names(ty);
-        let mut shadowed: Vec<FrameShadowedName> = Vec::new();
-        for name in &names.value_roots {
-            if !matches!(self.resolve_name(name, span), NameBinding::Free) {
-                let entry = FrameShadowedName::Value(Arc::from(name.as_str()));
-                if !shadowed.contains(&entry) {
-                    shadowed.push(entry);
-                }
-            }
-        }
-        for occurrence in &names.type_names {
-            // TYPE space, not value space: the answer's type names name
-            // TYPES, and only a type-DECLARING local shadows the owner
-            // scope's. `resolve_name` here would fail closed on a plain
-            // `const` / `let` / `var` / parameter / nested function that
-            // never shadowed the type at all.
-            //
-            // The MEANING is chosen PER OCCURRENCE, not per name: the
-            // same head can appear bare (`N`) and qualified (`N.B`) in
-            // one answer, and the local declarations that shadow the two
-            // are different sets. A single verdict for both makes one of
-            // them wrong.
-            let (meaning, entry) = if occurrence.qualified {
-                (
-                    NameMeaning::Namespace,
-                    FrameShadowedName::Namespace(Arc::from(occurrence.head.as_str())),
-                )
-            } else {
-                (
-                    NameMeaning::Type,
-                    FrameShadowedName::Type(Arc::from(occurrence.head.as_str())),
-                )
-            };
-            if self.name_is_frame_bound(&occurrence.head, span, meaning, binders)
-                && !shadowed.contains(&entry)
-            {
-                shadowed.push(entry);
-            }
-        }
-        shadowed
+        self.frame_gate
+            .answer_names_frame_bound(ty, self.rebase(span), binders)
     }
 
     /// The shared shallow-pass per-expression lowering for the position

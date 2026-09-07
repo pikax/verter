@@ -27,6 +27,8 @@ description: "Cross-file type resolution: type solver, ShallowFileState, Externa
 
 Dep-signature semantics: every reusable cache read returns a `CacheRead<T>` carrying the touched fact fragment. Callers merge those into the active `CompletionFence`, which bounds retries at 3 and publishes `UnstableState` when mid-flight invalidation persists.
 
+Nested flow descriptors retain linked, content-free defining-frame gates over shared skeletons and exact binding maps. Value, type, namespace, and binder queries preserve the lexical position without copying every visible declaration. Only graph-selected captured identities request mutable declaration authority: reuse the exact source-declaration product first, then use `DeclBodyMemo::flow_capture_authorities` for batched transient hydration under one retained-source lease. Exact indexed binding spans prune syntax intervals and binary-search authored sibling lists; linked contexts and annotation locators must match the original whole-source snapshot. The locator preserves both the authored declaration and runtime capture identity, plus the original frame's lexical gate; semantic lowering uses that frame's binder environment, including through intermediate closures. Signature-only children never lower capture annotations or child bodies. An absent annotation differs from a locator/version failure. Complete selected declared/reaching/assignment inputs before hashing the child basis, then import that same immutable bundle at the child's graph-owned captured hubs; annotation hydration never credits an enclosing initializer.
+
 ## Canonical Dependency Cache Rule
 
 Host-backed type/import resolution must treat the canonical file ID as cache identity. Contract:

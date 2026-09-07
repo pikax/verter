@@ -2264,12 +2264,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .executed_selection
                         .is_some_and(|selection| selection.is_selected(*node))
                         && binding_product_evidence(
-                            &FlowProductSubject::Local(
-                                match witness.bindings.local(&slot.identity) {
-                                    Some(binding) => binding,
-                                    None => return false,
-                                },
-                            ),
+                            &slot.binding,
                             witness.product_evidence,
                             witness.products,
                             &carrier.plan,
@@ -3992,6 +3987,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             params: &params,
             param_names: &ir.params,
             binder_env: &binder_env,
+            enclosing_frames: &[],
             bindings: Arc::clone(&ir.bindings),
             skeleton: Arc::clone(&skeleton),
             flow_graph: Arc::clone(&bound.bundle().graph),
@@ -5009,6 +5005,35 @@ fn slice_statements_have_non_subject_return<'a>(
     })
 }
 
+/// Immutable values prepared for one selected child capture. Source annotation
+/// resolution completes before these values define the child input basis.
+struct PreparedFlowCaptureInput {
+    subject: FlowProductSubject,
+    assignment: DefiniteAssignmentProduct,
+    reaching: Option<ReachingTypeProduct>,
+    declared: Option<SemanticNodeId>,
+}
+
+impl PreparedFlowCaptureInput {
+    fn apply_authority(
+        &mut self,
+        node: SemanticNodeId,
+        source: &crate::flow_slice_content::SliceCaptureAuthoritySource,
+    ) {
+        self.declared = Some(node);
+        if self.reaching.is_none()
+            || matches!(
+                source,
+                crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
+                    crate::flow_slice_content::SliceBindingKind::Var
+                ) | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter { .. }
+            )
+        {
+            self.reaching = Some(ReachingTypeProduct::of(node));
+        }
+    }
+}
+
 /// The child observation includes its actual parameter and selected capture
 /// inputs. The demand's separate graph/query basis owns binding identities.
 struct NestedFlowInputBasis<'a> {
@@ -5052,6 +5077,11 @@ struct FlowEvaluator<'d, 'b> {
     /// The function's OWN binder environment (parameters + body leaves
     /// lower under it).
     binder_env: &'b FlowBinderEnv,
+    enclosing_frames: &'b [(
+        verter_semantic::analysis::function_program::FunctionProgramKey,
+        &'b FlowBinderEnv,
+        FlowProductStore,
+    )],
     /// The frame's binding-NAME resolution authority: the one place an
     /// authored name becomes a typed [`FlowProductSubject`]. It holds
     /// names, never semantic state, and its two scope layers are two
@@ -10732,15 +10762,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// nested evaluation met ride the outer frame's hold set), and
     /// compose the `Signature` node.
     ///
-    /// Closure capture: the content lowering classified a nested read of
-    /// an ENCLOSING parameter / local as a by-name local read, so the
-    /// nested frame starts from a SNAPSHOT of the enclosing layers taken
-    /// at the function value's own position. Enclosing parameters seed
-    /// the function-scoped layer by name (they are the outermost frame
-    /// scope, and a redeclaring enclosing `var` still wins); the
-    /// enclosing lexical locals seed the lexical layer, so the nested
-    /// frame's own bindings shadow them and the membership flags stay
-    /// layer-exact.
+    /// Closure capture uses the selected graph's exact captured identities.
+    /// Each input comes from the enclosing continuation at the function
+    /// value's own position. The child has its own indexed graph, input
+    /// basis, and execution capability; its local bindings cannot alias an
+    /// enclosing slot merely because their names or numeric IDs match.
     fn eval_nested_function(
         &mut self,
         function: &verter_semantic::analysis::function_program::FunctionProgramKey,
@@ -10828,7 +10854,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.eval_nested_function_signature(
             &content.params,
             &content.type_parameters,
-            &context.mutable_authorities(),
+            context,
             content.declared_return.as_ref(),
             &content.body,
             content.can_fall_through,
@@ -10842,11 +10868,86 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         )
     }
 
+    fn capture_source_products(
+        &self,
+        locator: &crate::flow_slice_content::SliceCaptureAuthorityLocator,
+    ) -> Option<(FlowProductStore, FlowProductSubject)> {
+        let products = if &locator.declaration.defining_function == self.bindings.function() {
+            self.products.clone()
+        } else {
+            self.enclosing_frames
+                .iter()
+                .rev()
+                .find_map(|(function, _, products)| {
+                    (function == &locator.declaration.defining_function).then(|| products.clone())
+                })?
+        };
+        let subject = FlowProductSubject::Local(locator.local_declaration()?);
+        products
+            .contains_subject(&subject)
+            .then_some((products, subject))
+    }
+
+    fn lower_capture_authority(
+        &mut self,
+        locator: &crate::flow_slice_content::SliceCaptureAuthorityLocator,
+        authority: crate::flow_slice_content::SliceCaptureAuthority,
+    ) -> Option<SemanticNodeId> {
+        let binder_env = if &locator.declaration.defining_function == self.bindings.function() {
+            Some(self.binder_env)
+        } else {
+            self.enclosing_frames
+                .iter()
+                .rev()
+                .find_map(|(function, env, _)| {
+                    (function == &locator.declaration.defining_function).then_some(*env)
+                })
+        };
+        let Some(binder_env) = binder_env else {
+            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
+            return None;
+        };
+        let base =
+            if signature_answer_is_frame_shadowed(self.dispatch, binder_env, &authority.declared) {
+                self.record_degradation(
+                    crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                );
+                self.unmodeled_position()
+            } else {
+                let mut substitutions = Vec::new();
+                self.dispatch.shallow_lower_type_expr_with_context(
+                    authority.declared.ty(),
+                    &binder_env.env,
+                    &binder_env.scope,
+                    &binder_env.name_resolution,
+                    binder_env.scope_payload.as_ref(),
+                    &binder_env.shadowing,
+                    &mut substitutions,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                )
+            };
+        let node = match &authority.source {
+            crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter {
+                key: Some(key),
+                has_default,
+            } => self
+                .destructured_param_element_node(base, key, *has_default)
+                .unwrap_or_else(|| {
+                    self.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                    );
+                    self.unmodeled_position()
+                }),
+            _ => base,
+        };
+        Some(node)
+    }
+
     fn eval_nested_function_signature(
         &mut self,
         nested_params: &[crate::flow_slice_content::SliceParam],
         type_parameters: &[crate::flow_slice_content::SliceTypeParam],
-        mutable_capture_authorities: &[crate::flow_slice_content::SliceCaptureAuthority],
+        capture_context: &Arc<crate::flow_slice_content::NestedFlowContext>,
         declared_return: Option<&crate::flow_slice_content::GatedType>,
         body: &crate::flow_slice_content::SliceRegion,
         can_fall_through: bool,
@@ -10985,40 +11086,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let Some(planned) = planned else {
             return self.unmodeled_position();
         };
-        let mut imports = Vec::new();
-        for node in planned
-            .selection()
-            .value_nodes
-            .iter()
-            .chain(planned.selection().effect_only_nodes.iter())
-            .copied()
-        {
-            let verter_semantic::analysis::flow::flow_graph::FlowNodeKind::ExprSite(site) =
-                bound.bundle().graph.node_kind(node)
-            else {
-                continue;
-            };
-            let site = skeleton.expr_site(site);
-            for read in site.reads.iter() {
-                if !skeleton
-                    .bindings_of_name_in_scope(read.name, site.region)
-                    .is_empty()
-                {
-                    continue;
-                }
-                if let Some(identity) = captures
-                    .iter()
-                    .find(|identity| identity.name.as_ref() == skeleton.name(read.name))
-                {
-                    if !imports.iter().any(|(existing, _)| existing == identity) {
-                        imports.push((identity.clone(), node));
-                    }
-                }
-            }
-        }
-        let capture_basis: Vec<_> = imports
-            .iter()
-            .map(|(identity, _)| {
+        let inputs = FlowProductInputs::for_bound_graph(&bound);
+        // Prepare exactly the selected input values before sealing their basis.
+        // Only this transient evaluator owns execution handles; descriptors keep
+        // structural source locators and never retain semantic state.
+        let mut capture_inputs: Vec<_> = inputs
+            .selected_captures(planned.selection())
+            .map(|identity| {
                 let parent = self
                     .bindings
                     .local(identity)
@@ -11029,7 +11103,84 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 {
                     self.seed_destructured_param_element(&parent);
                 }
-                self.products.captured_input_bytes(&parent)
+                PreparedFlowCaptureInput {
+                    subject: FlowProductSubject::Captured(identity.clone()),
+                    assignment: self.products.assignment(&parent).with_single_path(false),
+                    reaching: self.products.reaching_type(&parent).cloned(),
+                    declared: self.products.declared_type(&parent),
+                }
+            })
+            .collect();
+        let mut candidates: Vec<_> = inputs
+            .selected_captures(planned.selection())
+            .map(|identity| capture_context.mutable_authorities(identity).into_iter())
+            .collect();
+        let mut unresolved: Vec<_> = (0..capture_inputs.len()).collect();
+        while !unresolved.is_empty() {
+            let mut missing = Vec::new();
+            for index in unresolved.drain(..) {
+                let Some(locator) = candidates[index].next() else {
+                    continue;
+                };
+                let source = self.capture_source_products(&locator);
+                if let Some(node) = source
+                    .as_ref()
+                    .and_then(|(products, subject)| products.declared_type(subject))
+                {
+                    capture_inputs[index].apply_authority(node, &locator.source);
+                } else {
+                    missing.push((index, locator, source));
+                }
+            }
+            if missing.is_empty() {
+                break;
+            }
+            let locators: Vec<_> = missing
+                .iter()
+                .map(|(_, locator, _)| locator.clone())
+                .collect();
+            let authorities = self
+                .dispatch
+                .ctx
+                .ensure_indexed_ready_serve(self.canonical)
+                .and_then(|serve| {
+                    serve
+                        .indexed
+                        .shallow_state
+                        .decl_bodies()
+                        .flow_capture_authorities(&locators)
+                });
+            let Some(authorities) = authorities else {
+                self.record_degradation(
+                    crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                );
+                break;
+            };
+            for ((index, locator, source), authority) in missing.into_iter().zip(authorities) {
+                match authority {
+                    None => self.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                    ),
+                    Some(None) => unresolved.push(index),
+                    Some(Some(authority)) => {
+                        if let Some(node) = self.lower_capture_authority(&locator, authority) {
+                            if let Some((mut products, subject)) = source {
+                                products.set_declared_type(&subject, Some(node));
+                            }
+                            capture_inputs[index].apply_authority(node, &locator.source);
+                        }
+                    }
+                }
+            }
+        }
+        let capture_basis: Vec<_> = capture_inputs
+            .iter()
+            .map(|input| {
+                FlowProductStore::captured_input_bytes(
+                    input.declared,
+                    input.reaching.as_ref(),
+                    input.assignment,
+                )
             })
             .collect();
         let request = super::flow_solve::FlowDemandRequest {
@@ -11063,8 +11214,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 None
             }
         };
-        let inputs =
-            FlowProductInputs::for_bound_graph(&bound).with_captures(imports.iter().cloned());
         let Ok(execution) = FlowProductExecution::new_for_selection(
             &inputs,
             Arc::clone(&execution_selection),
@@ -11077,23 +11226,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
             return self.unmodeled_position();
         };
-        for (identity, _) in imports.iter() {
-            let parent = self
-                .bindings
-                .local(identity)
-                .map(FlowProductSubject::Local)
-                .unwrap_or_else(|| FlowProductSubject::Captured(identity.clone()));
-            let subject = FlowProductSubject::Captured(identity.clone());
-            if let Some(reaching) = self.products.reaching_type(&parent).cloned() {
-                captured_products.bind(
-                    &subject,
-                    self.products.assignment(&parent).with_single_path(false),
-                    reaching,
-                );
-            }
-            if let Some(declared) = self.products.declared_type(&parent) {
-                captured_products.set_declared_type(&subject, Some(declared));
-            }
+        for input in capture_inputs {
+            captured_products.import_capture_input(
+                &input.subject,
+                input.assignment,
+                input.reaching,
+                input.declared,
+            );
         }
         seed_selected_parameters(
             &mut captured_products,
@@ -11103,72 +11242,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             &bound,
             &execution_selection,
         );
-        for authority in mutable_capture_authorities {
-            let subject = FlowProductSubject::Captured(authority.binding.clone());
-            if !captured_products.contains_subject(&subject) {
-                continue;
-            }
-            let node = if let Some(declared) = captured_products.declared_type(&subject) {
-                declared
-            } else {
-                let base = if authority
-                    .declared
-                    .shadowed()
-                    .iter()
-                    .any(|name| self.owner_scope_answers_name(name))
-                {
-                    self.record_degradation(
-                        crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
-                    );
-                    self.unmodeled_position()
-                } else {
-                    self.lower_body_type(authority.declared.ty())
-                };
-                match &authority.source {
-                    crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter {
-                        key: Some(key),
-                        has_default,
-                    } => self
-                        .destructured_param_element_node(base, key, *has_default)
-                        .unwrap_or_else(|| {
-                            self.record_degradation(
-                                crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
-                            );
-                            self.unmodeled_position()
-                        }),
-                    crate::flow_slice_content::SliceCaptureAuthoritySource::Local(_)
-                    | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter {
-                        key: None,
-                        ..
-                    } => base,
-                }
-            };
-            match authority.source {
-                crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
-                    crate::flow_slice_content::SliceBindingKind::Var,
-                ) => {
-                    captured_products.set_declared_type(&subject, Some(node));
-                    captured_products.set_reaching_type(&subject, ReachingTypeProduct::of(node));
-                }
-                crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
-                    crate::flow_slice_content::SliceBindingKind::Let,
-                ) => {
-                    captured_products.set_declared_type(&subject, Some(node));
-                    if captured_products.reaching(&subject).is_none() {
-                        captured_products
-                            .set_reaching_type(&subject, ReachingTypeProduct::of(node));
-                    }
-                }
-                crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter { .. } => {
-                    captured_products.set_declared_type(&subject, Some(node));
-                    captured_products.set_reaching_type(&subject, ReachingTypeProduct::of(node));
-                }
-                crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
-                    crate::flow_slice_content::SliceBindingKind::Const,
-                ) => {}
-            }
-        }
         let nested_holds;
+        let mut enclosing_frames = self.enclosing_frames.to_vec();
+        enclosing_frames.push((
+            self.bindings.function().clone(),
+            self.binder_env,
+            self.products.clone(),
+        ));
         let nested_degradation;
         let nested_bare_return_seen;
         let nested_implicit_undefined_seen;
@@ -11181,6 +11261,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 params: &params,
                 param_names: nested_params,
                 binder_env: &binder_env,
+                enclosing_frames: &enclosing_frames,
                 bindings: Arc::clone(bindings),
                 skeleton: Arc::clone(&skeleton),
                 flow_graph: Arc::clone(&bound.bundle().graph),
@@ -11224,10 +11305,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     use super::dispatch_txn::flow_obligation_state::FlowObligationBasis;
                     let products_complete = plan.obligation_specs().iter().all(|spec| {
                         let subject = match spec.basis() {
-                            FlowObligationBasis::Binding { slot, .. } => nested_evaluator
-                                .bindings
-                                .local(&slot.identity)
-                                .map(FlowProductSubject::Local),
+                            FlowObligationBasis::Binding { slot, .. } => Some(slot.binding.clone()),
                             FlowObligationBasis::CapturedBinding { identity, .. } => Some(
                                 nested_evaluator
                                     .bindings

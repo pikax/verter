@@ -39,17 +39,28 @@ mod tests {
     use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash;
     use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
 
-    #[test]
-    fn continuation_rewind_and_join_preserve_only_actual_reaching_definitions() {
-        let (state, _) = crate::resolver_core::ShallowFileState::service_backed_with_provenance_for_test(
-            "/ws/product-continuations.ts",
-            "function products(flag: boolean) { let x = 0; if (flag) { x = 1; x = 2; } else { x = 3; } return x; }",
-        );
+    fn fixture(
+        source: &str,
+        nested: bool,
+    ) -> (
+        FlowFrameProducts,
+        crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        super::super::flow_solve::FlowDemandPlan,
+    ) {
+        let (state, _) =
+            crate::resolver_core::ShallowFileState::service_backed_with_provenance_for_test(
+                "/ws/product-continuations.ts",
+                source,
+            );
         let memo = state.decl_bodies();
         let index = memo.function_program_index();
-        let entry = index.matches_named("products").next().unwrap().entry();
-        let skeleton = memo.function_body_skeleton(entry).unwrap();
-        let bound = memo.flow_bound_graph_for_tests(entry, skeleton);
+        let entry = index
+            .matches_named("products")
+            .find(|candidate| candidate.entry().lexical_parent.is_some() == nested)
+            .unwrap()
+            .entry();
+
+        let bound = memo.flow_bound_graph_for_tests(entry);
         let bundle = bound.bundle();
         let request = FlowDemandRequest {
             query: SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
@@ -104,7 +115,17 @@ mod tests {
             FlowProductBudget::for_demand_plan(&plan),
         )
         .unwrap();
-        let mut products = FlowFrameProducts::new(execution, &bound).unwrap();
+        let products = FlowFrameProducts::new(execution, &bound).unwrap();
+        (products, bound, plan)
+    }
+
+    #[test]
+    fn continuation_rewind_and_join_preserve_only_actual_reaching_definitions() {
+        let (mut products, bound, plan) = fixture(
+            "function products(flag: boolean) { let x = 0; if (flag) { x = 1; x = 2; } else { x = 3; } return x; }",
+            false,
+        );
+        let bundle = bound.bundle();
         let binding = bundle
             .graph
             .nodes()
@@ -178,6 +199,53 @@ mod tests {
         assert_eq!(definitions(&joined), expected, "the stale overwritten arm and entry definition are absent from the actual predecessor join");
         assert!(joined.finish(Some(&plan)).unwrap().is_some());
     }
+    #[test]
+    fn declared_capture_input_records_its_hub_and_preserves_unassigned_state() {
+        let (mut products, bound, plan) = fixture(
+            "function products() { const read = () => x; let x: 'a' | 'b' = 'a'; return read; }",
+            true,
+        );
+        let (hub, identity) = bound
+            .bundle()
+            .graph
+            .nodes()
+            .find_map(|node| {
+                let FlowNodeKind::CapturedBinding(binding) = bound.bundle().graph.node_kind(node)
+                else {
+                    return None;
+                };
+                Some((node, bound.bundle().graph.captured_binding(binding).clone()))
+            })
+            .expect("real selected captured hub");
+        let graph = crate::semantic_query_memo::SemanticGraphStore::new();
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let unassigned = DefiniteAssignmentProduct::default();
+        let subject = FlowBindingRef::Captured(identity);
+        products.import_capture_input(
+            &subject,
+            unassigned,
+            Some(ReachingTypeProduct::of(string)),
+            Some(string),
+        );
+        assert_eq!(
+            products.assignment(&subject),
+            unassigned,
+            "importing declared input does not execute the later initializer"
+        );
+        let Some(FlowProductValue::ReachingValue(definitions)) =
+            products.get(FlowDomain::ReachingValue, &subject)
+        else {
+            panic!("declared capture input needs exact definition provenance");
+        };
+        assert_eq!(
+            definitions.definitions(),
+            &[hub],
+            "only the child's actual input hub defines the imported value"
+        );
+        let key = products.key(FlowDomain::ReachingValue, &subject).unwrap();
+        let evidence = products.finish(Some(&plan)).unwrap().unwrap();
+        assert!(evidence.executed(&key));
+    }
 }
 
 pub(super) struct FlowFrameExecution {
@@ -196,12 +264,16 @@ pub(super) struct FlowFrameProducts {
 }
 
 impl FlowFrameProducts {
-    pub fn captured_input_bytes(&self, subject: &FlowBindingRef) -> Vec<u8> {
+    pub fn captured_input_bytes(
+        declared: Option<SemanticNodeId>,
+        reaching: Option<&ReachingTypeProduct>,
+        assignment: DefiniteAssignmentProduct,
+    ) -> Vec<u8> {
         use verter_identity::encoding::CanonicalEncoder;
         let mut e = CanonicalEncoder::new("verter.session.flow.captured_input.v1");
-        let declared = self.declared_type(subject).map(|node| node.0.to_le_bytes());
+        let declared = declared.map(|node| node.0.to_le_bytes());
         e.field_option(1, declared.as_ref().map(|bytes| bytes.as_slice()));
-        if let Some(reaching) = self.reaching_type(subject) {
+        if let Some(reaching) = reaching {
             e.field_bool(2, true);
             for node in reaching.contributors() {
                 e.field_u64(3, node.0);
@@ -225,7 +297,6 @@ impl FlowFrameProducts {
         } else {
             e.field_bool(2, false);
         }
-        let assignment = self.assignment(subject);
         e.field_bool(7, assignment.single_path());
         e.field_bool(8, assignment.failed_initializer());
         for (tag, state) in [
@@ -349,6 +420,24 @@ impl FlowFrameProducts {
         })();
         if let Err(failure) = result {
             frame.failure = Some(failure);
+        }
+    }
+
+    /// Import the exact prepared child input. Its selected captured hub is the
+    /// definition site; the enclosing initializer and assignment state are not
+    /// fabricated by annotation hydration.
+    pub fn import_capture_input(
+        &mut self,
+        subject: &FlowBindingRef,
+        assignment: DefiniteAssignmentProduct,
+        reaching: Option<ReachingTypeProduct>,
+        declared: Option<SemanticNodeId>,
+    ) {
+        self.set_declared_type(subject, declared);
+        if let Some(reaching) = reaching {
+            self.bind(subject, assignment, reaching);
+        } else {
+            self.set_assignment(subject, assignment);
         }
     }
 
