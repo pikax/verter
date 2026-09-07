@@ -772,7 +772,6 @@ pub use crate::project_semantic_dispatch::flow_solve::*;
 /// frame's real binding inventory from the `FunctionProgramIndex`.
 pub struct FlowGraphFixtureForTests {
     bound: crate::cache_runtime::flow_slice_node::BoundFlowGraph,
-    inventory: FlowBindingInventory,
 }
 
 #[rustfmt::skip]
@@ -812,7 +811,7 @@ impl FlowGraphFixtureForTests {
     /// for another graph or another demand must be a typed planning
     /// error, never a proof plan.
     pub fn build_plan_with_retained(&self, request: FlowDemandRequest, retained: &PlannedFlowSlice) -> Result<FlowDemandPlan, FlowDemandPlanError> {
-        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, retained, &self.inventory)
+        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, retained)
     }
 }
 
@@ -837,7 +836,7 @@ pub fn flow_graph_fixture_for_tests_with_language(source: &str, body_hash_tag: u
 
 #[rustfmt::skip]
 fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_language::FileLanguage) -> FlowGraphFixtureForTests {
-    use verter_semantic::analysis::flow::{FunctionBodySource, build_function_body_skeleton};
+    use verter_semantic::analysis::flow::{FunctionBodySource, build_indexed_function_body_skeleton};
     use verter_semantic::analysis::function_program::{build_function_program_index, FunctionDeclarationRef, FunctionProgramKey};
     use verter_semantic::analysis::top_level_owners::TopLevelOwnerTable;
     let oxc_source_type = match &file_language {
@@ -859,15 +858,11 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     let function = parsed.program.body.iter().find_map(|s| match s { oxc_ast::ast::Statement::FunctionDeclaration(f) => Some(f), _ => None }).expect("fixture must contain a function declaration");
     let name = function.id.as_ref().expect("named function").name.as_str();
     let canonical_id: std::sync::Arc<str> = std::sync::Arc::from("/flow_solve_fixture.ts");
-    let skeleton = build_function_body_skeleton(&FunctionBodySource::from_function(function).expect("bodied function"));
+    let body_source = FunctionBodySource::from_function(function).expect("bodied function");
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index = build_function_program_index(&parsed.program, source, &owners, canonical_id.clone());
     let declaration = FunctionDeclarationRef { owner: verter_type_expr::TopLevelOwnerId::ordinary_file(), name: std::sync::Arc::from(name), space: verter_semantic::facts::SymbolSpace::Value };
     let function = FunctionProgramKey { declaration, part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody, overload_ordinal: 0 };
-    let inventory = FlowBindingInventory {
-        anchor: index.get(&function).expect("the fixture function is indexed").entry().span.start,
-        bindings: std::sync::Arc::clone(&index.get(&function).expect("the fixture function is indexed").entry().bindings),
-    };
     let key = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
         canonical_id, function, parse_env_hash: [0u8; 16],
         flow_body_stable_hash: [body_hash_tag; 16], flow_body_exact_hash: [body_hash_tag; 16],
@@ -876,8 +871,9 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     };
     let store = crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new();
     let entry = index.get(&key.function).expect("the fixture function is indexed").entry();
-    let bound = store.mint_bound_flow_graph(key, skeleton, entry).expect("fixture binding correspondence");
-    FlowGraphFixtureForTests { bound, inventory }
+    let prepared = build_indexed_function_body_skeleton(&body_source, entry).expect("fixture binding correspondence");
+    let bound = store.mint_bound_flow_graph(key, prepared);
+    FlowGraphFixtureForTests { bound }
 }
 
 /// Mint the hermetic value payload: a clean flow-return result over `return_type`.

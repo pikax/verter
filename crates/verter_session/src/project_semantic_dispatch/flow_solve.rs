@@ -52,7 +52,6 @@ use verter_semantic::analysis::flow::peeker::{
     SliceOrigin,
 };
 use verter_semantic::analysis::flow::{SkeletonBindingId, SkeletonBindingKind};
-use verter_semantic::analysis::function_program::FunctionBindingRecord;
 
 use super::dispatch_txn::flow_obligation_state::{
     FlowBindingBasis, FlowConvergenceEvidence, FlowDemandHandle, FlowObligationBasis,
@@ -586,16 +585,6 @@ pub struct FlowDemandBasis {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowDemandSubject { pub projection_path: Arc<[Arc<str>]> }
 
-/// The frame's binding-inventory authority the planner resolves each
-/// binding obligation's cross-frame identity against: the
-/// `FunctionProgramIndex` entry's FULL binding list. Its slot numbering
-/// is the stable cross-frame slot domain. The planner validates an exact
-/// declaration-span/kind bijection against the skeleton, rebased using the
-/// inventory's live anchor. A mismatch refuses planning as a torn view.
-#[rustfmt::skip]
-#[derive(Debug, Clone)]
-pub struct FlowBindingInventory { pub bindings: Arc<[FunctionBindingRecord]>, pub anchor: u32 }
-
 /// The tie-break rule the work order is built with: domain rank, then
 /// ascending graph-node index, then edge class and source ordinal, then
 /// stable binding slot.
@@ -729,7 +718,6 @@ pub enum FlowDemandPlanError {
     /// The retained selection's minted slice identity does not recompute
     /// over the bound graph — a selection retained for ANOTHER graph.
     SelectionProvenanceMismatch,
-    BindingInventoryMismatch(verter_semantic::analysis::flow::FlowBindingMapError),
 }
 
 /// Derive the demand subject EXHAUSTIVELY from the operation-specific
@@ -879,7 +867,7 @@ fn require_retained_selection_of_bound_graph(
     // The selection must satisfy the REQUEST's slice budget: the retained
     // plan was minted under the budget armed at planning time, so a
     // stricter incoming request revalidates the selection's observable
-    // counts — the same two axes `ReturnPathPeeker::plan` enforces —
+    // counts — the same axes `ReturnPathPeeker::plan` enforces —
     // against its own budget. The final selection's node sets are
     // disjoint by construction, so the lengths ARE the selected count.
     let return_sites = selection
@@ -902,6 +890,13 @@ fn require_retained_selection_of_bound_graph(
             observed: u32::try_from(selected_nodes).unwrap_or(u32::MAX),
         }));
     }
+    if selection.value_states > budget.max_value_states {
+        return Err(FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
+            axis: FlowSliceBudgetAxis::ValueStates,
+            limit: budget.max_value_states,
+            observed: selection.value_states,
+        }));
+    }
     Ok(())
 }
 
@@ -921,7 +916,7 @@ fn require_retained_selection_of_bound_graph(
 /// registered [`FlowExpansionRule`]s, in domain rank, ascending node
 /// index, edge class and source ordinal order. Every obligation spec
 /// carries its closed semantic identity (populated from the skeleton/graph
-/// and the frame's binding inventory) and its exact evidence contract.
+/// and the bound graph's authoritative binding map) and its exact evidence contract.
 /// Obligation insertion is budget-checked BEFORE each append: the first
 /// excess returns the typed budget error and the remaining population is
 /// never constructed or scanned.
@@ -930,7 +925,6 @@ pub(crate) fn build_flow_demand_plan(
     request: FlowDemandRequest,
     bound: &BoundFlowGraph,
     retained: &PlannedFlowSlice,
-    inventory: &FlowBindingInventory,
 ) -> Result<FlowDemandPlan, FlowDemandPlanError> {
     let tag = request.query.tag();
     let contract = require_flow_operation_contract(tag).map_err(|_| FlowDemandPlanError::UnregisteredOperation)?;
@@ -1037,9 +1031,8 @@ pub(crate) fn build_flow_demand_plan(
         initial.push(push(requirement.clone(), FlowObligationOrigin::Additional, basis, Arc::from([]), Arc::from([]))?);
     }
 
-    // The cross-frame binding identities, resolved once against the
-    // frame's binding inventory (the ONE slot-numbering authority).
-    let identities = verter_semantic::analysis::flow::FlowBindingMap::build(&bundle.skeleton, &inventory.bindings, &bound.key().function, inventory.anchor).map_err(FlowDemandPlanError::BindingInventoryMismatch)?;
+    // The graph owner prepares exact declaration correspondence once.
+    let identities = &bundle.bindings;
 
     let graph = &bundle.graph;
     let mut selected: Vec<_> = structural_selection.value_nodes.iter()

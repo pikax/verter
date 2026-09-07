@@ -489,9 +489,6 @@ struct FlowSliceDemandSite {
     slice_key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
     /// The demanded member for a member-projection demand.
     demanded_member: Option<Arc<str>>,
-    /// The frame's binding inventory — the cross-frame binding authority
-    /// the demand planner resolves slot identities against.
-    inventory: super::flow_solve::FlowBindingInventory,
 }
 
 /// A demand site that could not be derived: the typed no-value failure
@@ -2023,7 +2020,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             resources,
             additional_requirements: Arc::from([]),
         };
-        let plan = match build_flow_demand_plan(request, &bound, &planned, &site.inventory) {
+        let plan = match build_flow_demand_plan(request, &bound, &planned) {
             Ok(plan) => plan,
             Err(error) => {
                 use super::flow_solve::FlowDemandPlanError as E;
@@ -2035,7 +2032,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     E::BasisKeyMismatch
                     | E::SelectionOutOfRange
                     | E::SelectionDemandMismatch
-                    | E::BindingInventoryMismatch(_)
                     | E::SelectionProvenanceMismatch => FlowPlanRefusal::TornView,
                     E::UnregisteredOperation | E::NotAnEnabledRoot | E::UnrepresentableDemand => {
                         FlowPlanRefusal::Unplannable
@@ -3440,10 +3436,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             slice_key_function,
             slice_key,
             demanded_member,
-            inventory: super::flow_solve::FlowBindingInventory {
-                bindings: Arc::clone(&entry.bindings),
-                anchor: entry.span.start,
-            },
         })
     }
 
@@ -3527,7 +3519,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             slice_key_function,
             slice_key,
             demanded_member,
-            inventory: _,
         } = site;
         let canonical = key.function.declaration_slot.defining_canonical.as_ref();
         let owner = key.function.declaration_slot.owner;

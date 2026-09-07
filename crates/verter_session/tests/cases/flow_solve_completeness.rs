@@ -2722,13 +2722,29 @@ fn demand_planner_rejects_a_selection_over_the_requests_slice_budget() {
         "a selection over the request's selected-node budget is a typed planning error"
     );
 
+    let mut strict_values = request_named("rich");
+    let value_states = loose.selection().value_states;
+    assert!(value_states > 0);
+    strict_values.resources.slice_budget.max_value_states = value_states - 1;
+    assert_eq!(
+        fixture
+            .build_plan_with_retained(strict_values, &loose)
+            .unwrap_err(),
+        FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
+            axis: FlowSliceBudgetAxis::ValueStates,
+            limit: value_states - 1,
+            observed: value_states,
+        }),
+        "retained projection states must satisfy the current request budget"
+    );
+
     // A stricter-but-satisfied budget still plans: the check compares the
     // selection's counts, never the budget VALUES.
     let mut tighter = request_named("rich");
     tighter.resources.slice_budget = FlowSliceBudget {
         max_return_sites: 2,
         max_selected_nodes: u32::try_from(selected).expect("in range"),
-        ..FlowSliceBudget::default()
+        max_value_states: value_states,
     };
     assert!(
         fixture.build_plan_with_retained(tighter, &loose).is_ok(),
