@@ -97,12 +97,12 @@ pub enum CarrierClass {
 /// attaches to the carrier region beginning at that point, so the
 /// correspondence stays answerable from the carrier side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Span {
+pub struct MappingSpan {
     pub start: u32,
     pub end: u32,
 }
 
-impl Span {
+impl MappingSpan {
     #[must_use]
     pub fn len(&self) -> u32 {
         self.end.saturating_sub(self.start)
@@ -118,20 +118,20 @@ impl Span {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectedRegion {
     /// The projected byte span this region covers.
-    pub generated: Span,
+    pub generated: MappingSpan,
     pub class: ProjectedClass,
     /// The carrier preimage. `None` EXACTLY when `class` is
     /// [`ProjectedClass::Synthesized`] — the same fact stated once as a class
     /// and once as data, so a consumer that branches on either reads the same
     /// disposition.
-    pub carrier: Option<Span>,
+    pub carrier: Option<MappingSpan>,
 }
 
 /// One region of the carrier surface, with every projection derived from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CarrierRegion {
     /// The carrier byte span this region covers. Never empty.
-    pub source: Span,
+    pub source: MappingSpan,
     pub class: CarrierClass,
     /// Indices into [`MappingProduct::projected`], ascending — which is
     /// projected-offset order, because the projected partition is itself built
@@ -281,7 +281,7 @@ fn push_synthesized(out: &mut Vec<ProjectedRegion>, generated: &mut u32, len: u3
     push_coalesced(
         out,
         ProjectedRegion {
-            generated: Span {
+            generated: MappingSpan {
                 start: *generated,
                 end: *generated + len,
             },
@@ -294,7 +294,7 @@ fn push_synthesized(out: &mut Vec<ProjectedRegion>, generated: &mut u32, len: u3
 
 /// Walk the chunks in output order and classify every projected byte.
 fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<InsertionAnchor>) {
-    let mut out: Vec<ProjectedRegion> = Vec::with_capacity(transform.chunk_slice().len() + 2);
+    let mut out: Vec<ProjectedRegion> = Vec::with_capacity(transform.chunks().len() + 2);
     let mut insertion_anchors = Vec::with_capacity(1);
     let mut generated: u32 = 0;
 
@@ -309,12 +309,8 @@ fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<Insertio
         }
     };
 
-    record_anchor(transform.intro_text(), generated);
-    push_synthesized(
-        &mut out,
-        &mut generated,
-        transform.intro_text().len() as u32,
-    );
+    record_anchor(transform.intro(), generated);
+    push_synthesized(&mut out, &mut generated, transform.intro().len() as u32);
 
     // The high-water mark of authored source already emitted. Identity means
     // the region's correspondence is a pure offset delta consistent with
@@ -326,7 +322,7 @@ fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<Insertio
     // rewrote it.
     let mut emitted_through: u32 = 0;
 
-    for chunk in transform.chunk_slice() {
+    for chunk in transform.chunks() {
         let content = match chunk {
             Chunk::Original { start, end } => &transform.original()[*start as usize..*end as usize],
             Chunk::Moved { content, .. }
@@ -349,12 +345,12 @@ fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<Insertio
                     push_coalesced(
                         &mut out,
                         ProjectedRegion {
-                            generated: Span {
+                            generated: MappingSpan {
                                 start: generated,
                                 end: generated + len,
                             },
                             class,
-                            carrier: Some(Span {
+                            carrier: Some(MappingSpan {
                                 start: *start,
                                 end: *end,
                             }),
@@ -375,7 +371,7 @@ fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<Insertio
                     push_coalesced(
                         &mut out,
                         ProjectedRegion {
-                            generated: Span {
+                            generated: MappingSpan {
                                 start: generated,
                                 end: generated + len,
                             },
@@ -384,7 +380,7 @@ fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<Insertio
                             } else {
                                 ProjectedClass::Relocated
                             },
-                            carrier: Some(Span {
+                            carrier: Some(MappingSpan {
                                 start: *start,
                                 end: *end,
                             }),
@@ -412,12 +408,12 @@ fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<Insertio
                         push_coalesced(
                             &mut out,
                             ProjectedRegion {
-                                generated: Span {
+                                generated: MappingSpan {
                                     start: generated,
                                     end: generated + len,
                                 },
                                 class: ProjectedClass::Rewritten,
-                                carrier: Some(Span {
+                                carrier: Some(MappingSpan {
                                     start: *start,
                                     end: *end,
                                 }),
@@ -440,7 +436,7 @@ fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<Insertio
                     push_coalesced(
                         &mut out,
                         ProjectedRegion {
-                            generated: Span {
+                            generated: MappingSpan {
                                 start: generated,
                                 end: generated + (len - offset),
                             },
@@ -448,7 +444,7 @@ fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<Insertio
                             // A mapped insertion stands at a carrier POINT: it
                             // accounts for no authored extent, so its preimage
                             // is the zero-width span at that point.
-                            carrier: Some(Span {
+                            carrier: Some(MappingSpan {
                                 start: *source_start,
                                 end: *source_start,
                             }),
@@ -470,7 +466,7 @@ fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<Insertio
                     push_coalesced(
                         &mut out,
                         ProjectedRegion {
-                            generated: Span {
+                            generated: MappingSpan {
                                 start: generated,
                                 end: generated + anchor.length,
                             },
@@ -478,7 +474,7 @@ fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<Insertio
                             // into generated scaffolding that shifted it: exact
                             // bytes at a different position.
                             class: ProjectedClass::Relocated,
-                            carrier: Some(Span {
+                            carrier: Some(MappingSpan {
                                 start: anchor.source_pos,
                                 end: anchor.source_pos + anchor.length,
                             }),
@@ -496,11 +492,7 @@ fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<Insertio
         }
     }
 
-    push_synthesized(
-        &mut out,
-        &mut generated,
-        transform.outro_text().len() as u32,
-    );
+    push_synthesized(&mut out, &mut generated, transform.outro().len() as u32);
     insertion_anchors.sort_unstable();
     insertion_anchors.dedup();
     (out, insertion_anchors)
@@ -605,7 +597,7 @@ fn partition_carrier(projected: &[ProjectedRegion], carrier_len: u32) -> Vec<Car
             members.clear();
         }
         out.push(CarrierRegion {
-            source: Span { start, end },
+            source: MappingSpan { start, end },
             class,
             projected: members,
         });
