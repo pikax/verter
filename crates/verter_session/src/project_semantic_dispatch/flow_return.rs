@@ -6459,23 +6459,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Join the reaching definitions two conditional arms wrote, into the
-    /// RESTORED layers: a binding an arm rebound holds, after the `if`,
-    /// the union of its arm value and the value it had on the paths that
-    /// never took that arm (with no `else`, the fall-through path is one
-    /// of them). An arm whose path TERMINATED (`consequent_falls` /
-    /// `alternate_falls` false — a return, throw, or absorbed break)
-    /// contributes the pre-`if` value at every binding: its writes left
-    /// with its path and never reach the join. Bindings an arm DECLARED
-    /// stay out of the join — the layer restore already scoped them,
-    /// except the hoisted `var`s, which survive by construction and keep
-    /// the conditional-definition membership.
-    ///
-    /// Rebinding at nesting 0 through [`Self::bind_local`] is what clears
-    /// the conditional-definition flag for a joined name: the join IS
-    /// both arms' values folded, so observing it afterwards is no longer
-    /// the one-arm answer the flag exists to fail closed on.
-    #[allow(clippy::too_many_arguments)]
+    /// Merge exactly the paths that continue past a conditional. A missing
+    /// alternate contributes the entry state; a terminated arm contributes
+    /// no state. The shared product join owns every domain combination.
     fn join_arm_writes(
         &mut self,
         consequent: &FlowProductStore,
@@ -6484,151 +6470,82 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         alternate_falls: bool,
         entry: &FlowProductStore,
     ) {
-        // The pre-`if` state is the LIVE one again (the caller restored
-        // it). Each SURVIVING arm contributes its end value (or the
-        // pre-`if` value when it never wrote the binding); a TERMINATED
-        // arm contributes NOTHING — with an explicit `else`, every path
-        // past the `if` took the surviving arm. A missing `else` is the
-        // implicit alternate: it always survives, with the pre-`if`
-        // value.
-        for (subject, name, before) in self.live_bindings(FlowBindingLayer::Lexical) {
-            let mut contributors: Vec<SemanticNodeId> = Vec::with_capacity(2);
-            if consequent_falls {
-                contributors.push(consequent.reaching(&subject).unwrap_or(before));
-            }
-            match alternate {
-                Some(alternate) if alternate_falls => {
-                    contributors.push(alternate.reaching(&subject).unwrap_or(before));
-                }
-                None => contributors.push(before),
-                _ => {}
-            }
-            if contributors.is_empty() || contributors.iter().all(|node| *node == before) {
-                continue;
-            }
-            let joined = self
-                .dispatch
-                .intern_normalized_union_or_intersection(&contributors, true);
-            self.bind_local(
-                &name,
-                crate::flow_slice_content::SliceBindingKind::Let,
-                joined,
-                None,
-                false,
-            );
+        let mut incoming: Vec<FlowLayerState> = Vec::with_capacity(2);
+        if consequent_falls {
+            incoming.push(FlowLayerState {
+                products: consequent.clone(),
+                inference_only_path: self.inference_only_path,
+            });
         }
-        for (subject, name, before) in self.live_bindings(FlowBindingLayer::Function) {
-            let mut contributors: Vec<SemanticNodeId> = Vec::with_capacity(2);
-            if consequent_falls {
-                contributors.push(consequent.reaching(&subject).unwrap_or(before));
-            }
-            match alternate {
-                Some(alternate) if alternate_falls => {
-                    contributors.push(alternate.reaching(&subject).unwrap_or(before));
-                }
-                None => contributors.push(before),
-                _ => {}
-            }
-            // An arm WROTE the binding when its value moved OR the write
-            // raised the single-path fact during an arm (an unchanged
-            // value still went through the write) — on an arm whose path
-            // SURVIVES the `if`. A terminated arm's writes never reach the
-            // join, so its flag-raising is folded the same way. The join
-            // folds both, so the flag must not survive either way.
-            let written_in_arm = (consequent_falls || alternate_falls)
-                && !entry.assignment(&subject).single_path()
-                && self.products.assignment(&subject).single_path();
-            if contributors.is_empty()
-                || (contributors.iter().all(|node| *node == before) && !written_in_arm)
-            {
-                continue;
-            }
-            let joined = self
-                .dispatch
-                .intern_normalized_union_or_intersection(&contributors, true);
-            self.bind_local(
-                &name,
-                crate::flow_slice_content::SliceBindingKind::Var,
-                joined,
-                None,
-                false,
-            );
+        if alternate_falls {
+            incoming.push(FlowLayerState {
+                products: alternate.unwrap_or(entry).clone(),
+                inference_only_path: self.inference_only_path,
+            });
         }
-        // Hoisted `var`s DECLARED inside an arm: the state restore scopes
-        // them away, but `var` hoisting means the binding itself survives
-        // the `if` — even when the arm's path terminates (hoisting is
-        // static). Merge them back with the single-path fact INTACT — on
-        // the paths that never took the arm the binding has no reaching
-        // definition, which is exactly what that fact fails closed on at a
-        // read.
-        let mut declared_in_arm: Vec<FlowProductSubject> = Vec::new();
-        for store in std::iter::once(consequent).chain(alternate) {
-            for (subject, _, _) in self.store_bindings(store, FlowBindingLayer::Function) {
-                if self.products.reaching(&subject).is_none() && !declared_in_arm.contains(&subject)
-                {
-                    declared_in_arm.push(subject);
+        if incoming.is_empty() {
+            return;
+        }
+
+        // A parameter without an executed write still has its signature
+        // input on that predecessor. Seed only parameters another actual
+        // predecessor mentions, so unused signature breadth creates no work.
+        let mut parameters = Vec::new();
+        for state in &incoming {
+            parameters.extend(store_param_ordinals(&state.products));
+        }
+        parameters.sort_unstable();
+        parameters.dedup();
+        for state in &mut incoming {
+            for ordinal in &parameters {
+                let subject = Self::param_subject(*ordinal);
+                if state.products.reaching(&subject).is_none() {
+                    if let Some(value) = self.params.get(*ordinal as usize) {
+                        state
+                            .products
+                            .set_reaching_type(&subject, ReachingTypeProduct::of(*value));
+                    }
                 }
             }
         }
-        for subject in declared_in_arm {
-            let consequent_node = consequent.reaching(&subject);
-            let alternate_node = alternate.and_then(|store| store.reaching(&subject));
-            let node = match (consequent_node, alternate_node) {
-                (Some(consequent), Some(alternate)) => self
-                    .dispatch
-                    .intern_normalized_union_or_intersection(&[consequent, alternate], true),
-                (Some(consequent), None) => consequent,
-                (None, Some(alternate)) => alternate,
-                (None, None) => continue,
-            };
-            self.products
-                .set_reaching_type(&subject, ReachingTypeProduct::of(node));
-            self.products.set_assignment(
-                &subject,
+
+        let mut joined = incoming[0].clone();
+        for state in &incoming[1..] {
+            joined = self.join_states(&joined, state);
+        }
+        // The function-scoped conditional-definition fact is discharged
+        // only for an already-established binding carried by every continuing
+        // predecessor. Conditional declarations retain their existing typed gap.
+        for (subject, _, _) in self.store_bindings(&joined.products, FlowBindingLayer::Function) {
+            let defined_on_every_path = incoming
+                .iter()
+                .all(|state| state.products.reaching(&subject).is_some());
+            let single_path = !defined_on_every_path
+                || entry.reaching(&subject).is_none()
+                || entry.assignment(&subject).single_path()
+                || self.conditional_arm_nesting > 0;
+            let assignment = joined
+                .products
+                .assignment(&subject)
+                .with_single_path(single_path);
+            joined.products.set_assignment(&subject, assignment);
+        }
+        let written = joined
+            .products
+            .subjects_in(super::flow_solve::FlowDomain::ReachingType)
+            .into_iter()
+            .filter(|subject| joined.products.reaching(subject) != entry.reaching(subject))
+            .collect::<Vec<_>>();
+        self.restore_layer_state(joined);
+        for subject in written {
+            if let Some(root) = self.narrow_root_of(&subject) {
                 self.products
-                    .assignment(&subject)
-                    .with_state(DefiniteAssignment::Assigned)
-                    .with_single_path(true),
-            );
-        }
-        let mut param_ordinals: Vec<u32> = Vec::new();
-        for store in std::iter::once(consequent).chain(alternate) {
-            for ordinal in store_param_ordinals(store) {
-                if !param_ordinals.contains(&ordinal) {
-                    param_ordinals.push(ordinal);
-                }
+                    .remove(super::flow_solve::FlowDomain::Narrowing, &root);
+                self.narrowing_writes
+                    .push(NarrowingLedgerEntry::Cleared { root });
             }
-        }
-        param_ordinals.sort_unstable();
-        for ordinal in param_ordinals {
-            let subject = Self::param_subject(ordinal);
-            let before = self.products.reaching(&subject);
-            let fallback = before.or_else(|| self.params.get(ordinal as usize).copied());
-            let Some(fallback) = fallback else {
-                continue;
-            };
-            let mut contributors: Vec<SemanticNodeId> = Vec::with_capacity(2);
-            if consequent_falls {
-                contributors.push(consequent.reaching(&subject).unwrap_or(fallback));
-            }
-            match alternate {
-                Some(alternate) if alternate_falls => {
-                    contributors.push(alternate.reaching(&subject).unwrap_or(fallback));
-                }
-                None => contributors.push(fallback),
-                _ => {}
-            }
-            if contributors.is_empty() || contributors.iter().all(|node| *node == fallback) {
-                continue;
-            }
-            let joined = self
-                .dispatch
-                .intern_normalized_union_or_intersection(&contributors, true);
-            self.products
-                .set_reaching_type(&subject, ReachingTypeProduct::of(joined));
         }
     }
-
     /// Rewind to the state a conditional arm was entered with, keeping
     /// exactly the facts an arm establishes that OUTLIVE it.
     ///

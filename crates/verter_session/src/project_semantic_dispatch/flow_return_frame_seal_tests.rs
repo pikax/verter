@@ -744,37 +744,39 @@ fn flow_product_worklist_is_permutation_deterministic() {
 fn flow_product_budget_boundary_is_exact_and_never_warm() {
     use super::flow_return::flow_admission_fault_injection as inject;
 
-    let host = make_product_host();
-    let control = run_product(&host, "switchJoin", 2);
-    assert!(
-        control.served.is_some(),
-        "the control frame merges within its plan's convergence policy"
-    );
-    assert_eq!(
-        control.candidates, 1,
-        "a converged frame warm-admits exactly one candidate"
-    );
-    assert_eq!(
-        control.cold_computes, 1,
-        "the second demand of a converged frame is a warm hit"
-    );
+    for function in ["switchJoin", "branchJoin"] {
+        let host = make_product_host();
+        let control = run_product(&host, function, 2);
+        assert!(
+            control.served.is_some(),
+            "the control frame merges within its plan's convergence policy"
+        );
+        assert_eq!(
+            control.candidates, 1,
+            "a converged frame warm-admits exactly one candidate"
+        );
+        assert_eq!(
+            control.cold_computes, 1,
+            "the second demand of a converged frame is a warm hit"
+        );
 
-    let exhausted_host = make_product_host();
-    let _zero_budget = inject::Guard::arm(
-        &exhausted_host
-            .flow_fault_injection
-            .zero_product_iteration_budget,
-    );
-    let exhausted = run_product(&exhausted_host, "switchJoin", 2);
-    assert_eq!(
-        exhausted.candidates, 0,
-        "an exhausted product budget retains no candidate"
-    );
-    assert_eq!(
-        exhausted.cold_computes, 2,
-        "a budget-exhausted demand recomputes cold rather than serving a \
+        let exhausted_host = make_product_host();
+        let _zero_budget = inject::Guard::arm(
+            &exhausted_host
+                .flow_fault_injection
+                .zero_product_iteration_budget,
+        );
+        let exhausted = run_product(&exhausted_host, function, 2);
+        assert_eq!(
+            exhausted.candidates, 0,
+            "an exhausted product budget retains no candidate"
+        );
+        assert_eq!(
+            exhausted.cold_computes, 2,
+            "a budget-exhausted demand recomputes cold rather than serving a \
          retained partial"
-    );
+        );
+    }
 }
 
 /// The frame's product budget counts BOTH subject spaces, and the
