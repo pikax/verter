@@ -39,7 +39,7 @@ use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_no_typeexpr::NoTypeExpr;
 
-pub use binding::{FlowBindingMap, FlowBindingMapError, FlowBindingRef};
+pub use binding::{FlowBindingMap, FlowBindingMapError, FlowBindingOccurrence, FlowBindingRef};
 pub use frame_span::FrameSpan;
 
 pub mod binding;
@@ -967,85 +967,40 @@ fn prepare_function_body_skeleton(
     mut skeleton: FunctionBodySkeleton,
     entry: &FunctionProgramEntry,
 ) -> Result<PreparedFunctionBodySkeleton, FlowBindingMapError> {
-    let bindings = FlowBindingMap::build(&skeleton, &entry.bindings, &entry.key, entry.span.start)?;
+    let mut bindings =
+        FlowBindingMap::build(&skeleton, &entry.bindings, &entry.key, entry.span.start)?;
+    bindings.prepare_occurrences(entry)?;
     for (ordinal, binding) in Arc::make_mut(&mut skeleton.bindings).iter_mut().enumerate() {
         binding.runtime_binding = binding
             .kind
             .declares_value()
             .then(|| bindings.canonical_local(SkeletonBindingId::from_index(ordinal as u32)));
     }
-    let mut identities: FxHashMap<_, _> = entry
-        .references
-        .iter()
-        .filter_map(|reference| {
-            reference
-                .binding
-                .as_ref()
-                .map(|binding| (FrameSpan::rebase(entry.span.start, reference.span), binding))
-        })
-        .collect();
-    for (ordinal, declaration) in skeleton.bindings.iter().enumerate() {
-        if let Some(identity) = bindings.identity(SkeletonBindingId::from_index(ordinal as u32)) {
-            identities.insert(declaration.span, identity);
-        }
-    }
-    for target in entry.writes.iter().flat_map(|write| write.targets.iter()) {
-        if let crate::analysis::function_program::FunctionWriteTarget::Binding {
-            reference, ..
-        } = target
-        {
-            if let Some(identity) = &reference.binding {
-                identities.insert(
-                    FrameSpan::rebase(entry.span.start, reference.span),
-                    identity,
-                );
-            }
-        }
-    }
-    for child in entry.nested_captures.iter() {
-        for read in child.reads.iter() {
-            identities.insert(
-                FrameSpan::rebase(entry.span.start, read.span),
-                &read.binding,
-            );
-        }
-    }
-    let resolve = |identity: &FlowBindingIdentity| -> Result<FlowBindingRef, FlowBindingMapError> {
-        if identity.defining_function == entry.key {
-            let local = bindings
-                .local(identity)
-                .ok_or(FlowBindingMapError::MissingDeclaration)?;
-            Ok(FlowBindingRef::Local(bindings.canonical_local(local)))
-        } else {
-            Ok(FlowBindingRef::Captured(identity.clone()))
-        }
-    };
     for site in Arc::make_mut(&mut skeleton.expr_sites) {
         for capture in Arc::make_mut(&mut site.capture_bindings) {
             if let FlowBindingRef::Captured(identity) = capture {
-                *capture = resolve(identity)?;
+                *capture = bindings.resolve_identity(identity)?;
             }
         }
         for read in Arc::make_mut(&mut site.reads) {
-            read.binding = identities
-                .get(&read.span)
-                .map(|identity| resolve(identity))
-                .transpose()?;
+            read.binding = match &read.binding {
+                Some(FlowBindingRef::Captured(identity)) => {
+                    Some(bindings.resolve_identity(identity)?)
+                }
+                _ => bindings.required_occurrence(read.span)?,
+            };
         }
         for call in Arc::make_mut(&mut site.calls) {
             call.binding = call
                 .root_span
-                .and_then(|span| identities.get(&span))
-                .map(|identity| resolve(identity))
-                .transpose()?;
+                .map(|span| bindings.required_occurrence(span))
+                .transpose()?
+                .flatten();
         }
     }
     for write in Arc::make_mut(&mut skeleton.writes) {
         if let Some(span) = write.target_span {
-            write.binding = identities
-                .get(&span)
-                .map(|identity| resolve(identity))
-                .transpose()?;
+            write.binding = bindings.required_occurrence(span)?;
         }
     }
     Ok(PreparedFunctionBodySkeleton { skeleton, bindings })
@@ -1463,7 +1418,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                 name,
                 path,
                 span,
-                binding: None,
+                binding: Some(FlowBindingRef::Captured(read.binding.clone())),
                 kind: FlowReadKind::Input,
             });
         }

@@ -22,6 +22,8 @@ pub enum FlowBindingMapError {
     DuplicateDeclaration,
     MissingDeclaration,
     ExtraDeclaration,
+    MissingOccurrence,
+    ConflictingOccurrence,
     InvalidSpan,
     TooManyBindings,
 }
@@ -36,6 +38,15 @@ pub struct FlowBindingMap {
     runtime_locals: Arc<[SkeletonBindingId]>,
     runtime_declarations: Arc<[SkeletonBindingId]>,
     declaration_offsets: Arc<[u32]>,
+    occurrences: Arc<FxHashMap<FrameSpan, Option<FlowBindingRef>>>,
+}
+
+/// The indexed authority for one exact authored identifier occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowBindingOccurrence<'a> {
+    Resolved(&'a FlowBindingRef),
+    Free,
+    Missing,
 }
 
 impl FlowBindingMap {
@@ -123,7 +134,98 @@ impl FlowBindingMap {
             runtime_locals: runtime_locals.into(),
             runtime_declarations: groups.into(),
             declaration_offsets: offsets.into(),
+            occurrences: Arc::new(FxHashMap::default()),
         })
+    }
+
+    pub(super) fn resolve_identity(
+        &self,
+        identity: &FlowBindingIdentity,
+    ) -> Result<FlowBindingRef, FlowBindingMapError> {
+        if identity.defining_function == self.function {
+            let local = self
+                .local(identity)
+                .ok_or(FlowBindingMapError::MissingDeclaration)?;
+            Ok(FlowBindingRef::Local(self.canonical_local(local)))
+        } else {
+            Ok(FlowBindingRef::Captured(identity.clone()))
+        }
+    }
+
+    pub(super) fn prepare_occurrences(
+        &mut self,
+        entry: &crate::analysis::function_program::FunctionProgramEntry,
+    ) -> Result<(), FlowBindingMapError> {
+        use crate::analysis::function_program::FunctionWriteTarget;
+        let mut occurrences = FxHashMap::default();
+        let mut insert = |span: verter_span::Span,
+                          binding: Option<FlowBindingRef>|
+         -> Result<(), FlowBindingMapError> {
+            if span.start < entry.span.start || span.end > entry.span.end || span.start >= span.end
+            {
+                return Err(FlowBindingMapError::InvalidSpan);
+            }
+            let span = FrameSpan::rebase(entry.span.start, span);
+            if let Some(previous) = occurrences.insert(span, binding.clone()) {
+                if previous != binding {
+                    return Err(FlowBindingMapError::ConflictingOccurrence);
+                }
+            }
+            Ok(())
+        };
+        for (slot, declaration) in entry.bindings.iter().enumerate() {
+            insert(
+                declaration.span,
+                Some(FlowBindingRef::Local(
+                    self.canonical_local(self.locals[slot]),
+                )),
+            )?;
+        }
+        for reference in entry.references.iter() {
+            insert(
+                reference.span,
+                reference
+                    .binding
+                    .as_ref()
+                    .map(|identity| self.resolve_identity(identity))
+                    .transpose()?,
+            )?;
+        }
+        for target in entry.writes.iter().flat_map(|write| write.targets.iter()) {
+            if let FunctionWriteTarget::Binding { reference, .. } = target {
+                insert(
+                    reference.span,
+                    reference
+                        .binding
+                        .as_ref()
+                        .map(|identity| self.resolve_identity(identity))
+                        .transpose()?,
+                )?;
+            }
+        }
+        self.occurrences = Arc::new(occurrences);
+        Ok(())
+    }
+
+    /// Exact read/write/callee occurrence authority. Known free and absent
+    /// occurrences are distinct; neither permits a runtime name fallback.
+    pub fn occurrence(&self, span: FrameSpan) -> FlowBindingOccurrence<'_> {
+        match self.occurrences.get(&span) {
+            Some(Some(binding)) => FlowBindingOccurrence::Resolved(binding),
+            Some(None) => FlowBindingOccurrence::Free,
+            None => FlowBindingOccurrence::Missing,
+        }
+    }
+
+    pub(super) fn required_occurrence(
+        &self,
+        span: FrameSpan,
+    ) -> Result<Option<FlowBindingRef>, FlowBindingMapError> {
+        match self.occurrence(span) {
+            FlowBindingOccurrence::Resolved(binding) => Ok(Some(binding.clone())),
+            FlowBindingOccurrence::Free => Ok(None),
+            FlowBindingOccurrence::Missing => Err(FlowBindingMapError::MissingOccurrence),
+        }
     }
 
     pub fn identity(&self, binding: SkeletonBindingId) -> Option<&FlowBindingIdentity> {
