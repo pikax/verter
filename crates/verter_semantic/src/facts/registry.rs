@@ -154,7 +154,16 @@ impl AsRef<str> for InternedGlobPattern {
 /// `verter_session::resolver_core::route_demand::SymbolSpace` is confined to
 /// resolve-only call paths; mixing the two is an error.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
 )]
 pub enum SymbolSpace {
