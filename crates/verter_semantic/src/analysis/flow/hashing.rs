@@ -158,8 +158,16 @@ pub fn compute_flow_slice_hash(
                 fold_u32(&mut buf, edge.ordinal);
                 match &edge.kind {
                     FlowEdgeKind::ValueDef => buf.push(1),
-                    FlowEdgeKind::PathWrite { path, certainty } => {
+                    FlowEdgeKind::PathWrite {
+                        path,
+                        certainty,
+                        source,
+                    } => {
                         buf.push(2);
+                        buf.push(match source {
+                            super::flow_graph::PathWriteSource::ObjectLiteralEntry => 1,
+                            super::flow_graph::PathWriteSource::Assignment => 2,
+                        });
                         buf.push(match certainty {
                             SkeletonWriteCertainty::Definite => 1,
                             SkeletonWriteCertainty::Optional => 2,
@@ -176,6 +184,14 @@ pub fn compute_flow_slice_hash(
                     }
                     FlowEdgeKind::EvalEffect => buf.push(3),
                     FlowEdgeKind::ControlRegion => buf.push(4),
+                    FlowEdgeKind::ControlInput => buf.push(7),
+                    FlowEdgeKind::ReadProjection { path } => {
+                        buf.push(5);
+                        fold_u32(&mut buf, path.len() as u32);
+                        for name in path.iter() {
+                            fold_text(&mut buf, skeleton.name(*name));
+                        }
+                    }
                 }
             }
         }

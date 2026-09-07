@@ -81,6 +81,175 @@ fn skeleton_of(source: &str) -> FunctionBodySkeleton {
 }
 
 #[test]
+fn captured_reads_select_own_frame_writes_and_their_control_inputs() {
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    use crate::analysis::flow::FlowBindingRef;
+    let source = "function root(value, flag) { return () => { if (flag) value = 'b'; { let value = 0; value = 2; } return value; }; }";
+    let skeleton = indexed_returned_arrow(source);
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(
+            &SliceDemand::for_return_projection(&skeleton, &[]),
+            &FlowSliceBudget::default(),
+        )
+        .unwrap();
+    let captured = skeleton
+        .writes
+        .iter()
+        .find(|write| matches!(write.binding, Some(FlowBindingRef::Captured(_))))
+        .unwrap();
+    assert!(
+        plan.is_value(graph.expr_site_node(captured.value.unwrap())),
+        "a captured read must select its own-frame written value"
+    );
+    assert!(
+        plan.is_selected(graph.expr_site_node(captured.site)),
+        "the write execution site stays selected"
+    );
+    let condition = skeleton.regions[captured.region.index()]
+        .control_input
+        .or_else(|| {
+            skeleton
+                .regions
+                .iter()
+                .find_map(|region| region.control_input)
+        })
+        .unwrap();
+    assert!(
+        plan.is_value(graph.expr_site_node(condition)),
+        "the governing control input stays value-selected"
+    );
+    let shadow = skeleton
+        .writes
+        .iter()
+        .find(|write| matches!(write.binding, Some(FlowBindingRef::Local(_))))
+        .unwrap();
+    assert!(
+        !plan.is_selected(graph.expr_site_node(shadow.site)),
+        "a same-named local write is not a captured definition"
+    );
+}
+
+fn indexed_returned_arrow(source: &str) -> FunctionBodySkeleton {
+    use crate::analysis::flow::build_indexed_function_body_skeleton;
+    use crate::analysis::function_program::{
+        build_function_program_index, resolve_function_node, FunctionNode,
+    };
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let index =
+        build_function_program_index(&parsed.program, source, &owners, Arc::from("/capture.ts"));
+    let root = index.matches_named("root").next().unwrap().entry();
+    let child = index
+        .nested_at(
+            &root.key,
+            verter_span::Span::new(
+                source.find("() =>").unwrap() as u32,
+                (source.rfind("; }").unwrap()) as u32,
+            ),
+        )
+        .unwrap()
+        .entry();
+    let FunctionNode::Arrow(arrow) = resolve_function_node(&parsed.program, &child.locator)
+        .unwrap()
+        .node
+    else {
+        panic!("arrow fixture");
+    };
+    let prepared =
+        build_indexed_function_body_skeleton(&FunctionBodySource::from_arrow(arrow), child)
+            .unwrap();
+    prepared.skeleton
+}
+
+#[test]
+fn captured_member_reads_compose_projection_before_selecting_write_members() {
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    use crate::analysis::flow::{FlowBindingRef, FrameSpan};
+    let source = "function root() { let x = {a: {b: 'old'}, b: 'other'}; return () => { x = {a: {b: 'wanted'}, b: 'sibling'}; return x.a; }; }";
+    let skeleton = indexed_returned_arrow(source);
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(
+            &SliceDemand::for_return_projection(&skeleton, &[Arc::from("b")]),
+            &FlowSliceBudget::default(),
+        )
+        .unwrap();
+    assert!(skeleton
+        .expr_sites
+        .iter()
+        .flat_map(|site| site.reads.iter())
+        .any(
+            |read| matches!(read.binding, Some(FlowBindingRef::Captured(_)))
+                && !read.path.is_empty()
+        ));
+    for (literal, selected) in [("'wanted'", true), ("'sibling'", false)] {
+        let start = source.find(literal).unwrap() as u32;
+        let span = FrameSpan::rebase(
+            source.find("() =>").unwrap() as u32,
+            verter_span::Span::new(start, start + literal.len() as u32),
+        );
+        let site = skeleton
+            .expr_sites
+            .iter()
+            .position(|site| site.span == span)
+            .unwrap();
+        assert_eq!(
+            plan.is_value(graph.expr_site_node(SkeletonExprSiteId::from_index(site as u32))),
+            selected,
+            "{literal}"
+        );
+    }
+}
+
+#[test]
+fn captured_binding_hubs_keep_many_reads_and_writes_linear() {
+    let graph_for = |count| {
+        let mut source = String::from("function root(x) { return () => {");
+        for ordinal in 0..count {
+            source.push_str(&format!("let value{ordinal} = x; x = {ordinal};"));
+        }
+        source.push_str("return [");
+        for ordinal in 0..count {
+            source.push_str(&format!("value{ordinal},"));
+        }
+        source.push_str("]; }; }");
+        let skeleton = indexed_returned_arrow(&source);
+        let graph = build_function_flow_graph(&skeleton);
+        let captured: Vec<_> = (0..graph.node_count())
+            .filter_map(|ordinal| {
+                let node = FlowNodeId::from_index(ordinal as u32);
+                match graph.node_kind(node) {
+                    FlowNodeKind::CapturedBinding(id) => Some((node, id)),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert_eq!(
+            captured.len(),
+            1,
+            "all occurrences share one exact captured variable"
+        );
+        assert_eq!(graph.captured_binding(captured[0].1).name.as_ref(), "x");
+        assert_eq!(graph.captured_binding_node(captured[0].1), captured[0].0);
+        assert_eq!(
+            skeleton.bindings.len(),
+            count,
+            "the captured variable is not a fabricated local declaration"
+        );
+        graph.edges().len()
+    };
+    let small = graph_for(32);
+    let large = graph_for(64);
+    assert!(
+        large <= small * 2 + 8,
+        "captured access edges grow linearly: {small} -> {large}"
+    );
+}
+
+#[test]
 fn flow_graph_builds_typed_edges_from_skeleton_alone() {
     let skeleton =
         skeleton_of("function myType() { const a = new Mytype(); const b = 1; return { a, b } }");
@@ -245,7 +414,10 @@ fn flow_graph_spread_entries_are_optional_unknown_path_writes() {
     let object_site = skeleton.return_sites[0].argument.expect("argument");
     let path_writes = out_path_writes(&graph, graph.expr_site_node(object_site));
     assert_eq!(path_writes.len(), 2);
-    let FlowEdgeKind::PathWrite { path, certainty } = &path_writes[0].kind else {
+    let FlowEdgeKind::PathWrite {
+        path, certainty, ..
+    } = &path_writes[0].kind
+    else {
         panic!("spread entry is a path write");
     };
     assert_eq!(path.as_ref(), &[SkeletonPathSegment::Computed]);
@@ -532,8 +704,7 @@ fn flow_graph_csr_out_edges_are_from_consistent() {
         skeleton_of("function e(a: number) { let b = a; b = a + 1; if (a) { b++; } return b; }");
     let graph = build_function_flow_graph(&skeleton);
     let mut total = 0usize;
-    for index in 0..graph.node_count() {
-        let node = FlowNodeId::from_index(index as u32);
+    for node in graph.nodes() {
         for edge in graph.out_edges(node) {
             assert_eq!(edge.from, node);
             total += 1;
@@ -541,4 +712,66 @@ fn flow_graph_csr_out_edges_are_from_consistent() {
     }
     assert_eq!(total, graph.edges().len());
     assert!(total > 0, "the fixture produces edges");
+}
+
+#[test]
+fn flow_graph_enumerates_every_node_family_and_empty_graphs() {
+    let populated = skeleton_of(
+        "function enumerate(x: number) { const y = x + 1; if (x) { return y; } return x; }",
+    );
+    let empty = FunctionBodySkeleton {
+        names: Arc::from([]),
+        regions: Arc::from([]),
+        bindings: Arc::from([]),
+        expr_sites: Arc::from([]),
+        return_sites: Arc::from([]),
+        writes: Arc::from([]),
+    };
+    let captured = indexed_returned_arrow("function root() { const x = 1; return () => x; }");
+    for (skeleton, captures) in [(populated, 0), (empty, 0), (captured, 1)] {
+        let graph = build_function_flow_graph(&skeleton);
+        let mut nodes = graph.nodes();
+        let expected = [
+            skeleton.bindings.len(),
+            skeleton.expr_sites.len(),
+            skeleton.return_sites.len(),
+            skeleton.regions.len(),
+            captures,
+        ];
+        let total: usize = expected.iter().sum();
+        assert_eq!(nodes.len(), total);
+        let mut families = [0usize; 5];
+        for index in 0..total {
+            let node = nodes.next().expect("every structural node is enumerated");
+            assert_eq!(node.index(), index, "enumeration is unique and ordered");
+            assert_eq!(nodes.len(), total - index - 1);
+            let reminted = match graph.node_kind(node) {
+                FlowNodeKind::Binding(id) => {
+                    families[0] += 1;
+                    graph.binding_node(id)
+                }
+                FlowNodeKind::ExprSite(id) => {
+                    families[1] += 1;
+                    graph.expr_site_node(id)
+                }
+                FlowNodeKind::ReturnSite(id) => {
+                    families[2] += 1;
+                    graph.return_site_node(id)
+                }
+                FlowNodeKind::Region(id) => {
+                    families[3] += 1;
+                    graph.region_node(id)
+                }
+                FlowNodeKind::CapturedBinding(id) => {
+                    families[4] += 1;
+                    assert_eq!(graph.captured_binding(id).name.as_ref(), "x");
+                    graph.captured_binding_node(id)
+                }
+            };
+            assert_eq!(node, reminted);
+            assert!(graph.out_edges(node).iter().all(|edge| edge.from == node));
+        }
+        assert_eq!(families, expected);
+        assert_eq!(nodes.next(), None);
+    }
 }

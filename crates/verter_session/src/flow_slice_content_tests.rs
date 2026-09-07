@@ -108,6 +108,62 @@ fn content_for(source: &str, name: &str) -> Arc<SliceContent> {
 }
 
 #[test]
+fn slice_binding_references_preserve_shadowed_capture_frames() {
+    use verter_semantic::analysis::flow::FlowBindingRef;
+    let content = content_for("function f(flag: boolean) { if (flag) { let twin = 1; return () => twin; } else { let twin = 2; return () => twin; } }", "f");
+    let SliceStatement::If {
+        consequent,
+        alternate: Some(alternate),
+        ..
+    } = &content.body.statements[0]
+    else {
+        panic!("conditional fixture");
+    };
+    let mut identities = Vec::new();
+    let mut functions = Vec::new();
+    for region in [consequent, alternate] {
+        let mut region: &SliceRegion = region;
+        while let [SliceStatement::Block(block)] = region.statements.as_ref() {
+            region = block;
+        }
+        let [SliceStatement::Binding { binding, .. }, SliceStatement::Return {
+            argument: Some(SliceExpr::NestedFunctionValue { body, bindings, .. }),
+            ..
+        }] = region.statements.as_ref()
+        else {
+            panic!("one declaration and one captured closure: {region:?}");
+        };
+        let identity = content
+            .bindings
+            .identity(*binding)
+            .expect("declaration identity");
+        let [SliceStatement::Return {
+            argument:
+                Some(SliceExpr::Local {
+                    binding: FlowBindingRef::Captured(captured),
+                    ..
+                }),
+            ..
+        }] = body.statements.as_ref()
+        else {
+            panic!("the nested frame reads an exact capture: {body:?}");
+        };
+        assert_eq!(captured, identity);
+        assert_ne!(bindings.function(), content.bindings.function());
+        identities.push(identity.clone());
+        functions.push(bindings.function().clone());
+    }
+    assert_ne!(
+        identities[0], identities[1],
+        "shadowed declarations never share capture storage"
+    );
+    assert_ne!(
+        functions[0], functions[1],
+        "each closure owns its local ID space"
+    );
+}
+
+#[test]
 fn optional_chain_after_active_type_predicate_lowers_to_gap() {
     let node = content_for(
         "export {};\n\
@@ -3279,7 +3335,10 @@ fn return_of_parameter_is_param_carrier() {
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
-            argument: Some(SliceExpr::Param { ordinal: 0 }),
+            argument: Some(SliceExpr::Param {
+                ordinal: 0,
+                binding: node.params[0].binding.expect("parameter binding")
+            }),
             freshness: SliceFreshness::Pinned,
         }],
     );
@@ -3326,6 +3385,7 @@ fn local_reaching_definition_is_binding_and_local() {
     );
     assert_eq!(node.body.statements.len(), 2);
     let SliceStatement::Binding {
+        binding,
         name,
         kind,
         init,
@@ -3356,6 +3416,7 @@ fn local_reaching_definition_is_binding_and_local() {
         node.body.statements[1],
         SliceStatement::Return {
             argument: Some(SliceExpr::Local {
+                binding: verter_semantic::analysis::flow::FlowBindingRef::Local(*binding),
                 name: Arc::from("x"),
                 param: None,
                 captured: false,
@@ -3598,7 +3659,10 @@ fn object_return_spread_of_a_frame_binding_reads_the_frame_binding() {
     };
     assert_eq!(
         source,
-        &SliceExpr::Param { ordinal: 0 },
+        &SliceExpr::Param {
+            ordinal: 0,
+            binding: node.params[0].binding.expect("parameter binding")
+        },
         "the frame-owned spread operand IS the parameter"
     );
     assert_eq!(member.key.static_name(), Some("x"));
@@ -3999,7 +4063,8 @@ fn typeof_guard_models_all_eight_kinds() {
             panic!("{spelling}: the test must model a Typeof guard: {guard:?}");
         };
         assert!(
-            matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty(),
+            matches!(subject.root, SliceNarrowRoot::Param { ordinal: 0, .. })
+                && subject.path.is_empty(),
             "{spelling}: the subject is the bare parameter: {guard:?}"
         );
         assert_eq!(
@@ -4082,7 +4147,8 @@ fn typeof_and_equality_guards_support_both_operand_orders_and_negation() {
             panic!("the test must model an EqLiteral guard: {guard:?}");
         };
         assert!(
-            matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty(),
+            matches!(subject.root, SliceNarrowRoot::Param { ordinal: 0, .. })
+                && subject.path.is_empty(),
             "{guard:?}"
         );
         assert!(
@@ -4123,7 +4189,7 @@ fn in_guard_and_instanceof_guard_model_their_closed_forms_and_negation() {
         };
         assert_eq!(key.as_ref(), "a", "{guard:?}");
         assert!(
-            matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty(),
+            matches!(subject.root, SliceNarrowRoot::Param { ordinal: 0, .. }) && subject.path.is_empty(),
             "{guard:?}"
         );
         assert_eq!(*n, negated, "{guard:?}");
@@ -4151,7 +4217,7 @@ fn in_guard_and_instanceof_guard_model_their_closed_forms_and_negation() {
             panic!("the test must model an Instanceof guard: {guard:?}");
         };
         assert!(
-            matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty(),
+            matches!(subject.root, SliceNarrowRoot::Param { ordinal: 0, .. }) && subject.path.is_empty(),
             "{guard:?}"
         );
         assert_eq!(ctor.as_ref(), "A", "{guard:?}");
@@ -4185,7 +4251,7 @@ fn truthy_guard_models_a_bare_parameter_and_a_member_path_subject() {
                 SliceGuard::Truthy {
                     ref subject,
                     negated: n,
-                } if matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty() && n == negated
+                } if matches!(subject.root, SliceNarrowRoot::Param { ordinal: 0, .. }) && subject.path.is_empty() && n == negated
             ),
             "a bare parameter's truthiness narrows the parameter itself, path-empty: {guard:?}"
         );
@@ -4207,7 +4273,7 @@ fn truthy_guard_models_a_bare_parameter_and_a_member_path_subject() {
         let SliceGuard::Truthy { subject, negated: n } = &guard else {
             panic!("the test must model a Truthy guard: {guard:?}");
         };
-        assert!(matches!(subject.root, SliceNarrowRoot::Param(0)), "{guard:?}");
+        assert!(matches!(subject.root, SliceNarrowRoot::Param { ordinal: 0, .. }), "{guard:?}");
         assert_eq!(
             subject.path.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
             vec!["y"],
@@ -4436,7 +4502,7 @@ fn a_binding_ineligible_for_the_alias_channel_still_models_its_own_truthiness() 
             matches!(
                 &guard,
                 SliceGuard::Truthy { subject, negated: false }
-                    if matches!(subject.root, SliceNarrowRoot::Local(ref name) if name.as_ref() == "c")
+                    if matches!(subject.root, SliceNarrowRoot::Local { ref name, .. } if name.as_ref() == "c")
                         && subject.path.is_empty()
             ),
             "{case}: the binding models its OWN truthiness, never the discarded initializer fact: {guard:?}"
@@ -4710,7 +4776,10 @@ fn truthiness_of_a_non_null_asserted_member_subject_names_the_asserted_reference
     assert!(!negated, "a bare truthiness test is not negated: {node:?}");
     assert_eq!(
         subject.root,
-        SliceNarrowRoot::Param(0),
+        SliceNarrowRoot::Param {
+            ordinal: 0,
+            binding: node.params[0].binding.expect("parameter binding")
+        },
         "the assertion is peeled to the parameter it wraps: {node:?}"
     );
     assert_eq!(

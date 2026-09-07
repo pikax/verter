@@ -39,6 +39,61 @@ fn names(path: &[&str]) -> Vec<Arc<str>> {
     path.iter().map(|name| Arc::from(*name)).collect()
 }
 
+#[test]
+fn planner_composes_member_reads_with_the_demanded_suffix() {
+    let source = "function f() { let x = {a: {b: 'wanted'}, b: 'sibling'}; return x.a; }";
+    let skeleton = skeleton_of(source);
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = plan_return(&skeleton, &graph, &["b"]);
+    for (literal, selected) in [("'wanted'", true), ("'sibling'", false)] {
+        let start = source.find(literal).unwrap() as u32;
+        let span = crate::analysis::flow::FrameSpan::rebase(
+            0,
+            verter_span::Span::new(start, start + literal.len() as u32),
+        );
+        let site = skeleton
+            .expr_sites
+            .iter()
+            .position(|site| site.span == span)
+            .unwrap();
+        assert_eq!(
+            plan.is_value(graph.expr_site_node(SkeletonExprSiteId::from_index(site as u32))),
+            selected,
+            "{literal}"
+        );
+    }
+}
+
+#[test]
+fn planner_bounds_a_self_growing_member_projection_cycle() {
+    let skeleton = skeleton_of("function f(x) { x = x.a; return x; }");
+    let graph = build_function_flow_graph(&skeleton);
+    let budget = FlowSliceBudget {
+        max_value_states: 64,
+        ..FlowSliceBudget::default()
+    };
+    let refused = ReturnPathPeeker::new(&graph)
+        .plan(&SliceDemand::for_return_projection(&skeleton, &[]), &budget)
+        .expect_err("a growing projection cycle must refuse instead of hanging or widening");
+    assert_eq!(refused.axis, FlowSliceBudgetAxis::ValueStates);
+    assert_eq!(refused.limit, 64);
+    assert_eq!(refused.observed, 65);
+}
+
+#[test]
+fn planner_keeps_mutable_member_definitions_across_conditional_and_later_writes() {
+    for source in [
+        "function f(flag) { let x = {}; x.a = 'first'; if(flag) x.a = 'second'; return x.a; }",
+        "function f() { let x = {}; x.a = 'first'; let before = x.a; x.a = 'second'; return before; }",
+    ] {
+        let skeleton = skeleton_of(source);
+        let graph = build_function_flow_graph(&skeleton);
+        let plan = plan_return(&skeleton, &graph, &[]);
+        let first = skeleton.writes.iter().find(|write| !write.path.is_empty()).unwrap();
+        assert!(plan.is_value(graph.expr_site_node(first.value.unwrap())), "runtime assignments have no graph-level overwrite proof: {source}");
+    }
+}
+
 fn plan_return(
     skeleton: &FunctionBodySkeleton,
     graph: &FunctionFlowGraph,
@@ -295,15 +350,15 @@ fn planner_multi_origin_unions_conditional_returns() {
     let arm_region = skeleton.return_sites[0].region;
     assert!(plan.is_effect_only(graph.region_node(arm_region)));
 
-    // The condition expression is not a value provider of `b`.
+    // Executing either selected return depends on the condition's value.
     let consequent_parent = skeleton.region(arm_region).parent.expect("consequent");
     let condition = skeleton
         .region(consequent_parent)
         .control_input
         .expect("condition input");
     assert!(
-        !plan.is_value(graph.expr_site_node(condition)),
-        "no narrowing-predicate edges exist yet — the condition is not value-selected"
+        plan.is_value(graph.expr_site_node(condition)),
+        "the region's control-input edge keeps the governing value selected"
     );
 }
 
@@ -353,6 +408,7 @@ fn planner_budget_exceeded_is_typed_refusal() {
     let tiny = FlowSliceBudget {
         max_return_sites: 256,
         max_selected_nodes: 1,
+        ..FlowSliceBudget::default()
     };
     let refused = ReturnPathPeeker::new(&graph)
         .plan(&demand, &tiny)
@@ -365,6 +421,7 @@ fn planner_budget_exceeded_is_typed_refusal() {
     let no_returns = FlowSliceBudget {
         max_return_sites: 0,
         max_selected_nodes: 4096,
+        ..FlowSliceBudget::default()
     };
     let refused = ReturnPathPeeker::new(&graph)
         .plan(&demand, &no_returns)

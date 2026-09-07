@@ -1074,7 +1074,8 @@ pub(crate) mod flow_obligation_state {
     use verter_identity::identity::{InputBasisId, ResultContractId};
     use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
     use verter_semantic::analysis::flow::{
-        SkeletonBindingId, SkeletonBindingKind, SkeletonExprSiteId, SkeletonRegionId,
+        FlowBindingRef, SkeletonBindingId, SkeletonBindingKind, SkeletonExprSiteId,
+        SkeletonRegionId,
     };
     use verter_semantic::analysis::function_program::FlowBindingIdentity;
 
@@ -1093,15 +1094,12 @@ pub(crate) mod flow_obligation_state {
     #[rustfmt::skip]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum FlowObligationOrigin { ContractDomain, Expansion(FlowExpansionRule), Additional }
-    /// The binding-slot identity of one binding obligation: the lexical
-    /// slot plus the cross-frame binding identity — never a fresh
-    /// identity. The planner populates both at plan time by resolving the
-    /// skeleton's binding index against the frame's binding inventory
-    /// (the ONE cross-frame authority whose slots ARE the
-    /// `FlowBindingIdentity.binding_slot` domain).
+    /// The exact subject of one binding obligation: a frame-local slot or
+    /// a graph-owned captured binding, plus its indexed declaration identity.
+    /// A captured subject never acquires a fabricated local declaration.
     #[rustfmt::skip]
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct FlowBindingBasis { pub binding: SkeletonBindingId, pub identity: FlowBindingIdentity }
+    pub struct FlowBindingBasis { pub binding: FlowBindingRef, pub identity: FlowBindingIdentity }
     /// The mandatory closed semantic identity of one planned obligation:
     /// every obligation names exactly the semantic subject it proves
     /// something about — the demand root and its derived program point,
@@ -1144,8 +1142,8 @@ pub(crate) mod flow_obligation_state {
         /// nested function DECLARATION's binding identity (the capture
         /// SET of a nested declaration body is beyond this skeleton's
         /// authority — nested bodies carry no reads here), or a closure
-        /// expression's captured binding the cross-frame inventory cannot
-        /// name (`identity: None`, e.g. a destructured parameter). The
+        /// expression's local binding the indexed correspondence cannot
+        /// name (`identity: None`). The
         /// obligation installs directly in the family's accepted typed
         /// gap.
         Capture { node: FlowNodeId, binding: SkeletonBindingId, identity: Option<FlowBindingIdentity> },

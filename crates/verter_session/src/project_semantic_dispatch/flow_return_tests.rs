@@ -2559,6 +2559,7 @@ pub(crate) fn flow_slice_budget_exceeded_is_return_only_at_the_memo() {
         .set_budget_for_test(FlowSliceBudget {
             max_return_sites: 256,
             max_selected_nodes: 1,
+            ..FlowSliceBudget::default()
         });
     with_dispatch(&host, |dispatch| {
         let key = flow_key(

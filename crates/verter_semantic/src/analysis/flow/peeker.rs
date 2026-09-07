@@ -28,10 +28,12 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_no_typeexpr::NoTypeExpr;
 
-use super::flow_graph::{FlowEdge, FlowEdgeClass, FlowEdgeKind, FlowNodeId, FunctionFlowGraph};
+use super::flow_graph::{
+    FlowEdgeClass, FlowEdgeKind, FlowNodeId, FunctionFlowGraph, PathWriteSource,
+};
 use super::flow_ir::ReturnSlicePlan;
 use super::{
     FlowNameId, FunctionBodySkeleton, SkeletonExprSiteId, SkeletonPathSegment,
@@ -165,6 +167,9 @@ pub struct FlowSliceBudget {
     pub max_return_sites: u32,
     /// Maximum selected nodes (value + effect + region) in one slice.
     pub max_selected_nodes: u32,
+    /// Maximum combined value visits and interned projection tails. This
+    /// bounds graph cycles that grow a demanded member path indefinitely.
+    pub max_value_states: u32,
 }
 
 impl Default for FlowSliceBudget {
@@ -172,6 +177,7 @@ impl Default for FlowSliceBudget {
         Self {
             max_return_sites: 256,
             max_selected_nodes: 4096,
+            max_value_states: 65_536,
         }
     }
 }
@@ -183,6 +189,8 @@ pub enum FlowSliceBudgetAxis {
     ReturnSites,
     /// Too many selected nodes.
     SelectedNodes,
+    /// Too many value visits or interned projection tails.
+    ValueStates,
 }
 
 /// A typed budget trip: the axis, its limit, and the observed count at
@@ -212,12 +220,12 @@ pub struct ReturnPathPeeker<'g> {
 /// One worklist item of the two-frontier reachability.
 enum WorkItem {
     /// Value-provider frontier: the node's value contributes to the
-    /// demanded projection `path[path_start..]`.
+    /// demanded projection stored in the shared path arena.
     Value {
         /// The reached node.
         node: FlowNodeId,
-        /// Start index of the remaining demanded path.
-        path_start: u32,
+        /// Interned remaining demanded path; zero is the whole value.
+        path: u32,
     },
     /// Effect frontier: the node's evaluation affects the slice even
     /// when its value is non-contributing.
@@ -260,7 +268,7 @@ impl<'g> ReturnPathPeeker<'g> {
         }
 
         let mut state = PlanState {
-            demand_path: &demand.path,
+            paths: PathArena::default(),
             value_nodes: FxHashSet::default(),
             effect_nodes: FxHashSet::default(),
             selected: FxHashSet::default(),
@@ -268,22 +276,23 @@ impl<'g> ReturnPathPeeker<'g> {
             effect_visited: FxHashSet::default(),
             worklist: Vec::new(),
         };
+        let mut path = 0;
+        for segment in demand.path.iter().rev() {
+            path = state.prepend(segment.clone(), path, budget)?;
+        }
 
         for origin in demand.origins.iter() {
             let node = match origin {
                 SliceOrigin::Return(id) => self.graph.return_site_node(*id),
                 SliceOrigin::Expr(id) => self.graph.expr_site_node(*id),
             };
-            state.worklist.push(WorkItem::Value {
-                node,
-                path_start: 0,
-            });
+            state.worklist.push(WorkItem::Value { node, path });
         }
 
         while let Some(item) = state.worklist.pop() {
             match item {
-                WorkItem::Value { node, path_start } => {
-                    self.process_value(&mut state, node, path_start, budget)?;
+                WorkItem::Value { node, path } => {
+                    self.process_value(&mut state, node, path, budget)?;
                 }
                 WorkItem::Effect { node } => {
                     self.process_effect(&mut state, node, budget)?;
@@ -291,12 +300,17 @@ impl<'g> ReturnPathPeeker<'g> {
             }
         }
 
+        let value_states = (state.value_visited.len() + state.paths.tails.len()) as u32;
         let mut value: Vec<FlowNodeId> = state.value_nodes.into_iter().collect();
         value.sort_by_key(|node| node.index());
         let mut effect_only: Vec<FlowNodeId> = state
             .effect_nodes
             .into_iter()
-            .filter(|node| !value.iter().any(|selected| selected == node))
+            .filter(|node| {
+                value
+                    .binary_search_by_key(&node.index(), |selected| selected.index())
+                    .is_err()
+            })
             .collect();
         effect_only.sort_by_key(|node| node.index());
 
@@ -305,6 +319,7 @@ impl<'g> ReturnPathPeeker<'g> {
             demand_path: Arc::clone(&demand.path),
             value_nodes: Arc::from(value.into_boxed_slice()),
             effect_only_nodes: Arc::from(effect_only.into_boxed_slice()),
+            value_states,
         })
     }
 
@@ -314,44 +329,34 @@ impl<'g> ReturnPathPeeker<'g> {
     /// provider runs its effects).
     fn process_value(
         &self,
-        state: &mut PlanState<'_>,
+        state: &mut PlanState,
         node: FlowNodeId,
-        path_start: u32,
+        path: u32,
         budget: &FlowSliceBudget,
     ) -> Result<(), FlowSliceBudgetExceeded> {
-        if !state.value_visited.insert((node, path_start)) {
+        if !state.value_visited.insert((node, path)) {
             return Ok(());
         }
+        state.check_value_budget(budget)?;
         state.value_nodes.insert(node);
         select(state, node, budget)?;
         state.worklist.push(WorkItem::Effect { node });
 
-        let remaining_len = state.demand_path.len().saturating_sub(path_start as usize);
         let edges = self.graph.out_edges(node);
 
         // Value-def edges thread the remaining demand unchanged: return
         // argument, reaching definition, binding read.
         for edge in edges {
-            if edge.kind.class() == FlowEdgeClass::ValueDef {
-                state.worklist.push(WorkItem::Value {
-                    node: edge.to,
-                    path_start,
-                });
-            }
-        }
-
-        if remaining_len == 0 {
-            // Whole-value demand: every path-write entry contributes its
-            // whole written value.
-            for edge in edges {
-                if edge.kind.class() == FlowEdgeClass::PathWrite {
-                    state.worklist.push(WorkItem::Value {
-                        node: edge.to,
-                        path_start,
-                    });
-                }
-            }
-            return Ok(());
+            let projection = match &edge.kind {
+                FlowEdgeKind::ValueDef => &[][..],
+                FlowEdgeKind::ReadProjection { path } => path.as_ref(),
+                _ => continue,
+            };
+            let projected = state.project(projection, path, budget)?;
+            state.worklist.push(WorkItem::Value {
+                node: edge.to,
+                path: projected,
+            });
         }
 
         // Path-write scan, right-to-left (descending source ordinal): a
@@ -360,32 +365,45 @@ impl<'g> ReturnPathPeeker<'g> {
         // earlier candidates remain reachable past them. Effect
         // reachability is untouched — it flows through the effect
         // frontier regardless of this stop.
-        let path_writes: Vec<&FlowEdge> = edges
-            .iter()
-            .filter(|edge| edge.kind.class() == FlowEdgeClass::PathWrite)
-            .collect();
-        for edge in path_writes.into_iter().rev() {
-            let FlowEdgeKind::PathWrite { path, certainty } = &edge.kind else {
-                continue;
+        let mut stopped_object_entries = false;
+        for edge in edges.iter().rev() {
+            let (write_path, certainty, object_entry) = match &edge.kind {
+                FlowEdgeKind::PathWrite {
+                    path,
+                    certainty,
+                    source,
+                } => (
+                    path,
+                    certainty,
+                    *source == PathWriteSource::ObjectLiteralEntry,
+                ),
+                _ => continue,
             };
-            match match_write_path(path, state.demand_path, path_start) {
+            if object_entry && stopped_object_entries {
+                continue;
+            }
+            match match_write_path(write_path, &state.paths, path) {
                 WritePathMatch::None => {}
-                WritePathMatch::Static { consumed } => {
+                WritePathMatch::Static {
+                    consumed,
+                    remainder,
+                } => {
                     state.worklist.push(WorkItem::Value {
                         node: edge.to,
-                        path_start: path_start + consumed,
+                        path: remainder,
                     });
-                    if *certainty == SkeletonWriteCertainty::Definite
-                        && path.len() == 1
+                    if object_entry
+                        && *certainty == SkeletonWriteCertainty::Definite
+                        && write_path.len() == 1
                         && consumed == 1
                     {
                         // Definite-present write for the demanded head:
                         // the value is fully determined here — earlier
                         // candidates are value-suppressed.
-                        break;
+                        stopped_object_entries = true;
                     }
                 }
-                WritePathMatch::Unknown { consumed } => {
+                WritePathMatch::Unknown { remainder } => {
                     // An unknown-key write may either provision the
                     // demanded key (consume it) or merge a whole source
                     // object (spread — the demand projects INTO the
@@ -393,11 +411,11 @@ impl<'g> ReturnPathPeeker<'g> {
                     // reachable; neither stops the scan.
                     state.worklist.push(WorkItem::Value {
                         node: edge.to,
-                        path_start: path_start + consumed,
+                        path: remainder,
                     });
                     state.worklist.push(WorkItem::Value {
                         node: edge.to,
-                        path_start,
+                        path,
                     });
                 }
             }
@@ -405,12 +423,12 @@ impl<'g> ReturnPathPeeker<'g> {
         Ok(())
     }
 
-    /// Effect-frontier step: select `node` for effect and follow ONLY
-    /// the effect-family out-edges (eval-effect + control-region). Value
-    /// materialization never enters through this frontier.
+    /// Effect-frontier step: select `node` for effect and follow the
+    /// effect-family edges. A typed ControlInput edge alone crosses to
+    /// a whole-value demand for the expression governing execution.
     fn process_effect(
         &self,
-        state: &mut PlanState<'_>,
+        state: &mut PlanState,
         node: FlowNodeId,
         budget: &FlowSliceBudget,
     ) -> Result<(), FlowSliceBudgetExceeded> {
@@ -420,6 +438,13 @@ impl<'g> ReturnPathPeeker<'g> {
         state.effect_nodes.insert(node);
         select(state, node, budget)?;
         for edge in self.graph.out_edges(node) {
+            if matches!(edge.kind, FlowEdgeKind::ControlInput) {
+                state.worklist.push(WorkItem::Value {
+                    node: edge.to,
+                    path: 0,
+                });
+                continue;
+            }
             match edge.kind.class() {
                 FlowEdgeClass::EvalEffect | FlowEdgeClass::ControlRegion => {
                     state.worklist.push(WorkItem::Effect { node: edge.to });
@@ -432,8 +457,8 @@ impl<'g> ReturnPathPeeker<'g> {
 }
 
 /// Traversal state of one plan.
-struct PlanState<'d> {
-    demand_path: &'d [DemandSegment],
+struct PlanState {
+    paths: PathArena,
     value_nodes: FxHashSet<FlowNodeId>,
     effect_nodes: FxHashSet<FlowNodeId>,
     selected: FxHashSet<FlowNodeId>,
@@ -442,9 +467,64 @@ struct PlanState<'d> {
     worklist: Vec<WorkItem>,
 }
 
+/// Hash-consed projection lists share suffixes when read edges prepend
+/// member paths. A cyclic projection allocates only its new prefix, and
+/// the same budget bounds both allocated tails and visited value states.
+#[derive(Default)]
+struct PathArena {
+    tails: Vec<(DemandSegment, u32)>,
+    ids: FxHashMap<(DemandSegment, u32), u32>,
+}
+
+impl PlanState {
+    fn check_value_budget(&self, budget: &FlowSliceBudget) -> Result<(), FlowSliceBudgetExceeded> {
+        let observed = self
+            .value_visited
+            .len()
+            .saturating_add(self.paths.tails.len());
+        if observed > budget.max_value_states as usize {
+            return Err(FlowSliceBudgetExceeded {
+                axis: FlowSliceBudgetAxis::ValueStates,
+                limit: budget.max_value_states,
+                observed: u32::try_from(observed).unwrap_or(u32::MAX),
+            });
+        }
+        Ok(())
+    }
+
+    fn prepend(
+        &mut self,
+        head: DemandSegment,
+        tail: u32,
+        budget: &FlowSliceBudget,
+    ) -> Result<u32, FlowSliceBudgetExceeded> {
+        let key = (head, tail);
+        if let Some(id) = self.paths.ids.get(&key) {
+            return Ok(*id);
+        }
+        self.paths.tails.push(key.clone());
+        self.check_value_budget(budget)?;
+        let id = self.paths.tails.len() as u32;
+        self.paths.ids.insert(key, id);
+        Ok(id)
+    }
+
+    fn project(
+        &mut self,
+        prefix: &[FlowNameId],
+        mut path: u32,
+        budget: &FlowSliceBudget,
+    ) -> Result<u32, FlowSliceBudgetExceeded> {
+        for name in prefix.iter().rev() {
+            path = self.prepend(DemandSegment::Named(*name), path, budget)?;
+        }
+        Ok(path)
+    }
+}
+
 /// Count a node toward the selection budget.
 fn select(
-    state: &mut PlanState<'_>,
+    state: &mut PlanState,
     node: FlowNodeId,
     budget: &FlowSliceBudget,
 ) -> Result<(), FlowSliceBudgetExceeded> {
@@ -469,33 +549,34 @@ enum WritePathMatch {
     Static {
         /// Demand segments consumed by the write path.
         consumed: u32,
+        /// Interned demand remaining after the matching write prefix.
+        remainder: u32,
     },
     /// An unknown-key (computed / spread) write: `consumed` segments are
     /// satisfied under the provisioning interpretation; the merge
     /// interpretation consumes none.
     Unknown {
-        /// Demand segments consumed under the provisioning reading.
-        consumed: u32,
+        /// Interned demand remaining under the provisioning reading.
+        remainder: u32,
     },
 }
 
-/// Match a write path against the remaining demand `demand[path_start..]`.
+/// Match a write path against an interned remaining demand.
 /// Static segments must equal the demanded key; computed segments match
 /// any demanded key; a write deeper than the demand still provides (its
 /// value occupies a sub-path of the demanded value).
 fn match_write_path(
     write_path: &[SkeletonPathSegment],
-    demand: &[DemandSegment],
-    path_start: u32,
+    demand: &PathArena,
+    mut remainder: u32,
 ) -> WritePathMatch {
-    let remaining = &demand[(path_start as usize).min(demand.len())..];
-    if write_path.is_empty() {
-        // Whole-slot write: provides the whole remaining demand.
-        return WritePathMatch::Static { consumed: 0 };
-    }
     let mut unknown = false;
-    let compared = write_path.len().min(remaining.len());
-    for (write_segment, demand_segment) in write_path.iter().zip(remaining.iter()) {
+    let mut consumed = 0;
+    for write_segment in write_path {
+        if remainder == 0 {
+            break;
+        }
+        let (demand_segment, tail) = &demand.tails[remainder as usize - 1];
         match (write_segment, demand_segment) {
             (SkeletonPathSegment::Static(write_name), DemandSegment::Named(demand_name)) => {
                 if write_name != demand_name {
@@ -509,11 +590,15 @@ fn match_write_path(
                 unknown = true;
             }
         }
+        remainder = *tail;
+        consumed += 1;
     }
-    let consumed = u32::try_from(compared).unwrap_or(u32::MAX);
     if unknown {
-        WritePathMatch::Unknown { consumed }
+        WritePathMatch::Unknown { remainder }
     } else {
-        WritePathMatch::Static { consumed }
+        WritePathMatch::Static {
+            consumed,
+            remainder,
+        }
     }
 }

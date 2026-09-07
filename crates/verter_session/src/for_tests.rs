@@ -773,11 +773,11 @@ pub use crate::project_semantic_dispatch::flow_solve::*;
 /// frame's real binding inventory from the `FunctionProgramIndex`.
 pub struct FlowGraphFixtureForTests {
     bound: crate::cache_runtime::flow_slice_node::BoundFlowGraph,
-    inventory: FlowBindingInventory,
 }
 
 #[rustfmt::skip]
 impl FlowGraphFixtureForTests {
+    pub fn program_key(&self) -> &verter_semantic::analysis::function_program::FunctionProgramKey { &self.bound.key().function }
     /// The ONE structural plan the production hash node would retain for
     /// this demand over this fixture's bound graph: planned once by graph
     /// reachability and sealed with the slice identity minted over the
@@ -813,7 +813,22 @@ impl FlowGraphFixtureForTests {
     /// for another graph or another demand must be a typed planning
     /// error, never a proof plan.
     pub fn build_plan_with_retained(&self, request: FlowDemandRequest, retained: &PlannedFlowSlice) -> Result<FlowDemandPlan, FlowDemandPlanError> {
-        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, retained, &self.inventory)
+        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, retained)
+    }
+
+    pub fn prepare_execution_with_retained(&self, request: &FlowDemandRequest, retained: &PlannedFlowSlice) -> Result<std::sync::Arc<FlowExecutionSelection>, FlowDemandPlanError> {
+        crate::project_semantic_dispatch::flow_solve::prepare_flow_execution(request, &self.bound, retained)
+    }
+
+    pub fn build_plan_from_execution(&self, execution: std::sync::Arc<FlowExecutionSelection>, additional: std::sync::Arc<[FlowRequirement]>) -> Result<FlowDemandPlan, FlowDemandPlanError> {
+        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan_from_execution(execution, &self.bound, additional)
+    }
+
+    /// The product-lattice inputs over this fixture's store-bound graph:
+    /// the graph plus the frame's binding identities, resolved through the
+    /// SAME single slot-numbering authority the demand planner uses.
+    pub fn product_inputs(&self) -> FlowProductInputs {
+        FlowProductInputs::for_bound_graph(&self.bound)
     }
 }
 
@@ -824,7 +839,7 @@ impl FlowGraphFixtureForTests {
 /// frame's binding inventory through the real `FunctionProgramIndex`.
 #[rustfmt::skip]
 pub fn flow_graph_fixture_for_tests(source: &str, body_hash_tag: u8) -> FlowGraphFixtureForTests {
-    flow_graph_fixture(source, body_hash_tag, verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts))
+    flow_graph_fixture(source, body_hash_tag, verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts), None)
 }
 
 /// The same fixture under a different runtime-authoritative language row:
@@ -833,13 +848,18 @@ pub fn flow_graph_fixture_for_tests(source: &str, body_hash_tag: u8) -> FlowGrap
 /// exactly the source-identity axes.
 #[rustfmt::skip]
 pub fn flow_graph_fixture_for_tests_with_language(source: &str, body_hash_tag: u8, file_language: verter_language::FileLanguage) -> FlowGraphFixtureForTests {
-    flow_graph_fixture(source, body_hash_tag, file_language)
+    flow_graph_fixture(source, body_hash_tag, file_language, None)
 }
 
 #[rustfmt::skip]
-fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_language::FileLanguage) -> FlowGraphFixtureForTests {
-    use verter_semantic::analysis::flow::{FunctionBodySource, build_function_body_skeleton};
-    use verter_semantic::analysis::function_program::{build_function_program_index, FunctionDeclarationRef, FunctionProgramKey};
+pub fn flow_graph_fixture_for_tests_nested(source: &str, body_hash_tag: u8, nested_declaration_name: &str) -> FlowGraphFixtureForTests {
+    flow_graph_fixture(source, body_hash_tag, verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts), Some(nested_declaration_name))
+}
+
+#[rustfmt::skip]
+fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_language::FileLanguage, nested: Option<&str>) -> FlowGraphFixtureForTests {
+    use verter_semantic::analysis::flow::{FunctionBodySource, build_indexed_function_body_skeleton};
+    use verter_semantic::analysis::function_program::{build_function_program_index, resolve_function_node, FunctionNode};
     use verter_semantic::analysis::top_level_owners::TopLevelOwnerTable;
     let oxc_source_type = match &file_language {
         verter_language::FileLanguage::Script { source_type, .. } => match source_type {
@@ -860,14 +880,28 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     let function = parsed.program.body.iter().find_map(|s| match s { oxc_ast::ast::Statement::FunctionDeclaration(f) => Some(f), _ => None }).expect("fixture must contain a function declaration");
     let name = function.id.as_ref().expect("named function").name.as_str();
     let canonical_id: std::sync::Arc<str> = std::sync::Arc::from("/flow_solve_fixture.ts");
-    let skeleton = build_function_body_skeleton(&FunctionBodySource::from_function(function).expect("bodied function"));
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index = build_function_program_index(&parsed.program, source, &owners, canonical_id.clone());
-    let declaration = FunctionDeclarationRef { owner: verter_type_expr::TopLevelOwnerId::ordinary_file(), name: std::sync::Arc::from(name), space: verter_semantic::facts::SymbolSpace::Value };
-    let function = FunctionProgramKey { declaration, part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody, overload_ordinal: 0 };
-    let inventory = FlowBindingInventory {
-        bindings: std::sync::Arc::clone(&index.get(&function).expect("the fixture function is indexed").entry().bindings),
+    let entry = if let Some(nested_name) = nested {
+        let mut matching = index.matches_named(name).filter(|candidate| {
+            candidate.entry().lexical_parent.is_some() && resolve_function_node(&parsed.program, &candidate.entry().locator).is_some_and(|resolved| {
+                matches!(resolved.node, FunctionNode::Function(func) if func.id.as_ref().is_some_and(|id| id.name.as_str() == nested_name))
+            })
+        });
+        let found = matching.next().expect("named nested fixture function");
+        assert!(matching.next().is_none(), "nested fixture name must be unique");
+        found.entry()
+    } else {
+        index.value_function(verter_type_expr::TopLevelOwnerId::ordinary_file(), name, &verter_type_expr::facts::FunctionPartIdentity::DeclarationBody, 0).expect("the fixture function is indexed").entry()
     };
+    let resolved = resolve_function_node(&parsed.program, &entry.locator).expect("exact fixture function locator");
+    let body = match resolved.node {
+        FunctionNode::Function(func) if func.r#type == oxc_ast::ast::FunctionType::FunctionExpression => FunctionBodySource::from_function_expression(func).expect("bodied expression"),
+        FunctionNode::Function(func) => FunctionBodySource::from_function(func).expect("bodied declaration"),
+        FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+    };
+    let prepared = build_indexed_function_body_skeleton(&body, entry).expect("indexed fixture structure");
+    let function = entry.key.clone();
     let key = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
         canonical_id, function, parse_env_hash: [0u8; 16],
         flow_body_stable_hash: [body_hash_tag; 16], flow_body_exact_hash: [body_hash_tag; 16],
@@ -875,8 +909,8 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
         build_toolchain_fingerprint: crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
     };
     let store = crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new();
-    let bound = store.mint_bound_flow_graph(key, skeleton);
-    FlowGraphFixtureForTests { bound, inventory }
+    let bound = store.mint_bound_flow_graph(key, prepared);
+    FlowGraphFixtureForTests { bound }
 }
 
 /// Mint the hermetic value payload: a clean flow-return result over `return_type`.

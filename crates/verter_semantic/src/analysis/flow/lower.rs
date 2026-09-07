@@ -58,7 +58,9 @@ pub fn lower_slice_plan(
             },
         )),
         FlowNodeKind::Binding(binding) => selected_bindings.push((binding, value)),
-        FlowNodeKind::ReturnSite(_) | FlowNodeKind::Region(_) => {}
+        FlowNodeKind::ReturnSite(_)
+        | FlowNodeKind::Region(_)
+        | FlowNodeKind::CapturedBinding(_) => {}
     };
     for node in plan.value_nodes.iter() {
         classify(*node, true);
@@ -108,10 +110,13 @@ pub fn lower_slice_plan(
                         Arc::from(Vec::new().into_boxed_slice()),
                         super::SkeletonWriteCertainty::Definite,
                     ),
-                    FlowEdgeKind::PathWrite { path, certainty } => {
-                        (lower_path(path, skeleton), *certainty)
-                    }
-                    FlowEdgeKind::EvalEffect | FlowEdgeKind::ControlRegion => continue,
+                    FlowEdgeKind::PathWrite {
+                        path, certainty, ..
+                    } => (lower_path(path, skeleton), *certainty),
+                    FlowEdgeKind::EvalEffect
+                    | FlowEdgeKind::ControlRegion
+                    | FlowEdgeKind::ControlInput
+                    | FlowEdgeKind::ReadProjection { .. } => continue,
                 };
                 let FlowNodeKind::ExprSite(site) = graph.node_kind(edge.to) else {
                     continue;
