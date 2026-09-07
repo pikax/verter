@@ -1039,7 +1039,7 @@ pub(crate) fn build_flow_demand_plan(
 /// registered [`FlowExpansionRule`]s, in domain rank, ascending node
 /// index, edge class and source ordinal order. Every obligation spec
 /// carries its closed semantic identity (populated from the skeleton/graph
-/// and the frame's binding inventory) and its exact evidence contract.
+/// and the bound graph's authoritative binding map) and its exact evidence contract.
 /// Obligation insertion is budget-checked BEFORE each append: the first
 /// excess returns the typed budget error and the remaining population is
 /// never constructed or scanned.

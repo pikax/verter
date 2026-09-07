@@ -909,7 +909,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
         build_toolchain_fingerprint: crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
     };
     let store = crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new();
-    let bound = store.mint_bound_flow_graph(key, prepared.skeleton, entry).expect("fixture binding correspondence");
+    let bound = store.mint_bound_flow_graph(key, prepared);
     FlowGraphFixtureForTests { bound }
 }
 

@@ -63,12 +63,12 @@ use verter_semantic::analysis::flow::lower::lower_slice_plan;
 use verter_semantic::analysis::flow::peeker::{
     FlowSliceBudget, FlowSliceBudgetExceeded, ReturnPathPeeker, SliceDemand,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use verter_semantic::analysis::flow::prepare_function_body_skeleton;
 use verter_semantic::analysis::flow::{
     FlowBindingMap, FlowBindingMapError, FunctionBodySkeleton, PreparedFunctionBodySkeleton,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use verter_semantic::analysis::function_program::FunctionProgramEntry;
 use verter_semantic::analysis::function_program::FunctionProgramKey;
 
@@ -268,7 +268,7 @@ pub(crate) struct FlowGraphBundle {
 /// The one bundle construction. Bindings come from the pinned indexed
 /// entry, and the graph derives from the skeleton alone. No demand or
 /// caller-authored inventory can initialize the cached binding authority.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn build_bundle(
     skeleton: FunctionBodySkeleton,
     entry: &FunctionProgramEntry,
@@ -375,32 +375,29 @@ impl FunctionFlowGraphStore {
         })
     }
 
-    /// Mint the bound graph for `key` over `skeleton` — the hermetic
-    /// fixture path. The bundle is built through the SAME construction
-    /// the memoizing path uses ([`build_bundle`]) and sealed with the
-    /// key, so a demand plan can only ever name the graph it actually
-    /// planned over.
+    /// Seal a fixture built through the production indexed structural owner,
+    /// retaining its already-prepared binding map without rebuilding it.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn mint_bound_flow_graph(
         &self,
         key: FlowSliceFunctionKey,
-        skeleton: FunctionBodySkeleton,
-        entry: &FunctionProgramEntry,
-    ) -> Result<BoundFlowGraph, FlowBindingMapError> {
+        prepared: PreparedFunctionBodySkeleton,
+    ) -> BoundFlowGraph {
         assert_eq!(
-            key.function, entry.key,
-            "fixture entry must match its content key"
+            &key.function,
+            prepared.bindings.function(),
+            "prepared fixture must match its content key"
         );
         let bundle = match self.entries.entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(occupied) => Arc::clone(occupied.get()),
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                let bundle = Arc::new(build_bundle(skeleton, entry)?);
+                let bundle = Arc::new(build_prepared_bundle(prepared));
                 self.builds.fetch_add(1, Ordering::Relaxed);
                 vacant.insert(Arc::clone(&bundle));
                 bundle
             }
         };
-        Ok(BoundFlowGraph { key, bundle })
+        BoundFlowGraph { key, bundle }
     }
 
     /// Non-blocking peek at the already-memoized bundle for `key` — the
