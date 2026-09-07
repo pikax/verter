@@ -642,8 +642,8 @@ impl FlowProductExecution {
         if !Rc::ptr_eq(&self.scope, &state.scope) || !Rc::ptr_eq(&self.scope, &site.scope) {
             return self.reject(FlowProductFailure::ScopeMismatch);
         }
-        let mut staged: smallvec::SmallVec<[((usize, usize), Option<FlowProductValue>); 5]> =
-            smallvec::SmallVec::new();
+        type StagedWrite = ((usize, usize), Option<FlowProductValue>);
+        let mut staged: smallvec::SmallVec<[StagedWrite; 5]> = smallvec::SmallVec::new();
         let mut active = state.values.len();
         let mut declared = self.scope.declared_active.borrow().len();
         for transfer in transfers {
