@@ -64,7 +64,9 @@ substrate's key contract forbids.
 4. **The primary enumeration API expresses iteration.** The long-term surface is
    `FunctionFlowGraph::nodes() -> impl ExactSizeIterator<Item = FlowNodeId> + '_`.
    It yields every valid node exactly once in ascending graph-local index order,
-   including bindings, expression sites, return sites, and control regions. Creating
+   including local and captured bindings, expression sites, return sites, and control
+   regions. The contract extends to every graph-owned node family; captured binding
+   construction remains the prerequisite owner's responsibility. Creating
    and advancing the iterator take constant time and allocate nothing; a full traversal
    is O(node_count) with constant auxiliary space. The graph alone mints its ids.
    Migrate enumeration callers to this surface and remove `node_at` in the same change
@@ -118,7 +120,7 @@ typed degradation, and finalization authority remain unchanged.
 Extend existing focused coverage where possible; each new assertion must discriminate a
 plausible contract failure.
 
-- Owner enumeration: every valid node appears exactly once across all four families,
+- Owner enumeration: every valid node appears exactly once across all graph-owned families,
   empty graphs yield no nodes, and enumeration agrees with the family constructors and
   CSR edges. If `node_at` remains, `node_count()` and `usize::MAX` return `None`.
 - Product scope: foreign-graph and foreign-version keys/seeds cannot affect another
@@ -138,7 +140,7 @@ plausible contract failure.
   Strictly worse than one read-only accessor on the owner.
 - **Enumerate only binding nodes.** The product lattice is defined over the whole node
   space (expression sites and return sites carry reaching values; regions carry guard
-  facts), so the owner API must cover all four families. This does not require every
+  facts), so the owner API must cover all graph-owned families. This does not require every
   query to evaluate all nodes.
 - **Treat dense indexing as the only enumeration API.** `node_at` is valid indexed
   lookup, but forcing every enumeration caller to pair it with `node_count()` adds a

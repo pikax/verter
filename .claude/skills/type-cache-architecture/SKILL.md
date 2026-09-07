@@ -115,7 +115,7 @@ the hash/lower nodes; it is never cached as absence or replaced by an empty map.
 
 `DeclBodyMemo::function_flow_structure` invokes the indexed current-frame
 builder under the retained parse lease and returns `PreparedFunctionBodySkeleton`
-(skeleton and binding map together). Nested capture paths come from the pinned
+(skeleton and binding map together, private fields with immutable views). The production graph builder accepts only that prepared witness, and never resolves names. Nested capture subjects, including write-only captures, and actual read paths come from the pinned
 index; this ingress never recursively constructs child skeletons. The source
 derives the graph from that prepared skeleton and publishes all three artifacts
 atomically.
@@ -130,7 +130,7 @@ control flow executes them. `ControlInput` edges keep the value
 that governs an executed region selected. The planner interns projection tails
 and bounds their count plus value visits with `max_value_states`; a growing
 projection cycle returns typed `ValueStates` non-admission. Selected projection
-payloads are content-bearing slice-hash inputs.
+payloads are content-bearing slice-hash inputs. The peeker alone constructs `ReturnSlicePlan`; immutable getters expose its selection and measured work. Only the cache owner can construct a production `PlannedFlowSlice` pair, so callers cannot understate retained work while reusing the same hash.
 
 The graph key includes the serving `ParseKey`, whose content digest pins the
 whole lexical source context. Inserting an ancestor declaration can change an

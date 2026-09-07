@@ -62,10 +62,10 @@ pub fn lower_slice_plan(
         | FlowNodeKind::Region(_)
         | FlowNodeKind::CapturedBinding(_) => {}
     };
-    for node in plan.value_nodes.iter() {
+    for node in plan.value_nodes().iter() {
         classify(*node, true);
     }
-    for node in plan.effect_only_nodes.iter() {
+    for node in plan.effect_only_nodes().iter() {
         classify(*node, false);
     }
     selected_sites.sort_by_key(|(site, _)| site.index());
@@ -276,7 +276,7 @@ pub fn lower_slice_plan(
     // ── Returns + expression origins ────────────────────────────────
     let mut returns: Vec<FlowReturnEntry> = Vec::new();
     let mut expression_origins: Vec<FlowExprId> = Vec::new();
-    for origin in plan.origins.iter() {
+    for origin in plan.origins().iter() {
         match origin {
             SliceOrigin::Return(id) => {
                 let site = skeleton.return_site(*id);
@@ -297,7 +297,7 @@ pub fn lower_slice_plan(
     returns.sort_by_key(|entry| entry.ordinal);
 
     FlowSliceIR {
-        demanded_path: lower_demand_path(&plan.demand_path, skeleton),
+        demanded_path: lower_demand_path(plan.demand_path(), skeleton),
         slots: Arc::from(slots.into_boxed_slice()),
         exprs: Arc::from(exprs.into_boxed_slice()),
         effects: Arc::from(effects.into_boxed_slice()),

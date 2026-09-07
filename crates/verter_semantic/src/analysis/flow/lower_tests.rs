@@ -6,35 +6,17 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::analysis::flow::flow_graph::build_function_flow_graph;
+use crate::analysis::flow::flow_graph::build_function_flow_graph_for_test as build_function_flow_graph;
 use crate::analysis::flow::flow_ir::{
     FlowCallee, FlowDef, FlowEffect, FlowEffectTarget, FlowExpr, FlowExprId, FlowExprRole,
     FlowExprShape, FlowObjectEntry, FlowObjectKey, FlowPathSegment, FlowRead, FlowReturnEntry,
     FlowSliceIR, FlowSlot, FlowSlotId, ReturnAccumulator,
 };
 use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
-use crate::analysis::flow::{
-    build_function_body_skeleton, FrameSpan, FunctionBodySkeleton, FunctionBodySource,
-    SkeletonWriteCertainty,
-};
+use crate::analysis::flow::{FrameSpan, FunctionBodySkeleton, SkeletonWriteCertainty};
 
 fn skeleton_of(source: &str) -> FunctionBodySkeleton {
-    let allocator = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::ts();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
-    assert!(
-        ret.errors.is_empty(),
-        "fixture must parse: {:?}",
-        ret.errors
-    );
-    for statement in &ret.program.body {
-        if let oxc_ast::ast::Statement::FunctionDeclaration(function) = statement {
-            if let Some(body_source) = FunctionBodySource::from_function(function) {
-                return build_function_body_skeleton(&body_source);
-            }
-        }
-    }
-    panic!("fixture must contain a bodied function declaration");
+    crate::analysis::flow::skeleton_tests::indexed_skeleton_of(source)
 }
 
 fn lowered(source: &str, path: &[&str]) -> FlowSliceIR {

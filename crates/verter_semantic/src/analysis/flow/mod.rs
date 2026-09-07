@@ -13,8 +13,8 @@
 //!
 //! The [`flow_graph::FunctionFlowGraph`] is the sparse typed-edge dependence
 //! structure the flow demand planner computes reachability over; it is built
-//! from the skeleton ALONE ([`flow_graph::build_function_flow_graph`] takes
-//! only `&FunctionBodySkeleton`), so a graph build can never re-walk the AST
+//! from sealed indexed structure ([`flow_graph::build_function_flow_graph`] takes
+//! only `&PreparedFunctionBodySkeleton`), so a graph build never resolves names or re-walks the AST
 //! or observe a query demand.
 //!
 //! On top of the graph: [`peeker::ReturnPathPeeker`] plans a demand slice
@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use crate::analysis::function_program::{
-    FlowBindingIdentity, FunctionCapturedRead, FunctionProgramEntry,
+    FlowBindingIdentity, FunctionNestedCaptures, FunctionProgramEntry,
 };
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentTarget, AssignmentTargetMaybeDefault,
@@ -36,7 +36,7 @@ use oxc_ast::ast::{
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_no_typeexpr::NoTypeExpr;
 
 pub use binding::{FlowBindingMap, FlowBindingMapError, FlowBindingRef};
@@ -328,6 +328,9 @@ pub struct SkeletonBinding {
     pub span: FrameSpan,
     /// The declarator initializer / parameter default site, when present.
     pub initializer: Option<SkeletonExprSiteId>,
+    /// Authored annotation of a whole-identifier local declarator. Parameters
+    /// use signature authority; destructured locals retain their typed boundary.
+    pub annotation_span: Option<FrameSpan>,
     /// Whether the identifier is bound by a DESTRUCTURING pattern (an
     /// object / array pattern element) rather than a plain binding
     /// identifier. Consumers that model only whole-slot declarators read
@@ -379,6 +382,10 @@ pub struct SkeletonCall {
     pub new_construct: bool,
     /// The call expression's span.
     pub span: FrameSpan,
+    /// Exact callee root occurrence, when the callee has an identifier root.
+    pub root_span: Option<FrameSpan>,
+    /// Indexed identity of that root; `None` is a known free or opaque callee.
+    pub binding: Option<FlowBindingRef>,
 }
 
 /// The key of one object-literal property entry.
@@ -915,8 +922,22 @@ pub fn build_function_body_skeleton(source: &FunctionBodySource<'_, '_>) -> Func
 
 /// A complete indexed structural artifact, built once before graph publication.
 pub struct PreparedFunctionBodySkeleton {
-    pub skeleton: FunctionBodySkeleton,
-    pub bindings: FlowBindingMap,
+    skeleton: FunctionBodySkeleton,
+    bindings: FlowBindingMap,
+}
+
+impl PreparedFunctionBodySkeleton {
+    pub fn skeleton(&self) -> &FunctionBodySkeleton {
+        &self.skeleton
+    }
+
+    pub fn bindings(&self) -> &FlowBindingMap {
+        &self.bindings
+    }
+
+    pub fn into_parts(self) -> (FunctionBodySkeleton, FlowBindingMap) {
+        (self.skeleton, self.bindings)
+    }
 }
 
 /// Build one current frame using the index's exact nested access facts. No child
@@ -931,7 +952,7 @@ pub fn build_indexed_function_body_skeleton(
 
 /// Resolve the authored access occurrences against one exact indexed inventory.
 /// The map is returned with the skeleton so the graph bundle can publish both.
-pub fn prepare_function_body_skeleton(
+fn prepare_function_body_skeleton(
     mut skeleton: FunctionBodySkeleton,
     entry: &FunctionProgramEntry,
 ) -> Result<PreparedFunctionBodySkeleton, FlowBindingMapError> {
@@ -1000,6 +1021,13 @@ pub fn prepare_function_body_skeleton(
                 .map(|identity| resolve(identity))
                 .transpose()?;
         }
+        for call in Arc::make_mut(&mut site.calls) {
+            call.binding = call
+                .root_span
+                .and_then(|span| identities.get(&span))
+                .map(|identity| resolve(identity))
+                .transpose()?;
+        }
     }
     for write in Arc::make_mut(&mut skeleton.writes) {
         if let Some(span) = write.target_span {
@@ -1061,7 +1089,7 @@ struct SiteDraft {
     calls: Vec<SkeletonCall>,
 }
 
-struct SkeletonBuilder {
+struct SkeletonBuilder<'entry> {
     /// The function's own start offset — the anchor [`Self::frame_span`]
     /// rebases every OXC position onto, at ingress. Nothing downstream of
     /// that one call can hold an absolute offset: the record fields are
@@ -1076,14 +1104,16 @@ struct SkeletonBuilder {
     site_stack: Vec<usize>,
     return_sites: Vec<SkeletonReturnSite>,
     writes: Vec<SkeletonWrite>,
-    nested_captures: FxHashMap<verter_span::Span, Arc<[FunctionCapturedRead]>>,
+    nested_captures: FxHashMap<verter_span::Span, &'entry FunctionNestedCaptures>,
+    capture_subjects: FxHashSet<(SkeletonExprSiteId, FlowBindingRef)>,
+    capture_names: FxHashSet<(SkeletonExprSiteId, FlowNameId)>,
 }
 
-impl SkeletonBuilder {
+impl<'entry> SkeletonBuilder<'entry> {
     fn new(
         anchor: u32,
         body_span: verter_span::Span,
-        entry: Option<&FunctionProgramEntry>,
+        entry: Option<&'entry FunctionProgramEntry>,
     ) -> Self {
         let root = SkeletonRegion {
             kind: SkeletonRegionKind::FunctionBody,
@@ -1103,12 +1133,14 @@ impl SkeletonBuilder {
             site_stack: Vec::new(),
             return_sites: Vec::new(),
             writes: Vec::new(),
+            capture_subjects: FxHashSet::default(),
+            capture_names: FxHashSet::default(),
             nested_captures: entry
                 .map(|entry| {
                     entry
                         .nested_captures
                         .iter()
-                        .map(|child| (child.span, Arc::clone(&child.reads)))
+                        .map(|child| (child.span, child))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -1368,23 +1400,27 @@ impl SkeletonBuilder {
         });
     }
 
-    /// A nested function value depends on each enclosing binding its own
-    /// frame reads. Record those free reads on the function-value site so the
-    /// value frontier selects the reaching outer definitions that seed the
-    /// nested evaluator. Reads resolved by the nested frame remain there.
+    /// A nested function retains each captured cell, including write-only
+    /// captures. Actual free reads separately carry the paths whose reaching
+    /// outer definitions seed the nested evaluator.
     /// Exact subjects are retained in `capture_bindings`; `captures`
     /// keeps their interned display names as diagnostic metadata.
     fn push_nested_capture_reads(&mut self, span: verter_span::Span) {
-        let Some(reads) = self.nested_captures.get(&span).cloned() else {
+        let Some(captures) = self.nested_captures.get(&span).copied() else {
             return;
         };
         let site = self.footprint_site(span);
-        let mut capture_names: Vec<FlowNameId> = Vec::new();
-        for read in reads.iter() {
-            let binding = FlowBindingRef::Captured(read.binding.clone());
-            if !self.sites[site.index()].capture_bindings.contains(&binding) {
+        for identity in captures.bindings.0.iter() {
+            let binding = FlowBindingRef::Captured(identity.clone());
+            if self.capture_subjects.insert((site, binding.clone())) {
                 self.sites[site.index()].capture_bindings.push(binding);
             }
+            let name = self.intern(&identity.name);
+            if self.capture_names.insert((site, name)) {
+                self.sites[site.index()].captures.push(name);
+            }
+        }
+        for read in captures.reads.iter() {
             let name = self.intern(&read.binding.name);
             let path: Arc<[_]> = read
                 .path
@@ -1392,9 +1428,6 @@ impl SkeletonBuilder {
                 .map(|segment| SkeletonPathSegment::Static(self.intern(segment)))
                 .collect::<Vec<_>>()
                 .into();
-            if !capture_names.contains(&name) {
-                capture_names.push(name);
-            }
             let span = self.frame_span(read.span);
             self.sites[site.index()].reads.push(SkeletonRead {
                 name,
@@ -1403,23 +1436,28 @@ impl SkeletonBuilder {
                 binding: None,
             });
         }
-        for name in capture_names {
-            if !self.sites[site.index()].captures.contains(&name) {
-                self.sites[site.index()].captures.push(name);
-            }
-        }
     }
 
     /// `span` is the call expression's ABSOLUTE position; the recorded
     /// [`SkeletonCall::span`] is its frame-relative twin, so a call effect
     /// and a write effect are ordered in the SAME coordinate system.
-    fn push_call(&mut self, callee: SkeletonCallee, new_construct: bool, span: verter_span::Span) {
+    fn push_call(
+        &mut self,
+        expression: &Expression<'_>,
+        new_construct: bool,
+        span: verter_span::Span,
+    ) {
+        let callee = self.extract_callee(expression);
+        let root_span = crate::analysis::function_program::access::expression_root(expression)
+            .map(|root| self.frame_span(root.span.into()));
         let site = self.footprint_site(span);
         let span = self.frame_span(span);
         self.sites[site.index()].calls.push(SkeletonCall {
             callee,
             new_construct,
             span,
+            root_span,
+            binding: None,
         });
     }
 
@@ -1466,6 +1504,7 @@ impl SkeletonBuilder {
             region,
             span,
             initializer,
+            annotation_span: None,
             destructured,
         });
     }
@@ -1486,20 +1525,24 @@ impl SkeletonBuilder {
 
     fn collect_params(&mut self, params: &oxc_ast::ast::FormalParameters<'_>) {
         for param in &params.items {
-            self.collect_param_pattern(&param.pattern);
+            self.collect_param_pattern(&param.pattern, param.initializer.as_deref());
         }
         if let Some(rest) = params.rest.as_ref() {
-            self.collect_param_pattern(&rest.rest.argument);
+            self.collect_param_pattern(&rest.rest.argument, None);
         }
     }
 
-    fn collect_param_pattern(&mut self, pattern: &BindingPattern<'_>) {
+    fn collect_param_pattern(
+        &mut self,
+        pattern: &BindingPattern<'_>,
+        default: Option<&Expression<'_>>,
+    ) {
         let (inner, initializer) = match pattern {
             BindingPattern::AssignmentPattern(assignment) => {
                 let site = self.open_root_site(&assignment.right);
                 (&assignment.left, Some(site))
             }
-            other => (other, None),
+            other => (other, default.map(|default| self.open_root_site(default))),
         };
         let mut identifiers = Vec::new();
         let mut defaults = Vec::new();
@@ -1525,6 +1568,7 @@ impl SkeletonBuilder {
         pattern: &BindingPattern<'_>,
         kind: SkeletonBindingKind,
         initializer: Option<SkeletonExprSiteId>,
+        annotation_span: Option<FrameSpan>,
     ) {
         let mut identifiers = Vec::new();
         let mut defaults = Vec::new();
@@ -1534,6 +1578,9 @@ impl SkeletonBuilder {
         }
         for (name, span, destructured) in identifiers {
             self.push_binding(&name, kind, span, initializer, destructured);
+            if !destructured {
+                self.bindings.last_mut().unwrap().annotation_span = annotation_span;
+            }
         }
     }
 
@@ -1839,7 +1886,7 @@ impl SkeletonBuilder {
     }
 }
 
-impl<'a> Visit<'a> for SkeletonBuilder {
+impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     // Type positions are never value footprint: a type name is not a read.
     fn visit_ts_type(&mut self, _it: &oxc_ast::ast::TSType<'a>) {}
 
@@ -2067,6 +2114,7 @@ impl<'a> Visit<'a> for SkeletonBuilder {
                     &param.pattern,
                     SkeletonBindingKind::CatchParam,
                     None,
+                    None,
                 );
             }
             self.visit_statement_list(&handler.body.body);
@@ -2122,7 +2170,11 @@ impl<'a> Visit<'a> for SkeletonBuilder {
                 .init
                 .as_ref()
                 .map(|init| self.open_root_site(init));
-            self.collect_declarator_pattern(&declarator.id, kind, initializer);
+            let annotation_span = declarator
+                .type_annotation
+                .as_ref()
+                .map(|annotation| self.frame_span(annotation.span.into()));
+            self.collect_declarator_pattern(&declarator.id, kind, initializer, annotation_span);
         }
     }
 
@@ -2248,19 +2300,17 @@ impl<'a> Visit<'a> for SkeletonBuilder {
     }
 
     fn visit_call_expression(&mut self, it: &oxc_ast::ast::CallExpression<'a>) {
-        let callee = self.extract_callee(&it.callee);
-        self.push_call(callee, false, it.span.into());
+        self.push_call(&it.callee, false, it.span.into());
         walk::walk_call_expression(self, it);
     }
 
     fn visit_new_expression(&mut self, it: &oxc_ast::ast::NewExpression<'a>) {
-        let callee = self.extract_callee(&it.callee);
-        self.push_call(callee, true, it.span.into());
+        self.push_call(&it.callee, true, it.span.into());
         walk::walk_new_expression(self, it);
     }
 }
 
-impl SkeletonBuilder {
+impl SkeletonBuilder<'_> {
     fn record_for_left(
         &mut self,
         left: &oxc_ast::ast::ForStatementLeft<'_>,
@@ -2279,6 +2329,13 @@ impl SkeletonBuilder {
                     for (name, span, destructured) in identifiers {
                         let interned = self.intern(&name);
                         self.push_binding(&name, kind, span, None, destructured);
+                        if !destructured {
+                            let annotation_span = declarator
+                                .type_annotation
+                                .as_ref()
+                                .map(|annotation| self.frame_span(annotation.span.into()));
+                            self.bindings.last_mut().unwrap().annotation_span = annotation_span;
+                        }
                         let region = self.current_region();
                         let span = self.frame_span(span);
                         self.writes.push(SkeletonWrite {

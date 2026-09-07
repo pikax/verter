@@ -20,6 +20,58 @@ fn index_of(source: &str) -> FunctionProgramIndex {
 }
 
 #[test]
+fn lexical_resolution_visits_only_candidates_of_the_referenced_name() {
+    for count in [64, 128] {
+        let mut source = String::from("function f() {");
+        for ordinal in 0..count {
+            source.push_str(&format!("let value{ordinal} = {ordinal};"));
+        }
+        source.push_str("return [");
+        for ordinal in 0..count {
+            source.push_str(&format!("value{ordinal},"));
+        }
+        source.push_str("];}");
+        LEXICAL_CANDIDATE_VISITS.with(|visits| visits.set(0));
+        let index = index_of(&source);
+        let entry = entry_of(&index, "f");
+        assert_eq!(entry.references.len(), count);
+        assert!(entry
+            .references
+            .iter()
+            .all(|reference| reference.binding.is_some()));
+        assert_eq!(LEXICAL_CANDIDATE_VISITS.with(std::cell::Cell::get), count);
+
+        let mut siblings = String::from("function f() {");
+        for ordinal in 0..count {
+            siblings.push_str(&format!("{{let same = {ordinal}; same;}}"));
+        }
+        siblings.push_str("return 0;}");
+        LEXICAL_CANDIDATE_VISITS.with(|visits| visits.set(0));
+        let index = index_of(&siblings);
+        let entry = entry_of(&index, "f");
+        let identities: std::collections::HashSet<_> = entry
+            .references
+            .iter()
+            .map(|reference| {
+                reference
+                    .binding
+                    .clone()
+                    .expect("each read resolves locally")
+            })
+            .collect();
+        assert_eq!(
+            identities.len(),
+            count,
+            "sibling shadows retain distinct identity"
+        );
+        assert!(
+            LEXICAL_CANDIDATE_VISITS.with(std::cell::Cell::get) <= count * 2,
+            "same-name sibling scopes must not scan every sibling declaration"
+        );
+    }
+}
+
+#[test]
 fn function_binding_inventory_preserves_every_stable_slot() {
     let source = r#"function inventory(arg, {p: renamed, q = 1}, [first, ...tail], ...rest) {
         var arg;

@@ -35,11 +35,21 @@ or repeated idempotence checks over unchanged predecessor snapshots.
 - Restore the complete indexed binder inventory and exact skeleton-to-index mapping.
   Local references carry skeleton binder identity; captured references carry the exact
   defining function and binder identity. Text names remain diagnostic metadata.
+- Construct production graphs only from the indexed prepared skeleton/binding pair.
+  Read, write, and callee references never recover identity by name. The lexical index
+  resolves containing scopes, with parameter defaults separate from body declarations.
+  Structural selections, retained demand/hash pairs, and work measurements are sealed
+  by their owning constructors; consumers receive immutable views.
 - Preserve already-supported nested callable forms by extending the existing function
   index and locator owner. A child obtains its own graph and sealed demand from shared
   cache/planning owners. Captured inputs are imported by exact identity at selected
   captured-binding nodes into that child scope; parent keys and transient narrowing do not
   cross the boundary.
+- Retain content-free defining-frame descriptors and exact annotation presence/spans.
+  Hydrate only selected authored annotations under the original pinned snapshot and
+  generic binder environment, and retain them in the original source declaration bank.
+  Prepare immutable selected child inputs before sealing their demand basis. Effect-only
+  captures do not force runtime value hydration.
 - Use compact slots over selected subjects, with immutable metadata shared by execution
   snapshots. Keys, inputs, snapshots, and evidence are bound to the graph content,
   demand basis, and execution. Unrelated graph inventory does not allocate products

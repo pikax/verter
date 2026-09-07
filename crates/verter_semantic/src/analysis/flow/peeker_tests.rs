@@ -8,31 +8,16 @@ use std::sync::Arc;
 
 use super::*;
 use crate::analysis::flow::flow_graph::{
-    build_function_flow_graph, FlowEdgeKind, FlowNodeId, FlowNodeKind, FunctionFlowGraph,
+    build_function_flow_graph_for_test as build_function_flow_graph, FlowEdgeKind, FlowNodeId,
+    FlowNodeKind, FunctionFlowGraph,
 };
 use crate::analysis::flow::flow_ir::ReturnSlicePlan;
 use crate::analysis::flow::{
-    build_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource, SkeletonPathSegment,
-    SkeletonReturnSiteId, SkeletonWriteCertainty,
+    FunctionBodySkeleton, SkeletonPathSegment, SkeletonReturnSiteId, SkeletonWriteCertainty,
 };
 
 fn skeleton_of(source: &str) -> FunctionBodySkeleton {
-    let allocator = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::ts();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
-    assert!(
-        ret.errors.is_empty(),
-        "fixture must parse: {:?}",
-        ret.errors
-    );
-    for statement in &ret.program.body {
-        if let oxc_ast::ast::Statement::FunctionDeclaration(function) = statement {
-            if let Some(body_source) = FunctionBodySource::from_function(function) {
-                return build_function_body_skeleton(&body_source);
-            }
-        }
-    }
-    panic!("fixture must contain a bodied function declaration");
+    crate::analysis::flow::skeleton_tests::indexed_skeleton_of(source)
 }
 
 fn names(path: &[&str]) -> Vec<Arc<str>> {
@@ -444,7 +429,7 @@ function d(a: number, flag: boolean) {
     let first = plan_return(&skeleton, &graph, &["out"]);
     let second = plan_return(&skeleton, &graph, &["out"]);
     assert_eq!(first, second);
-    assert!(!first.value_nodes.is_empty());
+    assert!(!first.value_nodes().is_empty());
 }
 
 /// The planner's input type is the structural proof it plans over the
@@ -471,30 +456,34 @@ fn planner_holds_only_the_graph_and_emits_disjoint_sorted_sets() {
     // fixture selects `b`, whose value reads `x`, and records the `x = "s"`
     // write as an effect.
     assert!(
-        !plan.value_nodes.is_empty(),
+        !plan.value_nodes().is_empty(),
         "the demanded member's value providers must be selected"
     );
     assert!(
-        !plan.effect_only_nodes.is_empty(),
+        !plan.effect_only_nodes().is_empty(),
         "the parameter write must be selected as an effect-only node"
     );
 
-    for window in plan.value_nodes.windows(2) {
+    for window in plan.value_nodes().windows(2) {
         assert!(window[0].index() < window[1].index(), "sorted, no dups");
     }
-    for window in plan.effect_only_nodes.windows(2) {
+    for window in plan.effect_only_nodes().windows(2) {
         assert!(window[0].index() < window[1].index(), "sorted, no dups");
     }
-    for node in plan.effect_only_nodes.iter() {
+    for node in plan.effect_only_nodes().iter() {
         assert!(!plan.is_value(*node), "role sets are disjoint");
     }
-    for node in plan.value_nodes.iter() {
+    for node in plan.value_nodes().iter() {
         assert!(plan.is_value(*node), "role sets are disjoint");
     }
     // Every selected node addresses a real graph node — `node_kind` is
     // total over the graph's own ids, so a selected id outside it is the
     // failure this catches.
-    for node in plan.value_nodes.iter().chain(plan.effect_only_nodes.iter()) {
+    for node in plan
+        .value_nodes()
+        .iter()
+        .chain(plan.effect_only_nodes().iter())
+    {
         assert!(
             node.index() < graph.node_count(),
             "a selected node must address a real graph node"
@@ -502,7 +491,7 @@ fn planner_holds_only_the_graph_and_emits_disjoint_sorted_sets() {
     }
     // A control REGION carries no value: it can be selected for its
     // EFFECTS, never as a value provider.
-    for node in plan.value_nodes.iter() {
+    for node in plan.value_nodes().iter() {
         let kind: FlowNodeKind = graph.node_kind(*node);
         assert!(
             matches!(
