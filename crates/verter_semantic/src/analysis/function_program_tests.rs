@@ -19,6 +19,161 @@ fn index_of(source: &str) -> FunctionProgramIndex {
     build_function_program_index(&ret.program, source, &owners, Arc::from("/test.ts"))
 }
 
+#[test]
+fn function_binding_inventory_preserves_every_stable_slot() {
+    let source = r#"function inventory(arg, {p: renamed, q = 1}, [first, ...tail], ...rest) {
+        var arg;
+        { let twin = 1; } { let twin = 2; }
+        const {a: local, nested: {deep}, ...others} = value;
+        let [element, , ...remaining] = values;
+        try {} catch ({message}) { const detail = message; }
+        class LocalClass {} enum LocalEnum { A }
+        namespace LocalNamespace {} import Alias = LocalNamespace;
+        function nested() { const excluded = 0; }
+    }"#;
+    let index = index_of(source);
+    let entry = entry_of(&index, "inventory");
+    let actual: Vec<_> = entry
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_ref())
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            "arg",
+            "renamed",
+            "q",
+            "first",
+            "tail",
+            "rest",
+            "arg",
+            "twin",
+            "twin",
+            "local",
+            "deep",
+            "others",
+            "element",
+            "remaining",
+            "message",
+            "detail",
+            "LocalClass",
+            "LocalEnum",
+            "LocalNamespace",
+            "Alias",
+            "nested"
+        ]
+    );
+    let spans: std::collections::HashSet<_> = entry
+        .bindings
+        .iter()
+        .map(|binding| (binding.span.start, binding.span.end))
+        .collect();
+    assert_eq!(
+        spans.len(),
+        entry.bindings.len(),
+        "each declaration has one real slot"
+    );
+    for binding in entry.bindings.iter() {
+        assert_eq!(
+            &source[binding.span.start as usize..binding.span.end as usize],
+            binding.name.as_ref()
+        );
+    }
+}
+
+#[test]
+fn nested_value_frames_have_exact_indexed_locators() {
+    let source =
+        "const root = () => { let x = 1; return () => ({ method() { return () => x; } }); };";
+    let index = index_of(source);
+    assert_eq!(index.entries.len(), 4, "every nested callable owns a frame");
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    for entry in index.entries.iter() {
+        let resolved = resolve_function_node(&parsed.program, &entry.locator)
+            .expect("indexed locator resolves");
+        assert_eq!(verter_span::Span::from(resolved.node.span()), entry.span);
+    }
+    for pair in index.entries.windows(2) {
+        assert_eq!(pair[1].lexical_parent.as_deref(), Some(&pair[0].key));
+    }
+}
+
+#[test]
+fn flow_binding_map_is_bijective_for_value_bindings() {
+    use crate::analysis::flow::{
+        build_function_body_skeleton, FlowBindingMap, FlowBindingMapError, FunctionBodySource,
+        SkeletonBindingId,
+    };
+    let source = "\n function inventory(p, {x: renamed}, ...rest) { var p; { let twin; } { let twin; } const [a, ...b] = list; try {} catch (err) {} class C {} enum E { A } namespace N {} import Alias = N; type OnlyType = string; interface OnlyInterface {} function child() {} }";
+    let index = index_of(source);
+    let entry = entry_of(&index, "inventory");
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let Statement::FunctionDeclaration(function) = &parsed.program.body[0] else {
+        panic!("function fixture");
+    };
+    let skeleton =
+        build_function_body_skeleton(&FunctionBodySource::from_function(function).unwrap());
+    let map =
+        FlowBindingMap::build(&skeleton, &entry.bindings, &entry.key, entry.span.start).unwrap();
+    assert_eq!(map.value_count(), entry.bindings.len());
+    let parameter = SkeletonBindingId::from_index(0);
+    let redeclaration = skeleton
+        .bindings
+        .iter()
+        .position(|binding| binding.kind == crate::analysis::flow::SkeletonBindingKind::Var)
+        .map(|ordinal| SkeletonBindingId::from_index(ordinal as u32))
+        .unwrap();
+    assert_ne!(map.identity(parameter), map.identity(redeclaration));
+    assert_eq!(map.canonical_local(redeclaration), parameter);
+    let twins: Vec<_> = skeleton
+        .bindings
+        .iter()
+        .enumerate()
+        .filter(|(_, binding)| skeleton.name(binding.name) == "twin")
+        .map(|(ordinal, _)| SkeletonBindingId::from_index(ordinal as u32))
+        .collect();
+    assert_ne!(map.canonical_local(twins[0]), map.canonical_local(twins[1]));
+    let mut slots = std::collections::HashSet::new();
+    for (ordinal, binding) in skeleton.bindings.iter().enumerate() {
+        let local = SkeletonBindingId::from_index(ordinal as u32);
+        if binding.kind.declares_value() {
+            let identity = map
+                .identity(local)
+                .expect("every value binding has a real slot");
+            assert!(slots.insert(identity.binding_slot));
+            assert_eq!(map.local(identity), Some(local));
+            assert_eq!(
+                entry.bindings[identity.binding_slot as usize].span,
+                binding.span.to_absolute(entry.span.start)
+            );
+        } else {
+            assert!(map.identity(local).is_none());
+        }
+    }
+    let mut corrupt = entry.bindings.to_vec();
+    corrupt[1].span = corrupt[0].span;
+    assert_eq!(
+        FlowBindingMap::build(&skeleton, &corrupt, &entry.key, entry.span.start),
+        Err(FlowBindingMapError::DuplicateDeclaration)
+    );
+    let mut renamed = entry.bindings.to_vec();
+    renamed[0].name = Arc::from("display-only");
+    let renamed_map =
+        FlowBindingMap::build(&skeleton, &renamed, &entry.key, entry.span.start).unwrap();
+    let local = SkeletonBindingId::from_index(0);
+    assert_eq!(
+        map.identity(local),
+        renamed_map.identity(local),
+        "display spelling is not semantic identity"
+    );
+    let mut foreign = map.identity(local).unwrap().clone();
+    foreign.defining_function.overload_ordinal += 1;
+    assert!(map.local(&foreign).is_none());
+}
+
 fn hash_of(source: &str, name: &str) -> crate::analysis::types::Hash16 {
     let index = index_of(source);
     let entry = index
@@ -701,14 +856,12 @@ function outer() {
         "the first nested position is Other {{ 0 }}, got {:?}",
         inner.key.part
     );
-    // Body locator: parent descent + the BodyStatement step (statement 1 —
-    // `const x = 1;` is statement 0).
+    // Body locator: parent descent plus the direct callable ordinal.
+    // The preceding variable declaration does not introduce a callable.
     assert_eq!(
         inner.locator.descent.last(),
-        Some(&FunctionDescentStep::BodyStatement {
-            statement_ordinal: 1
-        }),
-        "the nested locator ends at the hoisted declaration's statement ordinal"
+        Some(&FunctionDescentStep::NestedCallable { ordinal: 0 }),
+        "the nested locator addresses the first directly nested callable"
     );
     // Lexical parent + capture identity (content-free binding identity only).
     assert_eq!(
@@ -754,11 +907,8 @@ function outer() {
     );
     assert_eq!(
         callback.locator.descent.last(),
-        Some(&FunctionDescentStep::CallArgument {
-            call_ordinal: 0,
-            arg_ordinal: 0
-        }),
-        "the callback locator addresses (call site 0, argument 0)"
+        Some(&FunctionDescentStep::NestedCallable { ordinal: 0 }),
+        "the callback locator addresses the first directly nested callable"
     );
     assert_eq!(
         callback.captures.0.as_ref(),
@@ -818,8 +968,11 @@ function outer() {
         .filter(|entry| {
             matches!(
                 entry.locator.descent.last(),
-                Some(FunctionDescentStep::CallArgument { .. })
-            )
+                Some(
+                    FunctionDescentStep::CallArgument { .. }
+                        | FunctionDescentStep::NestedCallable { .. }
+                )
+            ) && entry.nested_declaration_name.is_none()
         })
         .collect();
     assert_eq!(callbacks.len(), 1);
@@ -873,8 +1026,11 @@ function outer(shadowed: string) {
         .filter(|entry| {
             matches!(
                 entry.locator.descent.last(),
-                Some(FunctionDescentStep::CallArgument { .. })
-            )
+                Some(
+                    FunctionDescentStep::CallArgument { .. }
+                        | FunctionDescentStep::NestedCallable { .. }
+                )
+            ) && entry.nested_declaration_name.is_none()
         })
         .collect();
     callbacks.sort_by_key(|entry| entry.span.start);

@@ -51,12 +51,8 @@ use verter_semantic::analysis::flow::peeker::{
     DemandSegment, FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded, SliceDemand,
     SliceOrigin,
 };
-use verter_semantic::analysis::flow::{
-    FunctionBodySkeleton, SkeletonBindingId, SkeletonBindingKind,
-};
-use verter_semantic::analysis::function_program::{
-    FlowBindingIdentity, FunctionBindingKind, FunctionBindingRecord, FunctionProgramKey,
-};
+use verter_semantic::analysis::flow::{SkeletonBindingId, SkeletonBindingKind};
+use verter_semantic::analysis::function_program::FunctionBindingRecord;
 
 use super::dispatch_txn::flow_obligation_state::{
     FlowBindingBasis, FlowConvergenceEvidence, FlowDemandHandle, FlowObligationBasis,
@@ -612,13 +608,12 @@ pub struct FlowDemandSubject { pub projection_path: Arc<[Arc<str>]> }
 /// The frame's binding-inventory authority the planner resolves each
 /// binding obligation's cross-frame identity against: the
 /// `FunctionProgramIndex` entry's FULL binding list. Its slot numbering
-/// IS the [`FlowBindingIdentity::binding_slot`] domain — the planner zips
-/// the skeleton's binding index against it in source order, and a binding
-/// whose record does not correspond is planned as unmodelable (a typed
-/// gap at install), never with a fabricated slot.
+/// is the stable cross-frame slot domain. The planner validates an exact
+/// declaration-span/kind bijection against the skeleton, rebased using the
+/// inventory's live anchor. A mismatch refuses planning as a torn view.
 #[rustfmt::skip]
 #[derive(Debug, Clone)]
-pub struct FlowBindingInventory { pub bindings: Arc<[FunctionBindingRecord]> }
+pub struct FlowBindingInventory { pub bindings: Arc<[FunctionBindingRecord]>, pub anchor: u32 }
 
 /// The tie-break rule the work order is built with: domain rank, then
 /// ascending graph-node index, then edge class and source ordinal, then
@@ -753,6 +748,7 @@ pub enum FlowDemandPlanError {
     /// The retained selection's minted slice identity does not recompute
     /// over the bound graph — a selection retained for ANOTHER graph.
     SelectionProvenanceMismatch,
+    BindingInventoryMismatch(verter_semantic::analysis::flow::FlowBindingMapError),
 }
 
 /// Derive the demand subject EXHAUSTIVELY from the operation-specific
@@ -794,101 +790,6 @@ pub fn derive_demand_subject(
     Ok(FlowDemandSubject {
         projection_path: Arc::from(path.into_boxed_slice()),
     })
-}
-
-/// Resolve every skeleton binding's cross-frame identity ONCE, in skeleton
-/// order, against the frame's binding inventory. The inventory records the
-/// mappable subset of the skeleton's bindings in the same source order
-/// (params first), so the walk matches each skeleton binding to its record
-/// monotonically. Two production realities shape the matching:
-///
-/// - The inventory builder collapses ADJACENT same-name same-kind records
-///   (its own `dedup_by`), so a shadowed twin or a `var` redeclaration has
-///   no second slot: the collapsed binding reuses its twin's slot — the
-///   slot domain genuinely cannot distinguish them.
-/// - A destructured element has no whole-slot inventory entry BY
-///   CONSTRUCTION (the builder records only whole binding identifiers),
-///   but its identity is still REAL: the skeleton names the element, its
-///   kind, and its frame. Its slot is the skeleton's own binding ordinal
-///   offset past the inventory's slot range — never a fabricated
-///   inventory slot, never a collision with one.
-///
-/// A binding the inventory truly cannot name (no record of its name and
-/// kind anywhere) yields NO identity, and kinds the cross-frame vocabulary
-/// cannot name yield NONE by construction; the planner turns `None` into
-/// an unmodelable obligation (a typed gap at install).
-pub(super) fn resolve_binding_identities(
-    skeleton: &FunctionBodySkeleton,
-    inventory: &FlowBindingInventory,
-    function: &FunctionProgramKey,
-) -> Vec<Option<FlowBindingIdentity>> {
-    let mut cursor = 0usize;
-    skeleton
-        .bindings
-        .iter()
-        .enumerate()
-        .map(|(binding_ordinal, binding)| {
-            let kind = match binding.kind {
-                SkeletonBindingKind::Param => FunctionBindingKind::Param,
-                SkeletonBindingKind::Const => FunctionBindingKind::Const,
-                SkeletonBindingKind::Let => FunctionBindingKind::Let,
-                SkeletonBindingKind::Var => FunctionBindingKind::Var,
-                SkeletonBindingKind::NestedFunction => FunctionBindingKind::NestedFunction,
-                SkeletonBindingKind::Class
-                | SkeletonBindingKind::CatchParam
-                | SkeletonBindingKind::Enum
-                | SkeletonBindingKind::Namespace
-                | SkeletonBindingKind::ImportEquals
-                | SkeletonBindingKind::TypeAlias
-                | SkeletonBindingKind::Interface => return None,
-            };
-            if binding.destructured {
-                return Some(FlowBindingIdentity {
-                    name: Arc::from(skeleton.name(binding.name)),
-                    kind,
-                    defining_function: function.clone(),
-                    binding_slot: u32::try_from(
-                        inventory.bindings.len().saturating_add(binding_ordinal),
-                    )
-                    .unwrap_or(u32::MAX),
-                });
-            }
-            let name = skeleton.name(binding.name);
-            // Forward from the cursor first (source order); a collapsed
-            // twin reuses the nearest earlier record of its name and kind.
-            let slot = match inventory
-                .bindings
-                .iter()
-                .enumerate()
-                .skip(cursor)
-                .find(|(_, record)| record.name.as_ref() == name && record.kind == kind)
-                .map(|(index, _)| index)
-            {
-                Some(slot) => {
-                    cursor = slot + 1;
-                    slot
-                }
-                None => match inventory
-                    .bindings
-                    .iter()
-                    .enumerate()
-                    .take(cursor)
-                    .rfind(|(_, record)| record.name.as_ref() == name && record.kind == kind)
-                    .map(|(index, _)| index)
-                {
-                    Some(slot) => slot,
-                    None => return None,
-                },
-            };
-            let record = &inventory.bindings[slot];
-            Some(FlowBindingIdentity {
-                name: Arc::clone(&record.name),
-                kind,
-                defining_function: function.clone(),
-                binding_slot: u32::try_from(slot).unwrap_or(u32::MAX),
-            })
-        })
-        .collect()
 }
 
 /// The query↔graph coherence proof: planning rejects unless every
@@ -1157,7 +1058,7 @@ pub(crate) fn build_flow_demand_plan(
 
     // The cross-frame binding identities, resolved once against the
     // frame's binding inventory (the ONE slot-numbering authority).
-    let identities = resolve_binding_identities(&bundle.skeleton, inventory, &bound.key().function);
+    let identities = verter_semantic::analysis::flow::FlowBindingMap::build(&bundle.skeleton, &inventory.bindings, &bound.key().function, inventory.anchor).map_err(FlowDemandPlanError::BindingInventoryMismatch)?;
 
     let graph = &bundle.graph;
     let mut selected: Vec<_> = structural_selection.value_nodes.iter()
@@ -1185,7 +1086,7 @@ pub(crate) fn build_flow_demand_plan(
             F::BindingSlot => {
                 for node in &selected {
                     let FlowNodeKind::Binding(binding) = graph.node_kind(*node) else { continue };
-                    let basis = match &identities[binding.index()] {
+                    let basis = match identities.identity(binding) {
                         Some(identity) => FlowObligationBasis::Binding {
                             node: *node,
                             slot: FlowBindingBasis { binding, identity: identity.clone() },
@@ -1261,7 +1162,7 @@ pub(crate) fn build_flow_demand_plan(
                     let id = push(
                         FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
                         FlowObligationOrigin::Expansion(E::Capture),
-                        FlowObligationBasis::Capture { node: *node, binding, identity: identities[binding.index()].clone() },
+                        FlowObligationBasis::Capture { node: *node, binding, identity: identities.identity(binding).cloned() },
                         Arc::from([]), Arc::from([]),
                     )?;
                     expanded.push(id);
@@ -1285,7 +1186,7 @@ pub(crate) fn build_flow_demand_plan(
                         for binding in bundle.skeleton.bindings_of_name_in_scope(*name, site_record.region) {
                             if seen.contains(&binding) { continue; }
                             seen.push(binding);
-                            let (basis, dischargeable) = match &identities[binding.index()] {
+                            let (basis, dischargeable) = match identities.identity(binding) {
                                 Some(identity) => (
                                     FlowObligationBasis::CapturedBinding { node: *node, site, identity: identity.clone() },
                                     true,

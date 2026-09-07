@@ -36,8 +36,10 @@ use oxc_span::GetSpan;
 use rustc_hash::FxHashMap;
 use verter_no_typeexpr::NoTypeExpr;
 
+pub use binding::{FlowBindingMap, FlowBindingMapError, FlowBindingRef};
 pub use frame_span::FrameSpan;
 
+pub mod binding;
 pub mod flow_graph;
 pub mod flow_ir;
 pub mod frame_span;
@@ -578,6 +580,14 @@ pub struct FunctionBodySkeleton {
 }
 
 impl FunctionBodySkeleton {
+    /// Resolve a declaration's exact identifier span within this frame.
+    pub fn binding_at_span(&self, span: FrameSpan) -> Option<SkeletonBindingId> {
+        self.bindings
+            .iter()
+            .position(|binding| binding.span == span)
+            .and_then(|index| u32::try_from(index).ok())
+            .map(SkeletonBindingId)
+    }
     /// The interned text of `name`.
     #[must_use]
     pub fn name(&self, name: FlowNameId) -> &str {
