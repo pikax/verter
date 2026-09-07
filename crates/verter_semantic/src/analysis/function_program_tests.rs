@@ -126,6 +126,138 @@ fn captures_exclude_local_shadows_and_share_hoisted_runtime_slots() {
 }
 
 #[test]
+fn indexed_write_targets_preserve_captures_and_sibling_shadows() {
+    let source = r#"function root(value) {
+        var value; let outer = 0; const object = {};
+        { let twin = 1; const first = () => { twin++; object.field = 1; [value, outer] = pair; }; }
+        { let twin = 2; const second = () => { twin = 3; }; }
+        const middle = () => { let outer = 1; return () => { outer = 4; }; };
+    }"#;
+    let index = index_of(source);
+    let root = entry_of(&index, "root");
+    let children: Vec<_> = index
+        .entries
+        .iter()
+        .filter(|entry| entry.lexical_parent.as_deref() == Some(&root.key))
+        .collect();
+    assert_eq!(children.len(), 3);
+    let first = children[0];
+    let second = children[1];
+    let middle = children[2];
+    let root_targets = |entry: &FunctionProgramEntry| {
+        entry
+            .writes
+            .iter()
+            .flat_map(|write| write.targets.iter())
+            .filter_map(|target| match target {
+                FunctionWriteTarget::Binding { reference, .. } => reference.binding.clone(),
+                FunctionWriteTarget::Unsupported { .. } => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_targets = root_targets(first);
+    let second_targets = root_targets(second);
+    assert_eq!(first_targets.len(), 4);
+    assert_ne!(
+        first_targets[0], second_targets[0],
+        "sibling twins are different runtime variables"
+    );
+    assert_eq!(
+        first_targets[2].binding_slot, 0,
+        "parameter/var writes use the canonical parameter slot"
+    );
+    assert!(matches!(
+        &first.writes[1].targets[0],
+        FunctionWriteTarget::Binding {
+            kind: FunctionWriteKind::Member,
+            ..
+        }
+    ));
+    let deepest = index
+        .entries
+        .iter()
+        .find(|entry| entry.lexical_parent.as_deref() == Some(&middle.key))
+        .unwrap();
+    let deepest_targets = root_targets(deepest);
+    assert_eq!(
+        deepest_targets[0].defining_function, middle.key,
+        "an intervening local stops capture resolution"
+    );
+    assert!(
+        deepest.captures.0.contains(&deepest_targets[0]),
+        "write-only captures retain their exact binding authority"
+    );
+    assert!(middle.descendant_writes.contains(&deepest_targets[0]));
+    assert!(!root.descendant_writes.contains(&deepest_targets[0]));
+}
+
+#[test]
+fn indexed_effect_reads_keep_syntactic_roles_and_transitive_capture_paths() {
+    let source = r#"function root(flag, payload, key) {
+        return () => { flag && consume(payload[key]); if (flag) new Factory(payload.selected);
+            const pure = flag + external();
+            return () => payload.selected;
+        };
+    }"#;
+    let index = index_of(source);
+    let root = entry_of(&index, "root");
+    let child = index
+        .entries
+        .iter()
+        .find(|entry| entry.lexical_parent.as_deref() == Some(&root.key))
+        .unwrap();
+    let reads: Vec<_> = child
+        .references
+        .iter()
+        .filter(|reference| {
+            reference
+                .read_role
+                .is_some_and(FunctionReadRole::is_effect_input)
+        })
+        .collect();
+    assert!(reads.iter().any(|read| read.name.as_ref() == "flag"
+        && read.read_role == Some(FunctionReadRole::ControlInput)));
+    assert!(reads
+        .iter()
+        .any(|read| read.name.as_ref() == "key"
+            && read.read_role == Some(FunctionReadRole::CallInput)));
+    assert!(reads.iter().any(|read| read.name.as_ref() == "payload"
+        && read.path.iter().map(AsRef::as_ref).eq(["selected"])));
+    let pure_flag = source.find("flag + external").unwrap() as u32;
+    assert!(
+        !reads.iter().any(|read| read.span.start == pure_flag),
+        "a sibling value read is not a call input"
+    );
+    let grandchild = index
+        .entries
+        .iter()
+        .find(|entry| entry.lexical_parent.as_deref() == Some(&child.key))
+        .unwrap();
+    assert_eq!(
+        grandchild.captured_reads[0].path.as_ref(),
+        [Arc::from("selected")]
+    );
+    assert_eq!(child.nested_captures[0].reads, grandchild.captured_reads);
+    assert_eq!(root.nested_captures[0].reads, child.captured_reads);
+    let transitive = index_of("function root(payload) { return () => () => payload.selected; }");
+    let root = entry_of(&transitive, "root");
+    let child = transitive
+        .entries
+        .iter()
+        .find(|entry| entry.lexical_parent.as_deref() == Some(&root.key))
+        .unwrap();
+    assert_eq!(
+        child.captures.0.len(),
+        1,
+        "intervening closures retain the cell their children capture"
+    );
+    assert_eq!(
+        child.captured_reads[0].path.as_ref(),
+        [Arc::from("selected")]
+    );
+}
+
+#[test]
 fn flow_binding_map_is_bijective_for_value_bindings() {
     use crate::analysis::flow::{
         build_function_body_skeleton, FlowBindingMap, FlowBindingMapError, FunctionBodySource,

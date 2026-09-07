@@ -10,7 +10,7 @@ use crate::analysis::function_program::{
 };
 
 /// A resolved value reference. Names are display metadata, never lookup keys.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
 pub enum FlowBindingRef {
     Local(SkeletonBindingId),
     Captured(FlowBindingIdentity),
