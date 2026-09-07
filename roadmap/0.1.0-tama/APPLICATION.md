@@ -76,6 +76,10 @@ When the current candidate is the train's final intended block, also spawn a fre
 
 The checkpoint count and reports are ordinary coordination artifacts, not DAG state. They add no implementation-ledger transitions, receipts, amendment digests, or readiness inputs.
 
+Autonomous repository-roadmap managers enable cumulative conformance by default, normally requesting a checkpoint after three new blocks and reserving active candidates within the six-block unchecked bound. Persist enough operational progress to resume after restart without treating unknown prior history as reviewed. On first adoption, require a fresh checkpoint over existing implemented train work when coverage is unknown. A material finding holds further train execution until corrected and reviewed. A deliberate override is a documented policy deviation, not implicit coverage.
+
+The final train review runs against a checkout containing the actual final candidate and cumulative implementation. A title or prompt listing an active node does not include its code. Baseline or candidate changes require a fresh applicable review; a node-review waiver cannot waive the independent final train review. Managers may retain checkout identifiers for ordinary review coordination, but never validate ledger commit hints or use those identifiers to derive node readiness.
+
 ## GitHub flow after GH6
 
 The ruling and historical reason for replacing GitHub-side DAG metadata are recorded in `decisions/2026-08-28-minimal-github-issue-mapping.md`.

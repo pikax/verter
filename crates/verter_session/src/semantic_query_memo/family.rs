@@ -581,6 +581,11 @@ pub(super) struct InstantiateAuthoredFamilyIdentity {
     base: crate::semantic_query::ResolvedDeclSlotIdentity,
     args: Arc<[SemanticNodeId]>,
     authored: crate::semantic_query::operand::AuthoredOperandQueryIdentity,
+    /// The force's projection precision (whole surface / residual path /
+    /// key domain). Part of the family identity because the family VALUE
+    /// differs per precision — a selective force must never warm-alias a
+    /// whole-surface entry or another selective precision's answer.
+    projection: crate::semantic_query::operand::SemanticOperandForceProjection,
     resolve_env_hash: crate::semantic_query::HashValue,
     body_source: crate::semantic_query::InstantiateBodySource,
     provenance: crate::semantic_query::SurfaceProvenanceContext,
@@ -590,8 +595,12 @@ pub(super) struct InstantiateAuthoredFamilyIdentity {
 
 // Family-side R6 witness. `base` is the env-bearing content-free slot;
 // `authored` is the content-free locator/scope/binder/split-env identity;
-// `resolve_env_hash` is a named env dimension. No content/version hash can
-// be added without updating this exhaustive no-`..` destructure.
+// `projection` is the request-owned precision vocabulary, which carries
+// store-local node identity only (path segments over known keys plus, for
+// a computed index, the issuing store's own `SemanticNodeId` — the same
+// class of value `args` already holds) and never a content or version
+// hash; `resolve_env_hash` is a named env dimension. No content/version
+// hash can be added without updating this exhaustive no-`..` destructure.
 const _: fn(&InstantiateAuthoredFamilyIdentity) = w_instantiate_authored_family_identity;
 
 #[allow(dead_code)]
@@ -600,6 +609,7 @@ fn w_instantiate_authored_family_identity(identity: &InstantiateAuthoredFamilyId
         base,
         args,
         authored,
+        projection,
         resolve_env_hash,
         body_source,
         provenance,
@@ -609,6 +619,7 @@ fn w_instantiate_authored_family_identity(identity: &InstantiateAuthoredFamilyId
     let _: &crate::semantic_query::ResolvedDeclSlotIdentity = base;
     let _: &Arc<[SemanticNodeId]> = args;
     let _: &crate::semantic_query::operand::AuthoredOperandQueryIdentity = authored;
+    let _: &crate::semantic_query::operand::SemanticOperandForceProjection = projection;
     let _: &crate::semantic_query::HashValue = resolve_env_hash;
     let _: &crate::semantic_query::InstantiateBodySource = body_source;
     let _: &crate::semantic_query::SurfaceProvenanceContext = provenance;
@@ -1586,12 +1597,13 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         }
         SemanticQueryKey::Instantiate(k) => {
             let prc = k.projection_reduction();
-            let family = match k.source().authored_identity() {
-                Some(identity) => FamilyKey::InstantiateAuthored {
+            let family = match k.source().authored_source() {
+                Some(source) => FamilyKey::InstantiateAuthored {
                     identity: Box::new(InstantiateAuthoredFamilyIdentity {
                         base: k.base().clone(),
                         args: Arc::clone(k.args()),
-                        authored: identity.clone(),
+                        authored: source.identity().clone(),
+                        projection: source.projection().clone(),
                         resolve_env_hash: k.resolve_env_hash(),
                         body_source: k.body_source(),
                         provenance: prc.provenance,
@@ -1986,11 +1998,22 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
 
 /// The projection path a query targets — the path carried by the
 /// path-bearing key variants (`ProjectPath` / `ProjectMember` /
-/// `IndexedAccess`), empty for every other variant (`Instantiate`,
-/// `KeyOf`, modeless families, …). This is the path of the owning
+/// `IndexedAccess`), the residual path of an authored-force `Instantiate`
+/// at path precision, empty for every other variant (declaration-source
+/// `Instantiate`, whole-surface and key-domain authored forces, `KeyOf`,
+/// modeless families, …). This is the path of the owning
 /// `FamilyKey`, so the §3.4 recorded-point backfill in
 /// [`FamilySlots::publish`] builds each sibling slot's requested point at
 /// the SAME path.
+///
+/// The authored-force arm is load-bearing for honesty of the recorded
+/// set: `build_authored_instantiation` leaves `satisfied_projection`
+/// empty, so `execute_cooperative` defaults the published record to the
+/// key's requested point. If a residual-path force's requested point were
+/// built at the EMPTY path, the entry would claim "materialised the whole
+/// surface at the slot's mode" while holding only the residual-path
+/// value; carrying the residual path here keeps the recorded point and
+/// the requested point the same real point.
 pub(super) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
     match key {
         SemanticQueryKey::ProjectPath { path, .. } => ProjectionPath::from(Arc::clone(path)),
@@ -2002,6 +2025,15 @@ pub(super) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
         SemanticQueryKey::IndexedAccess { index, .. } => {
             ProjectionPath::from_segments([PathSegment::Index(index.clone())])
         }
+        // An authored force at residual-path precision targets exactly its
+        // residual path; whole-surface and key-domain precisions have no
+        // path (the family value IS the whole-surface / key-domain
+        // answer), matching the declaration source's empty path.
+        SemanticQueryKey::Instantiate(k) => k
+            .source()
+            .authored_source()
+            .and_then(|source| source.projection().residual_path().cloned())
+            .map_or_else(ProjectionPath::empty, ProjectionPath::from),
         // FlowReturn: the path is the key's OWN demand-axis projection
         // path (whole-return = empty). Kept in lockstep with
         // `requested_demand_override` so the requested point's path and

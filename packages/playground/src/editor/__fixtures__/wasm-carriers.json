@@ -1,5 +1,5 @@
 {
-  "$comment": "Committed snapshot of REAL WASM-host carrier output (getIde / getPublicApi). Captured by scripts/capture-wasm-carrier-fixtures.mjs so guards run hermetically. Regenerate with: node scripts/capture-wasm-carrier-fixtures.mjs — verify against the built artifact with: node scripts/capture-wasm-carrier-fixtures.mjs --check",
+  "$comment": "Committed snapshot of REAL WASM-host carrier output (compileRequest / getPublicApi). Captured by scripts/capture-wasm-carrier-fixtures.mjs so guards run hermetically. Regenerate with: node scripts/capture-wasm-carrier-fixtures.mjs — verify against the built artifact with: node scripts/capture-wasm-carrier-fixtures.mjs --check",
   "compVue": {
     "filename": "Comp.vue",
     "source": "<script setup lang=\"ts\">\ndefineProps<{ count: number }>()\n</script>\n<template><div>{{ count }}</div></template>",

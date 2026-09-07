@@ -465,6 +465,32 @@ pub struct FfiSvelteCompileOptions {
     pub custom_element_extend: Option<bool>,
 }
 
+/// Which part of Vue's style cascade a runtime product owns. Wire spellings
+/// match the legacy profile route's `styleProcessing` and the canonical
+/// [`verter_compiler::compile_request::RuntimeStyleProcessing::wire_name`]:
+/// kebab-case, so `AuthoredOnly` is `"authored-only"`, not the `camelCase`
+/// container default's `authoredOnly`.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "HostRuntimeStyleProcessing")]
+pub enum FfiRuntimeStyleProcessing {
+    Complete,
+    #[serde(rename = "authored-only")]
+    AuthoredOnly,
+}
+
+/// Dev-server tooling flavour for Main-assembly decoration. Wire spellings
+/// are all-lowercase, matching the legacy `FfiCompileProfile.hmr_strategy`
+/// vocabulary (`"none"` / `"vite"` / `"webpack"`).
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename = "HostHmrStrategy")]
+pub enum FfiHmrStrategy {
+    None,
+    Vite,
+    Webpack,
+}
+
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(rename = "HostRuntimeProductOptions", optional_fields = nullable)]
@@ -474,6 +500,10 @@ pub struct FfiRuntimeProductRequest {
     /// substituted here.
     pub inline: Option<bool>,
     pub runtime_source_map: bool,
+    /// Style-pipeline ownership for this runtime product. Absent selects the
+    /// compiler-owned complete authored-to-published cascade; the
+    /// bundler-owned style lane states `"authored-only"`.
+    pub style_processing: Option<FfiRuntimeStyleProcessing>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
@@ -524,6 +554,15 @@ pub struct FfiHostCompileIdentity {
     pub component_id: Option<String>,
     pub is_production: bool,
     pub force_js: bool,
+    /// The `ssrContext.modules` manifest key form — root-relative under
+    /// Vite; absent falls back to the canonical id. Exactly the legacy
+    /// `FfiCompileProfile.ssr_module_id` semantics.
+    pub ssr_module_id: Option<String>,
+    /// Dev-server tooling flavour gating the natively composed `__file`
+    /// and hot-accept trailer; absent = no decoration. The Svelte Main
+    /// assembly has no decoration consumer, matching the legacy profile
+    /// where the field is inert for Svelte.
+    pub hmr_strategy: Option<FfiHmrStrategy>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq)]

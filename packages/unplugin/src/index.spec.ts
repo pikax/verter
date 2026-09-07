@@ -17,6 +17,17 @@ import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
 const require = createRequire(import.meta.url);
 const VUE_SFC_VERSION = require("@vue/compiler-sfc/package.json").version as string;
 
+// The pug preprocessor is an optional peer the test environment does not
+// install; the supplied-content route only needs a deterministic render.
+vi.mock(
+  "pug",
+  () => ({
+    default: { render: () => "<div>pug-supplied marker</div>" },
+    render: () => "<div>pug-supplied marker</div>",
+  }),
+  { virtual: true },
+);
+
 function cssTokens(css: string): string[] {
   return css
     .replace(/\/\*[\s\S]*?\*\//g, " ")
@@ -335,43 +346,75 @@ $border: #555;
     expect(style.code).not.toContain("[data-v-");
   });
 
-  it("selects authored-only style processing only for Vite Main renders", async () => {
+  it("states the style-cascade owner on the typed runtime product: Vite owns preprocessing, the compiler owns the complete cascade elsewhere", async () => {
     const host = loadHost();
-    const compileMany = vi.spyOn(host, "compileMany").mockReturnValue([
-      {
-        code: "export default {}",
-        errors: [],
-        diagnostics: [],
-        lang: "js",
-      },
-    ] as never);
-    const source = `<template><div>ok</div></template>
+    const compileMany = vi.spyOn(host, "compileMany");
+    const compileRequest = vi.spyOn(host, "compileRequest");
+    const scopedScss = `<template><div>ok</div></template>
 <style lang="scss" scoped>$tone: red; .x { color: $tone; }</style>`;
+    const unscopedScss = `<template><div>ok</div></template>
+<style lang="scss">$tone: red; .x { color: $tone; }</style>`;
+    const plainCss = `<template><div>ok</div></template>
+<style>.x { color: red; }</style>`;
 
     const vitePlugin = await createVitePlugin();
     await vitePlugin.transform.call(
       { warn: vi.fn() },
-      source,
+      scopedScss,
       join(tempDir, "ViteOwned.vue").replace(/\\/g, "/"),
     );
-    expect(compileMany.mock.calls.at(-1)?.[1]).toMatchObject({
-      target: "runtime-render",
-      compileProfile: { styleProcessing: "authored-only" },
+    // The Vite-owned style cascade is stated on the runtime product: Vite's
+    // CSS pipeline preprocesses and scopes, so the compiler publishes
+    // authored bytes only.
+    expect(compileRequest.mock.calls.at(-1)?.[1]).toMatchObject({
+      framework: "vue",
+      identity: { isProduction: true },
+      products: [{ kind: "runtimeClient", styleProcessing: "authored-only" }],
+    });
+
+    await vitePlugin.transform.call(
+      { warn: vi.fn() },
+      unscopedScss,
+      join(tempDir, "ViteUnscopedScss.vue").replace(/\\/g, "/"),
+    );
+    // Unscoped non-CSS is the same Vite-owned cascade: the complete cascade
+    // would strip preprocessor syntax with no diagnostic.
+    expect(compileRequest.mock.calls.at(-1)?.[1]).toMatchObject({
+      products: [{ styleProcessing: "authored-only" }],
+    });
+
+    await vitePlugin.transform.call(
+      { warn: vi.fn() },
+      plainCss,
+      join(tempDir, "VitePlain.vue").replace(/\\/g, "/"),
+    );
+    // Plain CSS under Vite defers to the same pipeline: authored-only.
+    expect(compileRequest.mock.calls.at(-1)?.[1]).toMatchObject({
+      products: [{ styleProcessing: "authored-only" }],
     });
 
     const rollupPlugin = unpluginFactory(undefined, {
       framework: "rollup",
       versions: { unplugin: "0.0.0", rollup: "0.0.0" },
     } as any) as any;
+    compileRequest.mockClear();
     await rollupPlugin.transform.call(
       { warn: vi.fn() },
-      source,
+      plainCss,
       join(tempDir, "CompilerOwned.vue").replace(/\\/g, "/"),
     );
-    expect(compileMany.mock.calls.at(-1)?.[1]).toMatchObject({
-      target: "runtime-render",
-      compileProfile: { styleProcessing: "complete" },
-    });
+    // Outside Vite the compiler owns the complete style cascade: the
+    // styleProcessing slot stays absent (absent = complete), and the render
+    // is the same single typed request.
+    const products = compileRequest.mock.calls.at(-1)?.[1]?.products as unknown[];
+    expect(products).toEqual([{ kind: "runtimeClient", runtimeSourceMap: true }]);
+    expect(
+      compileMany.mock.calls.some((call) => call[0][0]?.canonicalId.endsWith("CompilerOwned.vue")),
+    ).toBe(false);
+    await rollupPlugin.closeBundle();
+    await vitePlugin.closeBundle();
+    compileMany.mockRestore();
+    compileRequest.mockRestore();
   });
 
   it("transform() scopes CSS via transformVueStyle for scoped blocks", async () => {
@@ -737,6 +780,38 @@ const primary = "red";
     const source = ".box { color: v-bind(primary); }\n";
     const transformed = await plugin.transform(source, styleId);
     expect(transformed.code).toBe(source);
+  });
+
+  it("does not re-scope style bytes the compile cache already served", async () => {
+    const plugin = createPlugin();
+    const filename = "/test/AlreadyScoped.vue";
+    await plugin.transform(
+      `<template><div class="box">x</div></template>
+<style scoped>.box { color: red; }</style>`,
+      filename,
+    );
+    const loaded = await plugin.load(`${filename}?vue&type=style&index=0&lang.css`);
+    expect(loaded).toBeDefined();
+    expect(loaded.code).toMatch(/\[data-v-[0-9a-f]+\]/);
+    // The compile already scoped these bytes; a bundler that appends
+    // `&scoped` to the emitted id must not trigger a second scoping pass.
+    const styleId = `${filename}?vue&type=style&index=0&scoped&lang.css`;
+    const transformed = await plugin.transform(loaded.code, styleId);
+    expect(transformed.code).toBe(loaded.code);
+  });
+
+  it("does not mistake a Sass compiler message for a missing package", async () => {
+    const plugin = createPlugin();
+    const filename = "/test/BrokenScss.vue";
+    // The compiler message deliberately resembles a module-resolution error.
+    // It must still surface instead of becoming ProcessedContentRequired.
+    await expect(
+      plugin.transform(
+        `<template><div class="x">x</div></template>
+<style lang="scss">@error "Cannot find package from authored Sass";</style>`,
+        filename,
+      ),
+    ).rejects.toThrow(/Failed to preprocess style lang="scss" in \/test\/BrokenScss\.vue/);
   });
 });
 
@@ -1118,10 +1193,8 @@ import(branch)
     );
     const host = loadHost();
     const upsertSpy = vi.spyOn(host, "upsert");
-    const applySpy = vi.spyOn(host, "applyBlockOverrides").mockReturnValue(undefined as never);
-    vi.spyOn(host, "compileMany").mockReturnValue([
-      { code: "export default {}", errors: [], diagnostics: [] },
-    ] as never);
+    const applySpy = vi.spyOn(host, "applyBlockOverrides");
+    const compileManySpy = vi.spyOn(host, "compileMany");
 
     const transformed = await plugin.transform.call({ resolve, warn: vi.fn() }, source, filename);
 
@@ -1155,6 +1228,8 @@ import(branch)
       basisToken: refreshedRequest.basisToken,
       sourceSpaceToken: refreshedRequest.sourceSpaceToken,
     });
+    // The admitted override served the typed render — no legacy batch call.
+    expect(compileManySpy).not.toHaveBeenCalled();
   });
 
   it("transform does not delegate unknown dynamic references", async () => {
@@ -2811,5 +2886,607 @@ const flag = import.meta.server; const later = 1
     // module the pass did not rewrite, so what it reports here is the shift.
     const map = parseMap(rewritten.map);
     expect(overshootingPositions(rewritten.code, map.mappings)).toEqual([]);
+  });
+});
+
+describe("typed render routing", () => {
+  let tempDir: string;
+  let activePlugin: any = null;
+
+  beforeEach(() => {
+    tempDir = join(
+      tmpdir(),
+      `verter-lane-routing-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    mkdirSync(tempDir, { recursive: true });
+    resetHost();
+  });
+
+  afterEach(async () => {
+    if (activePlugin) {
+      await activePlugin.closeBundle();
+      activePlugin = null;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+    resetHost();
+  });
+
+  async function createVitePlugin(ssr = false) {
+    const plugin = unpluginFactory(undefined, {
+      framework: "vite",
+      versions: { unplugin: "0.0.0", vite: "7.0.0" },
+    } as any) as any;
+
+    const viteConfig = await resolveConfig(
+      defineConfig({
+        root: tempDir,
+        build: { cssCodeSplit: false, ssr },
+      }),
+      "build",
+      "production",
+    );
+
+    plugin.vite.configResolved(viteConfig);
+    activePlugin = plugin;
+    return plugin;
+  }
+
+  function rollupPlugin() {
+    return unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+  }
+
+  /**
+   * Spy the render routes of the host the NEXT plugin instance will render
+   * on (`closeBundle` resets the host, so a spy taken before a previous
+   * bundler's closeBundle records nothing).
+   */
+  function spyFreshHost() {
+    const host = loadHost();
+    return {
+      compileMany: vi.spyOn(host, "compileMany"),
+      compileRequest: vi.spyOn(host, "compileRequest"),
+      applyBlockOverrides: vi.spyOn(host, "applyBlockOverrides"),
+    };
+  }
+
+  it("serves supplied (externally preprocessed) template content through the typed request", async () => {
+    const { compileMany, compileRequest, applyBlockOverrides } = spyFreshHost();
+    const plugin = rollupPlugin();
+    const filename = "/test/PugCarrier.vue";
+
+    const result = await plugin.transform.call(
+      { warn: vi.fn() },
+      `<template lang="pug">div hello</template>`,
+      filename,
+    );
+
+    // The override is admitted to the PROFILE-LESS bucket — no
+    // `compileProfile` key — which is exactly the bucket the typed compile
+    // route reads.
+    expect(applyBlockOverrides).toHaveBeenCalledTimes(1);
+    expect(applyBlockOverrides.mock.calls.every((call) => !("compileProfile" in call[0]))).toBe(
+      true,
+    );
+    // One typed request consumed the supplied bytes: the compiled module
+    // renders the preprocessed template, not the raw pug source.
+    expect(compileRequest.mock.calls.some((call) => call[0] === filename)).toBe(true);
+    expect(result.code).toContain("pug-supplied marker");
+    expect(compileMany).not.toHaveBeenCalled();
+    await plugin.closeBundle();
+  });
+
+  it("carries the root-relative SSR-manifest key on the typed identity", async () => {
+    const { compileMany, compileRequest } = spyFreshHost();
+    const plugin = await createVitePlugin(true);
+    const filename = join(tempDir, "SsrEntry.vue").replace(/\\/g, "/");
+
+    const result = await plugin.transform.call(
+      { warn: vi.fn() },
+      `<template><div>ssr</div></template>`,
+      filename,
+    );
+
+    // The SSR-manifest key rides the typed identity; the SSR demand itself
+    // selects the runtimeServer product.
+    expect(compileRequest.mock.calls.at(-1)?.[1]).toMatchObject({
+      framework: "vue",
+      identity: { ssrModuleId: "SsrEntry.vue" },
+      products: [{ kind: "runtimeServer" }],
+    });
+    expect(result.code).toContain("SsrEntry.vue");
+    expect(compileMany).not.toHaveBeenCalled();
+  });
+
+  it("composes the dev-server decoration natively through the typed request, flavored by the bundler strategy", async () => {
+    const source = `<script setup>const x = 1</script>
+<template><div>{{ x }}</div></template>`;
+
+    const rolldown = unpluginFactory(undefined, {
+      framework: "rolldown",
+      versions: { unplugin: "0.0.0", rolldown: "0.0.0" },
+    } as any) as any;
+    const rolldownSpy = spyFreshHost();
+    const viteFlavor = await rolldown.transform.call(
+      { warn: vi.fn() },
+      source,
+      "/test/TrailerVite.vue",
+    );
+    // The dev-server flavour rides the typed identity, and the `__file`
+    // assignment plus hot-accept trailer are composed NATIVELY by the
+    // typed route — never a post-hoc splice over compiled output from
+    // TypeScript.
+    expect(
+      rolldownSpy.compileRequest.mock.calls.some((call) => call[0] === "/test/TrailerVite.vue"),
+    ).toBe(true);
+    expect(rolldownSpy.compileRequest.mock.calls.at(-1)?.[1]).toMatchObject({
+      identity: { hmrStrategy: "vite", isProduction: false },
+    });
+    expect(rolldownSpy.compileMany).not.toHaveBeenCalled();
+    expect(viteFlavor.code).toContain("_sfc_main.__file");
+    expect(viteFlavor.code).toContain("/test/TrailerVite.vue");
+    expect(viteFlavor.code).toContain("import.meta.hot");
+    expect(viteFlavor.code.indexOf("_sfc_main.__file")).toBeLessThan(
+      viteFlavor.code.lastIndexOf("export default _sfc_main"),
+    );
+    if (viteFlavor.map) {
+      const map = typeof viteFlavor.map === "string" ? JSON.parse(viteFlavor.map) : viteFlavor.map;
+      const generatedLines = viteFlavor.code.split("\n");
+      map.mappings.split(";").forEach((row: string, lineIndex: number) => {
+        if (row.length === 0) return;
+        expect(generatedLines[lineIndex]).toBeDefined();
+      });
+    }
+    await rolldown.closeBundle();
+    rolldownSpy.compileMany.mockRestore();
+    rolldownSpy.compileRequest.mockRestore();
+    rolldownSpy.applyBlockOverrides.mockRestore();
+
+    // closeBundle resets the host, so each bundler spies the host it renders on.
+    const webpack = unpluginFactory(undefined, {
+      framework: "webpack",
+      versions: { unplugin: "0.0.0", webpack: "0.0.0" },
+    } as any) as any;
+    const webpackSpy = spyFreshHost();
+    const webpackFlavor = await webpack.transform.call(
+      { warn: vi.fn() },
+      source,
+      "/test/TrailerWebpack.vue",
+    );
+    expect(
+      webpackSpy.compileRequest.mock.calls.some((call) => call[0] === "/test/TrailerWebpack.vue"),
+    ).toBe(true);
+    expect(webpackSpy.compileRequest.mock.calls.at(-1)?.[1]).toMatchObject({
+      identity: { hmrStrategy: "webpack" },
+    });
+    expect(webpackSpy.compileMany).not.toHaveBeenCalled();
+    expect(webpackFlavor.code).toContain("_sfc_main.__file");
+    expect(webpackFlavor.code).toContain("module.hot");
+    await webpack.closeBundle();
+    webpackSpy.compileMany.mockRestore();
+    webpackSpy.compileRequest.mockRestore();
+    webpackSpy.applyBlockOverrides.mockRestore();
+
+    // Strategy-less renders (rollup) state `none` and carry no trailer at
+    // all — still the same single typed route.
+    const rollup = rollupPlugin();
+    const rollupSpy = spyFreshHost();
+    const plain = await rollup.transform.call({ warn: vi.fn() }, source, "/test/NoTrailer.vue");
+    expect(plain.code).not.toContain("__file");
+    expect(plain.code).not.toContain("import.meta.hot");
+    expect(
+      rollupSpy.compileRequest.mock.calls.some((call) => call[0] === "/test/NoTrailer.vue"),
+    ).toBe(true);
+    expect(rollupSpy.compileRequest.mock.calls.at(-1)?.[1]).toMatchObject({
+      identity: { hmrStrategy: "none" },
+    });
+    expect(rollupSpy.compileMany).not.toHaveBeenCalled();
+    await rollup.closeBundle();
+    rollupSpy.compileMany.mockRestore();
+    rollupSpy.compileRequest.mockRestore();
+    rollupSpy.applyBlockOverrides.mockRestore();
+  });
+
+  it("serves non-Vite style sub-requests from the same typed compile (no second native read)", async () => {
+    const host = loadHost();
+    const getVirtualFile = vi.spyOn(host, "getVirtualFile");
+    const compileMany = vi.spyOn(host, "compileMany");
+    const plugin = rollupPlugin();
+    const filename = "/test/CompiledStyle.vue";
+
+    await plugin.transform.call(
+      { warn: vi.fn() },
+      `<template><div class="a">x</div></template>
+<style>.a { color: red }</style>`,
+      filename,
+    );
+
+    const style = await plugin.load(`${filename}?vue&type=style&index=0&lang.css`);
+    expect(style).toBeDefined();
+    expect(style.code).toContain("color");
+    expect(style.code).toContain("red");
+    // One typed compile at transform() served the style — the legacy
+    // per-style virtual reads never ran for this carrier.
+    expect(
+      getVirtualFile.mock.calls.some((call) => String(call[0]?.rawId).includes(filename)),
+    ).toBe(false);
+    expect(
+      compileMany.mock.calls.some((call) =>
+        String(call[0]?.[0]?.canonicalId ?? "").includes(filename),
+      ),
+    ).toBe(false);
+    await plugin.closeBundle();
+    getVirtualFile.mockRestore();
+    compileMany.mockRestore();
+  });
+
+  it("serves native-scoped CSS from the typed compile through the non-Vite style load", async () => {
+    const host = loadHost();
+    const getVirtualFile = vi.spyOn(host, "getVirtualFile");
+    const plugin = rollupPlugin();
+    const filename = "/test/ScopedTyped.vue";
+    const source = `<template><div class="box">x</div></template>
+<style scoped>.box { color: red; }</style>`;
+
+    await plugin.transform.call({ warn: vi.fn() }, source, filename);
+
+    const style = await plugin.load(`${filename}?vue&type=style&index=0&lang.css`);
+    expect(style).toBeDefined();
+    expect(style.code).toContain("color");
+    expect(style.code).toMatch(/\[data-v-[0-9a-f]+\]/);
+    expect(style.code.split("[data-v-").length - 1).toBe(1);
+    expect(
+      getVirtualFile.mock.calls.some((call) => String(call[0]?.rawId).includes(filename)),
+    ).toBe(false);
+
+    const styleId = `${filename}?vue&type=style&index=0&scoped&lang.css`;
+    expect(plugin.transformInclude(styleId)).toBe(false);
+
+    await plugin.closeBundle();
+    getVirtualFile.mockRestore();
+  });
+
+  it("typed lane throws on error-severity diagnostics and forwards only warnings", async () => {
+    const host = loadHost();
+    const plugin = rollupPlugin();
+    const filename = "/test/TypedDiag.vue";
+    const source = `<template><div>ok</div></template>`;
+    const warn = vi.fn();
+
+    const compileRequest = vi.spyOn(host, "compileRequest").mockReturnValue({
+      canonicalId: filename,
+      diagnostics: {
+        hasErrors: true,
+        diagnostics: [
+          { severity: "error", code: "E1", message: "typed boom", spanStart: 0, spanEnd: 0 },
+        ],
+      },
+      products: [
+        {
+          kind: "runtimeClient",
+          nodes: [
+            {
+              node: { kind: "main" },
+              code: "export default {}",
+              lang: "js",
+              meta: {},
+            },
+          ],
+        },
+      ],
+    } as never);
+
+    await expect(plugin.transform.call({ warn }, source, filename)).rejects.toThrow(/typed boom/);
+    expect(warn).not.toHaveBeenCalled();
+
+    compileRequest.mockReturnValue({
+      canonicalId: filename,
+      diagnostics: {
+        hasErrors: false,
+        diagnostics: [
+          { severity: "warning", code: "W1", message: "soft", spanStart: 0, spanEnd: 0 },
+          { severity: "info", code: "I1", message: "chatter", spanStart: 0, spanEnd: 0 },
+        ],
+      },
+      products: [
+        {
+          kind: "runtimeClient",
+          nodes: [
+            {
+              node: { kind: "main" },
+              code: "export default _sfc_main",
+              lang: "js",
+              meta: {},
+            },
+          ],
+        },
+      ],
+    } as never);
+
+    warn.mockClear();
+    const result = await plugin.transform.call({ warn }, source, "/test/TypedDiagWarn.vue");
+    expect(result).toBeDefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0].message).toContain("W1");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("chatter");
+
+    compileRequest.mockRestore();
+    await plugin.closeBundle();
+  });
+
+  it("typed sub-request read fails closed: an error-severity compile publishes no module", async () => {
+    const host = loadHost();
+    const plugin = rollupPlugin();
+    const filename = "/test/TypedLoadDiag.vue";
+
+    // A clean transform routes this carrier onto the typed lane.
+    await plugin.transform.call({ warn: vi.fn() }, `<template><div>ok</div></template>`, filename);
+
+    const warn = vi.fn();
+    const compileRequest = vi.spyOn(host, "compileRequest").mockReturnValue({
+      canonicalId: filename,
+      diagnostics: {
+        hasErrors: true,
+        diagnostics: [
+          { severity: "error", code: "E9", message: "load boom", spanStart: 0, spanEnd: 0 },
+        ],
+      },
+      products: [
+        {
+          kind: "runtimeClient",
+          nodes: [
+            {
+              node: { kind: "main" },
+              code: "export default { __recovery: true }",
+              lang: "js",
+              meta: {},
+            },
+          ],
+        },
+      ],
+    } as never);
+
+    // Script sub-requests are uncached outside Vite, so this read reaches the
+    // typed route. It must refuse the errored compile the way the profile-bearing
+    // virtual read it replaced did — never publish recovery output as a module.
+    const loaded = await plugin.load.call({ warn }, `${filename}?vue&type=script&lang.js`);
+    expect(loaded).toBeUndefined();
+    // The carrier's transform already reported diagnostics; a sub-request read
+    // must not duplicate them as a second build warning.
+    expect(warn).not.toHaveBeenCalled();
+
+    compileRequest.mockRestore();
+    await plugin.closeBundle();
+  });
+});
+
+describe("native request construction evidence", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = join(
+      tmpdir(),
+      `verter-request-evidence-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    mkdirSync(tempDir, { recursive: true });
+    resetHost();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(tempDir, { recursive: true, force: true });
+    resetHost();
+  });
+
+  /** Every callable member of the native host, own and inherited. */
+  function hostMethodNames(host: object): string[] {
+    const names = new Set<string>();
+    for (
+      let level: object | null = host;
+      level && level !== Object.prototype;
+      level = Object.getPrototypeOf(level)
+    ) {
+      for (const name of Object.getOwnPropertyNames(level)) {
+        if (name === "constructor") continue;
+        const descriptor = Object.getOwnPropertyDescriptor(level, name);
+        if (descriptor && typeof descriptor.value === "function") names.add(name);
+      }
+    }
+    return [...names];
+  }
+
+  /**
+   * Record every argument that reaches the native host, on EVERY callable
+   * member rather than a named list, so a profile-bearing call added on a
+   * host method this file never mentions is still observed.
+   */
+  function recordEveryHostCall(host: ReturnType<typeof loadHost>) {
+    const spies = new Map<string, { mock: { calls: unknown[][] } }>();
+    for (const name of hostMethodNames(host)) {
+      spies.set(name, vi.spyOn(host as never, name as never) as never);
+    }
+    return {
+      /** Host methods that received an argument carrying a compile profile. */
+      profileBearing(): string[] {
+        const hits: string[] = [];
+        for (const [name, spy] of spies) {
+          for (const args of spy.mock.calls) {
+            const carries = args.some(
+              (arg) => arg !== null && typeof arg === "object" && "compileProfile" in arg,
+            );
+            if (carries) {
+              hits.push(name);
+              break;
+            }
+          }
+        }
+        return hits;
+      },
+      callCount(name: string): number {
+        return spies.get(name)?.mock.calls.length ?? 0;
+      },
+    };
+  }
+
+  const PLAIN_VUE = `<script setup>const x = 1</script>
+<template><div class="a">{{ x }}</div></template>
+<style>.a { color: red; }</style>`;
+
+  const SCOPED_SCSS_VUE = `<template><div class="x">ok</div></template>
+<style lang="scss" scoped>$tone: red; .x { color: $tone; }</style>`;
+
+  const PUG_TEMPLATE_VUE = `<script setup>const x = 1</script>
+<template lang="pug">div {{ x }}</template>`;
+
+  const PLAIN_SVELTE = `<script>let count = $state(0)</script>
+<button onclick={() => count += 1}>{count}</button>
+<style>button { color: red; }</style>`;
+
+  function rollupPlugin() {
+    return unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+  }
+
+  async function vitePlugin(ssr = false) {
+    const plugin = unpluginFactory(undefined, {
+      framework: "vite",
+      versions: { unplugin: "0.0.0", vite: "7.0.0" },
+    } as any) as any;
+    plugin.vite.configResolved(
+      await resolveConfig(
+        defineConfig({ root: tempDir, build: { cssCodeSplit: false, ssr } }),
+        "build",
+        "production",
+      ),
+    );
+    return plugin;
+  }
+
+  /**
+   * EVERY carrier — plain ones and carriers stating each demand axis the
+   * typed request now carries (supplied externally-preprocessed block
+   * content, the root-relative SSR-manifest key, the dev-server decoration,
+   * the bundler-owned authored-only style cascade) — is served entirely by
+   * the typed request, and no compile profile is constructed for it
+   * anywhere: not for the render, not for a virtual sub-request, not for a
+   * style read, not for a block override.
+   *
+   * This is the behavioral absence proof for the whole plugin surface: it
+   * fails the moment any route reintroduces a profile-shaped native call.
+   */
+  it("every carrier — each demand axis included — reaches the native host with no compile profile", async () => {
+    const cases = [
+      {
+        name: "vue under vite",
+        file: join(tempDir, "ViteTyped.vue").replace(/\\/g, "/"),
+        source: PLAIN_VUE,
+        plugin: () => vitePlugin(),
+        subRequests: (file: string) => [`${file}?vue&type=script&lang.js`],
+      },
+      {
+        name: "vue under vite with a scoped scss block (authored-only cascade)",
+        file: join(tempDir, "ViteAuthored.vue").replace(/\\/g, "/"),
+        source: SCOPED_SCSS_VUE,
+        plugin: () => vitePlugin(),
+        subRequests: (file: string) => [`${file}?vue&type=script&lang.js`],
+      },
+      {
+        name: "vue under vite in ssr builds (root-relative manifest key)",
+        file: join(tempDir, "ViteSsr.vue").replace(/\\/g, "/"),
+        source: PLAIN_VUE,
+        plugin: () => vitePlugin(true),
+        subRequests: (file: string) => [`${file}?vue&type=script&lang.js`],
+      },
+      {
+        name: "vue outside vite with a preprocessed template (supplied content)",
+        file: "/test/RollupSupplied.vue",
+        source: PUG_TEMPLATE_VUE,
+        plugin: () => rollupPlugin(),
+        subRequests: (file: string) => [`${file}?vue&type=script&lang.js`],
+      },
+      {
+        name: "vue outside vite",
+        file: "/test/RollupTyped.vue",
+        source: PLAIN_VUE,
+        plugin: () => rollupPlugin(),
+        subRequests: (file: string) => [
+          `${file}?vue&type=script&lang.js`,
+          `${file}?vue&type=style&index=0&lang.css`,
+        ],
+      },
+      {
+        name: "svelte outside vite",
+        file: "/test/RollupTyped.svelte",
+        source: PLAIN_SVELTE,
+        plugin: () => VerterSvelte.rollup() as any,
+        subRequests: (file: string) => [
+          `${file}?verter&type=script&lang.js`,
+          `${file}?verter&type=style&index=0&lang.css`,
+        ],
+      },
+    ];
+
+    for (const testCase of cases) {
+      resetHost();
+      const plugin = await testCase.plugin();
+      const recorder = recordEveryHostCall(loadHost());
+
+      const transformed = await plugin.transform.call(
+        { warn: vi.fn() },
+        testCase.source,
+        testCase.file,
+      );
+      expect(transformed, testCase.name).toBeDefined();
+      for (const id of testCase.subRequests(testCase.file)) {
+        const loaded = await plugin.load.call({ warn: vi.fn() }, id);
+        expect(loaded, `${testCase.name}: ${id}`).toBeDefined();
+      }
+
+      expect(recorder.profileBearing(), testCase.name).toEqual([]);
+      expect(recorder.callCount("compileRequest"), testCase.name).toBeGreaterThan(0);
+
+      vi.restoreAllMocks();
+      await plugin.closeBundle();
+    }
+  });
+
+  it("a non-Vite scoped SCSS carrier compiles typed through the complete cascade and publishes scoped CSS", async () => {
+    resetHost();
+    const plugin = rollupPlugin();
+    const recorder = recordEveryHostCall(loadHost());
+    const filename = "/test/CompilerOwnedScss.vue";
+
+    const transformed = await plugin.transform.call({ warn: vi.fn() }, SCOPED_SCSS_VUE, filename);
+    expect(transformed).toBeDefined();
+
+    const style = await plugin.load.call(
+      { warn: vi.fn() },
+      `${filename}?vue&type=style&index=0&lang.css`,
+    );
+    expect(style).toBeDefined();
+    // The compiler-owned complete cascade: the authored SCSS is preprocessed
+    // (no `$tone` survives) and scoped (`[data-v-…]` present) — loss or
+    // corruption in non-Vite preprocessing is observable here.
+    expect(style.code).toContain("color: red");
+    expect(style.code).not.toContain("$tone");
+    expect(style.code).toMatch(/\[data-v-[0-9a-f]+\]/);
+
+    expect(recorder.profileBearing()).toEqual([]);
+    expect(recorder.callCount("compileRequest")).toBeGreaterThan(0);
+
+    vi.restoreAllMocks();
+    await plugin.closeBundle();
+  });
+
+  it("legacy native exports remain reachable alongside the typed route", () => {
+    const host = loadHost();
+    expect(typeof host.compileRequest).toBe("function");
+    expect(typeof host.compileMany).toBe("function");
+    expect(typeof host.getVirtualFile).toBe("function");
+    expect(typeof host.applyBlockOverrides).toBe("function");
   });
 });

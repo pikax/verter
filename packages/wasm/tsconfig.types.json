@@ -10,7 +10,6 @@
   },
   "files": [
     "src/handoff-types.ts",
-    "src/request-types.ts",
     "src/compile-request-types.ts",
     "src/index.test-d.ts"
   ]

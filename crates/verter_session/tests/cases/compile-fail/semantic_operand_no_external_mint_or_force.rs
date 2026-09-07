@@ -11,6 +11,8 @@ fn main() {
     let _ = OperandSplitEnv::new(todo!(), todo!(), todo!(), todo!(), todo!(), todo!());
     let _ = SemanticOperand::node(0, 0, todo!(), todo!(), todo!());
     let _ = SemanticOperandForceRequest::new(todo!());
+    let _ = SemanticOperandForceRequest::projecting(todo!(), todo!());
+    let _ = SemanticOperandForceRequest::key_domain(todo!());
 
     use verter_session::project_semantic_dispatch::semantic_operand as _;
 

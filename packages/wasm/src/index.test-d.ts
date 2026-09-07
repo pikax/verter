@@ -13,19 +13,11 @@ import type {
   BrowserHostVueCompileRequest,
 } from "./compile-request-types";
 import type {
-  HostBlockOverrideRequest,
-  HostCompileProfile,
-  HostVirtualQuery,
-} from "./request-types";
-import type {
   HostAnalysisProductOptions as NativeHostAnalysisProductOptions,
-  HostBlockOverrideRequest as NativeHostBlockOverrideRequest,
-  HostCompileProfile as NativeHostCompileProfile,
   HostCompileRequest as NativeHostCompileRequest,
   HostRequestedProduct as NativeHostRequestedProduct,
   HostRuntimeProductOptions as NativeHostRuntimeProductOptions,
   HostSvelteCompileRequest as NativeHostSvelteCompileRequest,
-  HostVirtualQuery as NativeHostVirtualQuery,
   HostVueCompileRequest as NativeHostVueCompileRequest,
 } from "@verter/native/host-types";
 
@@ -55,21 +47,6 @@ const artifactAsBlock: ArtifactBlockToken = artifactToken;
 const correlationAsBlock: ArtifactBlockToken = correlationToken;
 
 void [blockToken, artifactAsBlock, correlationAsBlock];
-
-// `@verter/wasm` declares the three request DTOs itself so its exported
-// declaration graph never reaches the native compile profile. A caller must
-// still be able to hand the same object to either binding, and nothing else
-// holds the two copies to one shape — so it is held here, where a
-// divergence in a field, its optionality or its type is a compile error.
-// Naming the native types in a `.test-d.ts` exports nothing and ships
-// nothing, so the declaration graph stays clean.
-type _ProfileIsExactlyTheNativeProfile = Expect<
-  Equal<HostCompileProfile, NativeHostCompileProfile>
->;
-type _BlockOverrideRequestIsExactlyTheNativeOne = Expect<
-  Equal<HostBlockOverrideRequest, NativeHostBlockOverrideRequest>
->;
-type _VirtualQueryIsExactlyTheNativeOne = Expect<Equal<HostVirtualQuery, NativeHostVirtualQuery>>;
 
 // The typed compile request is the SAME schema the native binding decodes,
 // tagged differently: this binding's decoder puts the arm name in the key

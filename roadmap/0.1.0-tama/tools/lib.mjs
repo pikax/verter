@@ -492,6 +492,7 @@ export function validateGraphModel(nodes, options = {}) {
 }
 
 const RETAINED_CATALOG_SCHEMAS = [
+  ["contract-dependencies.toml", "contract-dependencies.schema.json", "contract", "id"],
   ["conflict-domains.toml", "conflict-domain-catalog.schema.json", "domain", "id"],
   ["gate-profiles.toml", "gate-profile-catalog.schema.json", "profile", "id"],
   ["review-profiles.toml", "review-profile-catalog.schema.json", "profile", "id"],
@@ -598,8 +599,86 @@ export function validateGitHubProgramCatalog(authority, githubProgram) {
   return errors;
 }
 
+// These are static contract requirements. Completion still comes exclusively
+// from the implementation ledger; validation never inspects execution evidence.
+export function validateContractDependencies(authority, catalog) {
+  const errors = [];
+  const byId = new Map(authority.nodes.map((node) => [node.id, node]));
+  for (const contract of catalog.contract || []) {
+    if (!byId.has(contract.producer)) {
+      errors.push(`contract ${contract.id}: unknown producer ${contract.producer}`);
+      continue;
+    }
+    for (const consumer of contract.consumers || []) {
+      if (!byId.has(consumer)) {
+        errors.push(`contract ${contract.id}: unknown consumer ${consumer}`);
+        continue;
+      }
+      const seen = new Set([consumer]);
+      const queue = [...predecessorsOf(byId.get(consumer))];
+      let covered = false;
+      while (queue.length) {
+        const id = queue.pop();
+        if (seen.has(id)) continue;
+        seen.add(id);
+        if (id === contract.producer) {
+          covered = true;
+          break;
+        }
+        queue.push(...predecessorsOf(byId.get(id)));
+      }
+      if (!covered)
+        errors.push(`contract ${contract.id}: ${consumer} requires ancestor ${contract.producer}`);
+    }
+  }
+  return errors;
+}
+
+export function productReport(authority, state) {
+  const products = [...new Set(authority.nodes.map((node) => node.product))].sort();
+  return products.map((product) => {
+    const nodes = authority.nodes.filter((node) => node.product === product);
+    const pending = nodes.filter((node) => state.states.get(node.id).status !== "COMPLETE");
+    return {
+      product,
+      total: nodes.length,
+      implemented: nodes.length - pending.length,
+      ready: pending.filter((node) => state.states.get(node.id).status === "READY").length,
+      acceptance_gates: nodes
+        .filter(
+          (node) =>
+            ["product", "final"].includes(node.release_gating) && node.semantic_role !== "history",
+        )
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map((node) => ({
+          id: node.id,
+          status: state.states.get(node.id).status,
+          missing_ancestors: state.states.get(node.id).missing_ancestors,
+        })),
+      pending_without_release: pending
+        .filter((node) => !node.gh_milestone && node.semantic_role !== "history")
+        .map((node) => node.id)
+        .sort(),
+      // The report has no test/report inputs; ledger completion is never a
+      // claim that capabilities were exercised or review findings resolved.
+      evidence_status: "not_inspected",
+    };
+  });
+}
+
 function validateCatalogReferences(authority) {
   const errors = [];
+  const dependencies = readToml(
+    path.join(authority.packageRoot, "catalogs", "contract-dependencies.toml"),
+  );
+  errors.push(
+    ...validateSchemaObject(
+      dependencies,
+      loadSchema(authority.packageRoot, "contract-dependencies.schema.json"),
+      "catalogs.contract-dependencies",
+    ),
+  );
+  if (!errors.length) errors.push(...validateContractDependencies(authority, dependencies));
   const catalogs = [
     ["conflict-domains.toml", "domain", "conflict_domains"],
     ["gate-profiles.toml", "profile", "gate_profile"],

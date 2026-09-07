@@ -22,7 +22,8 @@ use std::sync::Arc;
 use verter_compiler::compile_request::{
     AnalysisProductRequest, CompileProduct, CompileRequest, DeclarationProductRequest,
     FrameworkCompileRequest, IdeProductRequest, ProductKind, PublicApiProductRequest,
-    RuntimeProductRequest, SvelteCompileRequest, VueBackendRequest, VueCompileRequest,
+    RuntimeHmrStrategy, RuntimeProductRequest, RuntimeStyleProcessing, SvelteCompileRequest,
+    VueBackendRequest, VueCompileRequest,
 };
 
 use crate::host_compile::{CompileRequestBatchInput, CompileRequestBatchOptions};
@@ -1172,21 +1173,19 @@ fn the_batch_registers_each_source_exactly_once() {
 
 // ── the mechanisms this route invented ───────────────────────────────
 
-/// The route reads the REGISTERED carrier source and no supplied
-/// (externally preprocessed) artifact bucket.
+/// The route reads supplied (externally preprocessed) block artifacts from
+/// the default-profile hash bucket — the bucket `apply_block_overrides`
+/// writes to when the caller names no compile profile — and serves them to
+/// the compile.
 ///
-/// A supplied artifact is admitted under the compile profile its
-/// admitting caller named. This route has no channel for admitting one,
-/// so it is entitled to no bucket: a block whose authored dialect needs
-/// external preprocessing refuses as unavailable rather than silently
-/// compiling another route's preprocessed bytes under a demand that never
-/// asked for them.
+/// An explicitly named default-valued profile shares this compatibility
+/// bucket. A block whose authored dialect needs external preprocessing
+/// compiles from the supplied bytes in that bucket.
 ///
-/// Discrimination: naming any profile bucket here — the default profile
-/// included — makes the seam serve the artifact admitted below, and the
-/// refusal assertion fails.
+/// Discrimination: under the no-bucket scope the compile below refuses as
+/// unavailable; under a non-default-profile bucket it serves nothing here.
 #[test]
-fn the_route_reads_the_registered_source_and_no_supplied_artifact_bucket() {
+fn the_route_reads_the_profile_less_supplied_artifact_bucket() {
     let host = new_host();
     let source = "<script setup lang=\"ts\">\nconst c = 'blue'\n</script>\n\
                   <template><div>x</div></template>\n\
@@ -1206,19 +1205,82 @@ fn the_route_reads_the_registered_source_and_no_supplied_artifact_bucket() {
         .find(|request| request.lang == "customcss")
         .expect("the non-native style dialect captures a preprocessing request");
 
-    // Admit the preprocessed bytes under the DEFAULT profile's bucket —
-    // the bucket a route that named a profile here would draw from.
-    let profile = CompileProfile::default();
+    // Admit the preprocessed bytes WITHOUT a compile profile — the FFI
+    // conversion of an absent profile is `CompileProfile::default()`, so
+    // this is the default-profile hash bucket the seam reads.
     let _ = host
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: update.canonical_id.clone(),
-            compile_profile: profile.clone(),
+            compile_profile: CompileProfile::default(),
             overrides: vec![BlockOverrideEntry::supplied_for_test(
                 request,
                 ".authored { color: rebeccapurple }",
             )],
         })
-        .expect("the supplied CSS is admitted for the default profile");
+        .expect("the supplied CSS is admitted without a compile profile");
+
+    let response = host
+        .compile_request("/src/Themed.vue", vue_request(vec![runtime_client(false)]))
+        .expect("the profile-less supplied artifact must serve the compile");
+    let style = runtime_nodes(&response)
+        .into_iter()
+        .find(|n| matches!(n.node, VirtualNodeKind::Style { .. }))
+        .expect("the runtime row publishes its style node");
+    assert!(
+        style.code.contains("rebeccapurple"),
+        "the style node must carry the supplied bytes, not the raw block:\n{}",
+        style.code
+    );
+    assert!(
+        !style.code.contains("authored preprocessing input"),
+        "the raw (un-preprocessed) block content must NOT reach the compile:\n{}",
+        style.code
+    );
+}
+
+/// An override admitted under a NAMED (non-default) compile profile stays
+/// invisible to this route: the seam draws from the default-profile hash
+/// bucket and never inherits a non-default profile's preprocessed bytes.
+///
+/// Discrimination: reading the named bucket would serve the artifact
+/// admitted below, and the refusal assertion fails.
+#[test]
+fn the_route_does_not_read_a_named_profile_supplied_bucket() {
+    let host = new_host();
+    let source = "<script setup lang=\"ts\">\nconst c = 'blue'\n</script>\n\
+                  <template><div>x</div></template>\n\
+                  <style lang=\"customcss\">authored preprocessing input</style>";
+    let update = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/src/Themed.vue".to_string()),
+            input_id: "/src/Themed.vue".to_string(),
+            source: Arc::from(source),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("the carrier registers");
+    let request = update
+        .preprocessor_requests
+        .iter()
+        .find(|request| request.lang == "customcss")
+        .expect("the non-native style dialect captures a preprocessing request");
+
+    // Admit the preprocessed bytes under a NAMED profile — any profile
+    // that is not the default, here a production one.
+    let named = CompileProfile {
+        is_production: true,
+        ..CompileProfile::default()
+    };
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: update.canonical_id.clone(),
+            compile_profile: named.clone(),
+            overrides: vec![BlockOverrideEntry::supplied_for_test(
+                request,
+                ".authored { color: rebeccapurple }",
+            )],
+        })
+        .expect("the supplied CSS is admitted under the named profile");
 
     // Positive control: the artifact IS reachable through a route that
     // names that bucket, so the refusal below is scope acting rather than
@@ -1226,19 +1288,19 @@ fn the_route_reads_the_registered_source_and_no_supplied_artifact_bucket() {
     let supplied = host
         .capture_compiler_block_content(
             "/src/Themed.vue",
-            crate::block_content::SuppliedBlockScope::Profile(&profile),
+            crate::block_content::SuppliedBlockScope::Profile(&named),
         )
         .expect("the profile-scoped read serves the supplied artifact");
     assert!(
         supplied.has_supplied,
-        "control: the default profile's bucket must hold the admitted artifact"
+        "control: the named profile's bucket must hold the admitted artifact"
     );
 
-    // THE PIN: the seam draws from no bucket, so the block that needs
-    // external preprocessing is unavailable to it.
+    // THE PIN: the seam reads the default-profile hash bucket, so the block
+    // that needs external preprocessing is unavailable to it.
     let failure = host
         .compile_request("/src/Themed.vue", vue_request(vec![runtime_client(false)]))
-        .expect_err("a block needing external preprocessing must refuse on this route");
+        .expect_err("a named-profile override must stay invisible to this route");
     assert!(
         matches!(
             &failure,
@@ -1250,6 +1312,217 @@ fn the_route_reads_the_registered_source_and_no_supplied_artifact_bucket() {
             ))
         ),
         "expected the unavailable refusal, got {failure:?}"
+    );
+}
+
+/// Fail-closed with NO override at all: a block whose authored dialect
+/// needs external preprocessing refuses as unavailable rather than
+/// silently compiling the raw bytes.
+#[test]
+fn the_route_refuses_an_unpreprocessed_block_without_an_override() {
+    let host = new_host();
+    let source = "<script setup lang=\"ts\">\nconst c = 'blue'\n</script>\n\
+                  <template><div>x</div></template>\n\
+                  <style lang=\"customcss\">authored preprocessing input</style>";
+    let update = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/src/Themed.vue".to_string()),
+            input_id: "/src/Themed.vue".to_string(),
+            source: Arc::from(source),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("the carrier registers");
+    assert!(
+        update
+            .preprocessor_requests
+            .iter()
+            .any(|request| request.lang == "customcss"),
+        "the non-native style dialect must demand preprocessing"
+    );
+
+    let failure = host
+        .compile_request("/src/Themed.vue", vue_request(vec![runtime_client(false)]))
+        .expect_err("a block needing external preprocessing must refuse without an override");
+    assert!(
+        matches!(
+            &failure,
+            CompileRequestFailure::Host(HostError::BlockContentRefused(
+                BlockContentRefusal::Unavailable {
+                    availability: BlockContentAvailability::ProcessedContentRequired,
+                    ..
+                }
+            ))
+        ),
+        "expected the unavailable refusal, got {failure:?}"
+    );
+}
+
+/// The request's own host-assembly axes drive the Main decoration: a
+/// `Vite` dev-server flavour on a non-production client compile composes
+/// the `__file` assignment and the hot-accept trailer; production or an
+/// unstated strategy emits neither.
+#[test]
+fn the_route_decorates_main_from_the_requests_hmr_strategy() {
+    let host = new_host();
+    upsert(&host, "/src/App.vue", VUE_SFC);
+
+    let main_code = |request: CompileRequest| {
+        let response = host
+            .compile_request("/src/App.vue", request)
+            .expect("the request executes");
+        runtime_nodes(&response)
+            .into_iter()
+            .find(|n| n.node == VirtualNodeKind::Main)
+            .expect("the runtime row publishes its main module")
+            .code
+            .to_string()
+    };
+
+    let vite = main_code(
+        vue_request(vec![runtime_client(false)])
+            .with_host_assembly_axes(None, RuntimeHmrStrategy::Vite),
+    );
+    assert!(
+        vite.contains("_sfc_main.__file"),
+        "a dev Vite compile must assign __file:\n{vite}"
+    );
+    assert!(
+        vite.contains("import.meta.hot"),
+        "a dev Vite compile must emit the hot-accept trailer:\n{vite}"
+    );
+
+    let production = main_code(
+        CompileRequest::new(
+            vec![runtime_client(false)],
+            FrameworkCompileRequest::Vue(VueCompileRequest {
+                backend: VueBackendRequest::Inferred,
+                ssr: false,
+                script_custom_element: Some(false),
+                ..VueCompileRequest::default()
+            }),
+            None,
+            None,
+            None,
+            true,
+            false,
+        )
+        .expect("the production demand constructs")
+        .with_host_assembly_axes(None, RuntimeHmrStrategy::Vite),
+    );
+    assert!(
+        !production.contains("_sfc_main.__file") && !production.contains("import.meta.hot"),
+        "production emits no dev-server decoration:\n{production}"
+    );
+
+    let unstated = main_code(vue_request(vec![runtime_client(false)]));
+    assert!(
+        !unstated.contains("_sfc_main.__file") && !unstated.contains("import.meta.hot"),
+        "an unstated hmr strategy emits no decoration:\n{unstated}"
+    );
+}
+
+/// The request's own SSR-manifest key reaches the Main assembly: a stated
+/// `ssrModuleId` is the registered `ssrContext.modules` key; absent falls
+/// back to the canonical id.
+#[test]
+fn the_route_registers_the_stated_ssr_manifest_key() {
+    let host = new_host();
+    upsert(&host, "/src/App.vue", VUE_SFC);
+
+    let ssr_request = || {
+        CompileRequest::new(
+            vec![CompileProduct::RuntimeServer(
+                RuntimeProductRequest::default(),
+            )],
+            FrameworkCompileRequest::Vue(VueCompileRequest {
+                backend: VueBackendRequest::Inferred,
+                ssr: true,
+                script_custom_element: Some(false),
+                ..VueCompileRequest::default()
+            }),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("the ssr demand constructs")
+    };
+    let main_code = |request: CompileRequest| {
+        let response = host
+            .compile_request("/src/App.vue", request)
+            .expect("the ssr request executes");
+        runtime_nodes(&response)
+            .into_iter()
+            .find(|n| n.node == VirtualNodeKind::Main)
+            .expect("the runtime row publishes its main module")
+            .code
+            .to_string()
+    };
+
+    let stated = main_code(
+        ssr_request()
+            .with_host_assembly_axes(Some("src/App.vue".to_string()), RuntimeHmrStrategy::None),
+    );
+    assert!(
+        stated.contains(".add(\"src/App.vue\")"),
+        "a stated ssrModuleId is the registered manifest key:\n{stated}"
+    );
+
+    let absent = main_code(ssr_request());
+    assert!(
+        absent.contains(".add(\"/src/App.vue\")"),
+        "absent ssrModuleId falls back to the canonical id:\n{absent}"
+    );
+}
+
+/// The wire-level `styleProcessing` axis executes the stated cascade: the
+/// complete cascade stays fail-closed on a scoped non-CSS dialect, while
+/// `AuthoredOnly` defers the post-preprocessor stages and preserves the
+/// authored `v-bind` runtime injection.
+#[test]
+fn the_route_executes_the_stated_style_processing_cascade() {
+    const SCOPED_SCSS: &str = r#"<script setup>
+const tone = "red"
+</script>
+<template><div class="card">x</div></template>
+<style lang="scss" scoped>
+$pad: 1rem;
+.card { color: v-bind(tone); padding: $pad; &:hover { color: blue; } }
+</style>"#;
+
+    let host = new_host();
+    upsert(&host, "/src/ScopedScss.vue", SCOPED_SCSS);
+
+    let complete_failure = host
+        .compile_request(
+            "/src/ScopedScss.vue",
+            vue_request(vec![runtime_client(false)]),
+        )
+        .expect_err("the complete cascade must stay fail-closed on scoped scss");
+    assert!(
+        format!("{complete_failure:?}").contains("StageRequiresPlainCss"),
+        "the refusal names the plain-CSS stage requirement: {complete_failure:?}"
+    );
+
+    let authored_only = host
+        .compile_request(
+            "/src/ScopedScss.vue",
+            vue_request(vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+                style_processing: RuntimeStyleProcessing::AuthoredOnly,
+                ..RuntimeProductRequest::default()
+            })]),
+        )
+        .expect("the authored-only cascade defers scoping and succeeds");
+    let main = runtime_nodes(&authored_only)
+        .into_iter()
+        .find(|n| n.node == VirtualNodeKind::Main)
+        .expect("the runtime row publishes its main module");
+    assert!(
+        main.code.contains("_useCssVars"),
+        "deferring post-preprocessor stages must preserve authored v-bind runtime injection:\n{}",
+        main.code
     );
 }
 

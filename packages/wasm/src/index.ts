@@ -23,7 +23,6 @@ export type {
   HostUpdateResult,
   HostResolvedId,
   HostVirtualMeta,
-  HostVirtualFileResponse,
   HostUpsertRequest,
   HostRemoveResult,
   HostTextEdit,
@@ -52,12 +51,10 @@ export type {
 
 import type {
   HostConfig,
-  HostIdeResponse,
   HostModuleReference,
   HostResolvedId,
   HostUpsertRequest,
   HostUpdateResult,
-  HostVirtualFileResponse,
   HostVirtualNodeKind,
   HostRemoveResult,
   HostCodeAction,
@@ -67,18 +64,6 @@ import type {
   HostSelectorMatchResult,
   HostDependencyResolution,
 } from "@verter/native/host-types";
-
-export type {
-  HostCompileProfile,
-  HostBlockOverrideRequest,
-  HostVirtualQuery,
-} from "./request-types";
-
-import type {
-  HostBlockOverrideRequest,
-  HostCompileProfile,
-  HostVirtualQuery,
-} from "./request-types";
 
 export type {
   BrowserHostCompileRequest,
@@ -113,15 +98,8 @@ import type {
 type WasmInitFn = () => Promise<unknown>;
 type WasmHostResolveFn = (rawId: string) => HostResolvedId | null;
 type WasmHostUpsertFn = (request: HostUpsertRequest) => HostUpdateResult;
-type WasmHostApplyBlockOverridesFn = (request: HostBlockOverrideRequest) => HostUpdateResult;
-type WasmHostGetVirtualFileFn = (query: HostVirtualQuery) => HostVirtualFileResponse | null;
 type WasmHostListVirtualFilesFn = (canonicalId: string) => HostVirtualNodeKind[];
 type WasmHostRemoveFn = (canonicalOrAlias: string) => HostRemoveResult | null;
-type WasmHostGetIdeFn = (
-  canonicalId: string,
-  profile?: HostCompileProfile,
-) => HostIdeResponse | null;
-type WasmHostEnsureIdeCompiledFn = (canonicalId: string, profile?: HostCompileProfile) => boolean;
 type WasmHostCompileRequestFn = (
   canonicalId: string,
   request: BrowserHostCompileRequest,
@@ -148,11 +126,7 @@ type WasmHostMatchCssSelectorsFn = (canonicalOrAlias: string) => HostSelectorMat
 interface WasmHostBinding {
   resolve: WasmHostResolveFn;
   upsert: WasmHostUpsertFn;
-  applyBlockOverrides: WasmHostApplyBlockOverridesFn;
-  getIde: WasmHostGetIdeFn;
-  ensureIdeCompiled: WasmHostEnsureIdeCompiledFn;
   compileRequest: WasmHostCompileRequestFn;
-  getVirtualFile: WasmHostGetVirtualFileFn;
   listVirtualFiles: WasmHostListVirtualFilesFn;
   remove: WasmHostRemoveFn;
   getAnalysis: WasmHostGetAnalysisFn;
@@ -226,27 +200,6 @@ export class Host {
     return this.inner.upsert(request);
   }
 
-  applyBlockOverrides(request: HostBlockOverrideRequest): HostUpdateResult {
-    return this.inner.applyBlockOverrides(request);
-  }
-
-  getIde(canonicalId: string, profile?: HostCompileProfile): HostIdeResponse | null {
-    return this.inner.getIde(canonicalId, profile);
-  }
-
-  /**
-   * Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
-   *
-   * The explicit IDE-ensure path — compiles the carrier's IDE surface without
-   * requesting the runtime `Main` node, so a Main-less carrier (Svelte)
-   * populates its `CachedTsx` and a subsequent `getIde` succeeds. `getIde`
-   * stays a pure cached read. Returns `true` when the IDE projection now
-   * exists, `false` when the file has no IDE surface (a non-carrier).
-   */
-  ensureIdeCompiled(canonicalId: string, profile?: HostCompileProfile): boolean {
-    return this.inner.ensureIdeCompiled(canonicalId, profile);
-  }
-
   /**
    * Execute one typed compile request against an already-registered source.
    *
@@ -271,10 +224,7 @@ export class Host {
    * `getAnalysis()` publishes them.
    *
    * Every call is a COMPLETE compile: this route consults and publishes no
-   * compile cache slot, so two identical calls compile twice. A per-keystroke
-   * loop that only needs the IDE surface should stay on the cached
-   * `ensureIdeCompiled()` / `getIde()` pair; reach for this when the demand
-   * is a fresh multi-product compile.
+   * compile cache slot, so two identical calls compile twice.
    *
    * Complete-only: a payload the schema refuses, a request the compiler
    * refuses, a framework arm the registered carrier contradicts, an
@@ -286,19 +236,6 @@ export class Host {
     request: BrowserHostCompileRequest,
   ): HostCompileRequestResponse {
     return this.inner.compileRequest(canonicalId, request);
-  }
-
-  /**
-   * Retrieve a single compiled virtual file (script, template, or style).
-   *
-   * Returns `null` when the node does not exist — a `.vue` with no `<style>`
-   * block, for instance. That is an ordinary negative answer about the
-   * carrier's structure, not a failure, and it is the same answer the native
-   * binding gives. A genuine failure (an invalid query, an unknown file, a
-   * refused compilation) still throws.
-   */
-  getVirtualFile(query: HostVirtualQuery): HostVirtualFileResponse | null {
-    return this.inner.getVirtualFile(query);
   }
 
   listVirtualFiles(canonicalId: string): HostVirtualNodeKind[] {

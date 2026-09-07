@@ -12,7 +12,7 @@
 import { describe, it, expect } from "vitest";
 import { compileScript, parse } from "@vue/compiler-sfc";
 import { VerterHost } from "@verter/native";
-import type { HostCompileProfile } from "@verter/native";
+import { typedRenderRequest, runtimeMainNode } from "../core/compiler";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -26,7 +26,8 @@ interface CompileResult {
 
 /**
  * One-shot compile helper: creates a fresh VerterHost, upserts the SFC,
- * and returns the compiled main module output.
+ * and returns the compiled main module output from one typed compile
+ * request (the same construction the plugin renders through).
  */
 function compile(
   source: string,
@@ -35,7 +36,6 @@ function compile(
     isProduction?: boolean;
     componentId?: string;
     forceJs?: boolean;
-    forceVapor?: boolean;
   } = {},
 ): CompileResult {
   const host = new VerterHost({ devMode: true });
@@ -43,26 +43,29 @@ function compile(
 
   host.upsert({ inputId: filename, source });
 
-  const profile: HostCompileProfile = {
+  const response = host.compileRequest(
     filename,
-    isProduction: options.isProduction ?? false,
-    ssr: false,
-    componentId: options.componentId,
-    hmrStrategy: "none",
-    sourceMap: false,
-    forceJs: options.forceJs ?? true,
-    forceVapor: options.forceVapor ?? false,
-  };
-
-  const result = host.getVirtualFile({
-    rawId: filename,
-    compileProfile: profile,
-  });
+    typedRenderRequest(
+      {
+        filename,
+        isProduction: options.isProduction ?? false,
+        customElement: false,
+        ssr: false,
+        componentId: options.componentId,
+        hmrStrategy: "none",
+        sourceMap: false,
+        forceJs: options.forceJs ?? true,
+      },
+      "vue",
+    ),
+  );
+  const main = runtimeMainNode(response, false);
+  if (!main) throw new Error("typed compile request published no runtime Main node");
 
   return {
-    code: result.code,
-    sourceMap: result.sourceMap,
-    lang: result.lang,
+    code: main.code,
+    sourceMap: main.sourceMap ?? undefined,
+    lang: main.lang,
   };
 }
 

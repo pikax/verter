@@ -72,6 +72,7 @@ max_related_packages = 2
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.0.2"
 
 [[node]]
 id = "TE3"
@@ -108,6 +109,7 @@ max_related_packages = 2
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.0.2"
 
 [[node]]
 id = "TE4"
@@ -144,6 +146,7 @@ max_related_packages = 2
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.0.2"
 
 [[node]]
 id = "TE5"
@@ -180,3 +183,4 @@ max_related_packages = 2
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.0.2"

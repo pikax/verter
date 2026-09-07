@@ -1754,6 +1754,69 @@ fn apply_block_overrides_template() {
     assert_eq!(admitted.content.as_deref(), Some("<div>hello</div>"));
 }
 
+/// @ai-generated - apply_block_overrides accepts the caller's raw id spelling
+///
+/// The wire echo carries the caller's own spelling of the owner id (the
+/// binding fills it from the request's top-level `canonicalId`), which on
+/// Windows differs from the host's canonical form by the drive-letter
+/// case. The echo comparison normalizes exactly that field: an
+/// uppercase-drive spelling is admitted, while an echo minted for a
+/// DIFFERENT file still refuses.
+#[test]
+fn apply_block_overrides_normalizes_the_echo_canonical_spelling() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let sfc =
+        "<template lang=\"pug\">\ndiv hello\n</template>\n<script setup>\nconst x = 1\n</script>";
+    let raw_spelling = "C:/Users/dev/project/Owner.vue";
+    let update = upsert_vue(&host, raw_spelling, sfc);
+    assert_ne!(
+        update.canonical_id, raw_spelling,
+        "canonicalization must lowercase the drive letter"
+    );
+    let request = &update.preprocessor_requests[0];
+
+    let mut entry = BlockOverrideEntry::supplied_for_test(request, "<div>hello</div>");
+    // Mirror the napi wire: the echo's canonical id is the caller's raw
+    // spelling, not the host's canonical one.
+    entry.captured_echo.request.canonical_id = raw_spelling.to_string();
+
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: raw_spelling.to_string(),
+            compile_profile: CompileProfile::default(),
+            overrides: vec![entry],
+        })
+        .expect("a raw drive-letter spelling of the owner id is admitted");
+    let admitted = host
+        .get_block_content(BlockContentQuery {
+            canonical_id: update.canonical_id.clone(),
+            block_token: request.block_token.to_string(),
+            compile_profile: CompileProfile::default(),
+            expected_basis_token: Some(request.basis_token.to_string()),
+        })
+        .expect("the override was admitted to the profile-less bucket");
+    assert_eq!(
+        admitted.availability,
+        BlockContentAvailability::SuppliedAvailable
+    );
+
+    let other = upsert_vue(&host, "C:/Users/dev/project/Other.vue", sfc);
+    let other_request = &other.preprocessor_requests[0];
+    let mut cross = BlockOverrideEntry::supplied_for_test(other_request, "<div>hello</div>");
+    cross.captured_echo.request.canonical_id = raw_spelling.to_string();
+    let failure = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: raw_spelling.to_string(),
+            compile_profile: CompileProfile::default(),
+            overrides: vec![cross],
+        })
+        .expect_err("an echo captured for another owner must refuse");
+    assert!(matches!(
+        failure,
+        HostError::BlockContentRefused(BlockContentRefusal::CorrelationMismatch)
+    ));
+}
+
 /// @ai-generated - apply_block_overrides: no change if same override applied twice
 #[test]
 fn apply_block_overrides_no_change_if_same_hash() {

@@ -42,3 +42,11 @@ Four successor trains now close the product boundary deliberately left outside t
 4. `PPR0` defines framework-neutral project roles. Nuxt (`NUX0`–`NUX3`) and SvelteKit (`SKT0`–`SKT3`) are co-equal first-class lanes; `PPR1` locks the shared project-profile architecture only after both terminals and cross-profile negative fixtures pass. Next is no longer the selected first project profile.
 
 JavaScript packages may execute bundler/framework host hooks and capture typed configuration facts. Arbitrary ecosystem configuration never executes inside Rust/WASM semantic demand. All four trains target accepted convergence gates, so the additional `D2C` flow-audit projection and `D2D` typed surface-producer outcome on `trains/rev11-flow` become transitive ancestors when that train lands; this branch does not duplicate those nodes or their ownership. Reconciliation must preserve the union topology (`D2D → D2B → D2C → D3R`, with `TE5` still a `D8` predecessor), the schema-2 implementation ledger, and both type-algebra/type-evaluation modules before strict validation is rerun.
+
+## Resource, project and closure contracts
+
+`MEM0 → E4 → MEM1 → G4` separates measured memory budgets, physical accounting, aggregate admission and convergence; G1/G2/G3 remain MEM1 prerequisites. L1 executes the fixed normal/pressure churn experiment and L2 applies exact controlling metric rows. `SG0 → L4` owns removal of the shipped-configuration exception before architecture close. These new nodes remain pending.
+
+PM3 supplies PM2 resolution proof and coherent project snapshots to native module/project families and LSO2. PM4 consumer convergence precedes NCK8, LSO10 and CLI2. `catalogs/contract-dependencies.toml` guards those transitive requirements. PM is explicitly included in 0.0.4; source modules, bundler hosting and paired Nuxt/SvelteKit profiles are included in 0.1.0. Product terminals remain independent.
+
+CVO0 can install the observation harness after CCA0 and CCA1O1, before CMP0 finishes. Early observations expose integration risk; they do not promote incomplete compiler capabilities or replace CPER0/VCP7/SCP7 acceptance.

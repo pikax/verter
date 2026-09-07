@@ -469,8 +469,8 @@ use verter_compiler::compile_request::vue::{
 use verter_compiler::compile_request::{
     AnalysisProductRequest, CompileProduct, CompileRequest, CompileRequestError,
     DeclarationProductRequest, FrameworkCompileRequest, FrameworkOption, IdeProductRequest,
-    PublicApiProductRequest, RuntimeProductRequest, SvelteOptionAttempt, VueOption,
-    VueOptionAttempt,
+    PublicApiProductRequest, RuntimeHmrStrategy, RuntimeProductRequest, RuntimeStyleProcessing,
+    SvelteOptionAttempt, VueOption, VueOptionAttempt,
 };
 use verter_identity::profile::{
     OutputProfileId, PresentationProfileId, SerializationProfileId, TypeScriptSemanticProfileId,
@@ -554,6 +554,8 @@ pub fn ffi_host_compile_request_to_compile_request(
         component_id,
         is_production,
         force_js,
+        ssr_module_id,
+        hmr_strategy,
     } = identity;
 
     let products = wire_products
@@ -570,6 +572,14 @@ pub fn ffi_host_compile_request_to_compile_request(
         is_production,
         force_js,
     )
+    .map(|request| {
+        request.with_host_assembly_axes(
+            ssr_module_id,
+            hmr_strategy.map_or(RuntimeHmrStrategy::None, |strategy| {
+                map_variants!(strategy, FfiHmrStrategy => RuntimeHmrStrategy { None, Vite, Webpack })
+            }),
+        )
+    })
 }
 
 fn requested_product_to_canonical(
@@ -579,15 +589,17 @@ fn requested_product_to_canonical(
     let runtime = |FfiRuntimeProductRequest {
                        inline,
                        runtime_source_map,
+                       style_processing,
                    }| RuntimeProductRequest {
         inline,
         runtime_source_map,
-        // The wire product carries no style-stage axis, so every transport
-        // request runs the complete authored-to-published cascade. A bundler
-        // that owns its own style-module lane reaches `AuthoredOnly` through
-        // the profile route only; giving the typed request that axis is a
-        // wire addition, not a silent default flip.
-        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        style_processing: style_processing
+            .map(|s| {
+                map_variants!(s, FfiRuntimeStyleProcessing => RuntimeStyleProcessing {
+                    Complete, AuthoredOnly
+                })
+            })
+            .unwrap_or_default(),
         output_profile: profiles.output.clone(),
         serialization: profiles.serialization.clone(),
     };

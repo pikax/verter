@@ -91,7 +91,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Numeric rescope signal: 1,500 production LOC or 12 files. Crossing it requires a scope-coherence investigation under `contracts/sizing.md`, not automatic rescope.
 - Architect rescope remains mandatory when the candidate spans 3 unrelated crates/packages, or combines public/wire, unsafe, concurrency, or lifetime work with another major concern.
 - Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
-- Performance budget: when preflight identifies touched authority or a hot path, equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance remains 0.0% unless an owning-authority amendment supplies exact replacement thresholds. Otherwise performance evidence is not applicable; do not create counters or a 100-request retention soak solely to satisfy this charter.
+- Performance acceptance: use the exact applicable metric rows and methodology from performance-gates.toml, the applicable MEM0 budget, or the owning ratified product catalog, under contracts/resource-and-finalization.md (L2). Exact work invariants, latency/allocation/RSS limits under their owning methodology, and bounded new-capability budgets are distinct. New capabilities and deliberate pressure policies declare bounded new work and replacement SLOs before measurement. Missing required coverage needs an owning-contract amendment before measurement; no implicit 0.0% threshold or post-hoc rebaseline applies.
 
 ## Abort conditions
 

@@ -249,9 +249,10 @@ fn supplied_style_vbind_vars_are_hydrated_for_the_compile_profile() {
     );
 }
 
-/// Hydrate the compile-input style capture for one SFC source, with no
-/// supplied bucket: the registered carrier source is the sole content
-/// authority, which is the ordinary inline-`<style>` case.
+/// Hydrate the compile-input style capture for one SFC source under the
+/// typed canonical-request route's scope: no override was admitted, so the
+/// unprofiled bucket is empty and the registered carrier source is the sole
+/// content authority, which is the ordinary inline-`<style>` case.
 fn capture_inline(source: &str) -> (Vec<String>, bool) {
     let host = make_host();
     let _ = host
@@ -265,10 +266,7 @@ fn capture_inline(source: &str) -> (Vec<String>, bool) {
             aliases: Vec::new(),
         })
         .expect("upsert must succeed");
-    capture(
-        &host,
-        crate::block_content::SuppliedBlockScope::RegisteredSourceOnly,
-    )
+    capture(&host, crate::block_content::SuppliedBlockScope::Unprofiled)
 }
 
 /// Admit preprocessor output for the file's single style block and hydrate

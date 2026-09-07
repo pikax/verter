@@ -6,10 +6,16 @@
 //! ## API parity
 //!
 //! Exposes the same `VerterHost` API as [`verter_napi`], minus platform-only
-//! features that require Node.js:
+//! features that require Node.js and legacy routes NAPI still carries for
+//! its own callers:
 //!
-//! - **Missing:** the NAPI CSS three-way (`prepareStyleForPreprocessor` /
-//!   `transformVueStyle` / `analyzeStyle`) — CSS preprocessing needs Node.js.
+//! - **Missing (platform):** the NAPI CSS three-way
+//!   (`prepareStyleForPreprocessor` / `transformVueStyle` / `analyzeStyle`)
+//!   — CSS preprocessing needs Node.js.
+//! - **NAPI-only:** the profile-bearing legacy read routes `getIde` /
+//!   `ensureIdeCompiled` / `getVirtualFile` (this binding decodes no compile
+//!   profile) and the preprocessor handshake `applyBlockOverrides`
+//!   (decodes a block-override request, not a compile profile).
 //!
 //! ## FFI architecture
 //!
@@ -43,7 +49,7 @@ use audit::{
     WorkspaceOpArgWasm,
 };
 use compile_request_response::{
-    compile_request_failure_to_string, compile_request_response_to_wasm, ide_response_to_ffi,
+    compile_request_failure_to_string, compile_request_response_to_wasm,
 };
 
 /// WASM audit bundle — mirror of the NAPI binding's bundle shape.
@@ -127,17 +133,16 @@ pub fn init() {
 /// straight to the schema through `serde_wasm_bindgen::Deserializer`. That
 /// deserializer answers a struct by reading only the keys the struct
 /// declares, so a key the schema does NOT declare is never visited and
-/// `deny_unknown_fields` never fires — measured on the built artifact, a
-/// `compileProfile` carrying an unknown key, or the other framework's
-/// option key, was accepted and silently ignored despite the attribute and
-/// the doc comment promising refusal.
+/// `deny_unknown_fields` never fires — measured on the built artifact, an
+/// input carrying an unknown key was accepted and silently ignored despite
+/// the attribute and the doc comment promising refusal.
 ///
 /// Going through `serde_json::Value` puts every own key of the payload in
 /// front of the schema, which is what makes the attribute mean what it
 /// says. It is the same materialisation
 /// [`host_compile_request_from_js`] already performs for the same reason;
-/// this makes the legacy routes agree with it instead of being the lax half
-/// of one boundary.
+/// this makes every input route agree with it instead of being the lax
+/// half of one boundary.
 fn parse_wasm_input<T: serde::de::DeserializeOwned>(value: JsValue) -> Result<T, JsValue> {
     let wire: serde_json::Value = serde_wasm_bindgen::from_value(value)
         .map_err(|e| JsValue::from_str(&format!("Invalid host input: {}", e)))?;
@@ -289,8 +294,6 @@ fn default_known_dependency_extensions() -> Vec<String> {
 // constructor decides whether the decoded request is admissible.
 //
 // The callable typed compile entry below is this adapter's only consumer.
-// The legacy `HostCompileProfile`-shaped entries stay on their existing
-// decode and execution paths.
 
 /// Why a JS host compile request did not become a canonical
 /// [`CompileRequest`].
@@ -483,10 +486,12 @@ fn normalize_compile_request_undefined_tags(request: JsValue) -> Result<JsValue,
 // VerterHost (in-memory virtual file host)
 //
 // API parity with NAPI (crates/verter_napi):
-// - Both: new, resolve, upsert, applyBlockOverrides, getVirtualFile,
-//         listVirtualFiles, remove, setImportDependencies, getAnalysis
-// - NAPI-only: prepareStyleForPreprocessor / transformVueStyle / analyzeStyle
-// - WASM-only: compileRequest
+// - Both: new, resolve, upsert, listVirtualFiles, remove,
+//         setImportDependencies, getAnalysis, compileRequest
+// - NAPI-only: prepareStyleForPreprocessor / transformVueStyle / analyzeStyle,
+//              the profile-bearing legacy read routes getIde /
+//              ensureIdeCompiled / getVirtualFile, and the preprocessor
+//              handshake applyBlockOverrides (not a profile-bearing read)
 // =============================================================================
 
 /// In-memory virtual file host for Vue SFC compilation (WASM variant).
@@ -577,74 +582,12 @@ impl WasmVerterHost {
         to_wasm_value(&host_update_to_ffi(result, Some(source_for_spans.as_str())))
     }
 
-    /// Replaces one or more blocks with preprocessed content (e.g. the output
-    /// of Pug, CoffeeScript, SCSS, or custom block preprocessors) and
-    /// recompiles affected virtual nodes.
-    ///
-    /// This is the unified API that handles template, script, style, AND
-    /// custom block preprocessing.
-    ///
-    /// Returns the same changeset structure as [`upsert`](Self::upsert).
-    ///
-    /// Every result must echo `block_token`, `owner_revision`,
-    /// `artifact_token`, and `basis_token`; the host validates those stamps
-    /// and the source-space/hash fields after the JavaScript await.
-    #[wasm_bindgen(js_name = applyBlockOverrides)]
-    pub fn apply_block_overrides(&self, request: JsValue) -> Result<JsValue, JsValue> {
-        let ffi_req = parse_wasm_input::<FfiBlockOverrideRequest>(request)?;
-        let host_req = ffi_block_override_to_host(ffi_req).map_err(ffi_err)?;
-        let result =
-            catch_panic(|| self.inner.apply_block_overrides(host_req))?.map_err(host_err)?;
-        let source = self.inner.get_source(&result.canonical_id);
-        to_wasm_value(&host_update_to_ffi(result, source.as_deref()))
-    }
-
-    /// Retrieves a single compiled virtual file (script, template, or style).
-    ///
-    /// The query can identify the file by raw import ID or by canonical ID +
-    /// node kind. A compile profile may be provided to control production
-    /// mode, SSR, source maps, etc.
-    ///
-    /// Returns the compiled code, optional source map, language hint, and
-    /// any compilation diagnostics.
-    ///
-    /// Returns `null` if the virtual node does not exist (e.g. no `<script>`
-    /// block). A node that is absent is an ordinary negative answer about the
-    /// carrier's structure, not a failure, so it is reported as an absent
-    /// response rather than a throw — the same answer the native binding
-    /// gives, so a consumer written against either transport ports unchanged
-    /// and can tell "no such node" from a genuine failure without reading the
-    /// error text.
-    ///
-    /// Throws if the query is invalid or the file is not found.
-    #[wasm_bindgen(js_name = getVirtualFile)]
-    pub fn get_virtual_file(&self, query: JsValue) -> Result<JsValue, JsValue> {
-        let ffi_query = parse_wasm_input::<FfiVirtualQuery>(query)?;
-        let canonical_for_source = if let Some(canonical) = ffi_query.canonical_id.as_ref() {
-            Some(canonical.clone())
-        } else if let Some(raw_id) = ffi_query.raw_id.as_ref() {
-            self.inner.resolve(raw_id).map(|r| r.canonical_id)
-        } else {
-            None
-        };
-        let host_query = ffi_virtual_query_to_host(ffi_query).map_err(ffi_err)?;
-        let result = catch_panic(|| self.inner.get_virtual_file(host_query))?;
-        match classify_host_virtual_file(result) {
-            VirtualFileOutcome::Published(response) => {
-                let source = canonical_for_source
-                    .as_deref()
-                    .and_then(|canonical| self.inner.get_source(canonical));
-                to_wasm_value(&host_virtual_file_to_ffi(response, source.as_deref()))
-            }
-            VirtualFileOutcome::Absent => Ok(JsValue::NULL),
-            VirtualFileOutcome::Failed(err) => Err(host_err(err)),
-        }
-    }
-
     /// Lists all virtual node kinds for a given canonical file ID.
     ///
     /// Returns a JS array of node kind objects (e.g. `{ kind: "style", index: 0 }`)
-    /// that can be passed to [`get_virtual_file`](Self::get_virtual_file).
+    /// describing the file's compiled outputs. Compiled node bytes are
+    /// obtained through [`compile_request`](Self::compile_request), not by
+    /// fetching a listed kind directly.
     /// Returns an empty array if the canonical ID is not tracked by the host.
     #[wasm_bindgen(js_name = listVirtualFiles)]
     pub fn list_virtual_files(&self, canonical_id: &str) -> Result<JsValue, JsValue> {
@@ -700,62 +643,6 @@ impl WasmVerterHost {
         to_wasm_value(&output)
     }
 
-    /// Retrieves the combined IDE output (TSX or JSX) for type checking.
-    ///
-    /// This is a dedicated API separate from virtual files. IDE output is
-    /// only consumed by the LSP and playground, never by bundlers.
-    ///
-    /// Returns `{ code: string, sourceMap?: string, isJsx: boolean }` or `null` if no IDE
-    /// output is available for the given file and profile.
-    #[wasm_bindgen(js_name = getIde)]
-    pub fn get_ide(&self, canonical_id: &str, profile: JsValue) -> Result<JsValue, JsValue> {
-        let ffi_profile: Option<FfiCompileProfile> = if profile.is_undefined() || profile.is_null()
-        {
-            None
-        } else {
-            Some(parse_wasm_input(profile)?)
-        };
-        let host_profile = ffi_profile_to_host(ffi_profile).map_err(ffi_err)?;
-        let result = catch_panic(|| self.inner.get_ide(canonical_id, &host_profile))?;
-        let sfc_source = self.inner.get_source(canonical_id);
-        to_wasm_value(&result.map(|response| ide_response_to_ffi(&response, sfc_source.as_deref())))
-    }
-
-    /// Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
-    ///
-    /// The explicit IDE-ensure path: it compiles the carrier's IDE surface
-    /// (never requesting the runtime `Main` node), so a Main-less carrier
-    /// (Svelte) populates its `CachedTsx` and a subsequent [`get_ide`](Self::get_ide)
-    /// succeeds. `getIde` itself stays a pure cached read.
-    ///
-    /// The caller profile is OPTIONAL and is normalized to an IDE/TSX-bearing
-    /// target INTERNALLY, so a default / bundler profile (no TSX bit) still
-    /// produces the IDE surface. Returns `true` when the carrier HAS an IDE
-    /// surface, and `false` ONLY for a genuine no-IDE-surface file (a
-    /// non-carrier / plain script).
-    ///
-    /// A profile that ALSO asks for a runtime product makes this a COMBINED
-    /// request identity: if the carrier fail-closes on that runtime surface the
-    /// transaction publishes nothing, and this throws the typed runtime-surface
-    /// refusal rather than reporting a missing IDE surface. A real failure
-    /// (missing source / compile error) throws too.
-    #[wasm_bindgen(js_name = ensureIdeCompiled)]
-    pub fn ensure_ide_compiled(
-        &self,
-        canonical_id: &str,
-        profile: JsValue,
-    ) -> Result<bool, JsValue> {
-        let ffi_profile: Option<FfiCompileProfile> = if profile.is_undefined() || profile.is_null()
-        {
-            None
-        } else {
-            Some(parse_wasm_input(profile)?)
-        };
-        let host_profile = ffi_profile_to_host(ffi_profile).map_err(ffi_err)?;
-        catch_panic(|| self.inner.ensure_ide_compiled(canonical_id, &host_profile))?
-            .map_err(host_err)
-    }
-
     /// Execute ONE typed compile request against an already-registered
     /// source and return its complete result.
     ///
@@ -788,9 +675,7 @@ impl WasmVerterHost {
     /// `getAnalysis` publishes them.
     ///
     /// Every call is a COMPLETE compile. This route consults and publishes
-    /// no compile cache slot, so two identical calls compile twice — a
-    /// per-keystroke loop that only needs the IDE surface stays cheaper on
-    /// the cached `ensureIdeCompiled` / `getIde` pair.
+    /// no compile cache slot, so two identical calls compile twice.
     ///
     /// Complete-only. A payload the schema refuses, a request the compiler
     /// refuses, a framework arm the registered carrier contradicts, an
@@ -835,8 +720,8 @@ impl WasmVerterHost {
 
     /// Retrieve TSC declaration output for a file.
     ///
-    /// Generates a minimal TypeScript declaration file for a Vue SFC.
-    /// Unlike `getIde`, this does NOT require a prior compilation pass.
+    /// Generates a minimal TypeScript declaration file for a Vue SFC. This
+    /// does NOT require a prior compilation pass.
     ///
     /// `mode` selects the served surface: `"public"` (default when absent /
     /// `undefined`) — the application-facing instance shape; `"testing"` —
@@ -1974,7 +1859,7 @@ defineProps<{ value: Unsafe }>()
         }
     }
 
-    /// `deny_unknown_fields` on the legacy input schemas must actually
+    /// `deny_unknown_fields` on a `parse_wasm_input` schema must actually
     /// FIRE at the JS boundary.
     ///
     /// It did not, for as long as `parse_wasm_input` fed the JS value
@@ -1982,16 +1867,26 @@ defineProps<{ value: Unsafe }>()
     /// answers a struct by reading only the keys the struct declares, so an
     /// undeclared key was never visited and the attribute never ran. The
     /// schema was closed on paper and open in practice — measured on the
-    /// built artifact, a `compileProfile` carrying an unknown key compiled
-    /// happily.
+    /// built artifact, a payload carrying an unknown key compiled happily.
     ///
     /// This is a JS-object-graph test, not a `serde_json::Value` one, on
     /// purpose: the defect lives in the JS→Rust decode step, and a fixture
-    /// that never becomes a JS object cannot reach it.
+    /// that never becomes a JS object cannot reach it. The schema below is
+    /// local to this test — `parse_wasm_input` is generic over any
+    /// `deny_unknown_fields` input, so the regression is pinned to the
+    /// helper itself rather than to whichever production route currently
+    /// happens to use it.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn an_unknown_key_on_a_legacy_input_is_refused_at_the_js_boundary() {
+    fn an_unknown_key_on_a_deny_unknown_fields_input_is_refused_at_the_js_boundary() {
         use wasm_bindgen::JsValue;
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct ClosedProbeInput {
+            #[allow(dead_code)]
+            filename: Option<String>,
+        }
 
         let payload = js_sys::Object::new();
         js_sys::Reflect::set(
@@ -2007,11 +1902,7 @@ defineProps<{ value: Unsafe }>()
         )
         .expect("undeclared key sets");
 
-        // `FfiCompileProfile` is not `Debug`, so match rather than
-        // `expect_err` — the Ok arm still has to fail loudly.
-        let refusal = match crate::parse_wasm_input::<verter_protocol::types::FfiCompileProfile>(
-            payload.into(),
-        ) {
+        let refusal = match crate::parse_wasm_input::<ClosedProbeInput>(payload.into()) {
             Ok(_) => panic!("an undeclared key must refuse, not be dropped"),
             Err(error) => error
                 .as_string()
@@ -2032,8 +1923,7 @@ defineProps<{ value: Unsafe }>()
         )
         .expect("declared key sets");
         assert!(
-            crate::parse_wasm_input::<verter_protocol::types::FfiCompileProfile>(accepted.into())
-                .is_ok(),
+            crate::parse_wasm_input::<ClosedProbeInput>(accepted.into()).is_ok(),
             "a payload of declared keys only still decodes"
         );
     }

@@ -7,7 +7,7 @@ product=validation_observability
 kind=contract
 semantic_role=delivery
 class=compiler
-predecessors=CMP0
+predecessors=CCA0,CCA1O1
 owner=compiler.validation-observability:test-only validation and observability lane
 conflict_domains=validation_observability,release_orchestration,github_projection_state
 resource_class=rust-mixed
@@ -51,7 +51,8 @@ One shared typed contract for validation and probe results. The current owner is
 
 ## Exact predecessor contracts
 
-- **CMP0:** implemented ledger row for "Compiler request, policy, compatibility, and identity contract"; it fixes the public compiler request/refusal vocabulary the probe taxonomy classifies against. Ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **CCA0:** accepted compiler product/admission constitution supplies the distinction between request transport and semantic product authority.
+- **CCA1O1:** typed public host-request/result schema supplies the probe envelope; no successor compiler implementation is required.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope
@@ -125,7 +126,7 @@ Before squashing or review, the implementation patch transitions this node's pre
 - XPASS surfacing and unrelated-class regression detection for canary/known-fail entries;
 - every skip carries an owning authority and reason; a gate needs an implemented authority covering its framework and dimension; canary preferred over skip whenever partial execution yields evidence.
 
-**Suggested predecessors:** `CMP0` public compiler request contract; no unfinished compiler work.
+**Required predecessors:** `CCA0` compiler capability contract and `CCA1O1` host adapter boundary. The harness may observe unfinished compiler work truthfully; compiler capability and performance promotion retain their own later gates.
 
 **Normative source decomposition:**
 
@@ -141,3 +142,7 @@ Before squashing or review, the implementation patch transitions this node's pre
 **Forbidden:** deriving semantics or expected output from external fixtures, tool-specific outcome variants, automatic promotion, skip entries without owners.
 
 **Deletion/abort:** no production deletion; abort if satisfying the contract would require repairing compiler behavior — record the failure against its owning future node instead.
+
+## Early observation boundary
+
+The taxonomy and non-gating workload observations run against the accepted request constitution and typed schema before the successor compiler rewrite. CMP0, CPER0, VCP7 and SCP7 retain their later semantic/performance promotion authority. Advancing observation grants no permission to treat an unimplemented semantic product as a passing gate.
