@@ -33,6 +33,8 @@ fn identity() -> FfiHostCompileIdentity {
         component_id: Some("c-1".to_string()),
         is_production: false,
         force_js: false,
+        ssr_module_id: None,
+        hmr_strategy: None,
     }
 }
 
@@ -350,6 +352,8 @@ fn the_identity_flags_convert_in_both_polarities() {
                     component_id: None,
                     is_production,
                     force_js,
+                    ssr_module_id: None,
+                    hmr_strategy: None,
                 },
                 "identity flags must cross unchanged for \
                  isProduction={is_production} forceJs={force_js}"
@@ -367,6 +371,7 @@ fn product_rows() -> Vec<(Value, FfiRequestedProduct)> {
     let runtime = || FfiRuntimeProductRequest {
         inline: Some(true),
         runtime_source_map: true,
+        style_processing: None,
     };
     vec![
         (

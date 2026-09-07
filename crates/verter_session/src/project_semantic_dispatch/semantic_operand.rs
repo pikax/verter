@@ -31,9 +31,11 @@ use crate::locator_identity::{
 };
 use crate::resolver_core::{BudgetDomain, BudgetExceededFailure};
 use crate::semantic_query::operand::{
-    authored_anchor, AuthoredSemanticOperand, ForcedSemanticOperand, OperandBinderIdentity,
-    OperandSplitEnv, SemanticOperand, SemanticOperandEvidence, SemanticOperandForceRequest,
-    SemanticOperandMintError, SemanticOperandParts,
+    authored_anchor, known_segment_to_path_segment, AuthoredSemanticOperand,
+    ForceProjectionSegment, ForcedSemanticOperand, OperandBinderIdentity, OperandSplitEnv,
+    SemanticOperand, SemanticOperandEvidence, SemanticOperandForceDemand,
+    SemanticOperandForceProjection, SemanticOperandForceRequest, SemanticOperandMintError,
+    SemanticOperandParts,
 };
 use crate::semantic_query::{
     DeclarationSlotSeed, DepSignature, IndexKey, InstantiateBodySource, InstantiateContext,
@@ -44,6 +46,12 @@ use crate::semantic_query::{
 use super::{ProjectSemanticDispatch, SemanticOperandAuthority};
 
 type OperandEvidenceEntry = (SemanticQueryKey, SemanticOperandEvidence);
+
+/// The canonical empty projection path — the single spelling of
+/// "expand the whole surface" on a `ProjectPath` key.
+fn empty_projection_path() -> Arc<[PathSegment]> {
+    Arc::from(Vec::<PathSegment>::new().into_boxed_slice())
+}
 
 struct OperandEvidenceGuard<'a> {
     stack: &'a std::cell::RefCell<smallvec::SmallVec<[OperandEvidenceEntry; 2]>>,
@@ -734,6 +742,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         slot: &ResolvedDeclSlotIdentity,
         locator: &AuthoredBodyLocator,
         args: &Arc<[SemanticNodeId]>,
+        projection: &SemanticOperandForceProjection,
         instantiate_context: InstantiateContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let parse_env = match instantiate_context.body_source() {
@@ -837,15 +846,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Err(error) = self.charge_operand_work("semantic-operand-project") {
             return (QueryResult::Error(error), lower.dep_signature).into();
         }
-        // The final projection dispatches through the SAME `ProjectPath`
-        // query family every other caller uses — never a direct builder
-        // call — so a plain `ProjectPath` request for the identical
+        // The terminal projection dispatches through the SAME shared query
+        // families every other caller uses — never a direct builder call —
+        // at exactly the force request's precision. `WholeSurface` is the
+        // empty-path `ProjectPath` (a plain request for the identical
         // (root, empty path, context) triple shares this admission/memo
-        // entry instead of the force path computing an uncached duplicate.
-        let project_key = SemanticQueryKey::ProjectPath {
-            base: root,
-            path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            context: instantiate_context.projection_reduction(),
+        // entry); `Path` carries the residual path so the operand is only
+        // forced at the requested keys (intermediate hops Navigate,
+        // terminal at the request context's mode); `KeyDomain` answers the
+        // operand's `keyof` without touching member values. The request's
+        // context arrives here UNCHANGED on the instantiate key — the
+        // precision axis is the projection demand, never a re-derived or
+        // defaulted context.
+        let context = instantiate_context.projection_reduction();
+        let project_key = match projection {
+            SemanticOperandForceProjection::WholeSurface => SemanticQueryKey::ProjectPath {
+                base: root,
+                path: empty_projection_path(),
+                context,
+            },
+            SemanticOperandForceProjection::Path(path) => SemanticQueryKey::ProjectPath {
+                base: root,
+                path: Arc::clone(path),
+                context,
+            },
+            SemanticOperandForceProjection::KeyDomain => SemanticQueryKey::KeyOf {
+                base: root,
+                context,
+            },
         };
         self.record_dispatch_intent_counters(&project_key);
         let projected = self.execute_read(project_key);
@@ -1034,6 +1062,56 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .collect())
     }
 
+    /// Lower a force request's demand into the derived, hashable
+    /// precision, sealing every operand the residual path itself carries.
+    ///
+    /// The key/index domain of the demand is decided BEFORE any base
+    /// surface is requested, and a computed index is validated exactly
+    /// like a node operand: a
+    /// handle from another store is [`QueryError::ForeignSemanticOperand`]
+    /// and a handle from a superseded generation is
+    /// [`QueryError::StaleSemanticOperand`], both refused before the base
+    /// is lowered. Its producer evidence joins `projection_evidence`, so
+    /// the index's own read facts and self-roots root the forced
+    /// candidate rather than being silently dropped.
+    fn seal_force_demand(
+        &self,
+        demand: SemanticOperandForceDemand,
+        projection_evidence: &mut smallvec::SmallVec<[SemanticOperandEvidence; 2]>,
+    ) -> Result<SemanticOperandForceProjection, QueryError> {
+        let segments = match demand {
+            SemanticOperandForceDemand::WholeSurface => {
+                return Ok(SemanticOperandForceProjection::WholeSurface)
+            }
+            SemanticOperandForceDemand::KeyDomain => {
+                return Ok(SemanticOperandForceProjection::KeyDomain)
+            }
+            SemanticOperandForceDemand::Path(segments) => segments,
+        };
+        let mut path = Vec::<PathSegment>::with_capacity(segments.len());
+        for segment in segments.iter() {
+            if let Some(known) = known_segment_to_path_segment(segment) {
+                path.push(known);
+                continue;
+            }
+            let ForceProjectionSegment::ComputedIndex(index) = segment else {
+                unreachable!("only a computed index has no statically-known lowering")
+            };
+            if index.store_identity() != self.graph().operand_store_identity() {
+                return Err(QueryError::ForeignSemanticOperand);
+            }
+            if index.generation() != self.ctx.project_type_store().current_project_generation() {
+                return Err(QueryError::StaleSemanticOperand);
+            }
+            self.merge_operand_evidence(index.evidence())?;
+            projection_evidence.push(index.evidence().clone());
+            path.push(PathSegment::Index(IndexKey::Computed(index.node())));
+        }
+        Ok(SemanticOperandForceProjection::Path(Arc::from(
+            path.into_boxed_slice(),
+        )))
+    }
+
     pub(super) fn force_semantic_operand(
         &self,
         operand: &SemanticOperand,
@@ -1046,7 +1124,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return QueryResult::Error(error);
         }
         let mut projection_evidence = smallvec::SmallVec::<[SemanticOperandEvidence; 2]>::new();
-        let context = request.into_context();
+        let (context, demand) = request.into_parts();
+        // The residual path's own operands are sealed FIRST — before the
+        // base is touched at all. A computed index is a graph handle the
+        // base's seal says nothing about, so its store identity and
+        // generation are proven and its producer evidence merged here; a
+        // refusal happens before any base lowering or projection, and the
+        // proven node only then becomes the `IndexKey::Computed` the
+        // derived precision hashes into family identity.
+        let projection = match self.seal_force_demand(demand, &mut projection_evidence) {
+            Ok(projection) => projection,
+            Err(error) => return QueryResult::Error(error),
+        };
         let key = match operand.parts(SemanticOperandAuthority::mint_for_forcing_boundary()) {
             SemanticOperandParts::Node {
                 store_identity,
@@ -1064,10 +1153,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     return QueryResult::Error(error);
                 }
                 projection_evidence.push(evidence.clone());
-                SemanticQueryKey::ProjectPath {
-                    base: node,
-                    path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-                    context,
+                // The requested key or residual path is known BEFORE the
+                // operand is forced: the projection demand selects the
+                // query family (key domain, residual path, or the explicit
+                // empty-path whole surface) so a selective ask never
+                // requests an unrelated base surface first. NO wildcard
+                // arm — a new precision has to classify itself here rather
+                // than silently degrading to the whole surface.
+                match &projection {
+                    SemanticOperandForceProjection::KeyDomain => SemanticQueryKey::KeyOf {
+                        base: node,
+                        context,
+                    },
+                    SemanticOperandForceProjection::WholeSurface => SemanticQueryKey::ProjectPath {
+                        base: node,
+                        path: empty_projection_path(),
+                        context,
+                    },
+                    SemanticOperandForceProjection::Path(path) => SemanticQueryKey::ProjectPath {
+                        base: node,
+                        path: Arc::clone(path),
+                        context,
+                    },
                 }
             }
             SemanticOperandParts::Authored(authored) => {
@@ -1101,18 +1208,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     parse,
                     super::BodySourceWitness::mint_for_dispatch_factory(),
                 );
-                // An empty-path TYPE-space `DeclBody` operand addresses the
-                // whole declaration body under the body frame — exactly the
-                // answer the declaration-source `Instantiate` query
-                // computes through its own lease-scoped binder-frame
-                // builder. Sealing that force under the authored source
-                // would fork the family: the identical (decl, args,
-                // context) would live twice, once for the compiler's
-                // ordinary dispatches and once for forces. Nested locator
-                // positions — and the value-space, augmentation, typedef,
-                // and macro arms, whose answers are not the declaration's
-                // Instantiate shell — keep locator identity in the key.
-                let whole_declaration = authored.addresses_whole_type_declaration();
+                // An empty-path TYPE-space `DeclBody` operand addressing the
+                // whole declaration body under the body frame — forced at
+                // the WHOLE-SURFACE precision — is exactly the answer the
+                // declaration-source `Instantiate` query computes through
+                // its own lease-scoped binder-frame builder. Sealing that
+                // force under the authored source would fork the family:
+                // the identical (decl, args, context) would live twice,
+                // once for the compiler's ordinary dispatches and once for
+                // forces. A SELECTIVE precision (residual path, key domain)
+                // answers a different value, so it keeps force-owned
+                // authored identity — converging it onto the declaration
+                // family would alias distinct demands onto one warm entry.
+                // Nested locator positions — and the value-space,
+                // augmentation, typedef, and macro arms, whose answers are
+                // not the declaration's Instantiate shell — keep locator
+                // identity in the key.
+                let whole_declaration =
+                    authored.addresses_whole_type_declaration() && projection.is_whole_surface();
                 SemanticQueryKey::Instantiate(if whole_declaration {
                     InstantiateKey::new(
                         locator_key.slot().clone(),
@@ -1125,6 +1238,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         authored.query_identity(),
                         Arc::clone(authored.substitution()),
                         instantiate_context,
+                        projection,
                         SemanticOperandAuthority::mint_for_forcing_boundary(),
                     )
                 })
@@ -1219,6 +1333,7 @@ pub(crate) fn authored_instantiate_key_fixture(
         ProjectIdentityDim,
     ),
     context: InstantiateContext,
+    projection: SemanticOperandForceProjection,
 ) -> SemanticQueryKey {
     let (parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash, project_identity) =
         split_env_axes;
@@ -1251,6 +1366,7 @@ pub(crate) fn authored_instantiate_key_fixture(
         authored.query_identity(),
         args,
         context,
+        projection,
         authority,
     ))
 }

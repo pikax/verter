@@ -102,7 +102,7 @@ await initialize();
 
 The package's compile entry. Initializes the module if needed, then returns
 a `Host` — the same in-memory `VerterHost` surface `@verter/native` exposes:
-register a source with `upsert`, then read its compiled virtual files.
+register a source with `upsert`, then compile it with `compileRequest`.
 
 ```typescript
 import { createHost } from "@verter/wasm";
@@ -116,20 +116,21 @@ host.upsert({
   fileLanguage: { framework: "vue" },
 });
 
-const main = host.getVirtualFile({
-  canonicalId: "/App.vue",
-  nodeKind: "Main",
-  compileProfile: {},
+const result = host.compileRequest("/App.vue", {
+  vue: {
+    identity: { isProduction: false, forceJs: false },
+    products: [{ runtimeClient: { runtimeSourceMap: false } }],
+    options: { backend: "inferred", ssr: false, isCustomElement: [], babelParserPlugins: [] },
+  },
 });
 
-console.log(main?.code);
+console.log(result.products[0]);
 ```
 
 There is no standalone `compile()` / `compileSync()`. The WASM artifact
 exports `VerterHost` and nothing else compile-shaped, so those wrappers never
-worked; they were removed rather than left throwing. Compile through the host:
-`Host.compileRequest()` for a typed one-call compile, or the profile-bearing
-reads for a cached IDE surface.
+worked; they were removed rather than left throwing. Compile through
+`Host.compileRequest()` — the sole compile route this binding exposes.
 
 ### `isInitialized(): boolean`
 
@@ -146,8 +147,8 @@ if (!isInitialized()) {
 ### Types
 
 Shared host request and response types (`HostConfig`, `HostUpsertRequest`,
-`HostVirtualQuery`, `HostVirtualFileResponse`, …) are re-exported from
-`@verter/native/host-types`. `BrowserHostCompileRequest` and
+`HostUpdateResult`, …) are re-exported from `@verter/native/host-types`.
+`BrowserHostCompileRequest` and
 `HostCompileRequestResponse` are exported by this package: the browser wire
 form tags each arm by key (`{ vue: … }`) where the native one uses a
 `framework` field, so the prefix keeps the two from being mistaken for each

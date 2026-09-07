@@ -46,8 +46,12 @@ in place. Compile through [`Host` / `VerterHost`](#host--verterhost).
 ### `Host` / `VerterHost`
 
 In-memory host facade exposed by the WASM runtime. It shares the typed
-`compileRequest()` and profile-bearing read methods with `@verter/native`, but
-the native-only source-registering `compileRequests()` batch route is absent.
+`compileRequest()` method with `@verter/native`, but the profile-bearing
+legacy read routes (`getIde`, `ensureIdeCompiled`, `getVirtualFile`), the
+preprocessor handshake `applyBlockOverrides`, and the native-only
+source-registering `compileRequests()` batch route are absent. Every WASM
+caller — the playground, fixture capture, and the transport probe —
+compiles exclusively through `compileRequest()`.
 
 ```ts
 import { createHost } from "@verter/wasm";
@@ -61,9 +65,12 @@ const update = host.upsert({
 
 // update.moduleReferences — import/require sites for dependency tracking
 
-const file = host.getVirtualFile({
-  rawId: "App.vue",
-  compileProfile: { isProduction: false },
+const result = host.compileRequest("App.vue", {
+  vue: {
+    identity: { isProduction: false, forceJs: false },
+    products: [{ runtimeClient: { runtimeSourceMap: false } }],
+    options: { backend: "inferred", ssr: false, isCustomElement: [], babelParserPlugins: [] },
+  },
 });
 ```
 
@@ -84,65 +91,19 @@ const host = await createHost();
 The `Host` class exposes the shared host methods below, including
 `compileRequest()`:
 
-| Method                                                                                      | Returns                           | Description                                                     |
-| ------------------------------------------------------------------------------------------- | --------------------------------- | --------------------------------------------------------------- |
-| `resolve(rawId)`                                                                            | `HostResolvedId \| null`          | Resolve raw ID to canonical ID                                  |
-| `upsert(request)`                                                                           | `HostUpdateResult`                | Register/update a file                                          |
-| `applyBlockOverrides(request)`                                                              | `HostUpdateResult`                | Apply preprocessed block overrides                              |
-| `getIde(canonicalId, profile?)`                                                             | `HostIdeResponse \| null`         | Get TSX or JSX for type checking                                |
-| `compileRequest(canonicalId, request)`                                                      | `HostCompileRequestResponse`      | Execute one typed compile request (throws on refusal)           |
-| `getVirtualFile(query)`                                                                     | `HostVirtualFileResponse \| null` | Get compiled virtual file (`null` when the node does not exist) |
-| `listVirtualFiles(canonicalId)`                                                             | `HostVirtualNodeKind[]`           | List virtual nodes for a file                                   |
-| `remove(canonicalOrAlias)`                                                                  | `HostRemoveResult \| null`        | Remove file from host                                           |
-| `getAnalysis(canonicalOrAlias)`                                                             | `unknown \| null`                 | Get analysis snapshot (native JS object)                        |
-| `setImportDependencies(id, deps)`                                                           | `void`                            | Set resolved import dependencies                                |
-| `collectResolvableModuleReferenceSpecifiers(moduleReferences)`                              | `string[]`                        | Return exact/finite candidate specifiers in encounter order     |
-| `resolveKnownModuleReferenceDependencies(ownerId, moduleReferences, knownIds, extensions?)` | `string[]`                        | Resolve exact/finite candidates against an in-memory file set   |
+| Method                                                                                      | Returns                      | Description                                                   |
+| ------------------------------------------------------------------------------------------- | ----------------------------- | --------------------------------------------------------------- |
+| `resolve(rawId)`                                                                            | `HostResolvedId \| null`     | Resolve raw ID to canonical ID                                  |
+| `upsert(request)`                                                                           | `HostUpdateResult`           | Register/update a file                                          |
+| `compileRequest(canonicalId, request)`                                                      | `HostCompileRequestResponse` | Execute one typed compile request (throws on refusal)           |
+| `listVirtualFiles(canonicalId)`                                                             | `HostVirtualNodeKind[]`      | List virtual nodes for a file                                   |
+| `remove(canonicalOrAlias)`                                                                  | `HostRemoveResult \| null`   | Remove file from host                                           |
+| `getAnalysis(canonicalOrAlias)`                                                             | `unknown \| null`            | Get analysis snapshot (native JS object)                        |
+| `setImportDependencies(id, deps)`                                                           | `void`                       | Set resolved import dependencies                                |
+| `collectResolvableModuleReferenceSpecifiers(moduleReferences)`                              | `string[]`                   | Return exact/finite candidate specifiers in encounter order     |
+| `resolveKnownModuleReferenceDependencies(ownerId, moduleReferences, knownIds, extensions?)` | `string[]`                   | Resolve exact/finite candidates against an in-memory file set   |
 
-See the [@verter/native documentation](./native.md) for detailed descriptions of each method and their parameter types.
-
-`applyBlockOverrides` uses sealed block identity, never a style index. Echo the
-stamps from the `preprocessorRequests` entry and hash the exact bytes returned by
-the processor:
-
-```ts
-async function hashBlockContent(value: string): Promise<string> {
-  const prefix = new TextEncoder().encode("verter.block-content.bytes.v1\0");
-  const bytes = new TextEncoder().encode(value);
-  const input = new Uint8Array(prefix.length + bytes.length);
-  input.set(prefix);
-  input.set(bytes, prefix.length);
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
-  return `sha256:${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
-
-const update = host.upsert({
-  inputId: "/src/App.vue",
-  source: '<template lang="pug">p Hello</template>',
-});
-const pending = update.preprocessorRequests[0];
-const code = "<p>Hello</p>";
-
-host.applyBlockOverrides({
-  canonicalId: update.canonicalId,
-  overrides: [
-    {
-      correlationToken: pending.correlationToken,
-      blockToken: pending.blockToken,
-      ownerRevision: pending.ownerRevision,
-      artifactToken: pending.artifactToken,
-      basisToken: pending.basisToken,
-      sourceSpaceToken: pending.sourceSpaceToken,
-      code,
-      codeHash: await hashBlockContent(code),
-    },
-  ],
-});
-```
-
-The host validates the current revision, artifact, basis, source space, code
-hash, and optional source-map hash after the asynchronous processor completes.
-It refuses stale or mismatched results without mutating its caches.
+See the [@verter/native documentation](./native.md) for detailed descriptions of each method and their parameter types. `@verter/native` additionally exposes the profile-bearing legacy routes (`getIde`, `ensureIdeCompiled`, `getVirtualFile`) and the preprocessor handshake `applyBlockOverrides` for its own, not-yet-migrated callers; this binding does not.
 
 #### `compileRequest(canonicalId, request)`
 
@@ -228,10 +189,7 @@ row's spans are **UTF-8 byte offsets into the registered source**, exactly as
 non-ASCII carrier.
 
 **No compile cache slot.** Every call is a complete compile: this route
-consults and publishes no cache slot, so two identical calls compile twice. The
-profile-bearing `ensureIdeCompiled()` / `getIde()` pair _is_ cached, so a
-per-keystroke editor loop that only needs the IDE surface stays cheaper there;
-reach for `compileRequest()` when the demand is a fresh multi-product compile.
+consults and publishes no cache slot, so two identical calls compile twice.
 
 **Complete-only.** Every requested product the host can produce is present.
 There is no partial response, no `null`, and no ensure boolean: a payload the
@@ -241,9 +199,6 @@ carrier contradicts, an unproducible product kind, or an execution refusal all
 names the offending product the way the request spelled it (`publicApi`, not
 `PublicApi`) and is thrown as the refusal-message string, not an `Error`
 instance.
-
-The profile-bearing `getIde()` / `ensureIdeCompiled()` / `getVirtualFile()`
-methods are unchanged and keep serving every existing caller.
 
 #### Shared module reference flow
 
@@ -280,15 +235,9 @@ For IDE/provider consumers, importing `App.vue` resolves through the public `.vu
 ### Host Types
 
 The `Host` class accepts and returns the same `Host*` types as `@verter/native`.
-
-`@verter/wasm` declares the compile profile and the two request shapes that carry it, so
-the browser binding owns its own compatibility contract for them. Their names and wire
-shapes are identical to the `@verter/native` ones, and `src/index.test-d.ts` type-checks
-that equivalence:
-
-- `HostCompileProfile`
-- `HostBlockOverrideRequest`
-- `HostVirtualQuery`
+`@verter/wasm` no longer declares a compile profile or a profile-bearing
+request shape of its own — `compileRequest()` is the sole compile route, and
+its request/response types are the ones documented below.
 
 ### Typed compile request types
 
@@ -330,7 +279,6 @@ The remaining types are re-exported from `@verter/native/host-types`:
 - `HostIdeResponse`
 - `HostUpdateResult`
 - `HostUpsertRequest`
-- `HostVirtualFileResponse`
 - `HostResolvedId`
 - `HostRemoveResult`
 - `HostVirtualNodeKind`
@@ -354,4 +302,6 @@ re-exported types.
 | `compileRequest()`              | Available                        | Available                        |
 | `compileRequest()` envelope     | Nested `ide`; `analysis` JSON string; structured `Error` | Flattened IDE DTO; `analysis` object; string throw |
 | `compileRequests()`             | Available                        | Not available                    |
+| `getIde()` / `ensureIdeCompiled()` / `getVirtualFile()` | Available (profile-bearing legacy routes) | Not available — `compileRequest()` is the sole compile route |
+| `applyBlockOverrides()`         | Available (preprocessor handshake, not a compile route) | Not available |
 | `source` accepts                | `string \| Buffer`               | `string`                         |

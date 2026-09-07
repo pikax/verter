@@ -72,3 +72,5 @@ Run targeted evidence during implementation and the owning final gate on the fin
 Remove disposable worktrees after their results are recorded. Report the implemented node, commit locator hints, review verdicts, verification results, remaining limitations, and cleanup state.
 
 See `references/templates.md` for prompts.
+
+Autonomous repository-roadmap managers use the default cumulative checkpoint policy in `roadmap/0.1.0-tama/APPLICATION.md`: normally three new blocks, a hard six-block unchecked bound including active reservations, conservative first-adoption coverage and durable operational progress. A final train review must inspect the actual candidate checkout and cannot be waived by a node-review override. Changed candidate/baseline content requires a fresh affected review. These execution controls do not add a DAG readiness input.

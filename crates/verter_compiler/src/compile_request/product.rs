@@ -85,6 +85,44 @@ impl std::fmt::Display for RuntimeStyleProcessing {
     }
 }
 
+/// Dev-server tooling flavour for the host Main-assembly decoration —
+/// which hot-update runtime the composed `__file` assignment and
+/// hot-accept trailer target.
+///
+/// This is a host build knob, not a framework option: the official
+/// Vue/Svelte option inventories carry no such row, so it lives on the
+/// request's own identity axes rather than on either framework's option
+/// block. The legacy `CompileProfile.hmr_strategy` carries the same axis
+/// and treats it as inert for Svelte; this request preserves that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RuntimeHmrStrategy {
+    /// No dev-server tooling: no `__file`, no hot-accept trailer.
+    #[default]
+    None,
+    /// Vite-style HMR (`import.meta.hot`).
+    Vite,
+    /// Webpack-style HMR (`module.hot`).
+    Webpack,
+}
+
+impl RuntimeHmrStrategy {
+    /// The `hmrStrategy` spelling a caller writes, and the one a refusal
+    /// quotes back. One owner for every transport.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            RuntimeHmrStrategy::None => "none",
+            RuntimeHmrStrategy::Vite => "vite",
+            RuntimeHmrStrategy::Webpack => "webpack",
+        }
+    }
+}
+
+impl std::fmt::Display for RuntimeHmrStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.wire_name())
+    }
+}
+
 /// Runtime (client or server) product options. `inline` is meaningful only
 /// on a `RuntimeClient` product — its presence on a `RuntimeServer` product
 /// is refused at [`super::CompileRequest::new`] time (`inline x SSR` fails

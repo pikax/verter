@@ -36,11 +36,7 @@ const REQUIRED_ARTIFACT_EXPORTS = ["default", "initSync", "VerterHost"] as const
 const REQUIRED_HOST_METHODS = [
   "resolve",
   "upsert",
-  "applyBlockOverrides",
-  "getIde",
-  "ensureIdeCompiled",
   "compileRequest",
-  "getVirtualFile",
   "listVirtualFiles",
   "remove",
   "getAnalysis",

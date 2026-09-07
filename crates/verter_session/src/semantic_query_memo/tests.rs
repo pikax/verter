@@ -8965,6 +8965,7 @@ mod env_scoped_key_identity_guards {
         use crate::locator_identity::{
             LibEnvHash, ParseEnvHash, ProjectIdentityDim, ResolveEnvHash, TypeEnvHash,
         };
+        use crate::semantic_query::operand::SemanticOperandForceProjection;
         use verter_type_expr::locators::{
             AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
         };
@@ -9000,14 +9001,21 @@ mod env_scoped_key_identity_guards {
             LibEnvHash::from_env_hash([0u8; 16]),
             ProjectIdentityDim::from_project_identity(0),
         );
+        let authored_key_at =
+            |slot: &ResolvedDeclSlotIdentity,
+             locator: &AuthoredBodyLocator,
+             projection: SemanticOperandForceProjection| {
+                crate::project_semantic_dispatch::semantic_operand::authored_instantiate_key_fixture(
+                    slot.clone(),
+                    locator.clone(),
+                    empty_args(),
+                    split_env_axes,
+                    context,
+                    projection,
+                )
+            };
         let authored_key = |slot: &ResolvedDeclSlotIdentity, locator: &AuthoredBodyLocator| {
-            crate::project_semantic_dispatch::semantic_operand::authored_instantiate_key_fixture(
-                slot.clone(),
-                locator.clone(),
-                empty_args(),
-                split_env_axes,
-                context,
-            )
+            authored_key_at(slot, locator, SemanticOperandForceProjection::WholeSurface)
         };
         let declaration = fam(&SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(slot.clone(), empty_args(), context),
@@ -9025,6 +9033,64 @@ mod env_scoped_key_identity_guards {
         assert_eq!(declaration.variant_label(), "Instantiate");
         assert_eq!(authored.variant_label(), "InstantiateAuthored");
         assert_eq!(authored.candidate_cap(), declaration.candidate_cap());
+
+        // The force's PROJECTION PRECISION is part of the authored family
+        // identity: a whole-surface force, a residual-path force, a
+        // different residual path, and a key-domain force each answer a
+        // DIFFERENT value for the same (decl, args, context), so warm-hitting
+        // one on another would hand back a foreign answer.
+        let member = |name: &str| {
+            let path: Arc<[crate::semantic_query::PathSegment]> = Arc::from(
+                vec![crate::semantic_query::PathSegment::Member(
+                    crate::semantic_query::PropertyKey::identifier(Arc::from(name)),
+                )]
+                .into_boxed_slice(),
+            );
+            SemanticOperandForceProjection::Path(path)
+        };
+        // An INDEX segment is its own axis: `Base["a"]` and `Base["b"]`
+        // answer different values, and neither is `Base.a`. The runtime
+        // path vocabulary carries index segments (including computed
+        // ones), so the table covers them alongside member segments.
+        let index = |name: &str| {
+            let path: Arc<[crate::semantic_query::PathSegment]> = Arc::from(
+                vec![crate::semantic_query::PathSegment::Index(
+                    crate::semantic_query::IndexKey::String(Arc::from(name)),
+                )]
+                .into_boxed_slice(),
+            );
+            SemanticOperandForceProjection::Path(path)
+        };
+        let precisions = [
+            SemanticOperandForceProjection::WholeSurface,
+            SemanticOperandForceProjection::KeyDomain,
+            member("wanted"),
+            member("other"),
+            index("a"),
+            index("b"),
+        ];
+        let families: Vec<_> = precisions
+            .iter()
+            .map(|projection| fam(&authored_key_at(&slot, &locator, projection.clone())))
+            .collect();
+        for (i, left) in families.iter().enumerate() {
+            for (j, right) in families.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert_ne!(
+                    left, right,
+                    "force precisions {:?} and {:?} must not share a family slot",
+                    precisions[i], precisions[j]
+                );
+            }
+        }
+        // Re-asking the SAME precision converges on one family — the axis
+        // splits distinct demands without fragmenting identical ones.
+        assert_eq!(
+            fam(&authored_key_at(&slot, &locator, member("wanted"))),
+            families[2]
+        );
     }
 
     /// Closes the "env validity purely ReadSetSignature" gap: a `type_env` /

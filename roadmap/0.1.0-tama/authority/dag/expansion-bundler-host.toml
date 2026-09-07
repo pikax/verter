@@ -36,6 +36,7 @@ max_related_packages = 0
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.1.0"
 
 [[node]]
 id = "BND1"
@@ -72,6 +73,7 @@ max_related_packages = 2
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.1.0"
 
 [[node]]
 id = "BND2"
@@ -108,6 +110,7 @@ max_related_packages = 2
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.1.0"
 
 [[node]]
 id = "BND3"
@@ -144,6 +147,7 @@ max_related_packages = 2
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.1.0"
 
 [[node]]
 id = "BND4"
@@ -180,6 +184,7 @@ max_related_packages = 2
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.1.0"
 
 [[node]]
 id = "BND5"
@@ -216,3 +221,4 @@ max_related_packages = 1
 rescope_loc = 1500
 rescope_files = 12
 rescope_unrelated_packages = 3
+gh_milestone = "0.1.0"

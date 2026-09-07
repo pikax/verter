@@ -359,9 +359,11 @@ const file = host.getVirtualFile({
 
 `null` means the requested node does not exist — an SFC with no `<style>` block
 asked for `style[0]`, for instance. That is an ordinary negative answer about
-the carrier's structure, not a failure, and `@verter/wasm` answers it the same
-way. A genuine failure — an invalid query, an unknown file, a refused
-compilation — throws.
+the carrier's structure, not a failure. A genuine failure — an invalid query,
+an unknown file, a refused compilation — throws.
+
+`@verter/wasm` does not expose this route — every WASM caller compiles
+through `compileRequest()` instead.
 
 #### `host.getPublicApi(canonicalId, mode?)`
 

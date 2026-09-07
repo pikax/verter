@@ -64,3 +64,15 @@ Move unplugin's native host calls to CCA1O2's typed framework-discriminated requ
 ## Deletions, budget, and verification
 
 Delete only unplugin-local legacy host request construction/imports. Ceiling: 500 production LOC, 4 production/test files, 1 package; abort if native binding deletion or another consumer enters. Run unplugin type/unit/bundler suites and `targeted-domain`. CCA1O4D consumes this migration fact.
+
+## Recorded deviation (proposed — awaiting ratification)
+
+The typed host-request route could not preserve Vue/Svelte bundling, HMR,
+and the manifest without three fields the typed wire schema did not carry
+(`ssr_module_id`, `hmr_strategy`, `style_processing`, plus the two enums
+they type), so the implementation extended the wire schema even though this
+charter's exclusions name native/NAPI signature work. The conflict, the
+footprint, and the ratification options are recorded in
+`decisions/2026-09-05-cca1o4-native-wire-extension-scope-disposition.md`.
+That record is a disclosure, not an approval; until the operator ruling the
+"Native/NAPI signatures … are excluded" line above stands as chartered.

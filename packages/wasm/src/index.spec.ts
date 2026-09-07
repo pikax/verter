@@ -28,7 +28,6 @@ const mockHostUpsert = vi.fn(() => ({
     },
   ],
 }));
-const mockHostGetVirtualFile = vi.fn(() => ({ code: "virtual", diagnostics: { diagnostics: [] } }));
 const mockHostListVirtualFiles = vi.fn(() => []);
 const mockHostRemove = vi.fn(() => null);
 const mockHostCollectResolvableModuleReferenceSpecifiers = vi.fn(() => ["./Foo.vue"]);
@@ -49,7 +48,6 @@ class MockHost {
 
   resolve = mockHostResolve;
   upsert = mockHostUpsert;
-  getVirtualFile = mockHostGetVirtualFile;
   listVirtualFiles = mockHostListVirtualFiles;
   remove = mockHostRemove;
   collectResolvableModuleReferenceSpecifiers = mockHostCollectResolvableModuleReferenceSpecifiers;
@@ -70,7 +68,6 @@ beforeEach(async () => {
   mockHostCtor.mockClear();
   mockHostResolve.mockClear();
   mockHostUpsert.mockClear();
-  mockHostGetVirtualFile.mockClear();
   mockHostListVirtualFiles.mockClear();
   mockHostRemove.mockClear();
   mockHostCollectResolvableModuleReferenceSpecifiers.mockClear();
@@ -95,7 +92,6 @@ describe("@verter/wasm host wrapper", () => {
 
       host.resolve("Comp.vue");
       const upsert = host.upsert({ inputId: "Comp.vue", source: "<template/>", fileKind: "vue" });
-      host.getVirtualFile({ rawId: "Comp.vue" });
       host.listVirtualFiles("Comp.vue");
       host.remove("Comp.vue");
 
@@ -103,7 +99,6 @@ describe("@verter/wasm host wrapper", () => {
       expect(mockHostCtor).toHaveBeenCalledWith({ devMode: true });
       expect(mockHostResolve).toHaveBeenCalledWith("Comp.vue");
       expect(mockHostUpsert).toHaveBeenCalled();
-      expect(mockHostGetVirtualFile).toHaveBeenCalled();
       expect(mockHostListVirtualFiles).toHaveBeenCalledWith("Comp.vue");
       expect(mockHostRemove).toHaveBeenCalledWith("Comp.vue");
     });
