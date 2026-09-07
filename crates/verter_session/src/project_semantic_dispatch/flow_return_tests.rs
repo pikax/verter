@@ -4711,18 +4711,40 @@ fn flow_return_nested_capture_state_matches_the_closure_position() {
     );
     assert_eq!(projected_function_return(&written), &string_literal("b"));
 
-    let destructured = expect_clean_flow_value(
-        "function makeProps({ x }: { x: \"a\" | \"b\" }) { return () => x }",
-    );
-    assert_eq!(
-        projected_function_return(&destructured),
-        &verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
-    );
-
     let read_only = expect_clean_flow_value(
         "function makeProps() { let x: \"a\" | \"b\" = \"a\"; return () => x }",
     );
     assert_eq!(projected_function_return(&read_only), &string_literal("a"));
+}
+
+#[test]
+fn flow_return_nested_destructured_capture_uses_its_parent_parameter_input() {
+    let value = expect_clean_flow_value(
+        "function makeProps({ x }: { x: \"a\" | \"b\" }) { return () => x }",
+    );
+    assert_eq!(
+        projected_function_return(&value),
+        &verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+    );
+}
+
+#[test]
+fn flow_return_one_expression_imports_a_wide_capture_environment() {
+    let declarations = (0..16)
+        .map(|index| format!("const value{index} = {index};"))
+        .collect::<String>();
+    let expression = (0..16)
+        .map(|index| format!("value{index}"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let value = expect_clean_flow_value(&format!(
+        "function makeProps() {{ {declarations} return () => {expression}; }}"
+    ));
+    assert_eq!(
+        projected_function_return(&value),
+        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "one expression's exact captured inputs fit its execution policy"
+    );
 }
 
 #[test]

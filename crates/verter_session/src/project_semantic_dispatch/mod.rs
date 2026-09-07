@@ -118,6 +118,7 @@ pub(crate) mod flow_return_frame_seal_tests;
 pub(crate) mod flow_return_lexical_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_positional_tests;
+mod flow_return_products;
 #[cfg(test)]
 pub(crate) mod flow_return_root_gate_tests;
 #[cfg(test)]

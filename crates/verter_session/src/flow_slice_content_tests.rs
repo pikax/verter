@@ -12,7 +12,6 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::flow::flow_graph::build_function_flow_graph;
 use verter_semantic::analysis::flow::lower::lower_slice_plan;
 use verter_semantic::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
 use verter_semantic::analysis::function_program::{
@@ -80,18 +79,20 @@ fn selection_for(
     path: &[Arc<str>],
 ) -> (
     FlowSliceSelection,
-    Arc<verter_semantic::analysis::flow::FunctionBodySkeleton>,
+    crate::cache_runtime::flow_slice_node::BoundFlowGraph,
 ) {
     let skeleton = memo
         .function_body_skeleton(entry)
         .expect("the skeleton must build for an indexed function");
-    let graph = build_function_flow_graph(&skeleton);
+    let bound = memo.flow_bound_graph_for_tests(entry, skeleton);
+    let skeleton = &bound.bundle().skeleton;
+    let graph = &bound.bundle().graph;
     let demand = SliceDemand::for_return_projection(&skeleton, path);
     let plan = ReturnPathPeeker::new(&graph)
         .plan(&demand, &FlowSliceBudget::default())
         .expect("the default budget admits these fixtures");
     let ir = lower_slice_plan(&plan, &graph, &skeleton);
-    (FlowSliceSelection::from_slice_ir(&ir), Arc::new(skeleton))
+    (FlowSliceSelection::from_slice_ir(&ir), bound)
 }
 
 fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceContent> {
@@ -99,7 +100,7 @@ fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceCon
     let index = memo.function_program_index();
     let entry = entry_of(&index, name);
     let (selection, skeleton) = selection_for(&memo, entry, path);
-    memo.flow_slice_content(entry, selection, skeleton)
+    memo.flow_slice_content(entry, selection, &skeleton)
         .expect("slice content must build for an indexed function")
 }
 
@@ -110,7 +111,9 @@ fn content_for(source: &str, name: &str) -> Arc<SliceContent> {
 #[test]
 fn slice_binding_references_preserve_shadowed_capture_frames() {
     use verter_semantic::analysis::flow::FlowBindingRef;
-    let content = content_for("function f(flag: boolean) { if (flag) { let twin = 1; return () => twin; } else { let twin = 2; return () => twin; } }", "f");
+    let source = "function f(flag: boolean) { if (flag) { let twin = 1; return () => twin; } else { let twin = 2; return () => twin; } }";
+    let content = content_for(source, "f");
+    let memo = memo_for(source);
     let SliceStatement::If {
         consequent,
         alternate: Some(alternate),
@@ -127,7 +130,7 @@ fn slice_binding_references_preserve_shadowed_capture_frames() {
             region = block;
         }
         let [SliceStatement::Binding { binding, .. }, SliceStatement::Return {
-            argument: Some(SliceExpr::NestedFunctionValue { body, bindings, .. }),
+            argument: Some(nested @ SliceExpr::NestedFunctionValue { .. }),
             ..
         }] = region.statements.as_ref()
         else {
@@ -137,6 +140,9 @@ fn slice_binding_references_preserve_shadowed_capture_frames() {
             .bindings
             .identity(*binding)
             .expect("declaration identity");
+        let child = nested_content(&memo, nested);
+        let body = &child.body;
+        let bindings = &child.bindings;
         let [SliceStatement::Return {
             argument:
                 Some(SliceExpr::Local {
@@ -1035,18 +1041,39 @@ fn instanceof_constructor_binds_through_the_frame_before_owner_scope() {
 }
 
 /// The body region of the ONE nested function value `name` returns.
-fn returned_nested_body(node: &SliceContent) -> &SliceRegion {
-    node.body
+fn nested_content(memo: &DeclBodyMemo, nested: &SliceExpr) -> Arc<SliceContent> {
+    let SliceExpr::NestedFunctionValue {
+        function, context, ..
+    } = nested
+    else {
+        panic!("nested descriptor");
+    };
+    let index = memo.function_program_index();
+    let entry = index.get(function).expect("indexed child").entry();
+    let (selection, skeleton) = selection_for(memo, entry, &[]);
+    memo.flow_slice_content_with_context(
+        entry,
+        Some(selection),
+        &skeleton,
+        Some(Arc::clone(context)),
+    )
+    .expect("selected child content")
+}
+
+fn returned_nested_body(source: &str, node: &SliceContent) -> Arc<SliceContent> {
+    let nested = node
+        .body
         .statements
         .iter()
         .find_map(|statement| match statement {
             SliceStatement::Return {
-                argument: Some(SliceExpr::NestedFunctionValue { body, .. }),
+                argument: Some(nested @ SliceExpr::NestedFunctionValue { .. }),
                 ..
-            } => Some(body),
+            } => Some(nested),
             _ => None,
         })
-        .expect("the function returns a nested function value")
+        .expect("the function returns a nested function value");
+    nested_content(&memo_for(source), nested)
 }
 
 /// The number of `if` statements of `region` guarded by a predicate fact.
@@ -1139,21 +1166,19 @@ fn predicate_target_over_caller_bindings_never_resolves_in_the_caller_environmen
         );
     }
 
-    let enclosing = content_for(
-        &format!(
-            "{PRELUDE}function outer<T extends number>() {{ \
+    let source = format!(
+        "{PRELUDE}function outer<T extends number>() {{ \
              return (x: number | string) => {{ if (isNum(x)) return x; return false }} }}"
-        ),
-        "outer",
     );
-    let nested = returned_nested_body(&enclosing);
+    let enclosing = content_for(&source, "outer");
+    let nested = returned_nested_body(&source, &enclosing);
     assert_eq!(
-        region_predicate_guard_count(nested),
+        region_predicate_guard_count(&nested.body),
         0,
         "an ENCLOSING frame's type parameter rebinds the target too: {enclosing:?}"
     );
     assert_eq!(
-        region_guard_gap_count(nested),
+        region_guard_gap_count(&nested.body),
         1,
         "the nested control test gaps: {enclosing:?}"
     );
@@ -2808,7 +2833,7 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
     let entry = member_entry_of(&index, "C", 1);
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let brand = memo
-        .flow_slice_content(entry, selection, skeleton)
+        .flow_slice_content(entry, selection, &skeleton)
         .expect("the class member slice content must build");
     assert_eq!(
         guard_gap_count(&brand),
@@ -3477,7 +3502,7 @@ fn symbolic_and_unrepresentable_calls() {
     let entry = member_entry_of(&index, "Service", 1);
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let node = memo
-        .flow_slice_content(entry, selection, skeleton)
+        .flow_slice_content(entry, selection, &skeleton)
         .expect("the class method slice content must build");
     assert_eq!(
         node.body.statements.as_ref(),
@@ -3774,12 +3799,8 @@ fn locator_miss_is_typed_none() {
     let mut missing_contributor = entry.clone();
     missing_contributor.locator.contributor.contributor_index = 9999;
     assert!(
-        memo.flow_slice_content(
-            &missing_contributor,
-            selection.clone(),
-            Arc::clone(&skeleton)
-        )
-        .is_none(),
+        memo.flow_slice_content(&missing_contributor, selection.clone(), &skeleton)
+            .is_none(),
         "an out-of-range contributor is a typed miss"
     );
 
@@ -3788,7 +3809,7 @@ fn locator_miss_is_typed_none() {
         declarator_ordinal: 99,
     }]);
     assert!(
-        memo.flow_slice_content(&bad_descent, selection, skeleton)
+        memo.flow_slice_content(&bad_descent, selection, &skeleton)
             .is_none(),
         "a mismatched descent is a typed miss"
     );

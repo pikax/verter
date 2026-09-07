@@ -732,14 +732,9 @@ fn flow_product_worklist_is_permutation_deterministic() {
     }
 }
 
-/// The product budget is the demand plan's OWN policy, and exhausting it
-/// is a typed frame failure that retains nothing.
-///
-/// The control frame merges within its plan's convergence policy and
-/// warm-admits. Under a ZERO-iteration budget the very first frame merge
-/// exhausts the policy, so the merge produces no joined state, the frame
-/// reports the typed budget failure, and the demand retains NO candidate
-/// and recomputes cold on the next request.
+/// Acyclic continuation joins require no fixed-point iterations. The
+/// materialized-product limit is independent: exhausting it refuses the
+/// entire transaction and retains no candidate.
 #[test]
 fn flow_product_budget_boundary_is_exact_and_never_warm() {
     use super::flow_return::flow_admission_fault_injection as inject;
@@ -760,12 +755,23 @@ fn flow_product_budget_boundary_is_exact_and_never_warm() {
             "the second demand of a converged frame is a warm hit"
         );
 
-        let exhausted_host = make_product_host();
-        let _zero_budget = inject::Guard::arm(
-            &exhausted_host
+        let acyclic_host = make_product_host();
+        let _zero_iterations = inject::Guard::arm(
+            &acyclic_host
                 .flow_fault_injection
                 .zero_product_iteration_budget,
         );
+        let acyclic = run_product(&acyclic_host, function, 2);
+        assert_eq!(acyclic.served, control.served);
+        assert_eq!(
+            acyclic.candidates, 1,
+            "acyclic joins perform no fixed-point iteration"
+        );
+        assert_eq!(acyclic.cold_computes, 1);
+
+        let exhausted_host = make_product_host();
+        let _zero_budget =
+            inject::Guard::arm(&exhausted_host.flow_fault_injection.zero_product_capacity);
         let exhausted = run_product(&exhausted_host, function, 2);
         assert_eq!(
             exhausted.candidates, 0,
@@ -779,22 +785,9 @@ fn flow_product_budget_boundary_is_exact_and_never_warm() {
     }
 }
 
-/// The frame's product budget counts BOTH subject spaces, and the
-/// parameter space is not selection-bound.
-///
-/// `max_products` is derived from the demand plan, so it must cover every
-/// subject the frame can hold. A binding subject is minted at a
-/// slice-selected site, but a PARAMETER subject is not: completing a
-/// return-edge snapshot's parameter layer files one product per signature
-/// parameter whether the body reads it or not. A budget derived from the
-/// selection alone therefore exhausts at the first merge that sees a
-/// completed parameter layer, and the frame stops producing a value at
-/// all: the typed budget failure is what refuses its admission, so the
-/// demand recomputes it cold and fails again on every request.
-///
-/// Both frames here have the SAME body; only the arity differs. The wide
-/// one must converge, serve the same value, and warm exactly like the
-/// narrow one.
+/// Unread signature parameters do not create product subjects. Both frames
+/// have the same selected body and must serve the same value and warm within
+/// the same demand-derived product policy despite their different arities.
 #[test]
 fn a_wide_signature_frame_converges_within_its_own_product_budget() {
     let narrow_host = make_product_host();
@@ -816,13 +809,10 @@ fn a_wide_signature_frame_converges_within_its_own_product_budget() {
     );
     assert_eq!(
         wide.candidates, narrow.candidates,
-        "a frame whose parameter subjects outnumber its selection still \
-         converges and warm-admits exactly one candidate"
+        "unselected signature parameters do not exhaust the product budget"
     );
     assert_eq!(
         wide.cold_computes, narrow.cold_computes,
-        "the second demand of the wide frame is a warm hit, exactly like \
-         the control's — a budget that ignored the parameter space exhausts \
-         at this frame's merge, and nothing it produces can be admitted"
+        "the second demand of either frame is a warm hit"
     );
 }

@@ -34,14 +34,14 @@ use super::dispatch_txn::{
     ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
 };
 use super::flow_products::{
-    join_frame_products, DefiniteAssignment, DefiniteAssignmentProduct, FlowBindingLayer,
-    FlowFrameBindings, FlowFrameJoinOutcome, FlowNarrowingFact, FlowProductBudget,
-    FlowProductBudgetExceeded, FlowProductStore, FlowProductSubject, NarrowingProduct,
-    ReachingTypeProduct, WideningMembership,
+    DefiniteAssignment, DefiniteAssignmentProduct, FlowNarrowingFact, FlowProductBudget,
+    FlowProductEvidence, FlowProductExecution, FlowProductFailure, FlowProductInputs,
+    NarrowingProduct, ReachingTypeProduct, WideningMembership,
 };
 use super::flow_return_callee::{
     CallValue, CalleeClause, CalleeClauseLookup, HeldCallee, ReturnOrigin, SignatureCall,
 };
+use super::flow_return_products::{FlowBindingLayer, FlowFrameProducts as FlowProductStore};
 use super::flow_solve::{
     FlowPartialReason, FlowSolveOutcome, NoValueFlowResult, PartialFlowResult,
 };
@@ -52,6 +52,9 @@ use crate::semantic_query::{
     FlowReturnDegradation, FlowReturnFailure, FlowReturnKey, FlowReturnResult, FlowReturnStep,
     FlowReturnUnsupported, PartialReasonSet, PrimitiveKind, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
+};
+use verter_semantic::analysis::flow::{
+    FlowBindingMap, FlowBindingRef as FlowProductSubject, FunctionBodySkeleton, SkeletonBindingId,
 };
 
 /// The consumer outcome of one sealed function-return demand
@@ -378,6 +381,8 @@ pub(crate) mod flow_admission_fault_injection {
         /// merge. Refuse-only: an exhausted budget withholds the frame's
         /// joined state and can never mint one.
         pub(crate) zero_product_iteration_budget: AtomicBool,
+        /// Refuse materializing the first selected product.
+        pub(crate) zero_product_capacity: AtomicBool,
 
         /// When armed, `evaluate_flow_return` assembles its execution
         /// witness with the frame's binding-domain product evidence
@@ -511,9 +516,6 @@ struct FlowSliceDemandSite {
     slice_key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
     /// The demanded member for a member-projection demand.
     demanded_member: Option<Arc<str>>,
-    /// The frame's binding inventory — the cross-frame binding authority
-    /// the demand planner resolves slot identities against.
-    inventory: super::flow_solve::FlowBindingInventory,
 }
 
 /// A demand site that could not be derived: the typed no-value failure
@@ -1941,7 +1943,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// evaluation still runs (values are the evaluator's), but no proof
     /// can mint and the close finalizes unproven (`ReturnOnly`).
     pub(super) fn prepare_flow_return_demand(&self, key: &FlowReturnKey, frame_idx: usize) {
-        use super::flow_solve::{build_flow_demand_plan, FlowDemandRequest, FlowResourcePolicy};
+        use super::flow_solve::{
+            build_flow_demand_plan_from_execution, prepare_flow_execution, FlowDemandRequest,
+            FlowResourcePolicy,
+        };
         let site = match self.flow_slice_demand_site(key) {
             Ok(site) => site,
             // The SITE classifies its own edge: a store read that did not
@@ -2045,24 +2050,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             resources,
             additional_requirements: Arc::from([]),
         };
-        let plan = match build_flow_demand_plan(request, &bound, &planned, &site.inventory) {
+        let execution = match prepare_flow_execution(&request, &bound, &planned) {
+            Ok(execution) => execution,
+            Err(error) => {
+                self.record_flow_plan_error(frame_idx, error);
+                return;
+            }
+        };
+        if let Some(state) = self
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .frame_mut_for_update(frame_idx)
+            .and_then(super::dispatch_txn::ObligationFrame::flow_return_mut)
+        {
+            state.flow_execution = Some(Arc::clone(&execution));
+        }
+        let plan = match build_flow_demand_plan_from_execution(
+            execution,
+            &bound,
+            request.additional_requirements,
+        ) {
             Ok(plan) => plan,
             Err(error) => {
-                use super::flow_solve::FlowDemandPlanError as E;
-                let refusal = match error {
-                    // Both budget axes are statements about the REQUEST.
-                    E::SliceBudget(_) | E::ObligationBudget { .. } => FlowPlanRefusal::Budget,
-                    // Retained artifacts that do not match the demand's
-                    // bound graph: a torn intermediate view.
-                    E::BasisKeyMismatch
-                    | E::SelectionOutOfRange
-                    | E::SelectionDemandMismatch
-                    | E::SelectionProvenanceMismatch => FlowPlanRefusal::TornView,
-                    E::UnregisteredOperation | E::NotAnEnabledRoot | E::UnrepresentableDemand => {
-                        FlowPlanRefusal::Unplannable
-                    }
-                };
-                self.record_flow_plan_refusal(frame_idx, refusal);
+                self.record_flow_plan_error(frame_idx, error);
                 return;
             }
         };
@@ -2086,6 +2097,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 provenance,
             });
         }
+    }
+
+    fn record_flow_plan_error(
+        &self,
+        frame_idx: usize,
+        error: super::flow_solve::FlowDemandPlanError,
+    ) {
+        use super::flow_solve::FlowDemandPlanError as E;
+        let refusal = match error {
+            E::SliceBudget(_) | E::ObligationBudget { .. } => FlowPlanRefusal::Budget,
+            E::BasisKeyMismatch
+            | E::SelectionOutOfRange
+            | E::SelectionDemandMismatch
+            | E::SelectionProvenanceMismatch => FlowPlanRefusal::TornView,
+            E::UnregisteredOperation | E::NotAnEnabledRoot | E::UnrepresentableDemand => {
+                FlowPlanRefusal::Unplannable
+            }
+        };
+        self.record_flow_plan_refusal(frame_idx, refusal);
     }
 
     /// Record WHY the demand preparation installed no proof layer on the
@@ -2114,6 +2144,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .frame(idx)
             .and_then(|frame| match &frame.domain {
                 ObligationFrameDomain::FlowReturn(state) => state.flow_demand.clone(),
+                _ => None,
+            })
+    }
+
+    fn flow_execution_of(
+        &self,
+        key: &FlowReturnKey,
+    ) -> Option<Arc<super::flow_solve::FlowExecutionSelection>> {
+        let txn = self.dispatch_txn.borrow();
+        let idx = txn
+            .reentry()
+            .find(&ObligationIdentity::FlowReturn(key.clone()))?;
+        txn.reentry()
+            .frame(idx)
+            .and_then(|frame| match &frame.domain {
+                ObligationFrameDomain::FlowReturn(state) => state.flow_execution.clone(),
                 _ => None,
             })
     }
@@ -2218,17 +2264,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .executed_selection
                         .is_some_and(|selection| selection.is_selected(*node))
                         && binding_product_evidence(
-                            &slot.identity,
-                            witness.bindings,
+                            &FlowProductSubject::Local(
+                                match witness.bindings.local(&slot.identity) {
+                                    Some(binding) => binding,
+                                    None => return false,
+                                },
+                            ),
                             witness.product_evidence,
+                            witness.products,
+                            &carrier.plan,
                         )
                 }
                 FlowObligationBasis::Site { node, .. }
                 | FlowObligationBasis::Guard { node, .. }
-                | FlowObligationBasis::ContextualTarget { node, .. }
-                | FlowObligationBasis::CapturedBinding { node, .. } => witness
+                | FlowObligationBasis::ContextualTarget { node, .. } => witness
                     .executed_selection
                     .is_some_and(|selection| selection.is_selected(*node)),
+                FlowObligationBasis::CapturedBinding { node, identity, .. } => {
+                    witness
+                        .executed_selection
+                        .is_some_and(|selection| selection.is_selected(*node))
+                        && binding_product_evidence(
+                            &witness
+                                .bindings
+                                .local(identity)
+                                .map(FlowProductSubject::Local)
+                                .unwrap_or_else(|| FlowProductSubject::Captured(identity.clone())),
+                            witness.product_evidence,
+                            witness.products,
+                            &carrier.plan,
+                        )
+                }
                 FlowObligationBasis::Edge { from, to, .. } => {
                     witness.executed_selection.is_some_and(|selection| {
                         selection.is_selected(*from) && selection.is_selected(*to)
@@ -3481,9 +3547,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             slice_key_function,
             slice_key,
             demanded_member,
-            inventory: super::flow_solve::FlowBindingInventory {
-                bindings: Arc::clone(&entry.bindings),
-            },
         })
     }
 
@@ -3567,7 +3630,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             slice_key_function,
             slice_key,
             demanded_member,
-            inventory: _,
         } = site;
         let canonical = key.function.declaration_slot.defining_canonical.as_ref();
         let owner = key.function.declaration_slot.owner;
@@ -3679,11 +3741,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(skeleton) = flow_slice.skeleton_for(&slice_key_function, self.ctx) else {
             return degraded(FlowReturnFailure::Unresolved, self_roots);
         };
-        let Some(ir) = indexed.shallow_state.decl_bodies().flow_slice_content(
-            entry,
-            selection,
-            Arc::clone(&skeleton),
-        ) else {
+        let Some(bound) = flow_slice.bound_graph_for(&slice_key_function) else {
+            return degraded(FlowReturnFailure::Unresolved, self_roots);
+        };
+        let Some(ir) = indexed
+            .shallow_state
+            .decl_bodies()
+            .flow_slice_content(entry, selection, &bound)
+        else {
             return degraded(FlowReturnFailure::Missing, self_roots);
         };
         // The frame anchor the skeleton's call footprint was rebased onto
@@ -3845,16 +3910,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
             params.push(node);
         }
-        // The product budget of THIS frame's merges: the installed demand
-        // plan's own convergence policy and obligation frontier. A frame
-        // whose demand could not be planned runs the substrate default
-        // and can never mint a proof anyway, so it never silently gains a
-        // more permissive budget than a proven frame.
-        let product_budget = self
-            .flow_demand_carrier_of(key)
-            .map_or_else(FlowProductBudget::default, |carrier| {
-                FlowProductBudget::for_demand_plan(&carrier.plan, params.len())
-            });
+        // Execution authority is separate from proof expansion. A refused
+        // obligation plan retains its validated selection; a later successful
+        // serve can validate that same structural route for value evaluation
+        // without replacing the frame's original proof refusal.
+        let execution_selection = match self.flow_execution_of(key) {
+            Some(selection) => selection,
+            None => {
+                let request = super::flow_solve::FlowDemandRequest {
+                    query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+                    input_basis: verter_identity::identity::InputBasisId::from_canonical(
+                        &provenance,
+                    ),
+                    resources: super::flow_solve::FlowResourcePolicy::default(),
+                    additional_requirements: Arc::from([]),
+                };
+                match super::flow_solve::prepare_flow_execution(&request, &bound, &planned) {
+                    Ok(selection) => selection,
+                    Err(_) => return degraded(FlowReturnFailure::Unresolved, self_roots),
+                }
+            }
+        };
+        let product_budget = FlowProductBudget::for_execution_selection(&execution_selection);
         #[cfg(any(test, feature = "test-support"))]
         let product_budget = if self
             .ctx
@@ -3870,6 +3947,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             product_budget
         };
+        #[cfg(any(test, feature = "test-support"))]
+        let product_budget = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .zero_product_capacity
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            FlowProductBudget {
+                max_products: 0,
+                ..product_budget
+            }
+        } else {
+            product_budget
+        };
+        let inputs = FlowProductInputs::for_bound_graph(&bound);
+        let execution = match FlowProductExecution::new_for_selection(
+            &inputs,
+            Arc::clone(&execution_selection),
+            product_budget,
+        ) {
+            Ok(execution) => execution,
+            Err(_) => {
+                return degraded(FlowReturnFailure::Unresolved, self_roots);
+            }
+        };
+        let Ok(mut products) = FlowProductStore::new(execution, &bound) else {
+            return degraded(FlowReturnFailure::Unresolved, self_roots);
+        };
+        seed_selected_parameters(
+            &mut products,
+            &ir.params,
+            &params,
+            &ir.bindings,
+            &bound,
+            &execution_selection,
+        );
         let mut evaluator = FlowEvaluator {
             dispatch: self,
             self_slot: Some(key),
@@ -3878,12 +3992,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             params: &params,
             param_names: &ir.params,
             binder_env: &binder_env,
-            bindings: FlowFrameBindings::new(),
-            products: FlowProductStore::new(),
-            product_budget,
+            bindings: Arc::clone(&ir.bindings),
+            skeleton: Arc::clone(&skeleton),
+            flow_graph: Arc::clone(&bound.bundle().graph),
+            execution_selection,
+            plan: demand_carrier
+                .as_ref()
+                .map(|carrier| Arc::clone(&carrier.plan)),
+            anchor: frame_anchor,
+            captures: Arc::clone(&entry.captures.0),
+            products,
             narrowing_writes: Vec::new(),
-            product_evidence: rustc_hash::FxHashSet::default(),
-            product_budget_exceeded: None,
             bare_return_seen: false,
             implicit_undefined_seen: false,
             member_filter,
@@ -3915,19 +4034,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let product_budget_exceeded;
         let frame_product_evidence;
         let frame_bindings;
+        let frame_products;
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
             evaluator.promote_pending_statement_gap();
             holds = std::mem::take(&mut evaluator.holds);
-            degradation = evaluator.degradation;
             bare_return_seen = evaluator.bare_return_seen;
             implicit_undefined_seen = evaluator.implicit_undefined_seen;
             call_evidence = std::mem::take(&mut evaluator.call_evidence);
-            executed_walk = evaluator.executed_walk;
-            product_budget_exceeded = evaluator.product_budget_exceeded;
-            frame_product_evidence = std::mem::take(&mut evaluator.product_evidence);
-            frame_bindings = std::mem::take(&mut evaluator.bindings);
+            executed_walk = std::mem::take(&mut evaluator.executed_walk);
+            let finished = evaluator.products.finish(evaluator.plan.as_deref());
+            product_budget_exceeded = match &finished {
+                Err(FlowProductFailure::BudgetExceeded(exceeded)) => Some(*exceeded),
+                _ => None,
+            };
+            if let Err(failure) = &finished {
+                if !matches!(failure, FlowProductFailure::BudgetExceeded(_)) {
+                    evaluator.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::FlowGap(
+                            crate::semantic_query::FlowGap::UnmodeledExpression,
+                        ),
+                    );
+                }
+            }
+            frame_product_evidence = finished.ok().flatten();
+            degradation = evaluator.degradation;
+            frame_bindings = Arc::clone(&evaluator.bindings);
+            frame_products = evaluator.products.clone();
             (outcome, body_falls_through)
         };
         // A call the lowering DECIDED ABOVE (folded into a surviving
@@ -4028,7 +4162,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .drop_binding_domain_product
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            rustc_hash::FxHashSet::default()
+            None
         } else {
             frame_product_evidence
         };
@@ -4038,7 +4172,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             anchor: frame_anchor,
             calls: &call_evidence,
             bindings: &frame_bindings,
-            product_evidence: &frame_product_evidence,
+            product_evidence: frame_product_evidence.as_ref(),
+            products: &frame_products,
         };
         let contributors = match contributors {
             Ok(contributors) => contributors,
@@ -4796,13 +4931,19 @@ fn slice_expr_is_exact_subject_read(
     }
     match (expr, &subject.root) {
         (
-            crate::flow_slice_content::SliceExpr::Param { ordinal },
-            crate::flow_slice_content::SliceNarrowRoot::Param(subject_ordinal),
-        ) => ordinal == subject_ordinal,
+            crate::flow_slice_content::SliceExpr::Param { binding, .. },
+            crate::flow_slice_content::SliceNarrowRoot::Param {
+                binding: subject_binding,
+                ..
+            },
+        ) => binding == subject_binding,
         (
-            crate::flow_slice_content::SliceExpr::Local { name, .. },
-            crate::flow_slice_content::SliceNarrowRoot::Local(subject_name),
-        ) => name == subject_name,
+            crate::flow_slice_content::SliceExpr::Local { binding, .. },
+            crate::flow_slice_content::SliceNarrowRoot::Local {
+                binding: subject_binding,
+                ..
+            },
+        ) => binding == subject_binding,
         _ => false,
     }
 }
@@ -4868,6 +5009,27 @@ fn slice_statements_have_non_subject_return<'a>(
     })
 }
 
+/// The child observation includes its actual parameter and selected capture
+/// inputs. The demand's separate graph/query basis owns binding identities.
+struct NestedFlowInputBasis<'a> {
+    parent: &'a verter_identity::identity::InputBasisId,
+    parameters: &'a [SemanticNodeId],
+    captures: &'a [Vec<u8>],
+}
+
+impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
+    const DOMAIN_TAG: &'static str = "verter.session.flow.nested_inputs.v1";
+    fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
+        e.field_bytes(1, self.parent.canonical_bytes());
+        for parameter in self.parameters {
+            e.field_u64(2, parameter.0);
+        }
+        for capture in self.captures {
+            e.field_bytes(3, capture);
+        }
+    }
+}
+
 /// The per-frame evaluator state.
 struct FlowEvaluator<'d, 'b> {
     dispatch: &'d ProjectSemanticDispatch<'d>,
@@ -4896,7 +5058,13 @@ struct FlowEvaluator<'d, 'b> {
     /// DISJOINT slot spaces — a lexical `const` / `let` binding and a
     /// function-scoped `var` of the same name are different subjects, so
     /// neither can read the other's product.
-    bindings: FlowFrameBindings,
+    bindings: Arc<FlowBindingMap>,
+    skeleton: Arc<FunctionBodySkeleton>,
+    flow_graph: Arc<verter_semantic::analysis::flow::flow_graph::FunctionFlowGraph>,
+    execution_selection: Arc<super::flow_solve::FlowExecutionSelection>,
+    plan: Option<Arc<super::flow_solve::FlowDemandPlan>>,
+    anchor: u32,
+    captures: Arc<[verter_semantic::analysis::function_program::FlowBindingIdentity]>,
     /// The frame's SEMANTIC STATE: the reaching types (with their
     /// literal-widening provenance), declared types, definite-assignment
     /// facts, and guard facts of every subject, in ONE product store.
@@ -4904,28 +5072,11 @@ struct FlowEvaluator<'d, 'b> {
     /// function-scoped subjects survive a lexical scope close because the
     /// close replays exactly the scope's own declaration shadows.
     products: FlowProductStore,
-    /// The product budget every frame merge runs under — derived from the
-    /// installed demand plan's own convergence policy and obligation
-    /// frontier ([`FlowProductBudget::for_demand_plan`]), never a private
-    /// constant. A frame with no installed demand runs the substrate
-    /// default and can never mint a proof anyway.
-    product_budget: FlowProductBudget,
     /// The guard facts this frame has WRITTEN, in write order — the
     /// establishment ledger a scoped guard's mark truncates and a
     /// union-of-facts guard reads its per-disjunct contribution from.
     /// Append-only within a mark's window, so a mark stays an index.
     narrowing_writes: Vec<NarrowingLedgerEntry>,
-    /// Every subject this evaluation ESTABLISHED a binding-domain product
-    /// for. The live product store is a point-in-time state — a
-    /// block-scoped binding's products are dropped when its scope closes
-    /// — so the discharge evidence a planned binding obligation rests on
-    /// is this ledger of what the evaluation actually produced, never the
-    /// residue that happens to survive to the end of the frame.
-    product_evidence: rustc_hash::FxHashSet<FlowProductSubject>,
-    /// The first typed product-budget exhaustion a frame merge observed.
-    /// A budget-exhausted merge has no joined state, so the evaluation
-    /// fails with the typed budget reason and can never be admitted warm.
-    product_budget_exceeded: Option<FlowProductBudgetExceeded>,
     /// Whether a bare `return;` was evaluated. A body whose ONLY return
     /// contributions are bare returns models as `void` (BL12);
     /// alongside value returns a bare return contributes `undefined`.
@@ -5098,15 +5249,15 @@ struct FlowExecutionWitness<'w> {
     skeleton: &'w verter_semantic::analysis::flow::FunctionBodySkeleton,
     anchor: u32,
     calls: &'w [FlowCallEvidence],
-    /// The frame's binding-name resolution authority — the table a
-    /// planned binding obligation's authored name resolves through.
-    bindings: &'w FlowFrameBindings,
+    /// The frame's exact indexed-to-skeleton declaration correspondence.
+    bindings: &'w FlowBindingMap,
     /// Every subject the evaluation ESTABLISHED a binding-domain product
     /// for — the evidence a planned binding obligation is discharged
     /// from. A binding subject the frame resolved but never produced a
     /// product for is never claimed, so a demand cannot seal without the
     /// product evidence its own bindings rest on.
-    product_evidence: &'w rustc_hash::FxHashSet<FlowProductSubject>,
+    product_evidence: Option<&'w FlowProductEvidence>,
+    products: &'w FlowProductStore,
 }
 
 /// One return-site contribution: the evaluated node plus whether it came
@@ -5159,11 +5310,9 @@ struct FlowBreakExit {
 /// fresh in the scope).
 struct ScopeShadow {
     subject: FlowProductSubject,
-    /// The outer binding's reaching-type and definite-assignment products
-    /// at scope entry (`None` = the name had no reaching value there, so
-    /// the scope close drops both).
-    prior: Option<(ReachingTypeProduct, DefiniteAssignmentProduct)>,
-    prior_declared: Option<SemanticNodeId>,
+    /// A shared canonical continuation snapshot, including definition-site
+    /// provenance. Scope closure restores only this exact declaration's cells.
+    prior: FlowProductStore,
 }
 
 /// One COMPLETED call that closed with fresh-preserved literal deposits,
@@ -5302,6 +5451,55 @@ fn standing_narrowings(
         .collect()
 }
 
+/// Parameter initialization also establishes its hoisted declaration aliases.
+/// Each selected declaration receives its own evidence, with the original
+/// parameter input as definition provenance; no later initializer is claimed.
+fn seed_selected_parameters(
+    products: &mut FlowProductStore,
+    parameters: &[crate::flow_slice_content::SliceParam],
+    values: &[SemanticNodeId],
+    bindings: &FlowBindingMap,
+    bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+    execution_selection: &super::flow_solve::FlowExecutionSelection,
+) {
+    let input_by_binding: rustc_hash::FxHashMap<_, _> = parameters
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, parameter)| {
+            Some((
+                bindings.canonical_local(parameter.binding?),
+                (parameter.binding?, *values.get(ordinal)?),
+            ))
+        })
+        .collect();
+    let selection = execution_selection.structural_selection();
+    for node in selection
+        .value_nodes
+        .iter()
+        .chain(selection.effect_only_nodes.iter())
+        .copied()
+    {
+        let verter_semantic::analysis::flow::flow_graph::FlowNodeKind::Binding(binding) =
+            bound.bundle().graph.node_kind(node)
+        else {
+            continue;
+        };
+        let Some((input, value)) = input_by_binding.get(&bindings.canonical_local(binding)) else {
+            continue;
+        };
+        let subject = FlowProductSubject::Local(binding);
+        if binding == *input {
+            products.set_declared_type(&subject, Some(*value));
+        }
+        products.bind_at(
+            &subject,
+            DefiniteAssignmentProduct::assigned(),
+            ReachingTypeProduct::of(*value),
+            Some(bound.bundle().graph.binding_node(*input)),
+        );
+    }
+}
+
 /// Whether the frame's product state carries the binding-domain evidence
 /// one planned binding obligation discharges on.
 ///
@@ -5313,30 +5511,28 @@ fn standing_narrowings(
 /// parameter binding is proven by the signature, not by a frame product,
 /// and it is not gated here.
 fn binding_product_evidence(
-    identity: &verter_semantic::analysis::function_program::FlowBindingIdentity,
-    bindings: &FlowFrameBindings,
-    established: &rustc_hash::FxHashSet<FlowProductSubject>,
+    subject: &FlowProductSubject,
+    evidence: Option<&FlowProductEvidence>,
+    products: &FlowProductStore,
+    plan: &super::flow_solve::FlowDemandPlan,
 ) -> bool {
-    use verter_semantic::analysis::function_program::FunctionBindingKind;
-    if identity.kind == FunctionBindingKind::Param {
-        return true;
-    }
-    // Both layers: the skeleton's kind is the DECLARATION's, while the
-    // layer a reaching definition lands in is the evaluation's, and one
-    // authored name is one binding subject to the obligation.
-    let resolved: Vec<FlowProductSubject> = [FlowBindingLayer::Lexical, FlowBindingLayer::Function]
-        .into_iter()
-        .filter_map(|layer| bindings.resolved(layer, identity.name.as_ref()))
-        .map(FlowProductSubject::FrameBinding)
-        .collect();
-    // A name this frame never resolved at all is a declaration the
-    // evaluation never reached — an unexecuted statement, not a missing
-    // product — and its obligation stays on the executed-selection
-    // evidence alone. A name the frame DID resolve must have had its
-    // binding-domain product established: resolving a subject and then
-    // failing to produce its product is exactly the missing evidence this
-    // gate refuses to seal on.
-    resolved.is_empty() || resolved.iter().any(|subject| established.contains(subject))
+    let Some(evidence) = evidence else {
+        return false;
+    };
+    use super::flow_solve::{FlowDomain, FlowFactFamily};
+    plan.registry_closure()
+        .iter()
+        .filter(|closure| {
+            closure.families.contains(&FlowFactFamily::BindingSlot)
+                && super::flow_products::domain_carries_product(closure.domain)
+        })
+        .map(|closure| closure.domain)
+        .chain(std::iter::once(FlowDomain::DefiniteAssignment))
+        .all(|domain| {
+            products
+                .key(domain, subject)
+                .is_some_and(|key| evidence.executed(&key))
+        })
 }
 
 /// Every guard fact `products` holds, in canonical subject order.
@@ -5361,19 +5557,6 @@ fn replace_narrowings(from: &FlowProductStore, into: &mut FlowProductStore) {
     }
 }
 
-/// The parameter ordinals holding an applied whole-slot write in `store`,
-/// in canonical subject order.
-fn store_param_ordinals(store: &FlowProductStore) -> Vec<u32> {
-    store
-        .subjects_in(super::flow_solve::FlowDomain::ReachingType)
-        .into_iter()
-        .filter_map(|subject| match subject {
-            FlowProductSubject::FrameParam(ordinal) => Some(ordinal),
-            FlowProductSubject::FrameBinding(_) => None,
-        })
-        .collect()
-}
-
 /// Record `path` under `root` narrowing to `node` in `products` — the ONE
 /// narrowing write, shared by the live overlay and by the snapshot states
 /// a `finally` bakes a fact into, so the two can never diverge. A fact
@@ -5396,7 +5579,13 @@ fn push_narrowing_into(
         })
         .unwrap_or_default();
     facts.push(FlowNarrowingFact {
-        subject: root.clone(),
+        binding: match products.identity(root) {
+            Some(identity) => identity,
+            None => {
+                products.remove(super::flow_solve::FlowDomain::Narrowing, root);
+                return;
+            }
+        },
         path: Arc::clone(path),
         narrowed_to: node,
     });
@@ -5772,95 +5961,62 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.degradation.get_or_insert(degradation);
     }
 
-    // ── The frame's product accessors ──────────────────────────────
-    //
-    // Every read and write of the frame's semantic state goes through
-    // this block: a name becomes a typed subject exactly once, and the
-    // products are then addressed by that subject. There is no second
-    // state layer a site could reach around these accessors to.
-
-    /// The subject of `name` in `layer`, allocating its slot on first use.
-    fn subject(&mut self, layer: FlowBindingLayer, name: &str) -> FlowProductSubject {
-        self.bindings.subject(layer, name)
+    fn param_subject(&self, ordinal: u32) -> Option<FlowProductSubject> {
+        self.param_names
+            .get(ordinal as usize)?
+            .binding
+            .map(FlowProductSubject::Local)
     }
 
-    /// The subject of `name` in `layer` when this frame already resolved
-    /// one. A name no declaration, write, or read ever resolved has no
-    /// subject and therefore no product — the read-side counterpart, so a
-    /// pure read never grows the frame's binding table.
-    fn resolved_subject(&self, layer: FlowBindingLayer, name: &str) -> Option<FlowProductSubject> {
-        self.bindings
-            .resolved(layer, name)
-            .map(FlowProductSubject::FrameBinding)
-    }
-
-    /// The subject of one formal parameter, by ordinal.
-    fn param_subject(ordinal: u32) -> FlowProductSubject {
-        FlowFrameBindings::param(ordinal)
-    }
-
-    /// The subject a narrowing root is held under. The narrowing overlay
-    /// is rooted at the authored NAME — it never distinguished the two
-    /// scope layers and does not start to here — so a local root always
-    /// resolves to the frame's lexical slot for that name: one stable
-    /// subject per name, independent of which layer currently binds it.
     fn narrow_subject(
-        &mut self,
+        &self,
         root: &crate::flow_slice_content::SliceNarrowRoot,
     ) -> FlowProductSubject {
         match root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
-                Self::param_subject(*ordinal)
+            crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
+                FlowProductSubject::Local(*binding)
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
-                self.subject(FlowBindingLayer::Lexical, name)
-            }
+            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => binding.clone(),
         }
     }
 
-    /// The narrowing root's subject when the frame already resolved one.
     fn resolved_narrow_subject(
         &self,
         root: &crate::flow_slice_content::SliceNarrowRoot,
     ) -> Option<FlowProductSubject> {
-        match root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
-                Some(Self::param_subject(*ordinal))
-            }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
-                self.resolved_subject(FlowBindingLayer::Lexical, name)
-            }
-        }
+        let binding = self.narrow_subject(root);
+        self.products.contains_subject(&binding).then_some(binding)
     }
 
-    /// The reaching value of `name` in `layer`.
-    fn local_value(&self, layer: FlowBindingLayer, name: &str) -> Option<SemanticNodeId> {
-        self.resolved_subject(layer, name)
-            .and_then(|subject| self.products.reaching(&subject))
+    fn local_value(&self, binding: &FlowProductSubject) -> Option<SemanticNodeId> {
+        self.products.reaching(binding)
     }
 
-    /// The declared (annotation) type of `name` in `layer`.
-    fn local_declared(&self, layer: FlowBindingLayer, name: &str) -> Option<SemanticNodeId> {
-        self.resolved_subject(layer, name)
-            .and_then(|subject| self.products.declared_type(&subject))
+    fn local_declared(&self, binding: &FlowProductSubject) -> Option<SemanticNodeId> {
+        self.products.declared_type(binding).or_else(|| {
+            let FlowProductSubject::Local(local) = binding else {
+                return None;
+            };
+            let canonical = self.bindings.canonical_local(*local);
+            (canonical != *local)
+                .then(|| {
+                    self.products
+                        .declared_type(&FlowProductSubject::Local(canonical))
+                })
+                .flatten()
+        })
     }
 
-    /// The definite-assignment product of `name` in `layer`.
-    fn local_assignment(&self, layer: FlowBindingLayer, name: &str) -> DefiniteAssignmentProduct {
-        self.resolved_subject(layer, name)
-            .map(|subject| self.products.assignment(&subject))
-            .unwrap_or_default()
+    fn local_assignment(&self, binding: &FlowProductSubject) -> DefiniteAssignmentProduct {
+        self.products.assignment(binding)
     }
 
-    /// The literal-widening membership of `name` in `layer`.
-    fn local_widening(&self, layer: FlowBindingLayer, name: &str) -> Option<WideningMembership> {
-        self.resolved_subject(layer, name)
-            .and_then(|subject| self.products.widening(&subject).cloned())
+    fn local_widening(&self, binding: &FlowProductSubject) -> Option<WideningMembership> {
+        self.products.widening(binding).cloned()
     }
 
-    /// The parameter ordinal's applied whole-slot write, when one was made.
     fn param_write(&self, ordinal: u32) -> Option<SemanticNodeId> {
-        self.products.reaching(&Self::param_subject(ordinal))
+        self.products.reaching(&self.param_subject(ordinal)?)
     }
 
     /// The snapshot of the frame's narrowing overlay — the mark a guard
@@ -5908,7 +6064,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         node: SemanticNodeId,
     ) {
-        let root = self.narrow_subject(&subject.root);
+        let Some(root) = self.resolved_narrow_subject(&subject.root) else {
+            return;
+        };
         push_narrowing_into(&mut self.products, &root, &subject.path, node);
         self.narrowing_writes
             .push(NarrowingLedgerEntry::Established {
@@ -5916,17 +6074,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 subject: subject.clone(),
                 node,
             });
-    }
-
-    /// Drop every guard fact rooted at `root` — what a write to the
-    /// binding does to the facts about the value it replaced.
-    fn clear_narrowings_of(&mut self, root: &crate::flow_slice_content::SliceNarrowRoot) {
-        if let Some(subject) = self.resolved_narrow_subject(root) {
-            self.products
-                .remove(super::flow_solve::FlowDomain::Narrowing, &subject);
-            self.narrowing_writes
-                .push(NarrowingLedgerEntry::Cleared { root: subject });
-        }
     }
 
     /// The guard facts established since `mark` and STILL standing at
@@ -5963,116 +6110,71 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// ENTERING state: the evaluation still returns a usable value, and
     /// the recorded failure is what refuses its warm admission.
     fn join_states(&mut self, a: &FlowLayerState, b: &FlowLayerState) -> FlowLayerState {
-        let joined = match join_frame_products(
-            self.dispatch,
-            &self.product_budget,
-            &a.products,
-            &b.products,
-        ) {
-            FlowFrameJoinOutcome::Joined(products) => products,
-            FlowFrameJoinOutcome::Gap(gap) => {
-                // The join's OWN typed gap, not a generic unresolved
-                // marker: a declared-type conflict, an unproven canonical
-                // union and a kind mismatch are three different reasons a
-                // merge could not be modelled, and the audit payload keeps
-                // them apart.
-                self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(gap));
-                a.products.clone()
-            }
-            FlowFrameJoinOutcome::BudgetExceeded(exceeded) => {
-                self.product_budget_exceeded.get_or_insert(exceeded);
-                a.products.clone()
-            }
-        };
         FlowLayerState {
-            products: joined,
-            // A joined path is inference-only only when every incoming
-            // edge is. One ordinary runtime edge makes the merged
-            // continuation ordinary.
+            products: FlowProductStore::join(&a.products, &b.products, self.dispatch),
             inference_only_path: a.inference_only_path && b.inference_only_path,
         }
     }
 
-    /// Bind one evaluated declarator into its SCOPE LAYER: a `var`-kind
-    /// binding is function-scoped (the layer block / `if` restores never
-    /// touch — `var` hoists, so `{ var y = 1 } return y` keeps `y`);
-    /// `const` / `let` stay in the lexical layer. `degraded` records a
-    /// failed initializer (the modeled `any`), `widening` the
-    /// widening-literal membership — both ride the SAME layer as the
-    /// value, so a block restore can never split a binding from its own
-    /// flags. A function-scoped binding recorded under non-zero
-    /// conditional-arm nesting additionally enters the
-    /// conditional-definition set; an unconditional rebind of the same
-    /// name clears it.
     fn bind_local(
         &mut self,
-        name: &str,
+        binding: &FlowProductSubject,
         kind: crate::flow_slice_content::SliceBindingKind,
         node: SemanticNodeId,
         widening: Option<WideningMembership>,
         degraded: bool,
     ) {
-        let function_scoped = kind == crate::flow_slice_content::SliceBindingKind::Var;
-        let layer = if function_scoped {
-            FlowBindingLayer::Function
-        } else {
-            FlowBindingLayer::Lexical
+        let definition = match binding {
+            FlowProductSubject::Local(binding) => Some(
+                self.skeleton
+                    .binding(*binding)
+                    .initializer
+                    .map(|site| self.flow_graph.expr_site_node(site))
+                    .unwrap_or_else(|| self.flow_graph.binding_node(*binding)),
+            ),
+            FlowProductSubject::Captured(_) => self
+                .products
+                .key(super::flow_solve::FlowDomain::ReachingValue, binding)
+                .map(|key| key.node()),
         };
-        let subject = self.subject(layer, name);
-        // The definite-assignment product of the binding: assigned on
-        // this path, with the two read-observable flags this declaration
-        // establishes. A function-scoped binding recorded under non-zero
-        // conditional-arm nesting is one arm's definition; an
-        // unconditional rebind of the same name clears the flag.
-        let single_path = if function_scoped {
+        self.bind_local_at(binding, kind, node, widening, degraded, definition);
+    }
+
+    fn bind_local_at(
+        &mut self,
+        binding: &FlowProductSubject,
+        kind: crate::flow_slice_content::SliceBindingKind,
+        node: SemanticNodeId,
+        widening: Option<WideningMembership>,
+        degraded: bool,
+        definition: Option<verter_semantic::analysis::flow::flow_graph::FlowNodeId>,
+    ) {
+        let single_path = if kind == crate::flow_slice_content::SliceBindingKind::Var {
             self.conditional_arm_nesting > 0
         } else {
-            // The lexical single-path fact is established by a clause
-            // boundary, not by a declaration: a rebind never clears it.
-            self.products.assignment(&subject).single_path()
+            self.products.assignment(binding).single_path()
         };
-        self.products.set_assignment(
-            &subject,
+        self.products.bind_at(
+            binding,
             DefiniteAssignmentProduct::assigned()
                 .with_single_path(single_path)
                 .with_failed_initializer(degraded),
-        );
-        // The reaching value and its literal-widening provenance ride ONE
-        // product, so a restore can never split a binding from its own
-        // freshness membership.
-        self.products.set_reaching_type(
-            &subject,
             ReachingTypeProduct::of(node).with_widening(widening),
+            definition,
         );
-        // The evaluation ESTABLISHED this binding's slot facts: the
-        // discharge evidence its planned obligation rests on.
-        self.product_evidence.insert(subject.clone());
-        // A (re)binding replaces the binding's value: every narrow fact a
-        // guard established about the OLD value — at the root or under
-        // any member path — dies with it.
-        let root = crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(name));
-        self.clear_narrowings_of(&root);
+        self.narrowing_writes.push(NarrowingLedgerEntry::Cleared {
+            root: binding.clone(),
+        });
     }
 
-    /// Record the authored declared type of a declaration separately from its
-    /// reaching value. A later assignment is reduced against this stable type,
-    /// just as an annotated initializer is. An unannotated lexical declaration
-    /// clears an outer declaration's metadata while it shadows that binding;
-    /// `close_lexical_scope` restores it at the boundary.
     fn set_declared_local(
         &mut self,
-        name: &str,
+        binding: &FlowProductSubject,
         kind: crate::flow_slice_content::SliceBindingKind,
         declared: Option<SemanticNodeId>,
     ) {
-        if kind == crate::flow_slice_content::SliceBindingKind::Var {
-            if let Some(node) = declared {
-                let subject = self.subject(FlowBindingLayer::Function, name);
-                self.products.set_declared_type(&subject, Some(node));
-            }
-        } else {
-            let subject = self.subject(FlowBindingLayer::Lexical, name);
-            self.products.set_declared_type(&subject, declared);
+        if kind != crate::flow_slice_content::SliceBindingKind::Var || declared.is_some() {
+            self.products.set_declared_type(binding, declared);
         }
     }
 
@@ -6085,23 +6187,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         target: &crate::flow_slice_content::SliceNarrowSubject,
     ) -> Option<SemanticNodeId> {
-        if let crate::flow_slice_content::SliceNarrowRoot::Local(name) = &target.root {
-            if self.local_value(FlowBindingLayer::Lexical, name).is_none()
-                && self.local_value(FlowBindingLayer::Function, name).is_none()
-            {
-                self.seed_destructured_param_element(name.as_ref());
+        if let crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } = &target.root {
+            if self.local_value(binding).is_none() {
+                self.seed_destructured_param_element(binding);
             }
         }
         match &target.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
+            crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => {
                 self.params.get(*ordinal as usize).copied()
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
-                if self.local_value(FlowBindingLayer::Lexical, name).is_some() {
-                    self.local_declared(FlowBindingLayer::Lexical, name)
-                } else {
-                    self.local_declared(FlowBindingLayer::Function, name)
-                }
+            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                self.local_declared(binding)
             }
         }
     }
@@ -6126,12 +6222,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // manufacture `number | number` instead of deduplicating the
             // assignment path.
             let current = match &target.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => self
+                crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_write(*ordinal)
                     .or_else(|| self.params.get(*ordinal as usize).copied()),
-                crate::flow_slice_content::SliceNarrowRoot::Local(name) => self
-                    .local_value(FlowBindingLayer::Lexical, name)
-                    .or_else(|| self.local_value(FlowBindingLayer::Function, name)),
+                crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                    self.local_value(binding)
+                }
             };
             if let Some(current) = current {
                 let value_data = self.dispatch.graph().node_data(value);
@@ -6351,12 +6447,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return vec![node];
         }
         if let crate::flow_slice_content::SliceExpr::Local {
-            name,
+            binding,
+            name: _,
             captured: false,
             ..
         } = expr
         {
-            match self.membership_of(name.as_ref()) {
+            match self.membership_of(binding) {
                 Some(WideningMembership::All) => return self.top_level_literal_nodes(node),
                 Some(WideningMembership::Partial(values)) => {
                     let values = values.clone();
@@ -6417,6 +6514,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         target: &crate::flow_slice_content::SliceNarrowSubject,
         node: SemanticNodeId,
         degraded: bool,
+        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
     ) {
         // A failed RHS carries the explicit unmodelled-position marker. It
         // cannot select a declared constituent; preserving the marker keeps
@@ -6427,26 +6525,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.assignment_node_for_target(target, node)
         };
         match &target.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
-                let ordinal = *ordinal;
-                self.clear_narrowings_of(&target.root);
-                let subject = Self::param_subject(ordinal);
-                self.products
-                    .set_reaching_type(&subject, ReachingTypeProduct::of(node));
-                self.products.set_assignment(
+            crate::flow_slice_content::SliceNarrowRoot::Param {
+                ordinal: _,
+                binding,
+                ..
+            } => {
+                let subject = FlowProductSubject::Local(*binding);
+                self.products.bind_at(
                     &subject,
                     self.products
                         .assignment(&subject)
                         .with_state(DefiniteAssignment::Assigned),
+                    ReachingTypeProduct::of(node),
+                    Some(self.flow_graph.expr_site_node(definition)),
                 );
+                self.narrowing_writes
+                    .push(NarrowingLedgerEntry::Cleared { root: subject });
                 if degraded {
                     self.record_degradation(
                         crate::semantic_query::FlowReturnDegradation::UnmodeledPosition,
                     );
                 }
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
-                let kind = if self.local_value(FlowBindingLayer::Lexical, name).is_some() {
+            crate::flow_slice_content::SliceNarrowRoot::Local {
+                name: _, binding, ..
+            } => {
+                let kind = if self.binding_layer(binding) == FlowBindingLayer::Lexical {
                     crate::flow_slice_content::SliceBindingKind::Let
                 } else {
                     crate::flow_slice_content::SliceBindingKind::Var
@@ -6454,7 +6558,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // `bind_local` itself clears the narrow facts about the
                 // replaced value (the invalidation cannot be forgotten at
                 // one of the two write sites).
-                self.bind_local(name, kind, node, None, degraded);
+                self.bind_local_at(
+                    binding,
+                    kind,
+                    node,
+                    None,
+                    degraded,
+                    Some(self.flow_graph.expr_site_node(definition)),
+                );
             }
         }
     }
@@ -6485,28 +6596,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
         if incoming.is_empty() {
             return;
-        }
-
-        // A parameter without an executed write still has its signature
-        // input on that predecessor. Seed only parameters another actual
-        // predecessor mentions, so unused signature breadth creates no work.
-        let mut parameters = Vec::new();
-        for state in &incoming {
-            parameters.extend(store_param_ordinals(&state.products));
-        }
-        parameters.sort_unstable();
-        parameters.dedup();
-        for state in &mut incoming {
-            for ordinal in &parameters {
-                let subject = Self::param_subject(*ordinal);
-                if state.products.reaching(&subject).is_none() {
-                    if let Some(value) = self.params.get(*ordinal as usize) {
-                        state
-                            .products
-                            .set_reaching_type(&subject, ReachingTypeProduct::of(*value));
-                    }
-                }
-            }
         }
 
         let mut joined = incoming[0].clone();
@@ -6552,16 +6641,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// - Reaching values rewind in both layers, and so do parameter
     ///   writes: a whole-binding write escapes an arm only through the
     ///   branch JOIN, never as the raw arm value.
-    /// - The LEXICAL layer rewinds wholly — its declared types, widening
-    ///   provenance and failed-initializer facts are the arm's own — with
+    /// - The LEXICAL layer rewinds its reaching types, widening
+    ///   provenance and failed-initializer facts with
     ///   one exception: the single-path fact is established by a clause
     ///   boundary, not by the arm, so it stays.
     /// - The FUNCTION-scoped layer keeps what `var` hoisting makes
-    ///   function-wide: declared types and definite-assignment facts. The
+    ///   function-wide: definite-assignment facts. The
     ///   single-path fact in particular is what the branch join reads to
-    ///   tell an arm's write from an untouched binding.
+    ///   tell an arm's write from an untouched binding. Source declaration
+    ///   authority remains installed independently of the control path.
     fn restore_arm_entry(&mut self, entry: &FlowProductStore) {
-        use super::flow_solve::FlowDomain;
         let mut subjects: Vec<FlowProductSubject> = self.products.subjects();
         let mut seen: rustc_hash::FxHashSet<FlowProductSubject> =
             subjects.iter().cloned().collect();
@@ -6571,51 +6660,41 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
         }
         for subject in subjects {
-            let lexical = matches!(
-                &subject,
-                FlowProductSubject::FrameBinding(slot)
-                    if self.bindings.layer(*slot) == Some(FlowBindingLayer::Lexical)
-            );
-            match entry.reaching_type(&subject) {
-                Some(reaching) => self.products.set_reaching_type(&subject, reaching.clone()),
-                None => self.products.remove(FlowDomain::ReachingType, &subject),
-            }
-            if !lexical {
-                continue;
-            }
-            self.products
-                .set_declared_type(&subject, entry.declared_type(&subject));
+            let lexical = self.binding_layer(&subject) == FlowBindingLayer::Lexical;
             let held = self.products.assignment(&subject);
-            self.products.set_assignment(
-                &subject,
+            let assignment = if lexical {
                 entry
                     .assignment(&subject)
-                    .with_single_path(held.single_path()),
-            );
+                    .with_single_path(held.single_path())
+            } else {
+                held
+            };
+            self.products
+                .restore_reaching_from(&subject, entry, Some(assignment), false);
         }
     }
 
-    /// The narrowing root a written subject's facts live under: a
-    /// parameter is its own root; a binding's facts are rooted at its
-    /// authored NAME, which is the frame's lexical slot for that name.
-    fn narrow_root_of(&mut self, subject: &FlowProductSubject) -> Option<FlowProductSubject> {
-        match subject {
-            FlowProductSubject::FrameParam(_) => Some(subject.clone()),
-            FlowProductSubject::FrameBinding(slot) => {
-                let name = Arc::clone(self.bindings.name(*slot)?);
-                Some(self.subject(FlowBindingLayer::Lexical, name.as_ref()))
-            }
-        }
+    /// The exact written subject whose narrowing facts must be invalidated.
+    fn narrow_root_of(&self, subject: &FlowProductSubject) -> Option<FlowProductSubject> {
+        Some(subject.clone())
     }
 
-    /// The frame's live bindings in `layer` that carry a reaching value,
-    /// in canonical subject order: the subject, its authored name, and its
-    /// current value.
-    fn live_bindings(
-        &self,
-        layer: FlowBindingLayer,
-    ) -> Vec<(FlowProductSubject, Arc<str>, SemanticNodeId)> {
-        self.store_bindings(&self.products, layer)
+    fn binding_layer(&self, subject: &FlowProductSubject) -> FlowBindingLayer {
+        let kind = match subject {
+            FlowProductSubject::Local(binding) => self
+                .bindings
+                .identity(*binding)
+                .map(|identity| identity.kind),
+            FlowProductSubject::Captured(identity) => Some(identity.kind),
+        };
+        if matches!(
+            kind,
+            Some(verter_semantic::analysis::function_program::FunctionBindingKind::Var)
+        ) {
+            FlowBindingLayer::Function
+        } else {
+            FlowBindingLayer::Lexical
+        }
     }
 
     /// The bindings of `layer` carrying a reaching value in `store`, in
@@ -6629,15 +6708,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .subjects_in(super::flow_solve::FlowDomain::ReachingType)
             .into_iter()
             .filter_map(|subject| {
-                let FlowProductSubject::FrameBinding(slot) = &subject else {
-                    return None;
-                };
-                let slot = *slot;
-                if self.bindings.layer(slot) != Some(layer) {
+                if self.binding_layer(&subject) != layer {
                     return None;
                 }
-                let name = Arc::clone(self.bindings.name(slot)?);
+                let identity = match &subject {
+                    FlowProductSubject::Local(binding) => self.bindings.identity(*binding)?,
+                    FlowProductSubject::Captured(identity) => identity,
+                };
                 let value = store.reaching(&subject)?;
+                let name = Arc::clone(&identity.name);
                 Some((subject, name, value))
             })
             .collect()
@@ -6669,53 +6748,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// off the evaluator's `scope_shadows` at the scope's boundaries, so
     /// a scope can never drop (or keep) another scope's binding.
     fn close_lexical_scope(state: &mut FlowLayerState, shadows: &[ScopeShadow]) {
-        use super::flow_solve::FlowDomain;
         for shadow in shadows.iter().rev() {
             state
                 .products
-                .set_declared_type(&shadow.subject, shadow.prior_declared);
-            match &shadow.prior {
-                // The outer binding's own products come back whole — the
-                // reaching value carries its widening membership, and the
-                // definite-assignment product carries both read-observable
-                // flags, so a scope close can never split a binding from
-                // its own facts.
-                Some((reaching, assignment)) => {
-                    state
-                        .products
-                        .set_reaching_type(&shadow.subject, reaching.clone());
-                    state.products.set_assignment(&shadow.subject, *assignment);
-                }
-                None => {
-                    state
-                        .products
-                        .remove(FlowDomain::ReachingType, &shadow.subject);
-                    state
-                        .products
-                        .remove(FlowDomain::DefiniteAssignment, &shadow.subject);
-                }
-            }
+                .restore_reaching_from(&shadow.subject, &shadow.prior, None, true);
         }
     }
 
-    /// Record one lexical declaration's shadow (the binding it replaces
-    /// for the extent of its block scope, when an outer scope bound the
-    /// same name). Every lexical `Binding` evaluation records BEFORE it
-    /// binds, so the scope close above never has to guess which names the
-    /// scope declared.
-    fn record_scope_shadow(&mut self, name: &str) {
-        let subject = self.subject(FlowBindingLayer::Lexical, name);
-        let prior = self
-            .products
-            .reaching_type(&subject)
-            .filter(|reaching| reaching.united().is_some())
-            .cloned()
-            .map(|reaching| (reaching, self.products.assignment(&subject)));
-        let prior_declared = self.products.declared_type(&subject);
+    /// Record the exact declaration's continuation before its scoped binding
+    /// event. Distinct lexical declarations never alias by spelling.
+    fn record_scope_shadow(&mut self, binding: &FlowProductSubject) {
         self.scope_shadows.push(ScopeShadow {
-            subject,
-            prior,
-            prior_declared,
+            subject: binding.clone(),
+            prior: self.products.clone(),
         });
     }
 
@@ -6761,8 +6806,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// executes from this state; the returned value remains a separate flow
     /// contribution.
     fn capture_return_edge(&mut self) {
-        let mut state = self.layer_state();
-        self.complete_param_writes(&mut state);
+        let state = self.layer_state();
         self.return_edges.push(state);
     }
 
@@ -6773,8 +6817,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if !self.collect_throw_points {
             return;
         }
-        let mut state = self.layer_state();
-        self.complete_param_writes(&mut state);
+        let state = self.layer_state();
         self.throw_points.push(state);
     }
 
@@ -6783,20 +6826,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// write on this path" as the parameter's declared value instead of
     /// dropping the ordinal. Reads are unchanged — every consumer already
     /// falls back to `params[ordinal]` for a missing write.
-    fn complete_param_writes(&self, state: &mut FlowLayerState) {
-        for ordinal in 0..self.params.len() {
-            let subject = Self::param_subject(ordinal as u32);
-            if state.products.reaching(&subject).is_some() {
-                continue;
-            }
-            if let Some(node) = self.params.get(ordinal) {
-                state
-                    .products
-                    .set_reaching_type(&subject, ReachingTypeProduct::of(*node));
-            }
-        }
-    }
-
     /// The bindings whose value moved between two states — a write (or a
     /// write-bearing join) on one path that the other path never saw.
     /// Read at a clause boundary where an abrupt exit could have preceded
@@ -6892,7 +6921,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         start: &FlowLayerState,
         region: &crate::flow_slice_content::SliceRegion,
-        catch_param: Option<&Arc<str>>,
+        catch_param: Option<SkeletonBindingId>,
         collect_throws: bool,
     ) -> Result<
         (
@@ -6910,7 +6939,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let saved_collect = self.collect_throw_points;
         self.collect_throw_points = collect_throws;
         if let Some(param) = catch_param {
-            self.record_scope_shadow(param.as_ref());
+            self.record_scope_shadow(&FlowProductSubject::Local(param));
             // The catch parameter is `unknown` under the checker's strict
             // default (`useUnknownInCatchVariables`): bound so a read
             // resolves to the honest primitive instead of a free-name miss.
@@ -6919,7 +6948,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .graph()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
             self.bind_local(
-                param.as_ref(),
+                &FlowProductSubject::Local(param),
                 crate::flow_slice_content::SliceBindingKind::Const,
                 unknown,
                 None,
@@ -6931,7 +6960,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let contributions = result?;
         let written = self.written_between(start, &self.layer_state());
         let mut end = self.layer_state();
-        self.complete_param_writes(&mut end);
         // The scope close replays on every state the clause's evaluation
         // produced: the end state, the throw points, and the pending
         // break exits that crossed the clause's scope.
@@ -6953,7 +6981,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// without folding the flags" is not expressible at any call site:
     /// every observation of a degraded binding degrades the result, by
     /// construction rather than by per-site discipline.
-    fn read_local(&mut self, name: &str) -> Option<SemanticNodeId> {
+    fn read_local(&mut self, binding: &FlowProductSubject) -> Option<SemanticNodeId> {
         // A destructured object-pattern parameter element binds its
         // annotation member LAZILY, on first read: an element the demand
         // never reads stays cold (no projection, no degradation), and an
@@ -6961,35 +6989,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // unmodelled-position marker with the failed-initializer
         // membership — exactly like an unmodelled declarator initializer,
         // so observing it degrades and never observing it is free.
-        if self.local_value(FlowBindingLayer::Lexical, name).is_none()
-            && self.local_value(FlowBindingLayer::Function, name).is_none()
-        {
-            self.seed_destructured_param_element(name);
+        if self.local_value(binding).is_none() {
+            self.seed_destructured_param_element(binding);
         }
-        // The lexical layer's conditional flag comes from the
-        // try-clause-write membership (a binding whose surviving value is
-        // one path's, not the join's); a block-scoped conditional binding
-        // otherwise never escapes its arm.
-        let (node, degraded, conditional) =
-            if let Some(node) = self.local_value(FlowBindingLayer::Lexical, name) {
-                let assignment = self.local_assignment(FlowBindingLayer::Lexical, name);
-                (
-                    node,
-                    assignment.failed_initializer(),
-                    assignment.single_path(),
-                )
-            } else {
-                let node = self
-                    .local_value(FlowBindingLayer::Function, name)
-                    .or_else(|| self.local_declared(FlowBindingLayer::Function, name))?;
-                let assignment = self.local_assignment(FlowBindingLayer::Function, name);
-                (
-                    node,
-                    assignment.failed_initializer(),
-                    assignment.single_path(),
-                )
-            };
-        if degraded {
+        let node = self
+            .local_value(binding)
+            .or_else(|| self.local_declared(binding))?;
+        let assignment = self.local_assignment(binding);
+        if assignment.failed_initializer() {
             // Observing a binding whose initializer FAILED is the
             // `FailedBindingInitializer` degradation: the value is a
             // modeled `any`, not the initializer's real type. An
@@ -6998,7 +7005,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer,
             );
         }
-        if conditional {
+        if assignment.single_path() {
             // Observing a function-scoped binding whose surviving
             // reaching definition was recorded inside a conditional arm
             // is the `ConditionalVarDefinition` degradation: the value is
@@ -7087,7 +7094,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Seed one destructured object-pattern parameter element into the
     /// lexical layer on its first read. A projection miss binds the typed
     /// unmodelled-position marker with failed-initializer membership.
-    fn seed_destructured_param_element(&mut self, name: &str) {
+    fn seed_destructured_param_element(&mut self, binding: &FlowProductSubject) {
         let Some((ordinal, key, has_default)) =
             self.param_names
                 .iter()
@@ -7096,7 +7103,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     param
                         .destructured
                         .iter()
-                        .find(|element| element.name.as_ref() == name)
+                        .find(|element| matches!(binding, FlowProductSubject::Local(id) if *id == element.binding))
                         .map(|element| (ordinal, Arc::clone(&element.key), element.has_default))
                 })
         else {
@@ -7111,12 +7118,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .map(|node| (node, false))
             .unwrap_or_else(|| (self.unmodeled_position(), true));
         self.set_declared_local(
-            name,
+            binding,
             crate::flow_slice_content::SliceBindingKind::Const,
             Some(node),
         );
         self.bind_local(
-            name,
+            binding,
             crate::flow_slice_content::SliceBindingKind::Const,
             node,
             None,
@@ -7140,8 +7147,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn eval_frame_rooted_typeof_path(
         &mut self,
         ty: &verter_type_expr::TypeExpr,
+        binding: Option<&FlowProductSubject>,
     ) -> Option<Positional<SemanticNodeId>> {
-        self.frame_rooted_typeof_path_node(ty)
+        self.frame_rooted_typeof_path_node(ty, binding)
             .map(Positional::Value)
     }
 
@@ -7153,6 +7161,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn frame_rooted_typeof_path_node(
         &mut self,
         ty: &verter_type_expr::TypeExpr,
+        binding: Option<&FlowProductSubject>,
     ) -> Option<SemanticNodeId> {
         let verter_type_expr::TypeExpr::TypeOf(value_ref) = ty else {
             return None;
@@ -7160,65 +7169,55 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if value_ref.path.len() < 2 || !value_ref.type_args.is_empty() {
             return None;
         }
-        let head = value_ref.path[0].as_str();
-        // A parameter is addressed BY NAME here (the leaf carries no
-        // ordinal); a local resolves through the same two-layer read every
-        // other local reference takes, flags folded by construction.
-        let param_ordinal = self
-            .param_names
-            .iter()
-            .position(|param| param.name.as_deref() == Some(head))
-            .map(|ordinal| ordinal as u32);
-        // THE narrowing overlay: a narrowed reference — at this exact
-        // path, or at any PREFIX of it (a discriminant narrowed the root)
-        // — substitutes the narrow's node and projects the remaining
-        // segments from it, so a guarded member read can never see the
-        // pre-narrow union.
-        let overlay_root = param_ordinal
-            .map(crate::flow_slice_content::SliceNarrowRoot::Param)
-            .or_else(|| {
-                (self.local_value(FlowBindingLayer::Lexical, head).is_some()
-                    || self.local_value(FlowBindingLayer::Function, head).is_some())
-                .then(|| crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(head)))
-            });
-        if let Some(root) = overlay_root {
-            let segments: Vec<Arc<str>> = value_ref.path[1..]
-                .iter()
-                .map(|segment| Arc::from(segment.as_str()))
-                .collect();
-            for prefix_len in (0..=segments.len()).rev() {
-                let subject = crate::flow_slice_content::SliceNarrowSubject {
-                    root: root.clone(),
-                    path: Arc::from(segments[..prefix_len].to_vec().into_boxed_slice()),
-                };
-                if let Some(base) = self.narrowed_read(&subject) {
-                    return self.project_segments_navigate(base, &segments[prefix_len..]);
-                }
-            }
-        }
-        let root = if let Some(ordinal) = param_ordinal {
-            // The same conditional-write observation the direct parameter
-            // read folds: a `typeof p.…` leaf rooted at a try-written
-            // parameter degrades instead of projecting one path's value.
-            if self
-                .products
-                .assignment(&Self::param_subject(ordinal))
-                .single_path()
-            {
-                self.record_degradation(
-                    crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
-                );
-            }
-            self.param_write(ordinal)
-                .or_else(|| self.params.get(ordinal as usize).copied())
-        } else {
-            self.read_local(head)
-        }?;
+        let binding = binding?;
+        let root = crate::flow_slice_content::SliceNarrowRoot::Local {
+            name: Arc::from(value_ref.path[0].as_str()),
+            binding: binding.clone(),
+        };
         let segments: Vec<Arc<str>> = value_ref.path[1..]
             .iter()
-            .map(|segment| Arc::from(segment.as_str()))
+            .map(|part| Arc::from(part.as_str()))
             .collect();
+        for prefix_len in (0..=segments.len()).rev() {
+            let subject = crate::flow_slice_content::SliceNarrowSubject {
+                root: root.clone(),
+                path: segments[..prefix_len].to_vec().into(),
+            };
+            if let Some(base) = self.narrowed_read(&subject) {
+                return self.project_segments_navigate(base, &segments[prefix_len..]);
+            }
+        }
+        let root = self.read_local(binding)?;
         self.project_segments_navigate(root, &segments)
+    }
+
+    /// Resolve an indexed argument at its retained source position through
+    /// the same skeleton lexical authority used by content lowering.
+    fn indexed_argument_binding(
+        &self,
+        expression: &verter_type_expr::IndexedValueExpression,
+        point: u32,
+    ) -> Option<FlowProductSubject> {
+        let name = indexed_bare_name(expression)?;
+        let span = verter_semantic::analysis::flow::FrameSpan::rebase(
+            self.anchor,
+            verter_span::Span::new(point, point.checked_add(1)?),
+        );
+        if let Some(name_id) = self.skeleton.name_id(name) {
+            let region = self.skeleton.innermost_region_containing(span);
+            if let Some(binding) = self
+                .skeleton
+                .bindings_of_name_in_scope(name_id, region)
+                .first()
+            {
+                return Some(FlowProductSubject::Local(*binding));
+            }
+        }
+        self.captures
+            .iter()
+            .find(|identity| identity.name.as_ref() == name)
+            .cloned()
+            .map(FlowProductSubject::Captured)
     }
 
     /// tsc's `getAssignmentReducedType`: the union of the DECLARED
@@ -7421,12 +7420,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             node
         } else {
             match &subject.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => self
+                crate::flow_slice_content::SliceNarrowRoot::Param {
+                    ordinal,
+                    binding: _,
+                    ..
+                } => self
                     .param_write(*ordinal)
                     .or_else(|| self.params.get(*ordinal as usize).copied())?,
-                crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
-                    self.read_local(name.as_ref())?
-                }
+                crate::flow_slice_content::SliceNarrowRoot::Local {
+                    name: _, binding, ..
+                } => self.read_local(binding)?,
             }
         };
         if subject.path.is_empty() {
@@ -8341,6 +8344,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         node: SemanticNodeId,
     ) {
+        let root = self.narrow_subject(&subject.root);
+        if !state.products.contains_subject(&root) {
+            return;
+        }
         // A fact about a PATH reference (a nested discriminant's parent)
         // cannot ride the reaching-definition layers — those carry whole
         // bindings — so it rides the state's narrowing overlay. The
@@ -8364,18 +8371,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             );
         };
         match &subject.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
-                rebind(&mut state.products, &Self::param_subject(*ordinal));
+            crate::flow_slice_content::SliceNarrowRoot::Param {
+                ordinal: _,
+                binding,
+                ..
+            } => {
+                rebind(&mut state.products, &FlowProductSubject::Local(*binding));
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
-                let lexical = self.subject(FlowBindingLayer::Lexical, name);
-                if state.products.reaching(&lexical).is_some() {
-                    rebind(&mut state.products, &lexical);
-                    return;
-                }
-                let function = self.subject(FlowBindingLayer::Function, name);
-                if state.products.reaching(&function).is_some() {
-                    rebind(&mut state.products, &function);
+            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                if state.products.reaching(binding).is_some() {
+                    rebind(&mut state.products, binding);
                 }
             }
         }
@@ -8419,12 +8424,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             node
         } else {
             match &subject.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => self
+                crate::flow_slice_content::SliceNarrowRoot::Param {
+                    ordinal,
+                    binding: _,
+                    ..
+                } => self
                     .param_write(*ordinal)
                     .or_else(|| self.params.get(*ordinal as usize).copied())?,
-                crate::flow_slice_content::SliceNarrowRoot::Local(name) => self
-                    .local_value(FlowBindingLayer::Lexical, name)
-                    .or_else(|| self.local_value(FlowBindingLayer::Function, name))?,
+                crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                    self.local_value(binding)?
+                }
             }
         };
         let parent = if subject.path.len() > 1 {
@@ -9106,25 +9115,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         (fact, consumption)
     }
 
-    /// Whether one local carries a WIDENING literal, in the layer that
-    /// currently answers reads of `name`. A pure predicate — it folds no
+    /// Whether one binding carries a WIDENING literal. A pure predicate — it folds no
     /// degradation, because asking about widening is not an observation
     /// of the binding's value.
-    fn widening_of(&self, name: &str) -> bool {
-        matches!(self.membership_of(name), Some(WideningMembership::All))
+    fn widening_of(&self, binding: &FlowProductSubject) -> bool {
+        matches!(self.membership_of(binding), Some(WideningMembership::All))
     }
 
-    /// The full widening MEMBERSHIP of a local binding, if it has one —
-    /// the layer resolution mirrors [`Self::widening_of`], which is its
-    /// `All`-only projection.
-    fn membership_of(&self, name: &str) -> Option<WideningMembership> {
-        if self.local_value(FlowBindingLayer::Lexical, name).is_some() {
-            return self.local_widening(FlowBindingLayer::Lexical, name);
-        }
-        if self.local_value(FlowBindingLayer::Function, name).is_some() {
-            return self.local_widening(FlowBindingLayer::Function, name);
-        }
-        None
+    /// The full widening membership of the exact binding's reaching value.
+    fn membership_of(&self, binding: &FlowProductSubject) -> Option<WideningMembership> {
+        self.local_value(binding)?;
+        self.local_widening(binding)
     }
 
     /// The widening membership one PLAIN (non-mixed) binding initializer
@@ -9146,12 +9147,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return Some(WideningMembership::All);
         }
         if let crate::flow_slice_content::SliceExpr::Local {
-            name,
+            binding,
+            name: _,
             captured: false,
             ..
         } = init
         {
-            if let Some(membership) = self.membership_of(name.as_ref()) {
+            if let Some(membership) = self.membership_of(binding) {
                 return Some(membership.clone());
             }
         }
@@ -9228,10 +9230,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// 1` — unannotated, no const assertion). `as const` / annotated
     /// literals, parameters, and non-local reads are never widening.
     fn reads_widening_literal_local(&self, expr: &crate::flow_slice_content::SliceExpr) -> bool {
-        let crate::flow_slice_content::SliceExpr::Local { name, .. } = expr else {
+        let crate::flow_slice_content::SliceExpr::Local {
+            binding, name: _, ..
+        } = expr
+        else {
             return false;
         };
-        self.widening_of(name.as_ref())
+        self.widening_of(binding)
     }
 
     /// The completed fresh-literal call this expression IS (transparently)
@@ -9277,8 +9282,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             return widen_values_within(self.dispatch, node, &call.values);
         }
-        if let crate::flow_slice_content::SliceExpr::Local { name, .. } = expr {
-            match self.membership_of(name.as_ref()) {
+        if let crate::flow_slice_content::SliceExpr::Local {
+            binding, name: _, ..
+        } = expr
+        {
+            match self.membership_of(binding) {
                 Some(WideningMembership::All) => {
                     return widen_fresh_read_node(self.dispatch, node);
                 }
@@ -9665,8 +9673,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // the tests do not cover the discriminant's every
                     // arm. The clauses share ONE block scope, exactly as
                     // the authored switch body does.
-                    let mut entry = self.layer_state();
-                    self.complete_param_writes(&mut entry);
+                    let entry = self.layer_state();
                     let break_base = self.break_exits.len();
                     let return_base = self.return_edges.len();
                     let throw_base = self.throw_points.len();
@@ -9928,8 +9935,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // aggregates every authored return contribution,
                     // including a try return whose runtime completion is
                     // overridden by an abrupt finally.
-                    let mut entry = self.layer_state();
-                    self.complete_param_writes(&mut entry);
+                    let entry = self.layer_state();
                     let break_base = self.break_exits.len();
                     let return_base = self.return_edges.len();
                     let throw_base = self.throw_points.len();
@@ -9964,7 +9970,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let (catch_contributors, catch_end, written) = match self.eval_try_clause(
                             &catch_start,
                             &catch.region,
-                            catch.param.as_ref(),
+                            catch.binding,
                             finally.is_some(),
                         ) {
                             Ok(clause) => clause,
@@ -10068,11 +10074,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 // killed — and the clause-write flags lose
                                 // their reason: no path past the statement
                                 // can have skipped those writes.
-                                let mut killed: Vec<FlowProductSubject> = Vec::new();
+                                let mut killed = Vec::new();
                                 for subject in &finally_written {
                                     if let Some(root) = self.narrow_root_of(subject) {
-                                        if !killed.contains(&root) {
-                                            killed.push(root);
+                                        if let Some(identity) = self.products.identity(&root) {
+                                            if !killed.contains(&identity) {
+                                                killed.push(identity);
+                                            }
                                         }
                                     }
                                 }
@@ -10081,14 +10089,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     .iter()
                                     .filter(|fact| {
                                         !entry_facts.contains(fact)
-                                            && !killed.contains(&fact.subject)
+                                            && !killed.contains(&fact.binding)
                                     })
                                     .cloned()
                                     .collect();
                                 for fact in restored {
+                                    let subject = self
+                                        .bindings
+                                        .local(&fact.binding)
+                                        .map(FlowProductSubject::Local)
+                                        .unwrap_or_else(|| {
+                                            FlowProductSubject::Captured(fact.binding.clone())
+                                        });
                                     push_narrowing_into(
                                         &mut self.products,
-                                        &fact.subject,
+                                        &subject,
                                         &fact.path,
                                         fact.narrowed_to,
                                     );
@@ -10166,8 +10181,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // state, so the join's intersection is exactly "a fact
                     // holds past the label only when every path into it
                     // established it".
-                    let mut entry = self.layer_state();
-                    self.complete_param_writes(&mut entry);
+                    let entry = self.layer_state();
                     let break_base = self.break_exits.len();
                     let return_base = self.return_edges.len();
                     let throw_base = self.throw_points.len();
@@ -10255,8 +10269,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // The edge past the absorbing construct is THIS state:
                     // capture it complete and end the region's path (the
                     // lowering already proved the target exists).
-                    let mut state = self.layer_state();
-                    self.complete_param_writes(&mut state);
+                    let state = self.layer_state();
                     self.break_exits.push(FlowBreakExit {
                         target: target.clone(),
                         state,
@@ -10275,11 +10288,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.capture_throw_point();
                 }
                 crate::flow_slice_content::SliceStatement::Binding {
-                    name,
+                    binding,
+                    name: _,
                     kind,
                     init,
                     declared,
                     freshness,
+                    ..
                 } => {
                     // A lexical declaration shadows any outer same-named
                     // binding for the extent of its block scope: record
@@ -10287,7 +10302,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // restore the shadowed value without losing the
                     // scope's writes to bindings that predate it.
                     if !matches!(kind, crate::flow_slice_content::SliceBindingKind::Var) {
-                        self.record_scope_shadow(name.as_ref());
+                        self.record_scope_shadow(&FlowProductSubject::Local(*binding));
                     }
                     // An authored annotation is the binding's DECLARED
                     // type, seeded HERE (in source order), never at
@@ -10310,12 +10325,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let no_init_var_with_reaching_value = init.is_none()
                             && matches!(kind, crate::flow_slice_content::SliceBindingKind::Var)
                             && (self
-                                .local_value(FlowBindingLayer::Function, name.as_ref())
+                                .local_value(&FlowProductSubject::Local(*binding))
                                 .is_some()
                                 || self.param_names.iter().enumerate().any(|(ordinal, param)| {
-                                    param.name.as_deref() == Some(name.as_ref())
-                                        && (self.param_write(ordinal as u32).is_some()
-                                            || self.params.get(ordinal).is_some())
+                                    param.binding.is_some_and(|parameter| {
+                                        self.bindings.canonical_local(parameter)
+                                            == self.bindings.canonical_local(*binding)
+                                    }) && (self.param_write(ordinal as u32).is_some()
+                                        || self.params.get(ordinal).is_some())
                                 }));
                         // THE root-identifier gate at the declarator
                         // annotation. `const v: Info` in a frame that
@@ -10336,14 +10353,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // reads this binding still publishes its
                             // return (degraded, never warm).
                             let marker = self.unmodeled_position();
-                            self.set_declared_local(name, *kind, Some(marker));
+                            self.set_declared_local(
+                                &FlowProductSubject::Local(*binding),
+                                *kind,
+                                Some(marker),
+                            );
                             if !no_init_var_with_reaching_value {
-                                self.bind_local(name, *kind, marker, None, false);
+                                self.bind_local(
+                                    &FlowProductSubject::Local(*binding),
+                                    *kind,
+                                    marker,
+                                    None,
+                                    false,
+                                );
                             }
                             continue;
                         }
                         let declared_node = self.lower_body_type(declared.ty());
-                        self.set_declared_local(name, *kind, Some(declared_node));
+                        self.set_declared_local(
+                            &FlowProductSubject::Local(*binding),
+                            *kind,
+                            Some(declared_node),
+                        );
                         // An initializer-less `var` declaration has no
                         // runtime write. Keep the authored declaration as the
                         // stable authority for later assignments, but do not
@@ -10354,7 +10385,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let arms = self.dispatch.union_arms_of(declared_node);
                         match (init, arms) {
                             (None, _) | (Some(_), None) => {
-                                self.bind_local(name, *kind, declared_node, None, false);
+                                self.bind_local(
+                                    &FlowProductSubject::Local(*binding),
+                                    *kind,
+                                    declared_node,
+                                    None,
+                                    false,
+                                );
                                 continue;
                             }
                             (Some(init), Some(arms)) => {
@@ -10375,12 +10412,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                         declared_node
                                     }
                                 };
-                                self.bind_local(name, *kind, node, None, false);
+                                self.bind_local(
+                                    &FlowProductSubject::Local(*binding),
+                                    *kind,
+                                    node,
+                                    None,
+                                    false,
+                                );
                                 continue;
                             }
                         }
                     }
-                    self.set_declared_local(name, *kind, None);
+                    self.set_declared_local(&FlowProductSubject::Local(*binding), *kind, None);
                     // A binding OUTSIDE the slice's value-selected slot
                     // set never even LOWERS — the content producer elides
                     // the whole declaration, so nothing here can observe
@@ -10445,7 +10488,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     fresh_values.into_boxed_slice(),
                                 )))
                             };
-                            self.bind_local(name, *kind, value, membership, false);
+                            self.bind_local(
+                                &FlowProductSubject::Local(*binding),
+                                *kind,
+                                value,
+                                membership,
+                                false,
+                            );
                             continue;
                         }
                         match self.eval_expr(init) {
@@ -10454,7 +10503,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     self.binding_init_membership(*kind, init, node, freshness);
                                 match kind {
                                     crate::flow_slice_content::SliceBindingKind::Const => {
-                                        self.bind_local(name, *kind, node, membership, false);
+                                        self.bind_local(
+                                            &FlowProductSubject::Local(*binding),
+                                            *kind,
+                                            node,
+                                            membership,
+                                            false,
+                                        );
                                     }
                                     // A MUTABLE declaration widens its
                                     // fresh provenance AT the declaration
@@ -10472,7 +10527,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                             }
                                             None => node,
                                         };
-                                        self.bind_local(name, *kind, node, None, false);
+                                        self.bind_local(
+                                            &FlowProductSubject::Local(*binding),
+                                            *kind,
+                                            node,
+                                            None,
+                                            false,
+                                        );
                                     }
                                 }
                             }
@@ -10491,7 +10552,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 let marker = super::flow_return_callee::unmodeled_position_marker(
                                     self.dispatch,
                                 );
-                                self.bind_local(name, *kind, marker, None, true);
+                                self.bind_local(
+                                    &FlowProductSubject::Local(*binding),
+                                    *kind,
+                                    marker,
+                                    None,
+                                    true,
+                                );
                             }
                         }
                     }
@@ -10500,6 +10567,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     target,
                     value,
                     freshness,
+                    definition,
                     ..
                 } => {
                     // THE applied write: a whole-binding `=` at statement
@@ -10526,7 +10594,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     match outcome {
                         Positional::Value(node) => {
                             self.holds.truncate(holds_before);
-                            self.apply_write(target, node, false);
+                            self.apply_write(target, node, false, *definition);
                         }
                         Positional::Hold => {
                             self.holds.truncate(holds_before);
@@ -10535,7 +10603,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             self.holds.truncate(holds_before);
                             let marker =
                                 super::flow_return_callee::unmodeled_position_marker(self.dispatch);
-                            self.apply_write(target, marker, true);
+                            self.apply_write(target, marker, true, *definition);
                         }
                     }
                 }
@@ -10600,6 +10668,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         for statement in region.statements.iter() {
             match statement {
                 SliceStatement::Binding {
+                    binding,
                     name,
                     kind: SliceBindingKind::Var,
                     declared: Some(declared),
@@ -10610,7 +10679,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .any(|name| self.owner_scope_answers_name(name)) =>
                 {
                     let node = self.lower_body_type(declared.ty());
-                    self.set_declared_local(name, SliceBindingKind::Var, Some(node));
+                    self.set_declared_local(
+                        &FlowProductSubject::Local(*binding),
+                        SliceBindingKind::Var,
+                        Some(node),
+                    );
                 }
                 SliceStatement::If {
                     consequent,
@@ -10668,6 +10741,107 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// enclosing lexical locals seed the lexical layer, so the nested
     /// frame's own bindings shadow them and the membership flags stay
     /// layer-exact.
+    fn eval_nested_function(
+        &mut self,
+        function: &verter_semantic::analysis::function_program::FunctionProgramKey,
+        context: &Arc<crate::flow_slice_content::NestedFlowContext>,
+        has_declared_return: bool,
+    ) -> SemanticNodeId {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from(self.canonical),
+                owner: function.declaration.owner,
+                symbol: Arc::clone(&function.declaration.name),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: function.part.clone(),
+            overload_ordinal: function.overload_ordinal,
+        };
+        let key = self.dispatch.flow_return_key_for(&identity);
+        let prepared = (|| {
+            let site = self.dispatch.flow_slice_demand_site(&key).ok()?;
+            let flow_slice = self.dispatch.ctx.project_type_store().flow_slice();
+            let index = site
+                .indexed
+                .shallow_state
+                .decl_bodies()
+                .function_program_index();
+            let entry = index.get(function)?.entry();
+            let skeleton = flow_slice.skeleton_for(&site.slice_key_function, self.dispatch.ctx)?;
+            let bound = flow_slice.bound_graph_for(&site.slice_key_function)?;
+            let planned_and_selection = if has_declared_return {
+                None
+            } else {
+                let crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(planned) =
+                    crate::cache_runtime::lookup(
+                        flow_slice.hash_node(),
+                        site.slice_key.clone(),
+                        self.dispatch.ctx,
+                    )?
+                else {
+                    return None;
+                };
+                let lowered = crate::cache_runtime::lookup(
+                    flow_slice.lowered_node(),
+                    crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey {
+                        hash_key: site.slice_key.clone(),
+                        slice_hash: planned.hash(),
+                    },
+                    self.dispatch.ctx,
+                )?;
+                Some((
+                    planned,
+                    crate::flow_slice_content::FlowSliceSelection::from_slice_ir(&lowered),
+                ))
+            };
+            let content = site
+                .indexed
+                .shallow_state
+                .decl_bodies()
+                .flow_slice_content_with_context(
+                    entry,
+                    planned_and_selection
+                        .as_ref()
+                        .map(|(_, selection)| selection.clone()),
+                    &bound,
+                    Some(Arc::clone(context)),
+                )?;
+            Some((
+                content,
+                skeleton,
+                bound,
+                planned_and_selection.map(|(planned, _)| planned),
+                entry.span.start,
+                Arc::clone(&entry.captures.0),
+            ))
+        })();
+        let Some((content, skeleton, bound, planned, anchor, captures)) = prepared else {
+            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
+            return self.unmodeled_position();
+        };
+        if content.budget_failure.is_some() {
+            self.record_degradation(
+                crate::semantic_query::FlowReturnDegradation::UnmodeledPosition,
+            );
+            return self.unmodeled_position();
+        }
+        self.eval_nested_function_signature(
+            &content.params,
+            &content.type_parameters,
+            &context.mutable_authorities(),
+            content.declared_return.as_ref(),
+            &content.body,
+            content.can_fall_through,
+            &content.bindings,
+            skeleton,
+            bound,
+            planned.as_deref(),
+            anchor,
+            captures,
+            &key,
+        )
+    }
+
     fn eval_nested_function_signature(
         &mut self,
         nested_params: &[crate::flow_slice_content::SliceParam],
@@ -10676,6 +10850,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         declared_return: Option<&crate::flow_slice_content::GatedType>,
         body: &crate::flow_slice_content::SliceRegion,
         can_fall_through: bool,
+        bindings: &Arc<FlowBindingMap>,
+        skeleton: Arc<FunctionBodySkeleton>,
+        bound: crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        planned: Option<&crate::cache_runtime::flow_slice_node::PlannedFlowSlice>,
+        anchor: u32,
+        captures: Arc<[verter_semantic::analysis::function_program::FlowBindingIdentity]>,
+        key: &FlowReturnKey,
     ) -> SemanticNodeId {
         let graph = self.dispatch.graph();
         // The nested function's OWN type parameters are binders in scope
@@ -10801,88 +10982,177 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ),
             });
         }
-        // The captured function-scope layer: the enclosing parameters BY
-        // NAME, overlaid by the enclosing `var` layer (a redeclaring
-        // enclosing `var` shares the parameter's slot and still wins).
-        // The nested frame inherits the enclosing frame's binding table and
-        // product state by NAME, minus the facts that do not cross a
-        // closure boundary: the narrowing overlay (a guard narrow lives and
-        // dies with the arm that established it, and the checker itself
-        // does not honour a narrowing of a mutable binding across a closure
-        // boundary), the enclosing frame's applied parameter writes (the
-        // nested signature has its own parameter slots), and the lexical
-        // single-path facts (a clause boundary of the enclosing frame is
-        // not one of the nested body).
-        let mut captured_bindings = self.bindings.clone();
-        let mut captured_products = self.products.clone();
-        for subject in captured_products.subjects_in(super::flow_solve::FlowDomain::Narrowing) {
-            captured_products.remove(super::flow_solve::FlowDomain::Narrowing, &subject);
-        }
-        for domain in super::flow_products::FLOW_FRAME_DOMAINS {
-            for subject in captured_products.subjects_in(domain) {
-                match &subject {
-                    FlowProductSubject::FrameParam(_) => {
-                        captured_products.remove(domain, &subject);
+        let Some(planned) = planned else {
+            return self.unmodeled_position();
+        };
+        let mut imports = Vec::new();
+        for node in planned
+            .selection()
+            .value_nodes
+            .iter()
+            .chain(planned.selection().effect_only_nodes.iter())
+            .copied()
+        {
+            let verter_semantic::analysis::flow::flow_graph::FlowNodeKind::ExprSite(site) =
+                bound.bundle().graph.node_kind(node)
+            else {
+                continue;
+            };
+            let site = skeleton.expr_site(site);
+            for read in site.reads.iter() {
+                if !skeleton
+                    .bindings_of_name_in_scope(read.name, site.region)
+                    .is_empty()
+                {
+                    continue;
+                }
+                if let Some(identity) = captures
+                    .iter()
+                    .find(|identity| identity.name.as_ref() == skeleton.name(read.name))
+                {
+                    if !imports.iter().any(|(existing, _)| existing == identity) {
+                        imports.push((identity.clone(), node));
                     }
-                    FlowProductSubject::FrameBinding(slot)
-                        if domain == super::flow_solve::FlowDomain::DefiniteAssignment
-                            && captured_bindings.layer(*slot)
-                                == Some(FlowBindingLayer::Lexical) =>
-                    {
-                        let cleared = captured_products
-                            .assignment(&subject)
-                            .with_single_path(false);
-                        captured_products.set_assignment(&subject, cleared);
-                    }
-                    _ => {}
                 }
             }
         }
-        for authority in mutable_capture_authorities {
-            let base = if authority
-                .declared
-                .shadowed()
-                .iter()
-                .any(|name| self.owner_scope_answers_name(name))
-            {
+        let capture_basis: Vec<_> = imports
+            .iter()
+            .map(|(identity, _)| {
+                let parent = self
+                    .bindings
+                    .local(identity)
+                    .map(FlowProductSubject::Local)
+                    .unwrap_or_else(|| FlowProductSubject::Captured(identity.clone()));
+                if self.products.contains_subject(&parent)
+                    && self.products.reaching(&parent).is_none()
+                {
+                    self.seed_destructured_param_element(&parent);
+                }
+                self.products.captured_input_bytes(&parent)
+            })
+            .collect();
+        let request = super::flow_solve::FlowDemandRequest {
+            query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+            input_basis: verter_identity::identity::InputBasisId::from_canonical(
+                &NestedFlowInputBasis {
+                    parent: &self.execution_selection.basis().input_basis,
+                    parameters: &params,
+                    captures: &capture_basis,
+                },
+            ),
+            resources: self.execution_selection.resources(),
+            additional_requirements: Arc::from([]),
+        };
+        let Ok(execution_selection) =
+            super::flow_solve::prepare_flow_execution(&request, &bound, planned)
+        else {
+            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
+            return self.unmodeled_position();
+        };
+        let plan = match super::flow_solve::build_flow_demand_plan_from_execution(
+            Arc::clone(&execution_selection),
+            &bound,
+            request.additional_requirements,
+        ) {
+            Ok(plan) => Some(Arc::new(plan)),
+            Err(_) => {
                 self.record_degradation(
                     crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
                 );
-                self.unmodeled_position()
+                None
+            }
+        };
+        let inputs =
+            FlowProductInputs::for_bound_graph(&bound).with_captures(imports.iter().cloned());
+        let Ok(execution) = FlowProductExecution::new_for_selection(
+            &inputs,
+            Arc::clone(&execution_selection),
+            FlowProductBudget::for_execution_selection(&execution_selection),
+        ) else {
+            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
+            return self.unmodeled_position();
+        };
+        let Ok(mut captured_products) = FlowProductStore::new(execution, &bound) else {
+            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
+            return self.unmodeled_position();
+        };
+        for (identity, _) in imports.iter() {
+            let parent = self
+                .bindings
+                .local(identity)
+                .map(FlowProductSubject::Local)
+                .unwrap_or_else(|| FlowProductSubject::Captured(identity.clone()));
+            let subject = FlowProductSubject::Captured(identity.clone());
+            if let Some(reaching) = self.products.reaching_type(&parent).cloned() {
+                captured_products.bind(
+                    &subject,
+                    self.products.assignment(&parent).with_single_path(false),
+                    reaching,
+                );
+            }
+            if let Some(declared) = self.products.declared_type(&parent) {
+                captured_products.set_declared_type(&subject, Some(declared));
+            }
+        }
+        seed_selected_parameters(
+            &mut captured_products,
+            nested_params,
+            &params,
+            bindings,
+            &bound,
+            &execution_selection,
+        );
+        for authority in mutable_capture_authorities {
+            let subject = FlowProductSubject::Captured(authority.binding.clone());
+            if !captured_products.contains_subject(&subject) {
+                continue;
+            }
+            let node = if let Some(declared) = captured_products.declared_type(&subject) {
+                declared
             } else {
-                self.lower_body_type(authority.declared.ty())
+                let base = if authority
+                    .declared
+                    .shadowed()
+                    .iter()
+                    .any(|name| self.owner_scope_answers_name(name))
+                {
+                    self.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                    );
+                    self.unmodeled_position()
+                } else {
+                    self.lower_body_type(authority.declared.ty())
+                };
+                match &authority.source {
+                    crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter {
+                        key: Some(key),
+                        has_default,
+                    } => self
+                        .destructured_param_element_node(base, key, *has_default)
+                        .unwrap_or_else(|| {
+                            self.record_degradation(
+                                crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                            );
+                            self.unmodeled_position()
+                        }),
+                    crate::flow_slice_content::SliceCaptureAuthoritySource::Local(_)
+                    | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter {
+                        key: None,
+                        ..
+                    } => base,
+                }
             };
-            let node = match &authority.source {
-                crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter {
-                    key: Some(key),
-                    has_default,
-                } => self
-                    .destructured_param_element_node(base, key, *has_default)
-                    .unwrap_or_else(|| {
-                        self.record_degradation(
-                            crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
-                        );
-                        self.unmodeled_position()
-                    }),
-                crate::flow_slice_content::SliceCaptureAuthoritySource::Local(_)
-                | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter {
-                    key: None,
-                    ..
-                } => base,
-            };
-            let name = authority.name.as_ref();
             match authority.source {
                 crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
                     crate::flow_slice_content::SliceBindingKind::Var,
                 ) => {
-                    let subject = captured_bindings.subject(FlowBindingLayer::Function, name);
                     captured_products.set_declared_type(&subject, Some(node));
                     captured_products.set_reaching_type(&subject, ReachingTypeProduct::of(node));
                 }
                 crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
                     crate::flow_slice_content::SliceBindingKind::Let,
                 ) => {
-                    let subject = captured_bindings.subject(FlowBindingLayer::Lexical, name);
                     captured_products.set_declared_type(&subject, Some(node));
                     if captured_products.reaching(&subject).is_none() {
                         captured_products
@@ -10890,22 +11160,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                 }
                 crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter { .. } => {
-                    let subject = captured_bindings.subject(FlowBindingLayer::Lexical, name);
                     captured_products.set_declared_type(&subject, Some(node));
                     captured_products.set_reaching_type(&subject, ReachingTypeProduct::of(node));
                 }
                 crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
                     crate::flow_slice_content::SliceBindingKind::Const,
                 ) => {}
-            }
-        }
-        for (ordinal, param) in self.param_names.iter().enumerate() {
-            let (Some(name), Some(node)) = (param.name.as_ref(), self.params.get(ordinal)) else {
-                continue;
-            };
-            let subject = captured_bindings.subject(FlowBindingLayer::Function, name);
-            if captured_products.reaching(&subject).is_none() {
-                captured_products.set_reaching_type(&subject, ReachingTypeProduct::of(*node));
             }
         }
         let nested_holds;
@@ -10921,12 +11181,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 params: &params,
                 param_names: nested_params,
                 binder_env: &binder_env,
-                bindings: captured_bindings,
+                bindings: Arc::clone(bindings),
+                skeleton: Arc::clone(&skeleton),
+                flow_graph: Arc::clone(&bound.bundle().graph),
+                execution_selection,
+                plan,
+                anchor,
+                captures,
                 products: captured_products,
-                product_budget: self.product_budget,
                 narrowing_writes: Vec::new(),
-                product_evidence: rustc_hash::FxHashSet::default(),
-                product_budget_exceeded: None,
                 bare_return_seen: false,
                 implicit_undefined_seen: false,
                 // A nested function value always evaluates its WHOLE
@@ -10951,6 +11214,56 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
             nested_evaluator.promote_pending_statement_gap();
             nested_holds = nested_evaluator.holds.clone();
+            let finished = nested_evaluator
+                .products
+                .finish(nested_evaluator.plan.as_deref())
+                .and_then(|evidence| {
+                    let Some(plan) = nested_evaluator.plan.as_deref() else {
+                        return Ok(evidence);
+                    };
+                    use super::dispatch_txn::flow_obligation_state::FlowObligationBasis;
+                    let products_complete = plan.obligation_specs().iter().all(|spec| {
+                        let subject = match spec.basis() {
+                            FlowObligationBasis::Binding { slot, .. } => nested_evaluator
+                                .bindings
+                                .local(&slot.identity)
+                                .map(FlowProductSubject::Local),
+                            FlowObligationBasis::CapturedBinding { identity, .. } => Some(
+                                nested_evaluator
+                                    .bindings
+                                    .local(identity)
+                                    .map(FlowProductSubject::Local)
+                                    .unwrap_or_else(|| {
+                                        FlowProductSubject::Captured(identity.clone())
+                                    }),
+                            ),
+                            _ => return true,
+                        };
+                        subject.is_some_and(|subject| {
+                            binding_product_evidence(
+                                &subject,
+                                evidence.as_ref(),
+                                &nested_evaluator.products,
+                                plan,
+                            )
+                        })
+                    });
+                    if products_complete {
+                        Ok(evidence)
+                    } else {
+                        Err(FlowProductFailure::Gap(
+                            crate::semantic_query::FlowGap::UnmodeledExpression,
+                        ))
+                    }
+                });
+            if let Err(failure) = finished {
+                if matches!(failure, FlowProductFailure::BudgetExceeded(_)) {
+                    self.products.execution.borrow_mut().failure = Some(failure);
+                }
+                nested_evaluator.record_degradation(
+                    crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                );
+            }
             nested_degradation = nested_evaluator.degradation;
             nested_bare_return_seen = nested_evaluator.bare_return_seen;
             nested_implicit_undefined_seen = nested_evaluator.implicit_undefined_seen;
@@ -11207,7 +11520,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // unchanged: its own typed miss carrier is the honest
                 // answer, exactly as for any other unresolved reference.
                 if let crate::flow_slice_content::SliceExpr::Type(leaf) = inner.as_ref() {
-                    if let Some(node) = self.eval_frame_rooted_typeof_path(leaf.ty()) {
+                    if let Some(node) =
+                        self.eval_frame_rooted_typeof_path(leaf.ty(), leaf.frame_root())
+                    {
                         return node;
                     }
                 }
@@ -11217,11 +11532,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // carry: the slice and the signature disagree about this
             // frame's arity. That is a fact about this REFERENCE, not
             // about the body around it.
-            crate::flow_slice_content::SliceExpr::Param { ordinal } => {
+            crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => {
                 // A guard narrow (or an applied write) substitutes the
                 // parameter's CURRENT value positionally.
                 let subject = crate::flow_slice_content::SliceNarrowSubject {
-                    root: crate::flow_slice_content::SliceNarrowRoot::Param(*ordinal),
+                    root: crate::flow_slice_content::SliceNarrowRoot::Param {
+                        ordinal: *ordinal,
+                        binding: *binding,
+                    },
                     path: Arc::from(Vec::new().into_boxed_slice()),
                 };
                 if let Some(node) = self.narrowed_read(&subject) {
@@ -11232,7 +11550,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // not the join's — fail closed at the read.
                 if self
                     .products
-                    .assignment(&Self::param_subject(*ordinal))
+                    .assignment(&FlowProductSubject::Local(*binding))
                     .single_path()
                 {
                     self.record_degradation(
@@ -11265,6 +11583,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
             crate::flow_slice_content::SliceExpr::Local {
+                binding,
                 name,
                 param,
                 captured,
@@ -11277,16 +11596,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // parameter is still the reaching value.
                 if !captured {
                     let subject = crate::flow_slice_content::SliceNarrowSubject {
-                        root: crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(
-                            name.as_ref(),
-                        )),
+                        root: crate::flow_slice_content::SliceNarrowRoot::Local {
+                            name: Arc::clone(name),
+                            binding: binding.clone(),
+                        },
                         path: Arc::from(Vec::new().into_boxed_slice()),
                     };
                     if let Some(node) = self.narrowed_read(&subject) {
                         return Positional::Value(node);
                     }
                 }
-                match self.read_local(name.as_ref()) {
+                match self.read_local(binding) {
                     Some(node) => Positional::Value(node),
                     // A CAPTURED binding the seeded snapshot does not
                     // carry has no honest value: it is neither the
@@ -11310,30 +11630,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.eval_object_literal(entries, false)
             }
             crate::flow_slice_content::SliceExpr::NestedFunctionValue {
+                function,
+                context,
+                has_declared_return,
                 gap,
-                params: nested_params,
-                type_parameters,
-                mutable_capture_authorities,
-                declared_return,
-                body,
-                can_fall_through,
             } => {
                 if let Some(gap) = gap {
                     self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
                 }
-                // The nested function's signature: a DECLARED return
-                // annotation decides it outright; a body-derived return
-                // evaluates through the same flow machinery in a FRESH
-                // frame (the nested function's own params / locals).
-                Positional::Value(self.eval_nested_function_signature(
-                    nested_params,
-                    type_parameters,
-                    mutable_capture_authorities,
-                    declared_return.as_ref(),
-                    body,
-                    *can_fall_through,
+                Positional::Value(self.eval_nested_function(
+                    function,
+                    context,
+                    *has_declared_return,
                 ))
             }
+
             // EVERY call form, through the ONE call sink. `CallValue`'s
             // constructors all decide what happens to the callee's own
             // type-parameter clause, so no arm below can hand a callee's
@@ -11442,46 +11753,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn eval_indexed_call_argument(
         &mut self,
         expression: &verter_type_expr::IndexedValueExpression,
+        point: u32,
     ) -> Option<SemanticNodeId> {
-        // A bare identifier names a frame binding (a parameter or a
-        // reaching local), which owner-scope lowering cannot see. The
-        // indexed lowering spells one as either a bare `Ref` or a
-        // single-segment `typeof` path — both are the same read here.
-        let bare_name = indexed_bare_name(expression);
-        if let Some(name) = bare_name {
-            // The narrowing overlay answers a bare-argument read exactly
-            // like the frame's own `Param` / `Local` carriers do.
-            let param_ordinal = self
-                .param_names
-                .iter()
-                .position(|param| param.name.as_deref() == Some(name))
-                .map(|ordinal| ordinal as u32);
-            let local_subject = crate::flow_slice_content::SliceNarrowSubject {
-                root: crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(name)),
-                path: Arc::from(Vec::new().into_boxed_slice()),
+        if let Some(binding) = self.indexed_argument_binding(expression, point) {
+            let name = self.products.identity(&binding)?.name;
+            let subject = crate::flow_slice_content::SliceNarrowSubject {
+                root: crate::flow_slice_content::SliceNarrowRoot::Local {
+                    name,
+                    binding: binding.clone(),
+                },
+                path: Arc::from([]),
             };
-            if let Some(node) = self.narrowed_read(&local_subject) {
-                return Some(node);
-            }
-            if let Some(node) = param_ordinal.and_then(|ordinal| {
-                self.narrowed_read(&crate::flow_slice_content::SliceNarrowSubject {
-                    root: crate::flow_slice_content::SliceNarrowRoot::Param(ordinal),
-                    path: Arc::from(Vec::new().into_boxed_slice()),
-                })
-            }) {
-                return Some(node);
-            }
-            if let Some(node) = self.read_local(name) {
-                return Some(node);
-            }
-            if let Some(ordinal) = param_ordinal {
-                if let Some(node) = self
-                    .param_write(ordinal)
-                    .or_else(|| self.params.get(ordinal as usize).copied())
-                {
-                    return Some(node);
-                }
-            }
+            return self
+                .narrowed_read(&subject)
+                .or_else(|| self.read_local(&binding));
         }
         self.dispatch.evaluate_indexed_value_expression_node_inner(
             self.canonical,
@@ -11578,7 +11863,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let call = indexed.as_ref();
         let mut args = Vec::with_capacity(call.args.len());
         for argument in call.args.iter() {
-            let Some(ty) = self.eval_indexed_call_argument(&argument.expression) else {
+            let Some(ty) = self.eval_indexed_call_argument(&argument.expression, argument.point)
+            else {
                 // An argument this substrate cannot type leaves
                 // applicability without its evidence: the executor
                 // refuses as surely, and degrading here is the same
@@ -11591,8 +11877,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // `wrap("x")`); the indexed lowering classifies every
             // reference as pinned because only this frame knows the
             // binding's widening membership.
-            let reads_widening_local =
-                indexed_bare_name(&argument.expression).is_some_and(|name| self.widening_of(name));
+            let reads_widening_local = self
+                .indexed_argument_binding(&argument.expression, argument.point)
+                .is_some_and(|binding| self.widening_of(&binding));
             args.push(crate::semantic_query::CallArgKey::Eager {
                 ty,
                 spread: argument.spread,
@@ -11627,7 +11914,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // rebase and `this`-typed methods read it — the same indexed
         // lowering the callee came from, evaluated in the same scope.
         let receiver = match call.receiver.as_deref() {
-            Some(receiver) => match self.eval_indexed_call_argument(receiver) {
+            Some(receiver) => match self.eval_indexed_call_argument(receiver, call.point) {
                 Some(node) => Some(node),
                 None => return Some(self.degraded_unrepresentable_callee()),
             },
@@ -12064,9 +12351,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
             crate::flow_slice_content::SliceCall::OnBinding {
+                binding,
                 param,
-                name,
+                name: _,
                 captured,
+                ..
             } => {
                 // A call on a function-typed binding: the call's value is
                 // the binding's signature return. Calling an `any`-typed
@@ -12078,7 +12367,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // parameter ordinal is the FALLBACK a `var` redeclaring
                 // a parameter name resolves to before its declarator
                 // runs (mirrors the `Local` read).
-                let node = self.read_local(name.as_ref()).or_else(|| {
+                let node = self.read_local(binding).or_else(|| {
                     param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
                 });
                 let Some(node) = node else {
@@ -12186,7 +12475,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     FlowReturnStep::NoValue(_) => Positional::Unmodeled,
                 }
             }
-            crate::flow_slice_content::SliceCall::Symbolic(ty) => {
+            crate::flow_slice_content::SliceCall::Symbolic(ty, binding) => {
                 // The symbolic `ReturnType<typeof …>` carrier: lower the
                 // callee, resolve its signature through the same builtin
                 // `ReturnType` reduction every consumer uses, and take the
@@ -12211,20 +12500,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // `typeof` leaf does. Everything else lowers in owner
                 // scope as before.
                 let mut frame_rooted = false;
-                let Some(callee_node) =
-                    (match self.frame_rooted_typeof_path_node(&type_arguments[0]) {
-                        Some(node) => {
-                            frame_rooted = true;
-                            Some(node)
-                        }
-                        None => self.dispatch.lower_type_expr_in_owner_scope_with_context(
-                            self.canonical,
-                            self.owner,
-                            &type_arguments[0],
-                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                        ),
-                    })
-                else {
+                let Some(callee_node) = (match self
+                    .frame_rooted_typeof_path_node(&type_arguments[0], binding.as_ref())
+                {
+                    Some(node) => {
+                        frame_rooted = true;
+                        Some(node)
+                    }
+                    None => self.dispatch.lower_type_expr_in_owner_scope_with_context(
+                        self.canonical,
+                        self.owner,
+                        &type_arguments[0],
+                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                    ),
+                }) else {
                     return self.degraded_unrepresentable_callee();
                 };
                 // A FRAME-ROOTED member callee carries receiver semantics
@@ -12419,12 +12708,35 @@ mod narrowing_ledger_tests {
     use super::*;
 
     fn param(ordinal: u32) -> FlowProductSubject {
-        FlowProductSubject::FrameParam(ordinal)
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed = oxc_parser::Parser::new(
+            &allocator,
+            "function f(p0: unknown, p1: unknown) {}",
+            oxc_span::SourceType::ts(),
+        )
+        .parse();
+        let oxc_ast::ast::Statement::FunctionDeclaration(function) = &parsed.program.body[0] else {
+            panic!("function fixture");
+        };
+        let source = verter_semantic::analysis::flow::FunctionBodySource::from_function(function)
+            .expect("body");
+        let skeleton = verter_semantic::analysis::flow::build_function_body_skeleton(&source);
+        let name = skeleton
+            .name_id(&format!("p{ordinal}"))
+            .expect("parameter name");
+        let binding = skeleton
+            .bindings_named(name)
+            .next()
+            .expect("parameter binding");
+        FlowProductSubject::Local(binding)
     }
 
     fn authored(ordinal: u32, path: &[&str]) -> crate::flow_slice_content::SliceNarrowSubject {
         crate::flow_slice_content::SliceNarrowSubject {
-            root: crate::flow_slice_content::SliceNarrowRoot::Param(ordinal),
+            root: crate::flow_slice_content::SliceNarrowRoot::Local {
+                name: Arc::from(format!("p{ordinal}")),
+                binding: param(ordinal),
+            },
             path: Arc::from(
                 path.iter()
                     .map(|segment| Arc::from(*segment))

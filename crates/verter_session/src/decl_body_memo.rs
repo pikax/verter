@@ -1121,12 +1121,56 @@ impl DeclBodyMemo {
     /// family memo's warm hit already prevents same-demand recomputation.
     /// Returns `None` on a locator miss (a typed miss, never a panic) or
     /// on a seeded memo / broken lease pin.
+    #[cfg(test)]
+    pub(crate) fn flow_bound_graph_for_tests(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        skeleton: verter_semantic::analysis::flow::FunctionBodySkeleton,
+    ) -> crate::cache_runtime::flow_slice_node::BoundFlowGraph {
+        let file_language =
+            verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts);
+        let (_, parse_key) =
+            verter_language::default_parse_identity_for(&self.eval_source, &file_language)
+                .expect("fixture parse identity");
+        let key = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+            canonical_id: Arc::clone(&self.key.canonical),
+            function: entry.key.clone(),
+            flow_body_stable_hash: entry.flow_body_stable_hash,
+            flow_body_exact_hash: entry.flow_body_exact_hash.expect("fixture exact body"),
+            parse_env_hash: self.key.parse_env_hash,
+            parse_key,
+            file_language,
+            build_toolchain_fingerprint:
+                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+        };
+        crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new()
+            .mint_bound_flow_graph(key, skeleton, entry)
+            .expect("fixture binding authority")
+    }
+
     pub(crate) fn flow_slice_content(
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
         selection: crate::flow_slice_content::FlowSliceSelection,
-        skeleton: Arc<verter_semantic::analysis::flow::FunctionBodySkeleton>,
+        bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
     ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
+        self.flow_slice_content_with_context(entry, Some(selection), bound, None)
+    }
+
+    pub(crate) fn flow_slice_content_with_context(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        selection: Option<crate::flow_slice_content::FlowSliceSelection>,
+        bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        context: Option<Arc<crate::flow_slice_content::NestedFlowContext>>,
+    ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
+        if bound.key().function != entry.key
+            || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash?
+        {
+            return None;
+        }
+        let skeleton = Arc::clone(&bound.bundle().skeleton);
+        let bindings = Arc::clone(&bound.bundle().bindings);
         let service = self.service.as_ref()?;
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
@@ -1144,9 +1188,11 @@ impl DeclBodyMemo {
                     p.source_str(),
                     &index,
                     &entry,
-                    &selection,
+                    selection.as_ref(),
                     &skeleton,
+                    Arc::clone(&bindings),
                     carrier_module,
+                    context.as_deref(),
                 )
             })
         }) else {

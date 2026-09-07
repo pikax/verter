@@ -69,10 +69,9 @@ use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
-    build_function_body_skeleton, object_entry_descent, value_descent, FrameSpan,
-    FunctionBodySkeleton, FunctionBodySource, NameMeaning, ObjectEntryDescent, ObjectEntryKey,
-    ObjectEntryKind, SkeletonBindingId, SkeletonBindingKind, SkeletonPathSegment,
-    SkeletonWriteTarget, ValueDescent,
+    object_entry_descent, value_descent, FlowBindingRef, FrameSpan, FunctionBodySkeleton,
+    NameMeaning, ObjectEntryDescent, ObjectEntryKey, ObjectEntryKind, SkeletonBindingId,
+    SkeletonBindingKind, SkeletonPathSegment, SkeletonWriteTarget, ValueDescent,
 };
 use verter_semantic::analysis::function_program::{
     for_each_call_expression, inventory_statement_list, resolve_function_node,
@@ -136,7 +135,8 @@ impl FlowSliceSelection {
 /// reachability result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceContent {
-    pub bindings: verter_semantic::analysis::flow::FlowBindingMap,
+    pub bindings: Arc<verter_semantic::analysis::flow::FlowBindingMap>,
+    pub declared_return: Option<GatedType>,
     /// Formal parameters in source order (rest parameter last).
     pub params: Arc<[SliceParam]>,
     /// The function's OWN type parameters (the root signature's binders —
@@ -286,6 +286,7 @@ pub enum SliceStatement {
         /// The write target (a binding root; the path is always empty for
         /// this variant — a member-path write never lowers).
         target: SliceNarrowSubject,
+        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
         /// The write expression's span, in this frame's coordinates — the
         /// identity the evaluator's write-effect ledger matches against,
         /// so a lowered write and a degraded write are the same fact seen
@@ -754,9 +755,12 @@ fn collect_guard_subjects(guard: &SliceGuard, visitor: &mut impl FnMut(&SliceNar
 /// content without deciding what the frame does to it" is inexpressible
 /// rather than merely discouraged.
 #[derive(Debug, Clone, PartialEq)]
-pub struct GatedLeaf(TypeExpr);
+pub struct GatedLeaf(TypeExpr, Option<FlowBindingRef>);
 
 impl GatedLeaf {
+    pub fn frame_root(&self) -> Option<&FlowBindingRef> {
+        self.1.as_ref()
+    }
     /// The lowered leaf type.
     #[must_use]
     pub fn ty(&self) -> &TypeExpr {
@@ -769,7 +773,7 @@ impl GatedLeaf {
     /// value, which cannot introduce a name the gate has not already
     /// seen — widening only ever replaces a literal with its primitive.
     fn map_ty(self, f: impl FnOnce(TypeExpr) -> TypeExpr) -> Self {
-        Self(f(self.0))
+        Self(f(self.0), self.1)
     }
 }
 
@@ -860,30 +864,10 @@ pub enum SliceExpr {
     /// body-derived return through the same flow evaluation, never a body
     /// scan and never a leaf fallback.
     NestedFunctionValue {
-        bindings: verter_semantic::analysis::flow::FlowBindingMap,
-        skeleton: Arc<FunctionBodySkeleton>,
+        function: verter_semantic::analysis::function_program::FunctionProgramKey,
+        context: Arc<NestedFlowContext>,
+        has_declared_return: bool,
         gap: Option<crate::semantic_query::FlowGap>,
-        /// The nested function's formal parameters (rest last).
-        params: Arc<[SliceParam]>,
-        /// The nested function's own type parameters (the signature's own
-        /// binders — carried so the composed signature keeps `<T>`).
-        type_parameters: Arc<[SliceTypeParam]>,
-        /// Authored declared authorities for mutable bindings captured from
-        /// enclosing frames. These exact declaration facts type reads across
-        /// the closure boundary without changing source-ordered initialization.
-        mutable_capture_authorities: Arc<[SliceCaptureAuthority]>,
-        /// The DECLARED return annotation, when authored. A declared
-        /// return always wins over the body-derived join (the checker
-        /// checks the body AGAINST the annotation; the signature's return
-        /// IS the annotation), so the evaluator answers the annotation
-        /// and never evaluates the body for the signature's return.
-        declared_return: Option<GatedType>,
-        /// The nested function's body region (an expression-bodied arrow
-        /// lowers to a single `return` of the expression).
-        body: SliceRegion,
-        /// Whether execution can reach past the nested body without a
-        /// `return`.
-        can_fall_through: bool,
     },
     /// EVERY call form — the one carrier through which a CALLEE's return
     /// can become this frame's value.
@@ -1114,7 +1098,7 @@ pub enum SliceCall {
     /// obligation edge to that target.
     Direct(verter_semantic::analysis::function_program::FunctionProgramKey),
     /// A call lowered to the symbolic `ReturnType<typeof …>` carrier.
-    Symbolic(TypeExpr),
+    Symbolic(TypeExpr, Option<FlowBindingRef>),
 }
 
 /// One name an answer references that the frame's LEXICAL AUTHORITY
@@ -1232,7 +1216,7 @@ pub struct SliceTypeParam {
 /// differ in exactly the way `resolveName` does and picking the wrong
 /// one is either a silent wrong answer (Root where Nested was needed) or
 /// a spurious fail-closed (the reverse).
-enum SignatureScope<'a, 'b> {
+enum SignatureScope<'a> {
     /// The indexed function's OWN signature: body-local declarations are
     /// NOT in scope here, so the owner-scope answer is the right one.
     Root,
@@ -1241,10 +1225,7 @@ enum SignatureScope<'a, 'b> {
     /// body-locals.
     Nested {
         /// The ENCLOSING frame's lexical authority.
-        gate: &'a Lowerer<'b>,
-        /// The nested function value's own position — the region the
-        /// enclosing frame resolves names at.
-        at: oxc_span::Span,
+        gate: &'a CaptureScope,
         /// The nested function's OWN type parameters: they bind inside
         /// its signature and the evaluator's binder environment carries
         /// them, so they are the answer's binders, not references into
@@ -1483,7 +1464,7 @@ fn slice_type_param_names(node: &FunctionNode<'_>) -> Vec<Arc<str>> {
 fn lower_type_param_clause(
     declaration: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
     source: &str,
-    scope: &SignatureScope<'_, '_>,
+    scope: &SignatureScope<'_>,
 ) -> Vec<SliceTypeParam> {
     let binders = scope.param_binders();
     declaration
@@ -1511,17 +1492,17 @@ fn lower_type_param_clause(
 fn lower_slice_type_params(
     node: &FunctionNode<'_>,
     source: &str,
-    scope: &SignatureScope<'_, '_>,
+    scope: &SignatureScope<'_>,
 ) -> Vec<SliceTypeParam> {
     lower_type_param_clause(node.type_parameters(), source, scope)
 }
 
-impl SignatureScope<'_, '_> {
+impl SignatureScope<'_> {
     /// Gate one signature-position answer for this scope.
     fn gate(&self, ty: TypeExpr, binders: &[Arc<str>]) -> GatedType {
         match self {
             SignatureScope::Root => GatedType::root_signature(ty),
-            SignatureScope::Nested { gate, at, .. } => gate.gate(ty, *at, binders),
+            SignatureScope::Nested { gate, .. } => gate.gate(ty, binders),
         }
     }
 
@@ -1558,13 +1539,10 @@ impl SignatureScope<'_, '_> {
     ) -> GatedType {
         let mut gated = match self {
             SignatureScope::Root => GatedType::root_signature(ty),
-            SignatureScope::Nested { gate, at, .. } => {
-                let mut gated = gate.gate(ty, *at, binders);
+            SignatureScope::Nested { gate, .. } => {
+                let mut gated = gate.gate(ty, binders);
                 if let Some(root) = chain_root_identifier(initializer) {
-                    if !matches!(
-                        gate.resolve_name(root.name.as_str(), root.span),
-                        NameBinding::Free
-                    ) {
+                    if !matches!(gate.lookup(root.name.as_str()), NameBinding::Free) {
                         gated.add_shadowed([FrameShadowedName::Value(Arc::from(
                             root.name.as_str(),
                         ))]);
@@ -1626,9 +1604,11 @@ pub(crate) fn build_flow_slice_content(
     source: &str,
     index: &verter_semantic::analysis::function_program::FunctionProgramIndex,
     entry: &FunctionProgramEntry,
-    selection: &FlowSliceSelection,
+    selection: Option<&FlowSliceSelection>,
     skeleton: &FunctionBodySkeleton,
+    bindings: Arc<verter_semantic::analysis::flow::FlowBindingMap>,
     carrier_module: bool,
+    context: Option<&NestedFlowContext>,
 ) -> Option<SliceContent> {
     let module_scope = carrier_module || program_has_module_syntax(program);
     // Whether the served function is NAMESPACE-OWNED: its locator descends
@@ -1660,25 +1640,30 @@ pub(crate) fn build_flow_slice_content(
         &SignatureScope::Root,
     );
     let type_param_names = slice_type_param_names(&node);
+    let root_captures = CaptureScope::default();
+    let captures = context
+        .map(|context| &context.captures)
+        .unwrap_or(&root_captures);
+    let signature_scope = match context {
+        Some(_) => SignatureScope::Nested {
+            gate: captures,
+            binders: &type_param_names,
+        },
+        None => SignatureScope::Root,
+    };
+    let declared_return = node.return_type().map(|annotation| {
+        signature_scope.gate(
+            lower_ts_type(&annotation.type_annotation, source),
+            signature_scope.param_binders(),
+        )
+    });
     let anchor = node_span(&node).start;
-    let bindings = verter_semantic::analysis::flow::FlowBindingMap::build(
-        skeleton,
-        &entry.bindings,
-        &entry.key,
-        anchor,
-    )
-    .ok()?;
-    let params = match lower_params(
-        node.params(),
-        source,
-        &SignatureScope::Root,
-        skeleton,
-        anchor,
-    ) {
+    let params = match lower_params(node.params(), source, &signature_scope, skeleton, anchor) {
         Ok(params) => params,
         Err(reason) => {
             return Some(SliceContent {
                 bindings,
+                declared_return,
                 can_fall_through: false,
                 params: Arc::from(Vec::new().into_boxed_slice()),
                 type_parameters: Arc::from(Vec::new().into_boxed_slice()),
@@ -1693,7 +1678,7 @@ pub(crate) fn build_flow_slice_content(
             });
         }
     };
-    let type_parameters = lower_slice_type_params(&node, source, &SignatureScope::Root);
+    let type_parameters = lower_slice_type_params(&node, source, &signature_scope);
     let body = node.body()?;
     // The enclosing clause is deliberately NOT part of this frame's
     // binder inventory. TS2300 protects a function's own clause from a
@@ -1711,18 +1696,17 @@ pub(crate) fn build_flow_slice_content(
     // marking it frame-bound would fail closed on. The class clause
     // therefore reaches the answer through the EVALUATOR's binder
     // environment only.
-    let captures = CaptureScope::default();
     let mut lowerer = Lowerer {
         bindings: &bindings,
         index,
         source,
         anchor,
-        selection: Some(selection),
+        selection,
         params: &params,
         type_param_names: &type_param_names,
         self_name: self_name.as_deref(),
         skeleton,
-        captures: &captures,
+        captures,
         control: Arc::clone(&entry.control),
         direct_calls: &entry.direct_calls,
         program,
@@ -1743,10 +1727,17 @@ pub(crate) fn build_flow_slice_content(
         break_target_followed_by_return: Vec::new(),
         current_statement_followed_by_return: false,
     };
-    lowerer.unsafe_invoked_closure_effects =
-        lowerer.index_unsafe_invoked_closure_effects(&body.statements);
-    lowerer.nested_free_writes = lowerer.build_nested_free_writes(&body.statements);
-    let region = if node.is_expression_body() {
+    if selection.is_some() {
+        lowerer.unsafe_invoked_closure_effects =
+            lowerer.index_unsafe_invoked_closure_effects(&body.statements);
+        lowerer.nested_free_writes = lowerer.build_nested_free_writes();
+    }
+    let region = if selection.is_none() {
+        SliceRegion {
+            statements: Arc::from([]),
+            can_fall_through: false,
+        }
+    } else if node.is_expression_body() {
         // An expression-bodied arrow's body is one synthesized expression
         // statement; it lowers to a single `return` of the expression (the
         // expression cannot fall through).
@@ -1794,6 +1785,7 @@ pub(crate) fn build_flow_slice_content(
     let decided_above_call_spans = lowerer.decided_above_call_spans;
     Some(SliceContent {
         bindings,
+        declared_return,
         can_fall_through: region.can_fall_through,
         params: Arc::from(params.into_boxed_slice()),
         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
@@ -2594,7 +2586,7 @@ fn parameter_list_shadowed(
 fn lower_params(
     params: &FormalParameters<'_>,
     source: &str,
-    scope: &SignatureScope<'_, '_>,
+    scope: &SignatureScope<'_>,
     skeleton: &FunctionBodySkeleton,
     anchor: u32,
 ) -> Result<Vec<SliceParam>, verter_type_expr::facts::InferenceUnavailableReason> {
@@ -2793,7 +2785,7 @@ enum NameBinding {
     /// `var` sharing a parameter's slot).
     Local(Option<u32>),
     /// A modelable binding an ENCLOSING frame declares (a closure
-    /// capture), read by name from the evaluator's seeded snapshot.
+    /// capture), read through its exact identity in the child input snapshot.
     Captured,
     /// A hoisted nested function declaration of this frame binds the
     /// name; it shadows every outer same-name declaration.
@@ -2804,7 +2796,7 @@ enum NameBinding {
 
 /// A name an enclosing frame binds, as the ENCLOSING frame's lexical
 /// authority classified it at the nested function value's own position.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CapturedBinding {
     /// A modelable enclosing parameter / local. Mutable captures use authored
     /// declared authority across the closure boundary; stable captures retain
@@ -2817,7 +2809,7 @@ enum CapturedBinding {
 /// The names a nested function value captures from its ENCLOSING frames,
 /// resolved once at the position the function value itself occupies.
 /// Empty for the root frame.
-#[derive(Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct CaptureScope {
     identities:
         FxHashMap<Arc<str>, verter_semantic::analysis::function_program::FlowBindingIdentity>,
@@ -2876,7 +2868,71 @@ impl<'a> Visit<'a> for DeclaratorAnnotationFinder<'_> {
     }
 }
 
+/// Owned lexical facts captured at the exact nested function position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NestedFlowContext {
+    captures: CaptureScope,
+}
+
+impl NestedFlowContext {
+    pub(crate) fn mutable_authorities(&self) -> Vec<SliceCaptureAuthority> {
+        let mut authorities: Vec<_> = self
+            .captures
+            .mutable_declared
+            .values()
+            .filter(|authority| {
+                matches!(
+                    self.captures.names.get(authority.name.as_ref()),
+                    Some(CapturedBinding::Local { mutable: true })
+                )
+            })
+            .cloned()
+            .collect();
+        authorities.sort_by(|a, b| {
+            a.binding
+                .defining_function
+                .cmp(&b.binding.defining_function)
+                .then_with(|| a.binding.binding_slot.cmp(&b.binding.binding_slot))
+        });
+        authorities
+    }
+}
+
 impl CaptureScope {
+    fn gate(&self, ty: TypeExpr, binders: &[Arc<str>]) -> GatedType {
+        let names = verter_type_expr::referenced_names(&ty);
+        let mut shadowed = Vec::new();
+        for name in names.value_roots {
+            if !matches!(self.lookup(&name), NameBinding::Free) {
+                shadowed.push(FrameShadowedName::Value(Arc::from(name)));
+            }
+        }
+        for occurrence in names.type_names {
+            let name = occurrence.head.as_str();
+            let binder = binders.iter().any(|binder| binder.as_ref() == name)
+                || self.binder_names.contains(name);
+            let bound = if binder {
+                occurrence.qualified
+            } else if occurrence.qualified {
+                self.namespace_names.contains(name)
+            } else {
+                self.type_names.contains(name)
+            };
+            let entry = if occurrence.qualified {
+                FrameShadowedName::Namespace(Arc::from(name))
+            } else {
+                FrameShadowedName::Type(Arc::from(name))
+            };
+            if bound && !shadowed.contains(&entry) {
+                shadowed.push(entry);
+            }
+        }
+        GatedType {
+            ty,
+            shadowed: Arc::from(shadowed),
+        }
+    }
+
     fn lookup(&self, name: &str) -> NameBinding {
         match self.names.get(name) {
             // A captured binding is read BY NAME from the evaluator's
@@ -2910,8 +2966,8 @@ struct Lowerer<'a> {
     /// source position, so a LIVE position is rebased onto this anchor
     /// before it is compared against, or looked up in, either of them.
     anchor: u32,
-    /// The demand selection gating content lowering (`None` inside a
-    /// nested function value — its whole body is one selected value).
+    /// The demand selection gating body content. `None` requests only the
+    /// callable's signature and never lowers its body.
     selection: Option<&'a FlowSliceSelection>,
     params: &'a [SliceParam],
     /// This frame's OWN type-parameter names. They are TYPE-meaning
@@ -3310,11 +3366,8 @@ impl Lowerer<'_> {
             if self.span_is_in_literal_dead_branch(statement, self.rebase(call.span)) {
                 return;
             }
-            let call_region = self
-                .skeleton
-                .innermost_region_containing(self.rebase(call.span));
             let mut inspect = |node: FunctionNode<'_>| {
-                if self.nested_function_transfers_downstream_slot(&node, call_region, loop_span) {
+                if self.nested_function_transfers_downstream_slot(&node, loop_span) {
                     transfers = true;
                 }
             };
@@ -3347,8 +3400,7 @@ impl Lowerer<'_> {
                     Expression::ArrowFunctionExpression(arrow) => FunctionNode::Arrow(arrow),
                     _ => return,
                 };
-                let call_region = self.skeleton.innermost_region_containing(call_span);
-                if self.nested_function_transfers_downstream_slot(&node, call_region, call_span) {
+                if self.nested_function_transfers_downstream_slot(&node, call_span) {
                     unsafe_calls.insert(call_span);
                 }
             });
@@ -3363,141 +3415,14 @@ impl Lowerer<'_> {
             .any(|call| span.contains(*call))
     }
 
-    fn build_nested_free_writes(
-        &self,
-        statements: &[Statement<'_>],
-    ) -> FxHashSet<SkeletonBindingId> {
-        struct Collector<'a> {
-            nested: Vec<(oxc_span::Span, FunctionBodySkeleton)>,
-            marker: std::marker::PhantomData<&'a ()>,
-        }
-
-        impl<'a> Visit<'a> for Collector<'a> {
-            fn visit_statement(&mut self, statement: &Statement<'a>) {
-                if let Statement::FunctionDeclaration(function) = statement {
-                    if let Some(source) = FunctionBodySource::from_function_expression(function) {
-                        self.nested
-                            .push((function.span, build_function_body_skeleton(&source)));
-                    }
-                }
-                walk::walk_statement(self, statement);
-            }
-
-            fn visit_expression(&mut self, expression: &Expression<'a>) {
-                match expression {
-                    Expression::FunctionExpression(function) => {
-                        if let Some(source) = FunctionBodySource::from_function_expression(function)
-                        {
-                            self.nested
-                                .push((function.span, build_function_body_skeleton(&source)));
-                        }
-                    }
-                    Expression::ArrowFunctionExpression(arrow) => {
-                        let source = FunctionBodySource::from_arrow(arrow);
-                        self.nested
-                            .push((arrow.span, build_function_body_skeleton(&source)));
-                    }
-                    _ => {}
-                }
-                walk::walk_expression(self, expression);
-            }
-        }
-
-        let mut collector = Collector {
-            nested: Vec::new(),
-            marker: std::marker::PhantomData,
-        };
-        for statement in statements {
-            collector.visit_statement(statement);
-        }
-
-        let mut writes = FxHashSet::default();
-        for (creation_span, nested) in collector.nested {
-            let outer_region = self
-                .skeleton
-                .innermost_region_containing(self.rebase(creation_span));
-            for write in nested.writes.iter() {
-                let SkeletonWriteTarget::Named(name) = write.target else {
-                    continue;
-                };
-                if !nested
-                    .bindings_of_name_in_scope(name, write.region)
-                    .is_empty()
-                {
-                    continue;
-                }
-                let Some(outer_name) = self.skeleton.name_id(nested.name(name)) else {
-                    continue;
-                };
-                for binding in self
-                    .skeleton
-                    .bindings_of_name_in_scope(outer_name, outer_region)
-                {
-                    if self.skeleton.binding(binding).kind == SkeletonBindingKind::Let {
-                        writes.insert(binding);
-                    }
-                }
-            }
-        }
-        writes
-    }
-
-    fn nested_free_read_bindings(
-        &self,
-        nested: &FunctionBodySkeleton,
-        creation_span: oxc_span::Span,
-    ) -> FxHashSet<SkeletonBindingId> {
-        let outer_region = self
-            .skeleton
-            .innermost_region_containing(self.rebase(creation_span));
-        let mut reads = FxHashSet::default();
-        for site in nested.expr_sites.iter() {
-            for read in site.reads.iter() {
-                if !nested
-                    .bindings_of_name_in_scope(read.name, site.region)
-                    .is_empty()
-                {
-                    continue;
-                }
-                let Some(outer_name) = self.skeleton.name_id(nested.name(read.name)) else {
-                    continue;
-                };
-                reads.extend(
-                    self.skeleton
-                        .bindings_of_name_in_scope(outer_name, outer_region)
-                        .iter()
-                        .copied(),
-                );
-            }
-        }
-        reads
-    }
-
-    fn nested_has_free_write(
-        &self,
-        nested: &FunctionBodySkeleton,
-        binding: SkeletonBindingId,
-        creation_span: oxc_span::Span,
-    ) -> bool {
-        let outer_region = self
-            .skeleton
-            .innermost_region_containing(self.rebase(creation_span));
-        nested.writes.iter().any(|write| {
-            let SkeletonWriteTarget::Named(name) = write.target else {
-                return false;
-            };
-            nested
-                .bindings_of_name_in_scope(name, write.region)
-                .is_empty()
-                && self
-                    .skeleton
-                    .name_id(nested.name(name))
-                    .is_some_and(|outer_name| {
-                        self.skeleton
-                            .bindings_of_name_in_scope(outer_name, outer_region)
-                            .contains(&binding)
-                    })
-        })
+    fn build_nested_free_writes(&self) -> FxHashSet<SkeletonBindingId> {
+        self.index
+            .get(self.bindings.function())
+            .into_iter()
+            .flat_map(|entry| entry.entry().descendant_writes.iter())
+            .filter_map(|identity| self.bindings.local(identity))
+            .filter(|binding| self.skeleton.binding(*binding).kind == SkeletonBindingKind::Let)
+            .collect()
     }
 
     fn binding_has_write_after(
@@ -3586,56 +3511,38 @@ impl Lowerer<'_> {
     fn nested_function_transfers_downstream_slot(
         &self,
         node: &FunctionNode<'_>,
-        outer_region: verter_semantic::analysis::flow::SkeletonRegionId,
         loop_span: FrameSpan,
     ) -> bool {
-        let nested_source = match node {
-            FunctionNode::Function(function) => {
-                FunctionBodySource::from_function_expression(function)
-            }
-            FunctionNode::Arrow(arrow) => Some(FunctionBodySource::from_arrow(arrow)),
-        };
-        let Some(nested_source) = nested_source else {
+        use verter_semantic::analysis::function_program::FunctionWriteTarget;
+        let Some(nested) = self
+            .index
+            .nested_at(self.bindings.function(), node_span(node).into())
+        else {
             return false;
         };
-        let nested = build_function_body_skeleton(&nested_source);
-        let free_name_targets_downstream = |nested_name, nested_region| {
-            if !nested
-                .bindings_of_name_in_scope(nested_name, nested_region)
-                .is_empty()
-            {
-                return false;
-            }
-            let Some(outer_name) = self.skeleton.name_id(nested.name(nested_name)) else {
-                return false;
+        let nested = nested.entry();
+        let targets_downstream =
+            |identity: &verter_semantic::analysis::function_program::FlowBindingIdentity| {
+                self.bindings
+                    .local(identity)
+                    .is_some_and(|binding| self.binding_is_read_after_loop(binding, loop_span))
             };
-            self.skeleton
-                .bindings_of_name_in_scope(outer_name, outer_region)
-                .iter()
-                .any(|binding| self.binding_is_read_after_loop(*binding, loop_span))
-        };
-        if nested.writes.iter().any(|write| {
-            let SkeletonWriteTarget::Named(nested_name) = write.target else {
-                return false;
-            };
-            free_name_targets_downstream(nested_name, write.region)
-        }) {
-            return true;
-        }
-
-        nested.expr_sites.iter().enumerate().any(|(index, site)| {
-            let control_or_call = !site.calls.is_empty()
-                || nested.regions.iter().any(|region| {
-                    region
-                        .control_input
-                        .is_some_and(|site| site.index() == index)
-                });
-            control_or_call
-                && site
-                    .reads
-                    .iter()
-                    .any(|read| free_name_targets_downstream(read.name, site.region))
-        })
+        nested
+            .writes
+            .iter()
+            .flat_map(|write| write.targets.iter())
+            .any(|target| {
+                let FunctionWriteTarget::Binding { reference, .. } = target else {
+                    return false;
+                };
+                reference.binding.as_ref().is_some_and(&targets_downstream)
+            })
+            || nested.references.iter().any(|reference| {
+                reference
+                    .read_role
+                    .is_some_and(|role| role.is_effect_input())
+                    && reference.binding.as_ref().is_some_and(&targets_downstream)
+            })
     }
 
     /// Whether `target` lies under an `if` branch whose literal test proves
@@ -6265,7 +6172,14 @@ impl Lowerer<'_> {
                 preserve_literal: true,
             },
         );
+        let definition = self
+            .skeleton
+            .writes
+            .iter()
+            .find(|write| write.span == self.rebase(identifier.span))?
+            .value?;
         Some(SliceStatement::Assignment {
+            definition,
             target: SliceNarrowSubject {
                 root,
                 path: Arc::from(Vec::new().into_boxed_slice()),
@@ -6461,11 +6375,18 @@ impl Lowerer<'_> {
                     // publishing the `any` was a fabricated value at a
                     // call position, warm and clean.
                     LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::UnreducedCallValue,
-                    LeafLowering::Free(ty) => {
-                        SliceExpr::Call(SliceCall::Symbolic(ty), call_site(call))
-                    }
+                    LeafLowering::Free(ty) => SliceExpr::Call(
+                        SliceCall::Symbolic(ty.clone(), self.frame_root_for_type(&ty, expr.span())),
+                        call_site(call),
+                    ),
                     LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
-                        inner: Box::new(SliceExpr::Call(SliceCall::Symbolic(ty), call_site(call))),
+                        inner: Box::new(SliceExpr::Call(
+                            SliceCall::Symbolic(
+                                ty.clone(),
+                                self.frame_root_for_type(&ty, expr.span()),
+                            ),
+                            call_site(call),
+                        )),
                         shadowed,
                     },
                 }
@@ -6654,12 +6575,13 @@ impl Lowerer<'_> {
                 captured: true,
             },
             NameBinding::NestedFunction | NameBinding::Unmodeled => SliceExpr::UnmodeledBinding,
-            NameBinding::Free => {
-                SliceExpr::Type(GatedLeaf(TypeExpr::TypeOf(verter_type_expr::ValueRef {
+            NameBinding::Free => SliceExpr::Type(GatedLeaf(
+                TypeExpr::TypeOf(verter_type_expr::ValueRef {
                     path: vec![name.to_owned()],
                     type_args: Vec::new(),
-                })))
-            }
+                }),
+                None,
+            )),
         }
     }
 
@@ -6892,83 +6814,10 @@ impl Lowerer<'_> {
     /// nested body lowers under its OWN [`FunctionBodySkeleton`] — the
     /// same lexical authority the root frame uses, built over the nested
     /// body alone — plus the CAPTURE SCOPE of every enclosing frame,
-    /// resolved at this function value's own position. A name the nested
-    /// frame does not bind but an enclosing frame does is a CAPTURE (read
-    /// by name from the evaluator's seeded snapshot), never a file-scope
-    /// leaf. Nested bodies are one selected value: content inside them is
-    /// never selection-gated.
+    /// resolved at this function value's own position. The descriptor retains
+    /// exact captured identities and lexical signature facts. Its body lowers
+    /// only when evaluated, through the child's own indexed graph and demand.
     fn lower_nested_function(&mut self, node: &FunctionNode<'_>) -> SliceExpr {
-        // A NESTED function value's signature sits INSIDE this frame's
-        // body, so this frame's body-local declarations ARE in scope in
-        // it: every answer minted for it is gated against THIS frame at
-        // the function value's own position. Its own type-parameter
-        // clause binds inside its parameter list (the evaluator's nested
-        // binder environment interns exactly those names).
-        let type_param_names = slice_type_param_names(node);
-        let scope = SignatureScope::Nested {
-            gate: self,
-            at: node_span(node),
-            binders: &type_param_names,
-        };
-        // A named function EXPRESSION binds its own name inside its own
-        // body: the nested skeleton carries it, so `function h() { … h … }`
-        // resolves `h` to THIS frame rather than looking free and
-        // falling through to an enclosing (or module-scope) `h`. It is
-        // built BEFORE the signature lowers, because the nested
-        // signature's own PARAMETER LIST is a shadowing inventory of that
-        // signature and the skeleton is its authority.
-        let nested_skeleton = match node {
-            FunctionNode::Function(func) => FunctionBodySource::from_function_expression(func)
-                .map(|source| build_function_body_skeleton(&source)),
-            FunctionNode::Arrow(arrow) => Some(build_function_body_skeleton(
-                &FunctionBodySource::from_arrow(arrow),
-            )),
-        };
-        let Some(nested_skeleton) = nested_skeleton else {
-            // A bodiless nested position has no lexical frame to lower.
-            return SliceExpr::UnmodeledBinding;
-        };
-        let free_reads = self.nested_free_read_bindings(&nested_skeleton, node_span(node));
-        let mut gap = None;
-        for binding in free_reads {
-            let binding_fact = self.skeleton.binding(binding);
-            let same_closure_write =
-                self.nested_has_free_write(&nested_skeleton, binding, node_span(node));
-            let active_guard = self.active_guard_bindings.contains(&binding);
-            let closure_gap = active_guard
-                || (binding_fact.kind == SkeletonBindingKind::Let
-                    && (self.binding_has_write_after(binding, node_span(node))
-                        || (self.nested_free_writes.contains(&binding) && !same_closure_write)));
-            if closure_gap {
-                gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
-                break;
-            }
-        }
-        let nested_anchor = node_span(node).start;
-        let params_result = lower_params(
-            node.params(),
-            self.source,
-            &scope,
-            &nested_skeleton,
-            nested_anchor,
-        );
-        let type_parameters = lower_slice_type_params(node, self.source, &scope);
-        // The DECLARED return annotation, lowered in the nested
-        // signature's own scope (its clause binds inside it), gated
-        // against THIS frame exactly like the parameter list.
-        let declared_return = node.return_type().map(|annotation| {
-            scope.gate(
-                lower_ts_type(&annotation.type_annotation, self.source),
-                scope.param_binders(),
-            )
-        });
-        let params = match params_result {
-            Ok(params) => params,
-            Err(reason) => {
-                self.budget_failure.get_or_insert(reason);
-                Vec::new()
-            }
-        };
         let Some(entry) = self
             .index
             .nested_at(self.bindings.function(), node_span(node).into())
@@ -6976,146 +6825,36 @@ impl Lowerer<'_> {
             return SliceExpr::UnmodeledBinding;
         };
         let entry = entry.entry();
-        let Ok(bindings) = verter_semantic::analysis::flow::FlowBindingMap::build(
-            &nested_skeleton,
-            &entry.bindings,
-            &entry.key,
-            nested_anchor,
-        ) else {
-            return SliceExpr::UnmodeledBinding;
-        };
-        let control = Arc::clone(&entry.control);
         let captures = self.capture_scope_for(node_span(node));
-        let mut mutable_capture_authorities = captures
-            .mutable_declared
-            .values()
-            .filter(|authority| {
-                matches!(
-                    captures.names.get(authority.name.as_ref()),
-                    Some(CapturedBinding::Local { mutable: true })
-                )
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        mutable_capture_authorities.sort_by(|a, b| a.name.cmp(&b.name));
-        let mutable_capture_authorities = Arc::from(mutable_capture_authorities.into_boxed_slice());
-        let mut nested = Lowerer {
-            bindings: &bindings,
-            index: self.index,
-            source: self.source,
-            anchor: nested_anchor,
-            selection: None,
-            params: &params,
-            type_param_names: &type_param_names,
-            // A nested function value is NOT the demanded flow slot, so
-            // it has no same-slot recursion to hold on: its own name is
-            // a binding of its skeleton (above), and the outer frame's
-            // self name must never mint a `DirectSelfCall` from in here
-            // — that hold would name the WRONG function.
-            self_name: None,
-            skeleton: &nested_skeleton,
-            captures: &captures,
-            control,
-            direct_calls: self.direct_calls,
-            program: self.program,
-            module_scope: self.module_scope,
-            namespace_owned: self.namespace_owned,
-            budget_failure: None,
-            inert_write_spans: FxHashSet::default(),
-            decided_above_call_spans: Vec::new(),
-            predicate_guard_call_spans: FxHashSet::default(),
-            control_test_gap: false,
-            narrowing_alias_locals: FxHashSet::default(),
-            unsafe_invoked_closure_effects: FxHashSet::default(),
-            nested_free_writes: FxHashSet::default(),
-            active_guard_bindings: Vec::new(),
-            active_guard_names: Vec::new(),
-            break_targets: Vec::new(),
-            loop_direct_labels: Vec::new(),
-            break_target_followed_by_return: Vec::new(),
-            current_statement_followed_by_return: false,
-        };
-        if let Some(body) = node.body() {
-            nested.unsafe_invoked_closure_effects =
-                nested.index_unsafe_invoked_closure_effects(&body.statements);
-            nested.nested_free_writes = nested.build_nested_free_writes(&body.statements);
-        }
-        let region = if node.is_expression_body() {
-            // An expression-bodied arrow's body is one synthesized
-            // expression statement; it lowers to a single `return` of the
-            // expression.
-            let body = node.body();
-            let unsafe_body =
-                body.and_then(|body| body.statements.first())
-                    .is_some_and(|statement| {
-                        nested.span_contains_unsafe_invoked_closure(statement.span())
-                    });
-            if unsafe_body {
-                SliceRegion {
-                    statements: Arc::from([SliceStatement::Unsupported(
-                        SliceUnsupported::InvokedClosureEffect,
-                    )]),
-                    can_fall_through: false,
-                }
-            } else {
-                let argument = body
-                    .and_then(|body| body.statements.first())
-                    .map(|statement| match statement {
-                        Statement::ExpressionStatement(expression) => (
-                            nested.lower_expr(&expression.expression, ExprMode::Return),
-                            expression_freshness(&expression.expression),
-                        ),
-                        _ => (
-                            SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression),
-                            SliceFreshness::Pinned,
-                        ),
-                    });
-                // The expression body's ternary-test gap lands ahead of
-                // the synthesized `return` (no statement loop drains it).
-                let mut statements = Vec::with_capacity(2);
-                if std::mem::take(&mut nested.control_test_gap) {
-                    statements.push(SliceStatement::Gap(
-                        crate::semantic_query::FlowGap::GuardNarrowing,
-                    ));
-                }
-                statements.extend(
-                    argument.map(|(argument, freshness)| SliceStatement::Return {
-                        argument: Some(argument),
-                        freshness,
-                    }),
-                );
-                SliceRegion {
-                    statements: Arc::from(statements.into_boxed_slice()),
-                    can_fall_through: false,
+        let mut gap = None;
+        for identity in entry.captures.0.iter() {
+            let Some(binding) = self.bindings.local(identity) else {
+                continue;
+            };
+            let fact = self.skeleton.binding(binding);
+            if fact.kind == SkeletonBindingKind::Let && self.nested_free_writes.contains(&binding) {
+                let writes_capture = entry.writes.iter().flat_map(|write| write.targets.iter()).any(|target| {
+                    matches!(target,
+                        verter_semantic::analysis::function_program::FunctionWriteTarget::Binding { reference, .. }
+                        if reference.binding.as_ref() == Some(identity))
+                });
+                if !writes_capture {
+                    gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
                 }
             }
-        } else {
-            match node.body() {
-                Some(body) => nested.lower_region(&body.statements).region,
-                None => SliceRegion {
-                    statements: Arc::from(Vec::new().into_boxed_slice()),
-                    can_fall_through: true,
-                },
+            if self.active_guard_bindings.contains(&binding)
+                || (fact.kind == SkeletonBindingKind::Let
+                    && self.binding_has_write_after(binding, node_span(node)))
+            {
+                gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
+                break;
             }
-        };
-        if let Some(reason) = nested.budget_failure {
-            self.budget_failure.get_or_insert(reason);
         }
-        // Absolute spans concatenate across frames: a call a NESTED
-        // body's lowering decided above is still a decided call of this
-        // run.
-        self.decided_above_call_spans
-            .append(&mut nested.decided_above_call_spans);
         SliceExpr::NestedFunctionValue {
-            bindings,
-            skeleton: Arc::new(nested_skeleton),
+            function: entry.key.clone(),
+            context: Arc::new(NestedFlowContext { captures }),
+            has_declared_return: node.return_type().is_some(),
             gap,
-            params: Arc::from(params.into_boxed_slice()),
-            type_parameters: Arc::from(type_parameters.into_boxed_slice()),
-            mutable_capture_authorities,
-            declared_return,
-            can_fall_through: region.can_fall_through,
-            body: region,
         }
     }
 
@@ -7165,12 +6904,18 @@ impl Lowerer<'_> {
             }
             LeafLowering::Free(ty) => {
                 self.record_decided_above_calls(expr);
-                SliceExpr::Type(GatedLeaf(ty))
+                SliceExpr::Type(GatedLeaf(
+                    ty.clone(),
+                    self.frame_root_for_type(&ty, expr.span()),
+                ))
             }
             LeafLowering::FrameShadowed { ty, shadowed } => {
                 self.record_decided_above_calls(expr);
                 SliceExpr::FrameShadowed {
-                    inner: Box::new(SliceExpr::Type(GatedLeaf(ty))),
+                    inner: Box::new(SliceExpr::Type(GatedLeaf(
+                        ty.clone(),
+                        self.frame_root_for_type(&ty, expr.span()),
+                    ))),
                     shadowed,
                 }
             }
@@ -7621,6 +7366,21 @@ impl Lowerer<'_> {
     /// minted here and carries the root-identifier gate's verdict. Dedicated
     /// frame carriers (including bare identifier reads) are lowered by their
     /// own typed arms rather than through this leaf path.
+    /// Resolve a leaf's value root while its exact lexical position is available.
+    fn frame_root_for_type(&self, ty: &TypeExpr, at: oxc_span::Span) -> Option<FlowBindingRef> {
+        let value = match ty {
+            TypeExpr::TypeOf(value) => value,
+            TypeExpr::Ref { type_arguments, .. } if type_arguments.len() == 1 => {
+                let TypeExpr::TypeOf(value) = &type_arguments[0] else {
+                    return None;
+                };
+                value
+            }
+            _ => return None,
+        };
+        self.binding_ref(value.path.first()?, at)
+    }
+
     fn leaf_type(&mut self, expr: &Expression<'_>, mode: ExprMode) -> LeafLowering {
         // A return argument PRESERVES its top-level literal: the aggregate
         // widening decision belongs to the return join, which is the only
