@@ -49,6 +49,10 @@ export function applyTextEdits(
   edits: TextEdit[],
 ): SsrRewriteResult {
   if (edits.length === 0) {
+    // The zero-edit path admits a map on exactly the terms the edited path
+    // does (`shiftMapColumns` → `parseSourceMap`): an unusable map is
+    // dropped here too, never preserved because no rewrite happened to
+    // reject it.
     return { code, map: map === undefined || parseSourceMap(map) ? map : undefined };
   }
 
@@ -115,7 +119,7 @@ function shiftMapColumns(
   lineEditsByLine: Map<number, LineColumnEdit[]>,
 ): string | undefined {
   const parsed = parseSourceMap(mapJson);
-  if (!parsed || typeof parsed.mappings !== "string") return undefined;
+  if (!parsed) return undefined;
 
   const decoded = decode(parsed.mappings);
   for (const [lineIndex, rawEdits] of lineEditsByLine) {
@@ -145,14 +149,25 @@ function shiftMapColumns(
   return JSON.stringify(parsed);
 }
 
-/** Parse a source map JSON value only when it is safe to access object properties. */
-function parseSourceMap(
-  mapJson: string,
-): { mappings?: unknown; [key: string]: unknown } | undefined {
+/** A parsed source map this module can shift: an object carrying string `mappings`. */
+interface ParsedSourceMap {
+  mappings: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Parse a source map JSON value only when it is a map this module can use:
+ * a non-null object whose `mappings` is a string. Anything else — invalid
+ * JSON, `null`, a primitive, an array, or an object without string
+ * `mappings` — is `undefined`, so both the edited and the zero-edit path
+ * drop the same shapes.
+ */
+function parseSourceMap(mapJson: string): ParsedSourceMap | undefined {
   try {
     const parsed: unknown = JSON.parse(mapJson);
-    return parsed !== null && typeof parsed === "object"
-      ? (parsed as { mappings?: unknown; [key: string]: unknown })
+    if (parsed === null || typeof parsed !== "object") return undefined;
+    return typeof (parsed as { mappings?: unknown }).mappings === "string"
+      ? (parsed as ParsedSourceMap)
       : undefined;
   } catch {
     return undefined;

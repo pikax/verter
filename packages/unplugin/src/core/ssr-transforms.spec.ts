@@ -154,15 +154,28 @@ describe("stripComponents", () => {
 
 describe("applyTextEdits", () => {
   // @ai-generated - Tests that invalid JSON source-map values are dropped on both edit paths.
-  it("drops a parsed null source map whether or not text changes", () => {
-    expect(applyTextEdits("before", "null", [{ start: 0, end: 6, replacement: "after" }])).toEqual({
+  it.each([
+    ["a parsed null", "null"],
+    ["a primitive", "3"],
+    ["an array", "[]"],
+    ["an object without mappings", JSON.stringify({ version: 3 })],
+    ["an object whose mappings is not a string", JSON.stringify({ version: 3, mappings: null })],
+  ])("drops %s source map whether or not text changes", (_label, map) => {
+    // Both paths admit a map on the same terms: the zero-edit path must not
+    // preserve a shape the edited path would reject at `shiftMapColumns`.
+    expect(applyTextEdits("before", map, [{ start: 0, end: 6, replacement: "after" }])).toEqual({
       code: "after",
       map: undefined,
     });
-    expect(applyTextEdits("unchanged", "null", [])).toEqual({
+    expect(applyTextEdits("unchanged", map, [])).toEqual({
       code: "unchanged",
       map: undefined,
     });
+  });
+
+  it("preserves a usable map untouched on the zero-edit path", () => {
+    const map = JSON.stringify({ version: 3, sources: [], names: [], mappings: "AAAA" });
+    expect(applyTextEdits("unchanged", map, [])).toEqual({ code: "unchanged", map });
   });
 
   it("skips an edit whose range is properly contained in a prior edit's range, not just a plain duplicate", () => {
