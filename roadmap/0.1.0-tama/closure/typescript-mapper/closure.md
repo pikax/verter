@@ -296,7 +296,7 @@ Subject: `roadmap/0.1.0-tama/tools/closure-register.mjs`, `roadmap/0.1.0-tama/sc
   - observed: nextest exit 4, error: no tests to run; Summary [ 0.018s] 0 tests run: 0 passed, 9510 skipped — a record transcribed from that run is refused twice over, for zero selected work and for 9510 skips against 547 declared
 - `CTL-mapping-product-elision` (source, unique-new-occurrence) — Let a carrier region with no projection keep the projections of a neighbouring point, so an elided position answers with an output correlate it has no correspondence to.
   - applied to: `crates/verter_compiler/src/code_transform/mapping_product.rs`
-  - observed: cargo exit 101; test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 6350 filtered out — code_transform::mapping_product_tests::wholly_synthetic_replacement_text_elides_the_source_it_stands_in_for panicked on `an elided carrier byte has NO projection: answering with a neighbour is the mis-mapping this class refuses`
+  - observed: cargo exit 101; test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 6350 filtered out — code_transform::mapping_product_tests::wholly_synthetic_replacement_text_elides_the_source_it_stands_in_for panicked on `an elided carrier byte has NO projection: answering with a neighbour is the mis-mapping this class refuses`
 
 ## Remainders
 

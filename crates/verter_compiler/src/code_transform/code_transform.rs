@@ -269,24 +269,6 @@ impl<'a> CodeTransform<'a> {
         self.original
     }
 
-    /// The emission record itself, in output order — the single authority the
-    /// mapping product is derived from. Module-private: a consumer outside this
-    /// module reads geometry through the typed product, never by re-walking
-    /// chunks with its own classification.
-    pub(super) fn chunk_slice(&self) -> &[Chunk<'a>] {
-        &self.chunks
-    }
-
-    /// Content rendered before every chunk. Carries no authored preimage.
-    pub(super) fn intro_text(&self) -> &'a str {
-        self.intro
-    }
-
-    /// Content rendered after every chunk. Carries no authored preimage.
-    pub(super) fn outro_text(&self) -> &'a str {
-        self.outro
-    }
-
     /// Whether `content` is the replacement text of an
     /// [`overwrite_unmapped`](Self::overwrite_unmapped): wholly synthetic bytes
     /// with NO correspondence to the span they stand in for. Joined by pointer

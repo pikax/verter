@@ -59,8 +59,8 @@ pub use fallible::CodeTransformError;
 // emitted the bytes, so the product is minted here and nowhere else; see
 // `mapping_product`'s module doc for the totality and one-to-many contracts.
 pub use mapping_product::{
-    CarrierClass, CarrierRegion, InsertionAnchor, MappingProduct, ProjectedClass, ProjectedRegion,
-    Span,
+    CarrierClass, CarrierRegion, InsertionAnchor, MappingProduct, MappingSpan, ProjectedClass,
+    ProjectedRegion,
 };
 pub use source_map::{advance_generated_position, SourceMapOptions};
 // The additive, opt-in segmented-overwrite primitive's plain data carrier.

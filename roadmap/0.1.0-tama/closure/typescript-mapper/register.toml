@@ -980,7 +980,7 @@ subject = "crates/verter_compiler/src/code_transform/mapping_product.rs"
 reverted = "        let class = class.unwrap_or(CarrierClass::Elided);\n        if class == CarrierClass::Elided {"
 applied = "        let class = class.unwrap_or(CarrierClass::Elided);\n        if false && class == CarrierClass::Elided {"
 uniqueness = "unique-new-occurrence"
-observed = "cargo exit 101; test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 6350 filtered out — code_transform::mapping_product_tests::wholly_synthetic_replacement_text_elides_the_source_it_stands_in_for panicked on `an elided carrier byte has NO projection: answering with a neighbour is the mis-mapping this class refuses`"
+observed = "cargo exit 101; test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 6350 filtered out — code_transform::mapping_product_tests::wholly_synthetic_replacement_text_elides_the_source_it_stands_in_for panicked on `an elided carrier byte has NO projection: answering with a neighbour is the mis-mapping this class refuses`"
 
 # ---------------------------------------------------------------------------
 # Findings. Every entry is routed to exactly one claim or one residue; the
