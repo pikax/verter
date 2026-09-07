@@ -106,6 +106,22 @@ describe("buildTypeInfoRequest", () => {
     ).toThrow(/budget/);
   });
 
+  it.each([
+    ["both budgets zero", 0, 0],
+    ["a negative node budget", -1, 8],
+    ["a negative depth budget", 8, -1],
+    ["a non-integer node budget", 1.5, 8],
+    ["a non-integer depth budget", 8, 2.5],
+  ])("structurally rejects an expanded closure with %s", (_label, nodeBudget, depthBudget) => {
+    expect(() =>
+      buildTypeInfoRequest({
+        canonicalId: "/types.ts",
+        name: "Foo",
+        closure: { kind: "expanded", nodeBudget, depthBudget },
+      }),
+    ).toThrow(/budget/);
+  });
+
   it("refuses a query without a canonical or name", () => {
     expect(() => buildTypeInfoRequest({ canonicalId: "", name: "Foo" })).toThrow();
     expect(() => buildTypeInfoRequest({ canonicalId: "/types.ts", name: "" })).toThrow();
@@ -137,6 +153,17 @@ function encodeGraphResponse(graph: Record<string, unknown>): Uint8Array {
 }
 
 describe("decodeTypeInfoResult", () => {
+  it("surfaces an empty response kind as the typed-unspecified error variant", () => {
+    // A response carrying no arm at all is malformed: the decoder answers
+    // with the error variant whose case is undefined — never a fabricated
+    // graph and never a thrown string.
+    const bytes = toBinary(TypeInfoGraphResponseSchema, create(TypeInfoGraphResponseSchema, {}));
+    const result = decodeTypeInfoResult(bytes);
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("error arm expected");
+    expect(result.error.case).toBeUndefined();
+  });
+
   it("decodes the graph arm with order + interned-string identity preserved", () => {
     // The producer reserves string id 0 as the absent sentinel, so real
     // member names intern from id 1 — a 0-sentinel bug in either
@@ -507,6 +534,58 @@ describe("decodeTypeInfoResult", () => {
     expect(method?.kind).toBe("function");
     if (method?.kind !== "function") throw new Error("method decodes to a function");
     expect(method.parameters[0].type.kind).toBe("unknown");
+  });
+
+  it.each([
+    ["getter", GraphObjectMemberKind.GET],
+    ["setter", GraphObjectMemberKind.SET],
+  ])("decodes a %s member through its callable value node", (_label, memberKind) => {
+    // The producer encodes GET / SET members as callable-object value
+    // nodes carrying the accessor signature; the decoder must read them
+    // through the same callable path a method takes, not as a plain
+    // property whose type is the bare callable object.
+    const response = encodeGraphResponse({
+      schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+      strings: { entries: ["", "value"] },
+      nodes: [
+        {},
+        {
+          kind: {
+            case: "object",
+            value: { members: [{ ...member(1, 2, false), memberKind }] },
+          },
+        },
+        {
+          kind: {
+            case: "object",
+            value: { callSignatureRefs: [0] },
+          },
+        },
+        { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.NUMBER } } },
+      ],
+      symbols: [],
+      signatures: [
+        {
+          typeParameterNodeIds: [],
+          parameters: [],
+          returnTypeNodeId: 3,
+          overloadIndex: 0,
+          isConstruct: false,
+          isImplementation: false,
+          isAbstract: false,
+          flags: 0,
+        },
+      ],
+      rootIds: [1],
+    });
+    const result = decodeTypeInfoResult(response);
+    if (result.kind !== "graph") throw new Error("graph arm expected");
+    if (result.root.kind !== "object") throw new Error("object root expected");
+    expect(result.root.properties[0]?.name).toBe("value");
+    const accessor = result.root.properties[0]?.type;
+    expect(accessor?.kind).toBe("function");
+    if (accessor?.kind !== "function") throw new Error("accessor decodes to a function");
+    expect(accessor.returnType.kind).toBe("primitive");
   });
 
   // @ai-generated - Pins one shared monotonic decode budget across callable walks.

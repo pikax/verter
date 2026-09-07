@@ -302,10 +302,13 @@ impl<'a> GraphExporter<'a> {
     /// equal nodes. Real nodes — opaque degradations included — consume
     /// the node budget; when it is exhausted the caller receives the
     /// shared budget marker instead.
+    ///
+    /// Identity is resolved BEFORE the budget is charged: a structurally
+    /// equal node already in the arena adds nothing and costs nothing, so
+    /// it answers with its existing id even once the budget is exhausted.
+    /// Only a genuinely new node is refused at the cap — one type never
+    /// reports two identities across the budget edge.
     fn push_node(&mut self, kind: graph_type_node::Kind) -> u32 {
-        if self.real_nodes >= self.budgets.node_budget {
-            return self.budget_marker(self.budgets.node_budget);
-        }
         let node = GraphTypeNode { kind: Some(kind) };
         // Content-hash identity: encode into the reusable scratch buffer,
         // hash, and confirm candidates by full equality — structurally
@@ -325,6 +328,9 @@ impl<'a> GraphExporter<'a> {
                     return id;
                 }
             }
+        }
+        if self.real_nodes >= self.budgets.node_budget {
+            return self.budget_marker(self.budgets.node_budget);
         }
         let id = u32::try_from(self.nodes.len()).unwrap_or(u32::MAX);
         self.nodes.push(node);
@@ -401,6 +407,17 @@ impl<'a> GraphExporter<'a> {
         }
         if self.real_nodes >= self.budgets.node_budget {
             return self.budget_marker(self.budgets.node_budget);
+        }
+        // Parenthesisation is fidelity-only; the graph is the semantic
+        // projection (the descriptor path unwraps the same way). The
+        // wrappers are peeled ITERATIVELY: they carry no semantic depth,
+        // so they are not charged against the depth budget, and a chain
+        // of any length costs stack for exactly one frame — a recursive
+        // unwrap would grow the stack per wrapper without ever reaching a
+        // budget marker.
+        let mut expr = expr;
+        while let TypeExpr::Parenthesized(inner) = expr {
+            expr = inner;
         }
         match expr {
             TypeExpr::Primitive(name) => {
@@ -589,11 +606,8 @@ impl<'a> GraphExporter<'a> {
                     readonly: false,
                 }))
             }
-            TypeExpr::Parenthesized(inner) => {
-                // Parenthesisation is fidelity-only; the graph is the
-                // semantic projection (the descriptor path unwraps the
-                // same way).
-                self.expr_node(inner, depth)
+            TypeExpr::Parenthesized(_) => {
+                unreachable!("parenthesised wrappers are peeled before dispatch")
             }
             TypeExpr::RecursiveRef {
                 name,

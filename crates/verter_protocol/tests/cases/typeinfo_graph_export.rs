@@ -929,3 +929,45 @@ fn the_signatures_arena_is_budget_capped() {
         other => panic!("a sig-capped object degrades to the marker, got {other:?}"),
     }
 }
+
+/// REGRESSION — parenthesised wrappers are fidelity-only and are peeled
+/// WITHOUT recursion: a chain far deeper than the encoder's stack could
+/// hold one frame per wrapper still encodes to the wrapped node, and the
+/// chain is charged no depth (it carries no semantic depth), so a depth
+/// budget of 2 admits the inner primitive rather than tripping.
+#[test]
+fn deep_parenthesised_chain_peels_without_stack_growth_or_depth_charge() {
+    const DEPTH: usize = 50_000;
+    let worker = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            let mut ty = TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
+            for _ in 0..DEPTH {
+                ty = TypeExpr::Parenthesized(Arc::new(ty));
+            }
+            let budgets = GraphExportBudgets::new(MAX_EXPORT_NODE_BUDGET, 2)
+                .expect("in-range budgets construct");
+            let graph = encode_type_expr_graph(&ty, &budgets);
+            // The fixture's drop glue recurses once per wrapper; leak it so
+            // the measured stack is the encoder's, not the destructor's.
+            std::mem::forget(ty);
+            let root = *graph.root_ids.first().expect("root present");
+            let kind = graph.nodes[root as usize]
+                .kind
+                .clone()
+                .expect("root kind present");
+            (graph.nodes.len(), kind)
+        })
+        .expect("spawn the bounded-stack encoder thread");
+    let (arena_len, root_kind) = worker
+        .join()
+        .expect("the encoder must peel the chain on a bounded stack");
+    assert!(
+        matches!(root_kind, graph_type_node::Kind::Primitive(_)),
+        "the chain encodes to its wrapped primitive, not a depth marker: {root_kind:?}"
+    );
+    assert_eq!(
+        arena_len, 2,
+        "the reserved sentinel plus the one primitive: wrappers intern nothing"
+    );
+}

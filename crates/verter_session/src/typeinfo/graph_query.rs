@@ -609,7 +609,7 @@ fn graph_payload(
         operation: GraphOperationTag::ResolveSymbol,
         mode: ProjectionModeTag::from(mode),
         demand: demand_tag,
-        roots_count: 0,
+        roots_count: u32::try_from(graph.root_ids.len()).unwrap_or(u32::MAX),
         closure: closure_tag,
         schema_version: graph.schema_version,
         snapshot_node_count: u32::try_from(graph.nodes.len()).unwrap_or(u32::MAX),
