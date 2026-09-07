@@ -49,7 +49,11 @@ or repeated idempotence checks over unchanged predecessor snapshots.
   Hydrate only selected authored annotations under the original pinned snapshot and
   generic binder environment, and retain them in the original source declaration bank.
   Prepare immutable selected child inputs before sealing their demand basis. Effect-only
-  captures do not force runtime value hydration.
+  captures do not force runtime value hydration. Binding-value obligations expand
+  only for value-selected subjects. Each closure expression site records its exact
+  read or effect requirement, even when another site reads the same shared hub.
+  Effect-only capture evidence attests the completed selected structural execution
+  and closure dependency without fabricating reaching-value or assignment products.
 - Use compact slots over selected subjects, with immutable metadata shared by execution
   snapshots. Keys, inputs, snapshots, and evidence are bound to the graph content,
   demand basis, and execution. Unrelated graph inventory does not allocate products

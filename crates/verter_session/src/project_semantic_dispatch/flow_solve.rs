@@ -41,7 +41,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
 use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
@@ -54,9 +54,9 @@ use verter_semantic::analysis::flow::peeker::{
 use verter_semantic::analysis::flow::{FlowBindingRef, SkeletonBindingKind};
 
 use super::dispatch_txn::flow_obligation_state::{
-    FlowBindingBasis, FlowConvergenceEvidence, FlowDemandHandle, FlowObligationBasis,
-    FlowObligationId, FlowObligationOrigin, FlowObligationSpec, ObligationState,
-    SealedFlowCompletion,
+    FlowBindingBasis, FlowCaptureDemand, FlowConvergenceEvidence, FlowDemandHandle,
+    FlowObligationBasis, FlowObligationId, FlowObligationOrigin, FlowObligationSpec,
+    ObligationState, SealedFlowCompletion,
 };
 use super::dispatch_txn::ObligationRuntime;
 use crate::cache_runtime::flow_slice_node::{
@@ -529,7 +529,8 @@ impl CanonicalEncode for ResultContractDescriptor<'_> {
     // adding, removing, or renumbering a `FlowDomain` variant bumps the
     // tag, so every minted contract identity changes with the registry
     // revision even when no individual contract row was edited.
-    const DOMAIN_TAG: &'static str = "verter.session.flow.result_contract.v4";
+    // Value binding facts and effect-only captures have distinct evidence requirements.
+    const DOMAIN_TAG: &'static str = "verter.session.flow.result_contract.v5";
     fn encode_fields(&self, e: &mut CanonicalEncoder) {
         let contract = self.0;
         e.field_str(1, contract.tag.name());
@@ -1180,7 +1181,9 @@ pub(crate) fn build_flow_demand_plan_from_execution(
         match family {
             F::GraphEdge(_) => {} // edges expand last — they anchor on node obligations
             F::BindingSlot => {
-                for node in &selected {
+                // Binding value domains consume only value-selected subjects.
+                // Effect-only hubs retain their capture/edge execution obligations.
+                for node in structural_selection.value_nodes() {
                     let basis = match graph.node_kind(*node) {
                         FlowNodeKind::Binding(binding) => match identities.identity(binding) {
                             Some(identity) => FlowObligationBasis::Binding {
@@ -1282,11 +1285,15 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                 for node in &selected {
                     let FlowNodeKind::ExprSite(site) = graph.node_kind(*node) else { continue };
                     let site_record = bundle.skeleton.expr_site(site);
+                    if site_record.capture_bindings.is_empty() { continue; }
+                    let value_captures: FxHashSet<_> = site_record.reads.iter()
+                        .filter_map(|read| read.binding.as_ref()).collect();
                     for capture in site_record.capture_bindings.iter() {
+                        let demand = if value_captures.contains(capture) { FlowCaptureDemand::Value } else { FlowCaptureDemand::Effect };
                         let (basis, dischargeable) = match capture {
                             FlowBindingRef::Local(binding) => match identities.identity(*binding) {
                                 Some(identity) => (
-                                    FlowObligationBasis::CapturedBinding { node: *node, site, identity: identity.clone() },
+                                    FlowObligationBasis::CapturedBinding { node: *node, site, identity: identity.clone(), demand },
                                     true,
                                 ),
                                 None => (
@@ -1295,7 +1302,7 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                                 ),
                             },
                             FlowBindingRef::Captured(identity) => (
-                                FlowObligationBasis::CapturedBinding { node: *node, site, identity: identity.clone() },
+                                FlowObligationBasis::CapturedBinding { node: *node, site, identity: identity.clone(), demand },
                                 true,
                             ),
                         };

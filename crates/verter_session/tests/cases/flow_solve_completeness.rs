@@ -1253,7 +1253,7 @@ fn flow_result_contract_is_exact_identity() {
             .any(|window| window == tag.as_bytes())
     };
     assert!(
-        carries("verter.session.flow.result_contract.v4"),
+        carries("verter.session.flow.result_contract.v5"),
         "the minted contract identity carries the domain tag of the registry revision \
          it ranks over"
     );
@@ -1261,6 +1261,7 @@ fn flow_result_contract_is_exact_identity() {
         "result_contract.v1",
         "result_contract.v2",
         "result_contract.v3",
+        "result_contract.v4",
     ] {
         assert!(
             !carries(superseded),
@@ -3094,4 +3095,85 @@ fn discharge_report_is_bound_to_the_installed_demands_basis() {
             .is_some(),
         "the matched report completes"
     );
+}
+
+#[test]
+fn effect_only_capture_retains_effect_obligations_without_value_products() {
+    use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeKind};
+    use verter_session::for_tests::FlowCaptureDemand;
+    let fixture = verter_session::for_tests::flow_graph_fixture_for_tests_nested(
+        "function root(x) { function middle() { return () => { x = 1; return 0; }; } return middle; }",
+        63,
+        "middle",
+    );
+    let function = fixture.program_key();
+    let mut request = request_named(&function.declaration.name);
+    let SemanticQueryKey::FlowReturn(query) = &mut request.query else {
+        unreachable!()
+    };
+    query.function.declaration_slot.owner = function.declaration.owner;
+    query.function.function_part = function.part.clone();
+    query.function.overload_ordinal = function.overload_ordinal;
+    let plan = fixture.build_plan(request).unwrap();
+    let inputs = fixture.product_inputs();
+    let hub = inputs
+        .graph()
+        .nodes()
+        .find(|node| {
+            matches!(
+                inputs.graph().node_kind(*node),
+                FlowNodeKind::CapturedBinding(_)
+            )
+        })
+        .unwrap();
+    assert!(plan.structural_selection().is_effect_only(hub));
+    assert!(plan.obligation_specs().iter().any(|spec| matches!(spec.basis(), FlowObligationBasis::Edge { to, class: FlowEdgeClass::EvalEffect, .. } if *to == hub)), "the exact effect dependency remains a proof obligation");
+    assert_eq!(plan.obligation_specs().iter().filter(|spec| matches!(spec.basis(), FlowObligationBasis::CapturedBinding { identity, demand: FlowCaptureDemand::Effect, .. } if identity.name.as_ref() == "x")).count(), 1, "the exact capture subject retains its effect-only proof requirement");
+    assert!(
+        !plan.obligation_specs().iter().any(
+            |spec| matches!(spec.basis(), FlowObligationBasis::Binding { node, .. } if *node == hub)
+        ),
+        "an effect-only capture cannot require fabricated reaching values or assignment products"
+    );
+}
+
+#[test]
+fn capture_value_requirements_are_local_to_each_closure_site() {
+    use verter_session::for_tests::FlowCaptureDemand;
+    let fixture = verter_session::for_tests::flow_graph_fixture_for_tests_nested(
+        "function root(x) { function middle() { const writer = () => { x = 1; return 0; }; const reader = () => x; return { writer, reader }; } return middle; }",
+        64,
+        "middle",
+    );
+    let function = fixture.program_key();
+    let mut request = request_named(&function.declaration.name);
+    let SemanticQueryKey::FlowReturn(query) = &mut request.query else {
+        unreachable!()
+    };
+    query.function.declaration_slot.owner = function.declaration.owner;
+    query.function.function_part = function.part.clone();
+    query.function.overload_ordinal = function.overload_ordinal;
+    let plan = fixture.build_plan(request).unwrap();
+    let captures: Vec<_> = plan
+        .obligation_specs()
+        .iter()
+        .filter_map(|spec| match spec.basis() {
+            FlowObligationBasis::CapturedBinding {
+                site,
+                identity,
+                demand,
+                ..
+            } if identity.name.as_ref() == "x" => Some((*site, identity, *demand)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(captures.len(), 2);
+    assert_eq!(
+        captures[0].1, captures[1].1,
+        "both closures capture the same exact binding"
+    );
+    assert_ne!(captures[0].0, captures[1].0);
+    assert_eq!(captures[0].2, FlowCaptureDemand::Effect);
+    assert_eq!(captures[1].2, FlowCaptureDemand::Value);
+    assert!(plan.obligation_specs().iter().any(|spec| matches!(spec.basis(), FlowObligationBasis::Binding { slot, .. } if &slot.identity == captures[0].1)), "the reader still requires value products for their shared hub");
 }
