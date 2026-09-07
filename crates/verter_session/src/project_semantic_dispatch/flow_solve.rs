@@ -912,21 +912,21 @@ fn require_retained_selection_of_bound_graph(
     // Bounds FIRST: nothing below may index the graph or the skeleton
     // with a foreign id.
     let nodes_in_range = selection
-        .value_nodes
+        .value_nodes()
         .iter()
-        .chain(selection.effect_only_nodes.iter())
+        .chain(selection.effect_only_nodes().iter())
         .all(|node| node.index() < bundle.graph.node_count());
     if !nodes_in_range {
         return Err(FlowDemandPlanError::SelectionOutOfRange);
     }
-    let origins_in_range = selection.origins.iter().all(|origin| match origin {
+    let origins_in_range = selection.origins().iter().all(|origin| match origin {
         SliceOrigin::Return(site) => site.index() < bundle.skeleton.return_sites.len(),
         SliceOrigin::Expr(site) => site.index() < bundle.skeleton.expr_sites.len(),
     });
     if !origins_in_range {
         return Err(FlowDemandPlanError::SelectionOutOfRange);
     }
-    let names_in_range = selection.demand_path.iter().all(|segment| match segment {
+    let names_in_range = selection.demand_path().iter().all(|segment| match segment {
         DemandSegment::Named(name) => name.index() < bundle.skeleton.names.len(),
         DemandSegment::Foreign(_) => true,
     });
@@ -937,7 +937,9 @@ fn require_retained_selection_of_bound_graph(
     // demand's origins and projection path are recomputed from the
     // query's own demand axis, never re-planned.
     let expected = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
-    if expected.origins != selection.origins || expected.path != selection.demand_path {
+    if expected.origins.as_ref() != selection.origins()
+        || expected.path.as_ref() != selection.demand_path()
+    {
         return Err(FlowDemandPlanError::SelectionDemandMismatch);
     }
     // The minted slice identity must be THIS selection over THIS graph:
@@ -952,7 +954,7 @@ fn require_retained_selection_of_bound_graph(
     // against its own budget. The final selection's node sets are
     // disjoint by construction, so the lengths ARE the selected count.
     let return_sites = selection
-        .origins
+        .origins()
         .iter()
         .filter(|origin| matches!(origin, SliceOrigin::Return(_)))
         .count();
@@ -963,7 +965,7 @@ fn require_retained_selection_of_bound_graph(
             observed: u32::try_from(return_sites).unwrap_or(u32::MAX),
         }));
     }
-    let selected_nodes = selection.value_nodes.len() + selection.effect_only_nodes.len();
+    let selected_nodes = selection.value_nodes().len() + selection.effect_only_nodes().len();
     if selected_nodes > budget.max_selected_nodes as usize {
         return Err(FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
             axis: FlowSliceBudgetAxis::SelectedNodes,
@@ -971,11 +973,11 @@ fn require_retained_selection_of_bound_graph(
             observed: u32::try_from(selected_nodes).unwrap_or(u32::MAX),
         }));
     }
-    if selection.value_states > budget.max_value_states {
+    if selection.value_states() > budget.max_value_states {
         return Err(FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
             axis: FlowSliceBudgetAxis::ValueStates,
             limit: budget.max_value_states,
-            observed: selection.value_states,
+            observed: selection.value_states(),
         }));
     }
     Ok(())
@@ -1155,8 +1157,8 @@ pub(crate) fn build_flow_demand_plan_from_execution(
     let identities = &bundle.bindings;
 
     let graph = &bundle.graph;
-    let mut selected: Vec<_> = structural_selection.value_nodes.iter()
-        .chain(structural_selection.effect_only_nodes.iter()).copied().collect();
+    let mut selected: Vec<_> = structural_selection.value_nodes().iter()
+        .chain(structural_selection.effect_only_nodes().iter()).copied().collect();
     selected.sort_by_key(|node| node.index());
     let mut expanded: Vec<FlowObligationId> = Vec::new();
     // The FIRST obligation planned for a node is its primary obligation —

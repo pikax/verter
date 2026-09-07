@@ -1,8 +1,8 @@
 //! The per-function [`FunctionFlowGraph`]: a sparse, arena-free typed-edge
 //! dependence structure built ONCE per function content version from its
-//! [`FunctionBodySkeleton`](super::FunctionBodySkeleton) — and from the
-//! skeleton ALONE. [`build_function_flow_graph`] takes only
-//! `&FunctionBodySkeleton`, so a graph build can never re-walk the AST,
+//! indexed [`PreparedFunctionBodySkeleton`](super::PreparedFunctionBodySkeleton).
+//! [`build_function_flow_graph`] consumes that sealed structural authority,
+//! so a graph build can never resolve bindings by name, re-walk the AST,
 //! observe a query demand, lower a type, or produce a fact.
 //!
 //! Nodes are the function's bindings (value-definition hubs), expression
@@ -32,10 +32,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_no_typeexpr::NoTypeExpr;
 
 use super::{
-    FlowBindingRef, FlowNameId, FunctionBodySkeleton, SkeletonBindingId, SkeletonCallee,
-    SkeletonExprShape, SkeletonExprSiteId, SkeletonObjectEntry, SkeletonObjectKey,
-    SkeletonPathSegment, SkeletonRegionId, SkeletonReturnSiteId, SkeletonWriteCertainty,
-    SkeletonWriteTarget,
+    FlowBindingRef, FlowNameId, FunctionBodySkeleton, SkeletonBindingId, SkeletonExprShape,
+    SkeletonExprSiteId, SkeletonObjectEntry, SkeletonObjectKey, SkeletonPathSegment,
+    SkeletonRegionId, SkeletonReturnSiteId, SkeletonWriteCertainty, SkeletonWriteTarget,
 };
 
 #[cfg(test)]
@@ -304,7 +303,19 @@ impl FunctionFlowGraph {
 /// over the skeleton alone: no AST, no demand, no type lowering, no
 /// resolution dispatch, no route lookup, no fact production.
 #[must_use]
-pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
+pub fn build_function_flow_graph(
+    prepared: &super::PreparedFunctionBodySkeleton,
+) -> FunctionFlowGraph {
+    build_graph(prepared.skeleton())
+}
+
+/// Explicit structural topology fixture seam, absent from production builds.
+#[cfg(any(test, feature = "test-support"))]
+pub fn build_function_flow_graph_for_test(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
+    build_graph(skeleton)
+}
+
+fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
     let binding_count = u32::try_from(skeleton.bindings.len()).unwrap_or(u32::MAX);
     let expr_site_count = u32::try_from(skeleton.expr_sites.len()).unwrap_or(u32::MAX);
     let return_site_count = u32::try_from(skeleton.return_sites.len()).unwrap_or(u32::MAX);
@@ -337,14 +348,6 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
         }
     }
 
-    // Lexical binding resolution runs through the skeleton's SINGLE
-    // authority ([`FunctionBodySkeleton::bindings_of_name_in_scope`]) —
-    // the same one the content lowering consumes, so a plan edge and a
-    // lowered read can never disagree about which slot a name denotes.
-    let bindings_of_name_in_scope =
-        |name: super::FlowNameId, region: SkeletonRegionId| -> Vec<SkeletonBindingId> {
-            skeleton.bindings_of_name_in_scope(name, region)
-        };
     let mut runtime_bindings: FxHashMap<SkeletonBindingId, Vec<SkeletonBindingId>> =
         FxHashMap::default();
     for (ordinal, binding) in skeleton.bindings.iter().enumerate() {
@@ -355,12 +358,12 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
                 .push(SkeletonBindingId::from_index(ordinal as u32));
         }
     }
-    let local_targets = |binding: Option<&FlowBindingRef>, name, region| match binding {
-        Some(FlowBindingRef::Local(binding)) => {
-            runtime_bindings.get(binding).cloned().unwrap_or_default()
-        }
-        Some(FlowBindingRef::Captured(_)) => Vec::new(),
-        None => bindings_of_name_in_scope(name, region),
+    let local_targets = |binding: Option<&FlowBindingRef>| match binding {
+        Some(FlowBindingRef::Local(binding)) => runtime_bindings
+            .get(binding)
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+        Some(FlowBindingRef::Captured(_)) | None => &[],
     };
     let capture_offset = binding_count + expr_site_count + return_site_count + region_count;
     let mut captured_bindings = Vec::new();
@@ -374,6 +377,18 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
                 .writes
                 .iter()
                 .filter_map(|write| write.binding.as_ref()),
+        )
+        .chain(
+            skeleton
+                .expr_sites
+                .iter()
+                .flat_map(|site| site.capture_bindings.iter()),
+        )
+        .chain(
+            skeleton
+                .expr_sites
+                .iter()
+                .flat_map(|site| site.calls.iter().filter_map(|call| call.binding.as_ref())),
         )
     {
         if let FlowBindingRef::Captured(identity) = binding {
@@ -429,6 +444,31 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
         let id = SkeletonExprSiteId::from_index(index as u32);
         let node = site_node(id);
         edges.push((node, region_node(site.region), FlowEdgeKind::ControlRegion));
+        // Retaining a captured cell is a subject dependency even when the
+        // nested callable only writes it. It does not read the cell's value.
+        for capture in site.capture_bindings.iter() {
+            let targets: &[SkeletonBindingId] = match capture {
+                FlowBindingRef::Local(binding) => runtime_bindings
+                    .get(binding)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                FlowBindingRef::Captured(_) => &[],
+            };
+            let captured_node = match capture {
+                FlowBindingRef::Captured(identity) => capture_nodes.get(identity).copied(),
+                FlowBindingRef::Local(_) => None,
+            };
+            for to in targets
+                .iter()
+                .copied()
+                .map(binding_node)
+                .chain(captured_node)
+            {
+                if seen.insert((node.0, to.0, FlowEdgeClass::EvalEffect)) {
+                    edges.push((node, to, FlowEdgeKind::EvalEffect));
+                }
+            }
+        }
         for read in site.reads.iter() {
             let projection: Arc<[FlowNameId]> = read
                 .path
@@ -440,8 +480,9 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
                 .collect::<Option<Vec<_>>>()
                 .unwrap_or_default()
                 .into();
-            let local_nodes = local_targets(read.binding.as_ref(), read.name, site.region)
-                .into_iter()
+            let local_nodes = local_targets(read.binding.as_ref())
+                .iter()
+                .copied()
                 .map(binding_node);
             let captured_node = if let Some(FlowBindingRef::Captured(identity)) = &read.binding {
                 capture_nodes.get(identity).copied()
@@ -465,17 +506,17 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
             }
         }
         for call in site.calls.iter() {
-            let root = match &call.callee {
-                SkeletonCallee::Named(name) => Some(*name),
-                SkeletonCallee::Path(path) => path.first().copied(),
-                SkeletonCallee::Opaque => None,
+            let locals = local_targets(call.binding.as_ref())
+                .iter()
+                .copied()
+                .map(binding_node);
+            let captured = match &call.binding {
+                Some(FlowBindingRef::Captured(identity)) => capture_nodes.get(identity).copied(),
+                _ => None,
             };
-            if let Some(root) = root {
-                for binding in bindings_of_name_in_scope(root, site.region) {
-                    let to = binding_node(binding);
-                    if seen.insert((node.0, to.0, FlowEdgeClass::EvalEffect)) {
-                        edges.push((node, to, FlowEdgeKind::EvalEffect));
-                    }
+            for to in locals.chain(captured) {
+                if seen.insert((node.0, to.0, FlowEdgeClass::EvalEffect)) {
+                    edges.push((node, to, FlowEdgeKind::EvalEffect));
                 }
             }
         }
@@ -539,12 +580,13 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
 
     // Writes: slot definitions + evaluation effects, in source order.
     for write in skeleton.writes.iter() {
-        let SkeletonWriteTarget::Named(name) = write.target else {
+        let SkeletonWriteTarget::Named(_) = write.target else {
             continue;
         };
         let provider = site_node(write.value.unwrap_or(write.site));
-        let local_nodes = local_targets(write.binding.as_ref(), name, write.region)
-            .into_iter()
+        let local_nodes = local_targets(write.binding.as_ref())
+            .iter()
+            .copied()
             .map(binding_node);
         let captured_node = if let Some(FlowBindingRef::Captured(identity)) = &write.binding {
             capture_nodes.get(identity).copied()

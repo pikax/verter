@@ -793,7 +793,7 @@ impl FlowGraphFixtureForTests {
             .plan(&demand, &request.resources.slice_budget)
             .map_err(FlowDemandPlanError::SliceBudget)?;
         let hash = compute_flow_slice_hash(&selection, &bundle.graph, &bundle.skeleton);
-        Ok(PlannedFlowSlice::new(hash, selection))
+        Ok(PlannedFlowSlice::for_test(hash, selection))
     }
 
     /// Plan `request` over this fixture's store-bound graph and binding
@@ -843,7 +843,7 @@ impl FlowGraphFixtureForTests {
     }
 
     pub fn selected_capture_identities_for_tests(&self, plan: &FlowDemandPlan) -> Vec<verter_semantic::analysis::function_program::FlowBindingIdentity> {
-        self.product_inputs().selected_captures(plan.structural_selection()).cloned().collect()
+        self.product_inputs().selected_captures(plan.structural_selection()).map(|(identity, _)| identity.clone()).collect()
     }
 }
 

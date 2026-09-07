@@ -81,16 +81,21 @@ impl FlowProductInputs {
     /// Graph-owned captured subjects in stable selected-node order. This can
     /// encode selected inputs before the execution basis is sealed, without
     /// rebuilding capture inventory or minting caller-supplied reference sites.
+    /// The flag distinguishes value demand from effect-only capture dependencies.
     pub(crate) fn selected_captures<'a>(
         &'a self,
         selection: &'a ReturnSlicePlan,
-    ) -> impl Iterator<Item = &'a FlowBindingIdentity> + 'a {
-        selected_nodes(selection).filter_map(|node| match self.graph.node_kind(node) {
-            FlowNodeKind::CapturedBinding(binding) => Some(self.graph.captured_binding(binding)),
-            FlowNodeKind::Binding(_)
-            | FlowNodeKind::ExprSite(_)
-            | FlowNodeKind::ReturnSite(_)
-            | FlowNodeKind::Region(_) => None,
+    ) -> impl Iterator<Item = (&'a FlowBindingIdentity, bool)> + 'a {
+        selected_nodes(selection).filter_map(|(node, value_demanded)| {
+            match self.graph.node_kind(node) {
+                FlowNodeKind::CapturedBinding(binding) => {
+                    Some((self.graph.captured_binding(binding), value_demanded))
+                }
+                FlowNodeKind::Binding(_)
+                | FlowNodeKind::ExprSite(_)
+                | FlowNodeKind::ReturnSite(_)
+                | FlowNodeKind::Region(_) => None,
+            }
         })
     }
 
@@ -101,9 +106,9 @@ impl FlowProductInputs {
 }
 
 /// Merge the owner's sorted disjoint selected arrays without allocation.
-fn selected_nodes(selection: &ReturnSlicePlan) -> impl Iterator<Item = FlowNodeId> + '_ {
-    let mut values = selection.value_nodes.iter().peekable();
-    let mut effects = selection.effect_only_nodes.iter().peekable();
+fn selected_nodes(selection: &ReturnSlicePlan) -> impl Iterator<Item = (FlowNodeId, bool)> + '_ {
+    let mut values = selection.value_nodes().iter().peekable();
+    let mut effects = selection.effect_only_nodes().iter().peekable();
     std::iter::from_fn(move || {
         let values_first = match (values.peek(), effects.peek()) {
             (Some(a), Some(b)) => a.index() < b.index(),
@@ -116,6 +121,7 @@ fn selected_nodes(selection: &ReturnSlicePlan) -> impl Iterator<Item = FlowNodeI
             effects.next()
         })
         .copied()
+        .map(|node| (node, values_first))
     })
 }
 
@@ -473,19 +479,20 @@ impl FlowProductExecution {
         budget.max_iterations = budget.max_iterations.min(plan.convergence().max_iterations);
         let structural = plan.structural_selection();
         if structural
-            .value_nodes
+            .value_nodes()
             .len()
-            .saturating_add(structural.effect_only_nodes.len())
+            .saturating_add(structural.effect_only_nodes().len())
             > plan.resources().slice_budget.max_selected_nodes as usize
         {
             return Err(FlowProductKeyError::SelectionBudget);
         }
-        let mut subjects =
-            Vec::with_capacity(structural.value_nodes.len() + structural.effect_only_nodes.len());
+        let mut subjects = Vec::with_capacity(
+            structural.value_nodes().len() + structural.effect_only_nodes().len(),
+        );
         let mut representatives = Vec::new();
         let mut local_storage = FxHashMap::default();
         let mut captures = FxHashMap::default();
-        for node in selected_nodes(structural) {
+        for (node, _) in selected_nodes(structural) {
             let subject = subjects.len();
             let (binding, binding_ref, existing_storage) = match inputs.graph.node_kind(node) {
                 FlowNodeKind::Binding(binding) => {
@@ -1525,9 +1532,9 @@ impl FlowProductBudget {
         // Captured bindings are real selected graph nodes and therefore use
         // the same structural limit as every other product subject.
         let subjects = selection
-            .value_nodes
+            .value_nodes()
             .len()
-            .saturating_add(selection.effect_only_nodes.len());
+            .saturating_add(selection.effect_only_nodes().len());
         let subjects = u32::try_from(subjects).unwrap_or(u32::MAX);
         Self {
             max_iterations: plan.convergence().max_iterations,

@@ -13,8 +13,6 @@ use std::sync::Arc;
 
 use verter_no_typeexpr::NoTypeExpr;
 
-use super::flow_graph::FlowNodeId;
-use super::peeker::{DemandSegment, SliceOrigin};
 use super::{
     FrameSpan, SkeletonBindingId, SkeletonBindingKind, SkeletonExprSiteId, SkeletonWriteCertainty,
 };
@@ -23,51 +21,7 @@ use super::{
 // The slice plan
 // ---------------------------------------------------------------------------
 
-/// The demand planner's result: exactly the subgraph reachable from the
-/// demand origins under the two edge-class families' stop conditions.
-/// Node sets are sorted ascending by dense node index and disjoint —
-/// `effect_only_nodes` holds nodes reached ONLY through effect edges
-/// (their value is never materialized; their evaluation effects are).
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
-pub struct ReturnSlicePlan {
-    /// The demand origins the reachability started from.
-    pub origins: Arc<[SliceOrigin]>,
-    /// The demanded projection path (empty = whole value).
-    pub demand_path: Arc<[DemandSegment]>,
-    /// Value-selected nodes (their value contributes to the demand),
-    /// sorted ascending.
-    pub value_nodes: Arc<[FlowNodeId]>,
-    /// Effect-only nodes (evaluation effects survive; value is never
-    /// materialized), sorted ascending, disjoint from `value_nodes`.
-    pub effect_only_nodes: Arc<[FlowNodeId]>,
-    /// Combined value visits and interned projection tails charged by planning.
-    /// Retained-plan admission compares this count with the caller's budget.
-    pub value_states: u32,
-}
-
-impl ReturnSlicePlan {
-    /// Whether `node` is selected at all (value or effect).
-    #[must_use]
-    pub fn is_selected(&self, node: FlowNodeId) -> bool {
-        self.is_value(node) || self.is_effect_only(node)
-    }
-
-    /// Whether `node` is value-selected.
-    #[must_use]
-    pub fn is_value(&self, node: FlowNodeId) -> bool {
-        self.value_nodes
-            .binary_search_by_key(&node.index(), |n| n.index())
-            .is_ok()
-    }
-
-    /// Whether `node` is effect-only.
-    #[must_use]
-    pub fn is_effect_only(&self, node: FlowNodeId) -> bool {
-        self.effect_only_nodes
-            .binary_search_by_key(&node.index(), |n| n.index())
-            .is_ok()
-    }
-}
+pub use super::peeker::ReturnSlicePlan;
 
 // ---------------------------------------------------------------------------
 // IR ids

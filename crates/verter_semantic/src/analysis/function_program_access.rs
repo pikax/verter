@@ -77,6 +77,26 @@ fn expression_target(
     }
 }
 
+pub(crate) fn expression_root<'a, 'ast>(
+    mut expression: &'a Expression<'ast>,
+) -> Option<&'a IdentifierReference<'ast>> {
+    loop {
+        expression = match expression {
+            Expression::Identifier(identifier) => return Some(identifier),
+            Expression::StaticMemberExpression(member) => &member.object,
+            Expression::ComputedMemberExpression(member) => &member.object,
+            Expression::PrivateFieldExpression(member) => &member.object,
+            Expression::ParenthesizedExpression(inner) => &inner.expression,
+            Expression::TSAsExpression(inner) => &inner.expression,
+            Expression::TSSatisfiesExpression(inner) => &inner.expression,
+            Expression::TSNonNullExpression(inner) => &inner.expression,
+            Expression::TSTypeAssertion(inner) => &inner.expression,
+            Expression::TSInstantiationExpression(inner) => &inner.expression,
+            _ => return None,
+        };
+    }
+}
+
 pub(super) fn simple_assignment_target(target: &SimpleAssignmentTarget<'_>) -> FunctionWriteTarget {
     match target {
         SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => {
