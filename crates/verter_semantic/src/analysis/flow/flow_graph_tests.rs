@@ -180,6 +180,26 @@ fn indexed_returned_arrow(source: &str) -> FunctionBodySkeleton {
 }
 
 #[test]
+fn captured_computation_inputs_do_not_grow_result_projection_cycles() {
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    let skeleton = indexed_returned_arrow(
+        "function root(value) { return () => { value=value.trim(); return value; }; }",
+    );
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(
+            &SliceDemand::for_return_projection(&skeleton, &[]),
+            &FlowSliceBudget {
+                max_value_states: 64,
+                ..FlowSliceBudget::default()
+            },
+        )
+        .expect("captured computation inputs have the same bounded path transfer as local inputs");
+    let write = skeleton.writes.first().unwrap();
+    assert!(plan.is_value(graph.expr_site_node(write.value.unwrap())));
+}
+
+#[test]
 fn captured_member_reads_compose_projection_before_selecting_write_members() {
     use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
     use crate::analysis::flow::{FlowBindingRef, FrameSpan};

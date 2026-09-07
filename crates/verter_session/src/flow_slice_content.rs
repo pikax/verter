@@ -6619,7 +6619,10 @@ impl Lowerer<'_> {
                 // the shallow pass's fallback `any` for reasons that have
                 // nothing to do with calls (`JSXElement`, `Super`,
                 // `await x` over a non-call) — see `lower_leaf`.
-                ValueDescent::Leaf => self.lower_leaf(other, mode),
+                ValueDescent::Reference
+                | ValueDescent::Logical
+                | ValueDescent::Sequence
+                | ValueDescent::Leaf => self.lower_leaf(other, mode),
             },
         }
     }

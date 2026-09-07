@@ -185,8 +185,12 @@ pub fn compute_flow_slice_hash(
                     FlowEdgeKind::EvalEffect => buf.push(3),
                     FlowEdgeKind::ControlRegion => buf.push(4),
                     FlowEdgeKind::ControlInput => buf.push(7),
-                    FlowEdgeKind::ReadProjection { path } => {
+                    FlowEdgeKind::ReadProjection { path, kind } => {
                         buf.push(5);
+                        buf.push(match kind {
+                            super::FlowReadKind::Result => 0,
+                            super::FlowReadKind::Input => 1,
+                        });
                         fold_u32(&mut buf, path.len() as u32);
                         for name in path.iter() {
                             fold_text(&mut buf, skeleton.name(*name));

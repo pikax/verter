@@ -359,6 +359,17 @@ pub struct SkeletonRead {
     /// The statically known projection path under the root. Empty is a
     /// whole-root read; a computed segment conservatively aliases every key.
     pub path: Arc<[SkeletonPathSegment]>,
+    /// Whether the read provides this expression result or is consumed independently.
+    pub kind: FlowReadKind,
+}
+
+/// How a read depends on a demand for the containing expression result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+pub enum FlowReadKind {
+    /// The read provides the result; append the demanded suffix to its path.
+    Result,
+    /// The read is a computation input; retain its own path with no result suffix.
+    Input,
 }
 
 /// The callee shape of one call / construct site.
@@ -1102,6 +1113,7 @@ struct SkeletonBuilder<'entry> {
     bindings: Vec<SkeletonBinding>,
     sites: Vec<SiteDraft>,
     site_stack: Vec<usize>,
+    read_kind: FlowReadKind,
     return_sites: Vec<SkeletonReturnSite>,
     writes: Vec<SkeletonWrite>,
     nested_captures: FxHashMap<verter_span::Span, &'entry FunctionNestedCaptures>,
@@ -1131,6 +1143,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             bindings: Vec::new(),
             sites: Vec::new(),
             site_stack: Vec::new(),
+            read_kind: FlowReadKind::Input,
             return_sites: Vec::new(),
             writes: Vec::new(),
             capture_subjects: FxHashSet::default(),
@@ -1294,10 +1307,24 @@ impl<'entry> SkeletonBuilder<'entry> {
             // it takes the leaf disposition here. Its sub-expressions are
             // still visited for their evaluation effects; the CONTENT
             // half is where the verdict differs (it fails closed).
-            ValueDescent::Leaf | ValueDescent::UnmodeledCall => {
+            disposition @ (ValueDescent::Reference
+            | ValueDescent::Logical
+            | ValueDescent::Sequence
+            | ValueDescent::Leaf
+            | ValueDescent::UnmodeledCall) => {
                 let id = self.alloc_site(span, parent);
                 self.site_stack.push(id.index());
+                let kind = if matches!(
+                    disposition,
+                    ValueDescent::Reference | ValueDescent::Logical | ValueDescent::Sequence
+                ) {
+                    FlowReadKind::Result
+                } else {
+                    FlowReadKind::Input
+                };
+                let previous = std::mem::replace(&mut self.read_kind, kind);
                 self.visit_expression(expression);
+                self.read_kind = previous;
                 self.site_stack.pop();
                 id
             }
@@ -1316,7 +1343,9 @@ impl<'entry> SkeletonBuilder<'entry> {
     ) -> SkeletonExprSiteId {
         let id = self.alloc_site(span, parent);
         self.site_stack.push(id.index());
+        let previous = std::mem::replace(&mut self.read_kind, FlowReadKind::Input);
         self.visit_expression(&conditional.test);
+        self.read_kind = previous;
         self.site_stack.pop();
         let consequent = self.open_site(&conditional.consequent, Some(id));
         let alternate = self.open_site(&conditional.alternate, Some(id));
@@ -1397,6 +1426,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             path,
             span,
             binding: None,
+            kind: self.read_kind,
         });
     }
 
@@ -1434,6 +1464,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                 path,
                 span,
                 binding: None,
+                kind: FlowReadKind::Input,
             });
         }
     }
@@ -2178,6 +2209,38 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
         }
     }
 
+    fn visit_expression(&mut self, it: &Expression<'a>) {
+        let previous = self.read_kind;
+        if matches!(
+            value_descent(it),
+            ValueDescent::Leaf | ValueDescent::UnmodeledCall
+        ) {
+            self.read_kind = FlowReadKind::Input;
+        }
+        walk::walk_expression(self, it);
+        self.read_kind = previous;
+    }
+
+    fn visit_sequence_expression(&mut self, it: &oxc_ast::ast::SequenceExpression<'a>) {
+        let Some((last, discarded)) = it.expressions.split_last() else {
+            return;
+        };
+        let previous = std::mem::replace(&mut self.read_kind, FlowReadKind::Input);
+        for expression in discarded {
+            self.visit_expression(expression);
+        }
+        self.read_kind = previous;
+        self.visit_expression(last);
+    }
+
+    fn visit_conditional_expression(&mut self, it: &oxc_ast::ast::ConditionalExpression<'a>) {
+        let previous = std::mem::replace(&mut self.read_kind, FlowReadKind::Input);
+        self.visit_expression(&it.test);
+        self.read_kind = previous;
+        self.visit_expression(&it.consequent);
+        self.visit_expression(&it.alternate);
+    }
+
     fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
         let name = self.intern(it.name.as_str());
         self.push_read(name, it.span.into());
@@ -2198,7 +2261,9 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
             );
             self.push_read_path(root, path, reference.span);
         } else {
+            let previous = std::mem::replace(&mut self.read_kind, FlowReadKind::Input);
             walk::walk_static_member_expression(self, it);
+            self.read_kind = previous;
         }
     }
 
