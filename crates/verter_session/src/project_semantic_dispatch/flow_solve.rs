@@ -1013,9 +1013,9 @@ pub(crate) fn prepare_flow_execution(
     }))
 }
 
-/// Prepare and expand a demand in one call. Callers that also evaluate cold
-/// values after proof refusal retain [`prepare_flow_execution`]'s capability
-/// and call [`build_flow_demand_plan_from_execution`] separately.
+/// Test convenience for preparing and expanding one demand. Production callers
+/// retain the structural execution capability separately from proof expansion.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn build_flow_demand_plan(
     request: FlowDemandRequest,
     bound: &BoundFlowGraph,
