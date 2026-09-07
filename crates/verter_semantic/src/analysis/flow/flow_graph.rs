@@ -28,13 +28,14 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_no_typeexpr::NoTypeExpr;
 
 use super::{
-    FunctionBodySkeleton, SkeletonBindingId, SkeletonCallee, SkeletonExprShape, SkeletonExprSiteId,
-    SkeletonObjectEntry, SkeletonObjectKey, SkeletonPathSegment, SkeletonRegionId,
-    SkeletonReturnSiteId, SkeletonWriteCertainty, SkeletonWriteTarget,
+    FlowBindingRef, FlowNameId, FunctionBodySkeleton, SkeletonBindingId, SkeletonCallee,
+    SkeletonExprShape, SkeletonExprSiteId, SkeletonObjectEntry, SkeletonObjectKey,
+    SkeletonPathSegment, SkeletonRegionId, SkeletonReturnSiteId, SkeletonWriteCertainty,
+    SkeletonWriteTarget,
 };
 
 #[cfg(test)]
@@ -80,6 +81,19 @@ pub enum FlowNodeKind {
     ReturnSite(SkeletonReturnSiteId),
     /// A control region.
     Region(SkeletonRegionId),
+    /// An exact binding defined in an enclosing frame; never a local declaration.
+    CapturedBinding(FlowCapturedBindingId),
+}
+
+/// A graph-local ordinal into this graph's exact captured-binding inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+pub struct FlowCapturedBindingId(u32);
+
+impl FlowCapturedBindingId {
+    #[must_use]
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 /// The typed dependence class of one edge.
@@ -89,6 +103,8 @@ pub enum FlowEdgeKind {
     /// argument, a binding's initializer / whole-slot definite write
     /// (reaching definition), or an expression site's read of a binding.
     ValueDef,
+    /// Prefix the authored static read projection to the remaining demand.
+    ReadProjection { path: Arc<[FlowNameId]> },
     /// A write targets a projection path on the source node's value: an
     /// object-literal entry provisioning a key, a member write on a slot,
     /// an optional / unknown write (spread, computed key, logical
@@ -98,6 +114,8 @@ pub enum FlowEdgeKind {
         path: Arc<[SkeletonPathSegment]>,
         /// Whether the write definitely happens when its site evaluates.
         certainty: SkeletonWriteCertainty,
+        /// Only entries of the same object literal have structural overwrite order.
+        source: PathWriteSource,
     },
     /// Evaluating the source affects the target: a site's contained write
     /// / call into a binding, or a container's evaluation of an effectful
@@ -105,6 +123,18 @@ pub enum FlowEdgeKind {
     EvalEffect,
     /// The source node belongs to (or nests inside) the target region.
     ControlRegion,
+    /// Executing the source region requires the target control value.
+    /// This crosses from the effect frontier to a whole-value demand.
+    ControlInput,
+}
+
+/// The structural authority of a path write's ordering semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr)]
+pub enum PathWriteSource {
+    /// Entries in one object literal execute in authored order.
+    ObjectLiteralEntry,
+    /// A runtime assignment remains a candidate until control flow executes it.
+    Assignment,
 }
 
 /// The edge-class family discriminant (the reachability stop-condition
@@ -126,10 +156,12 @@ impl FlowEdgeKind {
     #[must_use]
     pub fn class(&self) -> FlowEdgeClass {
         match self {
-            FlowEdgeKind::ValueDef => FlowEdgeClass::ValueDef,
+            FlowEdgeKind::ValueDef | FlowEdgeKind::ReadProjection { .. } => FlowEdgeClass::ValueDef,
             FlowEdgeKind::PathWrite { .. } => FlowEdgeClass::PathWrite,
             FlowEdgeKind::EvalEffect => FlowEdgeClass::EvalEffect,
-            FlowEdgeKind::ControlRegion => FlowEdgeClass::ControlRegion,
+            FlowEdgeKind::ControlRegion | FlowEdgeKind::ControlInput => {
+                FlowEdgeClass::ControlRegion
+            }
         }
     }
 }
@@ -159,6 +191,7 @@ pub struct FunctionFlowGraph {
     expr_site_count: u32,
     return_site_count: u32,
     region_count: u32,
+    captured_bindings: Arc<[super::FlowBindingIdentity]>,
     /// Every edge, grouped by `from` node (CSR layout).
     edges: Arc<[FlowEdge]>,
     /// CSR offsets: node `n`'s out-edges are `edges[offsets[n]..offsets[n+1]]`.
@@ -171,6 +204,7 @@ impl FunctionFlowGraph {
     pub fn node_count(&self) -> usize {
         (self.binding_count + self.expr_site_count + self.return_site_count + self.region_count)
             as usize
+            + self.captured_bindings.len()
     }
 
     /// Every edge, grouped by `from` node.
@@ -209,6 +243,25 @@ impl FunctionFlowGraph {
         )
     }
 
+    /// The exact outer declaration identity for a captured-binding hub.
+    #[must_use]
+    pub fn captured_binding(&self, id: FlowCapturedBindingId) -> &super::FlowBindingIdentity {
+        &self.captured_bindings[id.index()]
+    }
+
+    /// The node for one graph-owned captured binding.
+    #[must_use]
+    pub fn captured_binding_node(&self, id: FlowCapturedBindingId) -> FlowNodeId {
+        verter_debug_assert!(id.index() < self.captured_bindings.len());
+        FlowNodeId(
+            self.binding_count
+                + self.expr_site_count
+                + self.return_site_count
+                + self.region_count
+                + id.0,
+        )
+    }
+
     /// What `node` stands for.
     #[must_use]
     pub fn node_kind(&self, node: FlowNodeId) -> FlowNodeKind {
@@ -224,7 +277,11 @@ impl FunctionFlowGraph {
         if index < self.return_site_count {
             return FlowNodeKind::ReturnSite(SkeletonReturnSiteId::from_index(index));
         }
-        FlowNodeKind::Region(SkeletonRegionId::from_index(index - self.return_site_count))
+        let index = index - self.return_site_count;
+        if index < self.region_count {
+            return FlowNodeKind::Region(SkeletonRegionId::from_index(index));
+        }
+        FlowNodeKind::CapturedBinding(FlowCapturedBindingId(index - self.region_count))
     }
 
     /// The out-edges of `node`, source-ordered within each class.
@@ -281,15 +338,62 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
         |name: super::FlowNameId, region: SkeletonRegionId| -> Vec<SkeletonBindingId> {
             skeleton.bindings_of_name_in_scope(name, region)
         };
+    let mut runtime_bindings: FxHashMap<SkeletonBindingId, Vec<SkeletonBindingId>> =
+        FxHashMap::default();
+    for (ordinal, binding) in skeleton.bindings.iter().enumerate() {
+        if let Some(runtime) = binding.runtime_binding {
+            runtime_bindings
+                .entry(runtime)
+                .or_default()
+                .push(SkeletonBindingId::from_index(ordinal as u32));
+        }
+    }
+    let local_targets = |binding: Option<&FlowBindingRef>, name, region| match binding {
+        Some(FlowBindingRef::Local(binding)) => {
+            runtime_bindings.get(binding).cloned().unwrap_or_default()
+        }
+        Some(FlowBindingRef::Captured(_)) => Vec::new(),
+        None => bindings_of_name_in_scope(name, region),
+    };
+    let capture_offset = binding_count + expr_site_count + return_site_count + region_count;
+    let mut captured_bindings = Vec::new();
+    let mut capture_nodes = FxHashMap::default();
+    for binding in skeleton
+        .expr_sites
+        .iter()
+        .flat_map(|site| site.reads.iter().filter_map(|read| read.binding.as_ref()))
+        .chain(
+            skeleton
+                .writes
+                .iter()
+                .filter_map(|write| write.binding.as_ref()),
+        )
+    {
+        if let FlowBindingRef::Captured(identity) = binding {
+            capture_nodes.entry(identity).or_insert_with(|| {
+                let node = FlowNodeId(capture_offset + captured_bindings.len() as u32);
+                captured_bindings.push(identity.clone());
+                node
+            });
+        }
+    }
 
     let mut edges: Vec<(FlowNodeId, FlowNodeId, FlowEdgeKind)> = Vec::new();
     // Read / call-effect edges deduplicate per (from, to, class); write and
     // shape edges are never deduplicated — distinct definitions and
     // distinct entries are distinct dependence facts.
     let mut seen: FxHashSet<(u32, u32, FlowEdgeClass)> = FxHashSet::default();
+    let mut seen_reads = FxHashSet::default();
 
     // Region nesting.
     for (index, region) in skeleton.regions.iter().enumerate() {
+        if let Some(input) = region.control_input {
+            edges.push((
+                region_node(SkeletonRegionId::from_index(index as u32)),
+                site_node(input),
+                FlowEdgeKind::ControlInput,
+            ));
+        }
         if let Some(parent) = region.parent {
             edges.push((
                 region_node(SkeletonRegionId::from_index(index as u32)),
@@ -319,10 +423,37 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
         let node = site_node(id);
         edges.push((node, region_node(site.region), FlowEdgeKind::ControlRegion));
         for read in site.reads.iter() {
-            for binding in bindings_of_name_in_scope(read.name, site.region) {
-                let to = binding_node(binding);
-                if seen.insert((node.0, to.0, FlowEdgeClass::ValueDef)) {
-                    edges.push((node, to, FlowEdgeKind::ValueDef));
+            let projection: Arc<[FlowNameId]> = read
+                .path
+                .iter()
+                .map(|segment| match segment {
+                    SkeletonPathSegment::Static(name) => Some(*name),
+                    SkeletonPathSegment::Computed => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default()
+                .into();
+            let local_nodes = local_targets(read.binding.as_ref(), read.name, site.region)
+                .into_iter()
+                .map(binding_node);
+            let captured_node = if let Some(FlowBindingRef::Captured(identity)) = &read.binding {
+                capture_nodes.get(identity).copied()
+            } else {
+                None
+            };
+            for to in local_nodes.chain(captured_node) {
+                if seen_reads.insert((node.0, to.0, Arc::clone(&projection))) {
+                    edges.push((
+                        node,
+                        to,
+                        if projection.is_empty() {
+                            FlowEdgeKind::ValueDef
+                        } else {
+                            FlowEdgeKind::ReadProjection {
+                                path: Arc::clone(&projection),
+                            }
+                        },
+                    ));
                 }
             }
         }
@@ -373,6 +504,7 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
                                 node,
                                 site_node(*value),
                                 FlowEdgeKind::PathWrite {
+                                    source: PathWriteSource::ObjectLiteralEntry,
                                     path,
                                     certainty: SkeletonWriteCertainty::Definite,
                                 },
@@ -383,6 +515,7 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
                                 node,
                                 site_node(*source),
                                 FlowEdgeKind::PathWrite {
+                                    source: PathWriteSource::ObjectLiteralEntry,
                                     path: Arc::from(
                                         vec![SkeletonPathSegment::Computed].into_boxed_slice(),
                                     ),
@@ -403,8 +536,15 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
             continue;
         };
         let provider = site_node(write.value.unwrap_or(write.site));
-        for binding in bindings_of_name_in_scope(name, write.region) {
-            let hub = binding_node(binding);
+        let local_nodes = local_targets(write.binding.as_ref(), name, write.region)
+            .into_iter()
+            .map(binding_node);
+        let captured_node = if let Some(FlowBindingRef::Captured(identity)) = &write.binding {
+            capture_nodes.get(identity).copied()
+        } else {
+            None
+        };
+        for hub in local_nodes.chain(captured_node) {
             if write.path.is_empty() && matches!(write.certainty, SkeletonWriteCertainty::Definite)
             {
                 edges.push((hub, provider, FlowEdgeKind::ValueDef));
@@ -413,18 +553,15 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
                     hub,
                     provider,
                     FlowEdgeKind::PathWrite {
+                        source: PathWriteSource::Assignment,
                         path: Arc::clone(&write.path),
                         certainty: write.certainty,
                     },
                 ));
             }
             let effect_from = site_node(write.site);
-            if seen.insert((
-                effect_from.0,
-                binding_node(binding).0,
-                FlowEdgeClass::EvalEffect,
-            )) {
-                edges.push((effect_from, binding_node(binding), FlowEdgeKind::EvalEffect));
+            if seen.insert((effect_from.0, hub.0, FlowEdgeClass::EvalEffect)) {
+                edges.push((effect_from, hub, FlowEdgeKind::EvalEffect));
             }
             // The REVERSE effect edge: a slice that selects the slot's hub
             // must select the write site's evaluation, because the demand
@@ -432,12 +569,8 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
             // `site → hub` direction alone, a standalone preceding write
             // (`x = "s"; return x`) is never reached, and its effect
             // obligation silently drops out of the lowered slice.
-            if seen.insert((
-                binding_node(binding).0,
-                effect_from.0,
-                FlowEdgeClass::EvalEffect,
-            )) {
-                edges.push((binding_node(binding), effect_from, FlowEdgeKind::EvalEffect));
+            if seen.insert((hub.0, effect_from.0, FlowEdgeClass::EvalEffect)) {
+                edges.push((hub, effect_from, FlowEdgeKind::EvalEffect));
             }
         }
     }
@@ -460,7 +593,7 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
 
     // CSR finalize: stable-sort by `from` (emission order is source order
     // within a node), assign per-(from, class) ordinals, build offsets.
-    let node_count = (binding_count + expr_site_count + return_site_count + region_count) as usize;
+    let node_count = capture_offset as usize + captured_bindings.len();
     let mut order: Vec<usize> = (0..edges.len()).collect();
     order.sort_by_key(|&index| edges[index].0 .0);
     let mut finalized: Vec<FlowEdge> = Vec::with_capacity(edges.len());
@@ -498,6 +631,7 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
         expr_site_count,
         return_site_count,
         region_count,
+        captured_bindings: captured_bindings.into(),
         edges: Arc::from(finalized.into_boxed_slice()),
         offsets: Arc::from(offsets.into_boxed_slice()),
     }

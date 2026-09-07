@@ -52,6 +52,65 @@ fn skeleton_of(source: &str) -> FunctionBodySkeleton {
     parse_and_build(source, first_function, |skeleton| skeleton)
 }
 
+#[test]
+fn indexed_skeleton_retains_exact_nested_capture_paths_and_runtime_aliases() {
+    use crate::analysis::function_program::build_function_program_index;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    let source =
+        "function f(x) { {var x;} let unused = 0; { let x = {a: 1}; return () => () => x.a; } }";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty());
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let index =
+        build_function_program_index(&parsed.program, source, &owners, Arc::from("/capture.ts"));
+    let entry = index.matches_named("f").next().unwrap().entry();
+    let prepared =
+        build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+    let skeleton = &prepared.skeleton;
+    let xs: Vec<_> = skeleton
+        .bindings_named(skeleton.name_id("x").unwrap())
+        .collect();
+    assert_eq!(xs.len(), 3);
+    assert_ne!(
+        prepared.bindings.identity(xs[0]),
+        prepared.bindings.identity(xs[1])
+    );
+    assert_eq!(
+        skeleton.binding(xs[0]).runtime_binding,
+        skeleton.binding(xs[1]).runtime_binding
+    );
+    assert_ne!(
+        skeleton.binding(xs[0]).runtime_binding,
+        skeleton.binding(xs[2]).runtime_binding
+    );
+    let closure = skeleton
+        .expr_sites
+        .iter()
+        .find(|site| !site.capture_bindings.is_empty())
+        .unwrap();
+    assert_eq!(
+        closure.capture_bindings.as_ref(),
+        &[FlowBindingRef::Local(xs[2])]
+    );
+    assert_eq!(closure.reads.len(), 1);
+    assert_eq!(closure.reads[0].binding, Some(FlowBindingRef::Local(xs[2])));
+    assert_eq!(
+        closure.reads[0].path.as_ref(),
+        &[SkeletonPathSegment::Static(skeleton.name_id("a").unwrap())]
+    );
+    let start = source.rfind("x.a").unwrap() as u32;
+    assert_eq!(
+        closure.reads[0].span,
+        FrameSpan::rebase(0, verter_span::Span::new(start, start + 1))
+    );
+    assert_eq!(
+        skeleton.return_sites.len(),
+        1,
+        "nested frame bodies are never walked"
+    );
+}
+
 fn binding<'a>(skeleton: &'a FunctionBodySkeleton, name: &str) -> &'a SkeletonBinding {
     let id = skeleton
         .name_id(name)

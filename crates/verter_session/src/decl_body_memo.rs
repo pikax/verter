@@ -1216,7 +1216,24 @@ impl DeclBodyMemo {
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
     ) -> Option<verter_semantic::analysis::flow::FunctionBodySkeleton> {
-        let service = self.service.as_ref()?;
+        self.function_flow_structure(entry)
+            .ok()
+            .flatten()
+            .map(|prepared| prepared.skeleton)
+    }
+
+    /// Build the current frame with the index's retained closure-access facts,
+    /// returning its exact binding map with the structure for shared publication.
+    pub fn function_flow_structure(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+    ) -> Result<
+        Option<verter_semantic::analysis::flow::PreparedFunctionBodySkeleton>,
+        verter_semantic::analysis::flow::FlowBindingMapError,
+    > {
+        let Some(service) = self.service.as_ref() else {
+            return Ok(None);
+        };
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
@@ -1224,7 +1241,7 @@ impl DeclBodyMemo {
         let Some(skeleton) = service.run_leased(&self.key, move |program| {
             program.and_then(|p| {
                 use verter_semantic::analysis::flow::{
-                    build_function_body_skeleton, FunctionBodySource,
+                    build_indexed_function_body_skeleton, FunctionBodySource,
                 };
                 use verter_semantic::analysis::function_program::{
                     resolve_function_node, FunctionNode,
@@ -1240,7 +1257,7 @@ impl DeclBodyMemo {
                     }
                     FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
                 };
-                Some(build_function_body_skeleton(&source))
+                Some(build_indexed_function_body_skeleton(&source, &entry))
             })
         }) else {
             // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
@@ -1250,9 +1267,9 @@ impl DeclBodyMemo {
                 "decl-body lease pin broken: function_body_skeleton's lease-only run missed \
                  the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
             );
-            return None;
+            return Ok(None);
         };
-        skeleton
+        skeleton.transpose()
     }
 
     /// Transient typed IR for one indexed declaration expression. The retained

@@ -63,8 +63,14 @@ use verter_semantic::analysis::flow::lower::lower_slice_plan;
 use verter_semantic::analysis::flow::peeker::{
     FlowSliceBudget, FlowSliceBudgetExceeded, ReturnPathPeeker, SliceDemand,
 };
-use verter_semantic::analysis::flow::{FlowBindingMap, FlowBindingMapError, FunctionBodySkeleton};
-use verter_semantic::analysis::function_program::{FunctionProgramEntry, FunctionProgramKey};
+#[cfg(any(test, feature = "test-support"))]
+use verter_semantic::analysis::flow::prepare_function_body_skeleton;
+use verter_semantic::analysis::flow::{
+    FlowBindingMap, FlowBindingMapError, FunctionBodySkeleton, PreparedFunctionBodySkeleton,
+};
+#[cfg(any(test, feature = "test-support"))]
+use verter_semantic::analysis::function_program::FunctionProgramEntry;
+use verter_semantic::analysis::function_program::FunctionProgramKey;
 
 use super::admission::{CacheAdmission, CacheEntry, NonAdmissionReason};
 use super::node::{ArtifactNode, ComputeCtx, QueryFlightKey};
@@ -241,10 +247,10 @@ impl FlowBodySkeletonSource for RetainedSnapshotSkeletonSource {
         {
             return Ok(None);
         }
-        let Some(skeleton) = decl_bodies.function_body_skeleton(entry) else {
+        let Some(prepared) = decl_bodies.function_flow_structure(entry)? else {
             return Ok(None);
         };
-        build_bundle(skeleton, entry).map(Some)
+        Ok(Some(build_prepared_bundle(prepared)))
     }
 }
 
@@ -263,17 +269,24 @@ pub(crate) struct FlowGraphBundle {
 /// The one bundle construction. Bindings come from the pinned indexed
 /// entry, and the graph derives from the skeleton alone. No demand or
 /// caller-authored inventory can initialize the cached binding authority.
+#[cfg(any(test, feature = "test-support"))]
 fn build_bundle(
     skeleton: FunctionBodySkeleton,
     entry: &FunctionProgramEntry,
 ) -> Result<FlowGraphBundle, FlowBindingMapError> {
-    let bindings = FlowBindingMap::build(&skeleton, &entry.bindings, &entry.key, entry.span.start)?;
+    Ok(build_prepared_bundle(prepare_function_body_skeleton(
+        skeleton, entry,
+    )?))
+}
+
+fn build_prepared_bundle(prepared: PreparedFunctionBodySkeleton) -> FlowGraphBundle {
+    let PreparedFunctionBodySkeleton { skeleton, bindings } = prepared;
     let graph = build_function_flow_graph(&skeleton);
-    Ok(FlowGraphBundle {
+    FlowGraphBundle {
         skeleton: Arc::new(skeleton),
         bindings: Arc::new(bindings),
         graph: Arc::new(graph),
-    })
+    }
 }
 
 /// A flow graph bundle SEALED to the store key it was built for. Fields
