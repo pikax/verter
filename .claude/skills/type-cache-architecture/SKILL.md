@@ -113,6 +113,8 @@ inventories must never initialize a cached map. A correspondence error remains a
 typed source/store error, publishes nothing, and follows failed non-admission at
 the hash/lower nodes; it is never cached as absence or replaced by an empty map.
 
+The retained parse owns an immutable callable/call address table initialized once with its function index. Exact-key lease callbacks borrow that table; arena references remain on the worker and never enter `FlowGraphBundle` or the shared index. Locator misses stay misses and never trigger sibling-body rediscovery.
+
 `DeclBodyMemo::function_flow_structure` invokes the indexed current-frame
 builder under the retained parse lease and returns `PreparedFunctionBodySkeleton`
 (skeleton and binding map together, private fields with immutable views). The production graph builder accepts only that prepared witness, and never resolves names. Nested capture subjects, including write-only captures, and actual read paths come from the pinned

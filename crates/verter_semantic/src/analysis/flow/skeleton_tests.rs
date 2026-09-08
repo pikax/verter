@@ -204,7 +204,7 @@ fn prepared_graph_does_not_resolve_free_parameter_inputs_as_body_bindings() {
             .find(|read| read.name.as_ref() == "seed")
             .unwrap_or_else(|| panic!("default read is indexed: {:?}", entry.references));
         assert!(
-            reference.binding.is_none(),
+            reference.binding == crate::analysis::function_program::FunctionReferenceBinding::Free,
             "the default sees the outer environment"
         );
         let prepared =
@@ -784,6 +784,120 @@ fn prepared_occurrences_distinguish_free_shadowed_and_captured_targets() {
                 bindings.occurrence(frame_span(read, 5)),
                 bindings.occurrence(frame_span(write, 5))
             );
+        }
+    }
+}
+
+#[test]
+fn prepared_class_occurrences_distinguish_outer_free_and_static_local_bindings() {
+    use crate::analysis::function_program::build_function_program_index_with_nodes;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    let source = "function f(x) { class C { static { touch(); var touch; { let x; x = 1; } x = 2; try {} catch (caught) { caught = 3; } for (let item of []) { item = 4; } } static { touch(); x = 5; } method() { deferred(); } p = deferredInit(); static p = immediate(); } const named = class own { static { own(); } }; return x; }";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let (index, nodes) = build_function_program_index_with_nodes(
+        &parsed.program,
+        source,
+        &owners,
+        Arc::from("/class.ts"),
+    );
+    let entry = index.matches_named("f").next().unwrap().entry();
+    let prepared =
+        build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+    let occurrence = |needle: &str, name: &str| {
+        let start = source.find(needle).unwrap() as u32;
+        prepared.bindings().occurrence(FrameSpan::rebase(
+            entry.span.start,
+            verter_span::Span::new(start, start + name.len() as u32),
+        ))
+    };
+    for (needle, name) in [
+        ("touch(); var", "touch"),
+        ("x = 1", "x"),
+        ("caught = 3", "caught"),
+        ("item = 4", "item"),
+        ("own();", "own"),
+    ] {
+        assert_eq!(
+            occurrence(needle, name),
+            FlowBindingOccurrence::UnmodeledLocal,
+            "{needle}"
+        );
+    }
+    assert_eq!(
+        occurrence("touch(); x", "touch"),
+        FlowBindingOccurrence::Free
+    );
+    assert!(matches!(
+        occurrence("x = 2", "x"),
+        FlowBindingOccurrence::Resolved(FlowBindingRef::Local(_))
+    ));
+    assert_eq!(occurrence("x = 2", "x"), occurrence("x = 5", "x"));
+    assert_eq!(
+        occurrence("deferred();", "deferred"),
+        FlowBindingOccurrence::Missing
+    );
+    assert_eq!(
+        occurrence("deferredInit();", "deferredInit"),
+        FlowBindingOccurrence::Missing
+    );
+    assert_eq!(
+        occurrence("immediate();", "immediate"),
+        FlowBindingOccurrence::Free
+    );
+    for text in ["touch()", "own()", "immediate()"] {
+        let start = source.find(text).unwrap() as u32;
+        assert!(
+            nodes
+                .call(verter_span::Span::new(start, start + text.len() as u32))
+                .is_some(),
+            "evaluated call has retained address: {text}"
+        );
+    }
+    assert!(entry
+        .bindings
+        .iter()
+        .all(|binding| !["touch", "caught", "item", "own"].contains(&binding.name.as_ref())));
+}
+
+#[test]
+fn runtime_shape_preserves_parameter_var_and_pattern_alias_boundaries() {
+    use crate::analysis::function_program::build_function_program_index;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    let source = "function f(p,q,r) { var p; var [q] = []; { let q = 0; q; } return r; }";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty());
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let index =
+        build_function_program_index(&parsed.program, source, &owners, Arc::from("/runtime.ts"));
+    let entry = index.matches_named("f").next().unwrap().entry();
+    let prepared =
+        build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+    for (ordinal, binding) in prepared.skeleton().bindings.iter().enumerate() {
+        let local = SkeletonBindingId::from_index(ordinal as u32);
+        let shape = prepared.bindings().runtime_shape(local);
+        let name = prepared.bindings().identity(local).unwrap().name.as_ref();
+        if name == "p" {
+            assert_eq!(
+                shape,
+                FlowRuntimeBindingShape {
+                    has_var: true,
+                    has_destructured_var: false
+                }
+            );
+        } else if name == "q" && binding.kind != SkeletonBindingKind::Let {
+            assert_eq!(
+                shape,
+                FlowRuntimeBindingShape {
+                    has_var: true,
+                    has_destructured_var: true
+                }
+            );
+        } else {
+            assert_eq!(shape, FlowRuntimeBindingShape::default());
         }
     }
 }

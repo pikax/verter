@@ -2171,6 +2171,23 @@ fn function_program_index_builds_once_and_covers_every_function_position() {
         Arc::ptr_eq(&first, &second),
         "the index builds once per file artifact"
     );
+    let owners = Arc::clone(&memo.owner_table);
+    let canonical = Arc::clone(&memo.key.canonical);
+    let parse_env_hash = memo.key.parse_env_hash;
+    let retained = memo
+        .service
+        .as_ref()
+        .unwrap()
+        .run_leased(&memo.key, move |parsed| {
+            parsed
+                .unwrap()
+                .function_program_index(&owners, canonical, &parse_env_hash)
+        })
+        .unwrap();
+    assert!(
+        Arc::ptr_eq(&first, &retained),
+        "memo and retained table share one folded index allocation"
+    );
 }
 
 #[test]
@@ -2242,4 +2259,40 @@ fn function_program_index_hash_tracks_body_content_across_files() {
         hash_of(&memo_c),
         "a literal body edit changes the hash"
     );
+}
+
+#[test]
+fn retained_nested_function_demands_do_not_rediscover_sibling_bodies() {
+    use verter_semantic::analysis::function_program::take_nested_callable_walk_visits_for_tests;
+    let siblings: String = (0..64)
+        .map(|i| format!("const value{i} = () => invoke({i});"))
+        .collect();
+    let source = format!("function root() {{ {siblings} return () => 99; }}");
+    let (memo, provenance) = memo_for(&source);
+    let index = memo.function_program_index();
+    let children: Vec<_> = index
+        .matches_named("root")
+        .filter(|matched| matched.entry().lexical_parent.is_some())
+        .map(|matched| matched.entry().clone())
+        .collect();
+    assert_eq!(children.len(), 65);
+    let service = memo.service.as_ref().unwrap();
+    service
+        .run_leased(&memo.key, |_| take_nested_callable_walk_visits_for_tests())
+        .unwrap();
+    let parse_count = parses(&provenance);
+    for child in &children {
+        assert!(memo.function_flow_structure(child).unwrap().is_some());
+        for call in child.call_sites.iter() {
+            assert!(memo.indexed_call_expression_at(call.span).is_some());
+        }
+    }
+    let visits = service
+        .run_leased(&memo.key, |_| take_nested_callable_walk_visits_for_tests())
+        .unwrap();
+    assert_eq!(
+        visits, 0,
+        "demanded children must use retained exact addresses, never rediscover siblings"
+    );
+    assert_eq!(parses(&provenance), parse_count);
 }
