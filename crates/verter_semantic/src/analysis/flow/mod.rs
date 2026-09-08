@@ -39,7 +39,10 @@ use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_no_typeexpr::NoTypeExpr;
 
-pub use binding::{FlowBindingMap, FlowBindingMapError, FlowBindingOccurrence, FlowBindingRef};
+pub use binding::{
+    FlowBindingMap, FlowBindingMapError, FlowBindingOccurrence, FlowBindingRef,
+    FlowRuntimeBindingShape,
+};
 pub use frame_span::FrameSpan;
 
 pub mod binding;

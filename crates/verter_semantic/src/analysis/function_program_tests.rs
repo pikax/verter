@@ -38,7 +38,7 @@ fn lexical_resolution_visits_only_candidates_of_the_referenced_name() {
         assert!(entry
             .references
             .iter()
-            .all(|reference| reference.binding.is_some()));
+            .all(|reference| matches!(reference.binding, FunctionReferenceBinding::Resolved(_))));
         assert_eq!(LEXICAL_CANDIDATE_VISITS.with(std::cell::Cell::get), count);
 
         let mut siblings = String::from("function f() {");
@@ -55,7 +55,8 @@ fn lexical_resolution_visits_only_candidates_of_the_referenced_name() {
             .map(|reference| {
                 reference
                     .binding
-                    .clone()
+                    .resolved()
+                    .cloned()
                     .expect("each read resolves locally")
             })
             .collect();
@@ -202,7 +203,9 @@ fn indexed_write_targets_preserve_captures_and_sibling_shadows() {
             .iter()
             .flat_map(|write| write.targets.iter())
             .filter_map(|target| match target {
-                FunctionWriteTarget::Binding { reference, .. } => reference.binding.clone(),
+                FunctionWriteTarget::Binding { reference, .. } => {
+                    reference.binding.resolved().cloned()
+                }
                 FunctionWriteTarget::Unsupported { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -1424,5 +1427,90 @@ fn exact_function_key_lookup_does_not_scan_sibling_functions() {
         visits <= keys.len() * 2,
         "exact lookup must index keys once, not scan siblings: {visits} for {} keys",
         keys.len()
+    );
+}
+
+#[test]
+fn exact_value_function_lookup_does_not_scan_sibling_functions() {
+    let source: String = (0..128)
+        .map(|ordinal| format!("function value{ordinal}() {{ return {ordinal}; }}"))
+        .collect();
+    let index = index_of(&source);
+    super::FUNCTION_VALUE_LOOKUP_VISITS.with(|visits| visits.set(0));
+    for entry in index.entries.iter() {
+        let key = &entry.key;
+        assert_eq!(
+            index
+                .value_function(
+                    key.declaration.owner,
+                    &key.declaration.name,
+                    &key.part,
+                    key.overload_ordinal
+                )
+                .unwrap()
+                .key(),
+            key
+        );
+    }
+    let visits = super::FUNCTION_VALUE_LOOKUP_VISITS.with(|visits| visits.get());
+    assert!(
+        visits <= index.len() * 2,
+        "value lookup must not scan sibling entries: {visits}"
+    );
+}
+
+#[test]
+fn retained_function_addresses_preserve_exact_locator_metadata() {
+    let source = "namespace N { export const arrow = () => 0; export class Box<T> { method<U>(x:T) { return () => x; } field = () => 1; } } const named = function internal(){ return named(); }; const obj = { method() { return () => 2; } }; function root() { return () => ({ method(){ return () => 3; } }); }";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let (index, nodes) = build_function_program_index_with_nodes(
+        &parsed.program,
+        source,
+        &owners,
+        Arc::from("/retained.ts"),
+    );
+    for entry in index.entries.iter() {
+        let expected = resolve_function_node(&parsed.program, &entry.locator).unwrap();
+        let actual = nodes.get(&entry.key).unwrap();
+        assert_eq!(actual.node.span(), expected.node.span());
+        assert_eq!(actual.self_name, expected.self_name, "{:?}", entry.key);
+        assert_eq!(
+            actual.enclosing_type_parameters.map(GetSpan::span),
+            expected.enclosing_type_parameters.map(GetSpan::span),
+            "{:?}",
+            entry.key
+        );
+        for call in entry.call_sites.iter() {
+            assert_eq!(
+                verter_span::Span::from(nodes.call(call.span).unwrap().span),
+                call.span
+            );
+        }
+    }
+}
+
+#[test]
+fn class_evaluation_occurrences_are_indexed_without_promoting_static_locals() {
+    let index = index_of(
+        "function f(x) { class C { static { touch(); x = 1; let y = 0; y = 1; } } return x; }",
+    );
+    let entry = entry_of(&index, "f");
+    assert!(
+        entry
+            .references
+            .iter()
+            .any(|reference| reference.name.as_ref() == "touch"),
+        "class evaluation call roots must be indexed"
+    );
+    assert!(entry.writes.iter().flat_map(|write| write.targets.iter()).any(|target| matches!(target, FunctionWriteTarget::Binding { reference, .. } if reference.name.as_ref() == "x" && matches!(reference.binding, FunctionReferenceBinding::Resolved(_)))), "class evaluation writes retain their exact enclosing binding");
+    assert!(
+        !entry
+            .bindings
+            .iter()
+            .any(|binding| binding.name.as_ref() == "y"),
+        "static-block locals never enter the function's runtime inventory"
     );
 }
