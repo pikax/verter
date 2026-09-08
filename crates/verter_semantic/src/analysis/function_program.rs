@@ -716,9 +716,14 @@ impl<'a> FunctionProgramMatch<'a> {
 pub struct FunctionProgramIndex {
     /// Every served function position, in source order.
     entries: Arc<[FunctionProgramEntry]>,
+    by_key: Arc<rustc_hash::FxHashMap<FunctionProgramKey, usize>>,
+    nested: Arc<rustc_hash::FxHashMap<(FunctionProgramKey, verter_span::Span), usize>>,
     /// Indexed declaration/callback expressions, in source order.
     expressions: Arc<[ProgramExpressionRecord]>,
 }
+
+#[cfg(test)]
+std::thread_local! { static FUNCTION_KEY_LOOKUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 impl FunctionProgramIndex {
     /// Locate one exact child position in the retained file inventory.
@@ -727,18 +732,20 @@ impl FunctionProgramIndex {
         parent: &FunctionProgramKey,
         span: verter_span::Span,
     ) -> Option<FunctionProgramMatch<'_>> {
-        self.entries
-            .iter()
-            .find(|entry| entry.lexical_parent.as_deref() == Some(parent) && entry.span == span)
-            .map(|entry| FunctionProgramMatch { entry })
+        let ordinal = *self.nested.get(&(parent.clone(), span))?;
+        Some(FunctionProgramMatch {
+            entry: &self.entries[ordinal],
+        })
     }
     /// The entry for `key`, when the position is served by this file.
     #[must_use]
     pub fn get(&self, key: &FunctionProgramKey) -> Option<FunctionProgramMatch<'_>> {
-        self.entries
-            .iter()
-            .find(|entry| &entry.key == key)
-            .map(|entry| FunctionProgramMatch { entry })
+        #[cfg(test)]
+        FUNCTION_KEY_LOOKUP_VISITS.with(|visits| visits.set(visits.get() + 1));
+        let ordinal = *self.by_key.get(key)?;
+        Some(FunctionProgramMatch {
+            entry: &self.entries[ordinal],
+        })
     }
 
     /// The entry for a value-space function declaration / initializer of
@@ -812,6 +819,8 @@ impl FunctionProgramIndex {
                     .into_boxed_slice(),
             ),
             expressions: Arc::clone(&self.expressions),
+            by_key: Arc::clone(&self.by_key),
+            nested: Arc::clone(&self.nested),
         }
     }
 
@@ -890,7 +899,19 @@ pub fn build_function_program_index(
     resolve_direct_calls(&mut ctx.entries);
     link_callback_return_sources(&ctx.canonical_id, &mut ctx.entries, &mut ctx.expressions);
     ctx.expressions.sort_by_key(|record| record.span.start);
+    let mut by_key = rustc_hash::FxHashMap::default();
+    let mut nested = rustc_hash::FxHashMap::default();
+    for (ordinal, entry) in ctx.entries.iter().enumerate() {
+        by_key.entry(entry.key.clone()).or_insert(ordinal);
+        if let Some(parent) = &entry.lexical_parent {
+            nested
+                .entry((parent.as_ref().clone(), entry.span))
+                .or_insert(ordinal);
+        }
+    }
     FunctionProgramIndex {
+        by_key: Arc::new(by_key),
+        nested: Arc::new(nested),
         entries: Arc::from(ctx.entries.into_boxed_slice()),
         expressions: Arc::from(ctx.expressions.into_boxed_slice()),
     }
