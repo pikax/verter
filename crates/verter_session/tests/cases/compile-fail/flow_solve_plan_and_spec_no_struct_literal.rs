@@ -14,7 +14,6 @@ use verter_session::for_tests::{FlowDemandPlan, FlowExecutionSelection, FlowObli
 fn construct_plan() {
     let _ = FlowDemandPlan {
         execution: todo!(),
-        checker_capture_returns: todo!(),
         required_domains: todo!(),
         required_fact_families: todo!(),
         registry_closure: todo!(),

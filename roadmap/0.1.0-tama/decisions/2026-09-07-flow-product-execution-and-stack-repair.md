@@ -83,7 +83,7 @@ or repeated idempotence checks over unchanged predecessor snapshots.
 - Apply explicit executed transfers transactionally. Binding writes invalidate their
   matching narrowing facts; the presence of a write dependency elsewhere is not an
   executed write. Successful unchanged work contributes exact domain/subject evidence.
-- Join the actual incoming continuation snapshots once through exhaustive domain
+- Join the continuation snapshots supplied by the existing interpreter through domain
   joins and the canonical semantic algebra. Preserve reaching definitions, declared
   types, definite-assignment metadata, member-path narrowing, and canonical widening
   provenance. A failure exposes no partially accepted result or completion evidence.
@@ -102,61 +102,30 @@ or repeated idempotence checks over unchanged predecessor snapshots.
   the shared peeker, including captured writes and their governing control inputs.
   Bound projection states explicitly so growing paths terminate with typed refusal.
 
-## Completion routing and checker inference
+## Scope boundary and successor ownership
 
-The 2026-09-08 integrated review confirms that clause outcomes must retain their
-evaluated normal continuation and pending completion states. Syntax-only fallthrough
-cannot revive a terminated state. Evaluate `finally` through the existing interpreter
-for each corresponding incoming completion; a broadly joined normal-and-exceptional
-endpoint is not a transferable result of a conditional clause. Preserve narrowing
-from actual surviving states instead of restoring guards killed by executed writes.
-Switch refinement updates reaching type and the matching narrowing position atomically
-without inventing an assignment or discarding unrelated member facts.
+The maintainer's 2026-09-08 scope clarification excludes successor implementation.
+Source comparison confirms that ignored evaluated clause/case fallthrough, broadly
+joined finally endpoint replay, entry-guard restoration and reaching-type-only switch
+refinement predate the product migration. They are not migration regressions, and
+this repair does not redefine their behavior. D4 owns the narrowing corrections;
+D6 owns exact structural completion and G10 under AMD-004. Their charters record the
+concrete cases. Existing partial/cold boundaries and checker-correct warm rows remain
+in force; no compensating syntax-only refusal is introduced.
 
-Clause-scoped assertion cleanup projects entry narrowing facts only onto runtime
-roots without executed write or invalidation receipts since that clause's entry.
-An unchanged write or later assertion cannot restore an invalidated entry guard.
-Conversely, strengthening a guard without a write must not discard the valid outer
-guard when leaving the clause. The shared kernel normalizes aliases, validates all
-scopes and product capacity, and publishes only the narrowing replacement atomically;
-reaching values, reaching types, assignment state and authored authority remain intact.
-This projection grants no execution evidence.
+Retain the existing control interpreter and its completion policy while transporting
+its selected products through the shared kernel. The late per-completion frontier,
+checker-permit/result-contract v6, entry-guard projection and child-site receipt
+prototype is excluded from this candidate. It supplies no accepted predecessor or
+required design for D4–D6. D5 retains capture freshness/effects and call-argument
+closure bridging; this repair's Value/Effect classification is not their completion.
 
-The result contract remains checker type inference, including its existing authored
-return and abrupt-break policy. A pending break may carry an explicitly typed checker
-snapshot projected from the same execution, alongside the actual completion state.
-An outer `finally` reads the actual state; the matching inference target reads the
-checker projection. Scope closure applies to both. A replaced pending completion must
-not revive a runtime exit. Conservative entry and catch-consumed throw states may
-participate in authored-return inference only as tagged checker-only lanes. Their
-products, walks and child results cannot supply missing actual execution evidence or
-rescue an aborted required lane. This projection uses the same product authority;
-it is not an independently mutable inference store or a second interpreter.
-
-Result-contract descriptor v6 explicitly registers `AuthoredFinallyReturn` and
-`OverriddenBreakSuffix` as checker return capture-processing rules for `FlowReturn`.
-The closed policy is encoded in the result identity. Exact capture receipts retain
-their selected parent expression site, capture identity and observation purpose.
-Checker route permits are private to the actual control-policy seams; their receipts
-are staged until the successful return route contributes to the checker result.
-Only an Effect-capture requirement may accept such a receipt, and only alongside a
-completed required runtime walk. It never proves an actual runtime event, Value
-product, call or relation. Another site, discarded route or truncated required walk
-cannot borrow this permission. Distinct continuation purposes survive enclosing region
-boundaries; normal outputs with incompatible inference policies cannot be merged and
-relabelled as runtime execution.
-
-All completion evaluations share the same selected IR, execution capability,
-declaration bank and sticky failure state. Interpreter work has a monotonic limit
-separate from fixed-point iterations. Live owned completion frontiers have an
-execution-global capacity with RAII reservations acquired before storage growth and
-released when records are drained or dropped. Nested frontiers count together.
-Neither projection entry nor continuation replay resets either budget.
-
-Installed declaration fallback is indexed by the existing runtime storage group,
-with exact source authority first and source-order fallback among installed cells.
-Multiway reaching definitions are merged once under their distinct-width limit;
-neither operation repeatedly reconstructs or scans an accumulated prefix.
+The bounded performance corrections remain: installed declaration fallback uses the
+existing runtime storage group with exact source authority first and source-order
+fallback, and multiway reaching definitions merge once under their distinct-width
+limit. The live adapter consumes that indexed authority and uses canonical-identity
+set membership for finally-written roots, preserving the existing replay and fact
+order. Neither operation repeatedly scans an accumulated prefix.
 
 ## Legacy deletions
 
