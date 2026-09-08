@@ -1673,6 +1673,7 @@ pub(crate) fn build_flow_slice_content(
         source,
         &SignatureScope::Root,
         skeleton,
+        &bindings,
         anchor,
     ) {
         Ok(params) => params,
@@ -2600,6 +2601,7 @@ fn lower_params(
     source: &str,
     scope: &SignatureScope<'_, '_>,
     skeleton: &FunctionBodySkeleton,
+    bindings: &verter_semantic::analysis::flow::FlowBindingMap,
     anchor: u32,
 ) -> Result<Vec<SliceParam>, verter_type_expr::facts::InferenceUnavailableReason> {
     let binders = scope.param_binders();
@@ -2649,8 +2651,8 @@ fn lower_params(
                         _ => return None,
                     };
                     Some(SliceDestructuredElement {
-                        binding: skeleton
-                            .binding_at_span(FrameSpan::rebase(anchor, binding_span.into()))?,
+                        binding: bindings
+                            .declaration_at_span(FrameSpan::rebase(anchor, binding_span.into()))?,
                         name: binding,
                         key,
                         has_default,
@@ -2699,7 +2701,7 @@ fn lower_params(
         out.push(SliceParam {
             binding: match &param.pattern {
                 BindingPattern::BindingIdentifier(id) => {
-                    skeleton.binding_at_span(FrameSpan::rebase(anchor, id.span.into()))
+                    bindings.declaration_at_span(FrameSpan::rebase(anchor, id.span.into()))
                 }
                 _ => None,
             },
@@ -2726,7 +2728,7 @@ fn lower_params(
         out.push(SliceParam {
             binding: match &rest.rest.argument {
                 BindingPattern::BindingIdentifier(id) => {
-                    skeleton.binding_at_span(FrameSpan::rebase(anchor, id.span.into()))
+                    bindings.declaration_at_span(FrameSpan::rebase(anchor, id.span.into()))
                 }
                 _ => None,
             },
@@ -4429,7 +4431,7 @@ impl Lowerer<'_> {
                             SliceFreshness::Pinned
                         };
                         out.push(SliceStatement::Binding {
-                            binding: match self.skeleton.binding_at_span(self.rebase(id.span)) {
+                            binding: match self.bindings.declaration_at_span(self.rebase(id.span)) {
                                 Some(binding) => binding,
                                 None => {
                                     out.push(SliceStatement::Gap(
@@ -4694,7 +4696,7 @@ impl Lowerer<'_> {
                             binding: handler.param.as_ref().and_then(|param| {
                                 match &param.pattern {
                                     BindingPattern::BindingIdentifier(id) => {
-                                        self.skeleton.binding_at_span(self.rebase(id.span))
+                                        self.bindings.declaration_at_span(self.rebase(id.span))
                                     }
                                     _ => None,
                                 }
@@ -6954,11 +6956,27 @@ impl Lowerer<'_> {
             }
         }
         let nested_anchor = node_span(node).start;
+        let Some(entry) = self
+            .index
+            .nested_at(self.bindings.function(), node_span(node).into())
+        else {
+            return SliceExpr::UnmodeledBinding;
+        };
+        let entry = entry.entry();
+        let Ok(bindings) = verter_semantic::analysis::flow::FlowBindingMap::build(
+            &nested_skeleton,
+            &entry.bindings,
+            &entry.key,
+            nested_anchor,
+        ) else {
+            return SliceExpr::UnmodeledBinding;
+        };
         let params_result = lower_params(
             node.params(),
             self.source,
             &scope,
             &nested_skeleton,
+            &bindings,
             nested_anchor,
         );
         let type_parameters = lower_slice_type_params(node, self.source, &scope);
@@ -6977,21 +6995,6 @@ impl Lowerer<'_> {
                 self.budget_failure.get_or_insert(reason);
                 Vec::new()
             }
-        };
-        let Some(entry) = self
-            .index
-            .nested_at(self.bindings.function(), node_span(node).into())
-        else {
-            return SliceExpr::UnmodeledBinding;
-        };
-        let entry = entry.entry();
-        let Ok(bindings) = verter_semantic::analysis::flow::FlowBindingMap::build(
-            &nested_skeleton,
-            &entry.bindings,
-            &entry.key,
-            nested_anchor,
-        ) else {
-            return SliceExpr::UnmodeledBinding;
         };
         let control = Arc::clone(&entry.control);
         let captures = self.capture_scope_for(node_span(node));

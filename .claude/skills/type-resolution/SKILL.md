@@ -38,6 +38,8 @@ Binding-value obligations expand only for the sealed selection's value subjects.
 
 The retained parse worker lazily owns an immutable `FunctionProgramNodes` address table beside the content-free function index. The same discovery and reference walk registers callable keys and evaluated call spans, including class-evaluation calls. A second self-cell owns a reference-counted parse cell, and `OnceCell` initializes its table once on index demand. Lease-bound higher-ranked callbacks read exact registered addresses and return owned results; production never re-enumerates sibling bodies to dereference a function locator.
 
+Exact declaration addresses are prepared once by `FlowBindingMap::declaration_at_span`, with constant expected-time lookup by frame-relative identifier span. That lookup preserves authored declaration IDs, including distinct parameter/var redeclarations and shadowed binders; occurrence references and runtime aliases remain separate authorities. No content or parameter lowering may rediscover a declaration by scanning the frame inventory.
+
 Runtime alias declaration groups are prepared once on `FlowBindingMap::runtime_declarations` and borrowed in source order. `runtime_shape` retains constant-size var/pattern facts so repeated reads can classify parameter/var aliases without rescanning their declarations. Graph reads, writes and capture subjects target one canonical runtime binding hub; that hub links each distinct authored declaration once so alias fanout never multiplies access edges. `FunctionProgramIndex` retains exact key, value-function and nested-position indexes; keyed retrieval and stable-hash remapping reuse those indexes without scanning unrelated functions.
 
 ## Canonical Dependency Cache Rule
