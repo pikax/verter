@@ -472,6 +472,127 @@ fn continuation_joins_use_actual_predecessors_and_preserve_domain_rules() {
 }
 
 #[test]
+fn product_snapshots_and_evidence_are_predecessor_permutation_invariant() {
+    let fixture = flow_graph_fixture_for_tests(SOURCE, 1);
+    let plan = fixture.build_plan(request(0)).unwrap();
+    let inputs = fixture.product_inputs();
+    let (graph, number, string) = types();
+    let algebra = GraphSemanticAlgebra(&graph);
+    let domains = [
+        FlowDomain::ReachingValue,
+        FlowDomain::ReachingType,
+        FlowDomain::Narrowing,
+        FlowDomain::DeclaredType,
+        FlowDomain::DefiniteAssignment,
+    ];
+    let mut baseline = None;
+    // Both transfer arrival and the actual predecessor list vary. The graph,
+    // plan and semantic algebra remain the same; execution scopes are fresh.
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let mut execution =
+            FlowProductExecution::new(&inputs, &plan, FlowProductBudget::default()).unwrap();
+        let key = binding(&execution, &inputs, "x", FlowDomain::ReachingType);
+        let sites: Vec<_> = execution.selected_sites().take(3).collect();
+        assert_eq!(sites.len(), 3);
+        let mut states: [_; 3] = std::array::from_fn(|_| execution.empty_state());
+        for i in order {
+            for domain in domains {
+                let target = execution.key(domain, key.node()).unwrap();
+                let value = match domain {
+                    FlowDomain::ReachingValue => {
+                        FlowProductValue::ReachingValue(ReachingValueProduct::at(&sites[i]))
+                    }
+                    FlowDomain::ReachingType => reaching([number, string, number][i]),
+                    FlowDomain::Narrowing => {
+                        FlowProductValue::Narrowing(NarrowingProduct::new([FlowNarrowingFact {
+                            binding: key.binding().unwrap().clone(),
+                            path: Arc::from([]),
+                            narrowed_to: number,
+                        }]))
+                    }
+                    FlowDomain::DeclaredType => {
+                        FlowProductValue::DeclaredType(DeclaredTypeProduct::of(number))
+                    }
+                    FlowDomain::DefiniteAssignment if i == 2 => continue,
+                    FlowDomain::DefiniteAssignment => FlowProductValue::DefiniteAssignment(
+                        DefiniteAssignmentProduct::assigned().with_single_path(i == 1),
+                    ),
+                    _ => unreachable!("only product-bearing domains"),
+                };
+                put(&mut execution, &mut states[i], &target, value).unwrap();
+            }
+        }
+        let result = execution
+            .join_products(&order.map(|i| &states[i]), &algebra)
+            .unwrap();
+        assert_eq!(result.len(), domains.len());
+        let assignment = execution
+            .key(FlowDomain::DefiniteAssignment, key.node())
+            .unwrap();
+        assert_eq!(
+            result.get(&assignment),
+            Some(&FlowProductValue::DefiniteAssignment(
+                DefiniteAssignmentProduct::assigned()
+                    .with_state(DefiniteAssignment::MaybeAssigned)
+                    .with_single_path(true)
+            )),
+            "the absent predecessor product is unassigned, not absent control flow"
+        );
+        // Strip only execution-local capabilities and unordered contributor order.
+        // Keep every materialized domain, definition, semantic result and flag.
+        let snapshot: Vec<_> = result
+            .ordered_entries()
+            .map(|(key, value)| {
+                let value = match value {
+                    FlowProductValue::ReachingValue(product) => {
+                        format!("{:?}", product.definitions())
+                    }
+                    FlowProductValue::ReachingType(product) => {
+                        let mut contributors = product.contributors().to_vec();
+                        contributors.sort_unstable();
+                        format!(
+                            "{contributors:?}/{:?}/{:?}",
+                            product.united(),
+                            product.widening()
+                        )
+                    }
+                    other => format!("{other:?}"),
+                };
+                (key.domain(), key.node().index(), value)
+            })
+            .collect();
+        let evidence = execution.finish_with_plan(&plan).unwrap();
+        let executed: Vec<_> = execution
+            .selected_sites()
+            .flat_map(|site| {
+                domains.map(|domain| {
+                    let key = site.key(domain).unwrap();
+                    (domain, key.node().index(), evidence.executed(&key))
+                })
+            })
+            .collect();
+        assert!(executed.iter().any(|entry| entry.2));
+        assert!(
+            executed.iter().any(|entry| !entry.2),
+            "unexecuted selected sites remain distinguishable"
+        );
+        let observation = (snapshot, executed, evidence.iterations());
+        if let Some(baseline) = &baseline {
+            assert_eq!(&observation, baseline, "predecessor permutation {order:?}");
+        } else {
+            baseline = Some(observation);
+        }
+    }
+}
+
+#[test]
 fn hoisted_declaration_aliases_share_runtime_state_but_keep_exact_evidence() {
     let (inputs, mut execution) = execution(
         "function products(x) { var x = 1; return x; }",
