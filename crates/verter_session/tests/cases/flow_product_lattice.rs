@@ -724,6 +724,93 @@ fn executing_a_transfer_does_not_credit_the_unrelated_execution_site() {
 }
 
 #[test]
+fn completion_frontiers_share_a_live_limit_and_release_owned_reservations() {
+    let (_, mut execution) = execution(
+        SOURCE,
+        1,
+        FlowProductBudget {
+            max_completion_frontier: 2,
+            ..FlowProductBudget::default()
+        },
+    );
+    let outer = execution.reserve_completion_frontier(1).unwrap();
+    let inner = execution.reserve_completion_frontier(1).unwrap();
+    drop(outer);
+    let sibling = execution.reserve_completion_frontier(1).unwrap();
+    drop(inner);
+    drop(sibling);
+    let all = execution.reserve_completion_frontier(2).unwrap();
+    assert!(matches!(
+        execution.reserve_completion_frontier(1),
+        Err(FlowProductFailure::BudgetExceeded(
+            FlowProductBudgetExceeded {
+                axis: FlowProductBudgetAxis::CompletionFrontier,
+                limit: 2,
+                observed: 3
+            }
+        ))
+    ));
+    drop(all);
+    assert!(
+        execution.finish().is_err(),
+        "releasing memory must not erase an exhausted execution"
+    );
+}
+
+#[test]
+fn execution_work_is_shared_across_continuations_and_independent_of_iterations() {
+    let (_, mut execution) = execution(
+        SOURCE,
+        1,
+        FlowProductBudget {
+            max_execution_steps: 3,
+            ..FlowProductBudget::default()
+        },
+    );
+    execution.charge_execution_work(1).unwrap();
+    let before = execution.empty_state();
+    let _branch = before.clone();
+    execution.charge_execution_work(2).unwrap();
+    assert!(matches!(
+        execution.charge_execution_work(1),
+        Err(FlowProductFailure::BudgetExceeded(
+            FlowProductBudgetExceeded {
+                axis: FlowProductBudgetAxis::ExecutionWork,
+                limit: 3,
+                observed: 4
+            }
+        ))
+    ));
+    assert!(execution.finish().is_err());
+}
+
+#[test]
+fn checker_inference_transfers_do_not_certify_runtime_work() {
+    for actual_work in [false, true] {
+        let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
+        let (_, number, _) = types();
+        let key = binding(&execution, &inputs, "y", FlowDomain::ReachingType);
+        let mut state = execution.empty_state();
+        let value = FlowProductValue::ReachingType(ReachingTypeProduct::of(number));
+        let outer = execution.begin_checker_inference().unwrap();
+        let inner = execution.begin_checker_inference().unwrap();
+        drop(outer);
+        put(&mut execution, &mut state, &key, value.clone()).unwrap();
+        drop(inner);
+        assert_eq!(state.get(&key), Some(&value));
+        if actual_work {
+            assert!(!put(&mut execution, &mut state, &key, value).unwrap());
+        }
+        let evidence = execution.finish().unwrap();
+        assert_eq!(
+            evidence.executed(&key),
+            actual_work,
+            "only successful actual work, including unchanged work, certifies runtime evidence"
+        );
+    }
+}
+
+#[test]
 fn declared_authority_survives_snapshot_restore_and_cannot_be_erased() {
     for erase in [
         None,
@@ -768,7 +855,7 @@ fn declared_authority_survives_snapshot_restore_and_cannot_be_erased() {
 #[test]
 fn declared_types_belong_to_source_declarations_even_when_runtime_bindings_alias() {
     let (inputs, mut execution) = execution(
-        "function products(x: number) { var x: number = 1; return x; }",
+        "function products(x: number) { var x: number = 1; var x; return x; }",
         1,
         FlowProductBudget::default(),
     );
@@ -779,14 +866,34 @@ fn declared_types_belong_to_source_declarations_even_when_runtime_bindings_alias
         .filter_map(|node| execution.key(FlowDomain::DeclaredType, node).ok())
         .filter(|key| key.binding().is_some())
         .collect();
-    assert_eq!(keys.len(), 2);
+    assert_eq!(keys.len(), 3);
     let mut state = execution.empty_state();
+    let before = state.clone();
     let first = FlowProductValue::DeclaredType(DeclaredTypeProduct::of(number));
     let second = FlowProductValue::DeclaredType(DeclaredTypeProduct::of(string));
-    put(&mut execution, &mut state, &keys[0], first.clone()).unwrap();
+    assert_eq!(before.declared_type(&keys[2]), None);
     put(&mut execution, &mut state, &keys[1], second.clone()).unwrap();
+    assert_eq!(before.declared_type(&keys[0]), Some(string));
+    assert_eq!(before.declared_type(&keys[2]), Some(string));
+    put(&mut execution, &mut state, &keys[0], first.clone()).unwrap();
     assert_eq!(state.get(&keys[0]), Some(&first));
     assert_eq!(state.get(&keys[1]), Some(&second));
+    assert_eq!(
+        state.get(&keys[2]),
+        None,
+        "fallback does not fabricate authored facts"
+    );
+    assert_eq!(before.declared_type(&keys[0]), Some(number));
+    assert_eq!(
+        before.declared_type(&keys[1]),
+        Some(string),
+        "exact declaration wins"
+    );
+    assert_eq!(
+        before.declared_type(&keys[2]),
+        Some(number),
+        "fallback follows source order, not publication order"
+    );
 }
 
 #[test]

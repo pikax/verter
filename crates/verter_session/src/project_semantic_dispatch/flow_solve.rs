@@ -621,11 +621,18 @@ pub struct FlowConvergencePolicy { pub max_iterations: u32 }
 /// The resource policy a demand plans and solves under.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FlowResourcePolicy { pub slice_budget: FlowSliceBudget, pub max_obligations: u32 }
+pub struct FlowResourcePolicy {
+    pub slice_budget: FlowSliceBudget,
+    pub max_obligations: u32,
+    /// Total interpreter work across actual and checker-only continuations.
+    pub max_execution_steps: u32,
+    /// Simultaneously owned completion slots, including nested frontiers.
+    pub max_completion_frontier: u32,
+}
 
 #[rustfmt::skip]
 impl Default for FlowResourcePolicy {
-    fn default() -> Self { Self { slice_budget: FlowSliceBudget::default(), max_obligations: 1024 } }
+    fn default() -> Self { Self { slice_budget: FlowSliceBudget::default(), max_obligations: 1024, max_execution_steps: 65_536, max_completion_frontier: 4096 } }
 }
 
 /// The validated structural work of one execution. This capability carries
