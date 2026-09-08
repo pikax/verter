@@ -724,6 +724,112 @@ fn executing_a_transfer_does_not_credit_the_unrelated_execution_site() {
 }
 
 #[test]
+fn entry_guard_projection_preserves_unwritten_roots_and_excludes_written_aliases() {
+    let source = "function products(x) { var x; let y = x; return [x, y]; }";
+    let (inputs, mut execution) = execution(source, 1, FlowProductBudget::default());
+    let (graph, number, string) = types();
+    let literal = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(1.0)));
+    let x = binding(&execution, &inputs, "x", FlowDomain::Narrowing);
+    let y = binding(&execution, &inputs, "y", FlowDomain::Narrowing);
+    let alias = execution
+        .selected_sites()
+        .map(|site| site.key(FlowDomain::Narrowing).unwrap())
+        .find(|key| key.binding().is_some_and(|id| id.name.as_ref() == "x") && key != &x)
+        .unwrap();
+    let guard = |key: &FlowProductKey, narrowed_to| {
+        FlowProductValue::Narrowing(NarrowingProduct::new([FlowNarrowingFact {
+            binding: key.binding().unwrap().clone(),
+            path: Arc::from([]),
+            narrowed_to,
+        }]))
+    };
+    let mut entry = execution.empty_state();
+    put(&mut execution, &mut entry, &x, guard(&x, number)).unwrap();
+    put(&mut execution, &mut entry, &y, guard(&y, number)).unwrap();
+    let mut state = entry.clone();
+    put(&mut execution, &mut state, &y, guard(&y, literal)).unwrap();
+    let reaching_x = x.for_domain(FlowDomain::ReachingType).unwrap();
+    put(&mut execution, &mut state, &reaching_x, reaching(string)).unwrap();
+    // A later guard equal to the entry guard cannot erase an executed write.
+    put(&mut execution, &mut state, &x, guard(&x, number)).unwrap();
+    execution
+        .project_entry_narrowings(&mut state, &entry, &[alias])
+        .unwrap();
+    assert_eq!(state.get(&x), None);
+    assert_eq!(
+        state.get(&y),
+        entry.get(&y),
+        "unwritten outer guard survives clause-local strengthening"
+    );
+    assert_eq!(
+        state.get(&reaching_x),
+        Some(&reaching(string)),
+        "actual reaching state is preserved"
+    );
+    let before = state.clone();
+    let (foreign_inputs, foreign_execution) =
+        self::execution(source, 1, FlowProductBudget::default());
+    let foreign = binding(
+        &foreign_execution,
+        &foreign_inputs,
+        "x",
+        FlowDomain::Narrowing,
+    );
+    assert_eq!(
+        execution.project_entry_narrowings(&mut state, &entry, &[foreign]),
+        Err(FlowProductFailure::ScopeMismatch)
+    );
+    assert!(
+        state.shares_continuation_storage(&before),
+        "foreign projection fails before mutation"
+    );
+    assert!(execution.finish().is_err());
+}
+
+#[test]
+fn entry_guard_projection_rejects_product_growth_atomically() {
+    let source = "function products(x, y) { return [x, y]; }";
+    let (inputs, mut execution) = execution(
+        source,
+        1,
+        FlowProductBudget {
+            max_products: 1,
+            ..FlowProductBudget::default()
+        },
+    );
+    let (_, number, _) = types();
+    let x = binding(&execution, &inputs, "x", FlowDomain::Narrowing);
+    let y = binding(&execution, &inputs, "y", FlowDomain::ReachingType);
+    let mut entry = execution.empty_state();
+    put(
+        &mut execution,
+        &mut entry,
+        &x,
+        FlowProductValue::Narrowing(NarrowingProduct::new([FlowNarrowingFact {
+            binding: x.binding().unwrap().clone(),
+            path: Arc::from([]),
+            narrowed_to: number,
+        }])),
+    )
+    .unwrap();
+    let mut state = execution.empty_state();
+    put(&mut execution, &mut state, &y, reaching(number)).unwrap();
+    let before = state.clone();
+    assert_eq!(
+        execution.project_entry_narrowings(&mut state, &entry, &[]),
+        Err(FlowProductFailure::BudgetExceeded(
+            FlowProductBudgetExceeded {
+                axis: FlowProductBudgetAxis::Products,
+                limit: 1,
+                observed: 2,
+            }
+        ))
+    );
+    assert!(state.shares_continuation_storage(&before));
+    assert!(execution.finish().is_err());
+}
+
+#[test]
 fn execution_caps_cannot_exceed_the_sealed_request_policy() {
     let fixture = flow_graph_fixture_for_tests(SOURCE, 1);
     let mut demand = request(0);

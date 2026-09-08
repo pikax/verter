@@ -1,10 +1,12 @@
-error[E0451]: fields `execution`, `required_domains`, `required_fact_families`, `registry_closure`, `coverage_obligations`, `initial_obligations`, `expanded_obligations`, `work_order`, `tie_break` and `obligation_specs` of struct `FlowDemandPlan` are private
+error[E0451]: fields `execution`, `checker_capture_returns`, `required_domains`, `required_fact_families`, `registry_closure`, `coverage_obligations`, `initial_obligations`, `expanded_obligations`, `work_order`, `tie_break` and `obligation_specs` of struct `FlowDemandPlan` are private
  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_no_struct_literal.rs
   |
   |     let _ = FlowDemandPlan {
   |             -------------- in this type
   |         execution: todo!(),
   |         ^^^^^^^^^ private field
+  |         checker_capture_returns: todo!(),
+  |         ^^^^^^^^^^^^^^^^^^^^^^^ private field
   |         required_domains: todo!(),
   |         ^^^^^^^^^^^^^^^^ private field
   |         required_fact_families: todo!(),

@@ -113,6 +113,15 @@ from actual surviving states instead of restoring guards killed by executed writ
 Switch refinement updates reaching type and the matching narrowing position atomically
 without inventing an assignment or discarding unrelated member facts.
 
+Clause-scoped assertion cleanup projects entry narrowing facts only onto runtime
+roots without executed write or invalidation receipts since that clause's entry.
+An unchanged write or later assertion cannot restore an invalidated entry guard.
+Conversely, strengthening a guard without a write must not discard the valid outer
+guard when leaving the clause. The shared kernel normalizes aliases, validates all
+scopes and product capacity, and publishes only the narrowing replacement atomically;
+reaching values, reaching types, assignment state and authored authority remain intact.
+This projection grants no execution evidence.
+
 The result contract remains checker type inference, including its existing authored
 return and abrupt-break policy. A pending break may carry an explicitly typed checker
 snapshot projected from the same execution, alongside the actual completion state.
@@ -123,6 +132,19 @@ participate in authored-return inference only as tagged checker-only lanes. Thei
 products, walks and child results cannot supply missing actual execution evidence or
 rescue an aborted required lane. This projection uses the same product authority;
 it is not an independently mutable inference store or a second interpreter.
+
+Result-contract descriptor v6 explicitly registers `AuthoredFinallyReturn` and
+`OverriddenBreakSuffix` as checker return capture-processing rules for `FlowReturn`.
+The closed policy is encoded in the result identity. Exact capture receipts retain
+their selected parent expression site, capture identity and observation purpose.
+Checker route permits are private to the actual control-policy seams; their receipts
+are staged until the successful return route contributes to the checker result.
+Only an Effect-capture requirement may accept such a receipt, and only alongside a
+completed required runtime walk. It never proves an actual runtime event, Value
+product, call or relation. Another site, discarded route or truncated required walk
+cannot borrow this permission. Distinct continuation purposes survive enclosing region
+boundaries; normal outputs with incompatible inference policies cannot be merged and
+relabelled as runtime execution.
 
 All completion evaluations share the same selected IR, execution capability,
 declaration bank and sticky failure state. Interpreter work has a monotonic limit

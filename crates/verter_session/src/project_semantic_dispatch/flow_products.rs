@@ -13,7 +13,7 @@
 use super::flow_solve::{FlowDemandBasis, FlowDemandPlan, FlowDomain, FlowExecutionSelection};
 use crate::cache_runtime::flow_slice_node::{BoundFlowGraph, FlowSliceFunctionKey};
 use crate::semantic_query::{FlowGap, SemanticNodeId};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -692,6 +692,66 @@ impl FlowProductExecution {
     fn reject<T>(&mut self, failure: FlowProductFailure) -> Result<T, FlowProductFailure> {
         self.failure = Some(failure.clone());
         Err(failure)
+    }
+
+    /// Restore clause-entry guards only for runtime roots without an executed
+    /// write or invalidation since entry. Other runtime products and authored
+    /// declarations remain intact. This projection grants no execution evidence.
+    pub fn project_entry_narrowings(
+        &mut self,
+        state: &mut FlowProductStore,
+        entry: &FlowProductStore,
+        invalidated_keys: &[FlowProductKey],
+    ) -> Result<bool, FlowProductFailure> {
+        self.ready()?;
+        if !Rc::ptr_eq(&self.scope, &state.scope) || !Rc::ptr_eq(&self.scope, &entry.scope) {
+            return self.reject(FlowProductFailure::ScopeMismatch);
+        }
+        let mut invalidated = FxHashSet::default();
+        for key in invalidated_keys {
+            if !Rc::ptr_eq(&self.scope, &key.scope) {
+                return self.reject(FlowProductFailure::ScopeMismatch);
+            }
+            if key.binding().is_none() {
+                return self.reject(FlowProductFailure::Gap(FlowGap::UnmodeledExpression));
+            }
+            invalidated.insert(self.scope.subjects[key.subject].storage);
+        }
+        let mut projected = state.values.clone();
+        let mut changed = false;
+        let narrowing = product_offset(FlowDomain::Narrowing).expect("a product domain");
+        let addresses = (narrowing, 0)..(narrowing + 1, 0);
+        for (address, held) in state.values.range(addresses.clone()) {
+            let desired = (!invalidated.contains(&address.1))
+                .then(|| entry.values.get(address))
+                .flatten();
+            if desired == Some(held) {
+                continue;
+            }
+            changed = true;
+            if let Some(value) = desired {
+                projected.insert(*address, value.clone());
+            } else {
+                projected.remove(address);
+            }
+        }
+        for (address, value) in entry.values.range(addresses) {
+            if !invalidated.contains(&address.1) && !state.values.contains_key(address) {
+                projected.insert(*address, value.clone());
+                changed = true;
+            }
+        }
+        if projected.len() > self.budget.max_products as usize {
+            return self.reject(FlowProductFailure::BudgetExceeded(
+                FlowProductBudgetExceeded {
+                    axis: FlowProductBudgetAxis::Products,
+                    limit: self.budget.max_products,
+                    observed: u32::try_from(projected.len()).unwrap_or(u32::MAX),
+                },
+            ));
+        }
+        state.values = projected;
+        Ok(changed)
     }
 
     /// Validate the complete bundle, then publish it atomically. Neither
