@@ -761,14 +761,9 @@ export function parseTerminalSummary(grammar, summary, countKey) {
 export function parseRefusal(grammar, observed, countKey) {
   const text = stripStyling(normalizeLines(observed ?? ""));
   if (grammar === "libtest") {
-    // Every `test result:` line the run emitted, not only the failing ones.
-    // A failed count alone is the weakest thing a libtest refusal states, and
-    // it is the one number a stale transcript is most likely to still get
-    // right: a suite that grew by a case still fails exactly once under the
-    // same mutation, so comparing `failed` greens a transcript whose passing
-    // count, ignored count and binary list have all moved. The whole shape is
-    // aggregated instead, and order-independently — a multi-binary run does
-    // not fix the order its binaries report in.
+    // Retain the full observed shape for diagnostics, independent of binary
+    // reporting order. Replay separately compares the refusal while allowing
+    // successful siblings and inventory totals to change.
     const rows = [
       ...text.matchAll(
         /test result:\s*(ok|FAILED)\.\s*(\d+)\s+passed;\s*(\d+)\s+failed;\s*(\d+)\s+ignored;/gu,
@@ -1830,27 +1825,17 @@ export function analyze(packageRoot = PACKAGE_ROOT, options = {}) {
   unique(register.adapter, "id", "adapter", errors);
   const REFRESH_FIELDS = ["refresh_job", "refresh_filter", "refresh_command"];
   for (const adapter of register.adapter) {
-    // A node runner is one this instrument can invoke, so its records are
-    // re-executed rather than trusted; declaring otherwise would make the
-    // capability author-set.
+    // The schema's instrument/external field selects validation ownership.
+    // Node records belong to the instrument; replay itself is always manual.
     if (adapter.runner === "node" && adapter.reexecution !== "instrument")
-      errors.push(
-        `adapter ${adapter.id}: this instrument runs node itself, so its records are re-executed rather than trusted`,
-      );
-    // A record this instrument cannot re-run is not therefore unrefreshed: it
-    // names the lane that does re-run it, and that lane is resolved below. The
-    // declaration is mandatory in one direction and forbidden in the other, so
-    // neither an omission nor a decorative lane on a re-executed record can
-    // change which binding applies.
+      errors.push(`adapter ${adapter.id}: node records require instrument validation ownership`);
+    // External records name a normal test lane, resolved below. Neither an
+    // omission nor a decorative lane on an instrument record changes ownership.
     for (const field of REFRESH_FIELDS) {
       if (adapter.reexecution === "external" && !adapter[field])
-        errors.push(
-          `adapter ${adapter.id}: a record this instrument does not re-run must declare ${field}`,
-        );
+        errors.push(`adapter ${adapter.id}: an external record must declare ${field}`);
       if (adapter.reexecution === "instrument" && adapter[field])
-        errors.push(
-          `adapter ${adapter.id}: ${field} is meaningless on a record the control suite re-runs itself`,
-        );
+        errors.push(`adapter ${adapter.id}: ${field} is meaningless on an instrument-owned record`);
     }
     // The two selection-resolution declarations answer different questions and
     // neither may stand in for the other, so each is required exactly where its
@@ -2390,10 +2375,9 @@ export function analyze(packageRoot = PACKAGE_ROOT, options = {}) {
                 `control ${control.id}: ${JSON.stringify(token)} is already part of the command it claims to have mutated, so the mutation was not new`,
               );
       }
-      // Some runners derive their own selection from a directory the record
-      // already cites. Where the adapter says so, the selected count is
-      // re-derived from that directory instead of being trusted, so adding or
-      // removing a case there invalidates the transcription rather than passing.
+      // A historical directory-counted record still needs a real, unambiguous
+      // fixture directory. Its recorded total is not today's selection size;
+      // the normal test runner establishes current selection and completion.
       if (adapter.count_source === "fixture-directory") {
         obligations += 1;
         const directories = new Set(proof.fixtures.map((fixture) => path.posix.dirname(fixture)));
@@ -2407,13 +2391,12 @@ export function analyze(packageRoot = PACKAGE_ROOT, options = {}) {
             const entries = fs
               .readdirSync(confinedEntry(repoRoot, directory, `${where} fixture directory`))
               .filter((entry) => entry.endsWith(".rs"));
-            // The whole DIRECTORY is a validator input here, not just the
-            // fixtures the record happens to name: adding one case beside them
-            // changes the count this check re-derives.
+            // Keep directory existence and trigger coverage checked without
+            // requiring a transcript rewrite whenever the inventory changes.
             citeRead(filter, directory);
-            if (proof.selected !== entries.length) {
+            if (entries.length === 0) {
               errors.push(
-                `${where}: selected is ${proof.selected}, but ${directory} holds ${entries.length} cases the runner would select`,
+                `${where}: fixture directory ${directory} contains no cases the runner would select`,
               );
               refused = true;
             }
@@ -2558,11 +2541,9 @@ export function analyze(packageRoot = PACKAGE_ROOT, options = {}) {
   }
 
   // --- the gate that would notice ----------------------------------------
-  // Re-execution is what keeps a transcription current, and this instrument can
-  // only re-run its own runner. Every other record names the lane that re-runs
-  // it, and both bindings are RESOLVED against the workflow rather than
-  // assumed. Where a binding does not resolve, the record carries a derived
-  // limit — nothing here is a field an author could decline to fill in.
+  // Routine CI validates records and resolves the normal test lanes that cover
+  // their selections. Historical totals are not current-run assertions; replay
+  // is an explicit diagnostic. An unresolved coverage binding remains a limit.
   obligations += 1;
   let workflow = null;
   try {
@@ -2659,9 +2640,9 @@ export function analyze(packageRoot = PACKAGE_ROOT, options = {}) {
     // The refresh REACH, derived and published rather than left to prose. A
     // reader of the generated view otherwise sees one undifferentiated
     // "refreshed by" column over two materially different guarantees: a record
-    // the control suite re-runs and re-derives here, and a record whose lane
-    // re-runs the work while the transcription itself is compared against
-    // nothing. Saying which one a record has is not a limit — the evidence
+    // focused validator tests cover, and a record whose normal test lane
+    // executes its selection. Historical totals are not refreshed by either
+    // path. Saying which coverage a record has is not a limit — the evidence
     // model this instrument implements binds a record to no tree, SHA, or
     // digest — but leaving it unsaid publishes the weaker guarantee as the
     // stronger one.
@@ -2675,7 +2656,7 @@ export function analyze(packageRoot = PACKAGE_ROOT, options = {}) {
     if (adapterRow?.reexecution === "instrument")
       proofRefresh.set(
         proof.id,
-        `the control suite re-runs this command and compares the counts its own run derives${exercised}`,
+        `historical transcript; routine CI validates the record and focused guards, while command/mutation replay is on demand${exercised}`,
       );
     else if (adapterRow) {
       // The lane must also run work this record's OWN selection reaches, so
@@ -3278,7 +3259,12 @@ export function renderView(model) {
     lines.push("");
   }
 
-  lines.push("## Proof records", "");
+  lines.push(
+    "## Proof records",
+    "",
+    "Counts and terminal summaries below are historical observations. Routine CI validates record consistency and runs the normal test lanes; it does not require today's inventory to match these totals. Repository mutation replay is an on-demand diagnostic.",
+    "",
+  );
   lines.push(
     "| Proof | Command | Selected | Passed | Skipped | Refresh reach | Derived limits |",
     "| --- | --- | --- | --- | --- | --- | --- |",

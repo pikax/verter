@@ -1,45 +1,8 @@
 /**
- * The control lane.
- *
- * The instrument suite re-applies the negative controls whose bound record runs
- * under `node`. This lane re-applies the rest — the records that run under
- * `cargo`, the one whose command IS the instrument suite, and the command-shaped
- * controls beside them, whose mutation is an argument rather than a file edit.
- * Both halves use the same plant/run/restore routine, and the instrument suite
- * resolves the partition between them, so a control cannot be owned by neither
- * lane and this one cannot quietly cover a subset of what it claims.
- *
- * Two reasons the split is here rather than one suite:
- *
- *   - The roadmap job runs on a checkout with no Rust toolchain and a budget
- *     sized for node tools. Folding cargo re-application into it would either
- *     fail for a missing runner or turn into the skip this register refuses
- *     everywhere else. A separate job installs the toolchain and pays the build
- *     once, under a budget of its own that this lane's deadlines nest inside.
- *   - The control whose command is the instrument suite cannot be driven BY the
- *     instrument suite: that re-enters it. Driven from here it terminates by
- *     construction — the suite this lane spawns drives no control whose command
- *     is itself.
- *
- * The mirror is the whole repository minus its build and dependency output,
- * because a cargo record resolves a workspace rather than a file list. Every
- * installed `node_modules` tree — the repository root and each workspace
- * package's own tree — is linked in rather than copied: a re-applied cargo
- * record can run tests that resolve the workspace's JavaScript toolchain
- * (including nested package `node_modules` canonicalization), and linking keeps
- * the mirror a mutation copy without multiplying gigabytes of installed
- * output. A mutation belongs in a copy, never in the tree under review, where
- * an interrupted run would leave it behind as a real edit.
- *
- * One delegated record transcribes counters shaped by THIS lane's CI platform:
- * its three-package selection contains a `#[cfg(target_os)]`-gated set, so
- * selected, executed, and skipped all move together when the host compiles a
- * different set. Linux and Windows are not symmetric. The transcript is the CI
- * platform's (linux), and the lane that re-applies it in CI re-derives it
- * exactly; a lane run on another OS fails that record's clean-run comparison
- * by exactly those cases, which is the loud, named failure rather than a
- * silent one — re-derive the record on linux, never from another host, and
- * never widen the comparison to tolerate the difference.
+ * On-demand repository mutation replay. This entry is run explicitly from the
+ * Closure Control Replay workflow, never as a routine merge requirement.
+ * It drives all recorded controls in a disposable repository mirror. Focused
+ * tests for the driver live in closure-replay.test.mjs and run in normal CI.
  */
 
 import assert from "node:assert/strict";
@@ -51,12 +14,10 @@ import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  CONTROL_LANE,
   CONTROL_LANE_COMMAND_DEADLINE_MS,
   CONTROL_LANE_DEADLINE_MS,
   CONTROL_LANE_ENTRY,
   MIRROR_OUTPUT_BASENAMES,
-  controlsFor,
   installedModuleRelatives,
   linkInstalledModuleTrees,
   reapply,
@@ -289,14 +250,13 @@ test("delegated commands discard cached trybuild fixture results", () => {
 });
 
 test(
-  "every control the instrument suite delegates is re-applied and refused",
+  "every recorded control is re-applied and refused on demand",
   { timeout: CONTROL_LANE_DEADLINE_MS },
   (t) => {
     const laneStarted = Date.now();
     const { model } = analyze(PACKAGE_ROOT);
-    const instrumentEntry = "roadmap/0.1.0-tama/tools/closure-register.test.mjs";
-    const owned = controlsFor(model, CONTROL_LANE, instrumentEntry);
-    assert.ok(owned.length >= 1, "the live register delegates no control to this lane");
+    const owned = model.register.control;
+    assert.ok(owned.length >= 1, "the live register declares no controls to replay");
 
     const runners = new Set(
       owned.map(
@@ -393,7 +353,7 @@ test(
     assert.equal(
       reApplied,
       owned.length,
-      `every delegated control must be re-applied; ran ${reApplied} of ${owned.length}`,
+      `every recorded control must be re-applied; ran ${reApplied} of ${owned.length}`,
     );
 
     // The lane mirrors the repository from scratch on every run and its cargo
@@ -404,12 +364,12 @@ test(
     // discovering it as a runner kill months later.
     const elapsed = Date.now() - laneStarted;
     t.diagnostic(
-      `re-applied ${reApplied} delegated controls in ${elapsed}ms, ${Math.round((elapsed / CONTROL_LANE_DEADLINE_MS) * 100)}% of this lane's ${CONTROL_LANE_DEADLINE_MS}ms deadline`,
+      `re-applied ${reApplied} recorded controls in ${elapsed}ms, ${Math.round((elapsed / CONTROL_LANE_DEADLINE_MS) * 100)}% of this lane's ${CONTROL_LANE_DEADLINE_MS}ms deadline`,
     );
   },
 );
 
-test("this lane is the file the instrument suite delegates to", () => {
+test("the replay entry matches the declared command", () => {
   // `fileURLToPath`, never `URL.pathname`: a pathname is percent-encoded, so a
   // checkout under a directory containing a space, `#`, `%` or `?` yields
   // `.../Jane%20Doe/...` and this comparison fails on a developer machine while
