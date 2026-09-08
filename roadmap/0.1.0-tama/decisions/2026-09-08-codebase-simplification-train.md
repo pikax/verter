@@ -74,8 +74,8 @@ Code/tests are changed only by later node implementations. Verification of this 
 
 The full conflict-ownership projection check is currently blocked by a pre-existing invalid `crates/verter_formatter/src/service/**` production-surface entry in `charters/expansion-formatter/FMT3C.md`. That unrelated charter is unchanged. The new train's concrete surfaces are checked independently against their declared domains; the projection check is not reported as passing.
 
-## Remove redundant DAG-size evidence
+## Retain DAG-removal evidence
 
-The maintainer subsequently requested removal of the redundant checks that failed PR #512. The mapper closure instrument repeated the canonical DAG validator, pinned its entire summary, and reapplied a second missing-edge mutation. Adding valid roadmap nodes therefore failed both closure lanes because the recorded node count was stale.
+The mapper closure instrument retains an explicit negative control over the canonical DAG validator. Its authority proof pins the validated node and edge summary so removal of a node or predecessor edge cannot silently shrink the program, while its mutation control proves that a broken predecessor edge is rejected together with the resulting charter mismatch.
 
-Remove that closure atom, proof, mutation control and their exclusive pins. The canonical `validate-program-dag.mjs --strict` command remains in the Tama Roadmap CI job and continues checking graph validity, charter parity, catalogs and ledger membership. Roadmap growth no longer requires a mapper closure transcript update. Remaining mapper contract evidence and in-flight implementation ownership are unchanged.
+The control, proof, mutation and their exclusive pins remain part of the mapper closure unless an equivalent node-and-edge removal mutation test replaces them. The canonical `validate-program-dag.mjs --strict` command remains in the Tama Roadmap CI job and continues checking graph validity, charter parity, catalogs and ledger membership. Valid roadmap growth must refresh the mapper closure transcript consistently. Remaining mapper contract evidence and in-flight implementation ownership are unchanged.
