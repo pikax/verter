@@ -70,48 +70,6 @@ pub struct FfiHostConfig {
     pub metrics_enabled: Option<bool>,
 }
 
-/// Per-compilation variant options.
-///
-/// `deny_unknown_fields`: an unrecognized JSON key must refuse at
-/// deserialization, not be silently dropped before `ffi_profile_to_host`
-/// ever sees it — the decode-boundary half of the same "no silently
-/// ignored option" contract `CompileRequest` construction enforces
-/// downstream.
-#[derive(Deserialize, Default, Clone)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FfiCompileProfile {
-    pub filename: Option<String>,
-    pub is_production: Option<bool>,
-    pub custom_element: Option<bool>,
-    pub ssr: Option<bool>,
-    /// SSR asset-collection module id registered on `ssrContext.modules`.
-    /// Absent falls back to the canonical id.
-    pub ssr_module_id: Option<String>,
-    pub hmr_strategy: Option<String>,
-    pub component_id: Option<String>,
-    pub delimiters: Option<Vec<String>>,
-    pub custom_elements: Option<Vec<String>>,
-    pub comments: Option<bool>,
-    pub runtime_module_name: Option<String>,
-    pub types_module_name: Option<String>,
-    pub force_vapor: Option<bool>,
-    pub force_js: Option<bool>,
-    pub source_map: Option<bool>,
-    /// Compilation target preset: "bundler" (default), "ide", or "analysis".
-    pub target: Option<String>,
-    /// Inline the render function inside `setup()` (Vue production topology).
-    /// Absent resolves to `isProduction` (official default: inline in prod
-    /// builds). VDOM client only; Vapor inline and inline SSR fall back to
-    /// non-inline.
-    pub inline: Option<bool>,
-    /// Experimental: strict slot children type checking.
-    pub strict_slots: Option<bool>,
-    /// Requested compile cache mode: "stateless", "content", or
-    /// "session" (default). `FfiVirtualQuery` carries the mode through
-    /// this embedded profile.
-    pub requested_mode: Option<String>,
-}
-
 /// Request to upsert a file into the host.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,7 +140,6 @@ pub struct FfiBlockOverrideEntry {
 #[serde(rename_all = "camelCase")]
 pub struct FfiBlockOverrideRequest {
     pub canonical_id: String,
-    pub compile_profile: Option<FfiCompileProfile>,
     pub overrides: Vec<FfiBlockOverrideEntry>,
 }
 
@@ -193,7 +150,6 @@ pub struct FfiVirtualQuery {
     pub raw_id: Option<String>,
     pub canonical_id: Option<String>,
     pub node_kind: Option<FfiVirtualNodeKind>,
-    pub compile_profile: Option<FfiCompileProfile>,
 }
 
 // =============================================================================
@@ -480,8 +436,7 @@ pub enum FfiRuntimeStyleProcessing {
 }
 
 /// Dev-server tooling flavour for Main-assembly decoration. Wire spellings
-/// are all-lowercase, matching the legacy `FfiCompileProfile.hmr_strategy`
-/// vocabulary (`"none"` / `"vite"` / `"webpack"`).
+/// are all-lowercase (`"none"` / `"vite"` / `"webpack"`).
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(rename = "HostHmrStrategy")]
@@ -555,13 +510,11 @@ pub struct FfiHostCompileIdentity {
     pub is_production: bool,
     pub force_js: bool,
     /// The `ssrContext.modules` manifest key form — root-relative under
-    /// Vite; absent falls back to the canonical id. Exactly the legacy
-    /// `FfiCompileProfile.ssr_module_id` semantics.
+    /// Vite; absent falls back to the canonical id.
     pub ssr_module_id: Option<String>,
     /// Dev-server tooling flavour gating the natively composed `__file`
     /// and hot-accept trailer; absent = no decoration. The Svelte Main
-    /// assembly has no decoration consumer, matching the legacy profile
-    /// where the field is inert for Svelte.
+    /// assembly has no decoration consumer — the field is inert for Svelte.
     pub hmr_strategy: Option<FfiHmrStrategy>,
 }
 

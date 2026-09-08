@@ -83,7 +83,6 @@ fn block_override_entry_with_invalid_token(field: &str) -> FfiBlockOverrideEntry
 fn block_override_wire_reconstructs_the_exact_captured_echo() {
     let converted = ffi_block_override_to_host(FfiBlockOverrideRequest {
         canonical_id: "/src/App.vue".to_string(),
-        compile_profile: None,
         overrides: vec![valid_block_override_entry()],
     })
     .expect("valid bounded tokens must cross the FFI boundary");
@@ -121,7 +120,6 @@ fn block_override_wire_rejects_every_malformed_nominal_token() {
     ] {
         let error = ffi_block_override_to_host(FfiBlockOverrideRequest {
             canonical_id: "/src/App.vue".to_string(),
-            compile_profile: None,
             overrides: vec![block_override_entry_with_invalid_token(field)],
         })
         .expect_err("an empty sealed token must fail at the wire boundary");
@@ -591,86 +589,6 @@ fn invalid_analysis_level() {
 }
 
 #[test]
-fn invalid_hmr_strategy() {
-    let profile = FfiCompileProfile {
-        hmr_strategy: Some("rspack".to_string()),
-        ..Default::default()
-    };
-    let err = ffi_profile_to_host(Some(profile)).unwrap_err();
-    assert!(matches!(err, FfiConversionError::InvalidHmrStrategy(_)));
-}
-
-#[test]
-fn invalid_delimiters_count() {
-    let profile = FfiCompileProfile {
-        delimiters: Some(vec!["{{".to_string()]),
-        ..Default::default()
-    };
-    let err = ffi_profile_to_host(Some(profile)).unwrap_err();
-    assert!(matches!(err, FfiConversionError::InvalidDelimiters(1)));
-}
-
-/// `deny_unknown_fields` — the decode-boundary half of "no silently
-/// ignored option": an unrecognized JSON key on the compile profile must
-/// refuse AT DESERIALIZATION, before `ffi_profile_to_host` ever runs.
-/// This is exactly WASM's decode path (`serde_wasm_bindgen` deserializes
-/// `FfiCompileProfile` straight from the JS object); NAPI's typed
-/// `NapiCompileProfile -> FfiCompileProfile` `From` impl can never
-/// construct an unrecognized field in the first place, so this test
-/// exercises the JSON path directly rather than through either
-/// transport's own binding.
-#[test]
-fn ffi_compile_profile_refuses_an_unrecognized_json_field() {
-    let json = serde_json::json!({
-        "filename": "Comp.vue",
-        "compatConfig": true,
-    });
-    let err = match serde_json::from_value::<FfiCompileProfile>(json) {
-        Ok(_) => panic!("an unrecognized field must refuse deserialization, not construct"),
-        Err(err) => err,
-    };
-    assert!(
-        err.to_string().contains("compatConfig"),
-        "expected the unknown-field error to name the field, got: {err}"
-    );
-}
-
-/// Negative control: every genuinely recognized field, all set at once,
-/// must still deserialize cleanly — `deny_unknown_fields` must not have
-/// collateral-refused a real field along with the fix.
-#[test]
-fn ffi_compile_profile_accepts_every_recognized_field_together() {
-    let json = serde_json::json!({
-        "filename": "Comp.vue",
-        "isProduction": true,
-        "customElement": false,
-        "ssr": false,
-        "ssrModuleId": "assets/Comp.vue",
-        "hmrStrategy": "vite",
-        "componentId": "comp-id",
-        "delimiters": ["[[", "]]"],
-        "customElements": ["my-"],
-        "comments": true,
-        "runtimeModuleName": "vue",
-        "typesModuleName": "$verter/types",
-        "forceVapor": false,
-        "forceJs": false,
-        "sourceMap": true,
-        "target": "bundler",
-        "inline": true,
-        "strictSlots": true,
-        "requestedMode": "session",
-    });
-    let profile: FfiCompileProfile =
-        serde_json::from_value(json).expect("every recognized field must deserialize");
-    let host_profile =
-        ffi_profile_to_host(Some(profile)).expect("every recognized value must convert");
-    assert_eq!(host_profile.filename.as_deref(), Some("Comp.vue"));
-    assert!(host_profile.is_production);
-    assert_eq!(host_profile.component_id.as_deref(), Some("comp-id"));
-}
-
-#[test]
 fn invalid_file_kind() {
     let err = ffi_file_language_to_host(Some("binary"), Some("/a.vue")).unwrap_err();
     assert!(matches!(err, FfiConversionError::InvalidFileKind(_)));
@@ -740,13 +658,6 @@ fn host_cpu_threads_forwards_to_host_config() {
         "FfiHostConfig::host_cpu_threads = Some(0) must forward \
          as Some(0); the host constructor floors it to the default"
     );
-}
-
-#[test]
-fn profile_none_returns_default() {
-    let result = ffi_profile_to_host(None).unwrap();
-    assert!(!result.is_production);
-    assert!(!result.custom_element);
 }
 
 #[test]
@@ -1349,103 +1260,6 @@ fn config_analysis_level_all_variants() {
     }
 }
 
-// ── Profile: all fields populated ────────────────────────────────
-
-#[test]
-fn profile_all_fields() {
-    let profile = FfiCompileProfile {
-        filename: Some("Comp.vue".to_string()),
-        is_production: Some(true),
-        custom_element: Some(true),
-        ssr: Some(true),
-        ssr_module_id: Some("assets/Comp.vue".to_string()),
-        hmr_strategy: Some("vite".to_string()),
-        component_id: Some("abc123".to_string()),
-        delimiters: Some(vec!["<%".to_string(), "%>".to_string()]),
-        custom_elements: Some(vec!["my-el".to_string()]),
-        comments: Some(true),
-        runtime_module_name: Some("vue/runtime".to_string()),
-        types_module_name: Some("@custom/types".to_string()),
-        force_vapor: Some(true),
-        force_js: Some(true),
-        source_map: Some(true),
-        target: Some("ide".to_string()),
-        inline: Some(true),
-        strict_slots: Some(true),
-        requested_mode: Some("content".to_string()),
-    };
-    let result = ffi_profile_to_host(Some(profile)).unwrap();
-    assert_eq!(result.filename, Some("Comp.vue".to_string()));
-    assert!(result.is_production);
-    assert!(result.custom_element);
-    assert!(result.ssr);
-    assert_eq!(result.ssr_module_id, Some("assets/Comp.vue".to_string()));
-    assert!(result.target.needs_tsx());
-    assert!(result.strict_slots);
-    assert_eq!(result.inline, Some(true));
-    assert_eq!(result.requested_mode, host::CompileCacheMode::Content);
-    assert_eq!(result.hmr_strategy, host::HmrStrategy::Vite);
-    assert_eq!(result.component_id, Some("abc123".to_string()));
-    assert_eq!(
-        result.delimiters,
-        Some(("<%".to_string(), "%>".to_string()))
-    );
-    assert_eq!(result.custom_elements, Some(vec!["my-el".to_string()]));
-    assert_eq!(result.comments, Some(true));
-    assert_eq!(result.runtime_module_name, Some("vue/runtime".to_string()));
-    assert_eq!(result.types_module_name, Some("@custom/types".to_string()));
-    assert!(result.force_vapor);
-    assert!(result.force_js);
-    assert!(result.source_map);
-}
-
-// ── Profile: all HMR strategy variants ───────────────────────────
-
-#[test]
-fn profile_hmr_strategy_all_variants() {
-    let cases = [
-        ("vite", host::HmrStrategy::Vite),
-        ("VITE", host::HmrStrategy::Vite),
-        ("webpack", host::HmrStrategy::Webpack),
-        ("WEBPACK", host::HmrStrategy::Webpack),
-        ("none", host::HmrStrategy::None),
-        ("NONE", host::HmrStrategy::None),
-    ];
-    for (input, expected) in &cases {
-        let profile = FfiCompileProfile {
-            hmr_strategy: Some(input.to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            ffi_profile_to_host(Some(profile)).unwrap().hmr_strategy,
-            *expected,
-            "hmr strategy '{input}' mismatch"
-        );
-    }
-}
-
-// ── Profile: delimiters edge cases ───────────────────────────────
-
-#[test]
-fn profile_delimiters_three_elements() {
-    let profile = FfiCompileProfile {
-        delimiters: Some(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
-        ..Default::default()
-    };
-    let err = ffi_profile_to_host(Some(profile)).unwrap_err();
-    assert!(matches!(err, FfiConversionError::InvalidDelimiters(3)));
-}
-
-#[test]
-fn profile_delimiters_empty_vec() {
-    let profile = FfiCompileProfile {
-        delimiters: Some(vec![]),
-        ..Default::default()
-    };
-    let err = ffi_profile_to_host(Some(profile)).unwrap_err();
-    assert!(matches!(err, FfiConversionError::InvalidDelimiters(0)));
-}
-
 // ── File kind: all accepted variants ─────────────────────────────
 
 #[test]
@@ -1582,7 +1396,6 @@ fn virtual_query_with_raw_id() {
         raw_id: Some("Comp.vue?vue&type=style&index=0".to_string()),
         canonical_id: None,
         node_kind: None,
-        compile_profile: None,
     };
     let result = ffi_virtual_query_to_host(ffi).unwrap();
     assert_eq!(
@@ -1602,15 +1415,10 @@ fn virtual_query_with_explicit_kind() {
             kind: "template".to_string(),
             index: None,
         }),
-        compile_profile: Some(FfiCompileProfile {
-            ssr: Some(true),
-            ..Default::default()
-        }),
     };
     let result = ffi_virtual_query_to_host(ffi).unwrap();
     assert_eq!(result.canonical_id, Some("/src/Comp.vue".to_string()));
     assert_eq!(result.node_kind, Some(host::VirtualNodeKind::Template));
-    assert!(result.compile_profile.ssr);
 }
 
 #[test]
@@ -1622,7 +1430,6 @@ fn virtual_query_invalid_node_kind_propagates() {
             kind: "banana".to_string(),
             index: None,
         }),
-        compile_profile: None,
     };
     assert!(matches!(
         ffi_virtual_query_to_host(ffi).unwrap_err(),
@@ -2629,17 +2436,16 @@ fn ffi_payload_contains_instantiate_edge_for_generic_component() {
 
 // ─────────────────────────────────────────────────────────────────────
 // CompileCacheMode round-trips cleanly across the FFI seam that BOTH the
-// NAPI and WASM bindings funnel through. NAPI converts
-// `NapiCompileProfile -> FfiCompileProfile -> ffi_profile_to_host`, and
-// WASM deserialises `FfiCompileProfile` directly; both then serialise
+// NAPI and WASM batch input bindings funnel through
+// (`ffi_compile_cache_mode_to_host`); both then serialise
 // `FfiVirtualFileResponse`. These tests pin the shared seam: the
-// requested-mode string parses into the host profile, an invalid string
-// is rejected, and the host response's mode fields serialise back out.
+// requested-mode string parses into the host mode and an invalid string
+// is rejected.
 //
 // Discrimination: before the compile-mode FFI seam existed,
-// `FfiCompileProfile.requested_mode`, the three `FfiVirtualFileResponse`
-// mode fields, and `FfiConversionError::InvalidCompileCacheMode` did not
-// exist — the test would not compile.
+// `ffi_compile_cache_mode_to_host` and
+// `FfiConversionError::InvalidCompileCacheMode` did not exist — the test
+// would not compile.
 // ─────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -2651,33 +2457,17 @@ fn ffi_seam_requested_mode_parses_each_variant() {
         // case-insensitive
         ("Content", host::CompileCacheMode::Content),
     ] {
-        let profile = FfiCompileProfile {
-            requested_mode: Some(s.to_string()),
-            ..Default::default()
-        };
-        let host_profile = ffi_profile_to_host(Some(profile)).expect("parse mode");
+        let result = ffi_compile_cache_mode_to_host(s).expect("parse mode");
         assert_eq!(
-            host_profile.requested_mode, expected,
+            result, expected,
             "requestedMode '{s}' must parse to {expected:?}"
         );
     }
-
-    // A missing requestedMode keeps the host default (Session).
-    let default_profile = ffi_profile_to_host(Some(FfiCompileProfile::default())).unwrap();
-    assert_eq!(
-        default_profile.requested_mode,
-        host::CompileCacheMode::Session,
-        "an absent requestedMode must default to Session"
-    );
 }
 
 #[test]
 fn ffi_seam_invalid_requested_mode_is_rejected() {
-    let profile = FfiCompileProfile {
-        requested_mode: Some("turbo".to_string()),
-        ..Default::default()
-    };
-    let err = ffi_profile_to_host(Some(profile)).expect_err("invalid mode must error");
+    let err = ffi_compile_cache_mode_to_host("turbo").expect_err("invalid mode must error");
     assert!(
         matches!(err, FfiConversionError::InvalidCompileCacheMode(ref s) if s == "turbo"),
         "an unknown requestedMode must produce InvalidCompileCacheMode, got {err:?}"
@@ -3337,19 +3127,6 @@ fn resolution_less_conversion_reports_typed_unavailable_status_never_silent_succ
     );
     let json = serde_json::to_value(&ffi).expect("serialize");
     assert_eq!(json["resolutionStatus"]["kind"], "resolved");
-}
-
-#[test]
-fn inline_maps_to_host_profile() {
-    let profile = FfiCompileProfile {
-        inline: Some(true),
-        ..Default::default()
-    };
-    let result = ffi_profile_to_host(Some(profile)).unwrap();
-    assert_eq!(result.inline, Some(true));
-
-    let absent = ffi_profile_to_host(Some(FfiCompileProfile::default())).unwrap();
-    assert_eq!(absent.inline, None);
 }
 
 /// The FFI boundary preserves the whole-return wrapper role's EXACTNESS: an
