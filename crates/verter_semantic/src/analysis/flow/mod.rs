@@ -1441,7 +1441,7 @@ impl<'entry> SkeletonBuilder<'entry> {
         expression: &Expression<'_>,
         new_construct: bool,
         span: verter_span::Span,
-    ) {
+    ) -> SkeletonExprSiteId {
         let callee = self.extract_callee(expression);
         let root_span = crate::analysis::function_program::access::expression_root(expression)
             .map(|root| self.frame_span(root.span.into()));
@@ -1454,6 +1454,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             root_span,
             binding: None,
         });
+        site
     }
 
     fn push_write(
@@ -2330,17 +2331,15 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_call_expression(&mut self, it: &oxc_ast::ast::CallExpression<'a>) {
-        self.push_call(&it.callee, false, it.span.into());
+        let site = self.push_call(&it.callee, false, it.span.into());
         crate::analysis::type_eval_build::for_each_indexed_call_source_type_query(it, |query| {
             let span = self.frame_span(query.span.into());
-            if let Some(site) = self.current_site() {
-                self.sites[site.index()]
-                    .source_type_queries
-                    .push(SkeletonSourceTypeQuery {
-                        span,
-                        binding: None,
-                    });
-            }
+            self.sites[site.index()]
+                .source_type_queries
+                .push(SkeletonSourceTypeQuery {
+                    span,
+                    binding: None,
+                });
         });
         walk::walk_call_expression(self, it);
     }

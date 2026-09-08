@@ -1888,60 +1888,102 @@ fn warm_nominal_relation_misses_and_recomputes_after_declaration_edit() {
 /// carried by its value: changing `unique symbol` to `symbol` removes the
 /// nominal carrier on the next read and agrees with a fresh host.
 #[test]
+// @ai-generated - Root/member nominal facts invalidate through local, imported, and reexported values.
 fn warm_typeof_carrier_revalidates_after_unique_symbol_is_widened() {
-    const CANONICAL: &str = "/relation-authority/typeof-version.ts";
-    let host = make_audit_host();
-    let typeof_token = TypeExpr::TypeOf(ValueRef {
-        path: vec!["TOKEN".into()],
-        type_args: Vec::new(),
-    });
-    upsert(
-        &host,
-        CANONICAL,
-        "export declare const TOKEN: unique symbol;",
-    );
-    let before = dispatch_lower_type_expr_in_scope_with_context_for_tests(
-        &host,
-        CANONICAL,
-        &typeof_token,
-        ProjectionReductionContext::structural_transit(),
-    )
-    .expect("the initial typeof query must lower");
-    assert!(
-        dispatch_relation_nominal_identity_for_tests(&host, before).is_some(),
-        "the unique-symbol declaration must initially produce a nominal carrier"
-    );
+    const DECLARATION: &str = "/relation-authority/typeof-version.ts";
+    const CONSUMER: &str = "/relation-authority/consumer.ts";
+    const BARREL: &str = "/relation-authority/barrel.ts";
+    for (symbol, path, initial, edited) in [
+        (
+            "TOKEN",
+            vec!["TOKEN".into()],
+            "export declare const TOKEN: unique symbol;",
+            "export declare const TOKEN: symbol;",
+        ),
+        (
+            "Container",
+            vec!["Container".into(), "TOKEN".into()],
+            "export declare const Container: { readonly TOKEN: unique symbol };",
+            "export declare const Container: { readonly TOKEN: symbol };",
+        ),
+    ] {
+        for route in ["local", "import", "reexport"] {
+            let scope = if route == "local" {
+                DECLARATION
+            } else {
+                CONSUMER
+            };
+            let setup = |host: &VerterHost, declaration: &str| {
+                upsert(host, DECLARATION, declaration);
+                if route != "local" {
+                    let specifier = if route == "import" {
+                        "./typeof-version"
+                    } else {
+                        "./barrel"
+                    };
+                    upsert(
+                        host,
+                        BARREL,
+                        &format!("export {{ {symbol} }} from './typeof-version';"),
+                    );
+                    upsert(
+                        host,
+                        CONSUMER,
+                        &format!("import {{ {symbol} }} from '{specifier}';"),
+                    );
+                }
+            };
+            let typeof_token = TypeExpr::TypeOf(ValueRef {
+                path: path.clone(),
+                type_args: Vec::new(),
+            });
+            let resolve = |host: &VerterHost| {
+                dispatch_lower_type_expr_in_scope_with_context_for_tests(
+                    host,
+                    scope,
+                    &typeof_token,
+                    ProjectionReductionContext::structural_transit(),
+                )
+                .expect("the typeof query must lower")
+            };
+            let host = make_audit_host();
+            setup(&host, initial);
+            let before = resolve(&host);
+            assert!(
+                dispatch_relation_nominal_identity_for_tests(&host, before).is_some(),
+                "{symbol} via {route} starts nominal"
+            );
+            let graph = host.project_type_store().semantic_graph();
+            let warm_entries = graph.memo_entry_count();
+            assert!(warm_entries > 0);
+            assert_eq!(resolve(&host), before);
+            assert_eq!(
+                graph.memo_entry_count(),
+                warm_entries,
+                "the unchanged query reuses its entries"
+            );
 
-    upsert(&host, CANONICAL, "export declare const TOKEN: symbol;");
-    let after = dispatch_lower_type_expr_in_scope_with_context_for_tests(
-        &host,
-        CANONICAL,
-        &typeof_token,
-        ProjectionReductionContext::structural_transit(),
-    )
-    .expect("the edited typeof query must lower");
-
-    let fresh = make_audit_host();
-    upsert(&fresh, CANONICAL, "export declare const TOKEN: symbol;");
-    let fresh_node = dispatch_lower_type_expr_in_scope_with_context_for_tests(
-        &fresh,
-        CANONICAL,
-        &typeof_token,
-        ProjectionReductionContext::structural_transit(),
-    )
-    .expect("the fresh typeof query must lower");
-    let graph = host.project_type_store().semantic_graph();
-    let fresh_graph = fresh.project_type_store().semantic_graph();
-    assert_eq!(
-        graph.node_data(after).as_deref(),
-        Some(&SemanticNodeData::Primitive(PrimitiveKind::Symbol)),
-        "the edited declaration must not reuse the old nominal carrier"
-    );
-    assert_eq!(
-        graph.node_data(after).as_deref(),
-        fresh_graph.node_data(fresh_node).as_deref(),
-        "incremental and fresh resolution must agree after the edit"
-    );
+            upsert(&host, DECLARATION, edited);
+            let after = resolve(&host);
+            assert_eq!(
+                graph.node_data(after).as_deref(),
+                Some(&SemanticNodeData::Primitive(PrimitiveKind::Symbol)),
+                "{symbol} via {route} must invalidate when only declaring facts change"
+            );
+            let fresh = make_audit_host();
+            setup(&fresh, edited);
+            let fresh_node = resolve(&fresh);
+            assert_eq!(
+                graph.node_data(after).as_deref(),
+                fresh
+                    .project_type_store()
+                    .semantic_graph()
+                    .node_data(fresh_node)
+                    .as_deref(),
+                "incremental and fresh {symbol} via {route} agree"
+            );
+        }
+    }
 }
 
 /// A `unique symbol` exposed through `defineExpose` keeps its reference IN

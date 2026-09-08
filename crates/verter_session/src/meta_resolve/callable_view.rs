@@ -547,6 +547,8 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 //                              concrete callable shapes here)
                 SemanticNodeData::Object(_)
                 | SemanticNodeData::Primitive(_)
+                // A certified unique symbol cannot be or hide a string literal.
+                | SemanticNodeData::TypeOfNominal(_)
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Array { .. }
                 | SemanticNodeData::Tuple { .. }
@@ -587,10 +589,6 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 | SemanticNodeData::IndexedAccess { .. }
                 | SemanticNodeData::Mapped { .. }
                 | SemanticNodeData::TypeOf(_)
-                // The nominal terminal widens to the bare `symbol`
-                // primitive — never a string literal and never resolvable to
-                // one, so it is a decided non-contributor, not fail-closed.
-                | SemanticNodeData::TypeOfNominal(_)
                 | SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::InferRef { .. }
