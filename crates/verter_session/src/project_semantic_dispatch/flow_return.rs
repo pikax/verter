@@ -1916,7 +1916,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// evaluation still runs (values are the evaluator's), but no proof
     /// can mint and the close finalizes unproven (`ReturnOnly`).
     pub(super) fn prepare_flow_return_demand(&self, key: &FlowReturnKey, frame_idx: usize) {
-        use super::flow_solve::{build_flow_demand_plan, FlowDemandRequest, FlowResourcePolicy};
+        use super::flow_solve::{
+            build_flow_demand_plan_from_execution, prepare_flow_execution, FlowDemandRequest,
+            FlowResourcePolicy,
+        };
         let site = match self.flow_slice_demand_site(key) {
             Ok(site) => site,
             // The SITE classifies its own edge: a store read that did not
@@ -2020,7 +2023,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             resources,
             additional_requirements: Arc::from([]),
         };
-        let plan = match build_flow_demand_plan(request, &bound, &planned) {
+        let plan = match prepare_flow_execution(&request, &bound, &planned).and_then(|execution| {
+            build_flow_demand_plan_from_execution(
+                execution,
+                &bound,
+                request.additional_requirements,
+            )
+        }) {
             Ok(plan) => plan,
             Err(error) => {
                 use super::flow_solve::FlowDemandPlanError as E;

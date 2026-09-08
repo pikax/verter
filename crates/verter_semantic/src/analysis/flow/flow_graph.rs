@@ -252,6 +252,13 @@ impl FunctionFlowGraph {
         )
     }
 
+    /// Every node, exactly once in ascending graph-local index order.
+    /// Iteration covers all node families and allocates nothing.
+    #[must_use]
+    pub fn nodes(&self) -> impl ExactSizeIterator<Item = FlowNodeId> + '_ {
+        (0..self.node_count()).map(|index| FlowNodeId(index as u32))
+    }
+
     /// The exact outer declaration identity for a captured-binding hub.
     #[must_use]
     pub fn captured_binding(&self, id: FlowCapturedBindingId) -> &super::FlowBindingIdentity {

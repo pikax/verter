@@ -4,6 +4,10 @@
 - Date: 2026-08-30
 - Supersedes: nothing; narrows the D3 node created by `decisions/2026-08-29-rev11-flow-authority-correction.md` into four nodes, extending the split pattern of `decisions/2026-08-29-rev11-flow-d2-split.md`
 - Scope: rev11.flow DAG node D3 and its charter, ledger issue mapping, and downstream predecessor references; no production code
+- Execution and determinism clauses below are superseded by the
+  [2026-09-08 execution contract](2026-09-08-flow-product-execution-contract.md):
+  the interpreter supplies actual transfers and predecessors to the selected
+  product kernel. The split, original rationale and atomic landing remain.
 
 ## Context
 

@@ -846,8 +846,7 @@ fn flow_graph_csr_out_edges_are_from_consistent() {
         skeleton_of("function e(a: number) { let b = a; b = a + 1; if (a) { b++; } return b; }");
     let graph = build_function_flow_graph(&skeleton);
     let mut total = 0usize;
-    for index in 0..graph.node_count() {
-        let node = FlowNodeId::from_index(index as u32);
+    for node in graph.nodes() {
         for edge in graph.out_edges(node) {
             assert_eq!(edge.from, node);
             total += 1;
@@ -855,4 +854,66 @@ fn flow_graph_csr_out_edges_are_from_consistent() {
     }
     assert_eq!(total, graph.edges().len());
     assert!(total > 0, "the fixture produces edges");
+}
+
+#[test]
+fn flow_graph_enumerates_every_node_family_and_empty_graphs() {
+    let populated = skeleton_of(
+        "function enumerate(x: number) { const y = x + 1; if (x) { return y; } return x; }",
+    );
+    let empty = FunctionBodySkeleton {
+        names: Arc::from([]),
+        regions: Arc::from([]),
+        bindings: Arc::from([]),
+        expr_sites: Arc::from([]),
+        return_sites: Arc::from([]),
+        writes: Arc::from([]),
+    };
+    let captured = indexed_returned_arrow("function root() { const x = 1; return () => x; }");
+    for (skeleton, captures) in [(populated, 0), (empty, 0), (captured, 1)] {
+        let graph = build_function_flow_graph(&skeleton);
+        let mut nodes = graph.nodes();
+        let expected = [
+            skeleton.bindings.len(),
+            skeleton.expr_sites.len(),
+            skeleton.return_sites.len(),
+            skeleton.regions.len(),
+            captures,
+        ];
+        let total: usize = expected.iter().sum();
+        assert_eq!(nodes.len(), total);
+        let mut families = [0usize; 5];
+        for index in 0..total {
+            let node = nodes.next().expect("every structural node is enumerated");
+            assert_eq!(node.index(), index, "enumeration is unique and ordered");
+            assert_eq!(nodes.len(), total - index - 1);
+            let reminted = match graph.node_kind(node) {
+                FlowNodeKind::Binding(id) => {
+                    families[0] += 1;
+                    graph.binding_node(id)
+                }
+                FlowNodeKind::ExprSite(id) => {
+                    families[1] += 1;
+                    graph.expr_site_node(id)
+                }
+                FlowNodeKind::ReturnSite(id) => {
+                    families[2] += 1;
+                    graph.return_site_node(id)
+                }
+                FlowNodeKind::Region(id) => {
+                    families[3] += 1;
+                    graph.region_node(id)
+                }
+                FlowNodeKind::CapturedBinding(id) => {
+                    families[4] += 1;
+                    assert_eq!(graph.captured_binding(id).name.as_ref(), "x");
+                    graph.captured_binding_node(id)
+                }
+            };
+            assert_eq!(node, reminted);
+            assert!(graph.out_edges(node).iter().all(|edge| edge.from == node));
+        }
+        assert_eq!(families, expected);
+        assert_eq!(nodes.next(), None);
+    }
 }

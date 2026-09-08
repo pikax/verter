@@ -14,14 +14,19 @@
 //! the two legs cannot share a fixture.
 #![allow(dead_code, unreachable_code)]
 
-use verter_session::for_tests::{FlowDemandPlan, FlowObligationSpec, SealedFlowCompletion};
+use verter_session::for_tests::{FlowDemandPlan, FlowExecutionSelection, FlowObligationSpec, SealedFlowCompletion};
 
 // No field write and no field read: even with a plan in hand, its fields
 // are unreachable (E0616).
 fn mutate_plan(plan: &mut FlowDemandPlan) {
-    plan.basis = todo!();
+    plan.execution = todo!();
     plan.work_order = todo!();
-    let _ = &plan.subject;
+}
+
+fn mutate_selection(selection: &mut FlowExecutionSelection) {
+    selection.basis = todo!();
+    selection.structural_selection = todo!();
+    let _ = &selection.resources;
 }
 
 // No mutable slice or caller-supplied work order: no such accessor exists
