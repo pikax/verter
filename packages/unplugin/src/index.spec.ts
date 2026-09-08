@@ -2049,15 +2049,6 @@ defineEmits<DrawerEmits>()
     // Compile
     const result = host.getVirtualFile({
       rawId: consumerPath,
-      compileProfile: {
-        filename: consumerPath,
-        ssr: false,
-        isProduction: false,
-        componentId: "test",
-        hmrStrategy: "vite",
-        sourceMap: false,
-        forceJs: false,
-      },
     });
 
     expect(result.code).not.toContain("XInvalidMacroType");
