@@ -498,13 +498,6 @@ received_by_role = "sole-owner outcome"
 shipped_obligation = "authority-only"
 
 [[atom]]
-id = "A-authority-consistent"
-claim = "CLM-OWNERSHIP"
-statement = "The program authority the ownership rows reference — DAG structure, charter parity, catalog and ledger membership — validates without error."
-evidence_anchor = "roadmap/0.1.0-tama/authority"
-shipped_obligation = "authority-only"
-
-[[atom]]
 id = "A-downstream-owner-restated"
 claim = "CLM-OWNERSHIP"
 statement = "Every charter in this node's train declares the RATIFIED owner in its own generated header, and every charter that DELIVERS an outcome also narrates the migration pair — the owner being displaced and the one that ends up sole — with the ratified owner as final. Both statements are resolved against the charter's own bytes, because they are written by different hands and can disagree: a regenerated header standing over untouched prose still hands the capability to the displaced owner everywhere a reader actually looks. The narrative half is resolved inside the section that OWNS it rather than anywhere in the document, and a section stating more than one pair — or a charter declaring that section twice — is refused rather than resolved by position, because a compliant sentence written above a stale one leaves the reader meeting both while a first-match reader sees one. A missing header, a missing sentence on a delivery charter, a final owner that is not the ratified one, or a displaced owner that is not the one this register displaces fails here instead of being closed by assertion. A historical identity wrapper delivers no outcome and narrates no pair; that is the one exempt shape, and it is exercised by a control rather than assumed."
@@ -747,21 +740,6 @@ terminal_summary = "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 
 control = "CTL-profile-multiplicity"
 
 [[proof]]
-id = "P-authority-shape"
-adapter = "node-tool"
-argv_tail = ["roadmap/0.1.0-tama/tools/validate-program-dag.mjs", "--strict"]
-fixtures = ["roadmap/0.1.0-tama/authority/dag/rev11-typescript-mapper.toml", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM0R.md"]
-covers = ["A-authority-consistent"]
-selected = 411
-executed = 411
-passed = 411
-failed = 0
-skipped = 0
-terminal_summary = "validate-program-dag: PASS nodes=411 edges=1044 modules=52 charters=411 critical_path=113 max_width=36"
-count_key = "nodes"
-control = "CTL-authority-edge"
-
-[[proof]]
 id = "P-ledger-model"
 adapter = "node-test"
 argv_tail = ["roadmap/0.1.0-tama/tools/implementation-ledger.test.mjs"]
@@ -795,12 +773,12 @@ adapter = "node-tool"
 argv_tail = ["roadmap/0.1.0-tama/tools/closure-register.mjs", "--check"]
 fixtures = ["roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM0.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM1.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM2.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM3.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM4.md"]
 covers = ["A-plane-boundary", "A-no-oracle-callback", "A-mapper-total", "A-projection-classes-closed", "A-binding-is-a-witness", "A-no-unbound-semantic-result", "A-publication-requires-live-basis", "A-degraded-never-warms", "A-slot-keyed-by-query-identity", "A-incremental-equals-fresh", "A-single-owner-per-capability", "A-no-dual-running-window", "A-deletion-rows-concrete", "A-survivor-rows-received", "A-residue-owner-non-circular", "A-receiving-criterion-direct", "A-resolution-gate-named", "A-downstream-owner-restated"]
-selected = 545
-executed = 545
-passed = 545
+selected = 530
+executed = 530
+passed = 530
 failed = 0
 skipped = 0
-terminal_summary = "closure-register: PASS instrument=typescript-mapper-closure claims=7 atoms=52 proofs=9 controls=9 findings=36 residues=3 obligations=545 state=READY_FOR_REVIEW"
+terminal_summary = "closure-register: PASS instrument=typescript-mapper-closure claims=7 atoms=51 proofs=8 controls=8 findings=36 residues=3 obligations=530 state=READY_FOR_REVIEW"
 count_key = "obligations"
 control = "CTL-contract-section"
 
@@ -895,16 +873,6 @@ reverted = "        sorted.sort();\n        sorted.dedup();\n        let mut pay
 applied = "        sorted.sort();\n        let mut payload = Vec::new();"
 uniqueness = "unique-new-occurrence"
 observed = "cargo exit 101; test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 23 filtered out — encoding::tests::sorted_set_collapses_repeats_without_collapsing_distinct_elements panicked on `assertion `left == right` failed`, printing a 52-byte encoding for [a, a] beside a 17-byte-payload encoding for [a], and identity::tests::query_identity_is_a_profile_set_not_a_profile_list panicked on `assertion `left == right` failed: observing a profile twice is the same question as observing it once`, printing a 212-byte canonical against a 172-byte one; the order-independence case still passed, which is what makes the repeat case the discriminating half"
-
-[[control]]
-id = "CTL-authority-edge"
-kind = "source"
-mutation = "Point one predecessor edge in the typescript-mapper DAG module at a node id that does not exist."
-subject = "roadmap/0.1.0-tama/authority/dag/rev11-typescript-mapper.toml"
-reverted = "id = \"TCM1\"\nname = \"Compact mapping products inside CodeTransform\"\npredecessors = [\"TCM0R\"]"
-applied = "id = \"TCM1\"\nname = \"Compact mapping products inside CodeTransform\"\npredecessors = [\"TCM0R_ABSENT_EDGE\"]"
-uniqueness = "unique-new-occurrence"
-observed = "node exit 1, three errors and no PASS line:\nERROR: authority.dag/rev11-typescript-mapper.toml.node[2].predecessors[0]: string does not match ^[A-Z][A-Z0-9-]*$\nERROR: TCM1: missing predecessor TCM0R_ABSENT_EDGE\nERROR: TCM1: charter header predecessors differs from DAG (TCM0R != TCM0R_ABSENT_EDGE)"
 
 [[control]]
 id = "CTL-ledger-row"

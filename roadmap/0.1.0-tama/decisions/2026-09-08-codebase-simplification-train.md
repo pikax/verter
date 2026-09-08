@@ -73,3 +73,9 @@ The train uses ordinary independent-node candidates, risk-scaled fresh reviews a
 Code/tests are changed only by later node implementations. Verification of this amendment covers strict DAG validation, frontier and packet behavior, unchanged existing implementation/issue mappings, declared conflict-domain coverage, human issue synchronization in check mode, the implementation-ledger tests and the docs build. Fresh dependency, architecture and testing reviews passed after correcting the affected TypeScript gate selections and explicitly binding retained type assertions.
 
 The full conflict-ownership projection check is currently blocked by a pre-existing invalid `crates/verter_formatter/src/service/**` production-surface entry in `charters/expansion-formatter/FMT3C.md`. That unrelated charter is unchanged. The new train's concrete surfaces are checked independently against their declared domains; the projection check is not reported as passing.
+
+## Remove redundant DAG-size evidence
+
+The maintainer subsequently requested removal of the redundant checks that failed PR #512. The mapper closure instrument repeated the canonical DAG validator, pinned its entire summary, and reapplied a second missing-edge mutation. Adding valid roadmap nodes therefore failed both closure lanes because the recorded node count was stale.
+
+Remove that closure atom, proof, mutation control and their exclusive pins. The canonical `validate-program-dag.mjs --strict` command remains in the Tama Roadmap CI job and continues checking graph validity, charter parity, catalogs and ledger membership. Roadmap growth no longer requires a mapper closure transcript update. Remaining mapper contract evidence and in-flight implementation ownership are unchanged.
