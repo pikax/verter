@@ -501,9 +501,9 @@ acceptance = ["A dedicated lossless parser decision covers MDX grammar and recov
 [[issue]]
 node_id = "MDXR0"
 title = "Test React-qualified component discovery in MDX"
-problem = "React component suggestions in MDX are unreliable when capitalization or generic JSX is treated as proof, causing incorrect imports and navigation for Solid, Preact, plain JSX, or user-defined components."
+problem = "React component suggestions in MDX are unreliable when capitalization or generic JSX is treated as proof, causing incorrect imports and navigation for Solid 2, Preact, plain JSX, or user-defined components."
 expected_outcome = "A private experiment demonstrates React auto-import and navigation from bounded, project-qualified candidates while leaving generic MDX tooling framework-neutral."
-acceptance = ["A bounded React `ComponentInfo` provider contract exposes exact package, project, and export provenance.", "Private auto-import ranking and edits use only proven React candidates and preserve definition mappings.", "Solid, Preact, plain JSX, and ambiguous userland candidates are rejected rather than guessed.", "Cancellation, stale index bases, and search limits prevent incomplete results from appearing complete.", "The experiment leaves no reachable production provider, join path, or advertised React-in-MDX capability after evidence is captured."]
+acceptance = ["A bounded React `ComponentInfo` provider contract exposes exact package, project, and export provenance.", "Private auto-import ranking and edits use only proven React candidates and preserve definition mappings.", "Solid 2, Preact, plain JSX, and ambiguous userland candidates are rejected rather than guessed.", "Cancellation, stale index bases, and search limits prevent incomplete results from appearing complete.", "The experiment leaves no reachable production provider, join path, or advertised React-in-MDX capability after evidence is captured."]
 [[issue]]
 node_id = "PRF0"
 title = "Define falsifiable representative framework experiments"
@@ -518,10 +518,10 @@ expected_outcome = "A private React experiment activates facts from exact packag
 acceptance = ["React activation in the experiment is tied to exact package and project roles rather than syntax or naming heuristics.", "Component, hook, props, ref, children, reactivity, and directive facts remain React-owned facets.", "Ordinary TSX parsing and TypeScript type ownership remain unchanged.", "Plain TSX and userland hook lookalikes produce no React overlay work.", "A compiler-rule canary and one cross-framework consumer check demonstrate semantic value without advertising production React support."]
 [[issue]]
 node_id = "SLDP"
-title = "Use Solid to challenge React-shaped TSX assumptions"
-problem = "React-shaped abstractions can silently become the generic TSX substrate, causing incorrect component and reactivity facts, cache collisions, and cross-framework diagnostics when identical syntax belongs to Solid."
-expected_outcome = "A private Solid counterexample proves that component, props, signal, effect, and control-flow semantics remain framework-owned while only neutral TSX and TypeInfo boundaries are shared."
-acceptance = ["Solid activates in the experiment from exact package roles and does not inherit React semantics from syntax shape.", "Identical React and Solid syntax fixtures produce their framework-owned divergent facts.", "Private cache, diagnostic, action, and formatter-view checks remain isolated across mixed-framework projects.", "Neutral syntax contains no framework switch or flattened React-compatible reactivity schema.", "The experiment adds no parser, TypeScript semantic host, or advertised Solid capability."]
+title = "Use Solid 2 to challenge React-shaped TSX assumptions"
+problem = "React-shaped abstractions can silently become the generic TSX substrate, causing incorrect component and reactivity facts, cache collisions, and cross-framework diagnostics when identical syntax belongs to Solid 2."
+expected_outcome = "A private Solid 2 counterexample proves that component, props, signal, async memo, split effect, batching, store, and control-flow semantics remain framework-owned while only neutral TSX and TypeInfo boundaries are shared."
+acceptance = ["Solid 2 activates in the experiment from one exact 2.x release and package roles, with any prerelease maturity recorded, and does not inherit React semantics from syntax shape.", "Identical React and Solid 2 syntax fixtures produce their framework-owned divergent facts.", "Solid 1 support, compatibility, and migration remain out of scope; unsupported Solid 1 inputs cannot activate the Solid 2 profile.", "Private cache, diagnostic, action, and formatter-view checks remain isolated across mixed-framework projects.", "Neutral syntax contains no framework switch or flattened React-compatible reactivity schema.", "The experiment adds no parser, TypeScript semantic host, or advertised Solid 2 capability."]
 [[issue]]
 node_id = "UKS0"
 title = "Stabilize the framework extension contract from representative evidence"
@@ -827,7 +827,7 @@ node_id = "HWC2"
 title = "Publish neutral HTML facts and authored mappings"
 problem = "A syntax tree alone cannot support reliable HTML navigation, indexing, or framework overlays when element, attribute, identifier, selector, and source-map facts lack neutral ownership. Reconstructing those facts in consumers causes duplicate parsers, incorrect ranges, and ambiguous dynamic values presented as complete."
 expected_outcome = "The HTML frontend publishes neutral authored facts, exact mappings, TypeInfo roles, and atomic index contributions that framework overlays can consume without changing parser behavior."
-acceptance = ["Element, attribute, text, comment, namespace, ID, class, selector, symbol, and authored-region facts have stable identities.", "Every admitted fact and index contribution preserves exact authored UTF-8 ranges and provenance.", "Static definitions and renames are exact, while dynamic or ambiguous values remain explicitly incomplete.", "Representative framework overlays consume the same neutral facts without parser branches."]
+acceptance = ["Element, attribute, text, comment, namespace, ID, class, selector, symbol, and authored-region facts have stable identities.", "Every admitted fact and index contribution preserves exact authored UTF-8 ranges and provenance.", "Static definitions and renames are exact, while dynamic or ambiguous values remain explicitly incomplete.", "Alpine, htmx 4, and Angular test overlays consume the same neutral facts without parser branches.", "htmx counterfixtures pin one exact 4.x release; explicit inheritance, configuration overrides, and request/target/trigger/swap interpretation remain overlay-owned without implicit major fallback."]
 [[issue]]
 node_id = "HWC3"
 title = "Model standards-based custom elements and registry evidence"
@@ -1049,7 +1049,7 @@ node_id = "VID0"
 title = "Separate carrier, profile, project, and release identities"
 problem = "Conflated language, framework, release, project, snapshot, and capability identifiers allow unrelated artifacts to share cache keys or semantic dispatch. This causes cross-version collisions, implicit latest-version behavior, and incorrect framework claims for identical source bytes in different project contexts."
 expected_outcome = "Every carrier, semantic release, attachment, project profile, configured project, snapshot, and capability uses an orthogonal typed identity while preserving the accepted source and type-backend identities."
-acceptance = ["Source lineage remains stable while source revision, content, and map revisions change independently.", "Vue 2.6 and Vue 3 can coexist in one workspace without dispatch branches or cache collisions.", "Identical TSX bytes can carry distinct React and Solid claims through explicit profile identity.", "Latest-version aliases, family-wide cache keys, untagged string identities, and implicit default majors fail validation."]
+acceptance = ["Source lineage remains stable while source revision, content, and map revisions change independently.", "Vue 2.6 and Vue 3 can coexist in one workspace without dispatch branches or cache collisions.", "Identical TSX bytes can carry distinct React and Solid 2 claims through explicit profile identity.", "Solid 1 cannot activate a Solid 2 profile, and older htmx majors cannot activate an htmx 4 profile.", "Latest-version aliases, family-wide cache keys, untagged string identities, and implicit default majors fail validation."]
 [[issue]]
 node_id = "VIM0"
 title = "Define a typed conformance manifest for each supported profile"
@@ -1631,3 +1631,108 @@ title = "Restore behavioral verification under the shipped build configuration"
 problem = "The canonical gate temporarily skips verification with debug assertions disabled, allowing debug-only side effects to escape the normal acceptance path."
 expected_outcome = "The canonical, CI and release paths execute the shipped-configuration compile and behavioral lanes and refuse incomplete or skipped work."
 acceptance = ["Both the compile surface and behavioral contract execute with debug assertions disabled.", "A demonstrably applied debug-assertion side effect is caught through the canonical entry point.", "Missing summaries, zero selected tests, skipped prerequisites and aborted children cannot pass.", "Temporary-skip documentation is removed only after actual successful execution."]
+
+[[issue]]
+node_id = "SIMP1"
+title = "Retire scheduler source-shape guards"
+problem = "Scheduler tests scan for deleted names, exact signatures and enum spellings instead of exercising scheduling. Their known-variant counter fails to reject an additional variant, while harmless refactors must maintain obsolete spelling assertions."
+expected_outcome = "Scheduler behavior stays covered while obsolete source-shape guards and their exclusive machinery are removed."
+acceptance = ["Obsolete scheduler source-name guards and exclusive helpers are removed.","Capacity, cancellation, priority and dispatch behavior remain tested.","Bounded selection is supported by real work evidence instead of spelling bans."]
+
+[[issue]]
+node_id = "SIMP2"
+title = "Retire playground engine tombstones"
+problem = "The playground recursively scans itself for retired engine words and walks again to assert an arbitrary file count. Split-up banned strings and filename checks cause maintenance work without proving browser capabilities or saved-URL restoration."
+expected_outcome = "Browser capabilities and legacy URL restoration are tested directly without engine-name or source-layout tombstones."
+acceptance = ["Retired-engine source and filename scanners are removed.","Browser capabilities and legacy URL restoration remain covered.","Test diagnostics describe observable behavior without self-scanning workarounds."]
+
+[[issue]]
+node_id = "SIMP3"
+title = "Retire recursive test-governance machinery"
+problem = "A documentation-heading registry scans named guards and has additional tests pinning its own membership. The retention rule prevents removal of these recursive checks even when existing behavior and type evidence already cover the live contract."
+expected_outcome = "Test guidance assesses actual proof value without recursive guard-registration machinery or mandatory AI-authorship markers."
+acceptance = ["The heading-to-guard registry and checks pinning it are removed together.","Testing guidance no longer requires grandfather retention or authorship-comment quotas.","Live behavioral/type contracts and truthful gate disclosures remain intact."]
+
+[[issue]]
+node_id = "SIMP4"
+title = "Retire historical source and campaign guards"
+problem = "Deleted names, old file moves, roadmap wording and completed campaign prose remain enforced by source tests with parsers, exception lists and self-tests. Harmless refactors cause failures that do not identify a current product defect."
+expected_outcome = "Historical-only guards and exclusive support are deleted while live schema, portability and cache-behavior evidence remain."
+acceptance = ["Deleted identities, historic layouts and completed campaign wording no longer require runtime source guards.","Exclusive scanner helpers and exception bookkeeping are deleted with their consumers.","Live schema, portability, parse/build dedup and invalidation evidence remain."]
+
+[[issue]]
+node_id = "SIMP5"
+title = "Retire semantic migration analyzers"
+problem = "Residual tests implement a partial Rust analyzer with fixed anchors, taint propagation and call allowlists. After canonical types own the boundary, these duplicate enforcement paths risk drifting from the actual compiler and keep obsolete migration machinery alive."
+expected_outcome = "Live types, capabilities and behavior protect semantic boundaries while residual source analyzers and their self-tests disappear."
+acceptance = ["The residual semantic analyzer and closed migration inventories are retired.","Live compiler/type/capability constraints survive outside deleted scanner files.","Semantic output, complete admission and bounded materialization remain evidenced."]
+
+[[issue]]
+node_id = "SIMP6"
+title = "Retire provider source-shape backstops"
+problem = "Provider tests infer admission, witness use and lifecycle ordering from source strings and hand-written body parsers. Their shape checks can fail on equivalent code while missing unsafe protocol behavior, increasing maintenance alongside existing runtime coverage."
+expected_outcome = "Provider safety is verified through actual admission, protocol traffic, replay and close behavior without source-shape backstops."
+acceptance = ["Provider source scanners and exclusive parsers are retired.","Configured-project, non-owning protocol and close/replay boundaries retain discriminating evidence.","Shared test setup stays local and isolated with useful failure diagnostics."]
+
+[[issue]]
+node_id = "SIMP7"
+title = "Reuse provider coordinate conversion state"
+problem = "Diagnostic conversion builds and copies a full LineIndex per endpoint, potentially rebuilding the same source index 2D times for D diagnostics. This causes repeated full-source work even when every endpoint refers to the same document snapshot."
+expected_outcome = "Coordinate conversion reuses state for the exact source snapshot or batch with fewer full-source scans and copies and unchanged encoding/range behavior."
+acceptance = ["Identical source indexing is reused across response endpoints.","Negotiated encodings, strict rejection and source-version/target identity remain correct.","Source scans/copies decrease without another cache or unbounded retention."]
+
+[[issue]]
+node_id = "SIMP8"
+title = "Simplify provider transport bookkeeping"
+problem = "Large IPC modules repeat pending-request insertion, removal and completion logic while mixing process setup, framing, document state and feature decoding. Independent copies risk inconsistent cancellation and cleanup fixes and make request ownership harder to inspect."
+expected_outcome = "Shared request mechanics have one small owner and protocol-specific responsibilities are narrower without changing cancellation, completion or failure behavior."
+acceptance = ["Equivalent pending-request bookkeeping has one implementation.","IPC responsibilities narrow without a generic transport framework.","Completion, cancellation, shutdown and request retention remain correct and bounded."]
+
+[[issue]]
+node_id = "SIMP9"
+title = "Unify stale provider close operations"
+problem = "Background drain and workspace scanning duplicate forget, per-kind close and finalize-on-success operations with repeated lifecycle prose. Separate copies risk diverging when failure recovery or concurrent reopen behavior changes."
+expected_outcome = "One existing lifecycle owner closes stale provider surfaces with correct tokens, failure recovery and reopen ordering."
+acceptance = ["Equivalent stale-close callers use one operation owner.","Failed closes and concurrent reopen preserve correct state.","Per-kind behavior and declaration-overlay exclusions remain intact."]
+
+[[issue]]
+node_id = "SIMP10"
+title = "Simplify SSR property assembly"
+problem = "SSR renders properties to strings, reparses their keys and values to merge handlers, then rebuilds or removes strings. This causes avoidable parsing and allocation work and couples handler ordering to rendered-text details."
+expected_outcome = "Minimal property key/value/order information survives until final emission, removing reparsing and narrowing property assembly state access."
+acceptance = ["SSR handler merging no longer reparses rendered properties.","Handler order, spreads, output and mappings remain equivalent.","The property owner has narrower inputs and removes measured redundant work."]
+
+[[issue]]
+node_id = "SIMP11"
+title = "Consolidate integration-test layout verification"
+problem = "An 829-line Rust test duplicates the Node Cargo-metadata layout check already run before Rust CI. Maintaining two implementations causes repeated build and review work for the same integration-target discovery rule."
+expected_outcome = "One existing metadata-based check serves local and CI verification without duplicate Rust logic or hidden test-target discovery."
+acceptance = ["One implementation owns integration-target layout checks.","Local and CI discovery still reject hidden or duplicate binaries.","Duplicate checking is removed without weakening shipped or compile-contract lanes."]
+
+[[issue]]
+node_id = "SIMP12"
+title = "Simplify component-meta contract tests"
+problem = "Compat tests scan source for graph placeholders and pin an alias-bypassable _session allowlist. Other checks silently skip absent build artifacts, while excluded type fixtures leave some claimed public-contract checks unexecuted."
+expected_outcome = "Tests assert actual public output, types and built exports with less duplicate setup and no implementation-name scanner."
+acceptance = ["Compat source-name scanners and exclusive walkers are removed.","Real public types are checked by an explicitly bound TypeScript command; display/schema and Volar projection behavior stay tested.","Required artifact proof uses fresh exports and cannot pass by skipping missing artifacts."]
+
+[[issue]]
+node_id = "SIMP13"
+title = "Simplify surviving semantic memo coordination"
+problem = "Memo families repeat claim, abort, completion and publication coordination. Surviving copies risk inconsistent cancellation and publication fixes; current migrations may already remove some of them, so cleanup must inspect the final owners."
+expected_outcome = "Any surviving equivalent memo coordination uses the existing runtime while typed family preconditions and publication semantics remain explicit."
+acceptance = ["Surviving equivalent memo coordination uses one existing runtime owner.","Family semantics, cancellation and complete-only publication remain correct.","Duplicate coordination/state disappears without another cache or memo framework."]
+
+[[issue]]
+node_id = "SIMP14"
+title = "Reduce semantic dispatcher responsibilities"
+problem = "Large dispatch files mix declaration preparation, traversal and terminal projection with broad state access and duplicated helpers. This coupling risks unrelated behavior changes during maintenance, and arbitrary file splitting would leave it intact."
+expected_outcome = "Dispatcher responsibilities have narrower explicit inputs with redundant helpers/state forwarding removed and rationale held by its owner."
+acceptance = ["Dispatcher responsibilities use narrower inputs and fewer independent mechanisms.","Duplicate helpers/state forwarding and repeated rationale are removed.","Public results, lazy work, invalidation and cancellation remain equivalent."]
+
+[[issue]]
+node_id = "SIMP15"
+title = "Verify simplification outcomes and coverage"
+problem = "Line and test counts alone can fall while duplicated mechanisms remain or meaningful coverage disappears. This leaves maintainers unable to establish whether the combined cleanup simplified ownership or supports its claimed performance benefits."
+expected_outcome = "Completed simplification has explicit removed mechanisms, retained proof and separate truthful test/build and application-work measurements."
+acceptance = ["Every scoped outcome has a final owner, removed mechanism and preserved proof.","Production, tests and comments are measured separately without quotas or unsupported runtime claims.","Independent cumulative review passes with no unresolved required outcome."]

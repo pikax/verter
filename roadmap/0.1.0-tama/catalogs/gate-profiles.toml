@@ -23,3 +23,13 @@ final = ["node scripts/gate.mjs", "cargo clippy --workspace --all-targets -- -D 
 id = "historical-implemented"
 iteration = false
 final = []
+
+[[profile]]
+id = "simplification-playground"
+iteration = true
+final = ["pnpm --filter @verter/playground exec vitest run src/editor/wasmTsgoFailClosed.spec.ts --passWithNoTests=false"]
+
+[[profile]]
+id = "simplification-component-meta"
+iteration = true
+final = ["pnpm build:native", "pnpm build:ts", "pnpm --filter @verter/component-meta exec vitest run --exclude '**/checker.benchmark.spec.ts' --passWithNoTests=false", "pnpm --filter @verter/component-meta exec tsc --noEmit -p tsconfig.contract-tests.json"]

@@ -128,7 +128,7 @@ trains = ["expansion.custom-elements", "expansion.html-wc", "expansion.svelte-ce
 
 [[area_rule]]
 label = "area:tooling"
-trains = ["expansion.architecture-proof", "expansion.cli", "expansion.engine-provisioning", "expansion.kernel", "expansion.skills", "governance.feedback-intake", "governance.github-control-plane", "governance.governance", "rev11.lock"]
+trains = ["expansion.architecture-proof", "expansion.cli", "expansion.engine-provisioning", "expansion.kernel", "expansion.skills", "governance.feedback-intake", "governance.github-control-plane", "governance.governance", "rev11.lock", "rev11.simplification"]
 
 [[area_rule]]
 label = "area:release"
@@ -153,6 +153,10 @@ trains = ["expansion.engine-provisioning", "governance.feedback-intake", "govern
 [[problem_train_rule]]
 label = "problem:documentation"
 trains = ["governance.governance"]
+
+[[problem_train_rule]]
+label = "problem:architecture"
+trains = ["rev11.simplification"]
 
 [[problem_kind_rule]]
 label = "problem:architecture"

@@ -150,34 +150,18 @@ describe("VerterHost", () => {
     expect(mainFile.code).toContain("_sfc_main");
   });
 
-  it("ensureIdeCompiled populates the IDE CachedTsx for a Vue SFC without requiring getVirtualFile(Main)", () => {
-    // §APIDECISION ruling B: the explicit IDE-ensure path populates the IDE
-    // `CachedTsx`; `getIde` then reads it — WITHOUT a prior `getVirtualFile(Main)`.
-    const host = new VerterHost();
-    host.upsert({ inputId: "IdeOnly.vue", source: SFC_INPUT, fileKind: "vue" });
-
-    const profile = { target: "ide" };
-    const ensured = host.ensureIdeCompiled("IdeOnly.vue", profile);
-    expect(ensured).toBe(true);
-
-    const ide = host.getIde("IdeOnly.vue", profile);
-    expect(ide).not.toBeNull();
-    expect(ide!.code).toBeTruthy();
-  });
-
-  it("ensureIdeCompiled normalizes a default/bundler profile to the IDE surface (returns true + populates CachedTsx)", () => {
-    // Profile-normalization contract: `ensureIdeCompiled` normalizes the caller profile to an
-    // IDE/TSX-bearing target INTERNALLY, so it returns `true` and populates
-    // `CachedTsx` whenever the carrier HAS an IDE surface — even with NO profile
-    // (the NAPI wrapper defaults to the bundler target, no TSX bit). `getIde`
-    // reads the SAME normalized slot under the same (omitted) profile.
-    // DISCRIMINATING: before the fix, the omitted/bundler profile produced no
-    // TSX and `ensureIdeCompiled` returned `false` for a file that DOES have an
-    // IDE surface; `getIde` then peeked the empty bundler slot.
+  it("ensureIdeCompiled normalizes the host-default compile shape to the IDE surface (returns true + populates CachedTsx)", () => {
+    // The IDE-ensure path takes NO caller compile shape: it normalizes the
+    // host default (the bundler target, no TSX bit) to an IDE/TSX-bearing
+    // target INTERNALLY, so it returns `true` and populates `CachedTsx`
+    // whenever the carrier HAS an IDE surface. `getIde` then reads that SAME
+    // normalized slot — WITHOUT a prior `getVirtualFile(Main)`.
+    // DISCRIMINATING: without that normalization the bundler default produces
+    // no TSX, `ensureIdeCompiled` returns `false` for a file that DOES have an
+    // IDE surface, and `getIde` peeks the empty bundler slot.
     const host = new VerterHost();
     host.upsert({ inputId: "Bundler.vue", source: SFC_INPUT, fileKind: "vue" });
 
-    // No profile argument — the wrapper defaults to the bundler target.
     const ensured = host.ensureIdeCompiled("Bundler.vue");
     expect(ensured).toBe(true);
 
@@ -199,18 +183,13 @@ describe("VerterHost", () => {
       fileKind: "svelte",
     });
 
-    // "full" (bundler + TSX + template data) — this test exercises BOTH
-    // the IDE and runtime surfaces off the SAME profile, so the target
-    // must carry both a runtime output bit and the TSX bit;
-    // `compileProfile.target` gates which products a compile actually
-    // produces (an "ide"-only profile deliberately produces no runtime
-    // Main — see `ensure_compile_artifacts`'s "demand is consulted only
-    // to validate, never to steer" contract).
-    const profile = { target: "full" };
-    const ensured = host.ensureIdeCompiled("Counter.svelte", profile);
+    // The IDE and runtime surfaces are two separate cached reads under the
+    // host default: `ensureIdeCompiled` normalizes to the IDE/TSX target,
+    // while `getVirtualFile(main)` reads the runtime bundler product.
+    const ensured = host.ensureIdeCompiled("Counter.svelte");
     expect(ensured).toBe(true);
 
-    const ide = host.getIde("Counter.svelte", profile);
+    const ide = host.getIde("Counter.svelte");
     expect(ide).not.toBeNull();
     // Svelte-specific IDE output — the @verter/svelte-jsx pragma, NOT Vue TSX.
     expect(ide!.code).toContain("@jsxImportSource @verter/svelte-jsx");
@@ -219,7 +198,6 @@ describe("VerterHost", () => {
     const main = host.getVirtualFile({
       canonicalId: "Counter.svelte",
       nodeKind: { kind: "main" },
-      compileProfile: profile,
     });
     expect(main.code).toContain("import * as $ from 'svelte/internal/client';");
     expect(main.code).toContain("import 'svelte/internal/flags/legacy';");
@@ -260,7 +238,9 @@ const view = import('./Foo.vue')
     expect(result.moduleReferences[0].literalSpecifier).toBe("./Foo.vue");
   });
 
-  it("should strip TypeScript when forceJs is set in compile profile", () => {
+  it("should strip TypeScript when the typed request states forceJs", () => {
+    // `forceJs` is an identity axis of the typed compile request — the cached
+    // read routes carry no caller-stated compile shape.
     const host = new VerterHost();
     host.upsert({
       inputId: "TypedComponent.vue",
@@ -268,14 +248,19 @@ const view = import('./Foo.vue')
         '<script setup lang="ts">\nconst x: number = 1;\n</script>\n<template><div>{{ x }}</div></template>',
     });
 
-    const mainFile = host.getVirtualFile({
-      canonicalId: "TypedComponent.vue",
-      nodeKind: { kind: "main" },
-      compileProfile: { forceJs: true },
+    const response = host.compileRequest("TypedComponent.vue", {
+      framework: "vue",
+      identity: { isProduction: false, forceJs: true },
+      products: [{ kind: "runtimeClient", runtimeSourceMap: false }],
+      options: { backend: "inferred", ssr: false, isCustomElement: [], babelParserPlugins: [] },
     });
 
-    expect(mainFile.code).toContain("const x");
-    expect(mainFile.code).not.toContain(": number");
+    const main = response.products
+      .flatMap((product: any) => product.nodes ?? [])
+      .find((node: any) => node.node.kind === "main");
+    expect(main).not.toBeUndefined();
+    expect(main.code).toContain("const x");
+    expect(main.code).not.toContain(": number");
   });
 
   it("collects exact and finite module reference candidates in encounter order", () => {
@@ -386,17 +371,12 @@ const height = ref('100px')
       );
       expect(parseDup, "upsert should not produce DuplicateAttribute").toEqual([]);
 
-      // A `getVirtualFile(nodeKind: main)` query needs a profile whose
-      // target carries a runtime output bit — `compileProfile.target`
-      // gates which products a compile actually produces, and an
-      // `"ide"`-only profile deliberately produces no runtime Main (see
-      // `ensure_compile_artifacts`'s "demand is consulted only to
-      // validate, never to steer" contract). `"bundler"` is the correct
-      // preset here; this test only exercises the runtime compile.
+      // The cached per-node read compiles under the host default (the
+      // bundler target), which is exactly the runtime product this test
+      // exercises.
       const mainFile = host.getVirtualFile({
         canonicalId: result.canonicalId,
         nodeKind: { kind: "main" },
-        compileProfile: { target: "bundler" },
       });
 
       expect(mainFile.code).toBeTruthy();
