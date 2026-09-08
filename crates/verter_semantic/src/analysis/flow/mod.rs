@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use crate::analysis::function_program::{
-    FlowBindingIdentity, FunctionNestedCaptures, FunctionProgramEntry,
+    FlowBindingIdentity, FunctionNestedCaptures, FunctionProgramEntry, FunctionProgramKey,
 };
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentTarget, AssignmentTargetMaybeDefault,
@@ -613,9 +613,19 @@ pub struct FunctionBodySkeleton {
     pub return_sites: Arc<[SkeletonReturnSite]>,
     /// The assignment / kill summary, in source order.
     pub writes: Arc<[SkeletonWrite]>,
+    nested_function_sites: Arc<FxHashMap<FunctionProgramKey, SkeletonExprSiteId>>,
 }
 
 impl FunctionBodySkeleton {
+    /// The exact parent expression site for a tracked immediate child.
+    /// Multiple children in one aggregate may share a site; other frames miss.
+    pub fn nested_function_site(
+        &self,
+        function: &FunctionProgramKey,
+    ) -> Option<SkeletonExprSiteId> {
+        self.nested_function_sites.get(function).copied()
+    }
+
     /// The interned text of `name`.
     #[must_use]
     pub fn name(&self, name: FlowNameId) -> &str {
@@ -1069,6 +1079,7 @@ struct SkeletonBuilder<'entry> {
     nested_captures: FxHashMap<verter_span::Span, &'entry FunctionNestedCaptures>,
     capture_subjects: FxHashSet<(SkeletonExprSiteId, FlowBindingRef)>,
     capture_names: FxHashSet<(SkeletonExprSiteId, FlowNameId)>,
+    nested_function_sites: FxHashMap<FunctionProgramKey, SkeletonExprSiteId>,
 }
 
 impl<'entry> SkeletonBuilder<'entry> {
@@ -1098,6 +1109,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             writes: Vec::new(),
             capture_subjects: FxHashSet::default(),
             capture_names: FxHashSet::default(),
+            nested_function_sites: FxHashMap::default(),
             nested_captures: entry
                 .map(|entry| {
                     entry
@@ -1390,6 +1402,8 @@ impl<'entry> SkeletonBuilder<'entry> {
             return;
         };
         let site = self.footprint_site(span);
+        self.nested_function_sites
+            .insert(captures.function.clone(), site);
         for identity in captures.bindings.0.iter() {
             let binding = FlowBindingRef::Captured(identity.clone());
             if self.capture_subjects.insert((site, binding.clone())) {
@@ -1863,6 +1877,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             ),
             return_sites: Arc::from(self.return_sites.into_boxed_slice()),
             writes: Arc::from(self.writes.into_boxed_slice()),
+            nested_function_sites: Arc::new(self.nested_function_sites),
         }
     }
 }
