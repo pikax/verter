@@ -192,24 +192,11 @@ pub enum FlowOperationStatus { Enabled, PendingReducer, Live }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlowFinalizerKind { CompletenessProof, TypedGapOnly, Suboperation }
 
-/// Closed checker return rules whose exact surviving capture-processing
-/// receipts may contribute to return inference. A rule is not a route permit:
-/// only the content interpreter can attest that the corresponding route ran.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FlowCheckerReturnRule {
-    AuthoredFinallyReturn,
-    OverriddenBreakSuffix,
-}
-
 /// The result-contract descriptor of one operation: how its result may be
 /// admitted and which gaps it may surface as typed partials.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FlowResultContractDescriptor {
-    pub finalizer: FlowFinalizerKind,
-    pub accepted_gaps: &'static [FlowGap],
-    pub checker_capture_returns: &'static [FlowCheckerReturnRule],
-}
+pub struct FlowResultContractDescriptor { pub finalizer: FlowFinalizerKind, pub accepted_gaps: &'static [FlowGap] }
 
 /// One row of the flow-operation contract registry. The requirement
 /// universe is the CLOSED domain→family mapping `closures` (never two
@@ -227,29 +214,6 @@ pub struct FlowOperationContract {
 }
 
 impl FlowOperationContract {
-    fn checker_capture_returns(&self) -> &'static [FlowCheckerReturnRule] {
-        if self.tag == SemanticQueryKeyTag::FlowReturn
-            && self.role == FlowOperationRole::Root
-            && self.status == FlowOperationStatus::Enabled
-            && self.result.finalizer == FlowFinalizerKind::CompletenessProof
-        {
-            self.result.checker_capture_returns
-        } else {
-            &[]
-        }
-    }
-
-    /// This accepts only checker return capture processing. It grants no
-    /// runtime, value-product, call, relation or incomplete-walk evidence.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn accepts_checker_capture_return(
-        &self,
-        rule: FlowCheckerReturnRule,
-        demand: FlowCaptureDemand,
-    ) -> bool {
-        demand == FlowCaptureDemand::Effect && self.checker_capture_returns().contains(&rule)
-    }
-
     /// The contract's required domains, in closure declaration order.
     pub fn required_domains(&self) -> impl Iterator<Item = FlowDomain> + '_ {
         self.closures.iter().map(|closure| closure.domain)
@@ -277,7 +241,7 @@ const fn row(tag: SemanticQueryKeyTag, role: R, status: S, closures: &'static [F
 
 #[rustfmt::skip]
 const fn desc(finalizer: K, accepted_gaps: &'static [FlowGap]) -> FlowResultContractDescriptor {
-    FlowResultContractDescriptor { finalizer, accepted_gaps, checker_capture_returns: &[] }
+    FlowResultContractDescriptor { finalizer, accepted_gaps }
 }
 
 #[rustfmt::skip]
@@ -329,10 +293,7 @@ static FLOW_OPERATION_CONTRACTS: &[FlowOperationContract] = &[
             closure(D::CallResolution, CALL_RESOLUTION_FAMILIES),
             closure(D::Relation, RELATION_FAMILIES),
         ],
-        FlowResultContractDescriptor {
-            checker_capture_returns: &[FlowCheckerReturnRule::AuthoredFinallyReturn, FlowCheckerReturnRule::OverriddenBreakSuffix],
-            ..desc(K::CompletenessProof, &[FlowGap::GuardNarrowing, FlowGap::NominalRelation, FlowGap::ClosureCapture, FlowGap::AbruptCompletion, FlowGap::UnmodeledExpression])
-        }),
+        desc(K::CompletenessProof, &[FlowGap::GuardNarrowing, FlowGap::NominalRelation, FlowGap::ClosureCapture, FlowGap::AbruptCompletion, FlowGap::UnmodeledExpression])),
     // Roots whose reducers do not exist yet: typed gaps only.
     row(SemanticQueryKeyTag::FlowNarrowingAt, R::Root, S::PendingReducer,
         &[
@@ -568,9 +529,8 @@ impl CanonicalEncode for ResultContractDescriptor<'_> {
     // adding, removing, or renumbering a `FlowDomain` variant bumps the
     // tag, so every minted contract identity changes with the registry
     // revision even when no individual contract row was edited.
-    // Exact actual and surviving checker-return capture receipts have distinct
-    // provenance; only the registered return policy accepts the latter.
-    const DOMAIN_TAG: &'static str = "verter.session.flow.result_contract.v6";
+    // Value binding facts and effect-only captures have distinct evidence requirements.
+    const DOMAIN_TAG: &'static str = "verter.session.flow.result_contract.v5";
     fn encode_fields(&self, e: &mut CanonicalEncoder) {
         let contract = self.0;
         e.field_str(1, contract.tag.name());
@@ -593,10 +553,6 @@ impl CanonicalEncode for ResultContractDescriptor<'_> {
         e.field_u32(8, FLOW_FIXED_POINT_MAX_ITERATIONS);
         e.field_u32(9, finalizer_discriminant(contract.result.finalizer));
         encode_ordered_discriminants(e, 10, contract.result.accepted_gaps.iter().map(|gap| gap_discriminant(*gap)));
-        encode_ordered_discriminants(e, 11, contract.result.checker_capture_returns.iter().map(|rule| match rule {
-            FlowCheckerReturnRule::AuthoredFinallyReturn => 1,
-            FlowCheckerReturnRule::OverriddenBreakSuffix => 2,
-        }));
     }
 }
 
@@ -665,18 +621,11 @@ pub struct FlowConvergencePolicy { pub max_iterations: u32 }
 /// The resource policy a demand plans and solves under.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FlowResourcePolicy {
-    pub slice_budget: FlowSliceBudget,
-    pub max_obligations: u32,
-    /// Total interpreter work across actual and checker-only continuations.
-    pub max_execution_steps: u32,
-    /// Simultaneously owned completion slots, including nested frontiers.
-    pub max_completion_frontier: u32,
-}
+pub struct FlowResourcePolicy { pub slice_budget: FlowSliceBudget, pub max_obligations: u32 }
 
 #[rustfmt::skip]
 impl Default for FlowResourcePolicy {
-    fn default() -> Self { Self { slice_budget: FlowSliceBudget::default(), max_obligations: 1024, max_execution_steps: 65_536, max_completion_frontier: 4096 } }
+    fn default() -> Self { Self { slice_budget: FlowSliceBudget::default(), max_obligations: 1024 } }
 }
 
 /// The validated structural work of one execution. This capability carries
@@ -730,8 +679,6 @@ impl FlowExecutionSelection {
 #[derive(Debug, Clone)]
 pub struct FlowDemandPlan {
     execution: Arc<FlowExecutionSelection>,
-    /// Registered policy admitted once against the exact carried result identity.
-    checker_capture_returns: &'static [FlowCheckerReturnRule],
     /// The contract-required domains, in domain-rank order.
     required_domains: Arc<[FlowDomain]>,
     /// The contract's required fact families, deduplicated in
@@ -760,11 +707,6 @@ pub struct FlowDemandPlan {
 #[allow(dead_code)]
 #[rustfmt::skip]
 impl FlowDemandPlan {
-    /// Check the registered result policy carried by this sealed demand.
-    /// The producer must additionally validate its exact scoped route receipt.
-    pub fn accepts_checker_capture_return(&self, rule: FlowCheckerReturnRule, demand: FlowCaptureDemand) -> bool {
-        demand == FlowCaptureDemand::Effect && self.checker_capture_returns.contains(&rule)
-    }
     /// The exact structural execution capability this plan expands from.
     pub fn execution_selection(&self) -> &Arc<FlowExecutionSelection> { &self.execution }
     /// Evidence attaches only to this shared execution capability, even
@@ -1422,14 +1364,8 @@ pub(crate) fn build_flow_demand_plan_from_execution(
     let mut work_order = coverage.clone();
     work_order.extend(initial.iter().copied());
     work_order.extend(expanded.iter().copied());
-    let checker_capture_returns = if execution.basis().result_contract == flow_result_contract_id(contract) {
-        contract.checker_capture_returns()
-    } else {
-        &[]
-    };
     Ok(FlowDemandPlan {
         execution,
-        checker_capture_returns,
         required_domains: Arc::from(domains.into_boxed_slice()),
         required_fact_families: Arc::from(families.into_boxed_slice()),
         registry_closure: Arc::from(contract.closures.to_vec().into_boxed_slice()),

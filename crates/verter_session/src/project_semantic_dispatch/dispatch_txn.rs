@@ -1105,8 +1105,7 @@ pub(crate) mod flow_obligation_state {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct FlowBindingBasis { pub binding: FlowBindingRef, pub identity: FlowBindingIdentity }
     /// Whether a closure consumes a captured value or only retains its effect subject.
-    /// Effect evidence attests exact capture-subject processing, never fabricated
-    /// value products. Region completion counts alone do not establish its site.
+    /// Effect capture evidence is structural execution, never fabricated value products.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum FlowCaptureDemand {
         Value,

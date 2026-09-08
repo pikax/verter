@@ -57,17 +57,6 @@ pub(super) fn indexed_skeleton_of(source: &str) -> FunctionBodySkeleton {
 }
 
 fn indexed_structure_of(source: &str) -> PreparedFunctionBodySkeleton {
-    with_indexed_structure(source, |prepared, _, _| prepared)
-}
-
-fn with_indexed_structure<T>(
-    source: &str,
-    check: impl FnOnce(
-        PreparedFunctionBodySkeleton,
-        &FunctionProgramEntry,
-        &crate::analysis::function_program::FunctionProgramIndex,
-    ) -> T,
-) -> T {
     use crate::analysis::function_program::build_function_program_index;
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     let allocator = oxc_allocator::Allocator::default();
@@ -90,12 +79,11 @@ fn with_indexed_structure<T>(
         .next()
         .unwrap()
         .entry();
-    let prepared = build_indexed_function_body_skeleton(
+    build_indexed_function_body_skeleton(
         &FunctionBodySource::from_function(function).unwrap(),
         entry,
     )
-    .unwrap();
-    check(prepared, entry, &index)
+    .unwrap()
 }
 
 #[test]
@@ -985,52 +973,5 @@ fn declaration_span_index_preserves_authored_alias_and_shadow_identities() {
     assert!(
         bindings.identity(type_binding).is_none(),
         "declaration addressability never invents a value identity for a type-only binder"
-    );
-}
-
-#[test]
-fn nested_function_site_retains_exact_creation_sites_including_empty_captures() {
-    with_indexed_structure("function f(x) { return { read: () => x, empty: () => 0, wrapped: (() => x) as unknown, expression: function () { return x; }, method() { return x; } }; }", |prepared, entry, _| {
-        let skeleton = prepared.skeleton();
-        let returned = skeleton.return_sites[0].argument.unwrap();
-        let entries = object_entries(skeleton, returned);
-        assert_eq!(entry.nested_captures.len(), 5);
-        for (child, property) in entry.nested_captures.iter().zip(entries) {
-            let SkeletonObjectEntry::Property {value, ..} = property else { panic!("property") };
-            assert_eq!(skeleton.nested_function_site(&child.function), Some(value), "the indexed child must retain its owning expression site");
-        }
-        let empty = &entry.nested_captures[1];
-        assert!(empty.bindings.0.is_empty());
-        let site = skeleton.nested_function_site(&empty.function).unwrap();
-        assert!(skeleton.expr_site(site).capture_bindings.is_empty(), "site ingress does not fabricate a captured subject");
-        assert_eq!(skeleton.nested_function_site(&entry.key), None, "the parent is not its own child");
-    });
-}
-
-#[test]
-fn nested_function_site_shares_aggregate_sites_without_importing_grandchildren() {
-    with_indexed_structure(
-        "function f(x) { return [() => x, () => () => x, () => 0]; }",
-        |prepared, entry, index| {
-            let skeleton = prepared.skeleton();
-            let returned = skeleton.return_sites[0].argument.unwrap();
-            assert_eq!(entry.nested_captures.len(), 3);
-            for child in entry.nested_captures.iter() {
-                assert_eq!(
-                    skeleton.nested_function_site(&child.function),
-                    Some(returned)
-                );
-            }
-            let child = index
-                .get(&entry.nested_captures[1].function)
-                .unwrap()
-                .entry();
-            assert_eq!(child.nested_captures.len(), 1);
-            assert_eq!(
-                skeleton.nested_function_site(&child.nested_captures[0].function),
-                None,
-                "a descendant belongs to its own defining frame's site map"
-            );
-        },
     );
 }
