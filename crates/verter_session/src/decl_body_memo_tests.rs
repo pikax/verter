@@ -2337,3 +2337,35 @@ fn retained_function_requests_reject_stale_pins_and_use_owned_inventory() {
         "exact retained references must also survive caller edits"
     );
 }
+
+#[test]
+fn retained_call_arguments_carry_exact_identifier_occurrences() {
+    let source = "function f(value, rest, receiver) { receiver.method((value), ...rest, value as string, 1); }";
+    let (memo, provenance) = memo_for(source);
+    let index = memo.function_program_index();
+    let entry = index.matches_named("f").next().unwrap().entry();
+    let parse_count = parses(&provenance);
+    let call = memo
+        .indexed_call_expression_at(entry.call_sites[0].span)
+        .unwrap();
+    let span = |text: &str, prefix: usize, length: usize| {
+        let start = source.find(text).unwrap() + prefix;
+        verter_span::Span::new(start as u32, (start + length) as u32)
+    };
+    assert_eq!(
+        call.argument_roots.as_ref(),
+        &[
+            Some(span("(value)", 1, 5)),
+            Some(span("...rest", 3, 4)),
+            None,
+            None,
+        ]
+    );
+    assert_eq!(call.receiver_root, Some(span("receiver.method", 0, 8)));
+    assert_eq!(call.argument_roots.len(), call.call.args.len());
+    assert_eq!(
+        parses(&provenance),
+        parse_count,
+        "root metadata reuses the retained call borrow"
+    );
+}

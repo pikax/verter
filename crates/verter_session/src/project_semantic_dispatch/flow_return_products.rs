@@ -356,6 +356,7 @@ mod tests {
             );
             let after_other_arm = before.observe_writes();
             assert!(products.writes_since(&after_other_arm).is_empty(), "entry observations use the shared execution clock, including work on other snapshots");
+            // bounded-loop: fixed repeated-write fixture verifies receipt replacement.
             for _ in 0..16 {
                 products.bind_at(
                     &subject,

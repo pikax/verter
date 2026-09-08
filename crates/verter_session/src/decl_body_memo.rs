@@ -82,6 +82,56 @@ pub(crate) use locator_deref::{DerefedBodyShape, LocatorBodyDerefError};
 /// them for the session-owned lazy-lowering machinery and its consumers.
 pub use verter_semantic::resolver_core::{LoweredTypeDecl, LoweredValueDecl, ValueBodyHashFact};
 
+/// Transient call lowering and the exact identifier occurrences that feed its
+/// argument/receiver values. These addresses come from the same retained AST
+/// borrow as `call`; the memo retains neither this IR nor another body index.
+pub(crate) struct IndexedFlowCallExpression {
+    pub(crate) call: verter_type_expr::IndexedValueCall,
+    pub(crate) argument_roots: Box<[Option<verter_span::Span>]>,
+    pub(crate) receiver_root: Option<verter_span::Span>,
+}
+
+/// Only transparent value wrappers preserve a bare argument's binding read.
+/// An authored type assertion is evaluated by the indexed type authority.
+fn indexed_argument_root(
+    mut expression: &oxc_ast::ast::Expression<'_>,
+) -> Option<verter_span::Span> {
+    use oxc_ast::ast::Expression;
+    loop {
+        expression = match expression {
+            Expression::Identifier(identifier) => {
+                return Some(verter_span::Span::new(
+                    identifier.span.start,
+                    identifier.span.end,
+                ));
+            }
+            Expression::ParenthesizedExpression(wrapped) => &wrapped.expression,
+            Expression::TSNonNullExpression(wrapped) => &wrapped.expression,
+            Expression::TSSatisfiesExpression(wrapped) => &wrapped.expression,
+            _ => return None,
+        };
+    }
+}
+
+fn indexed_receiver_root(mut callee: &oxc_ast::ast::Expression<'_>) -> Option<verter_span::Span> {
+    use oxc_ast::ast::Expression;
+    loop {
+        callee = match callee {
+            Expression::StaticMemberExpression(member) => {
+                return indexed_argument_root(&member.object)
+            }
+            Expression::ComputedMemberExpression(member) => {
+                return indexed_argument_root(&member.object)
+            }
+            Expression::ParenthesizedExpression(wrapped) => &wrapped.expression,
+            Expression::TSAsExpression(wrapped) => &wrapped.expression,
+            Expression::TSSatisfiesExpression(wrapped) => &wrapped.expression,
+            Expression::TSNonNullExpression(wrapped) => &wrapped.expression,
+            _ => return None,
+        };
+    }
+}
+
 /// The committed value of one per-symbol demand cell.
 ///
 /// The cell carries the [`LeaseMiss`](Self::LeaseMiss) outcome ITSELF (never a
@@ -1412,20 +1462,32 @@ impl DeclBodyMemo {
     /// is found through the program index (a flow-selected call is inside
     /// a served function by construction); no body `TypeExpr` is
     /// memo-owned.
-    pub fn indexed_call_expression_at(
+    pub(crate) fn indexed_call_expression_at(
         &self,
         span: verter_span::Span,
-    ) -> Option<Arc<verter_type_expr::IndexedValueCall>> {
+    ) -> Option<Arc<IndexedFlowCallExpression>> {
         let service = self.service.as_ref()?;
         self.ensure_lease();
         let _index = self.function_program_index();
         let node = service.run_leased(&self.key, move |program| {
             program.and_then(|parsed| {
-                parsed.with_indexed_call(span, |call| {
-                    verter_semantic::analysis::type_eval_build::lower_indexed_call_expression(
+                parsed.with_indexed_call(span, |call| IndexedFlowCallExpression {
+                    call: verter_semantic::analysis::type_eval_build::lower_indexed_call_expression(
                         call,
                         parsed.source_str(),
-                    )
+                    ),
+                    argument_roots: call
+                        .arguments
+                        .iter()
+                        .map(|argument| {
+                            let expression = match argument {
+                                oxc_ast::ast::Argument::SpreadElement(spread) => &spread.argument,
+                                argument => argument.to_expression(),
+                            };
+                            indexed_argument_root(expression)
+                        })
+                        .collect(),
+                    receiver_root: indexed_receiver_root(&call.callee),
                 })
             })
         })??;

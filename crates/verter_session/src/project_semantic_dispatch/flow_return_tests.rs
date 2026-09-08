@@ -8731,3 +8731,122 @@ fn flow_return_finally_identity_membership_scales_with_written_subjects() {
         );
     }
 }
+
+#[test]
+fn flow_return_unused_catch_parameter_does_not_poison_selected_writes() {
+    // The existing catch policy retains its conditional-definition refusal.
+    // An unused binder must neither block the string write nor replace that
+    // established boundary with a product-selection failure.
+    for clause in ["catch(e)", "catch"] {
+        let source =
+            format!("function makeProps(){{let x=0;try{{throw 0;}}{clause}{{x='s';}}return x;}}");
+        let result = flow_source_probe(&source);
+        let FlowSourceProbe::Value {
+            expr,
+            degradation:
+                Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
+            candidates: 0,
+        } = result
+        else {
+            panic!("{source}: {result:?}");
+        };
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+    }
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps(){let x=0;try{throw 0;}catch(e){x=1;}return x;}"
+        ),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+    );
+    // Catch-root value lowering remains an established typed gap; keeping
+    // its selected bootstrap must not claim support or warm admission.
+    assert!(matches!(
+        flow_source_probe("function makeProps(){try{throw 0;}catch(e){return e;}}"),
+        FlowSourceProbe::Value {
+            degradation: Some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition),
+            candidates: 0,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn flow_return_indexed_argument_identity_work_is_independent_of_unrelated_bindings() {
+    for count in [64usize, 256] {
+        let declarations = (0..count)
+            .map(|n| format!("const unrelated{n}={n};"))
+            .collect::<String>();
+        let source=format!("function id<T>(x:T):T{{return x;}}function makeProps(x:number){{{declarations}return id(x);}}");
+        let mut counter = None;
+        let (result, _) = flow_source_probe_configured(&source, |host| {
+            counter = Some(Arc::clone(
+                &host.flow_fault_injection.indexed_argument_identity_work,
+            ))
+        });
+        let FlowSourceProbe::Value {
+            expr,
+            degradation: None,
+            candidates: 1,
+        } = result
+        else {
+            panic!("{result:?}");
+        };
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        let work = counter.unwrap().load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("{count} unrelated bindings: {work} argument identity probes");
+        assert!(
+            work > 0,
+            "the call must resolve its selected argument identity"
+        );
+        assert!(
+            work <= 8,
+            "fixed selected call inspected {work} identities with {count} unrelated declarations"
+        );
+    }
+}
+
+#[test]
+fn flow_return_indexed_arguments_keep_exact_parameter_and_capture_roots() {
+    assert_eq!(expect_clean_flow_value(
+        "function id<T>(x:T):T{return x;}const x=true;function makeProps(x:string){return id((x));}"
+    ), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
+    let closure=expect_clean_flow_value(
+        "function id<T>(x:T):T{return x;}const x=true;function makeProps(){const x='inner';return()=>id((x));}"
+    );
+    let verter_type_expr::TypeExpr::Function(function) = &closure else {
+        panic!("{closure:?}")
+    };
+    assert_eq!(
+        function.return_type.as_deref(),
+        Some(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        ))
+    );
+}
+
+#[test]
+fn flow_return_evolving_local_established_writes_keep_existing_warm_policy() {
+    let overwritten = expect_clean_flow_value(
+        "function makeProps(n:number){let v;if(n>0){v='p' as const;}v=1 as const;return {v};}",
+    );
+    assert_eq!(
+        member_types(&overwritten, "v"),
+        vec![verter_type_expr::TypeExpr::number_literal(1.0)]
+    );
+    let established = expect_clean_flow_value(
+        "function makeProps(n:number){let v;v=1 as const;if(n>0){v='p' as const;}return {v};}",
+    );
+    assert_eq!(
+        member_types(&established, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::number_literal(1.0),
+            verter_type_expr::TypeExpr::string_literal("p"),
+        ])]
+    );
+}
