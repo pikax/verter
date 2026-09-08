@@ -78,7 +78,7 @@ rescope_unrelated_packages = 3
 [[node]]
 id = "K3"
 name = "VerterHost and catch-all session decomposition"
-predecessors = ["E4","G5","H3","K2","TCM4"]
+predecessors = ["E4","G5","H3","K2","TCM4","SIMP14"]
 phase = "rev11"
 train = "rev11.host-session"
 product = "rev11"

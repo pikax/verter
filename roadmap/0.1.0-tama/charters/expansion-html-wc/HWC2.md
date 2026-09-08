@@ -111,8 +111,8 @@ Before squashing or review, the implementation patch transitions this node's pre
 **Intent:** turn the syntax product into neutral authored semantics usable by multiple overlays.
 **Predecessors:** `HWC1`, `TIF1`, `IDX0`.
 **Subblocks:** (1) element/attribute/text/comment/namespace/ID/class/selector facts; (2) document symbol and authored-region identities; (3) exact authored syntax/source maps; (4) neutral TypeInfo roles for elements/attributes without pretending DOM runtime values are known; (5) atomic index contributions for IDs/classes/assets/links/components; (6) incremental invalidation and bounded query tests.
-**Acceptance:** Alpine/HTMX/Angular test overlays consume the same neutral facts without parser branches; definitions/renames of static IDs and class/selector relationships are exact where admitted; ambiguous dynamic values remain incomplete.
-**Forbidden:** Angular/Alpine/HTMX rules in neutral facts, TypeScript projection of generic `.html` without project-context proof, runtime DOM inference, or lossy map recovery.
+**Acceptance:** Alpine/htmx 4/Angular test overlays consume the same neutral facts without parser branches; htmx counterfixtures pin one exact 4.x release and keep explicit attribute inheritance, configuration overrides, and request/target/trigger/swap interpretation overlay-owned; definitions/renames of static IDs and class/selector relationships are exact where admitted; ambiguous dynamic values remain incomplete.
+**Forbidden:** Angular/Alpine/htmx 4 rules in neutral facts, implicit htmx major fallback, TypeScript projection of generic `.html` without project-context proof, runtime DOM inference, or lossy map recovery.
 **Deletion/abort:** remove any copied Vue semantic fact types; rescope facts that require a framework owner.
 
 ## Collapsed non-authoritative subblock disposition

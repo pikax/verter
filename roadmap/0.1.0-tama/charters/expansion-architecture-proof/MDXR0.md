@@ -110,7 +110,7 @@ Before squashing or review, the implementation patch transitions this node's pre
 
 **Intent:** prove React-component auto-import and navigation in MDX only after a bounded React semantic provider exists.
 **Predecessors:** `RCTP`, `MDXP`, `IDX0`.
-**Subblocks:** (1) define the bounded React `ComponentInfo` provider contract; (2) join MDX JSX uses with proven React candidates; (3) rank auto-imports from exact package/project/export provenance; (4) produce import edits and definition/navigation maps; (5) reject Solid/Preact/plain-JSX/userland ambiguities; (6) test cancellation, index budgets, stale bases, and zero work.
+**Subblocks:** (1) define the bounded React `ComponentInfo` provider contract; (2) join MDX JSX uses with proven React candidates; (3) rank auto-imports from exact package/project/export provenance; (4) produce import edits and definition/navigation maps; (5) reject Solid 2/Preact/plain-JSX/userland ambiguities; (6) test cancellation, index budgets, stale bases, and zero work.
 **Acceptance:** React auto-import appears only for proven React profile/project candidates; generic MDX functionality remains available without React; no full React vertical or CLI is required.
 **Forbidden:** capitalized-name heuristics, assuming all JSX is React, unbounded workspace scans, duplicate TS programs, or MDX-owned React semantics.
 **Deletion/abort:** all proof-local provider/join code is deleted or remains unreachable after the experiment; no production terminal may depend on `MDXR0`. Its evidence may seed the separately ratified bounded React-provider production train described in §15.4.

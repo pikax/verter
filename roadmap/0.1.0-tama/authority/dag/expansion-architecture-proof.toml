@@ -299,7 +299,7 @@ rescope_unrelated_packages = 3
 
 [[node]]
 id = "SLDP"
-name = "Solid counterexample over identical TSX geometry"
+name = "Solid 2 counterexample over identical TSX geometry"
 predecessors = ["MDXR0"]
 phase = "expansion"
 train = "expansion.architecture-proof"

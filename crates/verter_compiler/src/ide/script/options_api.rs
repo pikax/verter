@@ -29,7 +29,7 @@ use super::{
     apply_template_ref_call_inference, collect_binding_names, collect_global_component_fallbacks,
     directive_accessor_declaration, emit_global_component_fallbacks, emit_helper_imports,
     emit_helper_imports_with_define_component, emit_type_constructs, instance_declaration_ambient,
-    should_infer_function_types,
+    script_content_insertion_anchor, should_infer_function_types,
 };
 
 // ── Companion Script Processing ──────────────────────────────────
@@ -295,12 +295,20 @@ pub(super) fn process_tsx_script_only<'alloc>(
         emit_helper_imports_with_define_component(
             out,
             hoist_pos,
+            Some(script_content_insertion_anchor(source, content_start)),
             options,
             builtin_components,
             template_ast,
         );
     } else {
-        emit_helper_imports(out, hoist_pos, options, builtin_components, template_ast);
+        emit_helper_imports(
+            out,
+            hoist_pos,
+            Some(script_content_insertion_anchor(source, content_start)),
+            options,
+            builtin_components,
+            template_ast,
+        );
     }
 
     emit_type_constructs(

@@ -112,5 +112,5 @@ Before squashing or review, the implementation patch transitions this node's pre
 **Subblocks:** (1) exact React release/package role lock; (2) component/hook/props/ref/children/reactivity/directive facts; (3) framework-owned TypeInfo facets; (4) React Compiler rule canary; (5) one cross-framework consumer/auto-import/navigation path; (6) plain TSX and userland-hook negatives.
 **Acceptance:** ordinary TSX parsing/type ownership stays unchanged; React facts activate from proven package roles; Verter adds semantic value not already supplied by TypeScript; inactive React causes zero overlay work.
 **Forbidden:** a React TSX parser, treating capitalized functions as proven components, Next semantics, or republishing TS checker facts as native.
-**Deletion/abort:** discard overlay abstractions that cannot survive the immediate Solid counterexample.
+**Deletion/abort:** discard overlay abstractions that cannot survive the immediate Solid 2 counterexample.
 

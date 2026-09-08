@@ -189,11 +189,9 @@ export type CarrierFramework = "vue" | "svelte";
  * the canonical id itself (a caller-stated name would pin path spelling/casing
  * the mirror host deliberately does not own).
  *
- * Every IDE axis is stated (`wantSourceMap` from the caller's source-map
- * intent; `false` for the rest) at the values the legacy positional
- * `{ target: "ide", sourceMap }` profile resolved to — the native real-host
- * boundary test asserts the typed route answers the profile route byte-for-byte
- * at exactly these values. `ideChunkBoundaries: false` is the only admitted
+ * Every IDE axis is stated explicitly (`wantSourceMap` from the caller's
+ * source-map intent; `false` for the rest) so the served IDE surface depends
+ * on no host-side default. `ideChunkBoundaries: false` is the only admitted
  * value there: the carrier bridge substitutes its own.
  *
  * Keyed by the closed `CarrierFramework` union (the `NAMING_KEY_BY_FRAMEWORK`
