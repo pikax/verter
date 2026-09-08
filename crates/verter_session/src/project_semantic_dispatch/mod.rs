@@ -2447,9 +2447,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //     `ProjectPath { base, path: [Index(index)], mode }`.
         //   - `NormalizeUnion` / `NormalizeIntersection` get structural
         //     member-list canonicalisation so `{A, B}` and `{B, A}` converge.
+        //   - Symmetric `Relate` operands get the same ordering as typed
+        //     relation callers before the family memo or wait graph sees them.
         // Other variants key off [`SemanticNodeId`]s that are already hashed
         // verbatim.
         let key = match key {
+            SemanticQueryKey::Relate {
+                mut source,
+                mut target,
+                relation,
+                policy,
+                source_freshness,
+                inference_context,
+                context,
+            } => {
+                relation.canonicalize_operands(&mut source, &mut target);
+                SemanticQueryKey::Relate {
+                    source,
+                    target,
+                    relation,
+                    policy,
+                    source_freshness,
+                    inference_context,
+                    context,
+                }
+            }
             SemanticQueryKey::ProjectMember { base, member, mode } => {
                 SemanticQueryKey::ProjectPath {
                     base,

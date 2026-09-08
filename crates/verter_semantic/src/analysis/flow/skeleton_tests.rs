@@ -127,6 +127,41 @@ fn source_type_queries_retain_separate_exact_lexical_occurrences() {
 }
 
 #[test]
+// @ai-generated - Calls without an enclosing expression site retain source-only query bindings.
+fn enum_initializer_call_retains_source_type_query_on_its_call_site() {
+    let source = "function flow(queried: unknown, other: unknown) { enum Local { Value = accept(other as typeof queried), } return Local.Value; }";
+    let prepared = indexed_structure_of(source);
+    let skeleton = prepared.skeleton();
+    let call_site = skeleton
+        .expr_sites
+        .iter()
+        .find(|site| !site.calls.is_empty())
+        .expect("enum initializer call is indexed");
+    assert_eq!(call_site.calls.len(), 1);
+    assert_eq!(call_site.source_type_queries.len(), 1);
+    let query = &call_site.source_type_queries[0];
+    assert!(matches!(query.binding, Some(FlowBindingRef::Local(_))));
+    assert_eq!(
+        prepared.bindings().source_type_query_occurrence(query.span),
+        FlowBindingOccurrence::Resolved(query.binding.as_ref().unwrap())
+    );
+    assert_eq!(
+        prepared.bindings().occurrence(query.span),
+        FlowBindingOccurrence::Missing,
+        "a source type query is not a runtime read"
+    );
+    assert_eq!(
+        skeleton
+            .expr_sites
+            .iter()
+            .map(|site| site.source_type_queries.len())
+            .sum::<usize>(),
+        1,
+        "the query belongs to the existing call site exactly once"
+    );
+}
+
+#[test]
 fn source_type_query_inventory_and_observer_share_wrapper_precedence() {
     for (input, count) in [
         ("other as typeof queried", 1),

@@ -8,8 +8,10 @@ because it contained more tests than an older transcript.
 
 Routine merge validation retains focused negative tests of important guards,
 record/schema consistency, coverage/selection checks, and the normal Rust and
-JavaScript test lanes. It does not replay historical proof commands or require
-today's passing, skipped, or fixture totals to equal historical counts. Adding
+JavaScript test lanes. Some focused CI commands are also cited by historical
+proof records; CI still executes those commands once. It does not add a second
+execution merely because a record cites a command or require today's passing,
+skipped, or fixture totals to equal historical counts. Adding
 or removing tests therefore does not require rewriting transcripts or pins.
 Selection must still resolve and actual executed work must pass; empty or
 incomplete runs are not success.
