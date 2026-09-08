@@ -9,13 +9,11 @@
 //! already carries a field-access privacy error (E0616) on that type.
 #![allow(dead_code, unreachable_code)]
 
-use verter_session::for_tests::{FlowDemandPlan, FlowObligationSpec};
+use verter_session::for_tests::{FlowDemandPlan, FlowExecutionSelection, FlowObligationSpec};
 
 fn construct_plan() {
     let _ = FlowDemandPlan {
-        basis: todo!(),
-        subject: todo!(),
-        structural_selection: todo!(),
+        execution: todo!(),
         required_domains: todo!(),
         required_fact_families: todo!(),
         registry_closure: todo!(),
@@ -24,9 +22,17 @@ fn construct_plan() {
         expanded_obligations: todo!(),
         work_order: todo!(),
         tie_break: todo!(),
+        obligation_specs: todo!(),
+    };
+}
+
+fn construct_selection() {
+    let _ = FlowExecutionSelection {
+        basis: todo!(),
+        subject: todo!(),
+        structural_selection: todo!(),
         convergence: todo!(),
         resources: todo!(),
-        obligation_specs: todo!(),
     };
 }
 

@@ -102,6 +102,40 @@ or repeated idempotence checks over unchanged predecessor snapshots.
   the shared peeker, including captured writes and their governing control inputs.
   Bound projection states explicitly so growing paths terminate with typed refusal.
 
+## Completion routing and checker inference
+
+The 2026-09-08 integrated review confirms that clause outcomes must retain their
+evaluated normal continuation and pending completion states. Syntax-only fallthrough
+cannot revive a terminated state. Evaluate `finally` through the existing interpreter
+for each corresponding incoming completion; a broadly joined normal-and-exceptional
+endpoint is not a transferable result of a conditional clause. Preserve narrowing
+from actual surviving states instead of restoring guards killed by executed writes.
+Switch refinement updates reaching type and the matching narrowing position atomically
+without inventing an assignment or discarding unrelated member facts.
+
+The result contract remains checker type inference, including its existing authored
+return and abrupt-break policy. A pending break may carry an explicitly typed checker
+snapshot projected from the same execution, alongside the actual completion state.
+An outer `finally` reads the actual state; the matching inference target reads the
+checker projection. Scope closure applies to both. A replaced pending completion must
+not revive a runtime exit. Conservative entry and catch-consumed throw states may
+participate in authored-return inference only as tagged checker-only lanes. Their
+products, walks and child results cannot supply missing actual execution evidence or
+rescue an aborted required lane. This projection uses the same product authority;
+it is not an independently mutable inference store or a second interpreter.
+
+All completion evaluations share the same selected IR, execution capability,
+declaration bank and sticky failure state. Interpreter work has a monotonic limit
+separate from fixed-point iterations. Live owned completion frontiers have an
+execution-global capacity with RAII reservations acquired before storage growth and
+released when records are drained or dropped. Nested frontiers count together.
+Neither projection entry nor continuation replay resets either budget.
+
+Installed declaration fallback is indexed by the existing runtime storage group,
+with exact source authority first and source-order fallback among installed cells.
+Multiway reaching definitions are merged once under their distinct-width limit;
+neither operation repeatedly reconstructs or scans an accumulated prefix.
+
 ## Legacy deletions
 
 Remove the whole-graph dependency propagation solver, name-interned product subjects,

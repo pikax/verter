@@ -341,10 +341,8 @@ fn skeleton_source_verifies_parse_key_and_language() {
     assert_eq!(bindings.function(), &entry.key);
     assert_eq!(bindings.value_count(), entry.bindings.len());
     for (slot, record) in entry.bindings.iter().enumerate() {
-        let local = first
-            .bundle()
-            .skeleton
-            .binding_at_span(verter_semantic::analysis::flow::FrameSpan::rebase(
+        let local = bindings
+            .declaration_at_span(verter_semantic::analysis::flow::FrameSpan::rebase(
                 entry.span.start,
                 record.span,
             ))

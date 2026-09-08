@@ -1659,7 +1659,14 @@ pub(crate) fn build_flow_slice_content(
         )
     });
     let anchor = node_span(&node).start;
-    let params = match lower_params(node.params(), source, &signature_scope, skeleton, anchor) {
+    let params = match lower_params(
+        node.params(),
+        source,
+        &signature_scope,
+        skeleton,
+        &bindings,
+        anchor,
+    ) {
         Ok(params) => params,
         Err(reason) => {
             return Some(SliceContent {
@@ -2658,6 +2665,7 @@ fn lower_params(
     source: &str,
     scope: &SignatureScope<'_>,
     skeleton: &FunctionBodySkeleton,
+    bindings: &verter_semantic::analysis::flow::FlowBindingMap,
     anchor: u32,
 ) -> Result<Vec<SliceParam>, verter_type_expr::facts::InferenceUnavailableReason> {
     let binders = scope.param_binders();
@@ -2707,8 +2715,8 @@ fn lower_params(
                         _ => return None,
                     };
                     Some(SliceDestructuredElement {
-                        binding: skeleton
-                            .binding_at_span(FrameSpan::rebase(anchor, binding_span.into()))?,
+                        binding: bindings
+                            .declaration_at_span(FrameSpan::rebase(anchor, binding_span.into()))?,
                         name: binding,
                         key,
                         has_default,
@@ -2757,7 +2765,7 @@ fn lower_params(
         out.push(SliceParam {
             binding: match &param.pattern {
                 BindingPattern::BindingIdentifier(id) => {
-                    skeleton.binding_at_span(FrameSpan::rebase(anchor, id.span.into()))
+                    bindings.declaration_at_span(FrameSpan::rebase(anchor, id.span.into()))
                 }
                 _ => None,
             },
@@ -2784,7 +2792,7 @@ fn lower_params(
         out.push(SliceParam {
             binding: match &rest.rest.argument {
                 BindingPattern::BindingIdentifier(id) => {
-                    skeleton.binding_at_span(FrameSpan::rebase(anchor, id.span.into()))
+                    bindings.declaration_at_span(FrameSpan::rebase(anchor, id.span.into()))
                 }
                 _ => None,
             },
@@ -4567,7 +4575,7 @@ impl Lowerer<'_> {
                             SliceFreshness::Pinned
                         };
                         out.push(SliceStatement::Binding {
-                            binding: match self.skeleton.binding_at_span(self.rebase(id.span)) {
+                            binding: match self.bindings.declaration_at_span(self.rebase(id.span)) {
                                 Some(binding) => binding,
                                 None => {
                                     out.push(SliceStatement::Gap(
@@ -4832,7 +4840,7 @@ impl Lowerer<'_> {
                             binding: handler.param.as_ref().and_then(|param| {
                                 match &param.pattern {
                                     BindingPattern::BindingIdentifier(id) => {
-                                        self.skeleton.binding_at_span(self.rebase(id.span))
+                                        self.bindings.declaration_at_span(self.rebase(id.span))
                                     }
                                     _ => None,
                                 }

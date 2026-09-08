@@ -114,6 +114,71 @@ fn sparse_multiway_join_visits_only_materialized_predecessor_cells() {
 }
 
 #[test]
+fn multiway_reaching_definitions_allocate_for_inputs_once() {
+    let graph = SemanticGraphStore::new();
+    let algebra = GraphSemanticAlgebra(&graph);
+    for predecessors in [32, 256] {
+        let names = (0..predecessors)
+            .map(|i| format!("x{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let fixture = flow_graph_fixture_for_tests(
+            &format!("function products({names}) {{ return [{names}]; }}"),
+            1,
+        );
+        let request = request(0);
+        let retained = fixture.retained_plan(&request).unwrap();
+        let selection = fixture
+            .prepare_execution_with_retained(&request, &retained)
+            .unwrap();
+        let inputs = fixture.product_inputs();
+        let mut execution = FlowProductExecution::new_for_selection(
+            &inputs,
+            selection,
+            FlowProductBudget {
+                max_product_width: predecessors as u32,
+                ..FlowProductBudget::default()
+            },
+        )
+        .unwrap();
+        let sites: Vec<_> = execution.selected_sites().take(predecessors).collect();
+        let key = sites[0].key(FlowDomain::ReachingValue).unwrap();
+        let mut states: Vec<_> = (0..predecessors).map(|_| execution.empty_state()).collect();
+        for (state, site) in states.iter_mut().zip(&sites) {
+            execution
+                .apply_transfers(
+                    state,
+                    site,
+                    &[FlowProductTransfer {
+                        key: key.clone(),
+                        value: Some(FlowProductValue::ReachingValue(ReachingValueProduct::at(
+                            site,
+                        ))),
+                    }],
+                )
+                .unwrap();
+        }
+        let incoming: Vec<_> = states.iter().collect();
+        reset_alloc_counter();
+        let joined = execution.join_products(&incoming, &algebra).unwrap();
+        let bytes = alloc_bytes();
+        let Some(FlowProductValue::ReachingValue(value)) = joined.get(&key) else {
+            panic!("joined definitions");
+        };
+        assert_eq!(value.definitions().len(), predecessors);
+        assert!(value
+            .definitions()
+            .windows(2)
+            .all(|pair| pair[0].index() < pair[1].index()));
+        eprintln!("reaching definition join predecessors={predecessors} allocated_bytes={bytes}");
+        assert!(
+            bytes <= predecessors as u64 * 384,
+            "join must not allocate growing definition prefixes: {bytes}"
+        );
+    }
+}
+
+#[test]
 fn continuation_allocation_depends_on_materialized_products_not_selected_capacity() {
     let types = SemanticGraphStore::new();
     let number = types.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));

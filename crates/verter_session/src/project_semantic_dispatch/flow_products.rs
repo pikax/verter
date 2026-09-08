@@ -14,7 +14,7 @@ use super::flow_solve::{FlowDemandBasis, FlowDemandPlan, FlowDomain, FlowExecuti
 use crate::cache_runtime::flow_slice_node::{BoundFlowGraph, FlowSliceFunctionKey};
 use crate::semantic_query::{FlowGap, SemanticNodeId};
 use rustc_hash::FxHashMap;
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -146,6 +146,7 @@ struct ProductLayout {
     // Authored facts have execution lifetime, independent of branch snapshots.
     declarations: Box<[OnceCell<Box<FlowProductValue>>]>,
     declared_active: RefCell<imbl::OrdSet<usize>>,
+    declared_by_runtime: Box<[Cell<Option<usize>>]>,
 }
 
 impl ProductLayout {
@@ -264,6 +265,24 @@ impl FlowProductStore {
             return None;
         }
         self.get_at(key.storage())
+    }
+    /// Exact authored authority wins. Otherwise use the first source-ordered
+    /// installed declaration in the same runtime group, without copying its fact.
+    #[must_use]
+    pub fn declared_type(&self, key: &FlowProductKey) -> Option<SemanticNodeId> {
+        if !Rc::ptr_eq(&self.scope, &key.scope) || key.domain() != FlowDomain::DeclaredType {
+            return None;
+        }
+        let exact = self.scope.declarations[key.subject].get();
+        let value = exact.or_else(|| {
+            let storage = self.scope.subjects[key.subject].storage;
+            let authority = self.scope.declared_by_runtime[storage].get()?;
+            self.scope.declarations[authority].get()
+        })?;
+        let FlowProductValue::DeclaredType(product) = value.as_ref() else {
+            return None;
+        };
+        product.declared()
     }
     fn get_at(&self, address: (usize, usize)) -> Option<&FlowProductValue> {
         if address.0 == product_offset(FlowDomain::DeclaredType).unwrap() {
@@ -452,10 +471,42 @@ pub struct FlowProductExecution {
     budget: FlowProductBudget,
     executed: Vec<bool>,
     iterations: u32,
+    execution_steps: u32,
+    completion_frontier: Rc<Cell<u32>>,
+    inference_depth: Rc<Cell<u32>>,
     failure: Option<FlowProductFailure>,
     sealed: bool,
     #[cfg(any(test, feature = "test-support"))]
     join_product_visits: usize,
+}
+
+/// Ownership of live pending completion slots. Moving a frontier moves its
+/// reservation; dropping it releases capacity without borrowing the controller.
+#[derive(Debug)]
+#[must_use]
+pub struct FlowCompletionLease {
+    active: Rc<Cell<u32>>,
+    units: u32,
+}
+
+impl Drop for FlowCompletionLease {
+    fn drop(&mut self) {
+        self.active.set(self.active.get() - self.units);
+    }
+}
+
+/// A checker-only projection uses the same product engine and source bank,
+/// but its transfers cannot certify runtime execution. Nested guards compose.
+#[derive(Debug)]
+#[must_use]
+pub struct FlowInferenceGuard {
+    depth: Rc<Cell<u32>>,
+}
+
+impl Drop for FlowInferenceGuard {
+    fn drop(&mut self) {
+        self.depth.set(self.depth.get() - 1);
+    }
 }
 
 impl FlowProductExecution {
@@ -477,6 +528,12 @@ impl FlowProductExecution {
             return Err(FlowProductKeyError::GraphMismatch);
         }
         budget.max_iterations = budget.max_iterations.min(plan.convergence().max_iterations);
+        budget.max_execution_steps = budget
+            .max_execution_steps
+            .min(plan.resources().max_execution_steps);
+        budget.max_completion_frontier = budget
+            .max_completion_frontier
+            .min(plan.resources().max_completion_frontier);
         let structural = plan.structural_selection();
         if structural
             .value_nodes()
@@ -550,6 +607,9 @@ impl FlowProductExecution {
             .max_declared_products
             .min(u32::try_from(subjects.len()).unwrap_or(u32::MAX));
         let declarations = (0..subjects.len()).map(|_| OnceCell::new()).collect();
+        let declared_by_runtime = (0..representatives.len())
+            .map(|_| Cell::new(None))
+            .collect();
         let executed = vec![false; subjects.len() * PRODUCT_DOMAINS.len()];
         Ok(Self {
             scope: Rc::new(ProductLayout {
@@ -560,10 +620,14 @@ impl FlowProductExecution {
                 captures,
                 declarations,
                 declared_active: RefCell::new(imbl::OrdSet::new()),
+                declared_by_runtime,
             }),
             budget,
             executed,
             iterations: 0,
+            execution_steps: 0,
+            completion_frontier: Rc::new(Cell::new(0)),
+            inference_depth: Rc::new(Cell::new(0)),
             failure: None,
             sealed: false,
             #[cfg(any(test, feature = "test-support"))]
@@ -708,6 +772,11 @@ impl FlowProductExecution {
                             .set(Box::new(value))
                             .expect("validated install-once authority");
                         self.scope.declared_active.borrow_mut().insert(slot.1);
+                        let storage = self.scope.subjects[slot.1].storage;
+                        let authority = &self.scope.declared_by_runtime[storage];
+                        authority.set(Some(
+                            authority.get().map_or(slot.1, |held| held.min(slot.1)),
+                        ));
                     }
                 }
             } else if let Some(value) = value {
@@ -716,8 +785,10 @@ impl FlowProductExecution {
                 state.values.remove(&slot);
             }
         }
-        for transfer in transfers {
-            self.executed[transfer.key.evidence()] = true;
+        if self.inference_depth.get() == 0 {
+            for transfer in transfers {
+                self.executed[transfer.key.evidence()] = true;
+            }
         }
         Ok(changed)
     }
@@ -795,6 +866,11 @@ impl FlowProductExecution {
                         Ok(product) => FlowProductValue::ReachingType(product),
                         Err(failure) => return self.reject(failure),
                     }
+                } else if domain == FlowDomain::ReachingValue {
+                    match join_reaching_values(&self.budget, &products) {
+                        Ok(product) => FlowProductValue::ReachingValue(product),
+                        Err(failure) => return self.reject(failure),
+                    }
                 } else {
                     // Missing paths carry no reaching definition/type or source
                     // fact. They do remove narrowing and contribute Unassigned
@@ -857,6 +933,59 @@ impl FlowProductExecution {
     #[cfg(any(test, feature = "test-support"))]
     pub fn join_product_visits_for_tests(&self) -> usize {
         self.join_product_visits
+    }
+
+    /// Charge interpreter work before evaluating it. All continuations and
+    /// checker projections share this monotonic execution-wide count.
+    pub fn charge_execution_work(&mut self, units: u32) -> Result<(), FlowProductFailure> {
+        self.ready()?;
+        let observed = u64::from(self.execution_steps) + u64::from(units);
+        if observed > u64::from(self.budget.max_execution_steps) {
+            return self.reject(FlowProductFailure::BudgetExceeded(
+                FlowProductBudgetExceeded {
+                    axis: FlowProductBudgetAxis::ExecutionWork,
+                    limit: self.budget.max_execution_steps,
+                    observed: u32::try_from(observed).unwrap_or(u32::MAX),
+                },
+            ));
+        }
+        self.execution_steps = observed as u32;
+        Ok(())
+    }
+
+    /// Reserve live completion storage before allocating or cloning its lanes.
+    /// The count includes simultaneously retained frontiers in nested clauses.
+    pub fn reserve_completion_frontier(
+        &mut self,
+        units: u32,
+    ) -> Result<FlowCompletionLease, FlowProductFailure> {
+        self.ready()?;
+        let observed = u64::from(self.completion_frontier.get()) + u64::from(units);
+        if observed > u64::from(self.budget.max_completion_frontier) {
+            return self.reject(FlowProductFailure::BudgetExceeded(
+                FlowProductBudgetExceeded {
+                    axis: FlowProductBudgetAxis::CompletionFrontier,
+                    limit: self.budget.max_completion_frontier,
+                    observed: u32::try_from(observed).unwrap_or(u32::MAX),
+                },
+            ));
+        }
+        self.completion_frontier.set(observed as u32);
+        Ok(FlowCompletionLease {
+            active: Rc::clone(&self.completion_frontier),
+            units,
+        })
+    }
+
+    /// Enter a checker-inference projection without granting runtime evidence.
+    pub fn begin_checker_inference(&mut self) -> Result<FlowInferenceGuard, FlowProductFailure> {
+        self.charge_execution_work(1)?;
+        // Every live guard consumed one step, so the successful bounded charge
+        // also proves this increment cannot overflow.
+        self.inference_depth.set(self.inference_depth.get() + 1);
+        Ok(FlowInferenceGuard {
+            depth: Rc::clone(&self.inference_depth),
+        })
     }
 
     /// Begin one actual fixed-point round, before running its transfers.
@@ -1124,19 +1253,6 @@ impl ReachingValueProduct {
         Self {
             definitions: Arc::from([site.scope.subjects[site.subject].node]),
             scope: Some(Rc::clone(&site.scope)),
-        }
-    }
-
-    fn merged(
-        definitions: impl IntoIterator<Item = FlowNodeId>,
-        scope: Option<Rc<ProductLayout>>,
-    ) -> Self {
-        let mut sites: Vec<FlowNodeId> = definitions.into_iter().collect();
-        sites.sort_by_key(|node| node.index());
-        sites.dedup();
-        Self {
-            definitions: Arc::from(sites.into_boxed_slice()),
-            scope,
         }
     }
 
@@ -1473,6 +1589,10 @@ impl FlowProductValue {
 pub enum FlowProductBudgetAxis {
     /// Fixed-point iterations.
     Iterations,
+    /// Interpreter work across all continuations and checker projections.
+    ExecutionWork,
+    /// Simultaneously retained completion slots across nested frontiers.
+    CompletionFrontier,
     /// The size of the product universe the solve would store.
     Products,
     /// Materialized source-declaration facts over the execution lifetime.
@@ -1500,6 +1620,10 @@ pub struct FlowProductBudget {
     /// stabilizes WITHIN this many iterations completes; one that would
     /// need another iteration is budget-exhausted.
     pub max_iterations: u32,
+    /// Total interpreter work; independent of fixed-point rounds.
+    pub max_execution_steps: u32,
+    /// Live owned completion slots, shared by all nested handlers.
+    pub max_completion_frontier: u32,
     /// Maximum materialized runtime products in one continuation snapshot.
     /// Source authority has its own execution-global cap below; the sum of
     /// the caps bounds all values visible through any snapshot.
@@ -1517,6 +1641,8 @@ impl Default for FlowProductBudget {
     fn default() -> Self {
         Self {
             max_iterations: 16,
+            max_execution_steps: 65_536,
+            max_completion_frontier: 4096,
             max_products: 4096,
             max_declared_products: 4096,
             max_product_width: 64,
@@ -1538,6 +1664,8 @@ impl FlowProductBudget {
         let subjects = u32::try_from(subjects).unwrap_or(u32::MAX);
         Self {
             max_iterations: plan.convergence().max_iterations,
+            max_execution_steps: plan.resources().max_execution_steps,
+            max_completion_frontier: plan.resources().max_completion_frontier,
             max_products: subjects.saturating_mul((PRODUCT_DOMAINS.len() - 1) as u32),
             max_declared_products: subjects,
             max_product_width: plan.resources().slice_budget.max_selected_nodes,
@@ -1604,29 +1732,16 @@ pub fn join_product(
         return FlowTransferOutcome::Unchanged;
     }
     let joined = match domain {
-        FlowDomain::ReachingValue => {
-            let (FlowProductValue::ReachingValue(left), FlowProductValue::ReachingValue(right)) =
-                (a, b)
-            else {
-                return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
-            };
-            if let (Some(a), Some(b)) = (&left.scope, &right.scope) {
-                if !Rc::ptr_eq(a, b) {
-                    return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
-                }
+        FlowDomain::ReachingValue => match join_reaching_values(budget, &[a, b]) {
+            Ok(product) => FlowProductValue::ReachingValue(product),
+            Err(FlowProductFailure::BudgetExceeded(exceeded)) => {
+                return FlowTransferOutcome::BudgetExceeded(exceeded)
             }
-            let product = ReachingValueProduct::merged(
-                left.definitions()
-                    .iter()
-                    .chain(right.definitions().iter())
-                    .copied(),
-                left.scope.as_ref().or(right.scope.as_ref()).cloned(),
-            );
-            if let Some(exceeded) = width_exceeded(budget, product.definitions().len()) {
-                return FlowTransferOutcome::BudgetExceeded(exceeded);
+            Err(FlowProductFailure::Gap(gap)) => return FlowTransferOutcome::Gap(gap),
+            Err(FlowProductFailure::ScopeMismatch | FlowProductFailure::Sealed) => {
+                return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression)
             }
-            FlowProductValue::ReachingValue(product)
-        }
+        },
         FlowDomain::ReachingType => {
             let (FlowProductValue::ReachingType(left), FlowProductValue::ReachingType(right)) =
                 (a, b)
@@ -1743,6 +1858,62 @@ fn width_exceeded(budget: &FlowProductBudget, width: usize) -> Option<FlowProduc
 /// Contributors preserve source/edge order and are deduplicated before the
 /// canonical owner constructs the final type. Temporary binary prefixes never
 /// consume/reset independent provenance budgets or publish intermediate types.
+/// Merge canonical definition streams once. Scratch follows actual inputs;
+/// width is checked before admitting each new distinct output definition.
+fn join_reaching_values(
+    budget: &FlowProductBudget,
+    products: &[&FlowProductValue],
+) -> Result<ReachingValueProduct, FlowProductFailure> {
+    let mut sources: smallvec::SmallVec<[&ReachingValueProduct; 4]> = smallvec::SmallVec::new();
+    let mut scope: Option<Rc<ProductLayout>> = None;
+    let mut total = 0usize;
+    for product in products {
+        let FlowProductValue::ReachingValue(value) = product else {
+            return Err(FlowProductFailure::Gap(FlowGap::UnmodeledExpression));
+        };
+        if let Some(exceeded) = width_exceeded(budget, value.definitions.len()) {
+            return Err(FlowProductFailure::BudgetExceeded(exceeded));
+        }
+        if let Some(incoming) = &value.scope {
+            if let Some(held) = &scope {
+                if !Rc::ptr_eq(held, incoming) {
+                    return Err(FlowProductFailure::ScopeMismatch);
+                }
+            } else {
+                scope = Some(Rc::clone(incoming));
+            }
+        }
+        total = total.saturating_add(value.definitions.len());
+        sources.push(value);
+    }
+    if let [only] = sources.as_slice() {
+        return Ok((*only).clone());
+    }
+    let mut heads = std::collections::BinaryHeap::with_capacity(sources.len());
+    for (source, product) in sources.iter().enumerate() {
+        if let Some(node) = product.definitions.first() {
+            heads.push(std::cmp::Reverse((node.index(), source, 0usize)));
+        }
+    }
+    let mut definitions = Vec::with_capacity(total.min(budget.max_product_width as usize));
+    while let Some(std::cmp::Reverse((_, source, offset))) = heads.pop() {
+        let node = sources[source].definitions[offset];
+        if definitions.last() != Some(&node) {
+            if let Some(exceeded) = width_exceeded(budget, definitions.len().saturating_add(1)) {
+                return Err(FlowProductFailure::BudgetExceeded(exceeded));
+            }
+            definitions.push(node);
+        }
+        if let Some(next) = sources[source].definitions.get(offset + 1) {
+            heads.push(std::cmp::Reverse((next.index(), source, offset + 1)));
+        }
+    }
+    Ok(ReachingValueProduct {
+        definitions: Arc::from(definitions.into_boxed_slice()),
+        scope,
+    })
+}
+
 fn join_reaching_types(
     algebra: &dyn FlowSemanticAlgebra,
     budget: &FlowProductBudget,

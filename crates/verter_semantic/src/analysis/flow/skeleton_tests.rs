@@ -53,6 +53,10 @@ fn skeleton_of(source: &str) -> FunctionBodySkeleton {
 }
 
 pub(super) fn indexed_skeleton_of(source: &str) -> FunctionBodySkeleton {
+    indexed_structure_of(source).into_parts().0
+}
+
+fn indexed_structure_of(source: &str) -> PreparedFunctionBodySkeleton {
     use crate::analysis::function_program::build_function_program_index;
     use crate::analysis::top_level_owners::TopLevelOwnerTable;
     let allocator = oxc_allocator::Allocator::default();
@@ -80,8 +84,6 @@ pub(super) fn indexed_skeleton_of(source: &str) -> FunctionBodySkeleton {
         entry,
     )
     .unwrap()
-    .into_parts()
-    .0
 }
 
 #[test]
@@ -900,4 +902,76 @@ fn runtime_shape_preserves_parameter_var_and_pattern_alias_boundaries() {
             assert_eq!(shape, FlowRuntimeBindingShape::default());
         }
     }
+}
+
+#[test]
+fn declaration_span_queries_do_not_scan_unrelated_parameters_or_aliases() {
+    for count in [32, 128, 512] {
+        let parameters = (0..count)
+            .map(|index| format!("p{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let declarations = "var shared = 0;".repeat(count);
+        let source = format!("function f({parameters}) {{ {declarations} return 0; }}");
+        let prepared = indexed_structure_of(&source);
+        let skeleton = prepared.skeleton();
+        let bindings = prepared.bindings();
+        assert_eq!(skeleton.bindings.len(), count * 2);
+        binding::take_declaration_span_comparisons();
+        for (ordinal, declaration) in skeleton.bindings.iter().enumerate() {
+            assert_eq!(
+                bindings.declaration_at_span(declaration.span),
+                Some(SkeletonBindingId::from_index(ordinal as u32))
+            );
+        }
+        let missing = FrameSpan::rebase(
+            0,
+            verter_span::Span::new(source.len() as u32, source.len() as u32 + 1),
+        );
+        assert_eq!(bindings.declaration_at_span(missing), None);
+        let comparisons = binding::take_declaration_span_comparisons();
+        eprintln!(
+            "{count} parameters + {count} aliases: {comparisons} declaration span comparisons"
+        );
+        assert!(comparisons <= 8 * (count * 2 + 1), "{count} parameters and {count} aliases used {comparisons} declaration span comparisons");
+    }
+}
+
+#[test]
+fn declaration_span_index_preserves_authored_alias_and_shadow_identities() {
+    let source = "function f(shared, {part: renamed}, ...rest) { var shared = 0; let local = 1; { let local = 2; } type Label = string; return 0; }";
+    let prepared = indexed_structure_of(source);
+    let skeleton = prepared.skeleton();
+    let bindings = prepared.bindings();
+    for (ordinal, declaration) in skeleton.bindings.iter().enumerate() {
+        assert_eq!(
+            bindings.declaration_at_span(declaration.span),
+            Some(SkeletonBindingId::from_index(ordinal as u32))
+        );
+    }
+    let shared = skeleton
+        .bindings_named(skeleton.name_id("shared").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(shared.len(), 2);
+    assert_ne!(shared[0], shared[1]);
+    assert_eq!(
+        bindings.canonical_local(shared[0]),
+        bindings.canonical_local(shared[1])
+    );
+    let locals = skeleton
+        .bindings_named(skeleton.name_id("local").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(locals.len(), 2);
+    assert_ne!(
+        bindings.canonical_local(locals[0]),
+        bindings.canonical_local(locals[1])
+    );
+    let type_binding = skeleton
+        .bindings_named(skeleton.name_id("Label").unwrap())
+        .next()
+        .unwrap();
+    assert!(
+        bindings.identity(type_binding).is_none(),
+        "declaration addressability never invents a value identity for a type-only binder"
+    );
 }

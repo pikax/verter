@@ -41,6 +41,27 @@ pub struct FlowBindingMap {
     declaration_offsets: Arc<[u32]>,
     runtime_shapes: Arc<[FlowRuntimeBindingShape]>,
     occurrences: Arc<FxHashMap<FrameSpan, IndexedOccurrence>>,
+    declarations_by_span: Arc<FxHashMap<DeclarationSpan, SkeletonBindingId>>,
+}
+
+/// An exact declaration address. Equality is also the actual lookup-work probe.
+#[derive(Debug, Clone, Copy)]
+struct DeclarationSpan(FrameSpan);
+
+impl PartialEq for DeclarationSpan {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(test)]
+        record_declaration_span_comparison();
+        self.0 == other.0
+    }
+}
+
+impl Eq for DeclarationSpan {}
+
+impl std::hash::Hash for DeclarationSpan {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.0, state);
+    }
 }
 
 /// Constant-size structural facts for one canonical runtime declaration group.
@@ -86,9 +107,22 @@ impl FlowBindingMap {
                 return Err(FlowBindingMapError::DuplicateDeclaration);
             }
         }
+        let mut declarations_by_span =
+            FxHashMap::with_capacity_and_hasher(skeleton.bindings.len(), Default::default());
         let mut identities = Vec::with_capacity(skeleton.bindings.len());
         let mut locals = vec![None; inventory.len()];
         for (ordinal, binding) in skeleton.bindings.iter().enumerate() {
+            let ordinal =
+                u32::try_from(ordinal).map_err(|_| FlowBindingMapError::TooManyBindings)?;
+            if declarations_by_span
+                .insert(
+                    DeclarationSpan(binding.span),
+                    SkeletonBindingId::from_index(ordinal),
+                )
+                .is_some()
+            {
+                return Err(FlowBindingMapError::DuplicateDeclaration);
+            }
             let Some(kind) = binding.kind.function_binding_kind() else {
                 identities.push(None);
                 continue;
@@ -97,8 +131,6 @@ impl FlowBindingMap {
                 .remove(&(binding.span, kind))
                 .ok_or(FlowBindingMapError::MissingDeclaration)?;
             let record = &inventory[slot as usize];
-            let ordinal =
-                u32::try_from(ordinal).map_err(|_| FlowBindingMapError::TooManyBindings)?;
             locals[slot as usize] = Some(SkeletonBindingId::from_index(ordinal));
             identities.push(Some(FlowBindingIdentity {
                 name: Arc::clone(&record.name),
@@ -159,7 +191,17 @@ impl FlowBindingMap {
             declaration_offsets: offsets.into(),
             runtime_shapes: runtime_shapes.into(),
             occurrences: Arc::new(FxHashMap::default()),
+            declarations_by_span: Arc::new(declarations_by_span),
         })
+    }
+
+    /// Resolve an authored declaration identifier without scanning the frame.
+    /// This preserves its exact declaration ID, including type-only declarations;
+    /// runtime storage aliases are obtained separately through `canonical_local`.
+    pub fn declaration_at_span(&self, span: FrameSpan) -> Option<SkeletonBindingId> {
+        self.declarations_by_span
+            .get(&DeclarationSpan(span))
+            .copied()
     }
 
     pub(super) fn resolve_identity(
@@ -312,4 +354,19 @@ impl SkeletonBindingKind {
             Self::TypeAlias | Self::Interface => return None,
         })
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static DECLARATION_SPAN_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn record_declaration_span_comparison() {
+    DECLARATION_SPAN_COMPARISONS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+pub(super) fn take_declaration_span_comparisons() -> usize {
+    DECLARATION_SPAN_COMPARISONS.with(|count| count.replace(0))
 }
