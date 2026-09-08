@@ -1104,6 +1104,13 @@ pub(crate) mod flow_obligation_state {
     #[rustfmt::skip]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct FlowBindingBasis { pub binding: FlowBindingRef, pub identity: FlowBindingIdentity }
+    /// Whether a closure consumes a captured value or only retains its effect subject.
+    /// Effect capture evidence is structural execution, never fabricated value products.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FlowCaptureDemand {
+        Value,
+        Effect,
+    }
     /// The mandatory closed semantic identity of one planned obligation:
     /// every obligation names exactly the semantic subject it proves
     /// something about — the demand root and its derived program point,
@@ -1156,7 +1163,7 @@ pub(crate) mod flow_obligation_state {
         /// — one obligation per (closure site, captured binding). The
         /// structural authority named the subject exactly, so the
         /// obligation is dischargeable, never a gap.
-        CapturedBinding { node: FlowNodeId, site: SkeletonExprSiteId, identity: FlowBindingIdentity },
+        CapturedBinding { node: FlowNodeId, site: SkeletonExprSiteId, identity: FlowBindingIdentity, demand: FlowCaptureDemand },
     }
     /// Evidence that one live semantic suboperation was consumed. This is
     /// a discharge INPUT: the runtime validates it against the specific

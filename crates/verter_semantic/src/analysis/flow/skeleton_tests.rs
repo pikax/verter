@@ -710,3 +710,80 @@ function d(a: number, b: string) {
         "the same function body indexes identically wherever it sits"
     );
 }
+
+#[test]
+fn prepared_occurrences_distinguish_free_shadowed_and_captured_targets() {
+    use crate::analysis::flow::{FlowBindingOccurrence, FlowBindingRef};
+    use crate::analysis::function_program::{
+        build_function_program_index, resolve_function_node, FunctionNode,
+    };
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    let source = "const seed='global'; function root(arg=seed) { const seed=1; let value=0; { let twin=1; consume(twin); } { let twin=2; consume(twin); } return () => { value=2; return value; }; }";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let index = build_function_program_index(
+        &parsed.program,
+        source,
+        &owners,
+        Arc::from("/occurrences.ts"),
+    );
+    let entries: Vec<_> = index.matches_named("root").collect();
+    for matched in entries {
+        let entry = matched.entry();
+        let node = resolve_function_node(&parsed.program, &entry.locator)
+            .unwrap()
+            .node;
+        let body = match node {
+            FunctionNode::Function(function) => {
+                FunctionBodySource::from_function(function).unwrap()
+            }
+            FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+        };
+        let prepared = build_indexed_function_body_skeleton(&body, entry).unwrap();
+        let bindings = prepared.bindings();
+        let frame_span = |start: u32, len: u32| {
+            FrameSpan::rebase(entry.span.start, verter_span::Span::new(start, start + len))
+        };
+        assert_eq!(
+            bindings.occurrence(frame_span(entry.span.start, 1)),
+            FlowBindingOccurrence::Missing
+        );
+        if entry.lexical_parent.is_none() {
+            let default = source.find("arg=seed").unwrap() as u32 + 4;
+            assert_eq!(
+                bindings.occurrence(frame_span(default, 4)),
+                FlowBindingOccurrence::Free,
+                "a body-local declaration must not capture a parameter-default read"
+            );
+            let mut twins = Vec::new();
+            for (position, _) in source.match_indices("consume(twin)") {
+                let FlowBindingOccurrence::Resolved(FlowBindingRef::Local(binding)) =
+                    bindings.occurrence(frame_span(position as u32 + 8, 4))
+                else {
+                    panic!("exact local occurrence");
+                };
+                twins.push(*binding);
+            }
+            assert_eq!(twins.len(), 2);
+            assert_ne!(
+                twins[0], twins[1],
+                "sibling shadows retain distinct exact references"
+            );
+        } else {
+            let write = source.find("value=2").unwrap() as u32;
+            let FlowBindingOccurrence::Resolved(FlowBindingRef::Captured(identity)) =
+                bindings.occurrence(frame_span(write, 5))
+            else {
+                panic!("write-only LHS is an indexed captured occurrence");
+            };
+            assert_eq!(identity.name.as_ref(), "value");
+            assert_ne!(identity.defining_function, entry.key);
+            let read = source.rfind("return value").unwrap() as u32 + 7;
+            assert_eq!(
+                bindings.occurrence(frame_span(read, 5)),
+                bindings.occurrence(frame_span(write, 5))
+            );
+        }
+    }
+}
