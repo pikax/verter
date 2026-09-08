@@ -4306,6 +4306,30 @@ enum FlowSourceProbe {
 /// the exact projected graph value for distinctions coarser corpus shapes
 /// intentionally erase.
 fn flow_source_probe(script: &str) -> FlowSourceProbe {
+    flow_source_probe_observed(script, false).0
+}
+
+fn flow_source_probe_observed(
+    script: &str,
+    observe: bool,
+) -> (
+    FlowSourceProbe,
+    Vec<super::flow_return::FlowJoinObservation>,
+) {
+    flow_source_probe_configured(script, |host| {
+        host.flow_fault_injection
+            .observe_product_joins
+            .store(observe, std::sync::atomic::Ordering::Relaxed);
+    })
+}
+
+fn flow_source_probe_configured(
+    script: &str,
+    configure: impl FnOnce(&VerterHost),
+) -> (
+    FlowSourceProbe,
+    Vec<super::flow_return::FlowJoinObservation>,
+) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let canonical = "/ws/flow-source-probe.ts";
     let _ = host.upsert(UpsertRequest {
@@ -4317,7 +4341,8 @@ fn flow_source_probe(script: &str) -> FlowSourceProbe {
             .static_resolution(),
         aliases: Vec::new(),
     });
-    with_dispatch(&host, |dispatch| {
+    configure(&host);
+    let result = with_dispatch(&host, |dispatch| {
         let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
         let prepared = host
             .prepared_value_decl_in(canonical, owner, "makeProps")
@@ -4355,7 +4380,9 @@ fn flow_source_probe(script: &str) -> FlowSourceProbe {
             },
             other => panic!("makeProps must execute its flow source, got {other:?}"),
         }
-    })
+    });
+    let joins = std::mem::take(&mut *host.flow_fault_injection.product_joins.lock().unwrap());
+    (result, joins)
 }
 
 #[track_caller]
@@ -4445,6 +4472,40 @@ fn flow_return_guard_union_omits_impossible_conjunction_alternative() {
     );
 }
 
+/// A disjunct that RE-ESTABLISHES the fact its position already holds
+/// still contributes its edge to the union. A member-path guard is where
+/// that is reachable: the subject's current node is the root's narrow
+/// projected down the path, never the path's own standing fact, so the
+/// enclosing conjunct's `typeof x.v === "string"` and the disjunct's
+/// identical test both write `string` at `x.v`. The disjunction's edges
+/// prove `string` and `number`, so `x.v` reads `string | number` inside
+/// it.
+///
+/// Reading each disjunct's contribution as a before/after diff of the
+/// overlay instead cannot see the second write at all: the `string`
+/// alternative comes out empty, `x.v` fails "narrowed in every
+/// alternative", and the branch publishes the enclosing `string` — a
+/// type NO edge of the disjunction proves on its own.
+#[test]
+fn flow_return_guard_union_counts_a_disjunct_that_re_establishes_a_held_fact() {
+    let expr = expect_clean_flow_value(
+        "function makeProps(x: { v: string | number }) { if (typeof x.v === \"string\" && (typeof x.v === \"string\" || typeof x.v === \"number\")) return { r: x.v }; throw 0 }",
+    );
+    assert_eq!(
+        member_types(&expr, "r"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        ])]
+    );
+    assert_ne!(
+        member_types(&expr, "r"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String,
+        )]
+    );
+}
+
 #[test]
 fn flow_return_declared_authority_is_seeded_before_forward_reads_and_writes() {
     let forward = expect_clean_flow_value(
@@ -4485,6 +4546,251 @@ fn flow_return_mutable_closures_use_declared_capture_authority() {
         assert_eq!(expr, expected);
         assert_ne!(expr, string_literal("a"));
     }
+}
+
+#[test]
+fn flow_return_transitive_capture_annotation_uses_its_original_generic_binder() {
+    let late = expect_clean_flow_value(
+        "function makeProps<T extends string>() { const mid = <T extends number>() => () => x; let x: T; return mid; }",
+    );
+    let terminal = match flow_source_probe(
+        "function makeProps<T extends string>() { return <T extends number>() => () => x; var x: T; }",
+    ) {
+        FlowSourceProbe::Value { expr, degradation, candidates } => {
+            assert_eq!(degradation, None);
+            assert_eq!(candidates, 0, "an unexecuted parent declaration supplies no runtime proof");
+            expr
+        }
+        other => panic!("selected capture authority supplies a value: {other:?}"),
+    };
+    for expr in [late, terminal] {
+        let verter_type_expr::TypeExpr::Function(intermediate) = &expr else {
+            panic!("intermediate signature: {expr:?}");
+        };
+        assert_eq!(
+            intermediate.type_parameters[0].constraint.as_deref(),
+            Some(&verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::Number
+            ))
+        );
+        let Some(verter_type_expr::TypeExpr::Function(inner)) = intermediate.return_type.as_deref()
+        else {
+            panic!("inner signature: {expr:?}");
+        };
+        let Some(verter_type_expr::TypeExpr::TypeParameter(captured)) =
+            inner.return_type.as_deref()
+        else {
+            panic!("captured binder: {expr:?}");
+        };
+        assert_eq!(
+            captured.constraint.as_deref(),
+            Some(&verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::String
+            )),
+            "a declaration hydrated later retains original outer T, never the intermediate T"
+        );
+    }
+}
+
+#[test]
+fn flow_return_finally_write_kills_entering_narrowing_even_when_type_is_unchanged() {
+    for body in [
+        "x = 1",
+        "if (flag) { x = 1 } else { x = 1 }",
+        "x = 1; x = 1",
+    ] {
+        let source = format!("function makeProps(x: string | number, flag: boolean) {{ if (typeof x === 'string') {{ try {{}} finally {{ {body}; }} return x; }} throw 0; }}");
+        assert_eq!(
+            expect_clean_flow_value(&source),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    }
+}
+
+#[test]
+fn flow_return_continuation_join_preserves_post_write_guard_facts() {
+    for source in [
+        "function assertString(x:unknown):asserts x is string{} function makeProps(flag:boolean,y:string|number){let x=y;if(flag){x=y;assertString(x);}else{x=y;assertString(x);}return x;}",
+        "function makeProps(x:string|number){if(typeof x==='string'){throw 0;}else{x='written';}return x;}",
+    ] {
+        assert_eq!(expect_clean_flow_value(source), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String), "{source}");
+    }
+}
+
+#[test]
+fn flow_return_finally_alias_write_kills_the_canonical_guard_root() {
+    assert_eq!(
+        expect_clean_flow_value("function makeProps(x:string|number){if(typeof x!=='string'){throw 0;}try{}finally{var x=1;}return x;}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+}
+
+#[test]
+fn flow_return_canonical_write_uses_later_alias_declared_authority() {
+    assert_eq!(
+        expect_clean_flow_value("function makeProps(){var x=0 as 0|1;var x:0|1=0;x=1;return x;}"),
+        verter_type_expr::TypeExpr::number_literal(1.0)
+    );
+}
+
+#[test]
+fn flow_return_effect_only_transitive_capture_does_not_hydrate_its_annotation() {
+    let expr = expect_clean_flow_value("type Local=string;function makeProps(){type Local=number;let x:Local;return()=>()=>{x=1;return 0;};}");
+    let verter_type_expr::TypeExpr::Function(outer) = &expr else {
+        panic!("outer closure");
+    };
+    let Some(verter_type_expr::TypeExpr::Function(inner)) = outer.return_type.as_deref() else {
+        panic!("inner closure");
+    };
+    assert_eq!(
+        inner.return_type.as_deref(),
+        Some(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        ))
+    );
+}
+
+#[test]
+fn flow_return_switch_merges_actual_predecessors_in_one_canonical_batch() {
+    let (result, joins) = flow_source_probe_observed("function makeProps(a:boolean,b:boolean){const tag=a?0:b?1:2;let out:number|string|boolean=0;switch(tag){case 0:out=1;break;case 1:out='x';break;case 2:out=true;break;}return out;}", true);
+    assert!(
+        matches!(
+            result,
+            FlowSourceProbe::Value {
+                degradation: None,
+                candidates: 1,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        joins.len(),
+        1,
+        "one actual switch exit must not construct binary prefixes: {joins:?}"
+    );
+    assert_eq!(joins[0].predecessors, 3);
+    assert!(joins[0].unions.iter().all(|width| *width == 3), "{joins:?}");
+    assert_eq!(
+        joins[0].provenance,
+        [3],
+        "all literal predecessor provenance must share one bounded inspection"
+    );
+}
+
+#[test]
+fn flow_return_labeled_catch_and_finally_merge_original_predecessors() {
+    for (source, predecessors) in [
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0; L:{if(a){x=1;break L;}if(b){x='b';break L;}x=true;}return x;}", 3),
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x=1;throw 0;}if(b){x='b';throw 0;}x=true;throw 0;}catch{return x;}}", 4),
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x='a';return 0;}if(b){x=true;throw 0;}x=1;}finally{x=2;}return x;}", 4),
+    ] {
+        let (result, joins) = flow_source_probe_observed(source, true);
+        assert!(matches!(result, FlowSourceProbe::Value { .. }), "{source}: {result:?}");
+        assert_eq!(joins.len(), 1, "one actual continuation, no union prefixes: {source}: {joins:?}");
+        assert_eq!(joins[0].predecessors, predecessors, "{source}: {joins:?}");
+        assert!(!joins[0].unions.is_empty(), "distinct predecessor values reached canonical algebra: {source}");
+    }
+}
+
+#[test]
+fn flow_return_switch_fallthrough_keeps_successive_control_merges_separate() {
+    let source = "function makeProps(a:boolean,b:boolean){const tag=a?0:b?1:2;let x:number|string|boolean=0;switch(tag){case 0:x='s';case 1:x=true;break;case 2:x=1;}return x;}";
+    let (result, joins) = flow_source_probe_observed(source, true);
+    let FlowSourceProbe::Value {
+        expr,
+        degradation: None,
+        candidates: 1,
+    } = result
+    else {
+        panic!("{result:?}");
+    };
+    assert_eq!(
+        expr,
+        verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        ])
+    );
+    assert_eq!(
+        joins
+            .iter()
+            .map(|join| join.predecessors)
+            .collect::<Vec<_>>(),
+        [2, 2],
+        "case entry merges before its executed write, then switch exit merges: {joins:?}"
+    );
+}
+
+#[test]
+fn flow_return_class_local_callee_cannot_borrow_a_free_function_receipt() {
+    let result = flow_source_probe("function check():void{} function makeProps(x:string|number){class C{static{const check=(v:unknown):asserts v is string=>{};check(x);}}return x;}");
+    assert!(
+        matches!(
+            result,
+            FlowSourceProbe::Value {
+                degradation: Some(_),
+                candidates: 0,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn flow_return_effect_capture_requires_completed_walk_but_reader_requires_value_evidence() {
+    use std::sync::atomic::Ordering;
+    let writer = "function makeProps(){let x:number;return()=>()=>{x=1;return 0;};}";
+    let (short, _) = flow_source_probe_configured(writer, |host| {
+        host.flow_fault_injection
+            .short_nested_execution_ledger
+            .store(true, Ordering::Relaxed);
+    });
+    assert!(
+        matches!(
+            short,
+            FlowSourceProbe::Value {
+                degradation: Some(_),
+                candidates: 0,
+                ..
+            }
+        ),
+        "{short:?}"
+    );
+    let (without_values, _) = flow_source_probe_configured(writer, |host| {
+        host.flow_fault_injection
+            .drop_binding_domain_product
+            .store(true, Ordering::Relaxed);
+    });
+    assert!(
+        matches!(
+            without_values,
+            FlowSourceProbe::Value {
+                degradation: None,
+                candidates: 1,
+                ..
+            }
+        ),
+        "effect-only proof consumes no value receipts: {without_values:?}"
+    );
+    let reader = "function makeProps(){let x:number=0;const writer=()=>{x=1;return 0;};const reader=()=>x;return {writer,reader};}";
+    let (without_reader, _) = flow_source_probe_configured(reader, |host| {
+        host.flow_fault_injection
+            .drop_binding_domain_product
+            .store(true, Ordering::Relaxed);
+    });
+    assert!(
+        matches!(
+            without_reader,
+            FlowSourceProbe::Value {
+                degradation: Some(_),
+                candidates: 0,
+                ..
+            }
+        ),
+        "a writer receipt cannot discharge the reader: {without_reader:?}"
+    );
 }
 
 #[test]
@@ -4677,18 +4983,43 @@ fn flow_return_nested_capture_state_matches_the_closure_position() {
     );
     assert_eq!(projected_function_return(&written), &string_literal("b"));
 
-    let destructured = expect_clean_flow_value(
-        "function makeProps({ x }: { x: \"a\" | \"b\" }) { return () => x }",
-    );
-    assert_eq!(
-        projected_function_return(&destructured),
-        &verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
-    );
-
     let read_only = expect_clean_flow_value(
         "function makeProps() { let x: \"a\" | \"b\" = \"a\"; return () => x }",
     );
     assert_eq!(projected_function_return(&read_only), &string_literal("a"));
+}
+
+#[test]
+fn flow_return_nested_destructured_capture_uses_its_parent_parameter_input() {
+    let value = expect_clean_flow_value(
+        "function makeProps({ x }: { x: \"a\" | \"b\" }) { return () => x }",
+    );
+    assert_eq!(
+        projected_function_return(&value),
+        &verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+    );
+}
+
+#[test]
+fn flow_return_one_expression_imports_a_wide_capture_environment() {
+    let declarations = (0..16)
+        .map(|index| format!("const value{index} = {index};"))
+        .collect::<String>();
+    let expression = (0..16)
+        .map(|index| format!("value{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let value = expect_clean_flow_value(&format!(
+        "function makeProps() {{ {declarations} return () => ({{ {expression} }}); }}"
+    ));
+    let returned = projected_function_return(&value);
+    for index in 0..16 {
+        assert_eq!(
+            object_prop(returned, &format!("value{index}")),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "every exact captured input fits the closure's execution policy"
+        );
+    }
 }
 
 #[test]
@@ -8321,4 +8652,239 @@ fn discharge_claims_require_evaluator_call_evidence() {
             "evaluator-recorded call evidence discharges and the demand seals"
         );
     });
+}
+
+#[test]
+fn flow_return_declared_authority_lookup_does_not_scan_runtime_aliases() {
+    for count in [32usize, 64] {
+        let declarations = "var x;".repeat(count);
+        let writes = "x=1;".repeat(8);
+        let source = format!("function makeProps(){{{declarations}var x:0|1=0;{writes}return x;}}");
+        let mut counter = None;
+        let (result, _) = flow_source_probe_configured(&source, |host| {
+            counter = Some(Arc::clone(
+                &host.flow_fault_injection.declared_authority_work,
+            ))
+        });
+        let FlowSourceProbe::Value {
+            expr,
+            degradation: None,
+            ..
+        } = result
+        else {
+            panic!("{result:?}");
+        };
+        assert_eq!(expr, verter_type_expr::TypeExpr::number_literal(1.0));
+        let work = counter.unwrap().load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("{count} aliases: {work} authority lookups for eight assignments");
+        assert!(work > 0, "the fixture must consume declaration authority");
+        assert!(
+            work <= 32,
+            "eight assignments across {count} aliases inspected {work} authority candidates"
+        );
+    }
+}
+
+#[test]
+fn flow_return_finally_identity_membership_scales_with_written_subjects() {
+    for count in [32usize, 64] {
+        let declarations = (0..count)
+            .map(|n| format!("let x{n}=0;"))
+            .collect::<String>();
+        let writes = (0..count).map(|n| format!("x{n}=1;")).collect::<String>();
+        let members = (0..count)
+            .map(|n| format!("x{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            "function makeProps(){{{declarations}try{{}}finally{{{writes}}}return {{{members}}};}}"
+        );
+        let mut counter = None;
+        let (result, _) = flow_source_probe_configured(&source, |host| {
+            counter = Some(Arc::clone(&host.flow_fault_injection.finally_identity_work))
+        });
+        let FlowSourceProbe::Value {
+            expr,
+            degradation: None,
+            ..
+        } = result
+        else {
+            panic!("{result:?}");
+        };
+        for n in 0..count {
+            assert_eq!(
+                member_types(&expr, &format!("x{n}")),
+                vec![verter_type_expr::TypeExpr::Primitive(
+                    verter_type_expr::PrimitiveName::Number
+                )]
+            );
+        }
+        let work = counter.unwrap().load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("{count} finally writes: {work} identity membership operations");
+        assert!(
+            work >= count,
+            "the fixture must execute every selected finally write: {work}"
+        );
+        assert!(
+            work <= count * 4,
+            "{count} finally writes examined {work} identities"
+        );
+    }
+}
+
+#[test]
+fn flow_return_unused_catch_parameter_does_not_poison_selected_writes() {
+    // The existing catch policy retains its conditional-definition refusal.
+    // An unused binder must neither block the string write nor replace that
+    // established boundary with a product-selection failure.
+    for clause in ["catch(e)", "catch"] {
+        let source =
+            format!("function makeProps(){{let x=0;try{{throw 0;}}{clause}{{x='s';}}return x;}}");
+        let result = flow_source_probe(&source);
+        let FlowSourceProbe::Value {
+            expr,
+            degradation:
+                Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
+            candidates: 0,
+        } = result
+        else {
+            panic!("{source}: {result:?}");
+        };
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+    }
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps(){let x=0;try{throw 0;}catch(e){x=1;}return x;}"
+        ),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+    );
+    // Catch-root value lowering remains an established typed gap; keeping
+    // its selected bootstrap must not claim support or warm admission.
+    assert!(matches!(
+        flow_source_probe("function makeProps(){try{throw 0;}catch(e){return e;}}"),
+        FlowSourceProbe::Value {
+            degradation: Some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition),
+            candidates: 0,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn flow_return_indexed_argument_identity_work_is_independent_of_unrelated_bindings() {
+    for argument in ["x", "other as typeof x"] {
+        for count in [64usize, 256] {
+            let declarations = (0..count)
+                .map(|n| format!("const unrelated{n}={n};"))
+                .collect::<String>();
+            let source=format!("const x:string='outer';function id<T>(x:T):T{{return x;}}function makeProps(x:number,other:boolean){{{declarations}return id({argument});}}");
+            let mut counter = None;
+            let (result, _) = flow_source_probe_configured(&source, |host| {
+                counter = Some(Arc::clone(
+                    &host.flow_fault_injection.indexed_argument_identity_work,
+                ))
+            });
+            let FlowSourceProbe::Value {
+                expr,
+                degradation: None,
+                candidates: 1,
+            } = result
+            else {
+                panic!("{result:?}");
+            };
+            assert_eq!(
+                expr,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+            );
+            let work = counter.unwrap().load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("{argument}, {count} unrelated bindings: {work} argument identity probes");
+            assert!(
+                work > 0,
+                "the call must resolve its selected argument identity"
+            );
+            assert!(
+            work <= 8,
+            "fixed selected call inspected {work} identities with {count} unrelated declarations"
+        );
+        }
+    }
+}
+
+#[test]
+fn flow_return_indexed_arguments_keep_exact_parameter_and_capture_roots() {
+    assert_eq!(expect_clean_flow_value(
+        "function id<T>(x:T):T{return x;}const x=true;function makeProps(x:string){return id((x));}"
+    ), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
+    let closure=expect_clean_flow_value(
+        "function id<T>(x:T):T{return x;}const x=true;function makeProps(){const x='inner';return()=>id((x));}"
+    );
+    let verter_type_expr::TypeExpr::Function(function) = &closure else {
+        panic!("{closure:?}")
+    };
+    assert_eq!(
+        function.return_type.as_deref(),
+        Some(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        ))
+    );
+}
+
+#[test]
+fn flow_return_evolving_local_established_writes_keep_existing_warm_policy() {
+    let overwritten = expect_clean_flow_value(
+        "function makeProps(n:number){let v;if(n>0){v='p' as const;}v=1 as const;return {v};}",
+    );
+    assert_eq!(
+        member_types(&overwritten, "v"),
+        vec![verter_type_expr::TypeExpr::number_literal(1.0)]
+    );
+    let established = expect_clean_flow_value(
+        "function makeProps(n:number){let v;v=1 as const;if(n>0){v='p' as const;}return {v};}",
+    );
+    assert_eq!(
+        member_types(&established, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::number_literal(1.0),
+            verter_type_expr::TypeExpr::string_literal("p"),
+        ])]
+    );
+}
+
+#[test]
+fn flow_return_indexed_wrapped_arguments_preserve_the_lowered_binding_root() {
+    assert_eq!(expect_clean_flow_value("const x:number=0;function id<T>(v:T):T{return v;}function makeProps(x:string){return id((x as string) satisfies string);}"), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
+    // An authoritative assertion supplies the argument's type, even when its
+    // authored type name is also the name of a runtime parameter.
+    assert_eq!(expect_clean_flow_value("type T=string;function id<V>(v:V):V{return v;}function makeProps(T:number,x:boolean){return id(x as T);}"), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
+}
+
+#[test]
+fn flow_return_authoritative_type_query_argument_preserves_lexical_scope() {
+    assert_eq!(
+        expect_clean_flow_value("const x:number=0;function id<T>(v:T):T{return v;}function makeProps(x:string){return id(x as typeof x);}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+    assert_eq!(
+        expect_clean_flow_value("const x:number=0;function id<T>(v:T):T{return v;}function makeProps(other:boolean){return id(other as typeof x);}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+}
+
+#[test]
+fn flow_return_type_query_argument_uses_its_own_binding() {
+    assert_eq!(
+        expect_clean_flow_value("const x:number=0;function id<T>(v:T):T{return v;}function makeProps(x:string,other:boolean){return id(other as typeof x);}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+}
+
+#[test]
+fn flow_return_type_query_argument_keeps_current_narrowing() {
+    assert_eq!(
+        expect_clean_flow_value("const x:boolean=false;function id<T>(v:T):T{return v;}function makeProps(x:string|number){if(typeof x!=='string'){throw 0;}return id(0 as typeof x);}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
 }

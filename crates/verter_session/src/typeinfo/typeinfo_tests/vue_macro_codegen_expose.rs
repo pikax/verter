@@ -471,3 +471,80 @@ defineExpose({ token: EXT_TOKEN, k: K })
          never a fresh `unique symbol`: {local:?}"
     );
 }
+
+/// The same nameability fail-close holds at a NESTED position, and the
+/// widen is applied before the reference set is collected.
+///
+/// A setup-local `unique symbol` reached through a member of an exposed
+/// object (`const obj = { inner: K }; defineExpose({ o: obj })`) renders
+/// inside a composite, where a root-only widen would leave `typeof K` in
+/// the spliced text AND record `K` as a scope requirement the generated
+/// declaration surface cannot satisfy — which fails the WHOLE macro
+/// projection rather than one member. The member must render the widened
+/// primitive at that position and contribute no owner-value dependency,
+/// while an IMPORTED carrier nested at the same depth keeps its precise
+/// spelling and retains its binding.
+#[test]
+fn nested_local_unique_symbol_member_widens_and_requires_no_setup_binding() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(
+        &host,
+        "/src/token.ts",
+        "export declare const EXT_TOKEN: unique symbol",
+    );
+    upsert(
+        &host,
+        "/src/Nested.vue",
+        r#"<script setup lang="ts">
+import { EXT_TOKEN } from './token'
+const K: unique symbol = Symbol()
+const local = { inner: K }
+const imported = { inner: EXT_TOKEN }
+defineExpose({ local, imported })
+</script>"#,
+    );
+
+    let output = produce(&host, "/src/Nested.vue", VueMacroCodegenDemand::Tsc);
+    let expose = expose_projection(&output);
+
+    let verter_macro_dto::TscExposeMemberType::Resolved(local) = member(expose, "local") else {
+        panic!("`local` must resolve, got: {expose:?}");
+    };
+    assert_eq!(
+        local.as_str().trim(),
+        "{ inner: symbol }",
+        "a script-setup local unique symbol nested in a member surface is \
+         no more nameable than a root one: {local:?}"
+    );
+    assert!(
+        expose
+            .scope
+            .owner_value_dependencies
+            .iter()
+            .all(|dependency| dependency.name != "K"),
+        "the widened position leaves NO owner-value dependency on the setup \
+         binding — recording one fails the whole macro projection, got: {:?}",
+        expose.scope
+    );
+
+    let verter_macro_dto::TscExposeMemberType::Resolved(imported) = member(expose, "imported")
+    else {
+        panic!("`imported` must resolve, got: {expose:?}");
+    };
+    assert_eq!(
+        imported.as_str().trim(),
+        "{ inner: typeof EXT_TOKEN }",
+        "an IMPORTED unique symbol keeps its precise nominal spelling at the \
+         same nested position: {imported:?}"
+    );
+    assert!(
+        expose
+            .scope
+            .retained_bindings
+            .iter()
+            .any(|binding| binding.local_name == "EXT_TOKEN"),
+        "the nested precise render must retain its binding for the generated \
+         surface to import, got: {:?}",
+        expose.scope
+    );
+}

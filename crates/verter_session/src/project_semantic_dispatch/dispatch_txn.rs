@@ -310,6 +310,10 @@ pub(crate) struct FlowReturnFrameState {
     /// the demand could not be planned — the evaluation still runs, but
     /// no proof can mint, so the close finalizes unproven.
     pub(crate) flow_demand: Option<flow_obligation_state::FlowDemandCarrier>,
+    /// Validated structural execution authority survives a refusal to expand
+    /// proof obligations. It authorizes the same selected value evaluation,
+    /// without manufacturing a proof carrier for the refused demand.
+    pub(crate) flow_execution: Option<Arc<super::flow_solve::FlowExecutionSelection>>,
     /// WHY the preparation installed no demand, when it refused —
     /// consumed by the frame close to classify the unproven outcome onto
     /// its partial class (a budget edge and a torn view fault consumers

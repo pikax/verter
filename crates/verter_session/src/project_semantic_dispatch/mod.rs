@@ -118,6 +118,7 @@ pub(crate) mod flow_return_frame_seal_tests;
 pub(crate) mod flow_return_lexical_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_positional_tests;
+mod flow_return_products;
 #[cfg(test)]
 pub(crate) mod flow_return_root_gate_tests;
 #[cfg(test)]
@@ -128,9 +129,9 @@ pub(crate) mod flow_return_tests;
 // constructor derives its result-contract identity from this registry.
 pub(crate) mod flow_solve;
 // The product lattice of the flow authority: the per-domain dataflow
-// products, their ONE transfer/join route, and the ONE deterministic
-// worklist. It owns product state only — the flow evaluator's own state
-// maps are the value authority.
+// products and the ONE join route every merge point folds through. The
+// flow evaluator holds its whole semantic state here — the products ARE
+// the live value path.
 pub(crate) mod flow_products;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
