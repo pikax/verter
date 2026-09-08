@@ -299,6 +299,14 @@ pub(crate) mod flow_admission_fault_injection {
     #[derive(Debug, Default)]
     pub(crate) struct FlowAdmissionFaultKnobs {
         #[cfg(test)]
+        pub(crate) observe_product_execution: AtomicBool,
+        #[cfg(test)]
+        pub(crate) product_executions:
+            std::sync::Mutex<Vec<super::super::flow_return_frame_seal_tests::ProductObservation>>,
+        // Reorders actual continuation inputs only; it cannot mint or suppress evidence.
+        #[cfg(test)]
+        pub(crate) reverse_product_predecessors: AtomicBool,
+        #[cfg(test)]
         pub(crate) observe_product_joins: AtomicBool,
         #[cfg(test)]
         pub(crate) product_joins: std::sync::Mutex<Vec<super::FlowJoinObservation>>,
@@ -2344,7 +2352,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .collect(),
             })
             .collect();
-        FlowDischargeReport::new(entries)
+        let report = FlowDischargeReport::new(entries);
+        #[cfg(test)]
+        {
+            let knobs = &self.ctx.host_for_fact_tracer_install().flow_fault_injection;
+            if knobs
+                .observe_product_execution
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                knobs.product_executions.lock().unwrap().push(
+                    super::flow_return_frame_seal_tests::ProductObservation::capture(
+                        witness.products,
+                        witness.product_evidence,
+                        report.clone(),
+                    ),
+                );
+            }
+        }
+        report
     }
 
     /// The ONE finalization driver for one evaluated flow demand: the
@@ -6236,6 +6261,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let algebra = self.dispatch;
         let products: smallvec::SmallVec<[&FlowProductStore; 4]> =
             incoming.iter().map(|state| &state.products).collect();
+        #[cfg(test)]
+        let products = {
+            let mut products = products;
+            if self
+                .dispatch
+                .ctx
+                .host_for_fact_tracer_install()
+                .flow_fault_injection
+                .reverse_product_predecessors
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                products.reverse();
+            }
+            products
+        };
         let joined = FlowLayerState {
             products: FlowProductStore::join(&products, observation, algebra),
             write_observation: self.products.observe_writes(),

@@ -535,6 +535,179 @@ fn product_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturn
     }
 }
 
+/// Owned test observations contain no execution capability and cannot affect
+/// admission. Semantic IDs are projected only after the demand has returned.
+#[derive(Debug)]
+pub(crate) struct ProductObservation {
+    products: Vec<(super::flow_solve::FlowDomain, usize, ObservedProduct)>,
+    executed: Vec<(super::flow_solve::FlowDomain, usize, bool)>,
+    iterations: Option<u32>,
+    report: super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
+}
+
+#[derive(Debug)]
+enum ObservedProduct {
+    Definitions(Vec<usize>),
+    Reaching(super::flow_products::ReachingTypeProduct),
+    Declared(Option<crate::semantic_query::SemanticNodeId>),
+    Narrowing(super::flow_products::NarrowingProduct),
+    Assignment(super::flow_products::DefiniteAssignmentProduct),
+}
+
+impl ProductObservation {
+    pub(super) fn capture(
+        products: &super::flow_return_products::FlowFrameProducts,
+        evidence: Option<&super::flow_products::FlowProductEvidence>,
+        report: super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
+    ) -> Self {
+        use super::flow_products::FlowProductValue;
+        use super::flow_solve::FlowDomain;
+        Self {
+            products: products
+                .state
+                .ordered_entries()
+                .map(|(key, value)| {
+                    let value = match value {
+                        FlowProductValue::ReachingValue(value) => ObservedProduct::Definitions(
+                            value
+                                .definitions()
+                                .iter()
+                                .map(|node| node.index())
+                                .collect(),
+                        ),
+                        FlowProductValue::ReachingType(value) => {
+                            ObservedProduct::Reaching(value.clone())
+                        }
+                        FlowProductValue::DeclaredType(value) => {
+                            ObservedProduct::Declared(value.declared())
+                        }
+                        FlowProductValue::Narrowing(value) => {
+                            ObservedProduct::Narrowing(value.clone())
+                        }
+                        FlowProductValue::DefiniteAssignment(value) => {
+                            ObservedProduct::Assignment(*value)
+                        }
+                    };
+                    (key.domain(), key.node().index(), value)
+                })
+                .collect(),
+            executed: products
+                .execution
+                .borrow()
+                .execution
+                .selected_sites()
+                .flat_map(|site| {
+                    [
+                        FlowDomain::ReachingValue,
+                        FlowDomain::ReachingType,
+                        FlowDomain::Narrowing,
+                        FlowDomain::DeclaredType,
+                        FlowDomain::DefiniteAssignment,
+                    ]
+                    .map(|domain| {
+                        let key = site.key(domain).unwrap();
+                        (
+                            domain,
+                            key.node().index(),
+                            evidence.is_some_and(|evidence| evidence.executed(&key)),
+                        )
+                    })
+                })
+                .collect(),
+            iterations: evidence.map(|evidence| evidence.iterations()),
+            report,
+        }
+    }
+
+    fn canonical(self, host: &VerterHost) -> CanonicalProductObservation {
+        use super::flow_products::WideningMembership;
+        fn structural_type(ty: &verter_type_expr::TypeExpr) -> String {
+            use verter_type_expr::TypeExpr;
+            match ty {
+                TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+                    let mut arms: Vec<_> = arms.iter().map(structural_type).collect();
+                    arms.sort();
+                    format!(
+                        "{}:{arms:?}",
+                        if matches!(ty, TypeExpr::Union(_)) {
+                            "union"
+                        } else {
+                            "intersection"
+                        }
+                    )
+                }
+                other => format!("{other:?}"),
+            }
+        }
+        let node = |id| {
+            structural_type(&host.project_node_to_type_expr_for_test(id).expect(
+                "fixture product types must project; a missing type is not equivalent evidence",
+            ))
+        };
+        let set = |ids: &[crate::semantic_query::SemanticNodeId]| {
+            let mut values: Vec<_> = ids.iter().copied().map(node).collect();
+            values.sort();
+            values
+        };
+        let products = self
+            .products
+            .into_iter()
+            .map(|(domain, site, value)| {
+                let value = match value {
+                    ObservedProduct::Definitions(value) => format!("{value:?}"),
+                    ObservedProduct::Reaching(value) => {
+                        let widening = match value.widening() {
+                            None => "none".to_string(),
+                            Some(WideningMembership::All) => "all".to_string(),
+                            Some(WideningMembership::Partial(members)) => {
+                                format!("{:?}", set(members))
+                            }
+                        };
+                        format!(
+                            "{:?}/{:?}/{widening}",
+                            set(value.contributors()),
+                            value.united().map(node)
+                        )
+                    }
+                    ObservedProduct::Declared(value) => format!("{:?}", value.map(node)),
+                    ObservedProduct::Narrowing(value) => {
+                        let mut facts: Vec<_> = value
+                            .facts()
+                            .iter()
+                            .map(|fact| {
+                                format!(
+                                    "{:?}/{:?}/{}",
+                                    fact.binding,
+                                    fact.path,
+                                    node(fact.narrowed_to)
+                                )
+                            })
+                            .collect();
+                        facts.sort();
+                        format!("{facts:?}")
+                    }
+                    ObservedProduct::Assignment(value) => format!("{value:?}"),
+                };
+                (domain, site, value)
+            })
+            .collect();
+        CanonicalProductObservation {
+            products,
+            executed: self.executed,
+            iterations: self.iterations,
+            report: self.report,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CanonicalProductObservation {
+    products: Vec<(super::flow_solve::FlowDomain, usize, String)>,
+    executed: Vec<(super::flow_solve::FlowDomain, usize, bool)>,
+    iterations: Option<u32>,
+    report: super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
+}
+
 /// One evaluated demand: the structural type it served (arena-free, so
 /// two hosts are comparable), the slot candidate count, and how many cold
 /// computations the run performed.
@@ -542,6 +715,7 @@ struct ProductRun {
     served: Option<verter_type_expr::TypeExpr>,
     candidates: usize,
     cold_computes: u32,
+    observations: Vec<CanonicalProductObservation>,
 }
 
 /// Serve `name` `demands` times, EACH through a fresh store view — the
@@ -576,10 +750,16 @@ fn run_product(host: &Arc<VerterHost>, name: &str, demands: u32) -> ProductRun {
             .graph()
             .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)))
     });
+    let observations =
+        std::mem::take(&mut *host.flow_fault_injection.product_executions.lock().unwrap());
     ProductRun {
         served,
         candidates,
         cold_computes,
+        observations: observations
+            .into_iter()
+            .map(|observation| observation.canonical(host))
+            .collect(),
     }
 }
 
@@ -675,24 +855,23 @@ fn flow_discharge_requires_product_evidence() {
     });
 }
 
-/// The frame's product state — and therefore the served result and its
-/// warm candidate — does not depend on the order equivalent demands
-/// arrive in.
-///
-/// Two hosts evaluate the same fixture through DIFFERENT but equivalent
-/// request orders: one takes the merging frame first, the other takes it
-/// last. Request order decides which semantic nodes are interned first,
-/// so it decides their ids — and the product join's contributor
-/// aggregation must not let that reach the answer. The served type, the
-/// candidate count, and the cold-compute count must agree exactly under
-/// either order.
+/// Equivalent demand and actual predecessor orders preserve every observed
+/// product, exact execution evidence, discharge claim, served type and warm hit.
+/// The second host reverses request order and feeds each multiway join its
+/// actual snapshots in reverse. Semantic types are compared structurally after
+/// evaluation; graph-local subjects refer to the same fixture content.
 #[test]
-fn flow_product_worklist_is_permutation_deterministic() {
+fn flow_product_execution_is_permutation_deterministic() {
+    use super::flow_return::flow_admission_fault_injection::Guard;
     let forward = make_product_host();
+    let _forward_observation = Guard::arm(&forward.flow_fault_injection.observe_product_execution);
     let forward_first = run_product(&forward, "switchJoin", 2);
     let forward_second = run_product(&forward, "boundControl", 2);
 
     let reverse = make_product_host();
+    let _reverse_observation = Guard::arm(&reverse.flow_fault_injection.observe_product_execution);
+    let _reverse_predecessors =
+        Guard::arm(&reverse.flow_fault_injection.reverse_product_predecessors);
     let reverse_second = run_product(&reverse, "boundControl", 2);
     let reverse_first = run_product(&reverse, "switchJoin", 2);
 
@@ -717,6 +896,36 @@ fn flow_product_worklist_is_permutation_deterministic() {
         ("switchJoin", &forward_first, &reverse_first),
         ("boundControl", &forward_second, &reverse_second),
     ] {
+        assert_eq!(
+            a.observations.len(),
+            1,
+            "{name}: observe the cold frame exactly once"
+        );
+        let observed = &a.observations[0];
+        assert!(
+            !observed.products.is_empty(),
+            "{name}: compare real materialized products"
+        );
+        assert!(observed.executed.iter().any(|entry| entry.2));
+        assert!(observed.executed.iter().any(|entry| !entry.2));
+        assert!(
+            !observed.report.entries().is_empty(),
+            "{name}: compare real discharge claims"
+        );
+        assert_eq!(
+            observed.iterations,
+            Some(0),
+            "acyclic joins consume no fixed-point rounds"
+        );
+        assert_eq!(
+            a.observations, b.observations,
+            "{name}: canonical products and exact discharge evidence are invariant"
+        );
+        assert_eq!(
+            (a.candidates, a.cold_computes),
+            (1, 1),
+            "{name}: the second demand actually warms"
+        );
         assert_eq!(
             a.served, b.served,
             "{name}: an equivalent request order serves the same value"

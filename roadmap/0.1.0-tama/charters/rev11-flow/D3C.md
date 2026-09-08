@@ -39,15 +39,17 @@ rescope_unrelated_packages=3
 
 Readiness comes only from trusted implementation-ledger rows. A READY node may start; tooling does not validate commit locators, Git identity, receipts, leases, external state, or runtime admission.
 
+Execution and proof follow the [2026-09-08 amendment](../../decisions/2026-09-08-flow-product-execution-contract.md). The historical node name does not require a dependence-graph scheduler.
+
 ## Independently acceptable outcome
 
-Product/worklist cutover (codex D3 scope ruling, `decisions/2026-08-30-rev11-flow-d3-split.md`) — one indivisible cutover that moves the live value path of the flow evaluator onto D3P's product lattice. The `FlowEvaluator` today stores semantic state in separate `FxHashMap<String, …>`/`FxHashSet<String>` layers, parameter ordinals, and a name-rooted narrowing overlay, and `join_layer_states` is a FlowReturn-private product join. This node: (1) replaces the evaluator's `locals`, `var_locals`, declared-type maps, parameter-write maps, conditional-definition sets, and the narrowing overlay with `FlowProductStore`; (2) replaces `join_layer_states` with the domain joins; (3) executes selected transfers in `FlowDemandPlan` order until stable, using `max_iterations` and the selected obligation frontier as the connected budget — the existing `FlowTieBreak::DomainNodeEdgeSlot` and `FlowConvergencePolicy` order the worklist, and work exhaustion feeds the existing typed budget/ledger/finalizer path (no private constant or parallel budget authority); (4) flows product-domain discharge evidence through the existing `FlowDischargeReport`/finalizer, so a complete result requires product evidence; (5) deletes all runtime semantic state keyed by `String`; (6) rehomes the already-supported narrowing state onto the narrowing product without enlarging D4 semantics; and (7) lets literal-widening provenance ride the reaching-type product to preserve current behavior (it is not D5's capture-creation freshness/invalidation domain). This node adds NO public product query: `FlowReturn` remains the only proof-enabled root, `FlowNarrowingAt` and `ContextualTypeAt` remain pending typed gaps, and `ResolveCallKey.flow` remains sealed-empty. The current and final owner is the **sole shared flow authority**: `ProjectSemanticDispatch` / `execute_function_return_source` (`crates/verter_session/src/project_semantic_dispatch/flow_return.rs`) over the flow substrate in `crates/verter_semantic/src/analysis/flow`. This charter accepts one authority/migration/cutover boundary; it contains no independently dispatchable subblocks.
+Product/worklist cutover (codex D3 scope ruling, `decisions/2026-08-30-rev11-flow-d3-split.md`) — one indivisible cutover that moves the live value path of the flow evaluator onto D3P's product lattice. The `FlowEvaluator` today stores semantic state in separate `FxHashMap<String, …>`/`FxHashSet<String>` layers, parameter ordinals, and a name-rooted narrowing overlay, and `join_layer_states` is a FlowReturn-private product join. This node: (1) replaces the evaluator's `locals`, `var_locals`, declared-type maps, parameter-write maps, conditional-definition sets, and the narrowing overlay with `FlowProductStore`; (2) replaces `join_layer_states` with the domain joins; (3) executes source-ordered transfers through the existing control interpreter inside the universe selected by `FlowDemandPlan`; the interpreter supplies actual predecessor snapshots and fixed-point rounds to `FlowProductExecution`, which owns product joins and the selected-product/iteration budget — `FlowTieBreak::DomainNodeEdgeSlot` orders proof obligations and report application, and work exhaustion feeds the existing typed budget/ledger/finalizer path (no private constant or parallel budget authority); (4) flows product-domain discharge evidence through the existing `FlowDischargeReport`/finalizer, so a complete result requires product evidence; (5) deletes all runtime semantic state keyed by `String`; (6) rehomes the already-supported narrowing state onto the narrowing product without enlarging D4 semantics; and (7) lets literal-widening provenance ride the reaching-type product to preserve current behavior (it is not D5's capture-creation freshness/invalidation domain). This node adds NO public product query: `FlowReturn` remains the only proof-enabled root, `FlowNarrowingAt` and `ContextualTypeAt` remain pending typed gaps, and `ResolveCallKey.flow` remains sealed-empty. The current and final owner is the **sole shared flow authority**: `ProjectSemanticDispatch` / `execute_function_return_source` (`crates/verter_session/src/project_semantic_dispatch/flow_return.rs`) over the flow substrate in `crates/verter_semantic/src/analysis/flow`. This charter accepts one authority/migration/cutover boundary; it contains no independently dispatchable subblocks.
 
 ## Concrete surfaces and APIs
 
 - Production surfaces: `crates/verter_session/src` only.
-- Production files: `project_semantic_dispatch/flow_return.rs`, `project_semantic_dispatch/flow_products.rs`, `project_semantic_dispatch/flow_solve.rs`, `flow_slice_content.rs`, and optionally `project_semantic_dispatch/dispatch_txn.rs` if final evidence plumbing was not completed in D3P.
-- Named API/data boundaries: `FlowProductStore`, `transfer_product`, `join_product`, `FlowDemandPlan`, `FlowDischargeReport`, `FlowConvergencePolicy`, `FlowTieBreak::DomainNodeEdgeSlot`, `max_iterations`, `finalize_flow_solve` (D2B's sole positive authority — assumed, never repaired or recreated here).
+- Production files: `project_semantic_dispatch/flow_return.rs`, `project_semantic_dispatch/flow_return_products.rs`, `project_semantic_dispatch/flow_products.rs`, `project_semantic_dispatch/flow_solve.rs`, `flow_slice_content.rs`, and optionally `project_semantic_dispatch/dispatch_txn.rs` if final evidence plumbing was not completed in D3P.
+- Named API/data boundaries: `FlowProductStore`, `FlowProductExecution`, `FlowFrameProducts`, `transfer_product`, `join_product`, `FlowDemandPlan`, `FlowDischargeReport`, `FlowConvergencePolicy`, `FlowTieBreak::DomainNodeEdgeSlot`, `max_iterations`, `finalize_flow_solve` (D2B's sole positive authority — assumed, never repaired or recreated here).
 - Mutation boundary: only the production surfaces and named API/data boundaries above; every changed path must be inside both that charter surface and the acquired conflict domain, and sibling ownership is excluded.
 
 ## Exact predecessor contracts
@@ -58,9 +60,9 @@ Product/worklist cutover (codex D3 scope ruling, `decisions/2026-08-30-rev11-flo
 ## Source-specific scope
 
 - Deliver exactly “Product worklist cutover” as the independently acceptable boundary; no neighboring authority is included.
-- Named work (ruling §3): replace `locals`, `var_locals`, declared-type maps, parameter-write maps, conditional-definition sets, and the narrowing overlay with `FlowProductStore`; replace `join_layer_states` with domain joins; execute selected transfers in `FlowDemandPlan` order until stable; use `max_iterations` and the selected obligation frontier as the connected budget; emit product-domain discharge evidence through D2B's report; delete all runtime semantic state keyed by `String`.
+- Named work (ruling §3): replace `locals`, `var_locals`, declared-type maps, parameter-write maps, conditional-definition sets, and the narrowing overlay with `FlowProductStore`; replace `join_layer_states` with domain joins; execute selected transfers through the control interpreter and join actual continuation snapshots through `FlowProductExecution`; charge actual fixed-point rounds and selected products to the plan-owned connected budget; emit product-domain discharge evidence through D2B's report; delete all runtime semantic state keyed by `String`.
 - D3C must not repair proof provenance, recreate admission predicates, or construct `CompleteFlowResult` directly — D2B's proof/admission contract is assumed intact.
-- Discriminating tests (all required): `flow_discharge_requires_product_evidence` (omitting one required binding-domain product from an otherwise clean evaluation cannot mint `CompleteFlowResult`, at either root or SCC publication); `flow_product_worklist_is_permutation_deterministic` (end-to-end legs: identical visitation order, products, discharge evidence, result bytes, and warm candidate under randomized equivalent order); `flow_product_budget_boundary_is_exact_and_never_warm` (end-to-end legs: typed budget exhaustion retains no candidate and recomputes cold); and the successor-boundary controls — existing `GuardNarrowing`, `ClosureCapture`, and `AbruptCompletion` fixtures unrelated to nominal comparability must remain typed partial/cold; D3 must not make D4/D5/D6 tests pass by widening its scope.
+- Discriminating tests (all required): `flow_discharge_requires_product_evidence` (omitting one required binding-domain product from an otherwise clean evaluation cannot mint `CompleteFlowResult`, at either root or SCC publication); `flow_product_execution_is_permutation_deterministic` (end-to-end legs: canonical-equivalent product snapshots, exact executed-domain/subject evidence and discharge report, equal served types, and demonstrated warm admission under equivalent request and actual predecessor order; no identical raw visitation requirement); `flow_product_budget_boundary_is_exact_and_never_warm` (end-to-end legs: typed budget exhaustion retains no candidate and recomputes cold); and the successor-boundary controls — existing `GuardNarrowing`, `ClosureCapture`, and `AbruptCompletion` fixtures unrelated to nominal comparability must remain typed partial/cold; D3 must not make D4/D5/D6 tests pass by widening its scope.
 - Landing: D3R, D3I, D3P, and D3C land as ONE atomic multi-node candidate; none of the four merges independently (codex D3 scope ruling, `decisions/2026-08-30-rev11-flow-d3-split.md`, extending the D1+D2A+D2B atomic-landing pattern of `decisions/2026-08-29-rev11-flow-d2-split.md`). The normal `contracts/github-control-plane.md` rule gives each mapped node its own issue and closing link. This maintainer-approved atomic candidate is the explicit exception: D3R, D3I, and D3P are intentionally unmapped substrate nodes, while D3C alone carries the rekeyed pre-existing D3 mapping (gh_issue 175). All four retain distinct implementation-ledger rows; only mapped D3C receives a closing link.
 
 ## Acceptance IDs and discriminating proof
@@ -68,11 +70,11 @@ Product/worklist cutover (codex D3 scope ruling, `decisions/2026-08-30-rev11-flo
 Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
 
 - **D3C-AC1 — sole-owner outcome:** the named final owner must be sole and every displaced route named below must be deleted or structurally rejected — no runtime semantic state keyed by `String` survives, and `join_layer_states` is gone. Prefer existing type, capability, dependency, compiler, or static enforcement. Add a negative or mutation test only for a plausible critical fail-closed/correctness boundary or a reproduced defect that existing evidence does not discriminate.
-- **D3C-AC2 — positive contract:** the named API/data boundary must preserve exact identities, provenance, completeness, and deterministic ordering — one deterministic worklist, product evidence feeding the existing report/finalizer, and unchanged D2B admission semantics. Reuse existing coverage or extend/table-drive one test before creating a new test.
+- **D3C-AC2 — positive contract:** the named API/data boundary must preserve exact identities, provenance, completeness, and deterministic ordering — one source-ordered control interpreter using the selected product kernel, canonical-equivalent products and exact evidence under equivalent predecessor order, product evidence feeding the existing report/finalizer, and unchanged D2B admission semantics. Reuse existing coverage or extend/table-drive one test before creating a new test.
 - **D3C-AC3 — incremental equivalence:** prove incremental equals fresh and degraded outcomes cannot warm — budget exhaustion and missing product evidence never mint `CompleteFlowResult` and recompute cold. Otherwise record a terse not-applicable rationale tied to the untouched authority.
 - **D3C-AC4 — bounded work:** prove no hidden duplicate parse, resolve, plan, emit, copy, allocation, or retained candidate — one connected budget (`max_iterations` plus the selected obligation frontier), no private constant or parallel budget authority — using applicable existing counters, inspection, or benchmarks. Otherwise record a terse not-applicable rationale; do not add counters or a soak by default.
 - Every proposed new test must name a plausible regression or contract boundary not already discriminated; prose/format assertions are allowed only when those bytes are the public contract. Do not add implementation mirrors, duplicate permutations, or universal negative/mutation tests.
-- Test homes: `crates/verter_semantic/tests`, `crates/verter_session/tests/cases`.
+- Test homes: `crates/verter_semantic/tests`, `crates/verter_session/tests/cases`, and existing owner unit-test modules including `flow_return_frame_seal_tests.rs`.
 
 ## Deletions and forbidden designs
 
@@ -89,6 +91,50 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Architect rescope remains mandatory when the candidate spans 3 unrelated crates/packages, or combines public/wire, unsafe, concurrency, or lifetime work with another major concern.
 - Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
 - Performance acceptance: use the exact applicable metric rows and methodology from performance-gates.toml, the applicable MEM0 budget, or the owning ratified product catalog, under contracts/resource-and-finalization.md (L2). Exact work invariants, latency/allocation/RSS limits under their owning methodology, and bounded new-capability budgets are distinct. New capabilities and deliberate pressure policies declare bounded new work and replacement SLOs before measurement. Missing required coverage needs an owning-contract amendment before measurement; no implicit 0.0% threshold or post-hoc rebaseline applies.
+
+### Scope-coherence disposition (2026-09-08)
+
+The external review correctly triggered the sizing investigation. Relative to
+D3P, the reviewed D3C patch contained `flow_return.rs` +2,219/-1,236 lines and
+a 1,143-line `flow_return_products.rs`. These are whole-file/diff line counts,
+including comments and tests, not measured production LOC. The adapter includes
+its substantial inline test module. The estimates materially understate the
+migration, so acceptance cannot rely on the original 600–800-line sketch.
+
+Bounded inspection classifies the actual patch as follows:
+
+- **Product cutover:** `flow_return.rs`, `flow_return_products.rs`, dispatch
+  wiring and their tests replace the existing semantic state with one kernel.
+  Branch, switch, exception, rewind, declaration and write paths all have to use
+  the same store in this atomic cutover; retaining a second old state path to
+  reduce the diff would violate the ownership contract. Shared `Rc` execution
+  and persistent snapshots enforce this store's existing synchronous lifetime;
+  they introduce no scheduler, cross-thread lifetime protocol or new concurrency
+  authority.
+- **Stable-binding integration:** `decl_body_memo.rs`, `flow_slice_content.rs`
+  and their tests connect prepared source origins to D3I's exact local/captured
+  identities. They are prerequisite integration, not a new binding solver or
+  a successor capture domain.
+- **Nominal output integration:** `project_semantic_dispatch/lower.rs`,
+  `resolver_core/component_meta_registry.rs`, `typeinfo/vue_macro_codegen.rs`,
+  `typeinfo/vue_macro_codegen/tsc_projection.rs`, their tests, and
+  `component_meta_audit/footprint_miner.rs` are D3R terminal-carrier compatibility
+  repairs within the approved atomic candidate. They preserve nameable imported
+  carriers and fail closed to `symbol` for unnameable owner-local carriers in
+  generated declarations. The audit label distinguishes the existing terminal
+  from a deferred carrier; no wire kind or public query is added. These edits
+  are explicitly not claimed to be product-lattice implementation. D3R retains
+  nominal semantic authority, and signature constraint/default traversal remains
+  with its already recorded separate owner.
+
+This disposition adds the listed prerequisite integration files to D3C's concrete
+file list only for these existing repairs. It does not transfer their semantic
+ownership or authorize new public behavior. The work stays within the session
+crate and the already approved D3R/D3I/D3P/D3C atomic landing unit. No independently
+acceptable successor feature or unrelated major concern was found. Keep this
+coherent candidate; do not mechanically split it or increase numeric thresholds
+to declare it compliant. The testing-only evidence correction adds no shipped
+product work. Future D4–D7 behavior and wider nominal traversal are excluded.
 
 ## Abort conditions
 
