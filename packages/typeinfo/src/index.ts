@@ -18,6 +18,25 @@ export { TypeInfoSession } from "./session.js";
 export { decodeResolveResult, TypeResolutionFaultError } from "./decode.js";
 export { decodeFrameworkSurfaceResponse } from "./framework-surface.js";
 
+// Typeinfo graph protocol operation DTOs — the consumer closure over
+// the graph wire (`TypeInfoGraphRequest` / `TypeInfoGraphResponse` /
+// the bounded `SemanticTypeGraph` export).
+export {
+  buildTypeInfoRequest,
+  decodeTypeInfoResult,
+  graphNodeToDescriptor,
+  MAX_EXPANSION_DEPTH_BUDGET,
+  MAX_EXPANSION_NODE_BUDGET,
+} from "./graph.js";
+
+export type {
+  GraphClosureSpec,
+  GraphProjectionModeTag,
+  ResolveSymbolGraphQuery,
+  SemanticTypeGraphView,
+  TypeInfoResult,
+} from "./graph.js";
+
 export type {
   FrameworkSurface,
   FrameworkSurfaceError,
