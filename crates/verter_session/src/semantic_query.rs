@@ -6769,6 +6769,20 @@ pub enum RelationKind {
     Comparable,
 }
 
+impl RelationKind {
+    /// Symmetric judgements share one operand ordering at construction and
+    /// query admission. Directional relations retain their source and target.
+    pub(crate) fn canonicalize_operands(
+        self,
+        source: &mut SemanticNodeId,
+        target: &mut SemanticNodeId,
+    ) {
+        if matches!(self, Self::Identity | Self::Comparable) && *source > *target {
+            std::mem::swap(source, target);
+        }
+    }
+}
+
 impl Default for RelationKind {
     /// [`Assignable`](Self::Assignable) — the relation the current engine
     /// computes.
@@ -7217,19 +7231,12 @@ impl RelateMemoKey {
     /// are DIRECTIONAL and keep the caller's order verbatim.
     #[must_use]
     pub fn for_kind(
-        source: SemanticNodeId,
-        target: SemanticNodeId,
+        mut source: SemanticNodeId,
+        mut target: SemanticNodeId,
         relation: RelationKind,
         context: RelationContext,
     ) -> Self {
-        let (source, target) =
-            if matches!(relation, RelationKind::Identity | RelationKind::Comparable)
-                && source > target
-            {
-                (target, source)
-            } else {
-                (source, target)
-            };
+        relation.canonicalize_operands(&mut source, &mut target);
         Self {
             source,
             target,
@@ -7257,12 +7264,12 @@ impl RelateMemoKey {
         }
     }
 
-    /// The inverse of [`Self::to_query_key`]: lift a
-    /// [`SemanticQueryKey::Relate`] into the memo-key surface. Panics on
-    /// any other variant — callers match first.
+    /// Lift a [`SemanticQueryKey::Relate`] into the memo-key surface,
+    /// canonicalizing symmetric operands while preserving every other axis.
+    /// Panics on any other variant — callers match first.
     #[must_use]
     pub fn from_query_key(key: &SemanticQueryKey) -> Self {
-        match key {
+        let mut lifted = match key {
             SemanticQueryKey::Relate {
                 source,
                 target,
@@ -7283,7 +7290,11 @@ impl RelateMemoKey {
             other => panic!(
                 "RelateMemoKey::from_query_key expects SemanticQueryKey::Relate, got {other:?}"
             ),
-        }
+        };
+        lifted
+            .relation
+            .canonicalize_operands(&mut lifted.source, &mut lifted.target);
+        lifted
     }
 }
 
@@ -9665,14 +9676,46 @@ mod tests {
         );
     }
 
-    /// Every `QueryError` variant must own a UNIQUE `u8` discriminant tag:
-    /// the tags are hand-assigned, and while the arena resolves hash collisions
-    /// by full equality, a REUSED tag silently shares the fast-path identity
-    /// for two DIFFERENT error carriers (the 14/14 `Cancelled`/`OpenSurface`
-    /// collision this caught). Exhaustive by construction: [`QueryError::tag`]
-    /// is an exhaustive match, so a variant added without a tag is a compile
-    /// error; this test pins the tag VALUES are pairwise-distinct.
     #[test]
+    // @ai-generated - Symmetric key lifting preserves every context axis and directional order.
+    fn relate_query_key_lifting_canonicalizes_only_symmetric_operands() {
+        for relation in [
+            RelationKind::Identity,
+            RelationKind::Comparable,
+            RelationKind::Assignable,
+            RelationKind::Subtype,
+            RelationKind::StrictSubtype,
+        ] {
+            let original = RelateMemoKey {
+                source: SemanticNodeId(2),
+                target: SemanticNodeId(1),
+                relation,
+                policy: RelationPolicy {
+                    excess_property_check: true,
+                    ..RelationPolicy::default()
+                },
+                source_freshness: FreshnessKey::Fresh,
+                inference_context: Some(InferenceContextKey::default()),
+                context: RelationContext {
+                    resolve_env_hash: [7; 16],
+                    ..RelationContext::default()
+                },
+            };
+            let mut expected = original.clone();
+            if matches!(relation, RelationKind::Identity | RelationKind::Comparable) {
+                std::mem::swap(&mut expected.source, &mut expected.target);
+            }
+            assert_eq!(
+                RelateMemoKey::from_query_key(&original.to_query_key()),
+                expected
+            );
+        }
+    }
+
+    /// Every `QueryError` variant must own a unique discriminant tag; equality
+    /// resolves hash collisions, but tags must distinguish the error categories.
+    #[test]
+    // @ai-generated - Includes signature and semantic-operand failure categories.
     fn query_error_hash_tags_are_unique_per_variant() {
         use std::collections::HashSet;
         // ADD NEW VARIANTS HERE when extending `QueryError` (the sibling
@@ -9693,6 +9736,12 @@ mod tests {
             ),
             QueryError::Cancelled,
             QueryError::UnstableState { attempts: 1 },
+            QueryError::SignatureOverflow,
+            QueryError::ForeignSemanticOperand,
+            QueryError::StaleSemanticOperand,
+            QueryError::IncompleteSemanticOperand {
+                reasons: PartialReasonSet::PROPAGATED,
+            },
             QueryError::AliasCycle {
                 chain: Arc::from(vec![Arc::from("A")].into_boxed_slice()),
             },

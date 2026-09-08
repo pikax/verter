@@ -9,9 +9,10 @@ For VS Code extension E2E fixtures, helpers API, and warm-session rules, see `/e
 
 ## Closure evidence in CI
 
-Routine CI runs the closure validator's focused fixture tests and the normal
-test lanes. It does not replay historical proof commands or require current
-passing/skipped totals to match old transcripts. Adding a test does not require
+Routine CI runs focused guard/validator commands and the normal test lanes once,
+including commands also cited by historical proof records. It does not rerun
+commands merely because a record cites them or require current passing/skipped
+totals to match old transcripts. Adding a test does not require
 updating closure counts or pins. Recorded transcripts remain internally checked
 historical evidence; they are not a claim that the current checkout was replayed.
 

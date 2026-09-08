@@ -68,6 +68,62 @@ fn reverse_homomorphic_reduces_more_than_eight_root_conditionals() {
 }
 
 #[test]
+// @ai-generated - Direct query admission and typed callers share symmetric relation entries.
+fn direct_symmetric_relation_queries_share_memo_entries_in_both_orders() {
+    use crate::semantic_query::{RelateMemoKey, RelationKind};
+    let host = host();
+    let canonical = "/w/symmetric-relations.ts";
+    upsert_ts(
+        &host,
+        canonical,
+        "export declare const A: unique symbol; export declare const B: unique symbol;",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let nominal = |name: &str| {
+        crate::for_tests::dispatch_lower_type_expr_in_scope_with_context_for_tests(
+            &host,
+            canonical,
+            &verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: vec![name.to_owned()],
+                type_args: Vec::new(),
+            }),
+            ProjectionReductionContext::structural_transit(),
+        )
+        .expect("the unique symbol resolves")
+    };
+    let a = nominal("A");
+    let b = nominal("B");
+    assert_ne!(a, b);
+    for relation in [RelationKind::Identity, RelationKind::Comparable] {
+        let key = dispatch.relate_key_for_kind(a, b, relation);
+        let reverse = RelateMemoKey {
+            source: key.target,
+            target: key.source,
+            ..key.clone()
+        };
+        let before = graph.relation_memo_count_of_kind(relation);
+        let direct = dispatch.execute(reverse.to_query_key());
+        assert!(
+            matches!(direct, QueryResult::Value(ref output) if matches!(&output.value, SemanticQueryValue::Relation(value) if value.outcome == RelationOutcome::NotAssignable))
+        );
+        assert_eq!(graph.relation_memo_count_of_kind(relation), before + 1);
+        let forward = dispatch.execute(key.to_query_key());
+        assert!(matches!(forward, QueryResult::Value(_)));
+        assert_eq!(
+            graph.relation_memo_count_of_kind(relation),
+            before + 1,
+            "reversed {relation:?} calls must reuse the same family slot"
+        );
+        assert!(matches!(
+            dispatch.execute_relate_pair_kind(a, b, relation),
+            RelationStep::NotAssignable
+        ));
+        assert_eq!(graph.relation_memo_count_of_kind(relation), before + 1);
+    }
+}
+
+#[test]
 fn scc_redischarge_reenters_the_semantic_query_relate_authority() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);

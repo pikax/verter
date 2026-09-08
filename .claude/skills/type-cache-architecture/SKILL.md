@@ -1887,6 +1887,11 @@ is permitted.
   `MacroPayloadContext` / `TypeOfContext`). The `provenance` + `merge_role`
   discriminators STAY at
   FAMILY-IDENTITY level on `FamilyKey` — they are NOT demoted into a `*Context`.
+- **Symmetric relation admission.** `Identity` and `Comparable` use one sorted
+  operand pair in typed constructors, raw-key lifting, and shared query admission
+  before family lookup or singleflight. Policy, freshness, inference, substitution,
+  and environment axes remain intact. Assignability and subtype relations retain
+  operand direction; they never borrow the symmetric ordering rule.
 - **Discriminating guards.** The env-scoping and value-domain guards are landed:
   `every_semantic_query_key_maps_to_exactly_one_value_domain`,
   `module_resolution_keys_on_resolve_env_not_type_or_lib`, and

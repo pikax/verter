@@ -3262,7 +3262,7 @@ export function renderView(model) {
   lines.push(
     "## Proof records",
     "",
-    "Counts and terminal summaries below are historical observations. Routine CI validates record consistency and runs the normal test lanes; it does not require today's inventory to match these totals. Repository mutation replay is an on-demand diagnostic.",
+    "Counts and terminal summaries below are historical observations. Routine CI runs focused guard/validator commands and normal test lanes once, including commands cited by these records. It does not add record-driven re-execution or require today's inventory to match these totals. Repository mutation replay is an on-demand diagnostic.",
     "",
   );
   lines.push(
