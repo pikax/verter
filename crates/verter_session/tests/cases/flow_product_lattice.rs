@@ -724,6 +724,42 @@ fn executing_a_transfer_does_not_credit_the_unrelated_execution_site() {
 }
 
 #[test]
+fn execution_caps_cannot_exceed_the_sealed_request_policy() {
+    let fixture = flow_graph_fixture_for_tests(SOURCE, 1);
+    let mut demand = request(0);
+    demand.resources.max_execution_steps = 3;
+    demand.resources.max_completion_frontier = 1;
+    let plan = fixture.build_plan(demand).unwrap();
+    let inputs = fixture.product_inputs();
+    let projected = FlowProductBudget::for_demand_plan(&plan);
+    assert_eq!(projected.max_execution_steps, 3);
+    assert_eq!(projected.max_completion_frontier, 1);
+    let mut work = FlowProductExecution::new(&inputs, &plan, FlowProductBudget::default()).unwrap();
+    assert!(matches!(
+        work.charge_execution_work(4),
+        Err(FlowProductFailure::BudgetExceeded(
+            FlowProductBudgetExceeded {
+                axis: FlowProductBudgetAxis::ExecutionWork,
+                limit: 3,
+                observed: 4
+            }
+        ))
+    ));
+    let mut frontier =
+        FlowProductExecution::new(&inputs, &plan, FlowProductBudget::default()).unwrap();
+    assert!(matches!(
+        frontier.reserve_completion_frontier(2),
+        Err(FlowProductFailure::BudgetExceeded(
+            FlowProductBudgetExceeded {
+                axis: FlowProductBudgetAxis::CompletionFrontier,
+                limit: 1,
+                observed: 2
+            }
+        ))
+    ));
+}
+
+#[test]
 fn completion_frontiers_share_a_live_limit_and_release_owned_reservations() {
     let (_, mut execution) = execution(
         SOURCE,
