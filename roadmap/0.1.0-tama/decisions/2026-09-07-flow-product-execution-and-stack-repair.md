@@ -45,6 +45,12 @@ or repeated idempotence checks over unchanged predecessor snapshots.
   origin; authoritative assertions retain their asserted result. The retained-call
   adapter consumes exact occurrences for value and freshness without its own wrapper
   classifier. Ordinary lowering callers require no origin arrays or extra traversal.
+  An authoritative whole, uninstantiated single-name `typeof` assertion carries its
+  queried occurrence separately from the operand read. Its exact source dependency
+  enters the graph before selection is sealed, and reads the selected binding's
+  existing narrowing/reaching type at the call. It creates no runtime, effect or
+  freshness credit. This preserves the existing supported query behavior without
+  introducing composite, member or generic annotation inference.
   Selected assignments retain their existing expression-site address beside the
   source span, so definition lookup does not scan unrelated writes after admission.
 - Preserve already-supported nested callable forms by extending the existing function
