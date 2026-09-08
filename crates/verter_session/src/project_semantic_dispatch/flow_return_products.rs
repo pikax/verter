@@ -1067,6 +1067,13 @@ impl FlowFrameProducts {
         }
     }
 
+    /// Runtime reads use the kernel's installed source-order authority index.
+    /// The exact-only accessor above remains the source hydration boundary.
+    pub fn runtime_declared_type(&self, subject: &FlowBindingRef) -> Option<SemanticNodeId> {
+        let key = self.key(FlowDomain::DeclaredType, subject)?;
+        self.state.declared_type(&key)
+    }
+
     pub fn set_declared_type(&mut self, subject: &FlowBindingRef, value: Option<SemanticNodeId>) {
         let Some(value) = value else {
             return;

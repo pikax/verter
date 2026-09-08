@@ -8653,3 +8653,81 @@ fn discharge_claims_require_evaluator_call_evidence() {
         );
     });
 }
+
+#[test]
+fn flow_return_declared_authority_lookup_does_not_scan_runtime_aliases() {
+    for count in [32usize, 64] {
+        let declarations = "var x;".repeat(count);
+        let writes = "x=1;".repeat(8);
+        let source = format!("function makeProps(){{{declarations}var x:0|1=0;{writes}return x;}}");
+        let mut counter = None;
+        let (result, _) = flow_source_probe_configured(&source, |host| {
+            counter = Some(Arc::clone(
+                &host.flow_fault_injection.declared_authority_work,
+            ))
+        });
+        let FlowSourceProbe::Value {
+            expr,
+            degradation: None,
+            ..
+        } = result
+        else {
+            panic!("{result:?}");
+        };
+        assert_eq!(expr, verter_type_expr::TypeExpr::number_literal(1.0));
+        let work = counter.unwrap().load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("{count} aliases: {work} authority lookups for eight assignments");
+        assert!(work > 0, "the fixture must consume declaration authority");
+        assert!(
+            work <= 32,
+            "eight assignments across {count} aliases inspected {work} authority candidates"
+        );
+    }
+}
+
+#[test]
+fn flow_return_finally_identity_membership_scales_with_written_subjects() {
+    for count in [32usize, 64] {
+        let declarations = (0..count)
+            .map(|n| format!("let x{n}=0;"))
+            .collect::<String>();
+        let writes = (0..count).map(|n| format!("x{n}=1;")).collect::<String>();
+        let members = (0..count)
+            .map(|n| format!("x{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            "function makeProps(){{{declarations}try{{}}finally{{{writes}}}return {{{members}}};}}"
+        );
+        let mut counter = None;
+        let (result, _) = flow_source_probe_configured(&source, |host| {
+            counter = Some(Arc::clone(&host.flow_fault_injection.finally_identity_work))
+        });
+        let FlowSourceProbe::Value {
+            expr,
+            degradation: None,
+            ..
+        } = result
+        else {
+            panic!("{result:?}");
+        };
+        for n in 0..count {
+            assert_eq!(
+                member_types(&expr, &format!("x{n}")),
+                vec![verter_type_expr::TypeExpr::Primitive(
+                    verter_type_expr::PrimitiveName::Number
+                )]
+            );
+        }
+        let work = counter.unwrap().load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("{count} finally writes: {work} identity membership operations");
+        assert!(
+            work >= count,
+            "the fixture must execute every selected finally write: {work}"
+        );
+        assert!(
+            work <= count * 4,
+            "{count} finally writes examined {work} identities"
+        );
+    }
+}

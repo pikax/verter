@@ -303,6 +303,10 @@ pub(crate) mod flow_admission_fault_injection {
         #[cfg(test)]
         pub(crate) product_joins: std::sync::Mutex<Vec<super::FlowJoinObservation>>,
         #[cfg(test)]
+        pub(crate) declared_authority_work: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        #[cfg(test)]
+        pub(crate) finally_identity_work: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        #[cfg(test)]
         pub(crate) short_nested_execution_ledger: AtomicBool,
 
         /// When armed, `build_flow_return` removes the `flow_completion`
@@ -6086,18 +6090,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     fn local_declared(&self, binding: &FlowProductSubject) -> Option<SemanticNodeId> {
-        self.products.declared_type(binding).or_else(|| {
-            let FlowProductSubject::Local(local) = binding else {
-                return None;
-            };
-            self.bindings
-                .runtime_declarations(*local)
-                .iter()
-                .find_map(|declaration| {
-                    self.products
-                        .declared_type(&FlowProductSubject::Local(*declaration))
-                })
-        })
+        #[cfg(test)]
+        self.dispatch
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .declared_authority_work
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.products.runtime_declared_type(binding)
     }
 
     fn local_assignment(&self, binding: &FlowProductSubject) -> DefiniteAssignmentProduct {
@@ -10208,13 +10208,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 // killed — and the clause-write flags lose
                                 // their reason: no path past the statement
                                 // can have skipped those writes.
-                                let mut killed = Vec::new();
+                                let mut killed = rustc_hash::FxHashSet::default();
                                 for subject in &finally_writes.executed.0 {
                                     if let Some(root) = self.narrow_root_of(subject) {
                                         if let Some(identity) = self.products.identity(&root) {
-                                            if !killed.contains(&identity) {
-                                                killed.push(identity);
-                                            }
+                                            #[cfg(test)]
+                                            self.dispatch
+                                                .ctx
+                                                .host_for_fact_tracer_install()
+                                                .flow_fault_injection
+                                                .finally_identity_work
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            killed.insert(identity);
                                         }
                                     }
                                 }
