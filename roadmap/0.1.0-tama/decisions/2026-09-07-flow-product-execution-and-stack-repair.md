@@ -51,6 +51,8 @@ or repeated idempotence checks over unchanged predecessor snapshots.
   existing narrowing/reaching type at the call. It creates no runtime, effect or
   freshness credit. This preserves the existing supported query behavior without
   introducing composite, member or generic annotation inference.
+  Query-only closure input bridging remains with D5; the existing exact selected
+  parent-input contract and its typed gaps are preserved here.
   Selected assignments retain their existing expression-site address beside the
   source span, so definition lookup does not scan unrelated writes after admission.
 - Preserve already-supported nested callable forms by extending the existing function
