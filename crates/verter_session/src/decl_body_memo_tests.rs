@@ -2369,3 +2369,28 @@ fn retained_call_arguments_carry_exact_identifier_occurrences() {
         "root metadata reuses the retained call borrow"
     );
 }
+
+#[test]
+fn retained_wrapped_receiver_uses_the_indexed_value_disposition() {
+    let source="function f(receiver:{method():string}){((receiver as {method():string}) satisfies {method():string}).method();(receiver as {method():string}).method();}";
+    let (memo, _) = memo_for(source);
+    let index = memo.function_program_index();
+    let entry = index.matches_named("f").next().unwrap().entry();
+    assert_eq!(entry.call_sites.len(), 2);
+    let transparent = memo
+        .indexed_call_expression_at(entry.call_sites[0].span)
+        .unwrap();
+    let start = source.find("((receiver").unwrap() + 2;
+    assert_eq!(
+        transparent.receiver_root,
+        Some(verter_span::Span::new(start as u32, (start + 8) as u32)),
+        "a receiver lowered as a binding read retains that exact occurrence"
+    );
+    let authoritative = memo
+        .indexed_call_expression_at(entry.call_sites[1].span)
+        .unwrap();
+    assert_eq!(
+        authoritative.receiver_root, None,
+        "an authoritative receiver assertion supplies its own type"
+    );
+}

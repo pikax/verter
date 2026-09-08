@@ -8850,3 +8850,11 @@ fn flow_return_evolving_local_established_writes_keep_existing_warm_policy() {
         ])]
     );
 }
+
+#[test]
+fn flow_return_indexed_wrapped_arguments_preserve_the_lowered_binding_root() {
+    assert_eq!(expect_clean_flow_value("const x:number=0;function id<T>(v:T):T{return v;}function makeProps(x:string){return id((x as string) satisfies string);}"), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
+    // An authoritative assertion supplies the argument's type, even when its
+    // authored type name is also the name of a runtime parameter.
+    assert_eq!(expect_clean_flow_value("type T=string;function id<V>(v:V):V{return v;}function makeProps(T:number,x:boolean){return id(x as T);}"), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
+}

@@ -5119,3 +5119,106 @@ fn truthiness_of_a_non_null_asserted_member_subject_names_the_asserted_reference
         "a reference this half CAN express carries no guard gap: {node:?}"
     );
 }
+
+#[test]
+fn selected_assignment_definition_lookup_ignores_unrelated_write_inventory() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for count in [64usize, 256] {
+        let writes = "unrelated=0;".repeat(count);
+        let source = format!("function f(){{let x=0;let unrelated=0;{writes}x=1;return x;}}");
+        let memo = memo_for(&source);
+        let index = memo.function_program_index();
+        let entry = entry_of(&index, "f");
+        let (mut selection, bound) = selection_for(&memo, entry, &[]);
+        let work = Arc::new(AtomicUsize::new(0));
+        selection.assignment_lookup_work = Some(Arc::clone(&work));
+        let content = memo.flow_slice_content(entry, selection, &bound).unwrap();
+        let definitions: Vec<_> = content
+            .body
+            .statements
+            .iter()
+            .filter_map(|statement| match statement {
+                SliceStatement::Assignment { definition, .. } => Some(*definition),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            definitions.len(),
+            1,
+            "only the demanded x assignment lowers"
+        );
+        let rhs_start = source.rfind("x=1").unwrap() + 2;
+        assert_eq!(
+            bound
+                .bundle()
+                .skeleton
+                .expr_site(definitions[0])
+                .span
+                .to_absolute(entry.span.start),
+            verter_span::Span::new(rhs_start as u32, (rhs_start + 1) as u32)
+        );
+        let inspected = work.load(Ordering::Relaxed);
+        eprintln!("{count} unrelated writes: {inspected} selected assignment identity probes");
+        assert!(inspected > 0);
+        assert!(
+            inspected <= 4,
+            "fixed selected assignment inspected {inspected} sites with {count} unrelated writes"
+        );
+    }
+}
+
+#[test]
+fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
+    let source = "function f(){let x=0;x=1;return x;}";
+    let memo = memo_for(source);
+    let index = memo.function_program_index();
+    let entry = entry_of(&index, "f");
+    let bound = memo.flow_bound_graph_for_tests(entry);
+    let skeleton = &bound.bundle().skeleton;
+    let graph = &bound.bundle().graph;
+    let demand = SliceDemand::for_return_projection(skeleton, &[]);
+    let plan = ReturnPathPeeker::new(graph)
+        .plan(&demand, &FlowSliceBudget::default())
+        .unwrap();
+    let mut ir = lower_slice_plan(&plan, graph, skeleton);
+    let rhs_start = source.find("x=1").unwrap() + 2;
+    let rhs_span = verter_semantic::analysis::flow::FrameSpan::rebase(
+        entry.span.start,
+        verter_span::Span::new(rhs_start as u32, (rhs_start + 1) as u32),
+    );
+    let original = ir
+        .exprs
+        .iter()
+        .find(|expression| expression.span == rhs_span)
+        .unwrap()
+        .clone();
+    let distinct_site = ir
+        .exprs
+        .iter()
+        .find(|expression| expression.site != original.site)
+        .unwrap()
+        .site;
+    let mut expressions = ir.exprs.to_vec();
+    expressions.push(original.clone());
+    ir.exprs = expressions.clone().into();
+    let content = memo
+        .flow_slice_content(entry, FlowSliceSelection::from_slice_ir(&ir), &bound)
+        .unwrap();
+    assert!(content.body.statements.iter().any(|statement| matches!(statement,SliceStatement::Assignment{definition,..} if *definition==original.site)),"repeated identical addresses preserve the same selected site");
+    expressions.push(verter_semantic::analysis::flow::flow_ir::FlowExpr {
+        site: distinct_site,
+        ..original
+    });
+    ir.exprs = expressions.into();
+    let content = memo
+        .flow_slice_content(entry, FlowSliceSelection::from_slice_ir(&ir), &bound)
+        .unwrap();
+    assert!(
+        !content
+            .body
+            .statements
+            .iter()
+            .any(|statement| matches!(statement, SliceStatement::Assignment { .. })),
+        "conflicting addresses must not attach either site's execution evidence"
+    );
+}

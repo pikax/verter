@@ -91,47 +91,6 @@ pub(crate) struct IndexedFlowCallExpression {
     pub(crate) receiver_root: Option<verter_span::Span>,
 }
 
-/// Only transparent value wrappers preserve a bare argument's binding read.
-/// An authored type assertion is evaluated by the indexed type authority.
-fn indexed_argument_root(
-    mut expression: &oxc_ast::ast::Expression<'_>,
-) -> Option<verter_span::Span> {
-    use oxc_ast::ast::Expression;
-    loop {
-        expression = match expression {
-            Expression::Identifier(identifier) => {
-                return Some(verter_span::Span::new(
-                    identifier.span.start,
-                    identifier.span.end,
-                ));
-            }
-            Expression::ParenthesizedExpression(wrapped) => &wrapped.expression,
-            Expression::TSNonNullExpression(wrapped) => &wrapped.expression,
-            Expression::TSSatisfiesExpression(wrapped) => &wrapped.expression,
-            _ => return None,
-        };
-    }
-}
-
-fn indexed_receiver_root(mut callee: &oxc_ast::ast::Expression<'_>) -> Option<verter_span::Span> {
-    use oxc_ast::ast::Expression;
-    loop {
-        callee = match callee {
-            Expression::StaticMemberExpression(member) => {
-                return indexed_argument_root(&member.object)
-            }
-            Expression::ComputedMemberExpression(member) => {
-                return indexed_argument_root(&member.object)
-            }
-            Expression::ParenthesizedExpression(wrapped) => &wrapped.expression,
-            Expression::TSAsExpression(wrapped) => &wrapped.expression,
-            Expression::TSSatisfiesExpression(wrapped) => &wrapped.expression,
-            Expression::TSNonNullExpression(wrapped) => &wrapped.expression,
-            _ => return None,
-        };
-    }
-}
-
 /// The committed value of one per-symbol demand cell.
 ///
 /// The cell carries the [`LeaseMiss`](Self::LeaseMiss) outcome ITSELF (never a
@@ -1471,24 +1430,59 @@ impl DeclBodyMemo {
         let _index = self.function_program_index();
         let node = service.run_leased(&self.key, move |program| {
             program.and_then(|parsed| {
-                parsed.with_indexed_call(span, |call| IndexedFlowCallExpression {
-                    call: verter_semantic::analysis::type_eval_build::lower_indexed_call_expression(
-                        call,
-                        parsed.source_str(),
-                    ),
-                    argument_roots: call
-                        .arguments
-                        .iter()
-                        .map(|argument| {
-                            let expression = match argument {
-                                oxc_ast::ast::Argument::SpreadElement(spread) => &spread.argument,
-                                argument => argument.to_expression(),
-                            };
-                            indexed_argument_root(expression)
+                parsed
+                    .with_indexed_call(span, |call| {
+                        use verter_semantic::analysis::type_eval_build::{
+                            lower_indexed_call_expression_with_read_roots, IndexedCallReadSite,
+                            IndexedValueReadRoot,
+                        };
+                        // Keep absence of an observer result distinct from an
+                        // explicit NonBinding disposition. No missing address may
+                        // fall back to the file's same-spelled value.
+                        let mut roots: Vec<Option<IndexedValueReadRoot>> =
+                            (0..call.arguments.len()).map(|_| None).collect();
+                        let mut receiver_root = None;
+                        let mut invalid_observation = false;
+                        let call = lower_indexed_call_expression_with_read_roots(
+                            call,
+                            parsed.source_str(),
+                            &mut |site, root| match site {
+                                IndexedCallReadSite::Argument(ordinal) => {
+                                    match roots.get_mut(ordinal) {
+                                        Some(slot) => {
+                                            invalid_observation |= slot.replace(root).is_some()
+                                        }
+                                        None => invalid_observation = true,
+                                    }
+                                }
+                                IndexedCallReadSite::Receiver => {
+                                    invalid_observation |= receiver_root.replace(root).is_some();
+                                }
+                            },
+                        );
+                        if invalid_observation {
+                            return None;
+                        }
+                        let read_span = |root| match root {
+                            IndexedValueReadRoot::NonBinding => None,
+                            IndexedValueReadRoot::Identifier(span) => Some(span),
+                        };
+                        let argument_roots = roots
+                            .into_iter()
+                            .map(|root| root.map(read_span))
+                            .collect::<Option<Box<[_]>>>()?;
+                        let receiver_root = match (call.receiver.is_some(), receiver_root) {
+                            (true, Some(root)) => read_span(root),
+                            (false, None) => None,
+                            _ => return None,
+                        };
+                        Some(IndexedFlowCallExpression {
+                            call,
+                            argument_roots,
+                            receiver_root,
                         })
-                        .collect(),
-                    receiver_root: indexed_receiver_root(&call.callee),
-                })
+                    })
+                    .flatten()
             })
         })??;
         Some(Arc::new(node))

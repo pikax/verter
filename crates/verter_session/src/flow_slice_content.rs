@@ -92,26 +92,44 @@ use verter_type_expr_oxc::lower_ts_type;
 /// transports the selection into the lease-only run.
 #[derive(Debug, Clone)]
 pub(crate) struct FlowSliceSelection {
-    /// Spans of the slice's VALUE-selected expression records, in the
-    /// frame's own coordinates — the only coordinates the plan speaks.
-    value_spans: FxHashSet<FrameSpan>,
+    /// VALUE-selected expression addresses, in the frame's own coordinates.
+    /// A conflicting duplicate span stays selected but has no unique site;
+    /// content must never attach one site's definition to another site.
+    value_sites: rustc_hash::FxHashMap<
+        FrameSpan,
+        Option<verter_semantic::analysis::flow::SkeletonExprSiteId>,
+    >,
     /// Binding-identifier spans of the slice's VALUE-selected slots —
     /// DECLARATION-precise identity, so a shadowed same-named sibling
     /// declarator the plan kept out never lowers (name identity would
     /// re-conflate what the plan's lexical resolution separated).
     value_slot_spans: FxHashSet<FrameSpan>,
+    #[cfg(test)]
+    pub(crate) assignment_lookup_work: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl FlowSliceSelection {
     /// The selection of one lowered slice.
     pub(crate) fn from_slice_ir(ir: &FlowSliceIR) -> Self {
+        let mut value_sites = rustc_hash::FxHashMap::default();
+        for expression in ir
+            .exprs
+            .iter()
+            .filter(|expression| expression.role == FlowExprRole::Value)
+        {
+            value_sites
+                .entry(expression.span)
+                .and_modify(|site| {
+                    if *site != Some(expression.site) {
+                        *site = None;
+                    }
+                })
+                .or_insert(Some(expression.site));
+        }
         Self {
-            value_spans: ir
-                .exprs
-                .iter()
-                .filter(|expr| expr.role == FlowExprRole::Value)
-                .map(|expr| expr.span)
-                .collect(),
+            value_sites,
+            #[cfg(test)]
+            assignment_lookup_work: None,
             value_slot_spans: ir
                 .slots
                 .iter()
@@ -122,7 +140,22 @@ impl FlowSliceSelection {
     }
 
     fn value_span(&self, span: FrameSpan) -> bool {
-        self.value_spans.contains(&span)
+        self.value_sites.contains_key(&span)
+    }
+
+    fn value_site(
+        &self,
+        span: FrameSpan,
+    ) -> Option<verter_semantic::analysis::flow::SkeletonExprSiteId> {
+        // This also performs the pre-existing selection filter. Only an
+        // admitted value position requests definition identity; no unrelated
+        // write inventory is inspected after that filter.
+        let site = self.value_sites.get(&span).copied().flatten()?;
+        #[cfg(test)]
+        if let Some(work) = &self.assignment_lookup_work {
+            work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Some(site)
     }
 
     fn value_slot_span(&self, span: FrameSpan) -> bool {
@@ -3658,7 +3691,8 @@ impl Lowerer<'_> {
     }
 
     /// Whether a root content position is value-selected by the demand
-    /// slice. Ungated (nested function value) frames select everything.
+    /// slice. Body lowering always carries a selection; None is reserved
+    /// for signature-only preparation, whose body remains empty.
     fn value_span_selected(&self, span: oxc_span::Span) -> bool {
         self.selection
             .is_none_or(|selection| selection.value_span(self.rebase(span)))
@@ -3672,8 +3706,8 @@ impl Lowerer<'_> {
     }
 
     /// Whether one resolved binding is part of the demanded value slice.
-    /// Nested function values lower without a selection and therefore treat
-    /// every binding as selected within their own frame.
+    /// A demanded nested body carries its own selection; signature-only
+    /// preparation does not visit its declarations.
     fn binding_is_selected(
         &self,
         binding: verter_semantic::analysis::flow::SkeletonBindingId,
@@ -6398,9 +6432,9 @@ impl Lowerer<'_> {
                 return None
             }
         };
-        if !self.value_span_selected(assignment.right.span()) {
-            return None;
-        }
+        let definition = self
+            .selection?
+            .value_site(self.rebase(assignment.right.span()))?;
         let value = self.lower_expr(
             &assignment.right,
             ExprMode::BindingInit {
@@ -6412,12 +6446,6 @@ impl Lowerer<'_> {
                 preserve_literal: true,
             },
         );
-        let definition = self
-            .skeleton
-            .writes
-            .iter()
-            .find(|write| write.span == self.rebase(identifier.span))?
-            .value?;
         Some(SliceStatement::Assignment {
             definition,
             target: SliceNarrowSubject {
