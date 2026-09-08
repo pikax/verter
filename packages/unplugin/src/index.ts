@@ -1120,17 +1120,33 @@ function createFrameworkFactory(
         // Determine the effective language of the compiled output.
         const mainLang: string = main.lang ?? "ts";
 
-        // Apply SSR transforms (import.meta dead-code elimination, component stripping)
+        // Apply SSR transforms (import.meta dead-code elimination, component
+        // stripping). Each rewrite carries the in-flight map along with the
+        // code, so the map's generated columns stay aligned with whatever
+        // text it currently describes.
         let compiledCode = main.code;
+        let compiledMap = main.sourceMap;
         const ssrOpts = opts.ssr;
         if (ssrOpts?.deadCodeElimination !== false) {
-          compiledCode = replaceImportMetaSsr(compiledCode, ssr);
+          ({ code: compiledCode, map: compiledMap } = replaceImportMetaSsr(
+            compiledCode,
+            ssr,
+            compiledMap,
+          ));
         }
         if (ssr && ssrOpts?.clientOnlyComponents?.length) {
-          compiledCode = stripComponents(compiledCode, ssrOpts.clientOnlyComponents);
+          ({ code: compiledCode, map: compiledMap } = stripComponents(
+            compiledCode,
+            ssrOpts.clientOnlyComponents,
+            compiledMap,
+          ));
         }
         if (!ssr && ssrOpts?.serverOnlyComponents?.length) {
-          compiledCode = stripComponents(compiledCode, ssrOpts.serverOnlyComponents);
+          ({ code: compiledCode, map: compiledMap } = stripComponents(
+            compiledCode,
+            ssrOpts.serverOnlyComponents,
+            compiledMap,
+          ));
         }
 
         if (viteConfig) {
@@ -1145,7 +1161,7 @@ function createFrameworkFactory(
           // properly processed JavaScript, not raw TS/JSX.
           scriptCache.set(filename, {
             code: compiledCode,
-            map: main.sourceMap ?? null,
+            map: compiledMap ?? null,
           });
 
           const scriptRequest = `${filename}?vue&type=script&lang.${mainLang}`;
@@ -1218,7 +1234,7 @@ function createFrameworkFactory(
         // host published and leave a non-Vite consumer with no way back to the
         // authored SFC. Absent a requested map the host publishes none and this
         // is `null`, which is what "no map" means to a bundler.
-        return { code: compiledCode, map: main.sourceMap ?? null };
+        return { code: compiledCode, map: compiledMap ?? null };
       },
 
       async closeBundle() {
