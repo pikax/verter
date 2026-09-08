@@ -1,6 +1,6 @@
 <!-- unified-charter-v2
 id=SLDP
-name=Solid counterexample over identical TSX geometry
+name=Solid 2 counterexample over identical TSX geometry
 phase=expansion
 train=expansion.architecture-proof
 product=architecture_proof
@@ -35,13 +35,13 @@ rescope_files=12
 rescope_unrelated_packages=3
 -->
 
-# SLDP — Solid counterexample over identical TSX geometry
+# SLDP — Solid 2 counterexample over identical TSX geometry
 
 Readiness comes only from trusted implementation-ledger rows. A READY node may start; tooling does not validate commit locators, Git identity, receipts, leases, external state, or runtime admission.
 
 ## Independently acceptable outcome
 
-Solid counterexample over identical TSX geometry. The current owner is **provisional universal-kernel claims**. The final and sole owner is **sequential counterexample evidence over concrete framework geometries**. This charter accepts one authority/migration/cutover boundary; it contains no independently dispatchable subblocks.
+Solid 2 counterexample over identical TSX geometry. The current owner is **provisional universal-kernel claims**. The final and sole owner is **sequential counterexample evidence over concrete framework geometries**. This charter accepts one authority/migration/cutover boundary; it contains no independently dispatchable subblocks.
 
 ## Concrete surfaces and APIs
 
@@ -57,6 +57,7 @@ Solid counterexample over identical TSX geometry. The current owner is **provisi
 ## Source-specific scope
 
 - **Normative intent:** prevent React semantics from becoming the generic TSX substrate.
+- **Release scope:** Solid 2 only, with one exact 2.x release and its package roles, oracle, and corpus pinned for the experiment. Any prerelease is identified exactly and retains its prerelease maturity. Solid 1 support, compatibility, and migration are outside current scope; Solid 1 inputs serve only as unsupported-major controls and must never activate the Solid 2 profile. See [the framework-major selection decision](../../decisions/2026-09-08-solid2-htmx4-targets.md).
 - **Atomic boundary:** the production surfaces and named API/data boundaries above form this source-owned node's exclusive acceptance subset; this node owns its complete named migration population and exactly one deletion/cutover disposition.
 - **Inventory evidence:** enumerate every in-scope outcome, consumer and displaced production route before validating ownership. Assign each outcome and consumer exactly one implementation owner, and each displaced production route exactly one later production-capable deletion/rejection owner, bound to its concrete DAG node, successor path and receiving acceptance criterion. This contract node proves inventory completeness and unambiguous ownership; later implementation nodes prove production deletion.
 
@@ -108,8 +109,8 @@ Before squashing or review, the implementation patch transitions this node's pre
 
 **Intent:** prevent React semantics from becoming the generic TSX substrate.
 **Predecessors:** `MDXR0`.
-**Subblocks:** (1) exact Solid release/roles; (2) component/props/signals/effects/control-flow facts; (3) reuse neutral TSX and TypeInfo seams; (4) prove divergent React/Solid semantics for identical syntax shapes; (5) one IDE/lint/action/format/public path; (6) mixed-workspace and ambiguous-package controls.
-**Acceptance:** React-only abstractions fail planted tests; Solid semantics remain profile-owned; caches/diagnostics/actions do not collide; no additional parser or TS program exists.
-**Forbidden:** `JsxFrameworkKind` switches in neutral syntax, React compatibility assumptions, or flattened “reactivity” without owner schema.
+**Subblocks:** (1) exact Solid 2 release/roles; (2) component/props/signals/async-memo/split-effect/batching/store/control-flow facts for that release; (3) reuse neutral TSX and TypeInfo seams; (4) prove divergent React/Solid 2 semantics for identical syntax shapes; (5) one IDE/lint/action/format/public path; (6) mixed-workspace, ambiguous-package, and unsupported Solid 1 controls.
+**Acceptance:** React-only abstractions fail planted tests; Solid 2 semantics remain profile-owned; caches/diagnostics/actions do not collide; Solid 1 inputs cannot activate Solid 2 semantics; no additional parser or TS program exists.
+**Forbidden:** `JsxFrameworkKind` switches in neutral syntax, React compatibility assumptions, Solid 1 compatibility or implicit major fallback, or flattened “reactivity” without owner schema.
 **Deletion/abort:** any React-shaped kernel type is removed or versioned behind the React facet before closing.
 

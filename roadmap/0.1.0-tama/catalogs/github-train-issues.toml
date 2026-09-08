@@ -350,3 +350,11 @@ expected_outcome = "A test-only validation and observability lane runs pinned ex
 acceptance = ["Every probe result carries a specific outcome class and causal ordering; no generic failure state survives.", "Known future failures execute as canary or known-fail with named implementation owners and do not turn required CI red.", "Unexpected passes and unrelated new failure classes are surfaced, never silently accepted.", "Benchmark observations carry correctness labeling and reproducibility metadata but no thresholds or gates.", "Critical false-green controls are small, required, and each names the invariant, plausible false-green, and positive-coverage gap it discriminates."]
 problem_label = "problem:automation"
 gh_milestone = "0.1.0"
+[[train_issue]]
+train = "rev11.simplification"
+title = "Simplify code ownership and retire low-value source tests"
+problem = "Repeated implementation paths, broad modules and historical source-name tests make ordinary changes harder to reason about and maintain. Scanner helpers and copied test/comment scaffolding cause additional build and review work without demonstrating user-visible behavior."
+expected_outcome = "Provider, compiler and semantic code use fewer independently maintained mechanisms, while tests retain meaningful behavior and type contracts and shed obsolete source-scanning machinery."
+acceptance = ["Obsolete source-name, historical-layout and recursive governance checks are retired with their unused infrastructure.","Provider, SSR and semantic duplication is removed through the existing domain owners.","Observable behavior, concurrency, identity, mapping and useful compiler constraints remain covered.","Code, test and comment changes and any measured build/runtime benefits are reported separately."]
+problem_label = "problem:architecture"
+gh_milestone = "0.0.2"

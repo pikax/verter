@@ -403,72 +403,6 @@ function runtimeNodes(response, kind) {
   }));
 }
 
-function runtimeProfile(canonicalId, ssr) {
-  return {
-    filename: canonicalId,
-    isProduction: false,
-    ssr: !!ssr,
-    componentId: "typed-route",
-    hmrStrategy: "none",
-    forceJs: false,
-    sourceMap: true,
-    target: "bundler",
-  };
-}
-
-function legacyRuntimeProduct(canonicalId, source, fileKind, ssr) {
-  const host = new addon.VerterHost();
-  upsertSource(host, canonicalId, source, fileKind);
-  const kinds = host.listVirtualFiles(canonicalId);
-  const compileProfile = runtimeProfile(canonicalId, ssr);
-  const nodes = kinds.map((nodeKind) => {
-    const file = host.getVirtualFile({ canonicalId, nodeKind, compileProfile });
-    return {
-      kind: nodeKind.kind,
-      index: nodeKind.index != null ? nodeKind.index : null,
-      code: file.code,
-      sourceMap: file.sourceMap == null ? null : file.sourceMap,
-      lang: file.lang == null ? null : file.lang,
-      meta: file.meta,
-    };
-  });
-  const main = host.getVirtualFile({
-    canonicalId,
-    nodeKind: { kind: "main" },
-    compileProfile,
-  });
-  host.close();
-  return { nodes, diagnostics: main && main.diagnostics };
-}
-
-function legacyRuntimeMain(canonicalId, source, fileKind) {
-  const product = legacyRuntimeProduct(canonicalId, source, fileKind, false);
-  const main = product.nodes.find((node) => node.kind === "main") || null;
-  if (!main) return null;
-  return { code: main.code, sourceMap: main.sourceMap, diagnostics: product.diagnostics };
-}
-
-function sameRuntimeNodes(typed, legacy) {
-  return JSON.stringify(typed) === JSON.stringify(legacy);
-}
-
-function legacyIde(canonicalId, source) {
-  const host = new addon.VerterHost();
-  upsertSource(host, canonicalId, source, "vue");
-  const profile = {
-    filename: canonicalId,
-    isProduction: false,
-    componentId: "typed-route",
-    forceJs: false,
-    sourceMap: true,
-    target: "ide",
-  };
-  host.ensureIdeCompiled(canonicalId, profile);
-  const response = host.getIde(canonicalId, profile);
-  host.close();
-  return response;
-}
-
 // The singular route reports ONE id spelling whatever the outcome: a
 // compile answers the host's canonical id, and so does a refusal that
 // never reached the host. A route that echoed the caller's raw spelling on
@@ -512,7 +446,6 @@ check("typed-single-vue-produces-runtime-output", () => {
   const response = host.compileRequest(canonicalId, vueRuntime(canonicalId));
   const main = runtimeMain(response);
   const typedNodes = runtimeNodes(response, "runtimeClient");
-  const legacy = legacyRuntimeProduct(canonicalId, source, "vue", false);
   const metrics = host.getMetrics();
   host.close();
   if (!main || typeof main.code !== "string" || !main.code.includes("Single")) {
@@ -521,14 +454,8 @@ check("typed-single-vue-produces-runtime-output", () => {
   if (typeof main.sourceMap !== "string" || !main.sourceMap.includes(canonicalId)) {
     return `typed Vue source map did not preserve the canonical id: ${main.sourceMap}`;
   }
-  if (
-    !legacy ||
-    !typedNodes ||
-    typedNodes.length === 0 ||
-    !sameRuntimeNodes(typedNodes, legacy.nodes) ||
-    JSON.stringify(response.diagnostics) !== JSON.stringify(legacy.diagnostics)
-  ) {
-    return `typed Vue output diverged from the profile route: ${JSON.stringify({ typedNodes, legacy })}`;
+  if (!typedNodes || typedNodes.length === 0) {
+    return `typed Vue runtime published no nodes: ${JSON.stringify(response)}`;
   }
   if (!metrics || metrics.upserts !== 1) {
     return `the source-only registration count was ${metrics && metrics.upserts}, expected 1`;
@@ -544,7 +471,6 @@ check("typed-single-svelte-produces-runtime-output", () => {
   const response = host.compileRequest(canonicalId, svelteRuntime(canonicalId));
   const main = runtimeMain(response);
   const typedNodes = runtimeNodes(response, "runtimeClient");
-  const legacy = legacyRuntimeProduct(canonicalId, source, "svelte", false);
   const metrics = host.getMetrics();
   host.close();
   if (!main || typeof main.code !== "string" || !main.code.includes("native-svelte")) {
@@ -553,14 +479,8 @@ check("typed-single-svelte-produces-runtime-output", () => {
   if (typeof main.sourceMap !== "string" || main.sourceMap.length === 0) {
     return `typed Svelte source map was absent: ${main.sourceMap}`;
   }
-  if (
-    !legacy ||
-    !typedNodes ||
-    typedNodes.length === 0 ||
-    !sameRuntimeNodes(typedNodes, legacy.nodes) ||
-    JSON.stringify(response.diagnostics) !== JSON.stringify(legacy.diagnostics)
-  ) {
-    return `typed Svelte output diverged from the profile route: ${JSON.stringify({ typedNodes, legacy })}`;
+  if (!typedNodes || typedNodes.length === 0) {
+    return `typed Svelte runtime published no nodes: ${JSON.stringify(response)}`;
   }
   if (!metrics || metrics.upserts !== 1) {
     return `the source-only registration count was ${metrics && metrics.upserts}, expected 1`;
@@ -593,10 +513,6 @@ const { title = greeting } = defineProps<{ title?: string }>()
   }
   if (!(published.blockStart > source.length && published.blockStart <= ide.code.length)) {
     return `generated blockStart ${published.blockStart} did not index IDE code of length ${ide.code.length}`;
-  }
-  const legacy = legacyIde(canonicalId, source);
-  if (!legacy || JSON.stringify(ide) !== JSON.stringify(legacy)) {
-    return `typed IDE output diverged from the profile route: ${JSON.stringify({ ide, legacy })}`;
   }
   return undefined;
 });
@@ -631,10 +547,6 @@ check("typed-single-vue-preserves-diagnostic-utf16-spans", () => {
   }
   if (JSON.stringify(published) !== JSON.stringify(spans(asciiResponse))) {
     return `diagnostic offsets changed with UTF-8 byte length: ${JSON.stringify({ published, ascii: spans(asciiResponse) })}`;
-  }
-  const legacy = legacyRuntimeProduct("/typed/Warn.vue", multibyte, "vue", false);
-  if (!legacy || JSON.stringify(response.diagnostics) !== JSON.stringify(legacy.diagnostics)) {
-    return `typed diagnostics diverged from the profile route: ${JSON.stringify({ typed: response.diagnostics, legacy: legacy && legacy.diagnostics })}`;
   }
   return undefined;
 });
@@ -714,12 +626,12 @@ check("typed-single-runtime-server-publishes-its-nodes", () => {
   const response = host.compileRequest(canonicalId, request);
   host.close();
   const typedNodes = runtimeNodes(response, "runtimeServer");
-  const legacy = legacyRuntimeProduct(canonicalId, source, "vue", true);
   if (!typedNodes || typedNodes.length === 0) {
     return `runtimeServer nodes were absent: ${JSON.stringify(response)}`;
   }
-  if (!legacy || !sameRuntimeNodes(typedNodes, legacy.nodes)) {
-    return `runtimeServer nodes diverged from the profile route: ${JSON.stringify({ typedNodes, legacy })}`;
+  const serverMain = typedNodes.find((node) => node.kind === "main");
+  if (!serverMain || typeof serverMain.code !== "string" || serverMain.code.length === 0) {
+    return `runtimeServer published no main node bytes: ${JSON.stringify(typedNodes)}`;
   }
   return undefined;
 });

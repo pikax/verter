@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=cutover
 semantic_role=delivery
 class=compiler
-predecessors=CCA1T1
+predecessors=CCA1T1,SIMP10
 owner=compiler.compiler-bridge:Vue CarrierCompiler implementation and compatibility-helper deletion
 conflict_domains=compiler_execution,capability_catalog,vue_product
 resource_class=rust-mixed
@@ -65,3 +65,11 @@ Characterize typed-versus-compatibility bytes/maps/diagnostics and work counts, 
 - **CCA1T2V-AC4:** no duplicate parse, semantic, projection, compile, assembly, map, or copy work appears; inapplicable products stay zero-work.
 
 Ceiling: 500 production LOC, 4 production files, 1 crate. Abort on a live Vue trait consumer, Svelte mutation, shared-trait deletion, cross-crate migration, or staged-artifact need. Run focused Vue compiler/capability/map suites and `targeted-domain`; CCA1T2 joins this with CCA1T2S.
+
+## Simplification predecessor contract
+
+- **SIMP10:** Minimal property key/value/order information survives until final emission, removing reparsing and narrowing property assembly state access.
+
+Characterize and delete Vue combined-compiler compatibility against the equivalent simplified SSR emitter. Keep the current bytes/maps and typed backend contracts.
+
+See [codebase simplification](../../contracts/codebase-simplification.md). Existing acceptance remains binding; no new obligation is placed on an in-flight predecessor.

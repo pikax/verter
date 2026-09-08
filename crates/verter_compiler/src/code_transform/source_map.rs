@@ -101,7 +101,7 @@ impl<'a> CodeTransform<'a> {
     #[must_use]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn generate_map(&self, options: SourceMapOptions) -> SourceMap<'static> {
-        self.generate_map_with_preamble(options).0
+        self.generate_map_product(options).0
     }
 
     /// Like [`generate_map`](Self::generate_map), but ALSO returns the generated-TSX position
@@ -119,12 +119,25 @@ impl<'a> CodeTransform<'a> {
         &self,
         options: SourceMapOptions,
     ) -> (SourceMap<'static>, Option<(u32, u32)>) {
+        let (map, preamble_end, _) = self.generate_map_product(options);
+        (map, preamble_end)
+    }
+
+    fn generate_map_product(
+        &self,
+        options: SourceMapOptions,
+    ) -> (
+        SourceMap<'static>,
+        Option<(u32, u32)>,
+        Option<super::mapping_product::InsertionAnchor>,
+    ) {
         verter_audit::attribute_n!(SourceMapBuild, self.chunks.len());
         let preamble = self.helper_preamble_content();
         // Generated-TSX position immediately after the helper-import preamble insertion, captured
         // when the walk advances past its chunk. Pointer identity (start + len) is exact: the same
         // bump-allocated `&str` flows from the insertion into its `Inserted`/`InsertedMapped` chunk.
         let mut preamble_end: Option<(u32, u32)> = None;
+        let mut insertion_anchor = None;
         let is_preamble = |content: &str| {
             preamble.is_some_and(|p| {
                 std::ptr::eq(p.as_ptr(), content.as_ptr()) && p.len() == content.len()
@@ -198,11 +211,28 @@ impl<'a> CodeTransform<'a> {
             if is_preamble(self.intro()) {
                 verter_debug_assert!(preamble_end.is_none());
                 preamble_end.get_or_insert((generated_line, generated_column));
+                insertion_anchor = self.helper_preamble_carrier_anchor().map(|carrier| {
+                    super::mapping_product::InsertionAnchor {
+                        projected: 0,
+                        carrier,
+                    }
+                });
             }
         }
 
         // Process chunks
+        let mut generated_byte = self.intro().len() as u32;
         for chunk in self.chunks() {
+            let chunk_start = generated_byte;
+            generated_byte = generated_byte.saturating_add(match chunk {
+                Chunk::Original { start, end } => end.saturating_sub(*start),
+                Chunk::Moved { content, .. }
+                | Chunk::Overwritten { content, .. }
+                | Chunk::OverwrittenSegmented { content, .. }
+                | Chunk::Inserted { content }
+                | Chunk::InsertedAnchored { content, .. }
+                | Chunk::InsertedMapped { content, .. } => content.len() as u32,
+            });
             match chunk {
                 Chunk::Original { start, end } => {
                     if let Some(source_id) = source_id {
@@ -403,6 +433,12 @@ impl<'a> CodeTransform<'a> {
                     if is_preamble(content) {
                         verter_debug_assert!(preamble_end.is_none());
                         preamble_end.get_or_insert((generated_line, generated_column));
+                        insertion_anchor = self.helper_preamble_carrier_anchor().map(|carrier| {
+                            super::mapping_product::InsertionAnchor {
+                                projected: chunk_start,
+                                carrier,
+                            }
+                        });
                     }
                 }
                 Chunk::InsertedMapped {
@@ -461,6 +497,12 @@ impl<'a> CodeTransform<'a> {
                     if is_preamble(content) {
                         verter_debug_assert!(preamble_end.is_none());
                         preamble_end.get_or_insert((generated_line, generated_column));
+                        insertion_anchor = self.helper_preamble_carrier_anchor().map(|carrier| {
+                            super::mapping_product::InsertionAnchor {
+                                projected: chunk_start,
+                                carrier,
+                            }
+                        });
                     }
                 }
             }
@@ -490,6 +532,7 @@ impl<'a> CodeTransform<'a> {
                 None,
             ),
             preamble_end,
+            insertion_anchor,
         )
     }
 
@@ -719,8 +762,8 @@ impl<'a> CodeTransform<'a> {
     #[must_use]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn generate_map_json_with_preamble(&self, options: SourceMapOptions) -> String {
-        let (map, preamble_end) = self.generate_map_with_preamble(options);
-        inject_helper_preamble_end(map.to_json_string(), preamble_end)
+        let (map, preamble_end, insertion_anchor) = self.generate_map_product(options);
+        inject_mapping_product(map.to_json_string(), preamble_end, insertion_anchor)
     }
 }
 
@@ -728,20 +771,29 @@ impl<'a> CodeTransform<'a> {
 ///
 /// `oxc_sourcemap`'s encoder has a fixed field set, so the boundary is added as a leading object
 /// member (the encoder always emits `{"version":3,…`, so splicing after `{` is deterministic and
-/// keeps valid JSON). A no-op when there is no boundary. The member shape mirrors the LSP's typed
-/// `TsPosition` (`{"line":<u32>,"character":<u32>}`).
-fn inject_helper_preamble_end(json: String, preamble_end: Option<(u32, u32)>) -> String {
-    match preamble_end {
+/// keeps valid JSON). A no-op when there is no boundary. The preamble member shape mirrors the
+/// LSP's typed `TsPosition` (`{"line":<u32>,"character":<u32>}`); the compact mapping-product
+/// member carries exact `[projected_byte, carrier_byte]` insertion points.
+fn inject_mapping_product(
+    json: String,
+    preamble_end: Option<(u32, u32)>,
+    insertion_anchor: Option<super::mapping_product::InsertionAnchor>,
+) -> String {
+    match (preamble_end, insertion_anchor) {
         // `strip_prefix('{')` both confirms the leading `{` and yields the remainder
         // without an explicit byte slice — safe even if the encoder ever emits an
         // empty / short string.
-        Some((line, character)) => match json.strip_prefix('{') {
+        (Some((line, character)), anchor) => match json.strip_prefix('{') {
             Some(rest) => format!(
-                "{{\"x_verter_helper_preamble_end\":{{\"line\":{line},\"character\":{character}}},{rest}"
+                "{{\"x_verter_helper_preamble_end\":{{\"line\":{line},\"character\":{character}}},{}{rest}",
+                anchor.map_or_else(String::new, |anchor| format!(
+                    "\"x_verter_mapping_product\":{{\"schema_version\":1,\"insertion_anchors\":[[{},{}]]}},",
+                    anchor.projected, anchor.carrier
+                ))
             ),
             None => json,
         },
-        None => json,
+        (None, _) => json,
     }
 }
 

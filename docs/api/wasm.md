@@ -46,8 +46,8 @@ in place. Compile through [`Host` / `VerterHost`](#host--verterhost).
 ### `Host` / `VerterHost`
 
 In-memory host facade exposed by the WASM runtime. It shares the typed
-`compileRequest()` method with `@verter/native`, but the profile-bearing
-legacy read routes (`getIde`, `ensureIdeCompiled`, `getVirtualFile`), the
+`compileRequest()` method with `@verter/native`, but the cached read routes
+(`getIde`, `ensureIdeCompiled`, `getVirtualFile`), the
 preprocessor handshake `applyBlockOverrides`, and the native-only
 source-registering `compileRequests()` batch route are absent. Every WASM
 caller — the playground, fixture capture, and the transport probe —
@@ -103,7 +103,7 @@ The `Host` class exposes the shared host methods below, including
 | `collectResolvableModuleReferenceSpecifiers(moduleReferences)`                              | `string[]`                   | Return exact/finite candidate specifiers in encounter order     |
 | `resolveKnownModuleReferenceDependencies(ownerId, moduleReferences, knownIds, extensions?)` | `string[]`                   | Resolve exact/finite candidates against an in-memory file set   |
 
-See the [@verter/native documentation](./native.md) for detailed descriptions of each method and their parameter types. `@verter/native` additionally exposes the profile-bearing legacy routes (`getIde`, `ensureIdeCompiled`, `getVirtualFile`) and the preprocessor handshake `applyBlockOverrides` for its own, not-yet-migrated callers; this binding does not.
+See the [@verter/native documentation](./native.md) for detailed descriptions of each method and their parameter types. `@verter/native` additionally exposes the cached read routes (`getIde`, `ensureIdeCompiled`, `getVirtualFile`) and the preprocessor handshake `applyBlockOverrides` for its own callers; this binding does not.
 
 #### `compileRequest(canonicalId, request)`
 
@@ -302,6 +302,6 @@ re-exported types.
 | `compileRequest()`              | Available                        | Available                        |
 | `compileRequest()` envelope     | Nested `ide`; `analysis` JSON string; structured `Error` | Flattened IDE DTO; `analysis` object; string throw |
 | `compileRequests()`             | Available                        | Not available                    |
-| `getIde()` / `ensureIdeCompiled()` / `getVirtualFile()` | Available (profile-bearing legacy routes) | Not available — `compileRequest()` is the sole compile route |
+| `getIde()` / `ensureIdeCompiled()` / `getVirtualFile()` | Available (cached read routes, host-default compile shape) | Not available — `compileRequest()` is the sole compile route |
 | `applyBlockOverrides()`         | Available (preprocessor handshake, not a compile route) | Not available |
 | `source` accepts                | `string \| Buffer`               | `string`                         |
