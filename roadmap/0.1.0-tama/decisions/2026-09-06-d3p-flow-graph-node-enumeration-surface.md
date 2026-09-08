@@ -3,6 +3,9 @@
 - Status: accepted (ratified by the maintainer, 2026-09-07, after architect review)
 - Date: 2026-09-06
 - Revised: 2026-09-07 to record the reviewed enumeration contract and cutover requirements
+- Execution clauses amended on 2026-09-08 by
+  [Flow product execution and determinism contract](2026-09-08-flow-product-execution-contract.md).
+  The enumeration ratification and its original date are retained.
 - Amends: `charters/rev11-flow/D3P.md` production-surface statement and production-file
   list, with owner-level enumeration proof
 - Scope: D3P only; no other node's charter, budget, or ledger changes
@@ -20,8 +23,9 @@ production lines outside that list:
 The current product substrate enumerates one product slot per `(requested domain, graph
 node)` pair. This motivates a graph-owned enumeration boundary; it does not establish
 that every demand must compute the entire product universe. The live cutover must follow
-D3C's existing contract: selected transfers in `FlowDemandPlan` order, with the selected
-obligation frontier and `max_iterations` as the connected budget.
+the amended D3C contract: the plan selects the executable universe, the control
+interpreter supplies actual transfers and predecessor snapshots, and the shared
+kernel enforces the selected-product frontier and actual fixed-point round budget.
 
 `FunctionFlowGraph` publishes
 `node_count()`, `node_kind(FlowNodeId)`, `out_edges(FlowNodeId)` and four per-family
@@ -89,7 +93,8 @@ The architect review identified two product-boundary issues adjacent to this acc
 Their disposition is **ADOPT-NOW within the existing atomic D3 candidate**: D3P owns the
 product substrate correction; D3C owns its integration with the existing sealed plan and
 finalizer. These are requirements before the atomic candidate lands, not follow-up debt,
-and they do not change D3C's charter or grant an additional flow authority.
+and grant no additional flow authority. The later execution amendment explicitly
+updates D3C's execution and determinism clauses.
 
 - **Demand-selected work.** `solve_flow_products` currently budgets and mints the entire
   requested-domain by graph-node universe. Its live use must instead consume the sealed
