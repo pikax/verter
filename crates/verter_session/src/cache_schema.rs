@@ -94,7 +94,13 @@
 ///   per-parameter `<const T>` fact. Version `9` entries lack these fact
 ///   shapes and must fail closed rather than serve a call surface without
 ///   its expression identity.
-pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 10;
+/// - `11` — `ValueTypeAnnotationFact.unique_symbol_members` (a gated
+///   `#[serde(default)]` member-name list recording the authored
+///   `unique symbol` members of an annotation). Version `10` entries
+///   deserialize without the field and under-record member nominal
+///   identity; the failure direction is safe (no member certified), but the
+///   invariant exists so re-deriving that never becomes necessary.
+pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 11;
 
 /// Trait surface every participating Db implements. The implementation is a
 /// trivial getter — the reason it exists at all is so the architecture-guard

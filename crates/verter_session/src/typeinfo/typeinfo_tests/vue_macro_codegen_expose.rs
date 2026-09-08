@@ -404,3 +404,70 @@ defineExpose({ dup: a, dup: b })
         "duplicate authored names must not collapse onto the same anchor: {expose:?}"
     );
 }
+
+/// A `unique symbol` member of a runtime-object `defineExpose` renders a
+/// NAMEABLE type only when its declaring declaration can be imported by the
+/// generated surface.
+///
+/// * A carrier declared in ANOTHER module (`import { EXT_TOKEN } …;
+///   defineExpose({ token: EXT_TOKEN })`) keeps the precise `typeof
+///   EXT_TOKEN` — the member's exact nominal type — and the reference set
+///   retains the binding so the surface can import it.
+/// * A carrier declared by a script-setup LOCAL (`const K: unique symbol =
+///   Symbol(); defineExpose({ k: K })`) is NOT nameable: setup bindings are
+///   not importable, so a `typeof K` render would splice an undeclared
+///   identifier into the declaration. Fail closed to the widened `symbol`
+///   primitive — the honest structural inhabitant — never a phantom
+///   reference and never a fresh `unique symbol` identity the source never
+///   declared.
+#[test]
+fn runtime_object_expose_unique_symbol_member_renders_only_nameable_references() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(
+        &host,
+        "/src/token.ts",
+        "export declare const EXT_TOKEN: unique symbol",
+    );
+    upsert(
+        &host,
+        "/src/Expose.vue",
+        r#"<script setup lang="ts">
+import { EXT_TOKEN } from './token'
+const K: unique symbol = Symbol()
+defineExpose({ token: EXT_TOKEN, k: K })
+</script>"#,
+    );
+
+    let output = produce(&host, "/src/Expose.vue", VueMacroCodegenDemand::Tsc);
+    let expose = expose_projection(&output);
+
+    let verter_macro_dto::TscExposeMemberType::Resolved(imported) = member(expose, "token") else {
+        panic!("`token` must resolve, got: {expose:?}");
+    };
+    assert_eq!(
+        imported.as_str().trim(),
+        "typeof EXT_TOKEN",
+        "an IMPORTED unique symbol keeps its precise nominal spelling: {imported:?}"
+    );
+    assert!(
+        expose
+            .scope
+            .retained_bindings
+            .iter()
+            .any(|binding| binding.local_name == "EXT_TOKEN"),
+        "the precise `typeof EXT_TOKEN` render must retain its binding for the \
+         generated surface to import, got: {:?}",
+        expose.scope
+    );
+
+    let verter_macro_dto::TscExposeMemberType::Resolved(local) = member(expose, "k") else {
+        panic!("`k` must resolve, got: {expose:?}");
+    };
+    assert_eq!(
+        local.as_str().trim(),
+        "symbol",
+        "a script-setup local unique symbol is NOT nameable by the generated \
+         surface — fail closed to the widened primitive, never `typeof K` and \
+         never a fresh `unique symbol`: {local:?}"
+    );
+}

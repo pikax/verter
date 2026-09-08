@@ -1079,13 +1079,13 @@ impl DeclBodyMemo {
         self.ensure_lease();
         let owner_table = Arc::clone(&self.owner_table);
         let canonical = Arc::clone(&self.key.canonical);
+        let parse_env_hash = self.key.parse_env_hash;
         let Some(index) = service.run_leased(&self.key, move |program| {
             program.map(|p| {
-                verter_semantic::analysis::function_program::build_function_program_index(
-                    p.borrow_dependent(),
-                    p.source_str(),
+                p.function_program_index(
                     owner_table.as_ref(),
                     Arc::clone(&canonical),
+                    &parse_env_hash,
                 )
             })
         }) else {
@@ -1106,11 +1106,7 @@ impl DeclBodyMemo {
             );
             return Arc::new(Default::default());
         };
-        let folded =
-            fold_flow_body_env_identity(&index, &self.key.parse_env_hash, self.source_type);
-        self.function_program_index
-            .get_or_init(|| Arc::new(folded))
-            .clone()
+        self.function_program_index.get_or_init(|| index).clone()
     }
 
     /// The OWNED slice content of one demanded flow evaluation: the
@@ -1132,20 +1128,28 @@ impl DeclBodyMemo {
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
         let entry = entry.clone();
+        let index = self.function_program_index();
         // A carrier's script block (`.vue` / `.svelte`) compiles to a
         // module by construction; a plain script file proves module scope
         // only through its own top-level syntax.
         let carrier_module = self.framework_parse.is_some();
         let Some(node) = service.run_leased(&self.key, move |program| {
             program.and_then(|p| {
-                crate::flow_slice_content::build_flow_slice_content(
-                    p.borrow_dependent(),
-                    p.source_str(),
-                    &entry,
-                    &selection,
-                    &skeleton,
-                    carrier_module,
-                )
+                p.with_indexed_function(&entry, |resolved, entry| {
+                    crate::flow_slice_content::build_flow_slice_content(
+                        crate::flow_slice_content::FlowSliceSource {
+                            program: p.borrow_dependent(),
+                            resolved,
+                        },
+                        p.source_str(),
+                        &index,
+                        entry,
+                        &selection,
+                        &skeleton,
+                        carrier_module,
+                    )
+                })
+                .flatten()
             })
         }) else {
             // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
@@ -1177,14 +1181,16 @@ impl DeclBodyMemo {
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
+        let _index = self.function_program_index();
         let entry = entry.clone();
         let Some(clause) = service.run_leased(&self.key, move |program| {
             program.and_then(|p| {
-                crate::flow_slice_content::build_function_type_param_clause(
-                    p.borrow_dependent(),
-                    p.source_str(),
-                    &entry,
-                )
+                p.with_indexed_function(&entry, |resolved, _entry| {
+                    crate::flow_slice_content::build_function_type_param_clause(
+                        resolved,
+                        p.source_str(),
+                    )
+                })
             })
         }) else {
             // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
@@ -1214,25 +1220,49 @@ impl DeclBodyMemo {
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
     ) -> Option<verter_semantic::analysis::flow::FunctionBodySkeleton> {
-        let service = self.service.as_ref()?;
+        self.function_flow_structure(entry)
+            .ok()
+            .flatten()
+            .map(|prepared| prepared.into_parts().0)
+    }
+
+    /// Build the current frame with the index's retained closure-access facts,
+    /// returning its exact binding map with the structure for shared publication.
+    pub fn function_flow_structure(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+    ) -> Result<
+        Option<verter_semantic::analysis::flow::PreparedFunctionBodySkeleton>,
+        verter_semantic::analysis::flow::FlowBindingMapError,
+    > {
+        let Some(service) = self.service.as_ref() else {
+            return Ok(None);
+        };
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
+        let _index = self.function_program_index();
         let entry = entry.clone();
         let Some(skeleton) = service.run_leased(&self.key, move |program| {
             program.and_then(|p| {
                 use verter_semantic::analysis::flow::{
-                    build_function_body_skeleton, FunctionBodySource,
+                    build_indexed_function_body_skeleton, FunctionBodySource,
                 };
-                use verter_semantic::analysis::function_program::{
-                    resolve_function_node, FunctionNode,
-                };
-                let resolved = resolve_function_node(p.borrow_dependent(), &entry.locator)?;
-                let source = match &resolved.node {
-                    FunctionNode::Function(func) => FunctionBodySource::from_function(func)?,
-                    FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
-                };
-                Some(build_function_body_skeleton(&source))
+                use verter_semantic::analysis::function_program::FunctionNode;
+                p.with_indexed_function(&entry, |resolved, entry| {
+                    let source = match &resolved.node {
+                        FunctionNode::Function(func) => {
+                            if func.r#type == oxc_ast::ast::FunctionType::FunctionExpression {
+                                FunctionBodySource::from_function_expression(func)?
+                            } else {
+                                FunctionBodySource::from_function(func)?
+                            }
+                        }
+                        FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+                    };
+                    Some(build_indexed_function_body_skeleton(&source, entry))
+                })
+                .flatten()
             })
         }) else {
             // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
@@ -1242,9 +1272,9 @@ impl DeclBodyMemo {
                 "decl-body lease pin broken: function_body_skeleton's lease-only run missed \
                  the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
             );
-            return None;
+            return Ok(None);
         };
-        skeleton
+        skeleton.transpose()
     }
 
     /// Transient typed IR for one indexed declaration expression. The retained
@@ -1279,20 +1309,15 @@ impl DeclBodyMemo {
     ) -> Option<Arc<verter_type_expr::IndexedValueCall>> {
         let service = self.service.as_ref()?;
         self.ensure_lease();
-        let index = self.function_program_index();
+        let _index = self.function_program_index();
         let node = service.run_leased(&self.key, move |program| {
             program.and_then(|parsed| {
-                let call = verter_semantic::analysis::function_program::call_expression_at(
-                    parsed.borrow_dependent(),
-                    &index,
-                    span,
-                )?;
-                Some(
+                parsed.with_indexed_call(span, |call| {
                     verter_semantic::analysis::type_eval_build::lower_indexed_call_expression(
                         call,
                         parsed.source_str(),
-                    ),
-                )
+                    )
+                })
             })
         })??;
         Some(Arc::new(node))
@@ -3004,6 +3029,7 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
         ValueDeclKind::Class,
         verter_type_expr::facts::ValueTypeAnnotationFact {
             is_unique_symbol: false,
+            unique_symbol_members: Arc::from([]),
             typeof_alias_target: None,
             classification: ValueAnnotationClass::Direct,
             annotation: Some(instance),
@@ -3082,7 +3108,7 @@ fn collect_augmentation_statement_dependencies(
 /// walk's `flow_body_stable_hash` covers body content only; this boundary
 /// mix is what makes a parse-env move or a parser/language flip miss
 /// exactly the affected artifact slots without re-walking the body.
-fn fold_flow_body_env_identity(
+pub(crate) fn fold_flow_body_env_identity(
     index: &verter_semantic::analysis::function_program::FunctionProgramIndex,
     parse_env_hash: &crate::types::Hash16,
     source_type: oxc_span::SourceType,

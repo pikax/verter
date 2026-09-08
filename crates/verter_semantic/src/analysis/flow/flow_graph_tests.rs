@@ -3,10 +3,11 @@
 //! value-dead siblings keeping their evaluation-effect edges, region
 //! membership / nesting, arena-freedom, and determinism.
 
+use super::build_function_flow_graph_for_test as build_function_flow_graph;
 use super::*;
 use crate::analysis::flow::{
-    build_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource, SkeletonBindingId,
-    SkeletonPathSegment, SkeletonRegionKind, SkeletonReturnSiteId, SkeletonWriteCertainty,
+    FunctionBodySkeleton, FunctionBodySource, SkeletonBindingId, SkeletonPathSegment,
+    SkeletonRegionKind, SkeletonReturnSiteId, SkeletonWriteCertainty,
 };
 
 fn return_site_id(skeleton: &FunctionBodySkeleton, ordinal: usize) -> SkeletonReturnSiteId {
@@ -62,22 +63,316 @@ fn path_write_path(edge: &FlowEdge) -> Vec<SkeletonPathSegment> {
 }
 
 fn skeleton_of(source: &str) -> FunctionBodySkeleton {
-    let allocator = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::ts();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
-    assert!(
-        ret.errors.is_empty(),
-        "fixture must parse: {:?}",
-        ret.errors
+    crate::analysis::flow::skeleton_tests::indexed_skeleton_of(source)
+}
+
+#[test]
+fn write_only_closure_capture_selects_an_effect_subject_without_a_value_read() {
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    let skeleton = indexed_returned_arrow(
+        "function root(value) { return () => () => { value = 1; return 0; }; }",
     );
-    for statement in &ret.program.body {
-        if let oxc_ast::ast::Statement::FunctionDeclaration(function) = statement {
-            if let Some(body_source) = FunctionBodySource::from_function(function) {
-                return build_function_body_skeleton(&body_source);
-            }
-        }
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(
+            &SliceDemand::for_return_projection(&skeleton, &[]),
+            &FlowSliceBudget::default(),
+        )
+        .unwrap();
+    let hub = (0..graph.node_count())
+        .map(|index| FlowNodeId::from_index(index as u32))
+        .find(|node| matches!(graph.node_kind(*node), FlowNodeKind::CapturedBinding(_)))
+        .expect("a captured cell has a graph-owned subject even without a value read");
+    assert!(plan.is_effect_only(hub));
+    assert!(skeleton.expr_sites.iter().all(|site| site.reads.is_empty()));
+    let closure = skeleton
+        .expr_sites
+        .iter()
+        .position(|site| !site.capture_bindings.is_empty())
+        .unwrap();
+    let from = graph.expr_site_node(SkeletonExprSiteId::from_index(closure as u32));
+    assert!(has_edge_class(&graph, from, hub, FlowEdgeClass::EvalEffect));
+    assert!(!has_edge_class(&graph, from, hub, FlowEdgeClass::ValueDef));
+}
+
+#[test]
+fn source_type_query_child_identity_does_not_mint_runtime_capture_receipts() {
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    let source = "function root(value) { return () => accept(0 as typeof value); }";
+    let parent = skeleton_of(source);
+    assert!(
+        parent
+            .expr_sites
+            .iter()
+            .all(|site| site.capture_bindings.is_empty()),
+        "query-only closure bridging retains its existing boundary"
+    );
+    let skeleton = indexed_returned_arrow(source);
+    let graph = build_function_flow_graph(&skeleton);
+    let (index, site) = skeleton
+        .expr_sites
+        .iter()
+        .enumerate()
+        .find(|(_, site)| !site.source_type_queries.is_empty())
+        .unwrap();
+    let Some(crate::analysis::flow::FlowBindingRef::Captured(identity)) =
+        &site.source_type_queries[0].binding
+    else {
+        panic!("exact outer query identity");
+    };
+    assert_eq!(identity.name.as_ref(), "value");
+    assert!(site.reads.iter().all(|read| read.binding.is_none()));
+    assert!(site.capture_bindings.is_empty());
+    let from = graph.expr_site_node(SkeletonExprSiteId::from_index(index as u32));
+    let edge = graph
+        .out_edges(from)
+        .iter()
+        .find(|edge| matches!(edge.kind, FlowEdgeKind::SourceTypeQuery))
+        .unwrap();
+    assert!(!has_edge_class(
+        &graph,
+        from,
+        edge.to,
+        FlowEdgeClass::EvalEffect
+    ));
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(
+            &SliceDemand::for_return_projection(&skeleton, &[]),
+            &FlowSliceBudget::default(),
+        )
+        .unwrap();
+    assert!(
+        plan.is_value(edge.to),
+        "child query selects an exact typed subject without a runtime read"
+    );
+}
+
+#[test]
+fn captured_reads_select_own_frame_writes_and_their_control_inputs() {
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    use crate::analysis::flow::FlowBindingRef;
+    let source = "function root(value, flag) { return () => { if (flag) value = 'b'; { let value = 0; value = 2; } return value; }; }";
+    let skeleton = indexed_returned_arrow(source);
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(
+            &SliceDemand::for_return_projection(&skeleton, &[]),
+            &FlowSliceBudget::default(),
+        )
+        .unwrap();
+    let captured = skeleton
+        .writes
+        .iter()
+        .find(|write| matches!(write.binding, Some(FlowBindingRef::Captured(_))))
+        .unwrap();
+    assert!(
+        plan.is_value(graph.expr_site_node(captured.value.unwrap())),
+        "a captured read must select its own-frame written value"
+    );
+    assert!(
+        plan.is_selected(graph.expr_site_node(captured.site)),
+        "the write execution site stays selected"
+    );
+    let condition = skeleton.regions[captured.region.index()]
+        .control_input
+        .or_else(|| {
+            skeleton
+                .regions
+                .iter()
+                .find_map(|region| region.control_input)
+        })
+        .unwrap();
+    assert!(
+        plan.is_value(graph.expr_site_node(condition)),
+        "the governing control input stays value-selected"
+    );
+    let shadow = skeleton
+        .writes
+        .iter()
+        .find(|write| matches!(write.binding, Some(FlowBindingRef::Local(_))))
+        .unwrap();
+    assert!(
+        !plan.is_selected(graph.expr_site_node(shadow.site)),
+        "a same-named local write is not a captured definition"
+    );
+}
+
+fn indexed_returned_arrow(source: &str) -> FunctionBodySkeleton {
+    use crate::analysis::flow::build_indexed_function_body_skeleton;
+    use crate::analysis::function_program::{
+        build_function_program_index, resolve_function_node, FunctionNode,
+    };
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let index =
+        build_function_program_index(&parsed.program, source, &owners, Arc::from("/capture.ts"));
+    let root = index.matches_named("root").next().unwrap().entry();
+    let child = index
+        .nested_at(
+            &root.key,
+            verter_span::Span::new(
+                source.find("() =>").unwrap() as u32,
+                (source.rfind("; }").unwrap()) as u32,
+            ),
+        )
+        .unwrap()
+        .entry();
+    let FunctionNode::Arrow(arrow) = resolve_function_node(&parsed.program, &child.locator)
+        .unwrap()
+        .node
+    else {
+        panic!("arrow fixture");
+    };
+    let prepared =
+        build_indexed_function_body_skeleton(&FunctionBodySource::from_arrow(arrow), child)
+            .unwrap();
+    prepared.skeleton
+}
+
+#[test]
+fn captured_computation_inputs_do_not_grow_result_projection_cycles() {
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    let skeleton = indexed_returned_arrow(
+        "function root(value) { return () => { value=value.trim(); return value; }; }",
+    );
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(
+            &SliceDemand::for_return_projection(&skeleton, &[]),
+            &FlowSliceBudget {
+                max_value_states: 64,
+                ..FlowSliceBudget::default()
+            },
+        )
+        .expect("captured computation inputs have the same bounded path transfer as local inputs");
+    let write = skeleton.writes.first().unwrap();
+    assert!(plan.is_value(graph.expr_site_node(write.value.unwrap())));
+}
+
+#[test]
+fn captured_member_reads_compose_projection_before_selecting_write_members() {
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    use crate::analysis::flow::{FlowBindingRef, FrameSpan};
+    let source = "function root() { let x = {a: {b: 'old'}, b: 'other'}; return () => { x = {a: {b: 'wanted'}, b: 'sibling'}; return x.a; }; }";
+    let skeleton = indexed_returned_arrow(source);
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(
+            &SliceDemand::for_return_projection(&skeleton, &[Arc::from("b")]),
+            &FlowSliceBudget::default(),
+        )
+        .unwrap();
+    assert!(skeleton
+        .expr_sites
+        .iter()
+        .flat_map(|site| site.reads.iter())
+        .any(
+            |read| matches!(read.binding, Some(FlowBindingRef::Captured(_)))
+                && !read.path.is_empty()
+        ));
+    for (literal, selected) in [("'wanted'", true), ("'sibling'", false)] {
+        let start = source.find(literal).unwrap() as u32;
+        let span = FrameSpan::rebase(
+            source.find("() =>").unwrap() as u32,
+            verter_span::Span::new(start, start + literal.len() as u32),
+        );
+        let site = skeleton
+            .expr_sites
+            .iter()
+            .position(|site| site.span == span)
+            .unwrap();
+        assert_eq!(
+            plan.is_value(graph.expr_site_node(SkeletonExprSiteId::from_index(site as u32))),
+            selected,
+            "{literal}"
+        );
     }
-    panic!("fixture must contain a bodied function declaration");
+}
+
+#[test]
+fn hoisted_runtime_aliases_keep_access_edges_linear() {
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    let edges_for = |count| {
+        let mut source = String::from("function f(value) {");
+        for _ in 0..count {
+            source.push_str("var value;");
+        }
+        for ordinal in 0..count {
+            source.push_str(&format!("value={ordinal}; const read{ordinal}=value;"));
+        }
+        source.push_str("return value; }");
+        let skeleton = skeleton_of(&source);
+        let graph = build_function_flow_graph(&skeleton);
+        let plan = ReturnPathPeeker::new(&graph)
+            .plan(
+                &SliceDemand::for_return_projection(&skeleton, &[]),
+                &FlowSliceBudget::default(),
+            )
+            .unwrap();
+        let name = skeleton.name_id("value").unwrap();
+        let declarations: Vec<_> = skeleton.bindings_named(name).collect();
+        assert_eq!(declarations.len(), count + 1);
+        for declaration in declarations {
+            assert!(
+                plan.is_value(graph.binding_node(declaration)),
+                "each exact authored declaration remains selected evidence"
+            );
+        }
+        graph.edges().len()
+    };
+    let small = edges_for(32);
+    let large = edges_for(64);
+    assert!(
+        large <= small * 2 + 8,
+        "runtime alias access edges must be linear: {small} -> {large}"
+    );
+}
+
+#[test]
+fn captured_binding_hubs_keep_many_reads_and_writes_linear() {
+    let graph_for = |count| {
+        let mut source = String::from("function root(x) { return () => {");
+        for ordinal in 0..count {
+            source.push_str(&format!("let value{ordinal} = x; x = {ordinal};"));
+        }
+        source.push_str("return [");
+        for ordinal in 0..count {
+            source.push_str(&format!("value{ordinal},"));
+        }
+        source.push_str("]; }; }");
+        let skeleton = indexed_returned_arrow(&source);
+        let graph = build_function_flow_graph(&skeleton);
+        let captured: Vec<_> = (0..graph.node_count())
+            .filter_map(|ordinal| {
+                let node = FlowNodeId::from_index(ordinal as u32);
+                match graph.node_kind(node) {
+                    FlowNodeKind::CapturedBinding(id) => Some((node, id)),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert_eq!(
+            captured.len(),
+            1,
+            "all occurrences share one exact captured variable"
+        );
+        assert_eq!(graph.captured_binding(captured[0].1).name.as_ref(), "x");
+        assert_eq!(graph.captured_binding_node(captured[0].1), captured[0].0);
+        assert_eq!(
+            skeleton.bindings.len(),
+            count,
+            "the captured variable is not a fabricated local declaration"
+        );
+        graph.edges().len()
+    };
+    let small = graph_for(32);
+    let large = graph_for(64);
+    assert!(
+        large <= small * 2 + 8,
+        "captured access edges grow linearly: {small} -> {large}"
+    );
 }
 
 #[test]
@@ -245,7 +540,10 @@ fn flow_graph_spread_entries_are_optional_unknown_path_writes() {
     let object_site = skeleton.return_sites[0].argument.expect("argument");
     let path_writes = out_path_writes(&graph, graph.expr_site_node(object_site));
     assert_eq!(path_writes.len(), 2);
-    let FlowEdgeKind::PathWrite { path, certainty } = &path_writes[0].kind else {
+    let FlowEdgeKind::PathWrite {
+        path, certainty, ..
+    } = &path_writes[0].kind
+    else {
         panic!("spread entry is a path write");
     };
     assert_eq!(path.as_ref(), &[SkeletonPathSegment::Computed]);
@@ -444,18 +742,34 @@ fn flow_graph_root_read_unions_parameter_with_hoisted_var_redeclaration() {
     let bindings: Vec<SkeletonBindingId> = skeleton.bindings_named(x_name).collect();
     assert_eq!(bindings.len(), 2, "the parameter and the `var` both bind x");
     let read_site = skeleton.return_sites[0].argument.expect("argument");
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(
+            &SliceDemand::for_return_projection(&skeleton, &[]),
+            &FlowSliceBudget::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        out_edges_of_class(
+            &graph,
+            graph.expr_site_node(read_site),
+            FlowEdgeClass::ValueDef
+        )
+        .len(),
+        1,
+        "one read names one runtime variable"
+    );
     for binding in bindings {
         assert!(
-            has_edge_class(
-                &graph,
-                graph.expr_site_node(read_site),
-                graph.binding_node(binding),
-                FlowEdgeClass::ValueDef
-            ),
-            "the root read binds {:?} — a `var` redeclaring a parameter \
-             shares the parameter's function-scope slot",
-            skeleton.binding(binding).kind
+            plan.is_value(graph.binding_node(binding)),
+            "the parameter and authored var declaration both retain their evidence"
         );
+        if let Some(initializer) = skeleton.binding(binding).initializer {
+            assert!(
+                plan.is_value(graph.expr_site_node(initializer)),
+                "the hoisted var's definition remains a value dependency"
+            );
+        }
     }
     // The block-scoped shadowing rail is untouched: an inner `let` of a
     // DIFFERENT name in a sibling block still resolves exactly.

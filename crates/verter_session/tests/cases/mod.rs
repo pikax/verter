@@ -54,6 +54,7 @@ mod oracle_query_specs_shared;
 mod oracle_tsgo_forbidden;
 mod preprocessor_boundary_contract;
 mod preprocessor_round_trip_parse_count;
+mod relation_nominal_authority;
 mod runtime_constructor_matrix;
 mod shared_process_contract;
 mod style_dialect_admission;

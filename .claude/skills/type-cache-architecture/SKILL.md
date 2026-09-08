@@ -101,6 +101,45 @@ subset. The plan in `.claude/skills/type-cache-architecture/SKILL.md` names the
 additional guards and discriminating tests that must land with each implementation
 block before the corresponding rule becomes executable policy.
 
+### Flow graph binding authority
+
+`FlowGraphBundle` owns the immutable skeleton, dependence graph, and
+`Arc<FlowBindingMap>` for one `FlowSliceFunctionKey` content version. The retained
+snapshot source checks the indexed entry's body hashes and the served parse and
+language identity before building the exact binding map from that entry's full
+declaration inventory. The graph store publishes the complete bundle once; every
+demand and selected-content lowering shares those artifacts. Caller-provided
+inventories must never initialize a cached map. A correspondence error remains a
+typed source/store error, publishes nothing, and follows failed non-admission at
+the hash/lower nodes; it is never cached as absence or replaced by an empty map.
+
+The retained parse owns an immutable callable/call address table initialized once with its function index. Exact-key lease callbacks borrow that table; arena references remain on the worker and never enter `FlowGraphBundle` or the shared index. Locator misses stay misses and never trigger sibling-body rediscovery.
+
+`DeclBodyMemo::function_flow_structure` invokes the indexed current-frame
+builder under the retained parse lease and returns `PreparedFunctionBodySkeleton`
+(skeleton and binding map together, private fields with immutable views). The production graph builder accepts only that prepared witness, and never resolves names. Nested capture subjects, including write-only captures, and actual read paths come from the pinned
+index; this ingress never recursively constructs child skeletons. The source
+derives the graph from that prepared skeleton and publishes all three artifacts
+atomically.
+
+Static member reads carry `ReadProjection` edges that prepend the authored path
+to the demand suffix. A real `CapturedBinding` graph node owns each exact captured
+identity, with the same definition, path-write, and execution adjacency as a
+local hub; captured read/write construction remains linear and never fabricates
+a local declaration. Only `PathWriteSource::ObjectLiteralEntry` can suppress an
+earlier definite duplicate property; mutable assignments remain candidates until
+control flow executes them. `ControlInput` edges keep the value
+that governs an executed region selected. The planner interns projection tails
+and bounds their count plus value visits with `max_value_states`; a growing
+projection cycle returns typed `ValueStates` non-admission. Selected projection
+payloads are content-bearing slice-hash inputs. The peeker alone constructs `ReturnSlicePlan`; immutable getters expose its selection and measured work. Only the cache owner can construct a production `PlannedFlowSlice` pair, so callers cannot understate retained work while reusing the same hash.
+
+The graph key includes the serving `ParseKey`, whose content digest pins the
+whole lexical source context. Inserting an ancestor declaration can change an
+unchanged child's captured binding slot; the changed parse key prevents reusing
+that child's old skeleton, map, or graph. An unrelated edit may preserve a narrow
+slice hash while still producing a distinct graph artifact key.
+
 ## Architectural rules (R1–R31)
 
 ### Mutation semantics
@@ -1848,6 +1887,11 @@ is permitted.
   `MacroPayloadContext` / `TypeOfContext`). The `provenance` + `merge_role`
   discriminators STAY at
   FAMILY-IDENTITY level on `FamilyKey` — they are NOT demoted into a `*Context`.
+- **Symmetric relation admission.** `Identity` and `Comparable` use one sorted
+  operand pair in typed constructors, raw-key lifting, and shared query admission
+  before family lookup or singleflight. Policy, freshness, inference, substitution,
+  and environment axes remain intact. Assignability and subtype relations retain
+  operand direction; they never borrow the symmetric ordering rule.
 - **Discriminating guards.** The env-scoping and value-domain guards are landed:
   `every_semantic_query_key_maps_to_exactly_one_value_domain`,
   `module_resolution_keys_on_resolve_env_not_type_or_lib`, and

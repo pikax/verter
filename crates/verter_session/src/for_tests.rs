@@ -772,7 +772,6 @@ pub use crate::project_semantic_dispatch::flow_solve::*;
 /// frame's real binding inventory from the `FunctionProgramIndex`.
 pub struct FlowGraphFixtureForTests {
     bound: crate::cache_runtime::flow_slice_node::BoundFlowGraph,
-    inventory: FlowBindingInventory,
 }
 
 #[rustfmt::skip]
@@ -792,7 +791,7 @@ impl FlowGraphFixtureForTests {
             .plan(&demand, &request.resources.slice_budget)
             .map_err(FlowDemandPlanError::SliceBudget)?;
         let hash = compute_flow_slice_hash(&selection, &bundle.graph, &bundle.skeleton);
-        Ok(PlannedFlowSlice::new(hash, selection))
+        Ok(PlannedFlowSlice::for_test(hash, selection))
     }
 
     /// Plan `request` over this fixture's store-bound graph and binding
@@ -812,7 +811,7 @@ impl FlowGraphFixtureForTests {
     /// for another graph or another demand must be a typed planning
     /// error, never a proof plan.
     pub fn build_plan_with_retained(&self, request: FlowDemandRequest, retained: &PlannedFlowSlice) -> Result<FlowDemandPlan, FlowDemandPlanError> {
-        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, retained, &self.inventory)
+        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, retained)
     }
 }
 
@@ -837,7 +836,7 @@ pub fn flow_graph_fixture_for_tests_with_language(source: &str, body_hash_tag: u
 
 #[rustfmt::skip]
 fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_language::FileLanguage) -> FlowGraphFixtureForTests {
-    use verter_semantic::analysis::flow::{FunctionBodySource, build_function_body_skeleton};
+    use verter_semantic::analysis::flow::{FunctionBodySource, build_indexed_function_body_skeleton};
     use verter_semantic::analysis::function_program::{build_function_program_index, FunctionDeclarationRef, FunctionProgramKey};
     use verter_semantic::analysis::top_level_owners::TopLevelOwnerTable;
     let oxc_source_type = match &file_language {
@@ -859,14 +858,11 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     let function = parsed.program.body.iter().find_map(|s| match s { oxc_ast::ast::Statement::FunctionDeclaration(f) => Some(f), _ => None }).expect("fixture must contain a function declaration");
     let name = function.id.as_ref().expect("named function").name.as_str();
     let canonical_id: std::sync::Arc<str> = std::sync::Arc::from("/flow_solve_fixture.ts");
-    let skeleton = build_function_body_skeleton(&FunctionBodySource::from_function(function).expect("bodied function"));
+    let body_source = FunctionBodySource::from_function(function).expect("bodied function");
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
     let index = build_function_program_index(&parsed.program, source, &owners, canonical_id.clone());
     let declaration = FunctionDeclarationRef { owner: verter_type_expr::TopLevelOwnerId::ordinary_file(), name: std::sync::Arc::from(name), space: verter_semantic::facts::SymbolSpace::Value };
     let function = FunctionProgramKey { declaration, part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody, overload_ordinal: 0 };
-    let inventory = FlowBindingInventory {
-        bindings: std::sync::Arc::clone(&index.get(&function).expect("the fixture function is indexed").entry().bindings),
-    };
     let key = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
         canonical_id, function, parse_env_hash: [0u8; 16],
         flow_body_stable_hash: [body_hash_tag; 16], flow_body_exact_hash: [body_hash_tag; 16],
@@ -874,8 +870,10 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
         build_toolchain_fingerprint: crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
     };
     let store = crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new();
-    let bound = store.mint_bound_flow_graph(key, skeleton);
-    FlowGraphFixtureForTests { bound, inventory }
+    let entry = index.get(&key.function).expect("the fixture function is indexed").entry();
+    let prepared = build_indexed_function_body_skeleton(&body_source, entry).expect("fixture binding correspondence");
+    let bound = store.mint_bound_flow_graph(key, prepared);
+    FlowGraphFixtureForTests { bound }
 }
 
 /// Mint the hermetic value payload: a clean flow-return result over `return_type`.
@@ -921,4 +919,153 @@ pub fn dispatch_flow_demand_footprint_for_tests(
 #[rustfmt::skip]
 pub fn composite_fixture_for_tests<K: crate::semantic_query::composite::CompositeKind>(members: std::sync::Arc<[crate::semantic_query::SemanticNodeId]>) -> crate::semantic_query::composite::CompositeList<K> {
     crate::semantic_query::composite::CompositeList::test_fixture(members)
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Shared-relation authority (nominal identity / comparability) shims.
+//
+// The relation verdicts a consumer can observe are three — holds, provably
+// does-not-hold, undecided — exactly as [`RelationStep`] collapses them for
+// consumers. The shims forward to the ONE canonical dispatch and map onto
+// that public three-verdict shape; they never hand back the internal step
+// type and never add a second resolution path. All are compile-absent in
+// every production profile (the `for_tests` module gate plus the stricter
+// per-fn gates).
+// ──────────────────────────────────────────────────────────────────────
+
+/// A relation verdict as an integration test spells it: the three outcomes
+/// a consumer of the shared relation authority can observe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelateVerdictForTests {
+    /// The asked relation holds.
+    Holds,
+    /// The asked relation provably does not hold.
+    DoesNotHold,
+    /// Undecided — no public value form; never warm-admitted as a decision.
+    Undecided,
+}
+
+/// Ask the shared relation authority one `(source, target, relation)`
+/// judgement through the canonical dispatch and return its verdict.
+#[cfg(any(test, feature = "test-support"))]
+pub fn dispatch_execute_relate_verdict_for_tests(
+    host: &crate::VerterHost,
+    source: crate::semantic_query::SemanticNodeId,
+    target: crate::semantic_query::SemanticNodeId,
+    relation: crate::semantic_query::RelationKind,
+) -> RelateVerdictForTests {
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    match dispatch.execute_relate_pair_kind(source, target, relation) {
+        crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { .. } => {
+            RelateVerdictForTests::Holds
+        }
+        crate::project_semantic_dispatch::dispatch_txn::RelationStep::NotAssignable => {
+            RelateVerdictForTests::DoesNotHold
+        }
+        crate::project_semantic_dispatch::dispatch_txn::RelationStep::Unknown
+        | crate::project_semantic_dispatch::dispatch_txn::RelationStep::BudgetExceeded(_)
+        | crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assumed(_) => {
+            RelateVerdictForTests::Undecided
+        }
+    }
+}
+
+/// The DECLARING nominal (`unique symbol`) identity a node denotes, or
+/// `None` when the node carries no nominal identity of its own. Identity
+/// carriers are unwrapped exactly as the relation authority itself unwraps
+/// them before reading the identity, so a guard can assert the identity is
+/// the DECLARATION — not the consumer alias that reached it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn dispatch_relation_nominal_identity_for_tests(
+    host: &crate::VerterHost,
+    node: crate::semantic_query::SemanticNodeId,
+) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
+    use crate::project_semantic_dispatch::relation::IdentityCarrierUnwrap;
+
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    match dispatch.unwrap_identity_carrier_for_relation(node) {
+        IdentityCarrierUnwrap::Concrete(unwrapped) => dispatch.relation_nominal_identity(unwrapped),
+        IdentityCarrierUnwrap::Unresolvable => None,
+    }
+}
+
+/// The declaration anchor for a named type in `canonical`, resolved through
+/// the shared `ResolveDecl` query — the same entry a consumer's reference
+/// reaches, so relation guards judge real carriers, never hand-interned
+/// nodes.
+#[cfg(any(test, feature = "test-support"))]
+pub fn dispatch_resolve_type_decl_for_tests(
+    host: &crate::VerterHost,
+    canonical: &str,
+    name: &str,
+) -> crate::semantic_query::SemanticNodeId {
+    use std::sync::Arc;
+
+    use crate::semantic_query::{
+        BinderScopeId, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
+    };
+
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: ScopeId {
+            canonical_id: Arc::from(canonical),
+            owner,
+            local_scope: None,
+            binder_scope_id: BinderScopeId::file_scope(owner),
+        },
+        name: Arc::from(name),
+    })) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("ResolveDecl({canonical}#{name}) must anchor, got {other:?}"),
+    }
+}
+
+/// The query-identity key the shared relation authority uses for one
+/// `(source, target, relation)` judgement (the same context composition
+/// the dispatch itself asks under), so a test can inspect that judgement's
+/// memo slot (admitted candidates, kind-distinct slots).
+#[cfg(any(test, feature = "test-support"))]
+pub fn relate_query_key_for_tests(
+    host: &crate::VerterHost,
+    source: crate::semantic_query::SemanticNodeId,
+    target: crate::semantic_query::SemanticNodeId,
+    relation: crate::semantic_query::RelationKind,
+) -> crate::semantic_query::SemanticQueryKey {
+    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
+        .relate_key_for_kind(source, target, relation)
+        .to_query_key()
+}
+
+/// The typed partial reasons the Vue runtime publication boundary would
+/// record for a `keyof <subject>` demand — the exact classification that
+/// decides whether an otherwise-complete result is forced to `ReturnOnly`.
+///
+/// Runs the prelude sequence — normalize the carrier subject, then classify
+/// it — because the classifier judges the POST-normalization subject.
+///
+/// Exposed because the contract is a NEGATIVE one for terminal
+/// subjects: a nominal (`unique symbol`) `typeof` carrier is the answer, not
+/// a failed carrier normalization, and must classify clean. Only the Vue
+/// publication demand is reachable here, since every other context returns
+/// empty before the subject is read.
+#[cfg(any(test, feature = "test-support"))]
+pub fn dispatch_vue_publication_keyof_partial_reasons_for_tests(
+    host: &crate::VerterHost,
+    subject: crate::semantic_query::SemanticNodeId,
+) -> crate::semantic_query::PartialReasonSet {
+    use crate::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, SemanticQueryKey, SurfaceProvenanceContext,
+    };
+
+    let context = ProjectionReductionContext::vue_runtime_object_surface(
+        ProjectionMode::Shallow,
+        SurfaceProvenanceContext::Structural,
+    );
+    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
+        .normalized_carrier_partial_reasons_for_tests(SemanticQueryKey::KeyOf {
+            base: subject,
+            context,
+        })
 }

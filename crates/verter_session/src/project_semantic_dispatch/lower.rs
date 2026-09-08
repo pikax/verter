@@ -21,16 +21,17 @@ use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::facts::{EnumPrimitiveDomain, EnumScalar, LeafTypeFact};
 use verter_type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 
+use super::build::EffectivePreparedValueDecl;
 use super::{map_primitive_name, ProjectSemanticDispatch};
 use crate::resolver_core::bare_name_resolve::{
     resolve_bare_name_in_scope, DeclarationScopePayload,
 };
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
-    DeclIdentity, HashValue, IndexSignature, NodeScopeId, PathSegment, PrimitiveKind,
-    ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceEntry,
-    SurfaceMember, SurfaceView, TupleElement, ValueRootKey,
+    DeclIdentity, HashValue, IndexSignature, NodeScopeId, PrimitiveKind, ProjectionMode,
+    ProjectionReductionContext, QueryError, QueryResult, ScopeId, SemanticNodeData, SemanticNodeId,
+    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceEntry, SurfaceMember,
+    SurfaceView, TupleElement, ValueRootKey,
 };
 
 fn infer_declaration_env_key(name: &str) -> String {
@@ -126,91 +127,344 @@ pub(crate) fn leaf_type_fact_expr(leaf: &LeafTypeFact) -> TypeExpr {
     }
 }
 
+/// Which declaration certifies a member as an authored `unique symbol`, and
+/// therefore which declaration the member's nominal identity anchors on.
+enum UniqueSymbolMemberCertification {
+    /// The value's OWN inline annotation declares the member (an
+    /// object-literal annotation member or a class static): the identity
+    /// anchors on the declaring VALUE declaration.
+    OwnAnnotation,
+    /// The value's annotation references a NAMED type whose declaration
+    /// certifies the member. tsc unifies `typeof a.K` and `typeof b.K`
+    /// through that one named type (`a: I; b: I` both read the interface's
+    /// member), so the identity anchors on the TYPE declaration the
+    /// annotation resolved to — anchoring on either value would mint two
+    /// nominal types where the checker sees one. Carries the resolved
+    /// `(canonical, owner, symbol)` of the certifying type declaration.
+    NamedType(Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>),
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
-    fn unique_symbol_identity_for_resolved_root(
-        &self,
-        root: &ResolvedRootIdentity,
-    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
-        let (canonical_id, owner, symbol, prepared) = self.effective_prepared_value_decl(
-            root.canonical_id.as_ref(),
-            root.owner,
-            root.symbol_name.as_ref(),
-        )?;
-        prepared.type_annotation.is_unique_symbol.then(|| {
-            verter_type_expr::facts::ValueDeclIdentityPart {
-                canonical_id,
-                owner,
-                symbol,
-                member_path: Arc::from([]),
-            }
-        })
-    }
-
-    pub(super) fn unique_symbol_identity_for_value_root(
-        &self,
-        value_root: &ValueRootKey,
-    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
-        let payload = self
-            .ctx
-            .prepared_decl_bundle(value_root.scope.canonical_id.as_ref())
-            .map(|bundle| DeclarationScopePayload::from_bundle(&bundle, value_root.scope.owner));
-        let root = resolve_bare_name_in_scope(
-            self.ctx,
-            value_root.scope.canonical_id.as_ref(),
-            value_root.scope.owner,
-            payload.as_ref(),
-            value_root.name.as_ref(),
-        )?;
-        self.unique_symbol_identity_for_resolved_root(&root)
-    }
-
+    /// The declaring identity a terminal nominal (`unique symbol`) carrier
+    /// records, or `None` for any other node. A single O(1) graph read: the
+    /// identity was minted once at the carrier's build site from facts that
+    /// build already held, so no reader repeats declaration or route
+    /// resolution merely to classify a carrier.
     pub(super) fn unique_symbol_identity_for_typeof_node(
         &self,
         node: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
-        let data = self.graph().node_data(node)?;
-        let (value_root, path) = data.typeof_head()?;
-        if !path.is_empty() || !data.carrier_type_args().is_empty() {
-            return None;
-        }
-        self.unique_symbol_identity_for_value_root(value_root)
+        self.graph()
+            .node_data(node)?
+            .typeof_nominal_identity()
+            .cloned()
     }
 
-    /// Resolve an authored `typeof value` property-key expression to the
-    /// declaration's nominal `unique symbol` identity.
+    /// The WIDENED structural inhabitant of a nominal (`unique symbol`)
+    /// carrier — the bare `symbol` primitive — or `None` when `node` carries
+    /// no nominal identity.
     ///
-    /// Resolution follows the same bare-name and effective value-declaration
-    /// chase as [`Self::build_typeof`], so imports and re-exports mint the
-    /// declaring identity rather than the consumer's local alias.
-    fn unique_symbol_identity_for_typeof(
+    /// A nominal carrier is TERMINAL under carrier resolution: it
+    /// self-resolves, because resolving its head would project the
+    /// annotation down to the shared `symbol` primitive and erase the
+    /// declaring identity that IS the type. Every consumer that asks a
+    /// NOMINAL question (which declaration, which relation) reads the
+    /// carrier directly and must never widen.
+    ///
+    /// A consumer that asks a STRUCTURAL question — which runtime
+    /// constructor a prop emits, which callable role a member plays, which
+    /// member surface a path hop reads — has no nominal question to ask, and
+    /// its `resolved == node` rail means "this reference did not resolve".
+    /// Reading a terminal carrier through that rail turns a program that
+    /// resolves fine into a missing dependency: a `unique symbol`-typed prop
+    /// would lose its `Symbol` runtime constructor and a `unique
+    /// symbol`-typed member would publish as an unresolved role. Those
+    /// consumers widen through THIS one helper instead, so the structural
+    /// answer stays the one the widened primitive always gave.
+    pub(crate) fn widened_nominal_typeof(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        self.graph()
+            .node_data(node)?
+            .typeof_nominal_identity()
+            .is_some()
+            .then(|| {
+                self.graph().intern_node(SemanticNodeData::Primitive(
+                    crate::semantic_query::PrimitiveKind::Symbol,
+                ))
+            })
+    }
+
+    /// Intern the terminal nominal `typeof` carrier for one declaration.
+    ///
+    /// The carrier's HEAD stays the AUTHORED reference — the value root and
+    /// dotted path the source actually wrote. Nominal equality is decided by
+    /// the `identity` PAYLOAD (the declaring `ValueDeclIdentityPart`), so
+    /// canonicalising the head as well would buy nothing and would cost the
+    /// authored spelling every display, provenance, and locator consumer
+    /// reads off the head: `import { TOKEN as T }` would then publish and
+    /// display `typeof TOKEN`, naming a symbol that is not in scope in the
+    /// consuming file. Two references to one declaration therefore intern as
+    /// two nodes that the nominal relation answers EQUAL — which is the
+    /// question the relation exists to answer.
+    pub(super) fn intern_nominal_typeof(
         &self,
-        value_ref: &verter_type_expr::ValueRef,
+        value_root: ValueRootKey,
+        path: Arc<[Arc<str>]>,
+        identity: verter_type_expr::facts::ValueDeclIdentityPart,
+        scope: NodeScopeId,
+    ) -> SemanticNodeId {
+        self.graph().intern_node_with_scope(
+            SemanticNodeData::new_nominal_typeof(value_root, path, identity),
+            scope,
+        )
+    }
+
+    /// The member-level nominal carrier for a member-qualified
+    /// `typeof Root.Member` — the ONE rail a member reference reaches its
+    /// declaring identity through, shared by every typeof resolution arm
+    /// (the evaluator, the path walker, the raising reducer) so no arm
+    /// projects past a nominal member the carrier exists to preserve.
+    ///
+    /// Qualifies exactly when a certification exists for the member as an
+    /// authored `unique symbol` (the `unique_symbol_members` declaration
+    /// fact): the carrier's identity is the declaring anchor plus the
+    /// member path, so `typeof Tokens.A` and `typeof Tokens.B` are two
+    /// nominal types while an inherited `typeof Derived.A` still names the
+    /// class that DECLARES `A` (the heritage chain is chased to the
+    /// declaring class, and stops at any class that re-declares the member
+    /// itself). A member certified through a NAMED type annotation
+    /// (`a: I` where `I` declares the member) anchors on the TYPE
+    /// declaration, so `typeof a.K` and `typeof b.K` name ONE nominal type
+    /// through it. Every other member shape — a non-unique
+    /// annotation, a computed key, a deeper projection — answers `None`
+    /// and projects/widens exactly as a non-nominal member always has.
+    /// Single segment only: a deeper projection reads members of the
+    /// `Symbol` interface, which is the widened primitive's surface.
+    ///
+    /// `root` is the caller's ALREADY-RESOLVED effective value declaration
+    /// for `value_root` — the same bare-name resolution plus export-target
+    /// walk the caller performed to reach this point. Taking it as an
+    /// argument keeps the member rail free of a second identical
+    /// bare-name resolve + prepared-decl walk of the root on the cold path
+    /// of every member-qualified `typeof`, including the common case where
+    /// the member is not a `unique symbol` and the answer is `None`. The
+    /// heritage chase below still resolves each BASE it visits, which the
+    /// caller has not seen.
+    pub(crate) fn member_nominal_typeof(
+        &self,
+        value_root: &ValueRootKey,
+        segments: &[Arc<str>],
+        root: &EffectivePreparedValueDecl,
+        authored_scope: Option<NodeScopeId>,
+    ) -> Option<SemanticNodeId> {
+        let [segment] = segments else {
+            return None;
+        };
+        // The BFS frontier holds only the bases still to resolve; the root
+        // arrives resolved. `visited` is keyed on the EFFECTIVE identity so
+        // two spellings that walk to one declaration are visited once.
+        let mut worklist: Vec<(Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>)> = Vec::new();
+        let mut resolved = Some(root.clone());
+        let mut visited = rustc_hash::FxHashSet::default();
+        loop {
+            let (eff_canonical, eff_owner, eff_symbol, prepared) = match resolved.take() {
+                Some(entry) => entry,
+                None => {
+                    let Some((canonical, owner, symbol)) = worklist.pop() else {
+                        break;
+                    };
+                    match self.effective_prepared_value_decl(
+                        canonical.as_ref(),
+                        owner,
+                        symbol.as_ref(),
+                    ) {
+                        Some(entry) => entry,
+                        None => continue,
+                    }
+                }
+            };
+            if !visited.insert((eff_canonical.clone(), eff_owner, eff_symbol.clone())) {
+                continue;
+            }
+            // WHICH declaration the identity anchors on is part of the
+            // certification, not a constant: the declaration the BFS is
+            // currently visiting is the anchor only for an OWN inline
+            // annotation member or a class static. A member certified
+            // through a NAMED type anchors on that type's declaration —
+            // every value carrying the same annotation names ONE nominal
+            // type through it, exactly as the checker unifies them.
+            if let Some((id_canonical, id_owner, id_symbol)) =
+                match self.unique_symbol_member_certification(&prepared, segment.as_ref()) {
+                    Some(UniqueSymbolMemberCertification::OwnAnnotation) => Some((
+                        Arc::clone(&eff_canonical),
+                        eff_owner,
+                        Arc::clone(&eff_symbol),
+                    )),
+                    Some(UniqueSymbolMemberCertification::NamedType(canonical, owner, symbol)) => {
+                        Some((canonical, owner, symbol))
+                    }
+                    None => None,
+                }
+            {
+                let identity = verter_type_expr::facts::ValueDeclIdentityPart {
+                    canonical_id: id_canonical,
+                    owner: id_owner,
+                    symbol: id_symbol,
+                    member_path: Arc::from(vec![segment.to_string()].into_boxed_slice()),
+                };
+                return Some(match authored_scope {
+                    Some(scope) => self.intern_nominal_typeof(
+                        value_root.clone(),
+                        Arc::from(segments.to_vec().into_boxed_slice()),
+                        identity,
+                        scope,
+                    ),
+                    // No authored scope to anchor the carrier under — intern
+                    // scope-free; the head still carries the authored
+                    // reference every display consumer reads.
+                    None => self
+                        .graph()
+                        .intern_node(SemanticNodeData::new_nominal_typeof(
+                            value_root.clone(),
+                            Arc::from(segments.to_vec().into_boxed_slice()),
+                            identity,
+                        )),
+                });
+            }
+            // A class that DECLARES the member itself — any annotation at
+            // all — is the member's declaring site for this reference: an
+            // own declaration shadows every base's member of the same name,
+            // so the heritage chase stops here. Without this stop a derived
+            // class re-declaring the member with a NON-nominal type would
+            // inherit the base's nominal identity and the relation would
+            // prove the override's actual type disjoint from itself.
+            if self.value_decl_declares_own_member(&prepared, segment.as_ref()) {
+                return None;
+            }
+            for (base_canonical, base_owner, base_name, _args) in
+                self.class_heritage_bases(eff_canonical.as_ref(), eff_owner, eff_symbol.as_ref())
+            {
+                worklist.push((base_canonical, base_owner, base_name));
+            }
+        }
+        None
+    }
+
+    /// Which declaration certifies a member as an authored `unique symbol`
+    /// — and therefore which declaration the member's nominal identity
+    /// anchors on.
+    fn unique_symbol_member_certification(
+        &self,
+        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        member: &str,
+    ) -> Option<UniqueSymbolMemberCertification> {
+        if prepared
+            .type_annotation
+            .unique_symbol_members
+            .iter()
+            .any(|name| name == member)
+        {
+            return Some(UniqueSymbolMemberCertification::OwnAnnotation);
+        }
+        let alias_name = match &prepared.type_annotation.reference_head {
+            verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, .. } => {
+                local_name.as_ref()
+            }
+            verter_type_expr::facts::AuthoredReferenceHeadFact::Qualified {
+                local_root,
+                member_path,
+                ..
+            } if member_path.is_empty() => local_root.as_ref(),
+            _ => return None,
+        };
+        let root = prepared.name_resolution.get(alias_name)?;
+        self.ctx
+            .prepared_type_decl_return_only(
+                root.canonical_id.as_ref(),
+                root.owner,
+                root.symbol_name.as_ref(),
+            )
+            .is_some_and(|ty| ty.unique_symbol_members.iter().any(|name| name == member))
+            .then(|| {
+                UniqueSymbolMemberCertification::NamedType(
+                    Arc::clone(&root.canonical_id),
+                    root.owner,
+                    Arc::clone(&root.symbol_name),
+                )
+            })
+    }
+
+    /// Whether a value declaration's OWN static surface declares a property
+    /// with this name (any annotation) — the heritage shadow stop for the
+    /// member nominal rail. Reads the constructor-shape fact a class
+    /// declaration already carries; non-class values have no heritage bases
+    /// to shadow, so an absent shape answers `false` and costs nothing.
+    fn value_decl_declares_own_member(
+        &self,
+        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        member: &str,
+    ) -> bool {
+        prepared.object_shape.as_ref().is_some_and(|shape| {
+            shape.members.iter().any(|fact| {
+                matches!(
+                    fact,
+                    verter_type_expr::facts::ObjectMemberFact::Property(property)
+                        if property.string_name() == Some(member)
+                )
+            })
+        })
+    }
+
+    /// Lower an authored `typeof value` key through the ordinary type-domain
+    /// path and recover the declaration's nominal identity from its result.
+    ///
+    /// This deliberately shares the full single-root-first lookup, namespace
+    /// fallback, and trailing [`SemanticQueryKey::ProjectPath`] projection of
+    /// the main [`TypeExpr::TypeOf`] arm. Only a bare name or one qualified
+    /// member may certify a nominal key; deeper projections stay computed even
+    /// when an intermediate prefix is nominal. Keeping a second path parser
+    /// here can truncate qualified references or certify a shadowed namespace
+    /// prefix.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_typeof_for_authored_key(
+        &self,
+        computed: &TypeExpr,
+        infer_binders: &crate::semantic_query::InferBinderFactory,
+        env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
         name_resolution: &FxHashMap<Arc<str>, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
-    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
-        if value_ref.path.len() != 1 || !value_ref.type_args.is_empty() {
-            return None;
-        }
-        let (scope_canonical, scope_owner) = match scope {
-            NodeScopeId::File {
-                canonical_id,
-                owner,
-                ..
-            } => (canonical_id.as_ref(), *owner),
-            NodeScopeId::Global => return None,
+        shadowing: &ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        reduction_context: ProjectionReductionContext,
+    ) -> (
+        SemanticNodeId,
+        Option<verter_type_expr::facts::ValueDeclIdentityPart>,
+    ) {
+        let node = self.lower_type_expr_with_infer_factory(
+            infer_binders,
+            computed,
+            env,
+            scope,
+            name_resolution,
+            scope_payload,
+            shadowing,
+            substitutions,
+            reduction_context,
+        );
+        let identity = match computed {
+            // The MARKER on the produced node is the authority for "this
+            // reference denotes a `unique symbol` declaration"; the authored
+            // path length is not. An arity test here would publish a marked
+            // carrier under `Computed` for the reference shapes it excludes,
+            // giving one declaration two key representations that never merge.
+            // Instantiation arguments still disqualify the key: `typeof
+            // C.make<string>` names an instantiation, not a declaration.
+            TypeExpr::TypeOf(value_ref) if value_ref.type_args.is_empty() => {
+                self.unique_symbol_identity_for_typeof_node(node)
+            }
+            _ => None,
         };
-        let root_name = value_ref.path[0].as_str();
-        let root = name_resolution.get(root_name).cloned().or_else(|| {
-            resolve_bare_name_in_scope(
-                self.ctx,
-                scope_canonical,
-                scope_owner,
-                scope_payload,
-                root_name,
-            )
-        })?;
-        self.unique_symbol_identity_for_resolved_root(&root)
+        (node, identity)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -236,26 +490,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) => {
                 verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity.clone())
             }
-            verter_type_expr::AuthoredPropertyKey::Computed(
-                computed @ TypeExpr::TypeOf(value_ref),
-            ) => self
-                .unique_symbol_identity_for_typeof(value_ref, scope, name_resolution, scope_payload)
-                .map(verter_type_expr::AuthoredPropertyKey::UniqueSymbol)
-                .unwrap_or_else(|| {
-                    verter_type_expr::AuthoredPropertyKey::Computed(
-                        self.lower_type_expr_with_infer_factory(
-                            infer_binders,
-                            computed,
-                            env,
-                            scope,
-                            name_resolution,
-                            scope_payload,
-                            shadowing,
-                            substitutions,
-                            reduction_context,
-                        ),
-                    )
-                }),
+            verter_type_expr::AuthoredPropertyKey::Computed(computed @ TypeExpr::TypeOf(_)) => {
+                let (node, identity) = self.lower_typeof_for_authored_key(
+                    computed,
+                    infer_binders,
+                    env,
+                    scope,
+                    name_resolution,
+                    scope_payload,
+                    shadowing,
+                    substitutions,
+                    reduction_context,
+                );
+                identity
+                    .map(verter_type_expr::AuthoredPropertyKey::UniqueSymbol)
+                    .unwrap_or(verter_type_expr::AuthoredPropertyKey::Computed(node))
+            }
             verter_type_expr::AuthoredPropertyKey::Computed(computed) => {
                 verter_type_expr::AuthoredPropertyKey::Computed(
                     self.lower_type_expr_with_infer_factory(
@@ -1746,14 +1996,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         crate::project_semantic_dispatch::build::integer_convention_index_key(*n)
                             .map(IndexKey::Number)
                     }
-                    TypeExpr::TypeOf(value_ref) => self
-                        .unique_symbol_identity_for_typeof(
-                            value_ref,
+                    computed @ TypeExpr::TypeOf(_) => {
+                        let (node, identity) = self.lower_typeof_for_authored_key(
+                            computed,
+                            infer_binders,
+                            env,
                             scope,
                             name_resolution,
                             scope_payload,
+                            shadowing,
+                            substitutions,
+                            reduction_context,
+                        );
+                        Some(
+                            identity
+                                .map(IndexKey::UniqueSymbol)
+                                .unwrap_or(IndexKey::Computed(node)),
                         )
-                        .map(IndexKey::UniqueSymbol),
+                    }
                     _ => None,
                 };
                 let index_key = match folded_key {
@@ -2001,36 +2261,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // graph carrier-preserving instead of detonating an
                 // Expanded materialisation at build time.
                 let single_root: Arc<str> = Arc::from(value_ref.path[0].as_str());
-                let single_query = self.execute_type_node(self.typeof_key_for(
-                    ValueRootKey {
-                        scope: ScopeId {
-                            canonical_id: Arc::clone(&scope_canonical_id),
-                            owner: scope_owner,
-                            local_scope: None,
-                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                                scope_owner,
-                            ),
-                        },
-                        name: Arc::clone(&single_root),
+                let remaining: Arc<[Arc<str>]> = Arc::from(
+                    value_ref.path[1..]
+                        .iter()
+                        .map(|segment| Arc::<str>::from(segment.as_str()))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+                let root_key = ValueRootKey {
+                    scope: ScopeId {
+                        canonical_id: Arc::clone(&scope_canonical_id),
+                        owner: scope_owner,
+                        local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            scope_owner,
+                        ),
                     },
+                    name: Arc::clone(&single_root),
+                };
+                let mut result = match self.execute_type_node(self.typeof_key_with_path(
+                    root_key,
+                    Arc::clone(&remaining),
                     reduction_context,
-                ));
-                let (mut result, consumed_segments) = match single_query {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => (id, 1usize),
+                )) {
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ if value_ref.path.len() > 1 => {
-                        // Namespace-member fallback: join the first two
-                        // segments into `Ns.Foo` and let
-                        // `resolve_namespace_member_from_facts` interpret
-                        // the dotted prefix when the first segment is a
-                        // namespace import alias.
                         let joined: Arc<str> = Arc::<str>::from(format!(
                             "{}.{}",
                             value_ref.path[0], value_ref.path[1]
                         ));
-                        match self.execute_type_node(self.typeof_key_for(
+                        let rest: Arc<[Arc<str>]> = Arc::from(
+                            value_ref.path[2..]
+                                .iter()
+                                .map(|segment| Arc::<str>::from(segment.as_str()))
+                                .collect::<Vec<_>>()
+                                .into_boxed_slice(),
+                        );
+                        match self.execute_type_node(self.typeof_key_with_path(
                             ValueRootKey {
                                 scope: ScopeId {
-                                    canonical_id: scope_canonical_id,
+                                    canonical_id: Arc::clone(&scope_canonical_id),
                                     owner: scope_owner,
                                     local_scope: None,
                                     binder_scope_id:
@@ -2040,40 +2310,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 },
                                 name: joined,
                             },
+                            rest,
                             reduction_context,
                         )) {
-                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => {
-                                (id, 2usize)
-                            }
+                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                             _ => return self.opaque(QueryError::Miss),
                         }
                     }
                     _ => return self.opaque(QueryError::Miss),
                 };
-                if value_ref.path.len() > consumed_segments {
-                    let path: Arc<[PathSegment]> = Arc::from(
-                        value_ref.path[consumed_segments..]
-                            .iter()
-                            .map(|segment| {
-                                PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
-                                    Arc::from(segment.as_str()),
-                                ))
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    );
-                    result = match self.execute_type_node(SemanticQueryKey::ProjectPath {
-                        base: result,
-                        path,
-                        context: crate::semantic_query::ProjectionReductionContext::published(
-                            ProjectionMode::Navigate,
-                        )
-                        .with_orthogonal_axes_from(reduction_context),
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                        _ => return self.opaque(QueryError::Miss),
-                    };
-                }
                 // Instantiation expression: `typeof C.make<string>` applies
                 // the lowered type arguments to the resolved generic
                 // signature — positional binder substitution through the

@@ -360,6 +360,7 @@ pub(crate) fn render_node(
         SemanticNodeData::IndexedAccess { .. } => "IndexedAccess(…)".to_owned(),
         SemanticNodeData::Mapped { .. } => "Mapped(…)".to_owned(),
         SemanticNodeData::TypeOf(_) => "TypeOf(…)".to_owned(),
+        SemanticNodeData::TypeOfNominal(_) => "TypeOfNominal(…)".to_owned(),
         SemanticNodeData::TypeParam { display_name, .. } => format!("TypeParam({display_name})"),
         SemanticNodeData::Infer { name, .. } => format!("Infer({name})"),
         SemanticNodeData::InferRef { name, .. } => format!("InferRef({name})"),

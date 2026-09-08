@@ -456,7 +456,9 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         SemanticNodeData::KeyOf { .. } => SemanticNodeKind::KeyOf,
         SemanticNodeData::IndexedAccess { .. } => SemanticNodeKind::IndexedAccess,
         SemanticNodeData::Mapped { .. } => SemanticNodeKind::Mapped,
-        SemanticNodeData::TypeOf(_) => SemanticNodeKind::TypeOf,
+        SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
+            SemanticNodeKind::TypeOf
+        }
         SemanticNodeData::TypeParam { .. } => SemanticNodeKind::TypeParam,
         SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. } => {
             SemanticNodeKind::Other {
@@ -524,7 +526,7 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             Arc::from(format!("IndexedAccess({})", index_key_label(index)))
         }
         SemanticNodeData::Mapped { .. } => Arc::from("Mapped"),
-        SemanticNodeData::TypeOf(_) => {
+        SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
             let (value_root, _path) = data.typeof_head().expect("TypeOf carrier head");
             Arc::from(format!("typeof {}", value_root.name))
         }

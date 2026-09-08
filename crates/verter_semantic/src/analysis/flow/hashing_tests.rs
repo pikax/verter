@@ -6,29 +6,12 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::analysis::flow::flow_graph::build_function_flow_graph;
+use crate::analysis::flow::flow_graph::build_function_flow_graph_for_test as build_function_flow_graph;
 use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
-use crate::analysis::flow::{
-    build_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource,
-};
+use crate::analysis::flow::FunctionBodySkeleton;
 
 fn skeleton_of(source: &str) -> FunctionBodySkeleton {
-    let allocator = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::ts();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
-    assert!(
-        ret.errors.is_empty(),
-        "fixture must parse: {:?}",
-        ret.errors
-    );
-    for statement in &ret.program.body {
-        if let oxc_ast::ast::Statement::FunctionDeclaration(function) = statement {
-            if let Some(body_source) = FunctionBodySource::from_function(function) {
-                return build_function_body_skeleton(&body_source);
-            }
-        }
-    }
-    panic!("fixture must contain a bodied function declaration");
+    crate::analysis::flow::skeleton_tests::indexed_skeleton_of(source)
 }
 
 fn slice_hash_of(source: &str, path: &[&str]) -> FlowSliceHash {
@@ -48,6 +31,42 @@ fn slice_hash_of(source: &str, path: &[&str]) -> FlowSliceHash {
 fn slice_hash_is_deterministic() {
     let source = "function f() { const a = 1; const b = 2; return { a, b } }";
     assert_eq!(slice_hash_of(source, &["b"]), slice_hash_of(source, &["b"]));
+}
+
+#[test]
+fn slice_hash_distinguishes_source_type_query_authority_and_runtime_reads() {
+    let source = "function f(left,right) { return accept(0 as typeof left); }";
+    assert_ne!(
+        slice_hash_of(source, &[]),
+        slice_hash_of(&source.replace("typeof left", "typeof right"), &[]),
+        "query target changes selected authority"
+    );
+    let runtime = "function f(left,right) { return accept(left); }";
+    assert_ne!(
+        slice_hash_of(source, &[]),
+        slice_hash_of(runtime, &[]),
+        "source query and runtime read edges have distinct semantic hashes"
+    );
+    assert_eq!(
+        slice_hash_of(source, &[]),
+        slice_hash_of(&format!("\n\n{source}"), &[]),
+        "query coordinates remain frame-relative"
+    );
+}
+
+#[test]
+fn slice_hash_preserves_composed_read_paths_and_ignores_disjoint_members() {
+    let before = "function f() { let x = {a: {b: 1}, c: {b: 2}, unused: 3}; return x.a; }";
+    let disjoint = "function f() { let x = {a: {b: 1}, c: {b: 2}, renamed: 4}; return x.a; }";
+    let projected = "function f() { let x = {a: {b: 1}, c: {b: 2}, unused: 3}; return x.c; }";
+    assert_eq!(
+        slice_hash_of(before, &["b"]),
+        slice_hash_of(disjoint, &["b"])
+    );
+    assert_ne!(
+        slice_hash_of(before, &["b"]),
+        slice_hash_of(projected, &["b"])
+    );
 }
 
 /// Two demands over one body select different subgraphs and hash

@@ -8,7 +8,11 @@
 //! guard); consumers reach the cell through the crate-root re-export
 //! (`crate::ParsedEvalProgram`).
 
-use std::sync::Arc;
+use std::{cell::OnceCell, rc::Rc, sync::Arc};
+use verter_semantic::analysis::function_program::{
+    build_function_program_index_with_nodes, FunctionProgramEntry, FunctionProgramIndex,
+    FunctionProgramNodes, ResolvedFunctionNode,
+};
 
 type CachedEvalProgramAst<'a> = oxc_ast::ast::Program<'a>;
 
@@ -27,10 +31,24 @@ self_cell::self_cell!(
     }
 );
 
+struct IndexedProgramFunctions<'a> {
+    index: Arc<FunctionProgramIndex>,
+    nodes: FunctionProgramNodes<'a>,
+}
+
+self_cell::self_cell!(
+    struct IndexedProgramFunctionsCell {
+        owner: Rc<ParsedEvalProgramCell>,
+        #[covariant]
+        dependent: IndexedProgramFunctions,
+    }
+);
+
 /// A retained eval-program parse: the `self_cell` owner/dependent pair plus
 /// the parse-outcome facts walkers need (`had_errors`).
 pub(crate) struct ParsedEvalProgram {
-    cell: ParsedEvalProgramCell,
+    cell: Rc<ParsedEvalProgramCell>,
+    functions: OnceCell<IndexedProgramFunctionsCell>,
     /// The parse produced RECOVERABLE errors (`ParserReturn::errors` was
     /// non-empty). An error-recovered AST can silently DROP real code, so
     /// provers of non-usage (e.g. macro-usage liveness) must fail open when
@@ -70,12 +88,74 @@ impl ParsedEvalProgram {
                 result.program
             },
         );
-        (!panicked).then_some(Self { cell, had_errors })
+        (!panicked).then_some(Self {
+            cell: Rc::new(cell),
+            functions: OnceCell::new(),
+            had_errors,
+        })
     }
 
     /// The parsed program AST, borrowed from the retained arena.
     pub(crate) fn borrow_dependent(&self) -> &CachedEvalProgramAst<'_> {
         self.cell.borrow_dependent()
+    }
+
+    /// Demand the content-free index and register arena addresses once under
+    /// this retained parse owner. Neither the arena nor its node table leaves it.
+    pub(crate) fn function_program_index(
+        &self,
+        owners: &verter_semantic::analysis::top_level_owners::TopLevelOwnerTable,
+        canonical: Arc<str>,
+        parse_env_hash: &crate::types::Hash16,
+    ) -> Arc<FunctionProgramIndex> {
+        let cell = self.functions.get_or_init(|| {
+            IndexedProgramFunctionsCell::new(Rc::clone(&self.cell), |owner| {
+                let (index, nodes) = build_function_program_index_with_nodes(
+                    owner.borrow_dependent(),
+                    owner.borrow_owner().source.as_ref(),
+                    owners,
+                    canonical,
+                );
+                IndexedProgramFunctions {
+                    index: Arc::new(crate::decl_body_memo::fold_flow_body_env_identity(
+                        &index,
+                        parse_env_hash,
+                        owner.borrow_owner().source_type,
+                    )),
+                    nodes,
+                }
+            })
+        });
+        Arc::clone(&cell.borrow_dependent().index)
+    }
+
+    /// Execute a pure lowerer against one exact retained function address.
+    /// The higher-ranked callback returns only owned output, never an arena borrow.
+    pub(crate) fn with_indexed_function<R>(
+        &self,
+        entry: &FunctionProgramEntry,
+        lower: impl for<'a> FnOnce(ResolvedFunctionNode<'a>, &'a FunctionProgramEntry) -> R,
+    ) -> Option<R> {
+        let cell = self.functions.get()?;
+        let retained = cell.borrow_dependent();
+        let indexed = retained.index.get(&entry.key)?.entry();
+        if indexed.locator != entry.locator
+            || indexed.span != entry.span
+            || indexed.body_span != entry.body_span
+            || indexed.flow_body_exact_hash != entry.flow_body_exact_hash
+        {
+            return None;
+        }
+        Some(lower(retained.nodes.get(&entry.key)?, indexed))
+    }
+
+    pub(crate) fn with_indexed_call<R>(
+        &self,
+        span: verter_span::Span,
+        lower: impl for<'a> FnOnce(&'a oxc_ast::ast::CallExpression<'a>) -> R,
+    ) -> Option<R> {
+        let cell = self.functions.get()?;
+        Some(lower(cell.borrow_dependent().nodes.call(span)?))
     }
 
     /// Whether the parse recovered from errors (`ParserReturn::errors`

@@ -489,9 +489,6 @@ struct FlowSliceDemandSite {
     slice_key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
     /// The demanded member for a member-projection demand.
     demanded_member: Option<Arc<str>>,
-    /// The frame's binding inventory — the cross-frame binding authority
-    /// the demand planner resolves slot identities against.
-    inventory: super::flow_solve::FlowBindingInventory,
 }
 
 /// A demand site that could not be derived: the typed no-value failure
@@ -2023,7 +2020,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             resources,
             additional_requirements: Arc::from([]),
         };
-        let plan = match build_flow_demand_plan(request, &bound, &planned, &site.inventory) {
+        let plan = match build_flow_demand_plan(request, &bound, &planned) {
             Ok(plan) => plan,
             Err(error) => {
                 use super::flow_solve::FlowDemandPlanError as E;
@@ -3439,9 +3436,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             slice_key_function,
             slice_key,
             demanded_member,
-            inventory: super::flow_solve::FlowBindingInventory {
-                bindings: Arc::clone(&entry.bindings),
-            },
         })
     }
 
@@ -3525,7 +3519,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             slice_key_function,
             slice_key,
             demanded_member,
-            inventory: _,
         } = site;
         let canonical = key.function.declaration_slot.defining_canonical.as_ref();
         let owner = key.function.declaration_slot.owner;
@@ -4692,12 +4685,6 @@ enum PredicateNarrowConsumption {
     Undecided,
 }
 
-#[derive(Default)]
-struct NodeDisjointness {
-    provably_disjoint: bool,
-    nominal_identity_missing: bool,
-}
-
 fn slice_expr_is_exact_subject_read(
     expr: &crate::flow_slice_content::SliceExpr,
     subject: &crate::flow_slice_content::SliceNarrowSubject,
@@ -4707,13 +4694,19 @@ fn slice_expr_is_exact_subject_read(
     }
     match (expr, &subject.root) {
         (
-            crate::flow_slice_content::SliceExpr::Param { ordinal },
-            crate::flow_slice_content::SliceNarrowRoot::Param(subject_ordinal),
-        ) => ordinal == subject_ordinal,
+            crate::flow_slice_content::SliceExpr::Param { binding, .. },
+            crate::flow_slice_content::SliceNarrowRoot::Param {
+                binding: subject_binding,
+                ..
+            },
+        ) => binding == subject_binding,
         (
-            crate::flow_slice_content::SliceExpr::Local { name, .. },
-            crate::flow_slice_content::SliceNarrowRoot::Local(subject_name),
-        ) => name == subject_name,
+            crate::flow_slice_content::SliceExpr::Local { binding, .. },
+            crate::flow_slice_content::SliceNarrowRoot::Local {
+                binding: subject_binding,
+                ..
+            },
+        ) => binding == subject_binding,
         _ => false,
     }
 }
@@ -5477,38 +5470,54 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     crate::semantic_query::PropertyKey::from_js_number(*value),
                 ))
             }
-            // A SYMBOL-valued key is the one nameable form the value
-            // channel cannot carry: a `unique symbol` names exactly one
-            // nominal property, and the evaluator flattens its value to
-            // the bare `symbol` primitive, losing the identity that IS
-            // the name. So the AUTHORED key names it — the same carrier
-            // the whole-literal leaf answer produced, resolved by the
-            // same downstream reader.
-            //
+            // A `unique symbol` key names exactly ONE nominal property, and
+            // the value channel carries that uniqueness: the read keeps the
+            // `typeof` carrier whose DECLARING identity is the name. Name
+            // the member by that identity — and by NOTHING else: a `typeof`
+            // value that carries no nominal identity is an unread key (a
+            // deferred shell the channel did not resolve), which leaves the
+            // key SET unknown exactly like every other unread value, never
+            // over-named from the authored spelling.
+            Some(SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_)) => self
+                .dispatch
+                .unique_symbol_identity_for_typeof_node(node)
+                .map(crate::semantic_query::AuthoredPropertyKey::UniqueSymbol),
             // A NON-unique `symbol` key genuinely provisions an index
             // signature rather than one property, and is over-named here.
             // That is not a new divergence: it is exactly what the leaf
             // answer this replaces already did, and telling the two apart
-            // needs the symbol's uniqueness on the value channel, which
-            // is the same missing fact.
+            // needs the key's own uniqueness, which a bare `symbol` value
+            // does not have.
             Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => {
-                match authored.cloned_known() {
-                    Some(known) => Some(crate::semantic_query::AuthoredPropertyKey::from_known(
-                        known,
-                    )),
-                    None => match authored {
-                        verter_type_expr::AuthoredPropertyKey::Computed(ty) => {
-                            Some(crate::semantic_query::AuthoredPropertyKey::Computed(
-                                self.lower_key_type(ty),
-                            ))
-                        }
-                        _ => None,
-                    },
-                }
+                self.authored_symbol_key(authored)
             }
             // Anything else — an OPEN `string` / `number` key, an
             // unresolved read — leaves the surface's key SET unknown.
             _ => None,
+        }
+    }
+
+    /// Name a symbol-valued member from its AUTHORED key — the same carrier
+    /// the whole-literal leaf answer produced, resolved by the same
+    /// downstream reader. The fallback when the value channel carries no
+    /// nominal identity of its own.
+    fn authored_symbol_key(
+        &self,
+        authored: &verter_type_expr::AuthoredPropertyKey<
+            verter_type_expr::TypeExpr,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
+    ) -> Option<crate::semantic_query::AuthoredPropertyKey> {
+        match authored.cloned_known() {
+            Some(known) => Some(crate::semantic_query::AuthoredPropertyKey::from_known(
+                known,
+            )),
+            None => match authored {
+                verter_type_expr::AuthoredPropertyKey::Computed(ty) => Some(
+                    crate::semantic_query::AuthoredPropertyKey::Computed(self.lower_key_type(ty)),
+                ),
+                _ => None,
+            },
         }
     }
 
@@ -5527,6 +5536,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// conditional-arm nesting additionally enters the
     /// conditional-definition set; an unconditional rebind of the same
     /// name clears it.
+    fn parameter_narrow_root(
+        &self,
+        ordinal: u32,
+    ) -> Option<crate::flow_slice_content::SliceNarrowRoot> {
+        let binding = self.param_names.get(ordinal as usize)?.binding?;
+        Some(crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, binding })
+    }
+
+    fn existing_local_narrow_root(
+        &self,
+        name: &str,
+    ) -> Option<crate::flow_slice_content::SliceNarrowRoot> {
+        self.narrowings
+            .iter()
+            .find_map(|(subject, _)| match &subject.root {
+                crate::flow_slice_content::SliceNarrowRoot::Local {
+                    name: candidate, ..
+                } if candidate.as_ref() == name => Some(subject.root.clone()),
+                _ => None,
+            })
+    }
     fn bind_local(
         &mut self,
         name: &str,
@@ -5573,8 +5603,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // A (re)binding replaces the binding's value: every narrow fact a
         // guard established about the OLD value — at the root or under
         // any member path — dies with it.
-        let root = crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(name));
-        self.narrowings.retain(|(subject, _)| subject.root != root);
+        let root = self.existing_local_narrow_root(name);
+        self.narrowings
+            .retain(|(subject, _)| Some(&subject.root) != root.as_ref());
     }
 
     /// Record the authored declared type of a declaration separately from its
@@ -5608,7 +5639,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         target: &crate::flow_slice_content::SliceNarrowSubject,
     ) -> Option<SemanticNodeId> {
-        if let crate::flow_slice_content::SliceNarrowRoot::Local(name) = &target.root {
+        if let crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } = &target.root {
             if !self.locals.contains_key(name.as_ref())
                 && !self.var_locals.contains_key(name.as_ref())
             {
@@ -5616,10 +5647,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
         }
         match &target.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
+            crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => {
                 self.params.get(*ordinal as usize).copied()
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+            crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } => {
                 if self.locals.contains_key(name.as_ref()) {
                     self.declared_locals.get(name.as_ref()).copied()
                 } else {
@@ -5649,12 +5680,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // manufacture `number | number` instead of deduplicating the
             // assignment path.
             let current = match &target.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => self
+                crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_writes
                     .get(ordinal)
                     .copied()
                     .or_else(|| self.params.get(*ordinal as usize).copied()),
-                crate::flow_slice_content::SliceNarrowRoot::Local(name) => self
+                crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } => self
                     .locals
                     .get(name.as_ref())
                     .copied()
@@ -5952,7 +5983,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.assignment_node_for_target(target, node)
         };
         match &target.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
+            crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => {
                 let ordinal = *ordinal;
                 self.narrowings
                     .retain(|(subject, _)| subject.root != target.root);
@@ -5963,7 +5994,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     );
                 }
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+            crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } => {
                 let kind = if self.locals.contains_key(name.as_ref()) {
                     crate::flow_slice_content::SliceBindingKind::Let
                 } else {
@@ -6809,10 +6840,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // segments from it, so a guarded member read can never see the
         // pre-narrow union.
         let overlay_root = param_ordinal
-            .map(crate::flow_slice_content::SliceNarrowRoot::Param)
+            .and_then(|ordinal| self.parameter_narrow_root(ordinal))
             .or_else(|| {
                 (self.locals.contains_key(head) || self.var_locals.contains_key(head))
-                    .then(|| crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(head)))
+                    .then(|| self.existing_local_narrow_root(head))
+                    .flatten()
             });
         if let Some(root) = overlay_root {
             let segments: Vec<Arc<str>> = value_ref.path[1..]
@@ -7052,12 +7084,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             node
         } else {
             match &subject.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => self
+                crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_writes
                     .get(ordinal)
                     .copied()
                     .or_else(|| self.params.get(*ordinal as usize).copied())?,
-                crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+                crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } => {
                     self.read_local(name.as_ref())?
                 }
             }
@@ -7253,75 +7285,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Whether two nodes have a provably empty intersection. The authority is
-    /// deliberately conservative: concrete primitive/literal tag conflicts,
-    /// or two structural surfaces with the same required member carrying
-    /// conflicting concrete tags. Different object key sets can overlap and
-    /// therefore are never declared disjoint here.
+    /// Whether `a` and `b` can have a common inhabitant, through the SAME
+    /// sole relation authority the assignability question goes to.
     ///
-    /// The tag-level half DELEGATES to the crate's sole proven-disjoint
-    /// authority ([`super::canonical_algebra::tag_level_disjoint`] — TS
-    /// literal identity with SameValueZero numbers, the `undefined`/`void`
-    /// widening pair, conservative `false` for every undecided shape), so
-    /// this consumer cannot drift from the canonical intersection collapse
-    /// and the relation engine. This site adds ONLY the nominal-identity
-    /// axis the authority does not model: a `symbol` operand has no
-    /// tag-level identity to compare, so a narrow over one is undecidable
-    /// here rather than provably anything.
-    fn nodes_provably_disjoint(
+    /// The evaluator owns NO relation classifier of its own. `Disjoint`
+    /// carries the authority's disjointness PROOF (which this consumer then
+    /// applies to the narrow), `Overlaps` means no such proof exists, and
+    /// `Undecided` is no fact at all — the caller records the typed
+    /// nominal-relation gap and never treats it as either answer.
+    fn comparable(
         &self,
-        left: SemanticNodeId,
-        right: SemanticNodeId,
-    ) -> NodeDisjointness {
-        let graph = self.dispatch.graph();
-        let tag_relation = |a: SemanticNodeId, b: SemanticNodeId| -> NodeDisjointness {
-            let is_symbol = |id: SemanticNodeId| {
-                matches!(
-                    graph.node_data(id).as_deref(),
-                    Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol))
-                )
-            };
-            NodeDisjointness {
-                provably_disjoint: super::canonical_algebra::tag_level_disjoint(graph, a, b),
-                nominal_identity_missing: is_symbol(a) || is_symbol(b),
-            }
-        };
-
-        let relation = tag_relation(left, right);
-        if relation.provably_disjoint || relation.nominal_identity_missing {
-            return relation;
-        }
-        let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
-        let (Some(left_view), Some(right_view)) = (
-            self.dispatch.resolve_typeinfo_surface_view(left, context),
-            self.dispatch.resolve_typeinfo_surface_view(right, context),
-        ) else {
-            return NodeDisjointness::default();
-        };
-        let mut relation = NodeDisjointness::default();
-        for left_member in left_view.positive_members() {
-            if left_member.optional {
-                continue;
-            }
-            let Some(key) = left_member.key.cloned_known() else {
-                continue;
-            };
-            let crate::semantic_query::SurfaceKeyProjection::Exact(right_member) =
-                right_view.project_known_key(&key)
-            else {
-                continue;
-            };
-            if right_member.optional {
-                continue;
-            }
-            let member_relation = tag_relation(left_member.value, right_member.value);
-            relation.nominal_identity_missing |= member_relation.nominal_identity_missing;
-            if member_relation.provably_disjoint {
-                relation.provably_disjoint = true;
-                break;
-            }
-        }
-        relation
+        a: SemanticNodeId,
+        b: SemanticNodeId,
+    ) -> super::relation::ComparabilityVerdict {
+        self.dispatch.nodes_comparable(a, b)
     }
 
     /// Apply a guard's facts for one branch (`positive` = the branch the
@@ -8039,10 +8016,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return;
         }
         match &subject.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
+            crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => {
                 state.param_writes.insert(*ordinal, node);
             }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+            crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } => {
                 if let Some(slot) = state.locals.get_mut(name.as_ref()) {
                     *slot = node;
                 } else if let Some(slot) = state.var_locals.get_mut(name.as_ref()) {
@@ -8090,12 +8067,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             node
         } else {
             match &subject.root {
-                crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => self
+                crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_writes
                     .get(ordinal)
                     .copied()
                     .or_else(|| self.params.get(*ordinal as usize).copied())?,
-                crate::flow_slice_content::SliceNarrowRoot::Local(name) => self
+                crate::flow_slice_content::SliceNarrowRoot::Local { name, .. } => self
                     .locals
                     .get(name.as_ref())
                     .or_else(|| self.var_locals.get(name.as_ref()))
@@ -8633,14 +8610,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     /// [`Self::narrow_to_predicate_target`] carrying the CONSUMPTION
     /// verdict — whether the evaluator genuinely consumed the predicate
-    /// fact, and whether every relation outcome that consumption asked
-    /// was decided. This is what the guard twin's call evidence is
-    /// recorded from: a fact the evaluator could not consume at all (a
+    /// fact, and whether the narrow-direction obligation it asked was
+    /// decided. This is what the guard twin's call evidence is recorded
+    /// from: a fact the evaluator could not consume at all (a
     /// frame-shadowed target, an unmodelled subject) is
     /// [`PredicateNarrowConsumption::NotConsumed`] — no evidence; a
-    /// consumed fact whose relation oracle answered `None` anywhere is
-    /// [`PredicateNarrowConsumption::Undecided`] — evidence with the
-    /// relation obligation left unclaimed.
+    /// consumed fact whose REVERSE-ASSIGNABILITY ask (the narrow-direction
+    /// obligation above) answered `None` is
+    /// [`PredicateNarrowConsumption::Undecided`] — evidence with that
+    /// obligation left unclaimed. The `Comparable` ask is deliberately NOT
+    /// folded into this verdict: its undecided case is recorded as the
+    /// typed `NominalRelation` gap (and cannot warm) but does not un-consume
+    /// the predicate — the evaluator did read and apply the checker's
+    /// intersection rule either way.
     fn narrow_to_predicate_target_consuming(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
@@ -8691,8 +8673,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Consumption::Decided,
                 );
             }
-            let relation = self.nodes_provably_disjoint(current, target_node);
-            if relation.nominal_identity_missing {
+            // Disjointness is not decided here. The evaluator owns no
+            // relation classifier: it asks the shared authority whether the
+            // subject and the predicate target can overlap, and consumes the
+            // authority's disjointness PROOF. An undecided verdict is a typed
+            // gap, never a guessed direction.
+            use super::relation::ComparabilityVerdict;
+            let comparable = self.comparable(current, target_node);
+            if matches!(comparable, ComparabilityVerdict::Undecided) {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
                     crate::semantic_query::FlowGap::NominalRelation,
                 ));
@@ -8706,7 +8694,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             } else {
                 Consumption::Decided
             };
-            if !relation.provably_disjoint {
+            let ComparabilityVerdict::Disjoint(ref proof) = comparable else {
+                let intersection = self
+                    .dispatch
+                    .intern_normalized_union_or_intersection(&[current, target_node], false);
+                return (
+                    GuardNarrowing::Narrowed(subject.clone(), intersection),
+                    consumption,
+                );
+            };
+            // The pair is PROVED disjoint, and the proof carries the
+            // CHECKER'S intersection-reduction answer for exactly this
+            // pair. A unit-discriminant conflict (disjoint tags, distinct
+            // `unique symbol` identities, a conflicting shared REQUIRED
+            // member whose values are both unit types) reduces the
+            // intersection to `never`; a conflict reachable only through
+            // non-unit member values keeps `A & B`, and the checker-kept
+            // intersection is the value this narrow must publish. The
+            // collapse class is the authority's payload on its own proof —
+            // the evaluator decides nothing about which disjoint pairs
+            // reduce.
+            if !proof.checker_reduces_intersection_to_never() {
                 let intersection = self
                     .dispatch
                     .intern_normalized_union_or_intersection(&[current, target_node], false);
@@ -8715,11 +8723,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     consumption,
                 );
             }
-            // The target is PROVED disjoint from the whole subject — the
-            // checker's intersection reduces to `never`, so the subject
-            // reads `never` on the positive edge while the edge stays
-            // alive: a contributor there that reads a different binding
-            // keeps its own type.
+            // The target is PROVED disjoint from the whole subject through a
+            // checker collapse criterion — the intersection reduces to
+            // `never`, so the subject reads `never` on the positive edge
+            // while the edge stays alive: a contributor there that reads a
+            // different binding keeps its own type.
             return (
                 GuardNarrowing::Narrowed(subject.clone(), self.never_node()),
                 consumption,
@@ -9758,27 +9766,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 // killed — and the clause-write flags lose
                                 // their reason: no path past the statement
                                 // can have skipped those writes.
-                                let mut killed: rustc_hash::FxHashSet<
-                                    crate::flow_slice_content::SliceNarrowRoot,
-                                > = rustc_hash::FxHashSet::default();
-                                for name in finally_written.0.iter().chain(finally_written.1.iter())
-                                {
-                                    killed.insert(
-                                        crate::flow_slice_content::SliceNarrowRoot::Local(
-                                            Arc::from(name.as_str()),
-                                        ),
-                                    );
-                                }
-                                for ordinal in &finally_written.2 {
-                                    killed.insert(
-                                        crate::flow_slice_content::SliceNarrowRoot::Param(*ordinal),
-                                    );
-                                }
                                 let restored: Vec<_> = try_narrowings
                                     .iter()
                                     .filter(|fact| {
-                                        !entry.narrowings.contains(fact)
-                                            && !killed.contains(&fact.0.root)
+                                        !entry.narrowings.contains(fact) && !match &fact.0.root {
+                                            crate::flow_slice_content::SliceNarrowRoot::Local {
+                                                name,
+                                                ..
+                                            } => finally_written
+                                                .0
+                                                .iter()
+                                                .chain(&finally_written.1)
+                                                .any(|written| written == name.as_ref()),
+                                            crate::flow_slice_content::SliceNarrowRoot::Param {
+                                                ordinal,
+                                                ..
+                                            } => finally_written.2.contains(ordinal),
+                                        }
                                     })
                                     .cloned()
                                     .collect();
@@ -9977,6 +9981,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     init,
                     declared,
                     freshness,
+                    ..
                 } => {
                     // A lexical declaration shadows any outer same-named
                     // binding for the extent of its block scope: record
@@ -10885,11 +10890,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // carry: the slice and the signature disagree about this
             // frame's arity. That is a fact about this REFERENCE, not
             // about the body around it.
-            crate::flow_slice_content::SliceExpr::Param { ordinal } => {
+            crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => {
                 // A guard narrow (or an applied write) substitutes the
                 // parameter's CURRENT value positionally.
                 let subject = crate::flow_slice_content::SliceNarrowSubject {
-                    root: crate::flow_slice_content::SliceNarrowRoot::Param(*ordinal),
+                    root: crate::flow_slice_content::SliceNarrowRoot::Param {
+                        ordinal: *ordinal,
+                        binding: *binding,
+                    },
                     path: Arc::from(Vec::new().into_boxed_slice()),
                 };
                 if let Some(node) = self.narrowed_read(&subject) {
@@ -10932,6 +10940,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 name,
                 param,
                 captured,
+                binding,
             } => {
                 // The READ folds the binding's membership flags into this
                 // evaluation's degradation channel. A plain unbound local
@@ -10941,9 +10950,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // parameter is still the reaching value.
                 if !captured {
                     let subject = crate::flow_slice_content::SliceNarrowSubject {
-                        root: crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(
-                            name.as_ref(),
-                        )),
+                        root: crate::flow_slice_content::SliceNarrowRoot::Local {
+                            name: Arc::clone(name),
+                            binding: binding.clone(),
+                        },
                         path: Arc::from(Vec::new().into_boxed_slice()),
                     };
                     if let Some(node) = self.narrowed_read(&subject) {
@@ -10981,6 +10991,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 declared_return,
                 body,
                 can_fall_through,
+                ..
             } => {
                 if let Some(gap) = gap {
                     self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
@@ -11120,17 +11131,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .iter()
                 .position(|param| param.name.as_deref() == Some(name))
                 .map(|ordinal| ordinal as u32);
-            let local_subject = crate::flow_slice_content::SliceNarrowSubject {
-                root: crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(name)),
-                path: Arc::from(Vec::new().into_boxed_slice()),
-            };
-            if let Some(node) = self.narrowed_read(&local_subject) {
-                return Some(node);
+            if let Some(root) = self.existing_local_narrow_root(name) {
+                let subject = crate::flow_slice_content::SliceNarrowSubject {
+                    root,
+                    path: Arc::from([]),
+                };
+                if let Some(node) = self.narrowed_read(&subject) {
+                    return Some(node);
+                }
             }
             if let Some(node) = param_ordinal.and_then(|ordinal| {
+                let root = self.parameter_narrow_root(ordinal)?;
                 self.narrowed_read(&crate::flow_slice_content::SliceNarrowSubject {
-                    root: crate::flow_slice_content::SliceNarrowRoot::Param(ordinal),
-                    path: Arc::from(Vec::new().into_boxed_slice()),
+                    root,
+                    path: Arc::from([]),
                 })
             }) {
                 return Some(node);
@@ -11732,6 +11746,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 param,
                 name,
                 captured,
+                ..
             } => {
                 // A call on a function-typed binding: the call's value is
                 // the binding's signature return. Calling an `any`-typed

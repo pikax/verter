@@ -57,22 +57,35 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-// Test-only capture of the `ProjectionMode` the PathWalker's `TypeOf` carrier
-// arm dispatches its INTERNAL `typeof v.path` projection under. The
-// intermediate-hop rule (matching `evaluate.rs` / `raise.rs`) requires this
-// internal projection to run in `Navigate` regardless of the caller's outer
-// mode; this capture lets a unit test assert the mode directly. Reset per probe
-// invocation.
+// Test-only capture of the `ProjectionMode` the typeof query's INTERNAL
+// remaining-path projection (`ProjectPath` inside `build_typeof`'s
+// `project_typeof_path`) actually dispatched under. The intermediate-hop
+// rule (matching `evaluate.rs` / `raise.rs`) requires that internal
+// projection to run in `Navigate` regardless of the caller's outer mode;
+// the capture is taken FROM THE KEY the build site constructed — never a
+// constant written at the capture site — so a regression to caller-mode
+// inheritance flips the captured value and the asserting test goes red.
+// Reset per probe invocation.
 #[cfg(test)]
 thread_local! {
     static LAST_WALK_TYPEOF_INTERNAL_PATH_MODE: std::cell::Cell<Option<ProjectionMode>> =
         const { std::cell::Cell::new(None) };
 }
 
-/// Drive a `ProjectPath` over `base`/`path` and return the `ProjectionMode` the
-/// PathWalker's `TypeOf` carrier arm used for its INTERNAL `typeof v.path`
-/// projection, or `None` if the arm did not fire / the carrier had an empty
-/// internal path. Test-only entry point.
+/// Record the `ProjectionMode` an internal typeof-path projection's
+/// `ProjectPath` key actually carried. Called from the build site that
+/// constructs the key. Test-only.
+#[cfg(test)]
+pub(super) fn observe_typeof_internal_path_mode(mode: ProjectionMode) {
+    LAST_WALK_TYPEOF_INTERNAL_PATH_MODE.with(|c| c.set(Some(mode)));
+}
+
+/// Drive a `ProjectPath` over `base`/`path` and return the `ProjectionMode`
+/// the typeof query's INTERNAL remaining-path projection actually
+/// dispatched its `ProjectPath` read under (captured from the constructed
+/// key inside `build_typeof`'s `project_typeof_path`), or `None` if no
+/// internal path projection ran / the carrier had an empty internal path.
+/// Test-only entry point.
 #[cfg(test)]
 #[doc(hidden)]
 #[must_use]
@@ -2529,31 +2542,40 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     current = resolved;
                 }
+                // The TERMINAL nominal carrier IS the type it denotes: it
+                // has no content to resolve, and resolving its head would
+                // project the annotation down to the shared `symbol`
+                // primitive, destroying the declaring identity. Reaching
+                // this arm means a segment is still pending (`while index <
+                // path.len()`), and member access on a `unique symbol` reads
+                // the `Symbol` interface, exactly as it does on the widened
+                // primitive. Widen and continue: the walk stays honest and
+                // never publishes the base with segments unconsumed.
+                SemanticNodeData::TypeOfNominal(_) => {
+                    let widened = self
+                        .dispatch
+                        .widened_nominal_typeof(current)
+                        .expect("a TypeOfNominal node always widens");
+                    drop(data);
+                    current = widened;
+                    continue;
+                }
                 SemanticNodeData::TypeOf(_) => {
-                    // `typeof value.path<args>`: resolve the value root, PROJECT
-                    // the carrier's dotted path, THEN apply the carrier's
-                    // instantiation `type_args` to the projected signature
-                    // (resolve → project → apply). The transparent unwrap does
-                    // not consume a walker segment; the resolved+instantiated
-                    // node re-enters the per-segment loop as `current`.
+                    // `typeof value.path<args>`: the TypeOf query owns the
+                    // remaining member path (sole unique-symbol member mint)
+                    // then apply the carrier's instantiation `type_args`.
                     let (value_root, typeof_path) =
                         data.typeof_head().expect("TypeOf carrier head");
                     let value_root = value_root.clone();
                     let typeof_path = typeof_path.clone();
-                    // Read the carrier args from the SAME borrow (owned copy so
-                    // the `data` borrow is not held across the apply call).
                     let type_args: Vec<SemanticNodeId> = data.carrier_type_args().to_vec();
-                    // PathWalker hop = a demand point: the typeof root
-                    // resolves under the walker's OWN full reduction
-                    // context (mode + demand + provenance + merge_role) —
-                    // a transit walk crossing `typeof` stays a transit
-                    // subquery. The carrier's INTERNAL dotted-path projection
-                    // (below) is an INTERMEDIATE hop and runs in `Navigate`
-                    // (matching the evaluate / raise `TypeOf` arms), NOT this
-                    // caller context — an Expanded/Identity outer demand must
-                    // not over-expand the internal typeof-path hop.
+                    drop(data);
                     let typeof_context = self.context;
-                    let typeof_key = self.dispatch.typeof_key_for(value_root, typeof_context);
+                    let typeof_key = self.dispatch.typeof_key_with_path(
+                        value_root,
+                        typeof_path,
+                        typeof_context,
+                    );
                     let mut resolved = match self.execute_read_folding_partial(typeof_key) {
                         QueryResult::Value(id) => id,
                         _ => {
@@ -2561,47 +2583,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             return;
                         }
                     };
-                    if !typeof_path.is_empty() {
-                        let projection_path: Arc<[PathSegment]> = Arc::from(
-                            typeof_path
-                                .iter()
-                                .map(|segment| {
-                                    PathSegment::Member(
-                                        crate::semantic_query::PropertyKey::identifier(Arc::clone(
-                                            segment,
-                                        )),
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .into_boxed_slice(),
-                        );
-                        // The internal `typeof v.path` projection is an
-                        // INTERMEDIATE hop — project it in `Navigate` (matching
-                        // the evaluate / raise `TypeOf` arms), NOT the caller's
-                        // outer mode (`typeof_context`). The TERMINAL/outer
-                        // demand stays the caller's; only this typeof-internal
-                        // path projection is Navigate.
-                        let internal_path_context = self.context_from_template(
-                            crate::semantic_query::ProjectionReductionContext::published(
-                                ProjectionMode::Navigate,
-                            ),
-                        );
-                        #[cfg(test)]
-                        LAST_WALK_TYPEOF_INTERNAL_PATH_MODE
-                            .with(|c| c.set(Some(internal_path_context.mode)));
-                        resolved =
-                            match self.execute_read_folding_partial(SemanticQueryKey::ProjectPath {
-                                base: resolved,
-                                path: projection_path,
-                                context: internal_path_context,
-                            }) {
-                                QueryResult::Value(id) => id,
-                                _ => {
-                                    results.push(self.opaque_miss());
-                                    return;
-                                }
-                            };
-                    }
                     // Instantiation expression (`typeof C.make<string>`): apply
                     // the lowered type arguments to the projected generic
                     // signature AFTER the path projection reached it. An
@@ -3338,14 +3319,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 match (head_name, args.len()) {
                     (Some(name), 1) if name.as_ref() == "InstanceType" => {
                         match self.graph().node_data(args[0]).as_deref() {
-                            Some(arg_data @ SemanticNodeData::TypeOf(_)) => {
-                                match arg_data.typeof_head() {
-                                    Some((value_root, path)) if path.is_empty() => {
-                                        MemberShape::InstanceTypeOf(value_root.clone())
-                                    }
-                                    _ => return value,
+                            Some(
+                                arg_data @ (SemanticNodeData::TypeOf(_)
+                                | SemanticNodeData::TypeOfNominal(_)),
+                            ) => match arg_data.typeof_head() {
+                                Some((value_root, path)) if path.is_empty() => {
+                                    MemberShape::InstanceTypeOf(value_root.clone())
                                 }
-                            }
+                                _ => return value,
+                            },
                             _ => return value,
                         }
                     }
@@ -3360,7 +3342,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             {
                 let arg = args[0];
                 match self.graph().node_data(arg).as_deref() {
-                    Some(arg_data @ SemanticNodeData::TypeOf(_)) => match arg_data.typeof_head() {
+                    Some(
+                        arg_data @ (SemanticNodeData::TypeOf(_)
+                        | SemanticNodeData::TypeOfNominal(_)),
+                    ) => match arg_data.typeof_head() {
                         Some((value_root, path)) if path.is_empty() => {
                             MemberShape::InstanceTypeOf(value_root.clone())
                         }
@@ -5263,6 +5248,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             | SemanticNodeData::Signature { .. }
             | SemanticNodeData::KeyOf { .. }
             | SemanticNodeData::TypeOf(_)
+            // The nominal terminal is its own resolved scalar — it carries
+            // no shallow surface members to contribute.
+            | SemanticNodeData::TypeOfNominal(_)
             // Raw-fallback / constructor / synthetic-binding carriers contribute
             // no shallow surface members (a raw-fallback holds no surface; a
             // constructor / synthetic binding is its own terminal).
@@ -6714,6 +6702,9 @@ pub(super) fn value_may_contribute_call_signatures(
             // intersection closed.
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
+            // The nominal terminal widens to the `symbol` scalar — same
+            // one-backing-interface order-safety as the primitive itself.
+            | SemanticNodeData::TypeOfNominal(_)
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::ObjectSpreadProgram(_) => {}
             SemanticNodeData::Opaque(err) => {

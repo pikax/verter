@@ -1915,6 +1915,16 @@ pub struct ValueTypeAnnotationFact {
     /// this declaration fact preserves the authored nominal distinction for
     /// computed-property identity resolution.
     pub is_unique_symbol: bool,
+    /// The statically-named MEMBERS whose authored annotations are exactly
+    /// `unique symbol` — class statics and object-type-literal annotation
+    /// members. The member-level nominal declaration fact: a
+    /// `typeof Root.Member` reference to a listed member denotes the member's
+    /// OWN `unique symbol` type (identity = the root's declaring anchor plus
+    /// the member path), not the shared `symbol` primitive every unlisted
+    /// member widens to. Same erasure rationale as
+    /// [`is_unique_symbol`](Self::is_unique_symbol).
+    #[serde(default)]
+    pub unique_symbol_members: Arc<[String]>,
     /// The precomputed graph-free `typeof x[.y]` target, when the annotation is a
     /// value peel.
     pub typeof_alias_target: Option<ValueDeclIdentityPart>,

@@ -1063,6 +1063,73 @@ defineProps<{
     );
 }
 
+/// A `unique symbol`-typed prop emits the `Symbol` runtime constructor.
+///
+/// The runtime constructor is a STRUCTURAL question: a nominal symbol is
+/// still a symbol at runtime, so the emitted `type:` must be `Symbol`
+/// exactly as it is for a plain `symbol`-typed prop. The classifier reaches
+/// a `typeof` carrier through its carrier arm, whose `resolved == node`
+/// rail means "this reference did not resolve" — and a nominal carrier is
+/// terminal under carrier resolution, so reading it through that rail
+/// classifies it `Unknown`. That is not a one-entry loss: an `Unknown` with
+/// no Boolean/Function present clears the WHOLE ordered constructor list,
+/// so the union row below would publish an EMPTY `type:` and Vue would stop
+/// coercing/validating the prop at runtime.
+#[test]
+fn runtime_props_emit_symbol_constructor_for_a_unique_symbol_type() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(
+        &host,
+        "/src/token.ts",
+        "export declare const TOKEN: unique symbol",
+    );
+    upsert(
+        &host,
+        "/src/Token.vue",
+        r#"<script setup lang="ts">
+import { TOKEN } from './token'
+defineProps<{
+  token: typeof TOKEN
+  either: typeof TOKEN | string
+  plain: symbol
+}>()
+</script>"#,
+    );
+
+    let runtime = produce(&host, "/src/Token.vue", VueMacroCodegenDemand::Runtime)
+        .runtime
+        .expect("runtime demand must produce a bundle");
+    let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(props)) =
+        &runtime.entries[0].outcome
+    else {
+        panic!("expected complete props runtime shape: {runtime:?}");
+    };
+    assert_eq!(
+        props
+            .props
+            .iter()
+            .map(|prop| prop.name.as_str())
+            .collect::<Vec<_>>(),
+        ["token", "either", "plain"]
+    );
+    assert_eq!(
+        constructors(&props.props[0]),
+        &[RuntimeConstructor::Symbol],
+        "a nominal `unique symbol` prop is a symbol at runtime"
+    );
+    assert_eq!(
+        constructors(&props.props[1]),
+        &[RuntimeConstructor::Symbol, RuntimeConstructor::String],
+        "an unclassifiable arm would clear the WHOLE ordered constructor list, \
+         not just its own entry"
+    );
+    assert_eq!(
+        constructors(&props.props[2]),
+        &[RuntimeConstructor::Symbol],
+        "the non-nominal control emits the same constructor"
+    );
+}
+
 #[test]
 fn runtime_props_degrade_only_a_direct_missing_member_dependency() {
     let host = VerterHost::new_standalone(HostConfig::default());

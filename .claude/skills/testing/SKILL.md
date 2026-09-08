@@ -7,6 +7,23 @@ description: "Testing patterns, TDD workflow, TypeScript and Rust test conventio
 
 For VS Code extension E2E fixtures, helpers API, and warm-session rules, see `/e2e-vscode-testing`.
 
+## Closure evidence in CI
+
+Routine CI runs focused guard/validator commands and the normal test lanes once,
+including commands also cited by historical proof records. It does not rerun
+commands merely because a record cites them or require current passing/skipped
+totals to match old transcripts. Adding a test does not require
+updating closure counts or pins. Recorded transcripts remain internally checked
+historical evidence; they are not a claim that the current checkout was replayed.
+
+Repository mutation replay is explicit: use the **Closure Control Replay**
+workflow (`workflow_dispatch`) or run
+`node --test roadmap/0.1.0-tama/tools/closure-controls.test.mjs` with its toolchain
+prerequisites installed. It is not part of `CI Required`. The focused driver
+tests in `closure-replay.test.mjs` require a nonempty, successful clean run and
+a detected mutation, with source restoration; current inventory totals may vary.
+See the [maintainer policy](../../../roadmap/0.1.0-tama/decisions/2026-09-08-closure-replay-policy.md).
+
 ## Server Cleanup
 
 Always kill dev/preview servers or other long-running test processes when done — stale servers interfere with subsequent runs (e.g., Playwright's `reuseExistingServer: true` uses old builds).

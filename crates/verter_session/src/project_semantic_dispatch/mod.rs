@@ -1556,6 +1556,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         root: crate::semantic_query::ValueRootKey,
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticQueryKey {
+        self.typeof_key_with_path(root, Arc::from([]), prc)
+    }
+
+    /// `typeof` query for a value root plus remaining member path. The path
+    /// is family identity: `typeof Tokens.A` is a distinct memo from
+    /// `typeof Tokens`, and `build_typeof` is the sole mint of a nominal
+    /// unique-symbol member carrier.
+    #[must_use]
+    pub(crate) fn typeof_key_with_path(
+        &self,
+        root: crate::semantic_query::ValueRootKey,
+        path: Arc<[Arc<str>]>,
+        prc: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticQueryKey {
         let host = self.ctx.host_for_fact_tracer_install();
         let canonical = root.scope.canonical_id.as_ref();
         let env = host.host_view_env_hashes_for(canonical);
@@ -1567,6 +1581,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 env.type_env_hash,
                 env.lib_env_hash,
             ),
+            path,
             context: crate::semantic_query::TypeOfContext::new(prc, env.resolve_env_hash),
         }
     }
@@ -2432,9 +2447,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //     `ProjectPath { base, path: [Index(index)], mode }`.
         //   - `NormalizeUnion` / `NormalizeIntersection` get structural
         //     member-list canonicalisation so `{A, B}` and `{B, A}` converge.
+        //   - Symmetric `Relate` operands get the same ordering as typed
+        //     relation callers before the family memo or wait graph sees them.
         // Other variants key off [`SemanticNodeId`]s that are already hashed
         // verbatim.
         let key = match key {
+            SemanticQueryKey::Relate {
+                mut source,
+                mut target,
+                relation,
+                policy,
+                source_freshness,
+                inference_context,
+                context,
+            } => {
+                relation.canonicalize_operands(&mut source, &mut target);
+                SemanticQueryKey::Relate {
+                    source,
+                    target,
+                    relation,
+                    policy,
+                    source_freshness,
+                    inference_context,
+                    context,
+                }
+            }
             SemanticQueryKey::ProjectMember { base, member, mode } => {
                 SemanticQueryKey::ProjectPath {
                     base,
@@ -2705,8 +2742,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
                 SemanticQueryKey::TypeOf {
                     value_root,
+                    path,
                     context,
-                } => self.build_typeof(&value_root.root, context.projection_reduction),
+                } => self.build_typeof(&value_root.root, path, context.projection_reduction),
                 SemanticQueryKey::Instantiate(k) => {
                     self.build_instantiate(k.base(), k.args(), k.source(), k.context())
                 }

@@ -1,7 +1,7 @@
 {
   "block_content_artifact_schema_version": 1,
   "qualified_source_map_schema_version": 1,
-  "cache_cluster_schema_version": 10,
+  "cache_cluster_schema_version": 11,
   "component_meta_schema_version": 11,
   "structure_protocol_version": 1,
   "provider_protocol_version": 12,

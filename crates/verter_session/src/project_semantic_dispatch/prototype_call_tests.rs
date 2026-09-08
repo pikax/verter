@@ -125,6 +125,7 @@ fn call_candidates(
             env.type_env_hash,
             env.lib_env_hash,
         ),
+        path: Arc::from([]),
         context: crate::semantic_query::TypeOfContext::new(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
             env.resolve_env_hash,

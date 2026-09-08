@@ -1382,6 +1382,37 @@ impl VerterHost {
                             if reduced.result_is_partial() {
                                 crate::request_context::mark_request_result_partial();
                             }
+                            // A NOMINAL carrier whose declaring identity is
+                            // a script-setup LOCAL of this owner cannot be
+                            // named by the generated surface: the setup
+                            // closure's bindings are not importable, so a
+                            // `typeof K` render would splice an undeclared
+                            // identifier into the declaration. Fail closed
+                            // to the widened `symbol` primitive — the
+                            // honest structural inhabitant, with no phantom
+                            // reference and no fresh nominal identity. A
+                            // carrier declared in ANOTHER module keeps its
+                            // precise `typeof` spelling; its lexical root
+                            // joins the reference set and the surface
+                            // imports it, exactly as any other cross-file
+                            // `typeof` reference does.
+                            let render_node = {
+                                let local_nominal = dispatch
+                                    .graph()
+                                    .node_data(reduced.node_id())
+                                    .as_deref()
+                                    .and_then(|data| data.typeof_nominal_identity())
+                                    .is_some_and(|identity| {
+                                        identity.canonical_id.as_ref() == owner_canonical
+                                    });
+                                if local_nominal {
+                                    dispatch
+                                        .widened_nominal_typeof(reduced.node_id())
+                                        .unwrap_or_else(|| reduced.node_id())
+                                } else {
+                                    reduced.node_id()
+                                }
+                            };
                             // `render_tsc_node` itself fails closed (typed
                             // `Err`) on a NESTED resolver degradation baked
                             // into the rendered text — see its doc comment.
@@ -1389,11 +1420,11 @@ impl VerterHost {
                             // masquerading as `Ok` text, so it needs no
                             // second, textual screen of its own; a genuinely
                             // resolved member is the only `Ok` outcome.
-                            match render_tsc_node(ctx, reduced.node_id(), counters) {
+                            match render_tsc_node(ctx, render_node, counters) {
                                 Ok(text) => {
                                     crate::resolver_core::component_meta_registry::collect_node_ref_names(
                                         ctx,
-                                        reduced.node_id(),
+                                        render_node,
                                         &mut ref_names,
                                     );
                                     TscExposeMemberType::Resolved(text)
