@@ -2296,3 +2296,44 @@ fn retained_nested_function_demands_do_not_rediscover_sibling_bodies() {
     );
     assert_eq!(parses(&provenance), parse_count);
 }
+
+#[test]
+fn retained_function_requests_reject_stale_pins_and_use_owned_inventory() {
+    let (memo, _) = memo_for("function f(x) { let value = x; return value; }");
+    let index = memo.function_program_index();
+    let entry = index.matches_named("f").next().unwrap().entry();
+    let mut stale_span = entry.clone();
+    stale_span.span.start += 1;
+    let mut stale_body = entry.clone();
+    stale_body.body_span.end -= 1;
+    let mut stale_hash = entry.clone();
+    let mut hash = stale_hash.flow_body_exact_hash.unwrap();
+    hash[0] ^= 1;
+    stale_hash.flow_body_exact_hash = Some(hash);
+    for stale in [&stale_span, &stale_body, &stale_hash] {
+        assert!(
+            memo.function_flow_structure(stale).unwrap().is_none(),
+            "stale address-bearing metadata must not reach the retained AST"
+        );
+    }
+    let mut modified_inventory = entry.clone();
+    modified_inventory.bindings = Arc::from([]);
+    modified_inventory.references = Arc::from([]);
+    let prepared = memo
+        .function_flow_structure(&modified_inventory)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        prepared.bindings().value_count(),
+        2,
+        "same-pins callers cannot replace the retained declaration inventory"
+    );
+    assert!(
+        prepared
+            .skeleton()
+            .expr_sites
+            .iter()
+            .any(|site| site.reads.iter().any(|read| read.binding.is_some())),
+        "exact retained references must also survive caller edits"
+    );
+}
