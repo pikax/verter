@@ -40,6 +40,13 @@ or repeated idempotence checks over unchanged predecessor snapshots.
   resolves containing scopes, with parameter defaults separate from body declarations.
   Structural selections, retained demand/hash pairs, and work measurements are sealed
   by their owning constructors; consumers receive immutable views.
+- Emit call-argument and receiver read origins from the shared value lowerer at the
+  actual identifier-read branch. Existing value-preserving wrappers forward that
+  origin; authoritative assertions retain their asserted result. The retained-call
+  adapter consumes exact occurrences for value and freshness without its own wrapper
+  classifier. Ordinary lowering callers require no origin arrays or extra traversal.
+  Selected assignments retain their existing expression-site address beside the
+  source span, so definition lookup does not scan unrelated writes after admission.
 - Preserve already-supported nested callable forms by extending the existing function
   index and locator owner. A child obtains its own graph and sealed demand from shared
   cache/planning owners. Captured inputs are imported by exact identity at selected

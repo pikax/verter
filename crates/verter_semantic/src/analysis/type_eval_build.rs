@@ -58,6 +58,23 @@ pub use verter_type_expr::{
     IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
 };
 
+/// Exact source provenance for an indexed value's whole binding read.
+/// Spans use the input AST's coordinate system; composite values have no root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedValueReadRoot {
+    /// No whole identifier read supplied this result. This does not certify
+    /// that names inside a composite or asserted type are free/module names.
+    NonBinding,
+    Identifier(verter_span::Span),
+}
+
+/// One direct input of an indexed call, excluding inputs of nested calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedCallReadSite {
+    Argument(usize),
+    Receiver,
+}
+
 /// Rebase substring-relative program points to their containing source file.
 pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, base: u32) {
     match expression {
@@ -4355,6 +4372,17 @@ fn infer_expression_type_ctx(
     budget: &mut InferenceBudget,
     depth: usize,
 ) -> InferenceResult<TypeExpr> {
+    infer_expression_type_ctx_with_read_root(expr, source, policy, budget, depth, None)
+}
+
+fn infer_expression_type_ctx_with_read_root(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+    budget: &mut InferenceBudget,
+    depth: usize,
+    read_root: Option<&mut IndexedValueReadRoot>,
+) -> InferenceResult<TypeExpr> {
     budget.visit(depth)?;
     match expr {
         // `undefined` is an IDENTIFIER in the grammar (unlike the `null`
@@ -4363,21 +4391,33 @@ fn infer_expression_type_ctx(
         Expression::Identifier(ident) if ident.name == "undefined" => {
             Ok(TypeExpr::Primitive(PrimitiveName::Undefined))
         }
-        Expression::Identifier(ident) => Ok(TypeExpr::TypeOf(ValueRef {
-            path: vec![ident.name.as_str().to_string()],
-            type_args: Vec::new(),
-        })),
+        Expression::Identifier(ident) => {
+            if let Some(read_root) = read_root {
+                *read_root = IndexedValueReadRoot::Identifier(ident.span.into());
+            }
+            Ok(TypeExpr::TypeOf(ValueRef {
+                path: vec![ident.name.as_str().to_string()],
+                type_args: Vec::new(),
+            }))
+        }
         Expression::StringLiteral(s) => Ok(TypeExpr::string_literal(s.value.as_str())),
         Expression::NumericLiteral(n) => Ok(TypeExpr::number_literal(n.value)),
         Expression::BooleanLiteral(b) => Ok(TypeExpr::boolean_literal(b.value)),
         Expression::NullLiteral(_) => Ok(TypeExpr::Primitive(PrimitiveName::Null)),
         Expression::ConditionalExpression(cond) => Ok(TypeExpr::union(vec![
+            // Both arms contribute to this composite; neither is its whole
+            // identifier origin.
             infer_expression_type_ctx(&cond.consequent, source, policy, budget, depth + 1)?,
             infer_expression_type_ctx(&cond.alternate, source, policy, budget, depth + 1)?,
         ])),
-        Expression::ParenthesizedExpression(paren) => {
-            infer_expression_type_ctx(&paren.expression, source, policy, budget, depth + 1)
-        }
+        Expression::ParenthesizedExpression(paren) => infer_expression_type_ctx_with_read_root(
+            &paren.expression,
+            source,
+            policy,
+            budget,
+            depth + 1,
+            read_root,
+        ),
         Expression::ArrayExpression(arr) => {
             // A literal-preserving position keeps the array literal's
             // POSITIONAL structure as a tuple. A spread or an elision makes
@@ -4487,12 +4527,13 @@ fn infer_expression_type_ctx(
             // properties keep their literals + become `readonly`.
             let asserted = lower_ts_type(&ts_as.type_annotation, source);
             if is_const_assertion_type_expr(&asserted) {
-                infer_expression_type_ctx(
+                infer_expression_type_ctx_with_read_root(
                     &ts_as.expression,
                     source,
                     MemberLiteralPolicy::ConstAssert,
                     budget,
                     depth + 1,
+                    read_root,
                 )
             } else {
                 Ok(asserted)
@@ -4501,12 +4542,13 @@ fn infer_expression_type_ctx(
         Expression::TSTypeAssertion(assertion) => {
             let asserted = lower_ts_type(&assertion.type_annotation, source);
             if is_const_assertion_type_expr(&asserted) {
-                infer_expression_type_ctx(
+                infer_expression_type_ctx_with_read_root(
                     &assertion.expression,
                     source,
                     MemberLiteralPolicy::ConstAssert,
                     budget,
                     depth + 1,
+                    read_root,
                 )
             } else {
                 Ok(asserted)
@@ -4523,7 +4565,14 @@ fn infer_expression_type_ctx(
             } else {
                 MemberLiteralPolicy::Preserve
             };
-            infer_expression_type_ctx(&sat.expression, source, inner_policy, budget, depth + 1)
+            infer_expression_type_ctx_with_read_root(
+                &sat.expression,
+                source,
+                inner_policy,
+                budget,
+                depth + 1,
+                read_root,
+            )
         }
         Expression::StaticMemberExpression(member) => {
             // obj.foo → typeof obj.foo (build a dotted path)
@@ -5855,8 +5904,17 @@ fn lower_value_expression(
     source: &str,
     policy: MemberLiteralPolicy,
 ) -> InferenceResult<TypeExpr> {
+    lower_value_expression_with_read_root(expr, source, policy, None)
+}
+
+fn lower_value_expression_with_read_root(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+    read_root: Option<&mut IndexedValueReadRoot>,
+) -> InferenceResult<TypeExpr> {
     let mut budget = InferenceBudget::default();
-    infer_expression_type_ctx(expr, source, policy, &mut budget, 0)
+    infer_expression_type_ctx_with_read_root(expr, source, policy, &mut budget, 0, read_root)
 }
 
 /// Lower an already-parsed value expression into indexed typed IR.
@@ -5887,7 +5945,20 @@ fn lower_indexed_value_expression_with_policy(
     source: &str,
     policy: MemberLiteralPolicy,
 ) -> IndexedValueExpression {
+    lower_indexed_value_expression_with_policy_and_read_root(expr, source, policy, None)
+}
+
+fn lower_indexed_value_expression_with_policy_and_read_root(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+    mut read_root: Option<&mut IndexedValueReadRoot>,
+) -> IndexedValueExpression {
+    if let Some(read_root) = read_root.as_deref_mut() {
+        *read_root = IndexedValueReadRoot::NonBinding;
+    }
     if has_authoritative_value_assertion(expr, source) {
+        // The assertion supplies the result; its operand's binding does not.
         return lower_value_expression(expr, source, policy)
             .map(IndexedValueExpression::Value)
             .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
@@ -5921,7 +5992,7 @@ fn lower_indexed_value_expression_with_policy(
                 point: unwrapped.span().start,
             }
         }
-        unwrapped => lower_value_expression(unwrapped, source, policy)
+        unwrapped => lower_value_expression_with_read_root(unwrapped, source, policy, read_root)
             .map(IndexedValueExpression::Value)
             .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
                 PrimitiveName::Any,
@@ -5996,16 +6067,26 @@ pub fn indexed_context_sensitive(expr: Option<&Expression<'_>>) -> bool {
 fn indexed_callee_and_receiver(
     callee: &Expression<'_>,
     source: &str,
+    observe: &mut Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
 ) -> (IndexedValueExpression, Option<Box<IndexedValueExpression>>) {
     let receiver = match unwrap_expression_wrappers(callee) {
-        Expression::StaticMemberExpression(member) => Some(Box::new(
-            lower_indexed_value_expression(&member.object, source),
-        )),
-        Expression::ComputedMemberExpression(member) => Some(Box::new(
-            lower_indexed_value_expression(&member.object, source),
-        )),
+        Expression::StaticMemberExpression(member) => Some(&member.object),
+        Expression::ComputedMemberExpression(member) => Some(&member.object),
         _ => None,
-    };
+    }
+    .map(|receiver| {
+        let mut read_root = IndexedValueReadRoot::NonBinding;
+        let lowered = lower_indexed_value_expression_with_policy_and_read_root(
+            receiver,
+            source,
+            MemberLiteralPolicy::Widen,
+            observe.as_ref().map(|_| &mut read_root),
+        );
+        if let Some(observe) = observe {
+            observe(IndexedCallReadSite::Receiver, read_root);
+        }
+        Box::new(lowered)
+    });
     (lower_indexed_value_expression(callee, source), receiver)
 }
 
@@ -6013,14 +6094,41 @@ pub fn lower_indexed_call_expression(
     call: &oxc_ast::ast::CallExpression<'_>,
     source: &str,
 ) -> IndexedValueCall {
-    let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source);
+    lower_indexed_call_expression_observed(call, source, None)
+}
+
+/// Lower one call while reporting exact direct-input read provenance.
+/// Each argument ordinal, including a spread, is reported once. A receiver
+/// is reported exactly when the lowered call contains one. Nested calls use
+/// their ordinary lowering and do not report into this observer.
+pub fn lower_indexed_call_expression_with_read_roots(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    source: &str,
+    observe: &mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot),
+) -> IndexedValueCall {
+    lower_indexed_call_expression_observed(call, source, Some(observe))
+}
+
+fn lower_indexed_call_expression_observed(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    source: &str,
+    mut observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+) -> IndexedValueCall {
+    let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source, &mut observe);
     let args = call
         .arguments
         .iter()
-        .map(|argument| {
+        .enumerate()
+        .map(|(ordinal, argument)| {
+            let mut read_root = IndexedValueReadRoot::NonBinding;
             let (expression, point, spread, literal_mode, context_sensitive) = match argument {
                 oxc_ast::ast::Argument::SpreadElement(spread) => (
-                    lower_indexed_call_argument_expression(&spread.argument, source),
+                    lower_indexed_value_expression_with_policy_and_read_root(
+                        &spread.argument,
+                        source,
+                        MemberLiteralPolicy::Argument,
+                        observe.as_ref().map(|_| &mut read_root),
+                    ),
                     spread.argument.span().start,
                     true,
                     indexed_literal_mode(Some(&spread.argument)),
@@ -6029,7 +6137,12 @@ pub fn lower_indexed_call_expression(
                 argument => {
                     let expression = argument.to_expression();
                     (
-                        lower_indexed_call_argument_expression(expression, source),
+                        lower_indexed_value_expression_with_policy_and_read_root(
+                            expression,
+                            source,
+                            MemberLiteralPolicy::Argument,
+                            observe.as_ref().map(|_| &mut read_root),
+                        ),
                         expression.span().start,
                         false,
                         indexed_literal_mode(Some(expression)),
@@ -6037,6 +6150,9 @@ pub fn lower_indexed_call_expression(
                     )
                 }
             };
+            if let Some(observe) = observe.as_mut() {
+                observe(IndexedCallReadSite::Argument(ordinal), read_root);
+            }
             IndexedValueCallArg {
                 expression,
                 point,
