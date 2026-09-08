@@ -74,8 +74,8 @@ use verter_semantic::analysis::flow::{
     SkeletonBindingKind, SkeletonPathSegment, SkeletonWriteTarget, ValueDescent,
 };
 use verter_semantic::analysis::function_program::{
-    for_each_call_expression, inventory_statement_list, resolve_function_node,
-    FunctionControlRegion, FunctionDescentStep, FunctionNode, FunctionProgramEntry,
+    for_each_call_expression, inventory_statement_list, FunctionControlRegion, FunctionDescentStep,
+    FunctionNode, FunctionProgramEntry, ResolvedFunctionNode,
 };
 use verter_semantic::analysis::type_eval_build::{
     embeds_call_return_carrier, infer_declaration_expression_type,
@@ -1582,16 +1582,16 @@ impl SignatureScope<'_> {
 /// declarations are not in scope in its own type-parameter clause.
 /// Returns `None` on a locator miss (a typed miss, never a panic).
 pub(crate) fn build_function_type_param_clause(
-    program: &Program<'_>,
+    resolved: ResolvedFunctionNode<'_>,
     source: &str,
-    entry: &FunctionProgramEntry,
-) -> Option<Vec<SliceTypeParam>> {
-    let resolved = resolve_function_node(program, &entry.locator)?;
-    Some(lower_slice_type_params(
-        &resolved.node,
-        source,
-        &SignatureScope::Root,
-    ))
+) -> Vec<SliceTypeParam> {
+    lower_slice_type_params(&resolved.node, source, &SignatureScope::Root)
+}
+
+/// One function borrowed from its exact retained parse address table.
+pub(crate) struct FlowSliceSource<'a> {
+    pub program: &'a Program<'a>,
+    pub resolved: ResolvedFunctionNode<'a>,
 }
 
 /// Build the slice content for one indexed function entry against the
@@ -1600,7 +1600,7 @@ pub(crate) fn build_function_type_param_clause(
 /// host re-entry. Returns `None` on any locator miss (a typed miss, never
 /// a panic).
 pub(crate) fn build_flow_slice_content(
-    program: &Program<'_>,
+    retained: FlowSliceSource<'_>,
     source: &str,
     index: &verter_semantic::analysis::function_program::FunctionProgramIndex,
     entry: &FunctionProgramEntry,
@@ -1611,6 +1611,7 @@ pub(crate) fn build_flow_slice_content(
     snapshot: &crate::decl_lowering::SnapshotKey,
     context: Option<&NestedFlowContext>,
 ) -> Option<SliceContent> {
+    let FlowSliceSource { program, resolved } = retained;
     let module_scope = carrier_module || program_has_module_syntax(program);
     // Whether the served function is NAMESPACE-OWNED: its locator descends
     // through a `namespace` / `module` block. Every call site in its body
@@ -1623,7 +1624,6 @@ pub(crate) fn build_flow_slice_content(
         .descent
         .iter()
         .any(|step| matches!(step, FunctionDescentStep::NamespaceMember { .. }));
-    let resolved = resolve_function_node(program, &entry.locator)?;
     let node = resolved.node;
     let self_name = resolved.self_name;
     // The ROOT function's OWN signature resolves in the OUTER scope: its
@@ -4013,13 +4013,19 @@ impl Lowerer<'_> {
                 let FunctionWriteTarget::Binding { reference, .. } = target else {
                     return false;
                 };
-                reference.binding.as_ref().is_some_and(&targets_downstream)
+                reference
+                    .binding
+                    .resolved()
+                    .is_some_and(&targets_downstream)
             })
             || nested.references.iter().any(|reference| {
                 reference
                     .read_role
                     .is_some_and(|role| role.is_effect_input())
-                    && reference.binding.as_ref().is_some_and(&targets_downstream)
+                    && reference
+                        .binding
+                        .resolved()
+                        .is_some_and(&targets_downstream)
             })
     }
 
@@ -7121,7 +7127,7 @@ impl Lowerer<'_> {
                 let writes_capture = entry.writes.iter().flat_map(|write| write.targets.iter()).any(|target| {
                     matches!(target,
                         verter_semantic::analysis::function_program::FunctionWriteTarget::Binding { reference, .. }
-                        if reference.binding.as_ref() == Some(identity))
+                        if reference.binding.resolved() == Some(identity))
                 });
                 if !writes_capture {
                     gap = Some(crate::semantic_query::FlowGap::ClosureCapture);

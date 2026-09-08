@@ -23,6 +23,7 @@ pub enum FlowBindingMapError {
     MissingDeclaration,
     ExtraDeclaration,
     MissingOccurrence,
+    UnmodeledOccurrence,
     ConflictingOccurrence,
     InvalidSpan,
     TooManyBindings,
@@ -38,15 +39,31 @@ pub struct FlowBindingMap {
     runtime_locals: Arc<[SkeletonBindingId]>,
     runtime_declarations: Arc<[SkeletonBindingId]>,
     declaration_offsets: Arc<[u32]>,
-    occurrences: Arc<FxHashMap<FrameSpan, Option<FlowBindingRef>>>,
+    runtime_shapes: Arc<[FlowRuntimeBindingShape]>,
+    occurrences: Arc<FxHashMap<FrameSpan, IndexedOccurrence>>,
+}
+
+/// Constant-size structural facts for one canonical runtime declaration group.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FlowRuntimeBindingShape {
+    pub has_var: bool,
+    pub has_destructured_var: bool,
 }
 
 /// The indexed authority for one exact authored identifier occurrence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowBindingOccurrence<'a> {
     Resolved(&'a FlowBindingRef),
+    UnmodeledLocal,
     Free,
     Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IndexedOccurrence {
+    Resolved(FlowBindingRef),
+    UnmodeledLocal,
+    Free,
 }
 
 impl FlowBindingMap {
@@ -109,9 +126,15 @@ impl FlowBindingMap {
                 )
             })
             .collect();
+        let mut runtime_shapes = vec![FlowRuntimeBindingShape::default(); skeleton.bindings.len()];
         let mut offsets = vec![0_u32; skeleton.bindings.len() + 1];
         for (ordinal, runtime) in runtime_locals.iter().enumerate() {
             if identities[ordinal].is_some() {
+                let binding = &skeleton.bindings[ordinal];
+                if binding.kind == SkeletonBindingKind::Var {
+                    runtime_shapes[runtime.index()].has_var = true;
+                    runtime_shapes[runtime.index()].has_destructured_var |= binding.destructured;
+                }
                 offsets[runtime.index() + 1] += 1;
             }
         }
@@ -134,6 +157,7 @@ impl FlowBindingMap {
             runtime_locals: runtime_locals.into(),
             runtime_declarations: groups.into(),
             declaration_offsets: offsets.into(),
+            runtime_shapes: runtime_shapes.into(),
             occurrences: Arc::new(FxHashMap::default()),
         })
     }
@@ -159,7 +183,7 @@ impl FlowBindingMap {
         use crate::analysis::function_program::FunctionWriteTarget;
         let mut occurrences = FxHashMap::default();
         let mut insert = |span: verter_span::Span,
-                          binding: Option<FlowBindingRef>|
+                          binding: IndexedOccurrence|
          -> Result<(), FlowBindingMapError> {
             if span.start < entry.span.start || span.end > entry.span.end || span.start >= span.end
             {
@@ -176,31 +200,28 @@ impl FlowBindingMap {
         for (slot, declaration) in entry.bindings.iter().enumerate() {
             insert(
                 declaration.span,
-                Some(FlowBindingRef::Local(
+                IndexedOccurrence::Resolved(FlowBindingRef::Local(
                     self.canonical_local(self.locals[slot]),
                 )),
             )?;
         }
+        for declaration in entry.unmodeled_bindings.iter() {
+            insert(declaration.span, IndexedOccurrence::UnmodeledLocal)?;
+        }
+        let reference_binding = |reference: &crate::analysis::function_program::FunctionReferenceRecord| -> Result<IndexedOccurrence, FlowBindingMapError> {
+            use crate::analysis::function_program::FunctionReferenceBinding;
+            Ok(match &reference.binding {
+                FunctionReferenceBinding::Resolved(identity) => IndexedOccurrence::Resolved(self.resolve_identity(identity)?),
+                FunctionReferenceBinding::Free => IndexedOccurrence::Free,
+                FunctionReferenceBinding::UnmodeledLocal => IndexedOccurrence::UnmodeledLocal,
+            })
+        };
         for reference in entry.references.iter() {
-            insert(
-                reference.span,
-                reference
-                    .binding
-                    .as_ref()
-                    .map(|identity| self.resolve_identity(identity))
-                    .transpose()?,
-            )?;
+            insert(reference.span, reference_binding(reference)?)?;
         }
         for target in entry.writes.iter().flat_map(|write| write.targets.iter()) {
             if let FunctionWriteTarget::Binding { reference, .. } = target {
-                insert(
-                    reference.span,
-                    reference
-                        .binding
-                        .as_ref()
-                        .map(|identity| self.resolve_identity(identity))
-                        .transpose()?,
-                )?;
+                insert(reference.span, reference_binding(reference)?)?;
             }
         }
         self.occurrences = Arc::new(occurrences);
@@ -211,8 +232,9 @@ impl FlowBindingMap {
     /// occurrences are distinct; neither permits a runtime name fallback.
     pub fn occurrence(&self, span: FrameSpan) -> FlowBindingOccurrence<'_> {
         match self.occurrences.get(&span) {
-            Some(Some(binding)) => FlowBindingOccurrence::Resolved(binding),
-            Some(None) => FlowBindingOccurrence::Free,
+            Some(IndexedOccurrence::Resolved(binding)) => FlowBindingOccurrence::Resolved(binding),
+            Some(IndexedOccurrence::UnmodeledLocal) => FlowBindingOccurrence::UnmodeledLocal,
+            Some(IndexedOccurrence::Free) => FlowBindingOccurrence::Free,
             None => FlowBindingOccurrence::Missing,
         }
     }
@@ -224,6 +246,7 @@ impl FlowBindingMap {
         match self.occurrence(span) {
             FlowBindingOccurrence::Resolved(binding) => Ok(Some(binding.clone())),
             FlowBindingOccurrence::Free => Ok(None),
+            FlowBindingOccurrence::UnmodeledLocal => Err(FlowBindingMapError::UnmodeledOccurrence),
             FlowBindingOccurrence::Missing => Err(FlowBindingMapError::MissingOccurrence),
         }
     }
@@ -261,6 +284,11 @@ impl FlowBindingMap {
         let runtime = self.canonical_local(binding).index();
         &self.runtime_declarations[self.declaration_offsets[runtime] as usize
             ..self.declaration_offsets[runtime + 1] as usize]
+    }
+
+    /// Precomputed runtime shape; repeated reads never scan alias declarations.
+    pub fn runtime_shape(&self, binding: SkeletonBindingId) -> FlowRuntimeBindingShape {
+        self.runtime_shapes[self.canonical_local(binding).index()]
     }
 
     pub fn runtime_identity(&self, binding: SkeletonBindingId) -> Option<&FlowBindingIdentity> {

@@ -7,14 +7,17 @@ use oxc_ast::ast::{
 use oxc_span::GetSpan;
 use std::sync::Arc;
 
-use super::{FunctionReadRole, FunctionReferenceRecord, FunctionWriteKind, FunctionWriteTarget};
+use super::{
+    FunctionReadRole, FunctionReferenceBinding, FunctionReferenceRecord, FunctionWriteKind,
+    FunctionWriteTarget,
+};
 
 fn named(identifier: &IdentifierReference<'_>, kind: FunctionWriteKind) -> FunctionWriteTarget {
     FunctionWriteTarget::Binding {
         reference: FunctionReferenceRecord {
             name: Arc::from(identifier.name.as_str()),
             span: identifier.span.into(),
-            binding: None,
+            binding: FunctionReferenceBinding::Free,
             read_role: None,
             path: Arc::from([]),
         },
@@ -35,7 +38,7 @@ pub(crate) fn static_member_reference(
                 return Some(FunctionReferenceRecord {
                     name: Arc::from(identifier.name.as_str()),
                     span: identifier.span.into(),
-                    binding: None,
+                    binding: FunctionReferenceBinding::Free,
                     read_role: Some(FunctionReadRole::Value),
                     path: path.into(),
                 });
