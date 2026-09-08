@@ -185,6 +185,7 @@ pub fn compute_flow_slice_hash(
                     FlowEdgeKind::EvalEffect => buf.push(3),
                     FlowEdgeKind::ControlRegion => buf.push(4),
                     FlowEdgeKind::ControlInput => buf.push(7),
+                    FlowEdgeKind::SourceTypeQuery => buf.push(8),
                     FlowEdgeKind::ReadProjection { path, kind } => {
                         buf.push(5);
                         buf.push(match kind {

@@ -116,7 +116,8 @@ pub fn lower_slice_plan(
                     FlowEdgeKind::EvalEffect
                     | FlowEdgeKind::ControlRegion
                     | FlowEdgeKind::ControlInput
-                    | FlowEdgeKind::ReadProjection { .. } => continue,
+                    | FlowEdgeKind::ReadProjection { .. }
+                    | FlowEdgeKind::SourceTypeQuery => continue,
                 };
                 let FlowNodeKind::ExprSite(site) = graph.node_kind(edge.to) else {
                     continue;

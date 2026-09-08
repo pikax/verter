@@ -97,6 +97,48 @@ fn planner_consumed_member_input_keeps_its_path_without_the_result_suffix() {
 }
 
 #[test]
+fn planner_source_type_query_selects_whole_current_subject_without_result_suffix() {
+    let source = "function f() { let queried={a:'first',b:'second'}; const unused='unused'; queried={a:'next',b:'last'}; return accept(0 as typeof queried); }";
+    let skeleton = skeleton_of(source);
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = plan_return(&skeleton, &graph, &["result"]);
+    let subject = binding_node(&skeleton, &graph, "queried");
+    assert!(plan.is_value(subject));
+    assert!(!plan.is_value(binding_node(&skeleton, &graph, "unused")));
+    for literal in ["'first'", "'second'", "'next'", "'last'"] {
+        let start = source.find(literal).unwrap() as u32;
+        let span = crate::analysis::flow::FrameSpan::rebase(
+            0,
+            verter_span::Span::new(start, start + literal.len() as u32),
+        );
+        let site = skeleton
+            .expr_sites
+            .iter()
+            .position(|site| site.span == span)
+            .unwrap();
+        assert!(
+            plan.is_value(graph.expr_site_node(SkeletonExprSiteId::from_index(site as u32))),
+            "query consumes the current whole subject independent of result path: {literal}"
+        );
+    }
+    let (site_id, site) = skeleton
+        .expr_sites
+        .iter()
+        .enumerate()
+        .find(|(_, site)| !site.source_type_queries.is_empty())
+        .unwrap();
+    assert!(site
+        .reads
+        .iter()
+        .all(|read| read.binding.as_ref() != site.source_type_queries[0].binding.as_ref()));
+    assert!(site.capture_bindings.is_empty());
+    assert!(graph
+        .out_edges(graph.expr_site_node(SkeletonExprSiteId::from_index(site_id as u32)))
+        .iter()
+        .any(|edge| edge.to == subject && matches!(edge.kind, FlowEdgeKind::SourceTypeQuery)));
+}
+
+#[test]
 fn planner_bounds_a_self_growing_member_projection_cycle() {
     let skeleton = skeleton_of("function f(x) { x = x.a; return x; }");
     let graph = build_function_flow_graph(&skeleton);
