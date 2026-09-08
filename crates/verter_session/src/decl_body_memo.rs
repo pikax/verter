@@ -82,13 +82,16 @@ pub(crate) use locator_deref::{DerefedBodyShape, LocatorBodyDerefError};
 /// them for the session-owned lazy-lowering machinery and its consumers.
 pub use verter_semantic::resolver_core::{LoweredTypeDecl, LoweredValueDecl, ValueBodyHashFact};
 
-/// Transient call lowering and the exact identifier occurrences that feed its
-/// argument/receiver values. These addresses come from the same retained AST
-/// borrow as `call`; the memo retains neither this IR nor another body index.
+/// Transient call lowering and the exact source origins used to evaluate its
+/// argument/receiver types. Value reads and authored type queries retain
+/// distinct roles from the same AST borrow as `call`; the memo retains neither
+/// this IR nor another body index.
 pub(crate) struct IndexedFlowCallExpression {
     pub(crate) call: verter_type_expr::IndexedValueCall,
-    pub(crate) argument_roots: Box<[Option<verter_span::Span>]>,
-    pub(crate) receiver_root: Option<verter_span::Span>,
+    pub(crate) argument_roots:
+        Box<[verter_semantic::analysis::type_eval_build::IndexedValueReadRoot]>,
+    pub(crate) receiver_root:
+        Option<verter_semantic::analysis::type_eval_build::IndexedValueReadRoot>,
 }
 
 /// The committed value of one per-symbol demand cell.
@@ -1463,16 +1466,9 @@ impl DeclBodyMemo {
                         if invalid_observation {
                             return None;
                         }
-                        let read_span = |root| match root {
-                            IndexedValueReadRoot::NonBinding => None,
-                            IndexedValueReadRoot::Identifier(span) => Some(span),
-                        };
-                        let argument_roots = roots
-                            .into_iter()
-                            .map(|root| root.map(read_span))
-                            .collect::<Option<Box<[_]>>>()?;
+                        let argument_roots = roots.into_iter().collect::<Option<Box<[_]>>>()?;
                         let receiver_root = match (call.receiver.is_some(), receiver_root) {
-                            (true, Some(root)) => read_span(root),
+                            (true, Some(root)) => Some(root),
                             (false, None) => None,
                             _ => return None,
                         };

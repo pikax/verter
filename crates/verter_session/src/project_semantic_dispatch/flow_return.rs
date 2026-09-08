@@ -4607,7 +4607,10 @@ fn flow_demanded_member_name(
 /// A retained argument's exact source disposition. Unknown local syntax or a
 /// missing occurrence must not escape to the file's same-spelled value.
 enum FlowIndexedArgumentBinding {
-    Resolved(FlowProductSubject),
+    ValueRead(FlowProductSubject),
+    /// The asserted type queries this subject; it supplies the current type,
+    /// but carries no operand-read or literal-freshness evidence.
+    SourceTypeQuery(FlowProductSubject),
     Free,
     UnmodeledLocal,
     Missing,
@@ -7338,15 +7341,25 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.project_segments_navigate(root, &segments)
     }
 
-    /// Classify the exact identifier occurrence retained with this call once;
-    /// both its reaching value and freshness consume this same disposition.
+    /// Classify the exact source occurrence retained with this call once.
+    /// A type query uses its own indexed authority and retains that role even
+    /// when its queried subject is the same as an ordinary operand read.
     fn indexed_argument_binding(
         &self,
-        root: Option<verter_span::Span>,
+        root: verter_semantic::analysis::type_eval_build::IndexedValueReadRoot,
     ) -> FlowIndexedArgumentBinding {
         use verter_semantic::analysis::flow::{FlowBindingOccurrence, FrameSpan};
-        let Some(root) = root else {
-            return FlowIndexedArgumentBinding::NonBindingExpression;
+        use verter_semantic::analysis::type_eval_build::IndexedValueReadRoot;
+        let occurrence = match root {
+            IndexedValueReadRoot::NonBinding => {
+                return FlowIndexedArgumentBinding::NonBindingExpression;
+            }
+            IndexedValueReadRoot::Identifier(root) => self
+                .bindings
+                .occurrence(FrameSpan::rebase(self.anchor, root)),
+            IndexedValueReadRoot::SourceTypeQuery(root) => self
+                .bindings
+                .source_type_query_occurrence(FrameSpan::rebase(self.anchor, root)),
         };
         #[cfg(test)]
         self.dispatch
@@ -7355,12 +7368,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .flow_fault_injection
             .indexed_argument_identity_work
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        match self
-            .bindings
-            .occurrence(FrameSpan::rebase(self.anchor, root))
-        {
+        match occurrence {
+            FlowBindingOccurrence::Resolved(binding)
+                if matches!(root, IndexedValueReadRoot::SourceTypeQuery(_)) =>
+            {
+                FlowIndexedArgumentBinding::SourceTypeQuery(binding.clone())
+            }
             FlowBindingOccurrence::Resolved(binding) => {
-                FlowIndexedArgumentBinding::Resolved(binding.clone())
+                FlowIndexedArgumentBinding::ValueRead(binding.clone())
             }
             FlowBindingOccurrence::Free => FlowIndexedArgumentBinding::Free,
             FlowBindingOccurrence::UnmodeledLocal => FlowIndexedArgumentBinding::UnmodeledLocal,
@@ -11971,10 +11986,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         false
     }
 
-    /// Evaluate one argument of an authored call IN THIS FRAME: a bare
-    /// identifier names a frame binding (a parameter or a reaching
-    /// local), which owner-scope lowering cannot see; every other shape
-    /// lowers through the owner-scope indexed evaluation.
+    /// Evaluate one argument in this frame. Ordinary value reads and authored
+    /// whole-root type queries consume the current type of their own exact
+    /// subjects. Free roots and other indexed values use owner-scope lowering.
     fn eval_indexed_call_argument(
         &mut self,
         expression: &verter_type_expr::IndexedValueExpression,
@@ -11986,7 +12000,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         ) {
             return None;
         }
-        if let FlowIndexedArgumentBinding::Resolved(binding) = binding {
+        if let FlowIndexedArgumentBinding::ValueRead(binding)
+        | FlowIndexedArgumentBinding::SourceTypeQuery(binding) = binding
+        {
             let name = self.products.identity(binding)?.name;
             let subject = crate::flow_slice_content::SliceNarrowSubject {
                 root: crate::flow_slice_content::SliceNarrowRoot::Local {
@@ -12112,7 +12128,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // reference as pinned because only this frame knows the
             // binding's widening membership.
             let reads_widening_local = matches!(&binding,
-                FlowIndexedArgumentBinding::Resolved(binding) if self.widening_of(binding));
+                FlowIndexedArgumentBinding::ValueRead(binding) if self.widening_of(binding));
             args.push(crate::semantic_query::CallArgKey::Eager {
                 ty,
                 spread: argument.spread,
@@ -12146,12 +12162,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // A member call's receiver rides the key: `.call` / `.apply`
         // rebase and `this`-typed methods read it — the same indexed
         // lowering the callee came from, evaluated in the same scope.
-        let receiver_binding = self.indexed_argument_binding(indexed.receiver_root);
         let receiver = match call.receiver.as_deref() {
-            Some(receiver) => match self.eval_indexed_call_argument(receiver, &receiver_binding) {
-                Some(node) => Some(node),
-                None => return Some(self.degraded_unrepresentable_callee()),
-            },
+            Some(receiver) => {
+                let Some(root) = indexed.receiver_root else {
+                    return Some(self.degraded_unrepresentable_callee());
+                };
+                let receiver_binding = self.indexed_argument_binding(root);
+                match self.eval_indexed_call_argument(receiver, &receiver_binding) {
+                    Some(node) => Some(node),
+                    None => return Some(self.degraded_unrepresentable_callee()),
+                }
+            }
             None => None,
         };
         let key = crate::semantic_query::ResolveCallKey {

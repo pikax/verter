@@ -8775,39 +8775,41 @@ fn flow_return_unused_catch_parameter_does_not_poison_selected_writes() {
 
 #[test]
 fn flow_return_indexed_argument_identity_work_is_independent_of_unrelated_bindings() {
-    for count in [64usize, 256] {
-        let declarations = (0..count)
-            .map(|n| format!("const unrelated{n}={n};"))
-            .collect::<String>();
-        let source=format!("function id<T>(x:T):T{{return x;}}function makeProps(x:number){{{declarations}return id(x);}}");
-        let mut counter = None;
-        let (result, _) = flow_source_probe_configured(&source, |host| {
-            counter = Some(Arc::clone(
-                &host.flow_fault_injection.indexed_argument_identity_work,
-            ))
-        });
-        let FlowSourceProbe::Value {
-            expr,
-            degradation: None,
-            candidates: 1,
-        } = result
-        else {
-            panic!("{result:?}");
-        };
-        assert_eq!(
-            expr,
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
-        );
-        let work = counter.unwrap().load(std::sync::atomic::Ordering::Relaxed);
-        eprintln!("{count} unrelated bindings: {work} argument identity probes");
-        assert!(
-            work > 0,
-            "the call must resolve its selected argument identity"
-        );
-        assert!(
+    for argument in ["x", "other as typeof x"] {
+        for count in [64usize, 256] {
+            let declarations = (0..count)
+                .map(|n| format!("const unrelated{n}={n};"))
+                .collect::<String>();
+            let source=format!("const x:string='outer';function id<T>(x:T):T{{return x;}}function makeProps(x:number,other:boolean){{{declarations}return id({argument});}}");
+            let mut counter = None;
+            let (result, _) = flow_source_probe_configured(&source, |host| {
+                counter = Some(Arc::clone(
+                    &host.flow_fault_injection.indexed_argument_identity_work,
+                ))
+            });
+            let FlowSourceProbe::Value {
+                expr,
+                degradation: None,
+                candidates: 1,
+            } = result
+            else {
+                panic!("{result:?}");
+            };
+            assert_eq!(
+                expr,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+            );
+            let work = counter.unwrap().load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("{argument}, {count} unrelated bindings: {work} argument identity probes");
+            assert!(
+                work > 0,
+                "the call must resolve its selected argument identity"
+            );
+            assert!(
             work <= 8,
             "fixed selected call inspected {work} identities with {count} unrelated declarations"
         );
+        }
     }
 }
 
@@ -8857,4 +8859,32 @@ fn flow_return_indexed_wrapped_arguments_preserve_the_lowered_binding_root() {
     // An authoritative assertion supplies the argument's type, even when its
     // authored type name is also the name of a runtime parameter.
     assert_eq!(expect_clean_flow_value("type T=string;function id<V>(v:V):V{return v;}function makeProps(T:number,x:boolean){return id(x as T);}"), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
+}
+
+#[test]
+fn flow_return_authoritative_type_query_argument_preserves_lexical_scope() {
+    assert_eq!(
+        expect_clean_flow_value("const x:number=0;function id<T>(v:T):T{return v;}function makeProps(x:string){return id(x as typeof x);}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+    assert_eq!(
+        expect_clean_flow_value("const x:number=0;function id<T>(v:T):T{return v;}function makeProps(other:boolean){return id(other as typeof x);}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+}
+
+#[test]
+fn flow_return_type_query_argument_uses_its_own_binding() {
+    assert_eq!(
+        expect_clean_flow_value("const x:number=0;function id<T>(v:T):T{return v;}function makeProps(x:string,other:boolean){return id(other as typeof x);}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+}
+
+#[test]
+fn flow_return_type_query_argument_keeps_current_narrowing() {
+    assert_eq!(
+        expect_clean_flow_value("const x:boolean=false;function id<T>(v:T):T{return v;}function makeProps(x:string|number){if(typeof x!=='string'){throw 0;}return id(0 as typeof x);}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
 }

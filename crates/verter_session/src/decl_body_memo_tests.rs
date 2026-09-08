@@ -2340,6 +2340,9 @@ fn retained_function_requests_reject_stale_pins_and_use_owned_inventory() {
 
 #[test]
 fn retained_call_arguments_carry_exact_identifier_occurrences() {
+    use verter_semantic::analysis::type_eval_build::IndexedValueReadRoot::{
+        Identifier, NonBinding,
+    };
     let source = "function f(value, rest, receiver) { receiver.method((value), ...rest, value as string, 1); }";
     let (memo, provenance) = memo_for(source);
     let index = memo.function_program_index();
@@ -2355,13 +2358,16 @@ fn retained_call_arguments_carry_exact_identifier_occurrences() {
     assert_eq!(
         call.argument_roots.as_ref(),
         &[
-            Some(span("(value)", 1, 5)),
-            Some(span("...rest", 3, 4)),
-            None,
-            None,
+            Identifier(span("(value)", 1, 5)),
+            Identifier(span("...rest", 3, 4)),
+            NonBinding,
+            NonBinding,
         ]
     );
-    assert_eq!(call.receiver_root, Some(span("receiver.method", 0, 8)));
+    assert_eq!(
+        call.receiver_root,
+        Some(Identifier(span("receiver.method", 0, 8)))
+    );
     assert_eq!(call.argument_roots.len(), call.call.args.len());
     assert_eq!(
         parses(&provenance),
@@ -2372,6 +2378,9 @@ fn retained_call_arguments_carry_exact_identifier_occurrences() {
 
 #[test]
 fn retained_wrapped_receiver_uses_the_indexed_value_disposition() {
+    use verter_semantic::analysis::type_eval_build::IndexedValueReadRoot::{
+        Identifier, NonBinding,
+    };
     let source="function f(receiver:{method():string}){((receiver as {method():string}) satisfies {method():string}).method();(receiver as {method():string}).method();}";
     let (memo, _) = memo_for(source);
     let index = memo.function_program_index();
@@ -2383,14 +2392,45 @@ fn retained_wrapped_receiver_uses_the_indexed_value_disposition() {
     let start = source.find("((receiver").unwrap() + 2;
     assert_eq!(
         transparent.receiver_root,
-        Some(verter_span::Span::new(start as u32, (start + 8) as u32)),
+        Some(Identifier(verter_span::Span::new(
+            start as u32,
+            (start + 8) as u32
+        ))),
         "a receiver lowered as a binding read retains that exact occurrence"
     );
     let authoritative = memo
         .indexed_call_expression_at(entry.call_sites[1].span)
         .unwrap();
     assert_eq!(
-        authoritative.receiver_root, None,
+        authoritative.receiver_root,
+        Some(NonBinding),
         "an authoritative receiver assertion supplies its own type"
     );
+}
+
+#[test]
+fn retained_call_type_query_keeps_its_distinct_source_origin() {
+    use verter_semantic::analysis::type_eval_build::IndexedValueReadRoot::{
+        Identifier, NonBinding, SourceTypeQuery,
+    };
+
+    let source = "function f(x,other){return id(x,other as typeof x,other as string);}";
+    let (memo, provenance) = memo_for(source);
+    let index = memo.function_program_index();
+    let entry = index.matches_named("f").next().unwrap().entry();
+    let parse_count = parses(&provenance);
+    let call = memo
+        .indexed_call_expression_at(entry.call_sites[0].span)
+        .unwrap();
+    let value_start = source.find("id(x").unwrap() as u32 + 3;
+    let query_start = source.find("typeof x").unwrap() as u32 + 7;
+    assert_eq!(
+        call.argument_roots.as_ref(),
+        &[
+            Identifier(verter_span::Span::new(value_start, value_start + 1)),
+            SourceTypeQuery(verter_span::Span::new(query_start, query_start + 1)),
+            NonBinding,
+        ]
+    );
+    assert_eq!(parses(&provenance), parse_count);
 }
