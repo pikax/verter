@@ -14,7 +14,7 @@ final = ["pnpm -r test"]
 [[profile]]
 id = "docs-domain"
 iteration = true
-final = ["node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict", "pnpm docs:build"]
+final = ["node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict", "node roadmap/0.1.0-tama/tools/validate-semantic-memory-budget.mjs", "node --test roadmap/0.1.0-tama/tools/semantic-memory-budget.test.mjs", "pnpm docs:build"]
 [[profile]]
 id = "canonical"
 iteration = true
