@@ -44,8 +44,6 @@ The retained parse worker lazily owns an immutable `FunctionProgramNodes` addres
 
 Exact declaration addresses are prepared once by `FlowBindingMap::declaration_at_span`, with constant expected-time lookup by frame-relative identifier span. That lookup preserves authored declaration IDs, including distinct parameter/var redeclarations and shadowed binders; occurrence references and runtime aliases remain separate authorities. No content or parameter lowering may rediscover a declaration by scanning the frame inventory.
 
-The prepared skeleton retains `nested_function_site(&FunctionProgramKey)` as the exact immediate-child-to-parent-expression ingress. It is minted during the existing closure footprint walk even for empty capture inventories; aggregate children may share a site, while grandchildren remain owned by their immediate defining frame. Consumers use this immutable map to bind capture-processing receipts to the actual creation site, with no query-time scan or nested rediscovery.
-
 Runtime alias declaration groups are prepared once on `FlowBindingMap::runtime_declarations` and borrowed in source order. `runtime_shape` retains constant-size var/pattern facts so repeated reads can classify parameter/var aliases without rescanning their declarations. Graph reads, writes and capture subjects target one canonical runtime binding hub; that hub links each distinct authored declaration once so alias fanout never multiplies access edges. `FunctionProgramIndex` retains exact key, value-function and nested-position indexes; keyed retrieval and stable-hash remapping reuse those indexes without scanning unrelated functions.
 
 ## Canonical Dependency Cache Rule

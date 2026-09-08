@@ -577,14 +577,14 @@ fn flow_function_key(byte: u8) -> FlowFunctionObservationKey {
 }
 
 fn empty_skeleton() -> FunctionBodySkeleton {
-    use crate::analysis::flow::{build_function_body_skeleton, FunctionBodySource};
-    let allocator = oxc_allocator::Allocator::default();
-    let parsed =
-        oxc_parser::Parser::new(&allocator, "function f() {}", oxc_span::SourceType::ts()).parse();
-    let oxc_ast::ast::Statement::FunctionDeclaration(function) = &parsed.program.body[0] else {
-        panic!("fixture function")
-    };
-    build_function_body_skeleton(&FunctionBodySource::from_function(function).unwrap())
+    FunctionBodySkeleton {
+        names: Arc::from([]),
+        regions: Arc::from([]),
+        bindings: Arc::from([]),
+        expr_sites: Arc::from([]),
+        return_sites: Arc::from([]),
+        writes: Arc::from([]),
+    }
 }
 
 #[test]
