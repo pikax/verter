@@ -127,6 +127,24 @@ limit. The live adapter consumes that indexed authority and uses canonical-ident
 set membership for finally-written roots, preserving the existing replay and fact
 order. Neither operation repeatedly scans an accumulated prefix.
 
+### Separate nominal-projection follow-up
+
+The cumulative review also identified an existing nominal rendering defect outside
+this product repair: the shared `component_meta_registry` signature walk visits
+parameters and return types but omits generic constraints and defaults. A setup-local
+`const K: unique symbol = Symbol()` used only by an exposed
+`<T extends typeof K = typeof K>() => void` can therefore escape both owner-local
+widening and scope-reference collection and render an undeclared `K`. The walker,
+widening consumer and expose projection are unchanged from the original D3C source;
+this is not a product-migration regression or a harmless/fixed result.
+
+A separately scoped D3R nominal-projection follow-up owns this defect under decision
+points 2–3 of the accepted
+[nominal carrier amendment](2026-09-02-d3r-typeof-carrier-mint-site-and-test-home.md).
+Its proof should cover both constraint and default positions and an imported-symbol
+control through the shared walk and existing expose nameability tests. It does not
+belong to D4–D6 and does not enlarge this repair's implementation scope.
+
 ## Legacy deletions
 
 Remove the whole-graph dependency propagation solver, name-interned product subjects,
