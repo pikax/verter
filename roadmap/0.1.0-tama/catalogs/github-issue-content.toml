@@ -501,9 +501,9 @@ acceptance = ["A dedicated lossless parser decision covers MDX grammar and recov
 [[issue]]
 node_id = "MDXR0"
 title = "Test React-qualified component discovery in MDX"
-problem = "React component suggestions in MDX are unreliable when capitalization or generic JSX is treated as proof, causing incorrect imports and navigation for Solid, Preact, plain JSX, or user-defined components."
+problem = "React component suggestions in MDX are unreliable when capitalization or generic JSX is treated as proof, causing incorrect imports and navigation for Solid 2, Preact, plain JSX, or user-defined components."
 expected_outcome = "A private experiment demonstrates React auto-import and navigation from bounded, project-qualified candidates while leaving generic MDX tooling framework-neutral."
-acceptance = ["A bounded React `ComponentInfo` provider contract exposes exact package, project, and export provenance.", "Private auto-import ranking and edits use only proven React candidates and preserve definition mappings.", "Solid, Preact, plain JSX, and ambiguous userland candidates are rejected rather than guessed.", "Cancellation, stale index bases, and search limits prevent incomplete results from appearing complete.", "The experiment leaves no reachable production provider, join path, or advertised React-in-MDX capability after evidence is captured."]
+acceptance = ["A bounded React `ComponentInfo` provider contract exposes exact package, project, and export provenance.", "Private auto-import ranking and edits use only proven React candidates and preserve definition mappings.", "Solid 2, Preact, plain JSX, and ambiguous userland candidates are rejected rather than guessed.", "Cancellation, stale index bases, and search limits prevent incomplete results from appearing complete.", "The experiment leaves no reachable production provider, join path, or advertised React-in-MDX capability after evidence is captured."]
 [[issue]]
 node_id = "PRF0"
 title = "Define falsifiable representative framework experiments"
@@ -518,10 +518,10 @@ expected_outcome = "A private React experiment activates facts from exact packag
 acceptance = ["React activation in the experiment is tied to exact package and project roles rather than syntax or naming heuristics.", "Component, hook, props, ref, children, reactivity, and directive facts remain React-owned facets.", "Ordinary TSX parsing and TypeScript type ownership remain unchanged.", "Plain TSX and userland hook lookalikes produce no React overlay work.", "A compiler-rule canary and one cross-framework consumer check demonstrate semantic value without advertising production React support."]
 [[issue]]
 node_id = "SLDP"
-title = "Use Solid to challenge React-shaped TSX assumptions"
-problem = "React-shaped abstractions can silently become the generic TSX substrate, causing incorrect component and reactivity facts, cache collisions, and cross-framework diagnostics when identical syntax belongs to Solid."
-expected_outcome = "A private Solid counterexample proves that component, props, signal, effect, and control-flow semantics remain framework-owned while only neutral TSX and TypeInfo boundaries are shared."
-acceptance = ["Solid activates in the experiment from exact package roles and does not inherit React semantics from syntax shape.", "Identical React and Solid syntax fixtures produce their framework-owned divergent facts.", "Private cache, diagnostic, action, and formatter-view checks remain isolated across mixed-framework projects.", "Neutral syntax contains no framework switch or flattened React-compatible reactivity schema.", "The experiment adds no parser, TypeScript semantic host, or advertised Solid capability."]
+title = "Use Solid 2 to challenge React-shaped TSX assumptions"
+problem = "React-shaped abstractions can silently become the generic TSX substrate, causing incorrect component and reactivity facts, cache collisions, and cross-framework diagnostics when identical syntax belongs to Solid 2."
+expected_outcome = "A private Solid 2 counterexample proves that component, props, signal, async memo, split effect, batching, store, and control-flow semantics remain framework-owned while only neutral TSX and TypeInfo boundaries are shared."
+acceptance = ["Solid 2 activates in the experiment from one exact 2.x release and package roles, with any prerelease maturity recorded, and does not inherit React semantics from syntax shape.", "Identical React and Solid 2 syntax fixtures produce their framework-owned divergent facts.", "Solid 1 support, compatibility, and migration remain out of scope; unsupported Solid 1 inputs cannot activate the Solid 2 profile.", "Private cache, diagnostic, action, and formatter-view checks remain isolated across mixed-framework projects.", "Neutral syntax contains no framework switch or flattened React-compatible reactivity schema.", "The experiment adds no parser, TypeScript semantic host, or advertised Solid 2 capability."]
 [[issue]]
 node_id = "UKS0"
 title = "Stabilize the framework extension contract from representative evidence"
@@ -827,7 +827,7 @@ node_id = "HWC2"
 title = "Publish neutral HTML facts and authored mappings"
 problem = "A syntax tree alone cannot support reliable HTML navigation, indexing, or framework overlays when element, attribute, identifier, selector, and source-map facts lack neutral ownership. Reconstructing those facts in consumers causes duplicate parsers, incorrect ranges, and ambiguous dynamic values presented as complete."
 expected_outcome = "The HTML frontend publishes neutral authored facts, exact mappings, TypeInfo roles, and atomic index contributions that framework overlays can consume without changing parser behavior."
-acceptance = ["Element, attribute, text, comment, namespace, ID, class, selector, symbol, and authored-region facts have stable identities.", "Every admitted fact and index contribution preserves exact authored UTF-8 ranges and provenance.", "Static definitions and renames are exact, while dynamic or ambiguous values remain explicitly incomplete.", "Representative framework overlays consume the same neutral facts without parser branches."]
+acceptance = ["Element, attribute, text, comment, namespace, ID, class, selector, symbol, and authored-region facts have stable identities.", "Every admitted fact and index contribution preserves exact authored UTF-8 ranges and provenance.", "Static definitions and renames are exact, while dynamic or ambiguous values remain explicitly incomplete.", "Alpine, htmx 4, and Angular test overlays consume the same neutral facts without parser branches.", "htmx counterfixtures pin one exact 4.x release; explicit inheritance, configuration overrides, and request/target/trigger/swap interpretation remain overlay-owned without implicit major fallback."]
 [[issue]]
 node_id = "HWC3"
 title = "Model standards-based custom elements and registry evidence"
@@ -1049,7 +1049,7 @@ node_id = "VID0"
 title = "Separate carrier, profile, project, and release identities"
 problem = "Conflated language, framework, release, project, snapshot, and capability identifiers allow unrelated artifacts to share cache keys or semantic dispatch. This causes cross-version collisions, implicit latest-version behavior, and incorrect framework claims for identical source bytes in different project contexts."
 expected_outcome = "Every carrier, semantic release, attachment, project profile, configured project, snapshot, and capability uses an orthogonal typed identity while preserving the accepted source and type-backend identities."
-acceptance = ["Source lineage remains stable while source revision, content, and map revisions change independently.", "Vue 2.6 and Vue 3 can coexist in one workspace without dispatch branches or cache collisions.", "Identical TSX bytes can carry distinct React and Solid claims through explicit profile identity.", "Latest-version aliases, family-wide cache keys, untagged string identities, and implicit default majors fail validation."]
+acceptance = ["Source lineage remains stable while source revision, content, and map revisions change independently.", "Vue 2.6 and Vue 3 can coexist in one workspace without dispatch branches or cache collisions.", "Identical TSX bytes can carry distinct React and Solid 2 claims through explicit profile identity.", "Solid 1 cannot activate a Solid 2 profile, and older htmx majors cannot activate an htmx 4 profile.", "Latest-version aliases, family-wide cache keys, untagged string identities, and implicit default majors fail validation."]
 [[issue]]
 node_id = "VIM0"
 title = "Define a typed conformance manifest for each supported profile"
