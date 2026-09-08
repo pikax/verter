@@ -1228,6 +1228,16 @@ fn flow_result_contract_is_exact_identity() {
                 ..base.clone()
             },
         ),
+        (
+            "checker capture return policies",
+            FlowOperationContract {
+                result: FlowResultContractDescriptor {
+                    checker_capture_returns: &[],
+                    ..base.result
+                },
+                ..base.clone()
+            },
+        ),
     ];
     for (name, contract) in &cases {
         assert_ne!(
@@ -1253,7 +1263,7 @@ fn flow_result_contract_is_exact_identity() {
             .any(|window| window == tag.as_bytes())
     };
     assert!(
-        carries("verter.session.flow.result_contract.v5"),
+        carries("verter.session.flow.result_contract.v6"),
         "the minted contract identity carries the domain tag of the registry revision \
          it ranks over"
     );
@@ -1262,6 +1272,7 @@ fn flow_result_contract_is_exact_identity() {
         "result_contract.v2",
         "result_contract.v3",
         "result_contract.v4",
+        "result_contract.v5",
     ] {
         assert!(
             !carries(superseded),
@@ -1269,6 +1280,42 @@ fn flow_result_contract_is_exact_identity() {
              it would reuse a previous registry revision's identity space"
         );
     }
+}
+
+#[test]
+fn checker_capture_return_rules_only_prove_effect_processing_for_return_contracts() {
+    use verter_session::for_tests::{FlowCaptureDemand, FlowCheckerReturnRule};
+    let (_, plan) = planned();
+    for rule in [
+        FlowCheckerReturnRule::AuthoredFinallyReturn,
+        FlowCheckerReturnRule::OverriddenBreakSuffix,
+    ] {
+        assert!(plan.accepts_checker_capture_return(rule, FlowCaptureDemand::Effect));
+        assert!(!plan.accepts_checker_capture_return(rule, FlowCaptureDemand::Value));
+        for tag in [
+            SemanticQueryKeyTag::FlowNarrowingAt,
+            SemanticQueryKeyTag::ContextualTypeAt,
+            SemanticQueryKeyTag::ResolveCall,
+            SemanticQueryKeyTag::Relate,
+        ] {
+            let contract = flow_operation_contract(tag).unwrap();
+            assert!(!contract.accepts_checker_capture_return(rule, FlowCaptureDemand::Effect));
+        }
+    }
+    let (fixture, _) = planned();
+    let mut stale = base_request();
+    let SemanticQueryKey::FlowReturn(key) = &mut stale.query else {
+        unreachable!()
+    };
+    key.result_contract = foreign_result_contract(6);
+    let stale_plan = fixture.build_plan(stale).unwrap();
+    assert!(
+        !stale_plan.accepts_checker_capture_return(
+            FlowCheckerReturnRule::AuthoredFinallyReturn,
+            FlowCaptureDemand::Effect,
+        ),
+        "an unregistered result identity cannot admit registered capture policy"
+    );
 }
 
 /// The central report applicator: a complete report discharges every
