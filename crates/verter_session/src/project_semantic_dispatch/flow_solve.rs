@@ -241,6 +241,7 @@ impl FlowOperationContract {
 
     /// This accepts only checker return capture processing. It grants no
     /// runtime, value-product, call, relation or incomplete-walk evidence.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn accepts_checker_capture_return(
         &self,
         rule: FlowCheckerReturnRule,
