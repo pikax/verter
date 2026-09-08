@@ -874,7 +874,7 @@ pub fn flow_graph_fixture_for_tests_nested(source: &str, body_hash_tag: u8, nest
 #[rustfmt::skip]
 fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_language::FileLanguage, nested: Option<&str>) -> FlowGraphFixtureForTests {
     use verter_semantic::analysis::flow::{FunctionBodySource, build_indexed_function_body_skeleton};
-    use verter_semantic::analysis::function_program::{build_function_program_index, resolve_function_node, FunctionNode};
+    use verter_semantic::analysis::function_program::{build_function_program_index_with_nodes, FunctionNode};
     use verter_semantic::analysis::top_level_owners::TopLevelOwnerTable;
     let oxc_source_type = match &file_language {
         verter_language::FileLanguage::Script { source_type, .. } => match source_type {
@@ -896,10 +896,10 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     let name = function.id.as_ref().expect("named function").name.as_str();
     let canonical_id: std::sync::Arc<str> = std::sync::Arc::from("/flow_solve_fixture.ts");
     let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
-    let index = build_function_program_index(&parsed.program, source, &owners, canonical_id.clone());
+    let (index, nodes) = build_function_program_index_with_nodes(&parsed.program, source, &owners, canonical_id.clone());
     let entry = if let Some(nested_name) = nested {
         let mut matching = index.matches_named(name).filter(|candidate| {
-            candidate.entry().lexical_parent.is_some() && resolve_function_node(&parsed.program, &candidate.entry().locator).is_some_and(|resolved| {
+            candidate.entry().lexical_parent.is_some() && nodes.get(&candidate.entry().key).is_some_and(|resolved| {
                 matches!(resolved.node, FunctionNode::Function(func) if func.id.as_ref().is_some_and(|id| id.name.as_str() == nested_name))
             })
         });
@@ -909,7 +909,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     } else {
         index.value_function(verter_type_expr::TopLevelOwnerId::ordinary_file(), name, &verter_type_expr::facts::FunctionPartIdentity::DeclarationBody, 0).expect("the fixture function is indexed").entry()
     };
-    let resolved = resolve_function_node(&parsed.program, &entry.locator).expect("exact fixture function locator");
+    let resolved = nodes.get(&entry.key).expect("exact indexed fixture function address");
     let body = match resolved.node {
         FunctionNode::Function(func) if func.r#type == oxc_ast::ast::FunctionType::FunctionExpression => FunctionBodySource::from_function_expression(func).expect("bodied expression"),
         FunctionNode::Function(func) => FunctionBodySource::from_function(func).expect("bodied declaration"),
