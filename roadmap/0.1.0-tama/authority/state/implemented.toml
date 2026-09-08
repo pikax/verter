@@ -12,6 +12,21 @@ schema = 2
 # affects readiness. [[github_train_issue]] rows map train parents.
 
 [implementation]
+"SIMP1" = { status = "pending" }
+"SIMP2" = { status = "pending" }
+"SIMP3" = { status = "pending" }
+"SIMP4" = { status = "pending" }
+"SIMP5" = { status = "pending" }
+"SIMP6" = { status = "pending" }
+"SIMP7" = { status = "pending" }
+"SIMP8" = { status = "pending" }
+"SIMP9" = { status = "pending" }
+"SIMP10" = { status = "pending" }
+"SIMP11" = { status = "pending" }
+"SIMP12" = { status = "pending" }
+"SIMP13" = { status = "pending" }
+"SIMP14" = { status = "pending" }
+"SIMP15" = { status = "pending" }
 
 "A0" = { status = "implemented", commit_message = "chore(*): add the architecture-lock program documents, state validator, and gate wiring", commit_date = "2026-08-10T01:40:28+01:00" }
 "A1" = { status = "implemented", commit_message = "docs(*): reference command-truth evidence in the capability matrix", commit_date = "2026-08-10T08:17:25+01:00" }

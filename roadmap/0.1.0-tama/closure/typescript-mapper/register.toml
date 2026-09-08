@@ -766,12 +766,12 @@ adapter = "node-tool"
 argv_tail = ["roadmap/0.1.0-tama/tools/validate-program-dag.mjs", "--strict"]
 fixtures = ["roadmap/0.1.0-tama/authority/dag/rev11-typescript-mapper.toml", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM0R.md"]
 covers = ["A-authority-consistent"]
-selected = 411
-executed = 411
-passed = 411
+selected = 426
+executed = 426
+passed = 426
 failed = 0
 skipped = 0
-terminal_summary = "validate-program-dag: PASS nodes=411 edges=1044 modules=52 charters=411 critical_path=113 max_width=36"
+terminal_summary = "validate-program-dag: PASS nodes=426 edges=1084 modules=53 charters=426 critical_path=113 max_width=36"
 count_key = "nodes"
 control = "CTL-authority-edge"
 

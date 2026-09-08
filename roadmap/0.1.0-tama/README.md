@@ -1,5 +1,7 @@
 # Tama 0.1.0 roadmap
 
+The [codebase simplification train](decisions/2026-09-08-codebase-simplification-train.md) adds SIMP1–SIMP15 under the [simplification contract](contracts/codebase-simplification.md). It retires low-value source tests and simplifies production ownership while preserving the named in-flight work.
+
 This directory is the live Tama roadmap for Verter 0.1.0. It carries the ratified Revision 11 architecture forward as an execution program rather than documentation. Static work definition lives in `authority/dag/` and `charters/`. Implemented state lives in one intentionally simple file: `authority/state/implemented.toml`.
 
 A node is implemented when its predeclared `[implementation]` line has `status = "implemented"`. Its `commit_message`, `commit_date`, and optional `pull_request` are loose locator hints for a person or agent who later wants to find the work. They are not identity, proof, or validator inputs. Flipping the row back to `status = "pending"` is the deliberate operation that marks a node unimplemented.
