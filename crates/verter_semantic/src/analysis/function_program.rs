@@ -241,6 +241,15 @@ pub struct FunctionReferenceRecord {
     pub path: Arc<[Arc<str>]>,
 }
 
+/// A whole authored `typeof name` result consumed by indexed call lowering.
+/// Separate from runtime reads: it neither executes nor captures its operand.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunctionSourceTypeQuery {
+    pub name: Arc<str>,
+    pub span: verter_span::Span,
+    pub binding: FunctionReferenceBinding,
+}
+
 /// The exact lexical answer for an indexed occurrence.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FunctionReferenceBinding {
@@ -600,6 +609,7 @@ pub struct FunctionProgramEntry {
     pub(crate) unmodeled_bindings: Arc<[FunctionBindingRecord]>,
     /// Identifier references in the current function body.
     pub references: Arc<[FunctionReferenceRecord]>,
+    pub source_type_queries: Arc<[FunctionSourceTypeQuery]>,
     /// Return sites in source order.
     pub return_sites: Arc<[FunctionReturnSite]>,
     /// Write sites (assignments / updates).
@@ -1136,12 +1146,10 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
             current = parents[position].clone();
         }
         let site = entries[index].span;
-        let resolve = |reference: &FunctionReferenceRecord| {
+        let resolve = |name: &Arc<str>, span: verter_span::Span| {
             let Some((frame, slot)) =
-                resolve_lexical_binding(&[index], &lexical_scopes, &reference.name, reference.span)
-                    .or_else(|| {
-                        resolve_lexical_binding(&chain, &lexical_scopes, &reference.name, site)
-                    })
+                resolve_lexical_binding(&[index], &lexical_scopes, name, span)
+                    .or_else(|| resolve_lexical_binding(&chain, &lexical_scopes, name, site))
             else {
                 return FunctionReferenceBinding::Free;
             };
@@ -1158,7 +1166,7 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
         };
         let mut captured_sites = Vec::new();
         for reference in Arc::make_mut(&mut entries[index].references) {
-            reference.binding = resolve(reference);
+            reference.binding = resolve(&reference.name, reference.span);
             if let FunctionReferenceBinding::Resolved(identity) = &reference.binding {
                 if identity.defining_function != frame_keys[index] {
                     captured_sites.push((reference.span.start, identity.clone()));
@@ -1170,7 +1178,7 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
                 let FunctionWriteTarget::Binding { reference, .. } = target else {
                     continue;
                 };
-                reference.binding = resolve(reference);
+                reference.binding = resolve(&reference.name, reference.span);
                 if let FunctionReferenceBinding::Resolved(identity) = &reference.binding {
                     if identity.defining_function != frame_keys[index] {
                         captured_sites.push((reference.span.start, identity.clone()));
@@ -1183,6 +1191,9 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
             }
         }
         captured_sites.sort_by_key(|(span, _)| *span);
+        for query in Arc::make_mut(&mut entries[index].source_type_queries) {
+            query.binding = resolve(&query.name, query.span);
+        }
         let mut seen = rustc_hash::FxHashSet::default();
         let captures: Vec<_> = captured_sites
             .into_iter()
@@ -3209,6 +3220,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             unmodeled_bindings,
             class_local_scope: _,
             references,
+            source_type_queries,
             return_sites,
             writes,
             effects,
@@ -3275,6 +3287,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             bindings: Arc::from(bindings.into_boxed_slice()),
             unmodeled_bindings: unmodeled_bindings.into(),
             references: Arc::from(references.into_boxed_slice()),
+            source_type_queries: source_type_queries.into(),
             return_sites: Arc::from(return_sites.into_boxed_slice()),
             writes: Arc::from(writes.into_boxed_slice()),
             descendant_writes: Arc::from([]),
@@ -3347,6 +3360,7 @@ struct InventoryVisitor<'sink, 'ast> {
     unmodeled_bindings: Vec<FunctionBindingRecord>,
     class_local_scope: Option<verter_span::Span>,
     references: Vec<FunctionReferenceRecord>,
+    source_type_queries: Vec<FunctionSourceTypeQuery>,
     return_sites: Vec<FunctionReturnSite>,
     writes: Vec<FunctionWriteRecord>,
     effects: Vec<FunctionEffectRecord>,
@@ -3541,6 +3555,8 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
             }
         }
         self.references.extend(evaluated.references);
+        self.source_type_queries
+            .extend(evaluated.source_type_queries);
         self.writes.extend(evaluated.writes);
         self.unmodeled_bindings.extend(evaluated.unmodeled_bindings);
     }
@@ -3750,6 +3766,13 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
     }
 
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        super::type_eval_build::for_each_indexed_call_source_type_query(it, |query| {
+            self.source_type_queries.push(FunctionSourceTypeQuery {
+                name: Arc::from(query.name.as_str()),
+                span: query.span.into(),
+                binding: FunctionReferenceBinding::Free,
+            });
+        });
         let call = self.alloc(it);
         if let Some(addresses) = &mut self.call_addresses {
             addresses.entry(it.span.into()).or_insert(call);

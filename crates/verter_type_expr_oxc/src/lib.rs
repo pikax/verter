@@ -50,6 +50,19 @@ mod dependency_facts_tests;
 /// `source` is the full source text, used for extracting raw text
 /// for `Unknown` fallback nodes and literal values.
 pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
+    lower_ts_type_with_whole_query(ts_type, source, None)
+}
+
+/// Lower a type while observing only an authored, whole, non-instantiated
+/// identifier query. Nested queries are not whole-result origins.
+pub fn lower_ts_type_with_whole_query(
+    ts_type: &TSType<'_>,
+    source: &str,
+    mut whole_query: Option<&mut Option<verter_span::Span>>,
+) -> TypeExpr {
+    if let Some(root) = whole_query.as_deref_mut() {
+        *root = None;
+    }
     match ts_type {
         // -- Primitive keywords --
         TSType::TSStringKeyword(_) => TypeExpr::Primitive(PrimitiveName::String),
@@ -210,7 +223,7 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
         }
 
         // -- typeof (type query) --
-        TSType::TSTypeQuery(query) => lower_type_query(query, source),
+        TSType::TSTypeQuery(query) => lower_type_query(query, source, whole_query),
 
         // -- infer T --
         TSType::TSInferType(infer) => TypeExpr::Infer {
@@ -394,9 +407,67 @@ fn collect_import_qualifier_parts(q: &TSImportTypeQualifier<'_>, parts: &mut Vec
     }
 }
 
-fn lower_type_query(query: &TSTypeQuery<'_>, source: &str) -> TypeExpr {
+/// The exact whole-query shape served by indexed call input provenance.
+/// This is content-free; it neither lowers nor resolves the annotation.
+pub fn whole_type_query_identifier<'a>(
+    ty: &'a TSType<'a>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'a>> {
+    let TSType::TSTypeQuery(query) = ty else {
+        return None;
+    };
+    type_query_identifier(query)
+}
+
+fn type_query_identifier<'a>(
+    query: &'a TSTypeQuery<'a>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'a>> {
+    if query
+        .type_arguments
+        .as_ref()
+        .is_some_and(|args| !args.params.is_empty())
+    {
+        return None;
+    }
+    match &query.expr_name {
+        TSTypeQueryExprName::IdentifierReference(identifier) => Some(identifier),
+        _ => None,
+    }
+}
+
+/// Source-level const marker recognition, shared with value inference's
+/// assertion policy. Parenthesized types remain distinct result carriers.
+pub fn is_const_assertion_type(ty: &TSType<'_>) -> bool {
+    match ty {
+        TSType::TSTypeReference(reference) => {
+            matches!(&reference.type_name, TSTypeName::IdentifierReference(id) if id.name == "const")
+                && reference
+                    .type_arguments
+                    .as_ref()
+                    .is_none_or(|args| args.params.is_empty())
+        }
+        TSType::TSTypeOperatorType(operator)
+            if matches!(
+                operator.operator,
+                TSTypeOperatorOperator::Readonly | TSTypeOperatorOperator::Unique
+            ) =>
+        {
+            is_const_assertion_type(&operator.type_annotation)
+        }
+        _ => false,
+    }
+}
+
+fn lower_type_query(
+    query: &TSTypeQuery<'_>,
+    source: &str,
+    whole_query: Option<&mut Option<verter_span::Span>>,
+) -> TypeExpr {
     let path = match &query.expr_name {
         TSTypeQueryExprName::IdentifierReference(id) => {
+            if let Some(whole_query) = whole_query {
+                *whole_query =
+                    type_query_identifier(query).map(|identifier| identifier.span.into());
+            }
             vec![id.name.to_string()]
         }
         TSTypeQueryExprName::QualifiedName(qualified) => {

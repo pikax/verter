@@ -87,6 +87,74 @@ fn indexed_structure_of(source: &str) -> PreparedFunctionBodySkeleton {
 }
 
 #[test]
+fn source_type_queries_retain_separate_exact_lexical_occurrences() {
+    let source = "function f<T>(arg=accept(0 as typeof later)) { let later=1; { let twin=1; accept(0 as typeof twin); } { let twin=2; accept(0 as typeof twin); } accept(0 as typeof T); return accept(0 as typeof outside); }";
+    let prepared = indexed_structure_of(source);
+    let bindings = prepared.bindings();
+    let queries: Vec<_> = prepared
+        .skeleton()
+        .expr_sites
+        .iter()
+        .flat_map(|site| site.source_type_queries.iter())
+        .collect();
+    assert_eq!(queries.len(), 5);
+    let mut twins = Vec::new();
+    for query in queries {
+        assert_eq!(
+            bindings.occurrence(query.span),
+            FlowBindingOccurrence::Missing,
+            "query is not a runtime read"
+        );
+        match bindings.source_type_query_occurrence(query.span) {
+            FlowBindingOccurrence::Resolved(FlowBindingRef::Local(binding)) => twins.push(*binding),
+            FlowBindingOccurrence::Free => assert!(query.binding.is_none()),
+            other => panic!("unexpected query disposition {other:?}"),
+        }
+    }
+    assert_eq!(
+        twins.len(),
+        2,
+        "default sees outer environment; type binder has no value identity"
+    );
+    assert_ne!(
+        twins[0], twins[1],
+        "same-name sibling scopes remain distinct"
+    );
+    assert_eq!(
+        bindings.source_type_query_occurrence(FrameSpan::rebase(0, verter_span::Span::new(0, 1))),
+        FlowBindingOccurrence::Missing
+    );
+}
+
+#[test]
+fn source_type_query_inventory_and_observer_share_wrapper_precedence() {
+    for (input, count) in [
+        ("other as typeof queried", 1),
+        ("(((other as typeof queried)))", 1),
+        ("<const>((other as typeof queried) satisfies unknown)", 1),
+        ("(other as typeof queried) satisfies unknown", 0),
+        ("(other as typeof queried) as const", 0),
+        ("other as (typeof queried)", 0),
+        ("other as typeof queried.member", 0),
+        ("other as typeof queried<string>", 0),
+        ("other as { value: typeof queried }", 0),
+    ] {
+        let source = format!("function f(other, queried) {{ return accept({input}); }}");
+        let prepared = indexed_structure_of(&source);
+        assert_eq!(
+            prepared
+                .skeleton()
+                .expr_sites
+                .iter()
+                .map(|site| site.source_type_queries.len())
+                .sum::<usize>(),
+            count,
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn skeleton_records_whole_declarator_annotation_presence_without_lowering() {
     let source = "function f() { let marked: Widget; var plain = 1; let {part}: Shape = other; return marked; }";
     let skeleton = skeleton_of(source);

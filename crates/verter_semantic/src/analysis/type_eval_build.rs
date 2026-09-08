@@ -58,7 +58,7 @@ pub use verter_type_expr::{
     IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
 };
 
-/// Exact source provenance for an indexed value's whole binding read.
+/// Exact source authority for an indexed value's whole binding input.
 /// Spans use the input AST's coordinate system; composite values have no root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexedValueReadRoot {
@@ -66,6 +66,9 @@ pub enum IndexedValueReadRoot {
     /// that names inside a composite or asserted type are free/module names.
     NonBinding,
     Identifier(verter_span::Span),
+    /// The result is an authored whole `typeof name` type query. This is
+    /// lexical type authority, never an operand read or freshness signal.
+    SourceTypeQuery(verter_span::Span),
 }
 
 /// One direct input of an indexed call, excluding inputs of nested calls.
@@ -3135,7 +3138,7 @@ fn apply_svelte_rune_initializer_inference(
             continue;
         };
         if !parts.annotation_is_authored {
-            if has_authoritative_value_assertion(initializer, source) {
+            if has_authoritative_value_assertion(initializer) {
                 continue;
             }
             if let Some(callback_point) = inline_svelte_derived_by_callback_point(initializer) {
@@ -3358,7 +3361,7 @@ fn unwrap_expression_wrappers<'a>(mut expr: &'a Expression<'a>) -> &'a Expressio
     }
 }
 
-fn has_authoritative_value_assertion(mut expr: &Expression<'_>, source: &str) -> bool {
+fn has_authoritative_value_assertion(mut expr: &Expression<'_>) -> bool {
     loop {
         match expr {
             Expression::ParenthesizedExpression(parenthesized) => {
@@ -3366,13 +3369,108 @@ fn has_authoritative_value_assertion(mut expr: &Expression<'_>, source: &str) ->
             }
             Expression::TSNonNullExpression(non_null) => expr = &non_null.expression,
             Expression::TSAsExpression(assertion) => {
-                return !is_const_assertion_type_expr(&lower_ts_type(
-                    &assertion.type_annotation,
-                    source,
-                ));
+                return !verter_type_expr_oxc::is_const_assertion_type(&assertion.type_annotation);
             }
             _ => return false,
         }
+    }
+}
+
+/// The indexed producer's existing assertion/unwrap precedence. Shallow
+/// input facts use this same disposition without lowering an annotation.
+enum IndexedValueDisposition<'a> {
+    Asserted(&'a Expression<'a>),
+    Inferred(&'a Expression<'a>),
+}
+
+fn indexed_value_disposition<'a>(expr: &'a Expression<'a>) -> IndexedValueDisposition<'a> {
+    if has_authoritative_value_assertion(expr) {
+        IndexedValueDisposition::Asserted(expr)
+    } else {
+        IndexedValueDisposition::Inferred(unwrap_expression_wrappers(expr))
+    }
+}
+
+enum ValueInferenceCarrier<'a> {
+    Parenthesized(&'a Expression<'a>),
+    Satisfies(&'a Expression<'a>),
+    Assertion {
+        operand: &'a Expression<'a>,
+        annotation: &'a oxc_ast::ast::TSType<'a>,
+    },
+    Value,
+}
+
+fn value_inference_carrier<'a>(expr: &'a Expression<'a>) -> ValueInferenceCarrier<'a> {
+    match expr {
+        Expression::ParenthesizedExpression(paren) => {
+            ValueInferenceCarrier::Parenthesized(&paren.expression)
+        }
+        Expression::TSSatisfiesExpression(satisfies) => {
+            ValueInferenceCarrier::Satisfies(&satisfies.expression)
+        }
+        Expression::TSAsExpression(assertion) => ValueInferenceCarrier::Assertion {
+            operand: &assertion.expression,
+            annotation: &assertion.type_annotation,
+        },
+        Expression::TSTypeAssertion(assertion) => ValueInferenceCarrier::Assertion {
+            operand: &assertion.expression,
+            annotation: &assertion.type_annotation,
+        },
+        _ => ValueInferenceCarrier::Value,
+    }
+}
+
+fn indexed_source_type_query<'a>(
+    expr: &'a Expression<'a>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'a>> {
+    let (IndexedValueDisposition::Asserted(mut expr) | IndexedValueDisposition::Inferred(mut expr)) =
+        indexed_value_disposition(expr);
+    loop {
+        expr = match value_inference_carrier(expr) {
+            ValueInferenceCarrier::Parenthesized(inner)
+            | ValueInferenceCarrier::Satisfies(inner) => inner,
+            ValueInferenceCarrier::Assertion {
+                operand,
+                annotation,
+            } => {
+                if verter_type_expr_oxc::is_const_assertion_type(annotation) {
+                    operand
+                } else {
+                    return verter_type_expr_oxc::whole_type_query_identifier(annotation);
+                }
+            }
+            ValueInferenceCarrier::Value => return None,
+        };
+    }
+}
+
+fn indexed_call_receiver<'a>(callee: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
+    match unwrap_expression_wrappers(callee) {
+        Expression::StaticMemberExpression(member) => Some(&member.object),
+        Expression::ComputedMemberExpression(member) => Some(&member.object),
+        _ => None,
+    }
+}
+
+/// Content-free query facts for direct indexed call inputs. Uses the actual
+/// producer's carrier policy, with no annotation lowering or additional
+/// whole-function traversal.
+pub(crate) fn for_each_indexed_call_source_type_query<'a>(
+    call: &'a oxc_ast::ast::CallExpression<'a>,
+    mut observe: impl FnMut(&'a oxc_ast::ast::IdentifierReference<'a>),
+) {
+    for argument in &call.arguments {
+        let expression = match argument {
+            oxc_ast::ast::Argument::SpreadElement(spread) => Some(&spread.argument),
+            argument => argument.as_expression(),
+        };
+        if let Some(query) = expression.and_then(indexed_source_type_query) {
+            observe(query);
+        }
+    }
+    if let Some(query) = indexed_call_receiver(&call.callee).and_then(indexed_source_type_query) {
+        observe(query);
     }
 }
 
@@ -3468,7 +3566,7 @@ fn lower_variable_parts(
 
         if type_annotation.is_none()
             && value_type_derives_from_a_call(init)
-            && !has_authoritative_value_assertion(init, source)
+            && !has_authoritative_value_assertion(init)
         {
             expression_source_offset = Some(init.span().start);
             inference_unavailable = None;
@@ -4384,6 +4482,59 @@ fn infer_expression_type_ctx_with_read_root(
     read_root: Option<&mut IndexedValueReadRoot>,
 ) -> InferenceResult<TypeExpr> {
     budget.visit(depth)?;
+    match value_inference_carrier(expr) {
+        ValueInferenceCarrier::Parenthesized(inner) => {
+            return infer_expression_type_ctx_with_read_root(
+                inner,
+                source,
+                policy,
+                budget,
+                depth + 1,
+                read_root,
+            )
+        }
+        ValueInferenceCarrier::Satisfies(inner) => {
+            let inner_policy = if policy == MemberLiteralPolicy::ConstAssert {
+                policy
+            } else {
+                MemberLiteralPolicy::Preserve
+            };
+            return infer_expression_type_ctx_with_read_root(
+                inner,
+                source,
+                inner_policy,
+                budget,
+                depth + 1,
+                read_root,
+            );
+        }
+        ValueInferenceCarrier::Assertion {
+            operand,
+            annotation,
+        } => {
+            if verter_type_expr_oxc::is_const_assertion_type(annotation) {
+                return infer_expression_type_ctx_with_read_root(
+                    operand,
+                    source,
+                    MemberLiteralPolicy::ConstAssert,
+                    budget,
+                    depth + 1,
+                    read_root,
+                );
+            }
+            let mut query = None;
+            let asserted = verter_type_expr_oxc::lower_ts_type_with_whole_query(
+                annotation,
+                source,
+                read_root.as_ref().map(|_| &mut query),
+            );
+            if let (Some(root), Some(query)) = (read_root, query) {
+                *root = IndexedValueReadRoot::SourceTypeQuery(query);
+            }
+            return Ok(asserted);
+        }
+        ValueInferenceCarrier::Value => {}
+    }
     match expr {
         // `undefined` is an IDENTIFIER in the grammar (unlike the `null`
         // literal) but its value position IS the `undefined` type — never a
@@ -4410,14 +4561,6 @@ fn infer_expression_type_ctx_with_read_root(
             infer_expression_type_ctx(&cond.consequent, source, policy, budget, depth + 1)?,
             infer_expression_type_ctx(&cond.alternate, source, policy, budget, depth + 1)?,
         ])),
-        Expression::ParenthesizedExpression(paren) => infer_expression_type_ctx_with_read_root(
-            &paren.expression,
-            source,
-            policy,
-            budget,
-            depth + 1,
-            read_root,
-        ),
         Expression::ArrayExpression(arr) => {
             // A literal-preserving position keeps the array literal's
             // POSITIONAL structure as a tuple. A spread or an elision makes
@@ -4519,60 +4662,6 @@ fn infer_expression_type_ctx_with_read_root(
                 sig.type_parameters,
                 fn_spans,
             ))))
-        }
-        Expression::TSAsExpression(ts_as) => {
-            // `as const` should preserve the underlying literal/object surface
-            // instead of degrading the inferred type to an opaque `const`
-            // marker — AND it establishes a const context, so nested object
-            // properties keep their literals + become `readonly`.
-            let asserted = lower_ts_type(&ts_as.type_annotation, source);
-            if is_const_assertion_type_expr(&asserted) {
-                infer_expression_type_ctx_with_read_root(
-                    &ts_as.expression,
-                    source,
-                    MemberLiteralPolicy::ConstAssert,
-                    budget,
-                    depth + 1,
-                    read_root,
-                )
-            } else {
-                Ok(asserted)
-            }
-        }
-        Expression::TSTypeAssertion(assertion) => {
-            let asserted = lower_ts_type(&assertion.type_annotation, source);
-            if is_const_assertion_type_expr(&asserted) {
-                infer_expression_type_ctx_with_read_root(
-                    &assertion.expression,
-                    source,
-                    MemberLiteralPolicy::ConstAssert,
-                    budget,
-                    depth + 1,
-                    read_root,
-                )
-            } else {
-                Ok(asserted)
-            }
-        }
-        Expression::TSSatisfiesExpression(sat) => {
-            // const x = value satisfies SomeType → infer from the underlying
-            // value expression, not the annotation. `satisfies` validates but
-            // does NOT widen the value's members (the engine performs no
-            // contextual typing) — Preserve, unless an enclosing `as const`
-            // already pinned a stronger (readonly) context.
-            let inner_policy = if policy == MemberLiteralPolicy::ConstAssert {
-                MemberLiteralPolicy::ConstAssert
-            } else {
-                MemberLiteralPolicy::Preserve
-            };
-            infer_expression_type_ctx_with_read_root(
-                &sat.expression,
-                source,
-                inner_policy,
-                budget,
-                depth + 1,
-                read_root,
-            )
         }
         Expression::StaticMemberExpression(member) => {
             // obj.foo → typeof obj.foo (build a dotted path)
@@ -5957,15 +6046,18 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
     if let Some(read_root) = read_root.as_deref_mut() {
         *read_root = IndexedValueReadRoot::NonBinding;
     }
-    if has_authoritative_value_assertion(expr, source) {
-        // The assertion supplies the result; its operand's binding does not.
-        return lower_value_expression(expr, source, policy)
-            .map(IndexedValueExpression::Value)
-            .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
-                PrimitiveName::Any,
-            )));
-    }
-    match unwrap_expression_wrappers(expr) {
+    let input = match indexed_value_disposition(expr) {
+        IndexedValueDisposition::Asserted(input) => {
+            // The assertion supplies the result; its operand's binding does not.
+            return lower_value_expression_with_read_root(input, source, policy, read_root)
+                .map(IndexedValueExpression::Value)
+                .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
+                    PrimitiveName::Any,
+                )));
+        }
+        IndexedValueDisposition::Inferred(input) => input,
+    };
+    match input {
         Expression::CallExpression(call) => {
             IndexedValueExpression::Call(lower_indexed_call_expression(call, source))
         }
@@ -6069,12 +6161,7 @@ fn indexed_callee_and_receiver(
     source: &str,
     observe: &mut Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
 ) -> (IndexedValueExpression, Option<Box<IndexedValueExpression>>) {
-    let receiver = match unwrap_expression_wrappers(callee) {
-        Expression::StaticMemberExpression(member) => Some(&member.object),
-        Expression::ComputedMemberExpression(member) => Some(&member.object),
-        _ => None,
-    }
-    .map(|receiver| {
+    let receiver = indexed_call_receiver(callee).map(|receiver| {
         let mut read_root = IndexedValueReadRoot::NonBinding;
         let lowered = lower_indexed_value_expression_with_policy_and_read_root(
             receiver,
@@ -6097,10 +6184,11 @@ pub fn lower_indexed_call_expression(
     lower_indexed_call_expression_observed(call, source, None)
 }
 
-/// Lower one call while reporting exact direct-input read provenance.
+/// Lower one call while reporting exact direct-input source provenance.
 /// Each argument ordinal, including a spread, is reported once. A receiver
 /// is reported exactly when the lowered call contains one. Nested calls use
 /// their ordinary lowering and do not report into this observer.
+/// Authored whole type queries are distinct from runtime operand reads.
 pub fn lower_indexed_call_expression_with_read_roots(
     call: &oxc_ast::ast::CallExpression<'_>,
     source: &str,
@@ -6258,8 +6346,8 @@ fn lower_indexed_new_expression(
 /// lowering fixes syntactically answers the same thing however its
 /// sub-expressions evaluate, so a call underneath one is not fabricated
 /// either.
-pub fn value_inference_fabricates_a_call(expr: &Expression<'_>, source: &str) -> bool {
-    !has_authoritative_value_assertion(expr, source) && value_type_derives_from_a_call(expr)
+pub fn value_inference_fabricates_a_call(expr: &Expression<'_>, _source: &str) -> bool {
+    !has_authoritative_value_assertion(expr) && value_type_derives_from_a_call(expr)
 }
 
 fn value_type_derives_from_a_call(expr: &Expression<'_>) -> bool {
