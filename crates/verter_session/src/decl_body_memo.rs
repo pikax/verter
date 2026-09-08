@@ -276,6 +276,8 @@ struct LoweredStatementBatch {
 
 /// See module docs.
 pub struct DeclBodyMemo {
+    #[cfg(test)]
+    pub(crate) capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
     key: SnapshotKey,
     eval_source: Arc<str>,
     framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
@@ -362,6 +364,8 @@ impl DeclBodyMemo {
             let _ = lease_cell.set(lease);
         }
         Self {
+            #[cfg(test)]
+            capture_lookup_work: Arc::default(),
             key,
             eval_source,
             framework_parse,
@@ -396,6 +400,8 @@ impl DeclBodyMemo {
         header_index: Arc<DeclHeaderIndex>,
     ) -> Self {
         let memo = Self {
+            #[cfg(test)]
+            capture_lookup_work: Arc::default(),
             key,
             eval_source: Arc::from(""),
             framework_parse: None,
@@ -1183,7 +1189,11 @@ impl DeclBodyMemo {
         // only through its own top-level syntax.
         let carrier_module = self.framework_parse.is_some();
         let snapshot = self.key.clone();
+        #[cfg(test)]
+        let work = Arc::clone(&self.capture_lookup_work);
         let Some(node) = service.run_leased(&self.key, move |program| {
+            #[cfg(test)]
+            let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
             program.and_then(|p| {
                 p.with_indexed_function(&entry, |resolved, entry| {
                     crate::flow_slice_content::build_flow_slice_content(
@@ -1227,8 +1237,12 @@ impl DeclBodyMemo {
         let index = self.function_program_index();
         let snapshot = self.key.clone();
         let locators = locators.to_vec();
+        #[cfg(test)]
+        let work = Arc::clone(&self.capture_lookup_work);
         self.ensure_lease();
         service.run_leased(&self.key, move |program| {
+            #[cfg(test)]
+            let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
             let program = program?;
             Some(
                 locators

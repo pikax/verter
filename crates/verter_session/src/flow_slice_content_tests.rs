@@ -279,6 +279,97 @@ fn selected_capture_locators_skip_known_unannotated_local_declarations() {
 }
 
 #[test]
+fn runtime_occurrence_classification_does_not_rescan_hoisted_alias_groups() {
+    use std::sync::atomic::Ordering;
+    for count in [32, 128] {
+        let aliases = "var x=0;".repeat(count);
+        let members = (0..count)
+            .map(|i| format!("p{i}:x"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("function f(x:number){{{aliases}return {{{members}}};}}");
+        let memo = memo_for(&source);
+        let index = memo.function_program_index();
+        let entry = entry_of(&index, "f");
+        let (selection, bound) = selection_for(&memo, entry, &[]);
+        memo.capture_lookup_work.store(0, Ordering::Relaxed);
+        let content = memo.flow_slice_content(entry, selection, &bound).unwrap();
+        assert!(matches!(
+            content.body.statements.last(),
+            Some(SliceStatement::Return {
+                argument: Some(SliceExpr::Object { .. }),
+                ..
+            })
+        ));
+        let inspected = memo.capture_lookup_work.load(Ordering::Relaxed);
+        assert!(
+            inspected <= count * 8,
+            "{count} selected alias reads inspected {inspected} binding entries"
+        );
+    }
+}
+
+#[test]
+fn selected_captured_parameters_retrieve_without_repeated_frame_inventory_scans() {
+    use std::sync::atomic::Ordering;
+    let count = 48;
+    let parameters = (0..count)
+        .map(|i| format!("p{i}: number"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let captures = (0..count)
+        .map(|i| format!("p{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let source = format!("function f({parameters}) {{ return () => ({{{captures}}}); }}");
+    let memo = memo_for(&source);
+    let content = content_for(&source, "f");
+    let (function, context) = content
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Return {
+                argument:
+                    Some(SliceExpr::NestedFunctionValue {
+                        function, context, ..
+                    }),
+                ..
+            } => Some((function, context)),
+            _ => None,
+        })
+        .expect("selected closure");
+    let index = memo.function_program_index();
+    let child = index.get(function).unwrap().entry();
+    memo.capture_lookup_work.store(0, Ordering::Relaxed);
+    let locators = {
+        let _probe = crate::flow_slice_content::capture_lookup_probe::enter(Arc::clone(
+            &memo.capture_lookup_work,
+        ));
+        child
+            .captures
+            .0
+            .iter()
+            .flat_map(|capture| context.mutable_authorities(capture))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(locators.len(), count);
+    let authorities = memo
+        .flow_capture_authorities(&locators)
+        .expect("retained source lease");
+    assert!(authorities
+        .iter()
+        .all(
+            |authority| authority.as_ref().is_some_and(|authority| authority
+                .as_ref()
+                .is_some_and(|authority| authority.declared.ty()
+                    == &TypeExpr::Primitive(PrimitiveName::Number)))
+        ));
+    let inspected = memo.capture_lookup_work.load(Ordering::Relaxed);
+    assert!(inspected <= count * 3, "full selected capture retrieval inspected {inspected} inventory entries for {count} parameters");
+}
+
+#[test]
 fn selected_annotation_descent_inspects_logarithmic_siblings() {
     use oxc_span::GetSpan;
     use std::cell::Cell;

@@ -41,7 +41,9 @@ use super::flow_products::{
 use super::flow_return_callee::{
     CallValue, CalleeClause, CalleeClauseLookup, HeldCallee, ReturnOrigin, SignatureCall,
 };
-use super::flow_return_products::{FlowBindingLayer, FlowFrameProducts as FlowProductStore};
+use super::flow_return_products::{
+    FlowBindingLayer, FlowFrameProducts as FlowProductStore, FlowWriteObservation,
+};
 use super::flow_solve::{
     FlowPartialReason, FlowSolveOutcome, NoValueFlowResult, PartialFlowResult,
 };
@@ -296,6 +298,13 @@ pub(crate) mod flow_admission_fault_injection {
     /// `VerterHost`; every slot defaults to disarmed.
     #[derive(Debug, Default)]
     pub(crate) struct FlowAdmissionFaultKnobs {
+        #[cfg(test)]
+        pub(crate) observe_product_joins: AtomicBool,
+        #[cfg(test)]
+        pub(crate) product_joins: std::sync::Mutex<Vec<super::FlowJoinObservation>>,
+        #[cfg(test)]
+        pub(crate) short_nested_execution_ledger: AtomicBool,
+
         /// When armed, `build_flow_return` removes the `flow_completion`
         /// proof token from its build output while leaving the boolean
         /// rails untouched — the exact shape the memo's flow-proof gate
@@ -2275,21 +2284,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | FlowObligationBasis::ContextualTarget { node, .. } => witness
                     .executed_selection
                     .is_some_and(|selection| selection.is_selected(*node)),
-                FlowObligationBasis::CapturedBinding { node, identity, .. } => {
-                    witness
-                        .executed_selection
-                        .is_some_and(|selection| selection.is_selected(*node))
-                        && binding_product_evidence(
-                            &witness
-                                .bindings
-                                .local(identity)
-                                .map(FlowProductSubject::Local)
-                                .unwrap_or_else(|| FlowProductSubject::Captured(identity.clone())),
-                            witness.product_evidence,
-                            witness.products,
-                            &carrier.plan,
-                        )
-                }
+                FlowObligationBasis::CapturedBinding {
+                    node,
+                    identity,
+                    demand,
+                    ..
+                } => witness
+                    .executed_selection
+                    .is_some_and(|selection| selection.is_selected(*node))
+                    && match demand {
+                        super::dispatch_txn::flow_obligation_state::FlowCaptureDemand::Effect => {
+                            whole_selection_executed
+                        }
+                        super::dispatch_txn::flow_obligation_state::FlowCaptureDemand::Value => {
+                            binding_product_evidence(
+                                &witness
+                                    .bindings
+                                    .local(identity)
+                                    .map(FlowProductSubject::Local)
+                                    .unwrap_or_else(|| {
+                                        FlowProductSubject::Captured(identity.clone())
+                                    }),
+                                witness.product_evidence,
+                                witness.products,
+                                &carrier.plan,
+                            )
+                        }
+                    },
                 FlowObligationBasis::Edge { from, to, .. } => {
                     witness.executed_selection.is_some_and(|selection| {
                         selection.is_selected(*from) && selection.is_selected(*to)
@@ -5009,6 +5030,7 @@ fn slice_statements_have_non_subject_return<'a>(
 /// resolution completes before these values define the child input basis.
 struct PreparedFlowCaptureInput {
     subject: FlowProductSubject,
+    value_demanded: bool,
     assignment: DefiniteAssignmentProduct,
     reaching: Option<ReachingTypeProduct>,
     declared: Option<SemanticNodeId>,
@@ -5031,6 +5053,36 @@ impl PreparedFlowCaptureInput {
         {
             self.reaching = Some(ReachingTypeProduct::of(node));
         }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct FlowJoinObservation {
+    pub(crate) predecessors: usize,
+    pub(crate) unions: Vec<usize>,
+    pub(crate) provenance: Vec<usize>,
+}
+
+#[cfg(test)]
+struct ObservedFlowAlgebra<'a> {
+    delegate: &'a dyn super::flow_products::FlowSemanticAlgebra,
+    observation: std::cell::RefCell<FlowJoinObservation>,
+}
+
+#[cfg(test)]
+impl super::flow_products::FlowSemanticAlgebra for ObservedFlowAlgebra<'_> {
+    fn union(&self, members: &[SemanticNodeId]) -> super::flow_products::FlowAlgebraComposite {
+        self.observation.borrow_mut().unions.push(members.len());
+        self.delegate.union(members)
+    }
+    fn literal_provenance(
+        &self,
+        inputs: &[super::flow_products::LiteralProvenance<'_>],
+        result: SemanticNodeId,
+    ) -> Result<super::flow_products::LiteralProvenanceResult, crate::semantic_query::FlowGap> {
+        self.observation.borrow_mut().provenance.push(inputs.len());
+        self.delegate.literal_provenance(inputs, result)
     }
 }
 
@@ -5253,6 +5305,16 @@ impl ExecutedSliceWalk {
     }
 }
 
+/// Control receipts and the conservative clause-refusal policy are distinct.
+/// A successful unchanged write must replay, but does not create a new type
+/// change for the existing exception-clause single-path policy.
+struct FlowExecutedClauseWrites(Vec<FlowProductSubject>);
+struct FlowClauseTypeChanges(Vec<FlowProductSubject>);
+struct FlowClauseWrites {
+    executed: FlowExecutedClauseWrites,
+    type_changes: FlowClauseTypeChanges,
+}
+
 /// One evaluated call occurrence's evidence: the authored call
 /// expression's span (the identity the skeleton's call footprint shares)
 /// and whether every relation outcome the call's resolution consumed was
@@ -5378,6 +5440,7 @@ struct FreshCallReturn {
 #[derive(Clone)]
 struct FlowLayerState {
     products: FlowProductStore,
+    write_observation: FlowWriteObservation,
     /// Whether this snapshot exists only for the return-inference suffix
     /// of a break that an abrupt `finally` replaced at runtime.
     inference_only_path: bool,
@@ -6014,7 +6077,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &self,
         root: &crate::flow_slice_content::SliceNarrowRoot,
     ) -> Option<FlowProductSubject> {
-        let binding = self.narrow_subject(root);
+        let binding = self.canonical_runtime_subject(&self.narrow_subject(root));
         self.products.contains_subject(&binding).then_some(binding)
     }
 
@@ -6027,13 +6090,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let FlowProductSubject::Local(local) = binding else {
                 return None;
             };
-            let canonical = self.bindings.canonical_local(*local);
-            (canonical != *local)
-                .then(|| {
+            self.bindings
+                .runtime_declarations(*local)
+                .iter()
+                .find_map(|declaration| {
                     self.products
-                        .declared_type(&FlowProductSubject::Local(canonical))
+                        .declared_type(&FlowProductSubject::Local(*declaration))
                 })
-                .flatten()
         })
     }
 
@@ -6134,16 +6197,65 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         standing_narrowings(&self.narrowing_writes[mark.writes.min(self.narrowing_writes.len())..])
     }
 
-    /// Join two frame states through the ONE frame join route. A merge
+    /// Join the original ordered predecessors of one continuation. A merge
     /// the domain rules could not model, or one that exhausts the demand
     /// plan's own product budget, records the typed failure and keeps the
     /// ENTERING state: the evaluation still returns a usable value, and
     /// the recorded failure is what refuses its warm admission.
-    fn join_states(&mut self, a: &FlowLayerState, b: &FlowLayerState) -> FlowLayerState {
-        FlowLayerState {
-            products: FlowProductStore::join(&a.products, &b.products, self.dispatch),
-            inference_only_path: a.inference_only_path && b.inference_only_path,
+    fn join_states(
+        &mut self,
+        incoming: &[&FlowLayerState],
+        observation: &FlowWriteObservation,
+    ) -> FlowLayerState {
+        let first = incoming.first().expect("a continuation has a predecessor");
+        if incoming.len() == 1 {
+            return FlowLayerState {
+                products: FlowProductStore::join(&[&first.products], observation, self.dispatch),
+                write_observation: self.products.observe_writes(),
+                inference_only_path: first.inference_only_path,
+            };
         }
+        #[cfg(test)]
+        let observed = self
+            .dispatch
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .observe_product_joins
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .then(|| ObservedFlowAlgebra {
+                delegate: self.dispatch,
+                observation: std::cell::RefCell::new(FlowJoinObservation {
+                    predecessors: incoming.len(),
+                    ..Default::default()
+                }),
+            });
+        #[cfg(test)]
+        let algebra: &dyn super::flow_products::FlowSemanticAlgebra = observed
+            .as_ref()
+            .map(|value| value as _)
+            .unwrap_or(self.dispatch);
+        #[cfg(not(test))]
+        let algebra = self.dispatch;
+        let products: smallvec::SmallVec<[&FlowProductStore; 4]> =
+            incoming.iter().map(|state| &state.products).collect();
+        let joined = FlowLayerState {
+            products: FlowProductStore::join(&products, observation, algebra),
+            write_observation: self.products.observe_writes(),
+            inference_only_path: incoming.iter().all(|state| state.inference_only_path),
+        };
+        #[cfg(test)]
+        if let Some(observed) = observed {
+            self.dispatch
+                .ctx
+                .host_for_fact_tracer_install()
+                .flow_fault_injection
+                .product_joins
+                .lock()
+                .unwrap()
+                .push(observed.observation.into_inner());
+        }
+        joined
     }
 
     fn bind_local(
@@ -6193,7 +6305,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             definition,
         );
         self.narrowing_writes.push(NarrowingLedgerEntry::Cleared {
-            root: binding.clone(),
+            root: self.canonical_runtime_subject(binding),
         });
     }
 
@@ -6569,8 +6681,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     ReachingTypeProduct::of(node),
                     Some(self.flow_graph.expr_site_node(definition)),
                 );
-                self.narrowing_writes
-                    .push(NarrowingLedgerEntry::Cleared { root: subject });
+                self.narrowing_writes.push(NarrowingLedgerEntry::Cleared {
+                    root: self.canonical_runtime_subject(&subject),
+                });
                 if degraded {
                     self.record_degradation(
                         crate::semantic_query::FlowReturnDegradation::UnmodeledPosition,
@@ -6605,20 +6718,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         consequent: &FlowProductStore,
         consequent_falls: bool,
-        alternate: Option<&FlowProductStore>,
+        alternate: &FlowProductStore,
         alternate_falls: bool,
         entry: &FlowProductStore,
+        observation: &FlowWriteObservation,
     ) {
         let mut incoming: Vec<FlowLayerState> = Vec::with_capacity(2);
         if consequent_falls {
             incoming.push(FlowLayerState {
                 products: consequent.clone(),
+                write_observation: consequent.observe_writes(),
                 inference_only_path: self.inference_only_path,
             });
         }
         if alternate_falls {
             incoming.push(FlowLayerState {
-                products: alternate.unwrap_or(entry).clone(),
+                products: alternate.clone(),
+                write_observation: entry.observe_writes(),
                 inference_only_path: self.inference_only_path,
             });
         }
@@ -6626,10 +6742,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return;
         }
 
-        let mut joined = incoming[0].clone();
-        for state in &incoming[1..] {
-            joined = self.join_states(&joined, state);
-        }
+        let states: smallvec::SmallVec<[&FlowLayerState; 2]> = incoming.iter().collect();
+        let mut joined = self.join_states(&states, observation);
         // The function-scoped conditional-definition fact is discharged
         // only for an already-established binding carried by every continuing
         // predecessor. Conditional declarations retain their existing typed gap.
@@ -6647,17 +6761,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .with_single_path(single_path);
             joined.products.set_assignment(&subject, assignment);
         }
-        let written = joined
-            .products
-            .subjects_in(super::flow_solve::FlowDomain::ReachingType)
-            .into_iter()
-            .filter(|subject| joined.products.reaching(subject) != entry.reaching(subject))
-            .collect::<Vec<_>>();
+        let written = joined.products.writes_since(observation);
         self.restore_layer_state(joined);
         for subject in written {
             if let Some(root) = self.narrow_root_of(&subject) {
-                self.products
-                    .remove(super::flow_solve::FlowDomain::Narrowing, &root);
+                // The kernel has already killed pre-write facts and joined
+                // each arm's final narrowing. Only stale guard events need
+                // retracting here; a fact re-established after a write survives.
                 self.narrowing_writes
                     .push(NarrowingLedgerEntry::Cleared { root });
             }
@@ -6704,7 +6814,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     /// The exact written subject whose narrowing facts must be invalidated.
     fn narrow_root_of(&self, subject: &FlowProductSubject) -> Option<FlowProductSubject> {
-        Some(subject.clone())
+        Some(self.canonical_runtime_subject(subject))
+    }
+
+    fn canonical_runtime_subject(&self, subject: &FlowProductSubject) -> FlowProductSubject {
+        match subject {
+            FlowProductSubject::Local(binding) => {
+                FlowProductSubject::Local(self.bindings.canonical_local(*binding))
+            }
+            FlowProductSubject::Captured(_) => subject.clone(),
+        }
     }
 
     fn binding_layer(&self, subject: &FlowProductSubject) -> FlowBindingLayer {
@@ -6754,6 +6873,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn layer_state(&self) -> FlowLayerState {
         FlowLayerState {
             products: self.products.clone(),
+            write_observation: self.products.observe_writes(),
             inference_only_path: self.inference_only_path,
         }
     }
@@ -6849,36 +6969,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.throw_points.push(state);
     }
 
-    /// Complete a snapshot's parameter-write layer with the signature's
-    /// own parameter nodes, so a pointwise join over snapshots reads "no
-    /// write on this path" as the parameter's declared value instead of
-    /// dropping the ordinal. Reads are unchanged — every consumer already
-    /// falls back to `params[ordinal]` for a missing write.
-    /// The bindings whose value moved between two states — a write (or a
-    /// write-bearing join) on one path that the other path never saw.
-    /// Read at a clause boundary where an abrupt exit could have preceded
-    /// the write: observing such a binding must fail closed.
+    /// Successful writes on the surviving continuation, including unchanged
+    /// transfers and repeated execution of the same source site. Receipts follow
+    /// control snapshots, so an exited arm never lends its writes to a survivor.
     fn written_between(
         &self,
-        before: &FlowLayerState,
+        observation: &FlowWriteObservation,
         after: &FlowLayerState,
-    ) -> Vec<FlowProductSubject> {
-        after
-            .products
-            .subjects_in(super::flow_solve::FlowDomain::ReachingType)
-            .into_iter()
-            .filter(|subject| {
-                after.products.reaching(subject).is_some()
-                    && before.products.reaching(subject) != after.products.reaching(subject)
-            })
-            .collect()
+    ) -> FlowExecutedClauseWrites {
+        FlowExecutedClauseWrites(after.products.writes_since(observation))
     }
 
     /// Flag a set of try-internal writes on a clause-entry state: a read
     /// of any of them in the clause fails closed (the throw can precede
     /// the write, so the value is one path's, not the join's).
-    fn flag_clause_writes(&self, state: &mut FlowLayerState, written: &[FlowProductSubject]) {
-        for subject in written {
+    fn flag_clause_type_changes(
+        &self,
+        state: &mut FlowLayerState,
+        changes: &FlowClauseTypeChanges,
+    ) {
+        for subject in &changes.0 {
             let flagged = state.products.assignment(subject).with_single_path(true);
             state.products.set_assignment(subject, flagged);
         }
@@ -6934,9 +7044,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// its writes to outer bindings are reaching definitions past it).
     /// Returns the clause's return contributions, the end-of-clause state
     /// (parameter writes completed, block scope closed), and the writes
-    /// the clause performed — computed BEFORE the block-scope close, so a
-    /// write to an OUTER lexical binding is seen too. The live layers are
-    /// the closed end state when the call returns.
+    /// the clause performed on bindings surviving the block-scope close.
+    /// Outer writes retain their receipts, while declarations owned by the
+    /// closed scope cannot be replayed into the following continuation.
     ///
     /// `collect_throws` turns throw-point collection on for the clause:
     /// on for the try block (a following `catch` / `finally` is entered
@@ -6951,14 +7061,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         region: &crate::flow_slice_content::SliceRegion,
         catch_param: Option<SkeletonBindingId>,
         collect_throws: bool,
-    ) -> Result<
-        (
-            Vec<FlowContribution>,
-            FlowLayerState,
-            Vec<FlowProductSubject>,
-        ),
-        FlowReturnFailure,
-    > {
+    ) -> Result<(Vec<FlowContribution>, FlowLayerState, FlowClauseWrites), FlowReturnFailure> {
+        let write_observation = self.products.observe_writes();
         self.restore_layer_state(start.clone());
         let shadow_base = self.scope_shadows.len();
         let throw_base = self.throw_points.len();
@@ -6986,7 +7090,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let (result, _) = self.eval_region(region);
         self.collect_throw_points = saved_collect;
         let contributions = result?;
-        let written = self.written_between(start, &self.layer_state());
         let mut end = self.layer_state();
         // The scope close replays on every state the clause's evaluation
         // produced: the end state, the throw points, and the pending
@@ -6994,8 +7097,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let shadows =
             self.split_scope_shadows_close_exits(shadow_base, break_base, return_base, throw_base);
         Self::close_lexical_scope(&mut end, &shadows);
+        let executed = self.written_between(&write_observation, &end);
+        // Preserve the clause-refusal contract without confusing it with
+        // execution evidence. Only written subjects need a type comparison.
+        let type_changes = FlowClauseTypeChanges(
+            executed
+                .0
+                .iter()
+                .filter(|subject| {
+                    start.products.reaching(subject) != end.products.reaching(subject)
+                })
+                .cloned()
+                .collect(),
+        );
         self.restore_layer_state(end.clone());
-        Ok((contributions, end, written))
+        Ok((
+            contributions,
+            end,
+            FlowClauseWrites {
+                executed,
+                type_changes,
+            },
+        ))
     }
 
     /// READ one local across the two scope layers — the ONLY way to take
@@ -9547,8 +9670,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // Bindings are block-scoped: each `if` arm evaluates
                     // under its own local scope, and the consequent reads
                     // the test's POSITIVE narrow, the alternate its
-                    // NEGATED one. Both overlays are arm-scoped — a narrow
-                    // never leaks out of the arm it was established in.
+                    // NEGATED one. The shared kernel keeps only narrowing
+                    // facts established on every actual continuing arm.
                     //
                     // A WHOLE-BINDING WRITE inside an arm does escape —
                     // through the branch JOIN, never the raw arm value:
@@ -9565,6 +9688,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // restores; the function-scoped `var` layer (and
                     // parameter writes) join by the same rule.
                     let entry_products = self.products.clone();
+                    let entry_writes = self.products.observe_writes();
                     let narrow_mark = self.narrowing_snapshot();
                     let shadow_base = self.scope_shadows.len();
                     let break_base = self.break_exits.len();
@@ -9573,7 +9697,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.conditional_arm_nesting += 1;
                     self.apply_guard_scoped(guard, true);
                     let (consequent_result, consequent_falls) = self.eval_region(consequent);
-                    self.restore_narrowings(narrow_mark.clone());
                     // Close the arm's lexical scope BEFORE snapshotting its
                     // contribution to the post-if join, and replay the same
                     // close on every abrupt edge that crossed the arm.
@@ -9586,6 +9709,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let mut consequent_state = self.layer_state();
                     Self::close_lexical_scope(&mut consequent_state, &shadows);
                     let consequent_products = consequent_state.products;
+                    self.restore_narrowings(narrow_mark.clone());
                     self.restore_arm_entry(&entry_products);
                     let consequent_contributors = match consequent_result {
                         Ok(contributors) => contributors,
@@ -9595,14 +9719,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     };
                     contributors.extend(consequent_contributors);
-                    let alternate_layers = if let Some(alternate) = alternate {
+                    let (alternate_products, alternate_falls) = if let Some(alternate) = alternate {
                         let shadow_base = self.scope_shadows.len();
                         let break_base = self.break_exits.len();
                         let return_base = self.return_edges.len();
                         let throw_base = self.throw_points.len();
                         self.apply_guard_scoped(guard, false);
                         let (alternate_result, alternate_falls) = self.eval_region(alternate);
-                        self.restore_narrowings(narrow_mark.clone());
                         let shadows = self.split_scope_shadows_close_exits(
                             shadow_base,
                             break_base,
@@ -9612,6 +9735,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let mut alternate_state = self.layer_state();
                         Self::close_lexical_scope(&mut alternate_state, &shadows);
                         let alternate_products = alternate_state.products;
+                        self.restore_narrowings(narrow_mark.clone());
                         self.restore_arm_entry(&entry_products);
                         let alternate_contributors = match alternate_result {
                             Ok(contributors) => contributors,
@@ -9621,41 +9745,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             }
                         };
                         contributors.extend(alternate_contributors);
-                        Some((alternate_products, alternate_falls))
+                        (alternate_products, alternate_falls)
                     } else {
-                        None
+                        // The implicit alternate is a real false-edge
+                        // predecessor, with no authored body or writes.
+                        self.apply_guard_scoped(guard, false);
+                        let products = self.products.clone();
+                        self.restore_narrowings(narrow_mark.clone());
+                        (products, true)
                     };
                     self.conditional_arm_nesting -= 1;
                     self.restore_arm_entry(&entry_products);
-                    let (alternate_products, alternate_falls) = match &alternate_layers {
-                        Some((products, falls)) => (Some(products), *falls),
-                        // No `else`: the implicit alternate always
-                        // reaches past the `if` — narrowing
-                        // impossibility collapses subject READS to
-                        // `never`, it never removes the edge.
-                        None => (None, true),
-                    };
                     self.join_arm_writes(
                         &consequent_products,
                         consequent_falls,
-                        alternate_products,
+                        &alternate_products,
                         alternate_falls,
                         &entry_products,
+                        &entry_writes,
                     );
-                    // The surviving edge's facts. Exactly one arm
-                    // terminating means every path past the `if` took the
-                    // OTHER reading of the test — apply its facts to the
-                    // rest of the region, exactly where an arm-scoped
-                    // truncation does not erase them. (Both arms reaching
-                    // establishes nothing; both terminating makes the rest
-                    // of the region unreachable.) An edge no arm survives
-                    // stays alive with its subject narrowed to `never` —
-                    // the application never kills the path.
-                    if !consequent_falls && alternate_falls {
-                        self.apply_guard_scoped(guard, false);
-                    } else if consequent_falls && !alternate_falls {
-                        self.apply_guard_scoped(guard, true);
-                    }
+                    // A single continuing predecessor already carries its
+                    // final facts. Reapplying its original test here would
+                    // revive a guard invalidated by a later arm write.
                     path_alive = consequent_falls || alternate_falls;
                 }
                 crate::flow_slice_content::SliceStatement::Switch {
@@ -9847,7 +9958,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             }
                             (false, None) => dispatch,
                             (false, Some(end)) => {
-                                let mut start = self.join_states(&dispatch, end);
+                                let mut start =
+                                    self.join_states(&[&dispatch, end], &entry.write_observation);
                                 // A `var` the fall-through edge first
                                 // defines has no reaching definition on the
                                 // dispatch edge: flag it so a read fails
@@ -9903,12 +10015,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     let reaches = !exit_states.is_empty();
                     let mut joined = match exit_states.split_first() {
-                        Some((first, rest)) => {
-                            let mut joined = first.clone();
-                            for state in rest {
-                                joined = self.join_states(&joined, state);
-                            }
-                            joined
+                        Some(_) => {
+                            let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> =
+                                exit_states.iter().collect();
+                            self.join_states(&incoming, &entry.write_observation)
                         }
                         // No path leaves the switch normally: the
                         // post-switch state is unreachable; restore the
@@ -9955,7 +10065,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let throw_base = self.throw_points.len();
                     let mut own: Vec<FlowContribution> = Vec::new();
                     let mut exit_states: Vec<FlowLayerState> = Vec::new();
-                    let (try_contributors, try_end, try_written) =
+                    let (try_contributors, try_end, try_writes) =
                         match self.eval_try_clause(&entry, block, None, true) {
                             Ok(clause) => clause,
                             Err(failure) => return (Err(failure), region.can_fall_through),
@@ -9974,13 +10084,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     } else {
                         self.throw_points[throw_base..].to_vec()
                     };
-                    let mut catch_written = None;
+                    let mut catch_writes = None;
                     if let Some(catch) = catch {
-                        let mut catch_start = entry.clone();
-                        for state in &block_throws {
-                            catch_start = self.join_states(&catch_start, state);
-                        }
-                        self.flag_clause_writes(&mut catch_start, &try_written);
+                        let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> =
+                            std::iter::once(&entry).chain(block_throws.iter()).collect();
+                        let mut catch_start = self.join_states(&incoming, &entry.write_observation);
+                        self.flag_clause_type_changes(&mut catch_start, &try_writes.type_changes);
                         let (catch_contributors, catch_end, written) = match self.eval_try_clause(
                             &catch_start,
                             &catch.region,
@@ -9991,7 +10100,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Err(failure) => return (Err(failure), region.can_fall_through),
                         };
                         own.extend(catch_contributors);
-                        catch_written = Some(written);
+                        catch_writes = Some(written);
                         if catch.region.can_fall_through {
                             exit_states.push(catch_end);
                         }
@@ -10004,18 +10113,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // (and the post-statement path) runs on the throw paths
                     // too.
                     let mut pre_finally = match exit_states.split_first() {
-                        Some((first, rest)) => {
-                            let mut joined = first.clone();
-                            for state in rest {
-                                joined = self.join_states(&joined, state);
-                            }
-                            joined
+                        Some(_) => {
+                            let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> =
+                                exit_states.iter().collect();
+                            self.join_states(&incoming, &entry.write_observation)
                         }
                         None => entry.clone(),
                     };
-                    self.flag_clause_writes(&mut pre_finally, &try_written);
-                    if let Some(catch_written) = &catch_written {
-                        self.flag_clause_writes(&mut pre_finally, catch_written);
+                    self.flag_clause_type_changes(&mut pre_finally, &try_writes.type_changes);
+                    if let Some(catch_writes) = &catch_writes {
+                        self.flag_clause_type_changes(&mut pre_finally, &catch_writes.type_changes);
                     }
                     if !exit_states.is_empty() {
                         self.flag_conditionally_defined_vars(&mut pre_finally, &exit_states);
@@ -10042,26 +10149,38 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // finally body's wide start either: only the
                             // normal completions reach it, plus the
                             // finally's own writes.
-                            let mut finally_start = self.join_states(&pre_finally, &entry);
-                            replace_narrowings(&entry.products, &mut finally_start.products);
-                            let clause_throws = self.throw_points[throw_base..].to_vec();
-                            for state in block_throws.iter().chain(clause_throws.iter()) {
-                                finally_start = self.join_states(&finally_start, state);
+                            // Normal and abrupt completions are original inputs to
+                            // this merge, never binary union prefixes. Clause-local
+                            // narrows do not enter finally on normal completions.
+                            let mut normal_inputs = exit_states.clone();
+                            normal_inputs.push(entry.clone());
+                            for state in &mut normal_inputs {
+                                replace_narrowings(&entry.products, &mut state.products);
+                                self.flag_clause_type_changes(state, &try_writes.type_changes);
+                                if let Some(written) = &catch_writes {
+                                    self.flag_clause_type_changes(state, &written.type_changes);
+                                }
                             }
+                            let clause_throws = self.throw_points[throw_base..].to_vec();
                             let pending_exits: Vec<FlowLayerState> = self.break_exits[break_base..]
                                 .iter()
                                 .map(|exit| exit.state.clone())
                                 .collect();
-                            for state in &pending_exits {
-                                finally_start = self.join_states(&finally_start, state);
-                            }
                             let pending_returns = self.return_edges[return_base..].to_vec();
-                            for state in &pending_returns {
-                                finally_start = self.join_states(&finally_start, state);
-                            }
+                            let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> = normal_inputs
+                                .iter()
+                                // Without a catch, block throws are already in
+                                // clause_throws; each actual predecessor enters once.
+                                .chain(block_throws.iter().filter(|_| catch.is_some()))
+                                .chain(clause_throws.iter())
+                                .chain(pending_exits.iter())
+                                .chain(pending_returns.iter())
+                                .collect();
+                            let finally_start =
+                                self.join_states(&incoming, &entry.write_observation);
                             let finally_break_base = self.break_exits.len();
                             let finally_return_base = self.return_edges.len();
-                            let (finally_contributors, finally_end, finally_written) =
+                            let (finally_contributors, finally_end, finally_writes) =
                                 match self.eval_try_clause(&finally_start, finally, None, false) {
                                     Ok(clause) => clause,
                                     Err(failure) => return (Err(failure), region.can_fall_through),
@@ -10072,11 +10191,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // finally's own writes.
                             let mut post = pre_finally.clone();
                             replace_narrowings(&entry.products, &mut post.products);
-                            for subject in &finally_written {
-                                if let Some(reaching) = finally_end.products.reaching_type(subject)
-                                {
-                                    post.products.set_reaching_type(subject, reaching.clone());
-                                }
+                            for subject in &finally_writes.executed.0 {
+                                post.products
+                                    .apply_executed_write_from(subject, &finally_end.products);
+                                self.narrowing_writes.push(NarrowingLedgerEntry::Cleared {
+                                    root: self.canonical_runtime_subject(subject),
+                                });
                             }
                             self.restore_layer_state(post);
                             if catch.is_none() {
@@ -10089,7 +10209,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 // their reason: no path past the statement
                                 // can have skipped those writes.
                                 let mut killed = Vec::new();
-                                for subject in &finally_written {
+                                for subject in &finally_writes.executed.0 {
                                     if let Some(root) = self.narrow_root_of(subject) {
                                         if let Some(identity) = self.products.identity(&root) {
                                             if !killed.contains(&identity) {
@@ -10122,7 +10242,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                         fact.narrowed_to,
                                     );
                                 }
-                                for subject in &try_written {
+                                for subject in &try_writes.type_changes.0 {
                                     if entry.products.assignment(subject).single_path() {
                                         continue;
                                     }
@@ -10226,12 +10346,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     let reaches = !exits.is_empty();
                     let mut joined = match exits.split_first() {
-                        Some((first, rest)) => {
-                            let mut joined = first.clone();
-                            for state in rest {
-                                joined = self.join_states(&joined, state);
-                            }
-                            joined
+                        Some(_) => {
+                            let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> =
+                                exits.iter().collect();
+                            self.join_states(&incoming, &entry.write_observation)
                         }
                         // No path leaves the body: the post-statement
                         // state is unreachable; restore the entry to keep
@@ -11090,15 +11208,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 PreparedFlowCaptureInput {
                     subject: FlowProductSubject::Captured(identity.clone()),
-                    assignment: self.products.assignment(&parent).with_single_path(false),
-                    reaching: self.products.reaching_type(&parent).cloned(),
-                    declared: self.products.declared_type(&parent),
+                    value_demanded,
+                    assignment: if value_demanded {
+                        self.products.assignment(&parent).with_single_path(false)
+                    } else {
+                        DefiniteAssignmentProduct::default()
+                    },
+                    reaching: value_demanded
+                        .then(|| self.products.reaching_type(&parent).cloned())
+                        .flatten(),
+                    declared: value_demanded
+                        .then(|| self.products.declared_type(&parent))
+                        .flatten(),
                 }
             })
             .collect();
         let mut candidates: Vec<_> = inputs
             .selected_captures(planned.selection())
-            .map(|(identity, _)| capture_context.mutable_authorities(identity).into_iter())
+            .map(|(identity, value_demanded)| {
+                if value_demanded {
+                    capture_context.mutable_authorities(identity)
+                } else {
+                    Vec::new()
+                }
+                .into_iter()
+            })
             .collect();
         let mut unresolved: Vec<_> = (0..capture_inputs.len()).collect();
         while !unresolved.is_empty() {
@@ -11212,6 +11346,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return self.unmodeled_position();
         };
         for input in capture_inputs {
+            if !input.value_demanded {
+                continue;
+            }
             captured_products.import_capture_input(
                 &input.subject,
                 input.assignment,
@@ -11279,11 +11416,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
             nested_evaluator.promote_pending_statement_gap();
+            #[cfg(test)]
+            if self
+                .dispatch
+                .ctx
+                .host_for_fact_tracer_install()
+                .flow_fault_injection
+                .short_nested_execution_ledger
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                nested_evaluator.executed_walk.aborted = true;
+            }
             nested_holds = nested_evaluator.holds.clone();
             let finished = nested_evaluator
                 .products
                 .finish(nested_evaluator.plan.as_deref())
                 .and_then(|evidence| {
+                    #[cfg(test)]
+                    let evidence = if self.dispatch.ctx.host_for_fact_tracer_install().flow_fault_injection
+                        .drop_binding_domain_product.load(std::sync::atomic::Ordering::Relaxed) {
+                        None
+                    } else { evidence };
                     let Some(plan) = nested_evaluator.plan.as_deref() else {
                         return Ok(evidence);
                     };
@@ -11291,7 +11444,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let products_complete = plan.obligation_specs().iter().all(|spec| {
                         let subject = match spec.basis() {
                             FlowObligationBasis::Binding { slot, .. } => Some(slot.binding.clone()),
-                            FlowObligationBasis::CapturedBinding { identity, .. } => Some(
+                            FlowObligationBasis::CapturedBinding { node, identity, demand, .. } => {
+                                let completed = nested_evaluator.executed_walk
+                                    .completed_selection(plan.structural_selection())
+                                    .is_some_and(|selection| selection.is_selected(*node));
+                                if !completed {
+                                    return false;
+                                }
+                                if *demand == super::dispatch_txn::flow_obligation_state::FlowCaptureDemand::Effect {
+                                    return true;
+                                }
+                                Some(
                                 nested_evaluator
                                     .bindings
                                     .local(identity)
@@ -11299,7 +11462,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     .unwrap_or_else(|| {
                                         FlowProductSubject::Captured(identity.clone())
                                     }),
-                            ),
+                                )
+                            },
                             _ => return true,
                         };
                         subject.is_some_and(|subject| {

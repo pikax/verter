@@ -4306,6 +4306,30 @@ enum FlowSourceProbe {
 /// the exact projected graph value for distinctions coarser corpus shapes
 /// intentionally erase.
 fn flow_source_probe(script: &str) -> FlowSourceProbe {
+    flow_source_probe_observed(script, false).0
+}
+
+fn flow_source_probe_observed(
+    script: &str,
+    observe: bool,
+) -> (
+    FlowSourceProbe,
+    Vec<super::flow_return::FlowJoinObservation>,
+) {
+    flow_source_probe_configured(script, |host| {
+        host.flow_fault_injection
+            .observe_product_joins
+            .store(observe, std::sync::atomic::Ordering::Relaxed);
+    })
+}
+
+fn flow_source_probe_configured(
+    script: &str,
+    configure: impl FnOnce(&VerterHost),
+) -> (
+    FlowSourceProbe,
+    Vec<super::flow_return::FlowJoinObservation>,
+) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let canonical = "/ws/flow-source-probe.ts";
     let _ = host.upsert(UpsertRequest {
@@ -4317,7 +4341,8 @@ fn flow_source_probe(script: &str) -> FlowSourceProbe {
             .static_resolution(),
         aliases: Vec::new(),
     });
-    with_dispatch(&host, |dispatch| {
+    configure(&host);
+    let result = with_dispatch(&host, |dispatch| {
         let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
         let prepared = host
             .prepared_value_decl_in(canonical, owner, "makeProps")
@@ -4355,7 +4380,9 @@ fn flow_source_probe(script: &str) -> FlowSourceProbe {
             },
             other => panic!("makeProps must execute its flow source, got {other:?}"),
         }
-    })
+    });
+    let joins = std::mem::take(&mut *host.flow_fault_injection.product_joins.lock().unwrap());
+    (result, joins)
 }
 
 #[track_caller]
@@ -4563,6 +4590,207 @@ fn flow_return_transitive_capture_annotation_uses_its_original_generic_binder() 
             "a declaration hydrated later retains original outer T, never the intermediate T"
         );
     }
+}
+
+#[test]
+fn flow_return_finally_write_kills_entering_narrowing_even_when_type_is_unchanged() {
+    for body in [
+        "x = 1",
+        "if (flag) { x = 1 } else { x = 1 }",
+        "x = 1; x = 1",
+    ] {
+        let source = format!("function makeProps(x: string | number, flag: boolean) {{ if (typeof x === 'string') {{ try {{}} finally {{ {body}; }} return x; }} throw 0; }}");
+        assert_eq!(
+            expect_clean_flow_value(&source),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    }
+}
+
+#[test]
+fn flow_return_continuation_join_preserves_post_write_guard_facts() {
+    for source in [
+        "function assertString(x:unknown):asserts x is string{} function makeProps(flag:boolean,y:string|number){let x=y;if(flag){x=y;assertString(x);}else{x=y;assertString(x);}return x;}",
+        "function makeProps(x:string|number){if(typeof x==='string'){throw 0;}else{x='written';}return x;}",
+    ] {
+        assert_eq!(expect_clean_flow_value(source), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String), "{source}");
+    }
+}
+
+#[test]
+fn flow_return_finally_alias_write_kills_the_canonical_guard_root() {
+    assert_eq!(
+        expect_clean_flow_value("function makeProps(x:string|number){if(typeof x!=='string'){throw 0;}try{}finally{var x=1;}return x;}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+}
+
+#[test]
+fn flow_return_canonical_write_uses_later_alias_declared_authority() {
+    assert_eq!(
+        expect_clean_flow_value("function makeProps(){var x=0 as 0|1;var x:0|1=0;x=1;return x;}"),
+        verter_type_expr::TypeExpr::number_literal(1.0)
+    );
+}
+
+#[test]
+fn flow_return_effect_only_transitive_capture_does_not_hydrate_its_annotation() {
+    let expr = expect_clean_flow_value("type Local=string;function makeProps(){type Local=number;let x:Local;return()=>()=>{x=1;return 0;};}");
+    let verter_type_expr::TypeExpr::Function(outer) = &expr else {
+        panic!("outer closure");
+    };
+    let Some(verter_type_expr::TypeExpr::Function(inner)) = outer.return_type.as_deref() else {
+        panic!("inner closure");
+    };
+    assert_eq!(
+        inner.return_type.as_deref(),
+        Some(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        ))
+    );
+}
+
+#[test]
+fn flow_return_switch_merges_actual_predecessors_in_one_canonical_batch() {
+    let (result, joins) = flow_source_probe_observed("function makeProps(a:boolean,b:boolean){const tag=a?0:b?1:2;let out:number|string|boolean=0;switch(tag){case 0:out=1;break;case 1:out='x';break;case 2:out=true;break;}return out;}", true);
+    assert!(
+        matches!(
+            result,
+            FlowSourceProbe::Value {
+                degradation: None,
+                candidates: 1,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        joins.len(),
+        1,
+        "one actual switch exit must not construct binary prefixes: {joins:?}"
+    );
+    assert_eq!(joins[0].predecessors, 3);
+    assert!(joins[0].unions.iter().all(|width| *width == 3), "{joins:?}");
+    assert_eq!(
+        joins[0].provenance,
+        [3],
+        "all literal predecessor provenance must share one bounded inspection"
+    );
+}
+
+#[test]
+fn flow_return_labeled_catch_and_finally_merge_original_predecessors() {
+    for (source, predecessors) in [
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0; L:{if(a){x=1;break L;}if(b){x='b';break L;}x=true;}return x;}", 3),
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x=1;throw 0;}if(b){x='b';throw 0;}x=true;throw 0;}catch{return x;}}", 4),
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x='a';return 0;}if(b){x=true;throw 0;}x=1;}finally{x=2;}return x;}", 4),
+    ] {
+        let (result, joins) = flow_source_probe_observed(source, true);
+        assert!(matches!(result, FlowSourceProbe::Value { .. }), "{source}: {result:?}");
+        assert_eq!(joins.len(), 1, "one actual continuation, no union prefixes: {source}: {joins:?}");
+        assert_eq!(joins[0].predecessors, predecessors, "{source}: {joins:?}");
+        assert!(!joins[0].unions.is_empty(), "distinct predecessor values reached canonical algebra: {source}");
+    }
+}
+
+#[test]
+fn flow_return_switch_fallthrough_keeps_successive_control_merges_separate() {
+    let source = "function makeProps(a:boolean,b:boolean){const tag=a?0:b?1:2;let x:number|string|boolean=0;switch(tag){case 0:x='s';case 1:x=true;break;case 2:x=1;}return x;}";
+    let (result, joins) = flow_source_probe_observed(source, true);
+    let FlowSourceProbe::Value {
+        expr,
+        degradation: None,
+        candidates: 1,
+    } = result
+    else {
+        panic!("{result:?}");
+    };
+    assert_eq!(
+        expr,
+        verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        ])
+    );
+    assert_eq!(
+        joins
+            .iter()
+            .map(|join| join.predecessors)
+            .collect::<Vec<_>>(),
+        [2, 2],
+        "case entry merges before its executed write, then switch exit merges: {joins:?}"
+    );
+}
+
+#[test]
+fn flow_return_class_local_callee_cannot_borrow_a_free_function_receipt() {
+    let result = flow_source_probe("function check():void{} function makeProps(x:string|number){class C{static{const check=(v:unknown):asserts v is string=>{};check(x);}}return x;}");
+    assert!(
+        matches!(
+            result,
+            FlowSourceProbe::Value {
+                degradation: Some(_),
+                candidates: 0,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn flow_return_effect_capture_requires_completed_walk_but_reader_requires_value_evidence() {
+    use std::sync::atomic::Ordering;
+    let writer = "function makeProps(){let x:number;return()=>()=>{x=1;return 0;};}";
+    let (short, _) = flow_source_probe_configured(writer, |host| {
+        host.flow_fault_injection
+            .short_nested_execution_ledger
+            .store(true, Ordering::Relaxed);
+    });
+    assert!(
+        matches!(
+            short,
+            FlowSourceProbe::Value {
+                degradation: Some(_),
+                candidates: 0,
+                ..
+            }
+        ),
+        "{short:?}"
+    );
+    let (without_values, _) = flow_source_probe_configured(writer, |host| {
+        host.flow_fault_injection
+            .drop_binding_domain_product
+            .store(true, Ordering::Relaxed);
+    });
+    assert!(
+        matches!(
+            without_values,
+            FlowSourceProbe::Value {
+                degradation: None,
+                candidates: 1,
+                ..
+            }
+        ),
+        "effect-only proof consumes no value receipts: {without_values:?}"
+    );
+    let reader = "function makeProps(){let x:number=0;const writer=()=>{x=1;return 0;};const reader=()=>x;return {writer,reader};}";
+    let (without_reader, _) = flow_source_probe_configured(reader, |host| {
+        host.flow_fault_injection
+            .drop_binding_domain_product
+            .store(true, Ordering::Relaxed);
+    });
+    assert!(
+        matches!(
+            without_reader,
+            FlowSourceProbe::Value {
+                degradation: Some(_),
+                candidates: 0,
+                ..
+            }
+        ),
+        "a writer receipt cannot discharge the reader: {without_reader:?}"
+    );
 }
 
 #[test]
