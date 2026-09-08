@@ -2100,7 +2100,7 @@ rescope_unrelated_packages = 3
 [[node]]
 id = "CCA1T2V"
 name = "Vue combined-compiler compatibility deletion"
-predecessors = ["CCA1T1"]
+predecessors = ["CCA1T1","SIMP10"]
 phase = "compiler"
 train = "compiler.compiler-bridge"
 product = "compiler_bridge"

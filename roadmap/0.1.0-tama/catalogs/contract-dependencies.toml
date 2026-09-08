@@ -43,7 +43,7 @@ evidence = "Reservation, shared-allocation, concurrent pressure and high-cardina
 [[contract]]
 id = "shipped-configuration-execution"
 producer = "SG0"
-consumers = ["L4"]
+consumers = ["L4", "SIMP3"]
 outcome = "Shipped-cfg behavioral tests execute in canonical local, CI and release verification"
 acceptance = "SG0-AC1 through SG0-AC3"
 evidence = "Canonical gate execution plus a proven applied debug-assertion-side-effect negative control"
@@ -55,3 +55,99 @@ consumers = ["EPR2", "EPR3", "EPR5"]
 outcome = "One production owner for executable-candidate identity, compatibility, integrity, origin and revocation validation"
 acceptance = "EPR4-AC-CANDIDATES and EPR4-AC-CONTRACT, plus downstream installer, shipping and activation integration"
 evidence = "Shared validator and receipt/cache/path behavioral cases under EPR4-SB3/SB6/SB7, reused by each consuming owner"
+
+[[contract]]
+id = "simplification-semantic-transit"
+producer = "E2"
+consumers = ["SIMP5"]
+outcome = "Canonical internal transit and permanent input/output boundaries"
+acceptance = "E2-AC1 through E2-AC4"
+evidence = "Live types/output/work proof retained by SIMP5"
+
+[[contract]]
+id = "simplification-flow-baseline"
+producer = "D3C"
+consumers = ["SIMP3"]
+outcome = "Landed flow product and current shared testing guidance"
+acceptance = "D3C-AC1 through D3C-AC4"
+evidence = "Existing flow product, complete admission and bounded-work proof retained when guidance changes"
+
+[[contract]]
+id = "simplification-public-boundary"
+producer = "E1"
+consumers = ["SIMP3", "SIMP12"]
+outcome = "Landed graph/protocol boundary and current public projection contracts"
+acceptance = "E1 sole-owner, positive-contract, incremental and bounded-work acceptance"
+evidence = "Existing output, type and projection evidence retained by the consuming test cleanup"
+
+[[contract]]
+id = "simplification-mapping-baseline"
+producer = "TCM1"
+consumers = ["SIMP4", "SIMP10", "SIMP11"]
+outcome = "Compact mapping products and current compiler/CI consumers"
+acceptance = "TCM1-AC1 through TCM1-AC4"
+evidence = "Mapping equivalence and actual gate execution preserved through compiler and test-tool cleanup"
+
+[[contract]]
+id = "simplification-native-boundary"
+producer = "CCA1O4D"
+consumers = ["SIMP4", "SIMP10"]
+outcome = "Landed native compile-profile deletion with the supported compile boundary intact"
+acceptance = "CCA1O4D invariants and acceptance"
+evidence = "Supported compile behavior retained without reopening native API or unplugin surfaces"
+
+[[contract]]
+id = "simplification-cache-runtime"
+producer = "G4"
+consumers = ["SIMP13"]
+outcome = "Converged query/cache runtime and bounded retention"
+acceptance = "G4-AC1 through G4-AC4"
+evidence = "Existing memo/cancellation/retention proof"
+
+[[contract]]
+id = "simplification-query-proof"
+producer = "SIMP5"
+consumers = ["G1"]
+outcome = "Useful semantic proof without migration analyzers"
+acceptance = "SIMP5-AC1 through SIMP5-AC3"
+evidence = "Preserved compile and semantic output/work evidence"
+
+[[contract]]
+id = "simplification-transport"
+producer = "SIMP8"
+consumers = ["H2"]
+outcome = "Shared pending-request ownership mechanics"
+acceptance = "SIMP8-AC1 through SIMP8-AC3"
+evidence = "Completion/cancellation/shutdown evidence"
+
+[[contract]]
+id = "simplification-close"
+producer = "SIMP9"
+consumers = ["H2"]
+outcome = "One stale-close operation with failure/reopen safety"
+acceptance = "SIMP9-AC1 through SIMP9-AC3"
+evidence = "LSP close/sync/reopen behavior"
+
+[[contract]]
+id = "simplification-dispatch"
+producer = "SIMP14"
+consumers = ["K3"]
+outcome = "Narrowed semantic dispatcher responsibilities"
+acceptance = "SIMP14-AC1 through SIMP14-AC3"
+evidence = "Public semantic and bounded-work evidence"
+
+[[contract]]
+id = "simplification-ssr"
+producer = "SIMP10"
+consumers = ["CCA1T2V"]
+outcome = "Equivalent SSR assembly without reparsing"
+acceptance = "SIMP10-AC1 through SIMP10-AC3"
+evidence = "SSR order/bytes/maps and work evidence"
+
+[[contract]]
+id = "simplification-complete"
+producer = "SIMP15"
+consumers = ["L1","L4"]
+outcome = "Verified code/test/comment simplification"
+acceptance = "SIMP15-AC1 through SIMP15-AC3"
+evidence = "Removed mechanisms, preserved proof and cumulative review"

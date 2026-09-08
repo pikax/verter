@@ -4,7 +4,7 @@ module = "rev11-finalization"
 [[node]]
 id = "L1"
 name = "Long-churn bounded-memory soak"
-predecessors = ["E4","G4","H3","J4","K3"]
+predecessors = ["E4","G4","H3","J4","K3","SIMP15"]
 phase = "rev11"
 train = "rev11.finalization"
 product = "rev11"
@@ -115,7 +115,7 @@ rescope_unrelated_packages = 3
 [[node]]
 id = "L4"
 name = "Final architecture lock"
-predecessors = ["L2","SG0"]
+predecessors = ["L2","SG0","SIMP15"]
 phase = "rev11"
 train = "rev11.finalization"
 product = "rev11"

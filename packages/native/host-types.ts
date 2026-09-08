@@ -131,42 +131,6 @@ export interface HostConfig {
   metricsEnabled?: boolean;
 }
 
-export interface HostCompileProfile {
-  filename?: string;
-  isProduction?: boolean;
-  /** Vue custom-element script policy; unrelated to template `customElements`. */
-  customElement?: boolean;
-  ssr?: boolean;
-  /**
-   * SSR asset-collection module id registered on `ssrContext.modules`.
-   * Vite's ssr-manifest keys are ROOT-RELATIVE — pass
-   * `normalizePath(relative(root, filename))`; absent falls back to the
-   * canonical id.
-   */
-  ssrModuleId?: string;
-  hmrStrategy?: "none" | "vite" | "webpack";
-  componentId?: string;
-  delimiters?: [string, string];
-  customElements?: string[];
-  comments?: boolean;
-  runtimeModuleName?: string;
-  typesModuleName?: string;
-  forceVapor?: boolean;
-  forceJs?: boolean;
-  sourceMap?: boolean;
-  /** Compilation target preset: "bundler" (default), "ide", or "analysis". */
-  target?: "bundler" | "ide" | "analysis";
-  /**
-   * Inline the render function inside `setup()` (Vue production topology,
-   * official `compileScript({ inlineTemplate: true })`). Absent resolves to
-   * `isProduction` (official default: inline in prod builds). VDOM client
-   * only; Vapor inline and inline SSR fall back to non-inline.
-   */
-  inline?: boolean;
-  /** Requested compile cache mode. Defaults to "session". */
-  requestedMode?: CompileCacheMode;
-}
-
 export interface HostIdeProjectConfig {
   root: string;
   workspaceRoot: string;
@@ -289,7 +253,6 @@ export interface HostBlockOverrideEntry extends HostBlockContentCapturedEchoFiel
 
 export interface HostBlockOverrideRequest {
   canonicalId: string;
-  compileProfile?: HostCompileProfile;
   overrides: HostBlockOverrideEntry[];
 }
 
@@ -372,7 +335,6 @@ export interface HostVirtualQuery {
   rawId?: string;
   canonicalId?: string;
   nodeKind?: HostVirtualNodeKind;
-  compileProfile?: HostCompileProfile;
 }
 
 export interface HostRemoveResult {

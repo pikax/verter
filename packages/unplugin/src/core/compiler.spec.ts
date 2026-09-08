@@ -134,22 +134,10 @@ describe("host: upsert + getVirtualFile", () => {
     host.upsert({
       inputId: "/test/App.vue",
       source: sfc,
-      compileProfile: {
-        filename: "/test/App.vue",
-        isProduction: false,
-        hmrStrategy: "vite",
-        sourceMap: true,
-      },
     } as any);
 
     const main = host.getVirtualFile({
       rawId: "/test/App.vue",
-      compileProfile: {
-        filename: "/test/App.vue",
-        isProduction: false,
-        hmrStrategy: "vite",
-        sourceMap: true,
-      },
     } as any);
 
     expect(main.code).toContain("_sfc_main");
@@ -164,17 +152,13 @@ describe("host: upsert + getVirtualFile", () => {
       "<style scoped>.red { color: red }</style>",
     ].join("\n");
 
-    const profile = { filename: "/test/App.vue" };
-
     host.upsert({
       inputId: "/test/App.vue",
       source: sfc,
-      compileProfile: profile,
     } as any);
 
     const main = host.getVirtualFile({
       rawId: "/test/App.vue",
-      compileProfile: profile,
     } as any);
 
     expect(main.code).toContain("import");
@@ -189,17 +173,13 @@ describe("host: upsert + getVirtualFile", () => {
       "<style>.red { color: red }</style>",
     ].join("\n");
 
-    const profile = { filename: "/test/App.vue" };
-
     host.upsert({
       inputId: "/test/App.vue",
       source: sfc,
-      compileProfile: profile,
     } as any);
 
     const style = host.getVirtualFile({
       rawId: "/test/App.vue?vue&type=style&index=0",
-      compileProfile: profile,
     } as any);
 
     expect(style.code).toContain("color");
@@ -214,17 +194,13 @@ describe("host: upsert + getVirtualFile", () => {
       "<style scoped>.red { color: red }</style>",
     ].join("\n");
 
-    const profile = { filename: "/test/App.vue", componentId: "abc123" };
-
     host.upsert({
       inputId: "/test/App.vue",
       source: sfc,
-      compileProfile: profile,
     } as any);
 
     const style = host.getVirtualFile({
       rawId: "/test/App.vue?vue&type=style&index=0",
-      compileProfile: profile,
     } as any);
 
     // Scoped styles should contain the scope attribute selector
@@ -235,19 +211,15 @@ describe("host: upsert + getVirtualFile", () => {
   it("caching: unchanged re-upsert reports no change", () => {
     const host = loadHost();
     const sfc = "<script setup>const x = 1</script>\n<template><div>{{ x }}</div></template>";
-    const profile = { filename: "/test/App.vue" };
-
     const first = host.upsert({
       inputId: "/test/App.vue",
       source: sfc,
-      compileProfile: profile,
     } as any);
     expect(first.changed).toBe(true);
 
     const second = host.upsert({
       inputId: "/test/App.vue",
       source: sfc,
-      compileProfile: profile,
     } as any);
     expect(second.changed).toBe(false);
   });
@@ -256,42 +228,45 @@ describe("host: upsert + getVirtualFile", () => {
   it("getVirtualFile returns identical code on repeated calls (compile cache)", () => {
     const host = loadHost();
     const sfc = "<script setup>const x = 1</script>\n<template><div>{{ x }}</div></template>";
-    const profile = { filename: "/test/App.vue", isProduction: false };
-
     host.upsert({
       inputId: "/test/App.vue",
       source: sfc,
-      compileProfile: profile,
     } as any);
 
-    const first = host.getVirtualFile({ rawId: "/test/App.vue", compileProfile: profile } as any);
-    const second = host.getVirtualFile({ rawId: "/test/App.vue", compileProfile: profile } as any);
+    const first = host.getVirtualFile({ rawId: "/test/App.vue" } as any);
+    const second = host.getVirtualFile({ rawId: "/test/App.vue" } as any);
 
     expect(first.code).toBe(second.code);
   });
 
-  // @ai-generated - Production vs dev produces different output
-  it("different compile profiles produce different output", () => {
+  it("production and development identities produce different output", () => {
     const host = loadHost();
     const sfc = "<script setup>const x = 1</script>\n<template><div>{{ x }}</div></template>";
 
     host.upsert({
       inputId: "/test/App.vue",
       source: sfc,
-      compileProfile: { filename: "/test/App.vue", isProduction: false },
     } as any);
 
-    const dev = host.getVirtualFile({
-      rawId: "/test/App.vue",
-      compileProfile: { filename: "/test/App.vue", isProduction: false },
-    } as any);
+    const render = (isProduction: boolean) =>
+      host.compileRequest("/test/App.vue", {
+        framework: "vue",
+        identity: { isProduction, forceJs: false },
+        products: [{ kind: "runtimeClient", runtimeSourceMap: false }],
+        options: { backend: "inferred", ssr: false, isCustomElement: [], babelParserPlugins: [] },
+      });
 
-    const prod = host.getVirtualFile({
-      rawId: "/test/App.vue",
-      compileProfile: { filename: "/test/App.vue", isProduction: true },
-    } as any);
+    const mainCode = (response: any) =>
+      response.products
+        .flatMap((product: any) => product.nodes ?? [])
+        .find((node: any) => node.node.kind === "main")?.code;
 
-    expect(dev.code).not.toBe(prod.code);
+    const dev = mainCode(render(false));
+    const prod = mainCode(render(true));
+
+    expect(dev).toBeTypeOf("string");
+    expect(prod).toBeTypeOf("string");
+    expect(dev).not.toBe(prod);
   });
 
   it("custom block virtual files are served", () => {
@@ -302,17 +277,13 @@ describe("host: upsert + getVirtualFile", () => {
       '<i18n>{"en":{"hello":"Hello"}}</i18n>',
     ].join("\n");
 
-    const profile = { filename: "/test/App.vue" };
-
     host.upsert({
       inputId: "/test/App.vue",
       source: sfc,
-      compileProfile: profile,
     } as any);
 
     const custom = host.getVirtualFile({
       rawId: "/test/App.vue?vue&type=i18n&index=0",
-      compileProfile: profile,
     } as any);
 
     expect(custom.code).toContain("hello");
@@ -365,7 +336,6 @@ describe("host: resolve", () => {
     host.upsert({
       inputId: "/test/App.vue",
       source: "<template><div>hi</div></template>",
-      compileProfile: { filename: "/test/App.vue" },
     } as any);
 
     const resolved = host.resolve("/test/App.vue");
@@ -384,7 +354,6 @@ describe("host: remove", () => {
     host.upsert({
       inputId: "/test/App.vue",
       source: "<template><div>hi</div></template>",
-      compileProfile: { filename: "/test/App.vue" },
     } as any);
 
     const result = host.remove("/test/App.vue");
@@ -397,7 +366,6 @@ describe("host: remove", () => {
     host.upsert({
       inputId: "/test/App.vue",
       source: "<template><div>hi</div></template>",
-      compileProfile: { filename: "/test/App.vue" },
     } as any);
 
     host.remove("/test/App.vue");
@@ -405,7 +373,6 @@ describe("host: remove", () => {
     expect(() => {
       host.getVirtualFile({
         rawId: "/test/App.vue",
-        compileProfile: { filename: "/test/App.vue" },
       } as any);
     }).toThrow();
   });
@@ -433,7 +400,6 @@ describe("host: listVirtualFiles", () => {
     host.upsert({
       inputId: "/test/App.vue",
       source: sfc,
-      compileProfile: { filename: "/test/App.vue" },
     } as any);
 
     const nodes = host.listVirtualFiles("/test/App.vue");
@@ -461,16 +427,13 @@ describe("host: applyBlockOverrides", () => {
       `<style lang="postcss">${authoredPreprocessorSyntax}; .authored-only { color: $authored-color }</style>`,
     ].join("\n");
 
-    const profile = { filename: "/test/App.vue" };
     const styleRequest = {
       rawId: "/test/App.vue?vue&type=style&index=0",
-      compileProfile: profile,
     };
 
     const update = host.upsert({
       inputId: "/test/App.vue",
       source: sfc,
-      compileProfile: profile,
     } as any);
 
     const request = update.preprocessorRequests[0];
@@ -482,7 +445,6 @@ describe("host: applyBlockOverrides", () => {
 
     host.applyBlockOverrides({
       canonicalId: "/test/App.vue",
-      compileProfile: profile,
       overrides: [
         {
           correlationToken: request.correlationToken,
@@ -512,7 +474,6 @@ describe("host: applyBlockOverrides", () => {
     expect(() =>
       host.applyBlockOverrides({
         canonicalId: "/test/App.vue",
-        compileProfile: profile,
         overrides: [
           {
             correlationToken: request.correlationToken,

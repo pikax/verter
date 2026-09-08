@@ -365,7 +365,8 @@ populates its `CachedTsx` and succeeds without a runtime `Main`. `get_ide`
 stays a PURE cached read (`peek_tsx`) — it NEVER computes on read. Both pinned
 by the static guards `get_ide_is_a_pure_cached_read_no_compute` and
 `ensure_ide_compiled_never_requests_virtual_node_main`. Exposed on WASM + NAPI
-as `ensureIdeCompiled(canonicalId, profile?)` (binding-parity tested).
+as `ensureIdeCompiled(canonicalId)` (binding-parity tested); the binding
+compiles under the host-default profile.
 
 ## Two-pass script-fact seam
 

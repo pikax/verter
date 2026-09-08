@@ -109,7 +109,7 @@ schema = 2
 "CCA1O3D" = { status = "implemented", commit_message = "feat(wasm): expose a callable typed compile request on the browser host", commit_date = "2026-09-02T12:00:00+01:00", pull_request = 469 }
 "CCA1O3E" = { status = "implemented", commit_message = "test(*): check the committed carrier fixtures against the built wasm host", commit_date = "2026-09-01T09:00:00+01:00" }
 "CCA1O4" = { status = "implemented", commit_message = "refactor(unplugin): converge native host requests onto the typed compile request", commit_date = "2026-09-05T01:05:00+01:00" }
-"CCA1O4D" = { status = "pending" }
+"CCA1O4D" = { status = "implemented", commit_message = "refactor(napi): delete the legacy compile-profile surface", commit_date = "2026-09-06T10:20:00+01:00" }
 "CCA1O5" = { status = "implemented", commit_message = "feat(play): migrate playground compile onto the typed WASM host request", commit_date = "2026-09-04T02:15:00+01:00", pull_request = 484 }
 "CCA1O5D" = { status = "implemented", commit_message = "refactor(wasm): delete the legacy compile-profile routes", commit_date = "2026-09-05T11:10:48+01:00", pull_request = 504 }
 "CCA1T1" = { status = "pending" }
@@ -370,6 +370,21 @@ schema = 2
 "SCP6" = { status = "pending" }
 "SCP7" = { status = "pending" }
 "SG0" = { status = "pending" }
+"SIMP1" = { status = "pending" }
+"SIMP10" = { status = "pending" }
+"SIMP11" = { status = "pending" }
+"SIMP12" = { status = "pending" }
+"SIMP13" = { status = "pending" }
+"SIMP14" = { status = "pending" }
+"SIMP15" = { status = "pending" }
+"SIMP2" = { status = "pending" }
+"SIMP3" = { status = "pending" }
+"SIMP4" = { status = "pending" }
+"SIMP5" = { status = "pending" }
+"SIMP6" = { status = "pending" }
+"SIMP7" = { status = "pending" }
+"SIMP8" = { status = "pending" }
+"SIMP9" = { status = "pending" }
 "SKL0" = { status = "pending" }
 "SKL1" = { status = "pending" }
 "SKL2" = { status = "pending" }
@@ -391,7 +406,7 @@ schema = 2
 "TA2" = { status = "implemented", commit_message = "feat(session): demand-scoped truthiness domain authority consumed by flow", commit_date = "2026-09-01T04:00:00+01:00" }
 "TCM0" = { status = "pending" }
 "TCM0R" = { status = "implemented", commit_message = "fix(*): deduplicate the canonical set field and ratify the TypeScript dual-plane contract", commit_date = "2026-09-04T18:00:00+01:00", pull_request = 477 }
-"TCM1" = { status = "pending" }
+"TCM1" = { status = "implemented", commit_message = "feat(core): dual-surface mapping product inside CodeTransform", commit_date = "2026-09-05T00:00:00+01:00" }
 "TCM2" = { status = "pending" }
 "TCM3" = { status = "pending" }
 "TCM4" = { status = "pending" }

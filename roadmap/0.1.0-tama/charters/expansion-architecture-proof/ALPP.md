@@ -51,7 +51,7 @@ Alpine HTML attribute scope proof. The current owner is **provisional universal-
 
 ## Exact predecessor contracts
 
-- **SLDP:** implemented ledger row for “Solid counterexample over identical TSX geometry”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **SLDP:** implemented ledger row for “Solid 2 counterexample over identical TSX geometry”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **HWC2:** implemented ledger row for “HTML facts, TypeInfo, authored maps, and index contributions”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
@@ -112,5 +112,5 @@ Before squashing or review, the implementation patch transitions this node's pre
 **Subblocks:** (1) exact Alpine directive/modifier roles; (2) `x-data` parent→descendant scope graph; (3) embedded JS expression maps; (4) definition/rename/hover/completion for state and refs; (5) unknown property/modifier/`x-for` key diagnostic plus safe fix; (6) formatting/public/zero-work proof.
 **Acceptance:** `count` resolves and renames from descendant directives to its proven `x-data` declaration; nested shadowing and dynamic scopes return correct partiality; neutral HTML remains Alpine-free.
 **Forbidden:** evaluating Alpine expressions, global state assumptions, attribute-name parsing in the HTML parser, or applying Alpine semantics without activation.
-**Deletion/abort:** rescope generic attribute-claim APIs if HTMX/Angular counterfixtures expose Alpine-shaped vocabulary.
+**Deletion/abort:** rescope generic attribute-claim APIs if htmx 4/Angular counterfixtures expose Alpine-shaped vocabulary.
 

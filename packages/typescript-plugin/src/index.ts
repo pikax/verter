@@ -399,23 +399,6 @@ function frameworkAttributeCompletionName(label: string): string {
   return /[A-Z]/.test(base) ? camelToKebab(base) : base;
 }
 
-function isPureImportInsertion(ts: typeof tsModule, text: string): boolean {
-  const parsed = ts.createSourceFile(
-    "__verter_completion_import.ts",
-    text,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  ) as tsModule.SourceFile & { parseDiagnostics?: readonly tsModule.Diagnostic[] };
-  return (
-    (parsed.parseDiagnostics?.length ?? 0) === 0 &&
-    parsed.statements.length > 0 &&
-    parsed.statements.every(
-      (statement) => ts.isImportDeclaration(statement) || ts.isImportEqualsDeclaration(statement),
-    )
-  );
-}
-
 /** Stable identity for diagnostics produced by more than one LS pass. */
 function diagnosticIdentity(
   diagnostic: tsModule.Diagnostic,
@@ -1847,72 +1830,6 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         : null;
     }
 
-    function remapEditorCompletionChanges(
-      runtime: ProcessEditorProjectRuntime,
-      sourceFileName: string,
-      sourcePosition: number,
-      changes: readonly tsModule.FileTextChanges[],
-    ): tsModule.FileTextChanges[] {
-      const runtimeContext: CarrierRemapContext = {
-        reader: runtime.getStore(),
-        readCompanion: runtime.readCompanion,
-        readSource: runtime.readSource,
-        fileExists: _fileExists,
-      };
-      const out: tsModule.FileTextChanges[] = [];
-      for (const change of changes) {
-        const mapped = remapAllFileTextChanges(runtimeContext, [change]);
-        if (mapped.length > 0) {
-          out.push(...mapped);
-          continue;
-        }
-
-        // TypeScript inserts a new import at generated offset zero, which is
-        // correctly unmapped when the companion starts with synthetic JSX and
-        // helper preambles. Recover only a syntactically pure import insertion,
-        // and only into the exact source script block that requested the
-        // completion. Every other unmappable edit remains dropped atomically.
-        const owned = runtime.getStore().ownedSourceFor(change.fileName);
-        const sourceStructure =
-          owned === undefined
-            ? null
-            : carrierSourceStructure(runtime.getStore(), owned.provider_uri);
-        // The stamped script spans are UTF-8 BYTE offsets; `sourcePosition`
-        // and the recovered anchor are UTF-16 code units — convert before
-        // comparing or anchoring (no source text ⇒ fail closed, no recovery).
-        const sourceTextForAnchor = runtime.readSource(sourceFileName);
-        const importAnchor =
-          sourceStructure === null || sourceTextForAnchor === undefined
-            ? null
-            : (utf8RangesToUtf16(sourceTextForAnchor, sourceStructure.scriptContentRanges).find(
-                ([start, end]) => sourcePosition >= start && sourcePosition <= end,
-              )?.[0] ?? null);
-        if (
-          importAnchor === null ||
-          owned === undefined ||
-          !sameStorePath(runtime.getStore(), owned.provider_uri, change.fileName) ||
-          !sameStorePath(runtime.getStore(), owned.source_uri, sourceFileName) ||
-          change.textChanges.length === 0 ||
-          change.textChanges.some(
-            (edit) => edit.span.length !== 0 || !isPureImportInsertion(ts, edit.newText),
-          )
-        ) {
-          continue;
-        }
-        const existsRelToContaining = containingFileAwareExists(_fileExists, sourceFileName);
-        out.push({
-          ...change,
-          fileName: sourceFileName,
-          textChanges: change.textChanges.map((edit) => ({
-            ...edit,
-            span: { start: importAnchor, length: 0 },
-            newText: cleanupCarrierVirtualImportPath(edit.newText, existsRelToContaining),
-          })),
-        });
-      }
-      return out;
-    }
-
     /**
      * VS Code opens the real framework source and owns that ScriptInfo, while
      * this plugin owns a distinct generated companion root. Route diagnostics
@@ -1991,6 +1908,130 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       for (const diagnostic of diagnostics) {
         const mapped = mapEditorDiagnostic(diagnostic, program, targetRuntime);
         if (mapped !== undefined) out.push(mapped);
+      }
+      return out;
+    }
+
+    function strictUtf8PointToUtf16(text: string, byteOffset: number): number | null {
+      if (!Number.isSafeInteger(byteOffset) || byteOffset < 0) return null;
+      const offset = utf8RangesToUtf16(text, [[byteOffset, byteOffset]])[0][0];
+      return Buffer.byteLength(text.slice(0, offset), "utf8") === byteOffset ? offset : null;
+    }
+
+    function mappedCompletionInsertionAnchor(
+      runtime: ProcessEditorProjectRuntime,
+      program: tsModule.Program | undefined,
+      companion: string,
+      generatedOffset: number,
+    ): { fileName: string; offset: number } | null {
+      const store = runtime.getStore();
+      const ready = store.readyFile(companion);
+      const owned = store.ownedSourceFor(companion);
+      if (
+        ready?.map_rel === undefined ||
+        owned === undefined ||
+        !sameStorePath(store, owned.provider_uri, companion)
+      ) {
+        return null;
+      }
+      const raw = store.readMapSync(ready.map_rel) as {
+        x_verter_mapping_product?: {
+          schema_version?: unknown;
+          insertion_anchors?: unknown;
+        };
+      } | null;
+      const product = raw?.x_verter_mapping_product;
+      if (product?.schema_version !== 1 || !Array.isArray(product.insertion_anchors)) return null;
+
+      // The completion query can race a store publication: its edit position
+      // belongs to the Program companion that produced the response, while the
+      // insertion anchor belongs to the current manifest/map pair. Do not map
+      // across those revisions.
+      const companionFile = program?.getSourceFile(companion);
+      if (companionFile === undefined) return null;
+      const companionText = runtime.readCompanion(companion);
+      const sourceText = runtime.readSource(owned.source_uri);
+      if (companionText === undefined || sourceText === undefined) return null;
+      const publishedVersion = `${ready.version}:${ready.content_hash}`;
+      const companionVersion = (
+        companionFile as tsModule.SourceFile & { readonly version?: unknown }
+      ).version;
+      if (typeof companionVersion === "string") {
+        if (companionVersion !== publishedVersion) return null;
+      } else if (companionFile.text !== companionText) {
+        // Some test and third-party hosts do not expose SourceFile.version.
+        // In that case, matching the current published bytes is the fallback.
+        return null;
+      }
+      for (const candidate of product.insertion_anchors) {
+        if (
+          !Array.isArray(candidate) ||
+          candidate.length !== 2 ||
+          typeof candidate[0] !== "number" ||
+          typeof candidate[1] !== "number"
+        ) {
+          return null;
+        }
+        const projected = strictUtf8PointToUtf16(companionText, candidate[0]);
+        const carrier = strictUtf8PointToUtf16(sourceText, candidate[1]);
+        if (projected === null || carrier === null) return null;
+        if (projected === generatedOffset) {
+          return { fileName: owned.source_uri, offset: carrier };
+        }
+      }
+      return null;
+    }
+
+    function remapEditorCompletionChanges(
+      runtime: ProcessEditorProjectRuntime,
+      program: tsModule.Program | undefined,
+      changes: readonly tsModule.FileTextChanges[],
+    ): tsModule.FileTextChanges[] {
+      const store = runtime.getStore();
+      const runtimeContext: CarrierRemapContext = {
+        reader: store,
+        readCompanion: runtime.readCompanion,
+        readSource: runtime.readSource,
+        fileExists: _fileExists,
+      };
+      const out: tsModule.FileTextChanges[] = [];
+      for (const change of changes) {
+        const mapped = remapAllFileTextChanges(runtimeContext, [change]);
+        if (mapped.length > 0) {
+          out.push(...mapped);
+          continue;
+        }
+        const textChanges: tsModule.TextChange[] = [];
+        let sourceFileName: string | undefined;
+        for (const edit of change.textChanges) {
+          if (edit.span.length !== 0) {
+            sourceFileName = undefined;
+            break;
+          }
+          const anchor = mappedCompletionInsertionAnchor(
+            runtime,
+            program,
+            change.fileName,
+            edit.span.start,
+          );
+          if (
+            anchor === null ||
+            (sourceFileName !== undefined && !sameStorePath(store, sourceFileName, anchor.fileName))
+          ) {
+            sourceFileName = undefined;
+            break;
+          }
+          sourceFileName = anchor.fileName;
+          const existsRelToContaining = containingFileAwareExists(_fileExists, sourceFileName);
+          textChanges.push({
+            ...edit,
+            span: { start: anchor.offset, length: 0 },
+            newText: cleanupCarrierVirtualImportPath(edit.newText, existsRelToContaining),
+          });
+        }
+        if (sourceFileName !== undefined && textChanges.length === change.textChanges.length) {
+          out.push({ ...change, fileName: sourceFileName, textChanges });
+        }
       }
       return out;
     }
@@ -2640,6 +2681,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (usesEditorCarrierRouting(fileName)) {
         const routed = editorCarrierPosition(fileName, position);
         if (routed === null) return undefined;
+        const program = routed.runtime.languageService.getProgram?.();
         const result = routed.runtime.languageService.getCompletionEntryDetails(
           routed.companion,
           routed.position,
@@ -2651,12 +2693,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         );
         if (result?.codeActions && responseRemap) {
           for (const action of result.codeActions) {
-            action.changes = remapEditorCompletionChanges(
-              routed.runtime,
-              fileName,
-              position,
-              action.changes,
-            );
+            action.changes = remapEditorCompletionChanges(routed.runtime, program, action.changes);
           }
         }
         return result;

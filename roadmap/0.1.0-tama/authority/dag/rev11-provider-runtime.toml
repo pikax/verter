@@ -4,7 +4,7 @@ module = "rev11-provider-runtime"
 [[node]]
 id = "H2"
 name = "Project-scoped ProviderHub bindings"
-predecessors = ["G5","H1"]
+predecessors = ["G5","H1","SIMP8","SIMP9"]
 phase = "rev11"
 train = "rev11.provider-runtime"
 product = "rev11"

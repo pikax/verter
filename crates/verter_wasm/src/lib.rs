@@ -12,10 +12,8 @@
 //! - **Missing (platform):** the NAPI CSS three-way
 //!   (`prepareStyleForPreprocessor` / `transformVueStyle` / `analyzeStyle`)
 //!   — CSS preprocessing needs Node.js.
-//! - **NAPI-only:** the profile-bearing legacy read routes `getIde` /
-//!   `ensureIdeCompiled` / `getVirtualFile` (this binding decodes no compile
-//!   profile) and the preprocessor handshake `applyBlockOverrides`
-//!   (decodes a block-override request, not a compile profile).
+//! - **NAPI-only:** the cached read routes `getIde` / `ensureIdeCompiled` /
+//!   `getVirtualFile` and the preprocessor handshake `applyBlockOverrides`.
 //!
 //! ## FFI architecture
 //!
@@ -489,9 +487,9 @@ fn normalize_compile_request_undefined_tags(request: JsValue) -> Result<JsValue,
 // - Both: new, resolve, upsert, listVirtualFiles, remove,
 //         setImportDependencies, getAnalysis, compileRequest
 // - NAPI-only: prepareStyleForPreprocessor / transformVueStyle / analyzeStyle,
-//              the profile-bearing legacy read routes getIde /
-//              ensureIdeCompiled / getVirtualFile, and the preprocessor
-//              handshake applyBlockOverrides (not a profile-bearing read)
+//              the cached read routes getIde / ensureIdeCompiled /
+//              getVirtualFile, and the preprocessor handshake
+//              applyBlockOverrides
 // =============================================================================
 
 /// In-memory virtual file host for Vue SFC compilation (WASM variant).
