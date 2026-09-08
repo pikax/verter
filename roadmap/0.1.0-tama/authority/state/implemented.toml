@@ -12,21 +12,6 @@ schema = 2
 # affects readiness. [[github_train_issue]] rows map train parents.
 
 [implementation]
-"SIMP1" = { status = "pending" }
-"SIMP2" = { status = "pending" }
-"SIMP3" = { status = "pending" }
-"SIMP4" = { status = "pending" }
-"SIMP5" = { status = "pending" }
-"SIMP6" = { status = "pending" }
-"SIMP7" = { status = "pending" }
-"SIMP8" = { status = "pending" }
-"SIMP9" = { status = "pending" }
-"SIMP10" = { status = "pending" }
-"SIMP11" = { status = "pending" }
-"SIMP12" = { status = "pending" }
-"SIMP13" = { status = "pending" }
-"SIMP14" = { status = "pending" }
-"SIMP15" = { status = "pending" }
 
 "A0" = { status = "implemented", commit_message = "chore(*): add the architecture-lock program documents, state validator, and gate wiring", commit_date = "2026-08-10T01:40:28+01:00" }
 "A1" = { status = "implemented", commit_message = "docs(*): reference command-truth evidence in the capability matrix", commit_date = "2026-08-10T08:17:25+01:00" }
@@ -199,7 +184,7 @@ schema = 2
 "D7" = { status = "pending" }
 "D8" = { status = "pending" }
 "DEM0" = { status = "pending" }
-"E1" = { status = "pending" }
+"E1" = { status = "implemented", commit_message = "feat(typeinfo): resolve-symbol graph operation with bounded SemanticTypeGraph export", commit_date = "2026-09-05T01:30:00+01:00" }
 "E2" = { status = "pending" }
 "E3" = { status = "pending" }
 "E4" = { status = "pending" }
@@ -385,6 +370,21 @@ schema = 2
 "SCP6" = { status = "pending" }
 "SCP7" = { status = "pending" }
 "SG0" = { status = "pending" }
+"SIMP1" = { status = "pending" }
+"SIMP10" = { status = "pending" }
+"SIMP11" = { status = "pending" }
+"SIMP12" = { status = "pending" }
+"SIMP13" = { status = "pending" }
+"SIMP14" = { status = "pending" }
+"SIMP15" = { status = "pending" }
+"SIMP2" = { status = "pending" }
+"SIMP3" = { status = "pending" }
+"SIMP4" = { status = "pending" }
+"SIMP5" = { status = "pending" }
+"SIMP6" = { status = "pending" }
+"SIMP7" = { status = "pending" }
+"SIMP8" = { status = "pending" }
+"SIMP9" = { status = "pending" }
 "SKL0" = { status = "pending" }
 "SKL1" = { status = "pending" }
 "SKL2" = { status = "pending" }

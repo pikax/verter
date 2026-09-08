@@ -7520,6 +7520,20 @@ const KNOWN_NON_DTO_OUTPUT_IDENTS: &[(&str, NonAuthorityCategory)] = &[
         "TypeInfoGraphResponse",
         NonAuthorityCategory::ExternalNonAuthority(&["verter_protocol::typeinfo::graph"]),
     ),
+    // `SemanticTypeGraph` — the bounded graph-export WIRE answer (proto
+    // nodes / symbols / signatures / interned strings), the same class as
+    // the framework-surface wire DTO above it: a prost message generated
+    // into OUT_DIR (no readable seed home), carrying graph nodes, NOT the
+    // Rust `verter_type_expr::TypeExpr`. Returned by the graph-protocol
+    // raise sink `project_node_to_semantic_type_graph`. The category is
+    // QUALIFIER-AWARE (a `SemanticTypeGraph` written outside the approved
+    // `verter_protocol::typeinfo::graph` home still fires the fail-closed
+    // completeness check — proven for this name by
+    // `unclassifiable_output_idents_self_test_discriminates`).
+    (
+        "SemanticTypeGraph",
+        NonAuthorityCategory::ExternalNonAuthority(&["verter_protocol::typeinfo::graph"]),
+    ),
     (
         "TypeInfoRequestError",
         NonAuthorityCategory::ExternalNonAuthority(&["verter_protocol::typeinfo::graph"]),
@@ -8493,6 +8507,69 @@ fn unclassifiable_output_idents_self_test_discriminates() {
         "self-test (F2): a known non-DTO name (`Span`) written under a FORGED qualifier \
          (`evil::Span`) MUST FIRE the output completeness check (not blessed by the bare-name \
          exemption); got: {v:?}"
+    );
+
+    // RED (F2, the bounded graph-export wire answer): a same-named
+    // `SemanticTypeGraph` under a FORGED qualifier must NOT be blessed by
+    // its approved `verter_protocol::typeinfo::graph` home.
+    let forged_graph = SinkFnSig {
+        module_path: "crate::typeinfo::graph_query".to_string(),
+        name: "leak_forged_graph".to_string(),
+        input_idents: std::collections::BTreeSet::new(),
+        output_idents: [resolve_type_ref(
+            &["evil".to_string(), "SemanticTypeGraph".to_string()],
+            "crate::typeinfo::graph_query",
+            &UseIndex::default(),
+            &name_index_with_seed_ids(&fixture),
+            &ReExportIndex::default(),
+            &UseBindingIndex::default(),
+        )]
+        .into_iter()
+        .collect(),
+        mut_outparam_idents: std::collections::BTreeSet::new(),
+        test_gated: false,
+        module_private: false,
+    };
+    let v = unclassifiable_output_idents(&[forged_graph], &fixture, &empty_bearing);
+    assert!(
+        v.iter()
+            .any(|(f, id)| f.contains("leak_forged_graph") && id == "SemanticTypeGraph"),
+        "self-test (F2): `SemanticTypeGraph` written under a FORGED qualifier \
+         (`evil::SemanticTypeGraph`) MUST FIRE the output completeness check — the wire-DTO \
+         category exemption is qualifier-exact for this name too; got: {v:?}"
+    );
+
+    // GREEN: `SemanticTypeGraph` under its APPROVED qualified home (the
+    // spelling the raise sink's return type uses) is classifiable.
+    let approved_graph = SinkFnSig {
+        module_path: "crate::typeinfo::graph_query".to_string(),
+        name: "ok_graph_wire_home".to_string(),
+        input_idents: std::collections::BTreeSet::new(),
+        output_idents: [resolve_type_ref(
+            &[
+                "verter_protocol".to_string(),
+                "typeinfo".to_string(),
+                "graph".to_string(),
+                "SemanticTypeGraph".to_string(),
+            ],
+            "crate::typeinfo::graph_query",
+            &UseIndex::default(),
+            &name_index_with_seed_ids(&fixture),
+            &ReExportIndex::default(),
+            &UseBindingIndex::default(),
+        )]
+        .into_iter()
+        .collect(),
+        mut_outparam_idents: std::collections::BTreeSet::new(),
+        test_gated: false,
+        module_private: false,
+    };
+    let approved_graph_v =
+        unclassifiable_output_idents(&[approved_graph], &fixture, &empty_bearing);
+    assert!(
+        approved_graph_v.is_empty(),
+        "self-test: `SemanticTypeGraph` under its approved home \
+         (`verter_protocol::typeinfo::graph`) MUST be classifiable; got: {approved_graph_v:?}"
     );
 
     // RED: an unread wrapper in a `&mut` OUT-param channel also fires.
@@ -12454,6 +12531,39 @@ const HOT_TERMINAL_PASSTHROUGH_IDENTS: &[&str] = &[
     "extend",
 ];
 
+/// QUALIFIER-EXACT terminal passthrough publications — recognised by their
+/// FULL written call path, never by final segment. A bare-name list entry
+/// exempts every same-named helper irrespective of qualifier or location
+/// (an unrelated `evil::encode_type_expr_graph` would ride it); these paths
+/// exempt a call ONLY when every `::`-joined segment matches, so a forged
+/// qualifier, a partial path, or a bare local spelling all stay subject to
+/// the unknown-helper rail. Proven by
+/// `qualifier_exact_passthrough_discriminates_forged_encoder_and_unrelated_sink`.
+const HOT_QUALIFIER_EXACT_PASSTHROUGH_PATHS: &[&str] = &[
+    // The pure bounded wire-graph encoder — the graph-protocol publication
+    // terminal. Its boundedness is STRUCTURAL, not prose: the budget
+    // parameter is the validated `GraphExportBudgets` capability, whose
+    // only constructors hard-cap both axes (an unbounded export has no
+    // spelling). Encoding a sink-minted value into its wire DTO is
+    // publication — the raise sink `project_node_to_semantic_type_graph`
+    // discards the `TypeExpr` after it.
+    "verter_protocol::typeinfo::graph_export::encode_type_expr_graph",
+];
+
+/// Whether a call's written path is EXACTLY one of the
+/// [`HOT_QUALIFIER_EXACT_PASSTHROUGH_PATHS`] — every segment matched,
+/// `::`-joined with no normalization, so only the canonical spelling is
+/// exempt.
+fn hot_call_path_is_qualifier_exact_passthrough(path: &syn::Path) -> bool {
+    let written = path
+        .segments
+        .iter()
+        .map(|seg| seg.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    HOT_QUALIFIER_EXACT_PASSTHROUGH_PATHS.contains(&written.as_str())
+}
+
 /// Collection-mutation method idents that PROPAGATE a materialized ARGUMENT's
 /// taint onto the RECEIVER collection (`out.push(mat)` / `map.insert(k, mat)` /
 /// `buf.extend(mats)`): after the mutation the collection owns a materialized
@@ -12539,6 +12649,21 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ("macro_output_expansion.rs", "expand_slot_binding_output"),
     ("typeinfo/raise.rs", "project_node_to_type_expr_json_bytes"),
     ("typeinfo/raise.rs", "render_node_display_with_ctx"),
+    // The graph-protocol raise terminal: materialises the resolved node
+    // ONCE through the sealed output capability and hands the terminal
+    // `TypeExpr` straight to the pure bounded wire-graph encoder, called
+    // ONLY under its qualifier-exact passthrough path
+    // (`verter_protocol::typeinfo::graph_export::encode_type_expr_graph`).
+    // The budgets are request-carried and ride the VALIDATED
+    // `GraphExportBudgets` capability (constructor-hard-capped — an
+    // unbounded export has no spelling), the miss is decided on the
+    // OPTION, and nothing branches on the materialised value; it takes
+    // no `TypeExpr` param, so the self-policing rail seeds nothing. The
+    // entry blesses the (file, fn) PAIR only — an unrelated same-named
+    // sink body at any other location still trips the location rail
+    // (proven by
+    // `qualifier_exact_passthrough_discriminates_forged_encoder_and_unrelated_sink`).
+    ("typeinfo/raise.rs", "project_node_to_semantic_type_graph"),
     // The hover-boundary synthetic slot-binding deepen entry: raises the
     // published source arm under the terminal demand, decides the carrier
     // fallback in NODE DOMAIN (`node_is_synthetic_binding_carrier`, BEFORE
@@ -14744,6 +14869,7 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
                     && !self.returns_typeexpr.contains(&id)
                     && !HOT_TAINT_WRAP_CTORS.contains(&id.as_str())
                     && !HOT_TERMINAL_PASSTHROUGH_IDENTS.contains(&id.as_str())
+                    && !hot_call_path_is_qualifier_exact_passthrough(&p.path)
                     && !HOT_SERIALIZER_PUBLISH_IDENTS.contains(&id.as_str())
                     && !(hot_call_is_type_associated(&p.path) && hot_assoc_tail_is_constructor(&id))
                 {
@@ -15221,12 +15347,136 @@ fn {PROBE_FN}(x: &TypeExpr) -> bool {{
     );
 
     // (3) GREEN again on the immutable cached production facts — the probe
-    //     never re-reads disk and never mutates the production fact model.
+    // never re-reads disk and never mutates the production fact model.
     let restored = &hot_production_facts().offenders;
     assert!(
         restored.is_empty(),
         "probe step 3: the unmodified sources must scan green again (the probe never touches \
          disk); got: {restored:#?}"
+    );
+}
+
+/// Discrimination self-test for the QUALIFIER-EXACT passthrough mechanism
+/// and the (file, fn)-scoped terminal-sink pair. The exemptions for the
+/// bounded wire-graph encoder must never ride a NAME:
+///
+/// - RED: a same-named encoder under a FORGED qualifier
+///   (`evil::encode_type_expr_graph`) fires the unknown-helper rail.
+/// - RED: a bare one-segment local spelling of the encoder name fires too
+///   (the exemption is path-exact, never final-segment).
+/// - GREEN-with-mint: the exact canonical path is a passthrough
+///   publication — a non-terminal caller still trips the LOCATION rail for
+///   its own mint, but the unknown-helper rail adds NO decide note.
+/// - RED: an unrelated same-named terminal-sink body (the exact body shape
+///   of the sanctioned `project_node_to_semantic_type_graph`) planted at an
+///   UNRELATED file still trips the location rail — `HOT_TERMINAL_SINKS`
+///   blesses the (file, fn) pair, never the fn name.
+#[test]
+fn qualifier_exact_passthrough_discriminates_forged_encoder_and_unrelated_sink() {
+    const CANONICAL: &str = "verter_protocol::typeinfo::graph_export::encode_type_expr_graph";
+
+    // RED: forged qualifier — same final segment, different path.
+    let forged = hot_scan_snippet(
+        "src/probe_garden.rs",
+        r#"
+fn forged_encoder_probe(x: &TypeExpr) -> bool {
+    let cap = ProbeCap::new();
+    let minted = cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap));
+    evil::encode_type_expr_graph(&minted)
+}
+"#,
+    );
+    assert!(
+        forged.iter().any(|o| o.contains("forged_encoder_probe")
+            && o.contains("tainted value passed to `encode_type_expr_graph`")),
+        "self-test: a same-named encoder under a FORGED qualifier (`evil::encode_type_expr_graph`) \
+         MUST fire the unknown-helper rail — the passthrough exemption is qualifier-exact; \
+         got: {forged:?}"
+    );
+
+    // RED: bare one-segment local spelling — not the canonical path.
+    let bare = hot_scan_snippet(
+        "src/probe_garden.rs",
+        r#"
+fn bare_encoder_probe(x: &TypeExpr) -> bool {
+    let cap = ProbeCap::new();
+    let minted = cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap));
+    encode_type_expr_graph(&minted)
+}
+"#,
+    );
+    assert!(
+        bare.iter().any(|o| o.contains("bare_encoder_probe")
+            && o.contains("tainted value passed to `encode_type_expr_graph`")),
+        "self-test: a bare local spelling of the encoder name MUST fire the unknown-helper rail — \
+         only the full canonical path is exempt; got: {bare:?}"
+    );
+
+    // GREEN-with-mint: the canonical path is a passthrough publication. The
+    // probe fn is NOT a registered terminal, so its own mint trips the
+    // LOCATION rail ("materialize") — but no unknown-helper decide note may
+    // appear: passing the minted value to the canonical encoder is
+    // publication, not a decide.
+    let qualified = hot_scan_snippet(
+        "src/probe_garden.rs",
+        &format!(
+            r#"
+fn qualified_encoder_probe(x: &TypeExpr) -> ProbeGraph {{
+    let cap = ProbeCap::new();
+    let minted = cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap));
+    {CANONICAL}(&minted, &budgets())
+}}
+"#
+        ),
+    );
+    assert!(
+        qualified
+            .iter()
+            .any(|o| o.contains("qualified_encoder_probe") && o.contains("materialize")),
+        "self-test: the non-terminal probe still trips the mint LOCATION rail (it is not a \
+         registered terminal sink); got: {qualified:?}"
+    );
+    assert!(
+        qualified
+            .iter()
+            .all(|o| !o.contains("passed to `encode_type_expr_graph`")),
+        "self-test: the canonical encoder path is a passthrough publication — the unknown-helper \
+         rail must NOT fire on it; got: {qualified:?}"
+    );
+
+    // RED: an unrelated same-named SINK — the exact body shape of the
+    // sanctioned terminal, planted at a file the HOT_TERMINAL_SINKS pair
+    // does not cover. The mint must trip the location rail: the pair blesses
+    // (file, fn), never the name.
+    let unrelated_sink = hot_scan_snippet(
+        "src/unrelated_probe.rs",
+        &format!(
+            r#"
+fn project_node_to_semantic_type_graph(
+    node: &ProbeNode,
+    budgets: &GraphExportBudgets,
+) -> Option<ProbeGraph> {{
+    let cap = ProbeCap::new();
+    let type_expr = cap.materialize_output_type_expr(node)?.into_type_expr(&cap);
+    Some({CANONICAL}(&type_expr, budgets))
+}}
+"#
+        ),
+    );
+    assert!(
+        unrelated_sink
+            .iter()
+            .any(|o| o.contains("project_node_to_semantic_type_graph") && o.contains("materialize")),
+        "self-test: an unrelated same-named sink body at an UNRELATED file MUST trip the \
+         materialization-location rail — the terminal-sink pair is (file, fn)-scoped, never a \
+         name blessing; got: {unrelated_sink:?}"
+    );
+    assert!(
+        unrelated_sink
+            .iter()
+            .all(|o| !o.contains("passed to `encode_type_expr_graph`")),
+        "self-test: the unrelated sink's canonical encoder call stays a publication (no \
+         unknown-helper note) — only its LOCATION is the violation; got: {unrelated_sink:?}"
     );
 }
 
@@ -17096,6 +17346,20 @@ fn hot_detector_spellings_are_live_or_synthetic() {
                      planting self-test row"
                 )),
             }
+        }
+    }
+    // Same liveness contract for the QUALIFIER-EXACT passthrough paths: the
+    // full `::`-joined call path must appear in production source — a path
+    // whose exact spelling is never written live is an inert exemption row.
+    for path in HOT_QUALIFIER_EXACT_PASSTHROUGH_PATHS {
+        let live = prod_sources
+            .iter()
+            .any(|(_, src)| whole_ident_occurrences(src, path) > 0);
+        if !live {
+            failures.push(format!(
+                "`{path}` (HOT_QUALIFIER_EXACT_PASSTHROUGH_PATHS) is INERT: the exact call path \
+                 appears in no production source under crates/*/src — sweep the stale exemption"
+            ));
         }
     }
     assert!(
