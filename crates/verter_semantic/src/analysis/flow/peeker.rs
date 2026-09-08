@@ -410,6 +410,7 @@ impl<'g> ReturnPathPeeker<'g> {
         for edge in edges {
             let (projection, suffix) = match &edge.kind {
                 FlowEdgeKind::ValueDef => (&[][..], path),
+                FlowEdgeKind::SourceTypeQuery => (&[][..], 0),
                 FlowEdgeKind::ReadProjection {
                     path: projection,
                     kind,

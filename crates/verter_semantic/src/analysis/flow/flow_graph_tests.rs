@@ -96,6 +96,58 @@ fn write_only_closure_capture_selects_an_effect_subject_without_a_value_read() {
 }
 
 #[test]
+fn source_type_query_child_identity_does_not_mint_runtime_capture_receipts() {
+    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    let source = "function root(value) { return () => accept(0 as typeof value); }";
+    let parent = skeleton_of(source);
+    assert!(
+        parent
+            .expr_sites
+            .iter()
+            .all(|site| site.capture_bindings.is_empty()),
+        "query-only closure bridging retains its existing boundary"
+    );
+    let skeleton = indexed_returned_arrow(source);
+    let graph = build_function_flow_graph(&skeleton);
+    let (index, site) = skeleton
+        .expr_sites
+        .iter()
+        .enumerate()
+        .find(|(_, site)| !site.source_type_queries.is_empty())
+        .unwrap();
+    let Some(crate::analysis::flow::FlowBindingRef::Captured(identity)) =
+        &site.source_type_queries[0].binding
+    else {
+        panic!("exact outer query identity");
+    };
+    assert_eq!(identity.name.as_ref(), "value");
+    assert!(site.reads.iter().all(|read| read.binding.is_none()));
+    assert!(site.capture_bindings.is_empty());
+    let from = graph.expr_site_node(SkeletonExprSiteId::from_index(index as u32));
+    let edge = graph
+        .out_edges(from)
+        .iter()
+        .find(|edge| matches!(edge.kind, FlowEdgeKind::SourceTypeQuery))
+        .unwrap();
+    assert!(!has_edge_class(
+        &graph,
+        from,
+        edge.to,
+        FlowEdgeClass::EvalEffect
+    ));
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(
+            &SliceDemand::for_return_projection(&skeleton, &[]),
+            &FlowSliceBudget::default(),
+        )
+        .unwrap();
+    assert!(
+        plan.is_value(edge.to),
+        "child query selects an exact typed subject without a runtime read"
+    );
+}
+
+#[test]
 fn captured_reads_select_own_frame_writes_and_their_control_inputs() {
     use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
     use crate::analysis::flow::FlowBindingRef;

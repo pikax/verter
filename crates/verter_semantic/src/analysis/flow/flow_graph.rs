@@ -103,6 +103,9 @@ pub enum FlowEdgeKind {
     /// argument, a binding's initializer / whole-slot definite write
     /// (reaching definition), or an expression site's read of a binding.
     ValueDef,
+    /// A whole authored type query consumes the queried subject's current
+    /// semantic type independently of the result's projection suffix.
+    SourceTypeQuery,
     /// Follow an authored read path, forwarding a result suffix only when
     /// the read itself provides the expression result.
     ReadProjection {
@@ -160,7 +163,9 @@ impl FlowEdgeKind {
     #[must_use]
     pub fn class(&self) -> FlowEdgeClass {
         match self {
-            FlowEdgeKind::ValueDef | FlowEdgeKind::ReadProjection { .. } => FlowEdgeClass::ValueDef,
+            FlowEdgeKind::ValueDef
+            | FlowEdgeKind::ReadProjection { .. }
+            | FlowEdgeKind::SourceTypeQuery => FlowEdgeClass::ValueDef,
             FlowEdgeKind::PathWrite { .. } => FlowEdgeClass::PathWrite,
             FlowEdgeKind::EvalEffect => FlowEdgeClass::EvalEffect,
             FlowEdgeKind::ControlRegion | FlowEdgeKind::ControlInput => {
@@ -368,6 +373,11 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
         .expr_sites
         .iter()
         .flat_map(|site| site.reads.iter().filter_map(|read| read.binding.as_ref()))
+        .chain(skeleton.expr_sites.iter().flat_map(|site| {
+            site.source_type_queries
+                .iter()
+                .filter_map(|query| query.binding.as_ref())
+        }))
         .chain(
             skeleton
                 .writes
@@ -456,6 +466,18 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
             for to in target.into_iter().chain(captured_node) {
                 if seen.insert((node.0, to.0, FlowEdgeClass::EvalEffect)) {
                     edges.push((node, to, FlowEdgeKind::EvalEffect));
+                }
+            }
+        }
+        let mut seen_queries = FxHashSet::default();
+        for query in site.source_type_queries.iter() {
+            let target = local_target(query.binding.as_ref()).or_else(|| match &query.binding {
+                Some(FlowBindingRef::Captured(identity)) => capture_nodes.get(identity).copied(),
+                _ => None,
+            });
+            if let Some(to) = target {
+                if seen_queries.insert(to) {
+                    edges.push((node, to, FlowEdgeKind::SourceTypeQuery));
                 }
             }
         }

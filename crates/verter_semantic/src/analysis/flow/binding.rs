@@ -41,6 +41,7 @@ pub struct FlowBindingMap {
     declaration_offsets: Arc<[u32]>,
     runtime_shapes: Arc<[FlowRuntimeBindingShape]>,
     occurrences: Arc<FxHashMap<FrameSpan, IndexedOccurrence>>,
+    source_type_queries: Arc<FxHashMap<FrameSpan, IndexedOccurrence>>,
     declarations_by_span: Arc<FxHashMap<DeclarationSpan, SkeletonBindingId>>,
 }
 
@@ -85,6 +86,15 @@ enum IndexedOccurrence {
     Resolved(FlowBindingRef),
     UnmodeledLocal,
     Free,
+}
+
+fn indexed_occurrence(occurrence: Option<&IndexedOccurrence>) -> FlowBindingOccurrence<'_> {
+    match occurrence {
+        Some(IndexedOccurrence::Resolved(binding)) => FlowBindingOccurrence::Resolved(binding),
+        Some(IndexedOccurrence::UnmodeledLocal) => FlowBindingOccurrence::UnmodeledLocal,
+        Some(IndexedOccurrence::Free) => FlowBindingOccurrence::Free,
+        None => FlowBindingOccurrence::Missing,
+    }
 }
 
 impl FlowBindingMap {
@@ -191,6 +201,7 @@ impl FlowBindingMap {
             declaration_offsets: offsets.into(),
             runtime_shapes: runtime_shapes.into(),
             occurrences: Arc::new(FxHashMap::default()),
+            source_type_queries: Arc::new(FxHashMap::default()),
             declarations_by_span: Arc::new(declarations_by_span),
         })
     }
@@ -250,34 +261,65 @@ impl FlowBindingMap {
         for declaration in entry.unmodeled_bindings.iter() {
             insert(declaration.span, IndexedOccurrence::UnmodeledLocal)?;
         }
-        let reference_binding = |reference: &crate::analysis::function_program::FunctionReferenceRecord| -> Result<IndexedOccurrence, FlowBindingMapError> {
+        let reference_binding = |binding: &crate::analysis::function_program::FunctionReferenceBinding| -> Result<IndexedOccurrence, FlowBindingMapError> {
             use crate::analysis::function_program::FunctionReferenceBinding;
-            Ok(match &reference.binding {
+            Ok(match binding {
                 FunctionReferenceBinding::Resolved(identity) => IndexedOccurrence::Resolved(self.resolve_identity(identity)?),
                 FunctionReferenceBinding::Free => IndexedOccurrence::Free,
                 FunctionReferenceBinding::UnmodeledLocal => IndexedOccurrence::UnmodeledLocal,
             })
         };
         for reference in entry.references.iter() {
-            insert(reference.span, reference_binding(reference)?)?;
+            insert(reference.span, reference_binding(&reference.binding)?)?;
         }
         for target in entry.writes.iter().flat_map(|write| write.targets.iter()) {
             if let FunctionWriteTarget::Binding { reference, .. } = target {
-                insert(reference.span, reference_binding(reference)?)?;
+                insert(reference.span, reference_binding(&reference.binding)?)?;
+            }
+        }
+        let mut queries = FxHashMap::default();
+        for query in entry.source_type_queries.iter() {
+            if query.span.start < entry.span.start
+                || query.span.end > entry.span.end
+                || query.span.start >= query.span.end
+            {
+                return Err(FlowBindingMapError::InvalidSpan);
+            }
+            let span = FrameSpan::rebase(entry.span.start, query.span);
+            let binding = reference_binding(&query.binding)?;
+            if queries
+                .insert(span, binding.clone())
+                .is_some_and(|previous| previous != binding)
+            {
+                return Err(FlowBindingMapError::ConflictingOccurrence);
             }
         }
         self.occurrences = Arc::new(occurrences);
+        self.source_type_queries = Arc::new(queries);
         Ok(())
     }
 
     /// Exact read/write/callee occurrence authority. Known free and absent
     /// occurrences are distinct; neither permits a runtime name fallback.
     pub fn occurrence(&self, span: FrameSpan) -> FlowBindingOccurrence<'_> {
-        match self.occurrences.get(&span) {
-            Some(IndexedOccurrence::Resolved(binding)) => FlowBindingOccurrence::Resolved(binding),
-            Some(IndexedOccurrence::UnmodeledLocal) => FlowBindingOccurrence::UnmodeledLocal,
-            Some(IndexedOccurrence::Free) => FlowBindingOccurrence::Free,
-            None => FlowBindingOccurrence::Missing,
+        indexed_occurrence(self.occurrences.get(&span))
+    }
+
+    /// Exact lexical authority for authored whole type queries. Type queries
+    /// never enter the runtime occurrence or capture inventory.
+    pub fn source_type_query_occurrence(&self, span: FrameSpan) -> FlowBindingOccurrence<'_> {
+        indexed_occurrence(self.source_type_queries.get(&span))
+    }
+
+    pub(super) fn required_source_type_query(
+        &self,
+        span: FrameSpan,
+    ) -> Result<Option<FlowBindingRef>, FlowBindingMapError> {
+        match self.source_type_query_occurrence(span) {
+            FlowBindingOccurrence::Resolved(binding) => Ok(Some(binding.clone())),
+            FlowBindingOccurrence::Free => Ok(None),
+            FlowBindingOccurrence::UnmodeledLocal => Err(FlowBindingMapError::UnmodeledOccurrence),
+            FlowBindingOccurrence::Missing => Err(FlowBindingMapError::MissingOccurrence),
         }
     }
 

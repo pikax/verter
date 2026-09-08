@@ -366,6 +366,14 @@ pub struct SkeletonRead {
     pub kind: FlowReadKind,
 }
 
+/// A type-query dependency of an indexed call input, independent of runtime
+/// operand reads, effects and closure capture receipts.
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+pub struct SkeletonSourceTypeQuery {
+    pub span: FrameSpan,
+    pub binding: Option<FlowBindingRef>,
+}
+
 /// How a read depends on a demand for the containing expression result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
 pub enum FlowReadKind {
@@ -486,6 +494,7 @@ pub struct SkeletonExprSite {
     pub shape: SkeletonExprShape,
     /// Identifier reads attributed to this site.
     pub reads: Arc<[SkeletonRead]>,
+    pub source_type_queries: Arc<[SkeletonSourceTypeQuery]>,
     /// The captured names of the nested function value (arrow / function
     /// expression) this site holds: the nested frame's free reads, already
     /// interned into THIS frame's name table, deduplicated by name. A
@@ -985,6 +994,9 @@ fn prepare_function_body_skeleton(
                 _ => bindings.required_occurrence(read.span)?,
             };
         }
+        for query in Arc::make_mut(&mut site.source_type_queries) {
+            query.binding = bindings.required_source_type_query(query.span)?;
+        }
         for call in Arc::make_mut(&mut site.calls) {
             call.binding = call
                 .root_span
@@ -1045,6 +1057,7 @@ struct SiteDraft {
     parent: Option<SkeletonExprSiteId>,
     shape: SkeletonExprShape,
     reads: Vec<SkeletonRead>,
+    source_type_queries: Vec<SkeletonSourceTypeQuery>,
     captures: Vec<FlowNameId>,
     capture_bindings: Vec<FlowBindingRef>,
     calls: Vec<SkeletonCall>,
@@ -1176,6 +1189,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             parent,
             shape: SkeletonExprShape::Other,
             reads: Vec::new(),
+            source_type_queries: Vec::new(),
             captures: Vec::new(),
             capture_bindings: Vec::new(),
             calls: Vec::new(),
@@ -1854,6 +1868,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                         parent: draft.parent,
                         shape: draft.shape,
                         reads: Arc::from(draft.reads.into_boxed_slice()),
+                        source_type_queries: draft.source_type_queries.into(),
                         captures: Arc::from(draft.captures.into_boxed_slice()),
                         capture_bindings: Arc::from(draft.capture_bindings.into_boxed_slice()),
                         calls: Arc::from(draft.calls.into_boxed_slice()),
@@ -2316,6 +2331,17 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
 
     fn visit_call_expression(&mut self, it: &oxc_ast::ast::CallExpression<'a>) {
         self.push_call(&it.callee, false, it.span.into());
+        crate::analysis::type_eval_build::for_each_indexed_call_source_type_query(it, |query| {
+            let span = self.frame_span(query.span.into());
+            if let Some(site) = self.current_site() {
+                self.sites[site.index()]
+                    .source_type_queries
+                    .push(SkeletonSourceTypeQuery {
+                        span,
+                        binding: None,
+                    });
+            }
+        });
         walk::walk_call_expression(self, it);
     }
 
