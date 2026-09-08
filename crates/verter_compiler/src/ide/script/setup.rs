@@ -32,7 +32,7 @@ use super::{
     emit_global_component_fallbacks, emit_helper_imports, emit_minimal_wrapper,
     emit_type_constructs, instance_declaration, instance_probe_line, kebab_to_pascal_case,
     process_companion_for_tsx, process_macros, rewrite_ts_type_assertions,
-    should_infer_function_types, MacroSourceCtx, PREFIX,
+    script_content_insertion_anchor, should_infer_function_types, MacroSourceCtx, PREFIX,
 };
 
 // ── Script Setup Processing ───────────────────────────────────────
@@ -1146,7 +1146,14 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     }
 
     // Emit helper imports (hoisted before wrapper)
-    emit_helper_imports(out, hoist_pos, options, builtin_components, template_ast);
+    emit_helper_imports(
+        out,
+        hoist_pos,
+        Some(script_content_insertion_anchor(source, content_start)),
+        options,
+        builtin_components,
+        template_ast,
+    );
 
     // Emit type constructs (appended after source map, no sourcemap needed)
     emit_type_constructs(

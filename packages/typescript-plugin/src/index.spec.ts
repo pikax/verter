@@ -4243,7 +4243,7 @@ describe("editor-owned source diagnostic routing", () => {
     );
   });
 
-  it("reanchors a generated-preamble auto-import edit into the owning script block", () => {
+  it("maps a generated-preamble auto-import through the published insertion anchor", () => {
     const sourcePath = "/ws/src/A.vue";
     const companionPath = "/ws/src/A.vue.tsx";
     const sourceText =
@@ -4266,6 +4266,10 @@ describe("editor-owned source diagnostic routing", () => {
           version: 3,
           sources: [sourcePath],
           names: [],
+          x_verter_mapping_product: {
+            schema_version: 1,
+            insertion_anchors: [[0, sourceText.indexOf("\n") + 1]],
+          },
           // Generated line 1 maps to source line 1; the generated preamble at
           // line 0 deliberately has no source origin.
           mappings: ";AACA",
@@ -4280,6 +4284,17 @@ describe("editor-owned source diagnostic routing", () => {
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
       [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
+    const companionFile = ts.createSourceFile(
+      companionPath,
+      companionText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    (companionFile as ts.SourceFile & { version: string }).version = "1:a1";
+    info.languageService.getProgram = () => ({
+      getSourceFile: (fileName: string) => (fileName === companionPath ? companionFile : undefined),
+    });
     info.languageService.__lsImpl = {
       getCompletionEntryDetails: (fileName: string, position: number) => {
         expect({ fileName, position }).toEqual({
@@ -4336,11 +4351,7 @@ describe("editor-owned source diagnostic routing", () => {
     ]);
   });
 
-  // R3-B-02: the recovered auto-import anchor is the START of the owning
-  // `script_content_ranges` span — a UTF-8 BYTE offset. Writing it raw as a
-  // TS UTF-16 edit span lands the import inside the astral prefix instead of
-  // at the script content start.
-  it("reanchors the auto-import at the UTF-16 script start under an astral prefix", () => {
+  it("maps the auto-import anchor from UTF-8 to UTF-16 under an astral prefix", () => {
     const sourcePath = "/ws/src/A.vue";
     const companionPath = "/ws/src/A.vue.tsx";
     const sourceText =
@@ -4367,6 +4378,10 @@ describe("editor-owned source diagnostic routing", () => {
           version: 3,
           sources: [sourcePath],
           names: [],
+          x_verter_mapping_product: {
+            schema_version: 1,
+            insertion_anchors: [[0, byteAt(scriptContentStart)]],
+          },
           // The generated preamble at line 0 has no source origin; generated
           // line 1 maps to source line 2 (the script content line).
           mappings: ";AAEA",
@@ -4381,6 +4396,16 @@ describe("editor-owned source diagnostic routing", () => {
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
       [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
+    const companionFile = ts.createSourceFile(
+      companionPath,
+      companionText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    info.languageService.getProgram = () => ({
+      getSourceFile: (fileName: string) => (fileName === companionPath ? companionFile : undefined),
+    });
     info.languageService.__lsImpl = {
       getCompletionEntryDetails: (fileName: string, position: number) => {
         expect({ fileName, position }).toEqual({
@@ -4424,8 +4449,6 @@ describe("editor-owned source diagnostic routing", () => {
     );
 
     expect(details?.codeActions).toHaveLength(1);
-    // The anchor is the UTF-16 script content start — NOT the raw byte
-    // offset (which the astral hearts shift 4 units to the right).
     expect(details!.codeActions![0].changes).toEqual([
       {
         fileName: sourcePath,
@@ -4437,6 +4460,156 @@ describe("editor-owned source diagnostic routing", () => {
         ],
       },
     ]);
+  });
+
+  it("refuses a zero-width edit in synthesized output without a declared anchor", () => {
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
+    const sourceText = '<script setup lang="ts">\nconst value = 1;\n</script>\n';
+    const companionText = "/** generated preamble */\nconst value = 1;\n/** generated tail */\n";
+    const trailingOffset = companionText.indexOf("/** generated tail */");
+    const manifest = mappableManifest();
+    const ready = manifest.projects["/ws/tsconfig.json"].ready_files[companionPath];
+    ready.blob_rel = "blobs/A.vue.tsx";
+    ready.map_hash = "auto-import-synthesized-refusal";
+    const dir = track(
+      writeStore(manifest, {
+        ...mappableBlobs(),
+        "blobs/A.vue.tsx": companionText,
+        "maps/A.vue.json": JSON.stringify({
+          version: 3,
+          sources: [sourcePath],
+          names: [],
+          x_verter_mapping_product: {
+            schema_version: 1,
+            insertion_anchors: [[0, sourceText.indexOf("\n") + 1]],
+          },
+          mappings: ";AACA;A",
+        }),
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    info.languageService.__lsImpl = {
+      getCompletionEntryDetails: () => ({
+        name: "value",
+        kind: ts.ScriptElementKind.alias,
+        kindModifiers: "export",
+        displayParts: [],
+        codeActions: [
+          {
+            description: "generated edit",
+            changes: [
+              {
+                fileName: companionPath,
+                textChanges: [
+                  {
+                    span: { start: trailingOffset, length: 0 },
+                    newText: "generated edit",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const details = info.languageService.getCompletionEntryDetails(
+      sourcePath,
+      sourceText.indexOf("value"),
+      "value",
+      {},
+      undefined,
+      {},
+      undefined,
+    );
+
+    expect(details?.codeActions?.[0].changes).toEqual([]);
+  });
+
+  // @ai-generated - Verifies that completion insertion anchors never remap a
+  // response produced by a Program companion from an older published revision.
+  it("drops an anchored completion edit from a stale Program companion", () => {
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
+    const sourceText = '<script setup lang="ts">\nconst value = 1;\n</script>\n';
+    const companionText = "/** generated preamble */\nconst value = 1;\n";
+    const manifest = mappableManifest();
+    const ready = manifest.projects["/ws/tsconfig.json"].ready_files[companionPath];
+    ready.blob_rel = "blobs/A.vue.tsx";
+    ready.map_hash = "auto-import-synthesized-refusal";
+    const dir = track(
+      writeStore(manifest, {
+        ...mappableBlobs(),
+        "blobs/A.vue.tsx": companionText,
+        "maps/A.vue.json": JSON.stringify({
+          version: 3,
+          sources: [sourcePath],
+          names: [],
+          x_verter_mapping_product: {
+            schema_version: 1,
+            insertion_anchors: [[0, sourceText.indexOf("\n") + 1]],
+          },
+          mappings: ";AACA",
+        }),
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    const staleCompanionFile = ts.createSourceFile(
+      companionPath,
+      companionText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    (staleCompanionFile as ts.SourceFile & { version: string }).version = "0:old";
+    info.languageService.getProgram = () => ({
+      getSourceFile: (fileName: string) =>
+        fileName === companionPath ? staleCompanionFile : undefined,
+    });
+    info.languageService.__lsImpl = {
+      getCompletionEntryDetails: () => ({
+        name: "value",
+        kind: ts.ScriptElementKind.alias,
+        kindModifiers: "export",
+        displayParts: [],
+        codeActions: [
+          {
+            description: "generated edit",
+            changes: [
+              {
+                fileName: companionPath,
+                textChanges: [{ span: { start: 0, length: 0 }, newText: "generated edit" }],
+              },
+            ],
+          },
+        ],
+      }),
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const details = info.languageService.getCompletionEntryDetails(
+      sourcePath,
+      sourceText.indexOf("value"),
+      "value",
+      {},
+      undefined,
+      {},
+      undefined,
+    );
+
+    expect(details?.codeActions?.[0].changes).toEqual([]);
   });
 
   // @ai-generated - A coarse carrier mapping can make tsserver label an in-scope

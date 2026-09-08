@@ -106,6 +106,21 @@ pub use type_constructs::{
 };
 pub use wrapper::global_component_nav_probe_offset;
 
+fn script_content_insertion_anchor(source: &str, content_start: u32) -> u32 {
+    let tail = source
+        .as_bytes()
+        .get(content_start as usize..)
+        .unwrap_or_default();
+    content_start
+        + if tail.starts_with(b"\r\n") {
+            2
+        } else if tail.starts_with(b"\n") || tail.starts_with(b"\r") {
+            1
+        } else {
+            0
+        }
+}
+
 #[cfg(test)]
 use comp_emit::resolve_all_prop_refs_in_expr;
 #[cfg(test)]
@@ -199,7 +214,14 @@ pub fn generate_ide_script<'alloc>(
             // No script blocks — emit minimal wrapper + full type constructs.
             // Imports must come BEFORE the function wrapper (TS1232: imports
             // can only appear at the top level of a module).
-            emit_helper_imports(&mut out, 0, options, &builtin_components, template_ast);
+            emit_helper_imports(
+                &mut out,
+                0,
+                None,
+                options,
+                &builtin_components,
+                template_ast,
+            );
             global_component_fallbacks = collect_global_component_fallbacks(
                 template_ast,
                 source,
