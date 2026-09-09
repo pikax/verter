@@ -627,6 +627,16 @@ const completeSurface = {
   toleratedOccurred: false,
   coverage: { parseable: true, complete: true },
 };
+// The shipped-cfg lane has no enable flag either, so every row below carries a complete shipped
+// receipt: an isolated wasm-lane FAIL here is attributable to the wasm receipt under test and not to a
+// second missing lane.
+const completeShipped = {
+  hardFailure: false,
+  failures: [],
+  check: { status: "ok" },
+  contract: { status: "ok", parseable: true, complete: true },
+  parity: { complete: true, matches: true },
+};
 const completeWasm = {
   laneId: WASM_LANE_ID,
   hardFailure: false,
@@ -638,9 +648,8 @@ const completeWasm = {
 test("the verdict reducer requires a complete wasm receipt in every direction", () => {
   const green = reduceGateLaneReceipts({
     surface: completeSurface,
-    shipped: null,
+    shipped: completeShipped,
     wasm: completeWasm,
-    shippedCfgLaneEnabled: false,
   });
   assert.equal(green.verdict, "PASS", "the positive control must actually PASS");
 
@@ -672,9 +681,8 @@ test("the verdict reducer requires a complete wasm receipt in every direction", 
   for (const [label, wasm] of rows) {
     const decision = reduceGateLaneReceipts({
       surface: completeSurface,
-      shipped: null,
+      shipped: completeShipped,
       wasm,
-      shippedCfgLaneEnabled: false,
     });
     assert.equal(decision.verdict, "FAIL", `${label} must FAIL`);
     assert.equal(decision.coverageComplete, false, `${label} must not read as complete coverage`);
@@ -688,13 +696,12 @@ test("the verdict reducer requires a complete wasm receipt in every direction", 
 test("a failing wasm case is attributed to the lane and defeats a tolerated-only PASS", () => {
   const decision = reduceGateLaneReceipts({
     surface: { ...completeSurface, toleratedOccurred: true },
-    shipped: null,
+    shipped: completeShipped,
     wasm: {
       ...completeWasm,
       hardFailure: true,
       failures: [{ surface: "wasm:verter_wasm", name: "js_boundary::an_unknown_key_is_refused" }],
     },
-    shippedCfgLaneEnabled: false,
   });
   assert.equal(decision.verdict, "FAIL");
   assert.deepEqual(
@@ -707,9 +714,8 @@ test("a failing wasm case is attributed to the lane and defeats a tolerated-only
 test("a lane infrastructure abort propagates its exit code, never a verdict", () => {
   const decision = reduceGateLaneReceipts({
     surface: completeSurface,
-    shipped: null,
+    shipped: completeShipped,
     wasm: { ...completeWasm, exitCode: 124 },
-    shippedCfgLaneEnabled: false,
   });
   assert.equal(decision.verdict, null);
   assert.equal(decision.exitCode, 124);

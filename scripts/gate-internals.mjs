@@ -239,22 +239,16 @@ export function deriveGateResourceLimits({
 // package-scoped contract — ten-ish tests — whose own wall-clock matters far less than Surface 1's) gets
 // a minority share, floored at 1.
 //
-// Temporary skip of that shipped-cfg lane. Flip to `true` to restore both steps:
+// The shipped-cfg lane has NO enable flag and NO skip disposition. Both of its steps
 //   cargo check --workspace --all-targets --profile no-debug-assertions
 //   cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions
-// TODO: re-enable. Until then the gate does not execute tests with debug_assertions /
-// overflow-checks off. That is the only path that catches a state mutation written inside a
-// debug_assert! argument — a silent no-op in every shipped build, while compiling and passing
-// in debug. `cargo check --workspace --release` compiles the shipped cfg but runs nothing, so
-// it does not cover this class.
-export const SHIPPED_CFG_LANE_ENABLED = false;
-export const SHIPPED_CFG_SKIP_SUMMARY =
-  "SHIPPED-CFG GUARD: SKIPPED (temporary). This verdict covers Surface 1 and the wasm JS-boundary lane only; " +
-  "cargo check --workspace --all-targets --profile no-debug-assertions and " +
-  "cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions did not run. " +
-  "Until re-enabled, a state mutation written inside a debug_assert! argument is uncovered " +
-  "(silent no-op in every shipped build; cargo check --workspace --release compiles that cfg but runs nothing).";
-export const SHIPPED_CFG_SKIP_VERDICT_NOTE = "shipped-cfg guard SKIPPED";
+// run on every real gate invocation, and `reduceGateLaneReceipts` below cannot reach PASS without a
+// complete receipt from each. They are the only path in this repo that EXECUTES anything with
+// debug_assertions / overflow-checks off, so they are the only path that catches a state mutation
+// written inside a debug_assert! argument — a silent no-op in every shipped build, while compiling
+// and passing in debug. `cargo check --workspace --release` compiles the shipped cfg but runs
+// nothing, so it does not cover this class. A lane that can be switched off reproduces exactly the
+// defect it exists to detect, one layer up.
 //
 // Below a ceiling of 2 on either axis there is no way to give both lanes >= 1 unit of that axis while also
 // bounding their SUM to the ceiling — a lane cannot run `cargo`/`nextest` with 0 build jobs or 0 test
@@ -2238,12 +2232,7 @@ function receiptExitCode(receipt) {
 
 // Pure final authority. Promise completion order cannot enter this function: it reads fixed receipt slots
 // and appends failures in Surface/check/contract order. Coverage is an independent green fence.
-export function reduceGateLaneReceipts({
-  surface = null,
-  shipped = null,
-  wasm = null,
-  shippedCfgLaneEnabled = true,
-} = {}) {
+export function reduceGateLaneReceipts({ surface = null, shipped = null, wasm = null } = {}) {
   const exits = [receiptExitCode(surface), receiptExitCode(shipped), receiptExitCode(wasm)].filter(
     (code) => code !== null,
   );
@@ -2261,20 +2250,19 @@ export function reduceGateLaneReceipts({
   }
 
   const surfaceComplete = Boolean(surface?.coverage?.parseable && surface?.coverage?.complete);
-  const shippedComplete = shippedCfgLaneEnabled
-    ? Boolean(
-        shipped?.check?.status === "ok" &&
-        shipped?.contract?.status === "ok" &&
-        shipped?.contract?.parseable &&
-        shipped?.contract?.complete &&
-        shipped?.parity?.complete &&
-        shipped?.parity?.matches,
-      )
-    : true;
-  // The wasm JS-boundary lane has NO enable flag and NO skip disposition. Its whole reason to exist is
-  // that its tests were compiled but never executed; a lane that can be turned off, or that can report a
-  // green verdict without a complete receipt and a discovered-vs-executed parity, would reproduce exactly
-  // that defect one layer up.
+  // Neither post-list lane has an enable flag or a skip disposition. The shipped-cfg lane exists because
+  // its tests are the only ones in the repo that EXECUTE with debug_assertions off; the wasm JS-boundary
+  // lane exists because its tests were compiled but never executed. A lane that can be turned off, or that
+  // can report a green verdict without a complete receipt and a discovered-vs-executed parity, would
+  // reproduce exactly the defect it exists to detect, one layer up.
+  const shippedComplete = Boolean(
+    shipped?.check?.status === "ok" &&
+    shipped?.contract?.status === "ok" &&
+    shipped?.contract?.parseable &&
+    shipped?.contract?.complete &&
+    shipped?.parity?.complete &&
+    shipped?.parity?.matches,
+  );
   const wasmComplete = Boolean(
     wasm?.coverage?.parseable &&
     wasm?.coverage?.complete &&
@@ -2285,10 +2273,10 @@ export function reduceGateLaneReceipts({
   const coverageDisposition = coverageComplete
     ? "complete"
     : wasm?.status === "cancelled" ||
-        (shippedCfgLaneEnabled &&
-          (shipped?.check?.status === "cancelled" || shipped?.contract?.status === "cancelled"))
+        shipped?.check?.status === "cancelled" ||
+        shipped?.contract?.status === "cancelled"
       ? "cancelled-by-local-fail-fast"
-      : surface?.hardFailure || wasm?.hardFailure || (shippedCfgLaneEnabled && shipped?.hardFailure)
+      : surface?.hardFailure || wasm?.hardFailure || shipped?.hardFailure
         ? "blocked-by-failure"
         : "incomplete";
   const failures = [];
@@ -2301,32 +2289,28 @@ export function reduceGateLaneReceipts({
         : `${WASM_LANE_ID}/${failure.surface || "unknown"}`,
     });
   }
-  if (shippedCfgLaneEnabled) {
-    for (const failure of shipped?.failures || []) {
-      failures.push({
-        ...failure,
-        surface: String(failure.surface || "unknown").startsWith("shipped-cfg/")
-          ? failure.surface
-          : `shipped-cfg/${failure.surface || "unknown"}`,
-      });
-    }
+  for (const failure of shipped?.failures || []) {
+    failures.push({
+      ...failure,
+      surface: String(failure.surface || "unknown").startsWith("shipped-cfg/")
+        ? failure.surface
+        : `shipped-cfg/${failure.surface || "unknown"}`,
+    });
   }
   if (!coverageComplete) {
     const missing = [];
     if (!surfaceComplete) missing.push("complete parseable Surface 1 receipt");
-    if (shippedCfgLaneEnabled) {
-      if (shipped?.check?.status !== "ok") missing.push("successful shipped-cfg check receipt");
-      if (
-        !shipped?.contract ||
-        shipped.contract.status !== "ok" ||
-        !shipped.contract.parseable ||
-        !shipped.contract.complete
-      ) {
-        missing.push("complete parseable shipped-cfg contract receipt");
-      }
-      if (!shipped?.parity?.complete || !shipped?.parity?.matches) {
-        missing.push("shipped-cfg expected-count parity");
-      }
+    if (shipped?.check?.status !== "ok") missing.push("successful shipped-cfg check receipt");
+    if (
+      !shipped?.contract ||
+      shipped.contract.status !== "ok" ||
+      !shipped.contract.parseable ||
+      !shipped.contract.complete
+    ) {
+      missing.push("complete parseable shipped-cfg contract receipt");
+    }
+    if (!shipped?.parity?.complete || !shipped?.parity?.matches) {
+      missing.push("shipped-cfg expected-count parity");
     }
     if (!wasmComplete) {
       if (!wasm?.coverage?.parseable || !wasm?.coverage?.complete) {
@@ -2338,7 +2322,7 @@ export function reduceGateLaneReceipts({
     }
     failures.push({
       surface: "gate/incomplete",
-      name: `<required ${shippedCfgLaneEnabled ? "parallel-lane" : "Surface 1 + wasm JS-boundary"} coverage incomplete: ${missing.join("; ")}>`,
+      name: `<required parallel-lane coverage incomplete: ${missing.join("; ")}>`,
     });
   }
   return {

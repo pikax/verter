@@ -185,13 +185,13 @@ libdir metadata fails setup; no suite is skipped or tolerated.
 
 The canonical full verification pass:
 
-1. `node scripts/gate.mjs` — CANONICAL provider-free local Rust gate. It builds/lists the SINGLE TEST UNIVERSE once, verifies that core/tsserver/tsgo form a complete disjoint partition, then runs archive-backed Surface 1 without real-provider packages/tests or `verter_svelte_conformance`. The shipped-cfg lane is currently SKIPPED (temporary; `SHIPPED_CFG_LANE_ENABLED` in `scripts/gate-internals.mjs`) — a PASS is Surface 1 only and is disclosed on every run. Use `node scripts/gate.mjs --exhaustive` for CI, release, complete failure diagnostics, and comparable benchmarks. See `docs/contributing/gate-performance.md`.
+1. `node scripts/gate.mjs` — CANONICAL provider-free local Rust gate. It builds/lists the SINGLE TEST UNIVERSE once, verifies that core/tsserver/tsgo form a complete disjoint partition, then runs archive-backed Surface 1 without real-provider packages/tests or `verter_svelte_conformance`. It also runs the shipped-cfg lane (compile check + `verter_shipped_cfg_contract` nextest run under `no-debug-assertions`), whose receipt is equally required — a PASS means Surface 1, the wasm JS-boundary lane, and the shipped-cfg guard all passed. Use `node scripts/gate.mjs --exhaustive` for CI, release, complete failure diagnostics, and comparable benchmarks. See `docs/contributing/gate-performance.md`.
 2. `node scripts/provider-ci.mjs run tsserver` and `node scripts/provider-ci.mjs run tsgo` — dedicated serial real-provider lanes. The tsserver lane requires the language-shared and TypeScript-plugin build outputs; the tsgo lane requires the pinned local engine installed by pnpm. CI owns that setup explicitly.
 3. `node scripts/compile-contracts.mjs` — every compile-fail/pass fixture, including feature-specific variants, through standalone non-test Cargo binaries. These builds are absent from nextest discovery.
 4. `cargo test --no-fail-fast -p verter_svelte_conformance --features conformance-tests --lib --bin verter_svelte_conformance --test main -- --test-threads=4` — the dedicated Svelte conformance lane.
 5. `pnpm proto:check` — proto regeneration/format freshness in the lint-style lane, never as a Rust test.
 6. `cargo clippy --workspace --all-targets -- -D warnings`
-7. `cargo check --workspace --release` — the only thing in the loop that compiles the REAL release profile (opt-level 3 + fat LTO); surface 1 is debug, and the shipped-cfg lane (cheap `no-debug-assertions` profile) is currently skipped. `debug_assert!` gates on `cfg!`, a RUNTIME constant, so its body still name-resolves in release: a `#[cfg(debug_assertions)]` helper called inside one is an E0425 in every release build (napi and wasm artifacts included) while compiling clean in debug. It is a CHECK and RUNS NO TESTS, so it cannot observe the runtime half of that class — a state mutation written inside a `debug_assert!` argument compiles fine and silently never executes in a shipped build. `verter_shipped_cfg_contract` under `no-debug-assertions` is what covers that half — the ONLY tests in the repo that execute with `debug_assertions` off — and the gate currently skips that lane. Mirrored in CI by the `rust-build-configs` job.
+7. `cargo check --workspace --release` — the only thing in the loop that compiles the REAL release profile (opt-level 3 + fat LTO); surface 1 is debug and the shipped-cfg lane uses the cheap `no-debug-assertions` profile. `debug_assert!` gates on `cfg!`, a RUNTIME constant, so its body still name-resolves in release: a `#[cfg(debug_assertions)]` helper called inside one is an E0425 in every release build (napi and wasm artifacts included) while compiling clean in debug. It is a CHECK and RUNS NO TESTS, so it cannot observe the runtime half of that class — a state mutation written inside a `debug_assert!` argument compiles fine and silently never executes in a shipped build. `verter_shipped_cfg_contract` under `no-debug-assertions` is what covers that half — the ONLY tests in the repo that execute with `debug_assertions` off — and step 1's gate runs it as its shipped-cfg lane. Mirrored in CI by the `rust-build-configs` job, which owns the same two commands directly.
 8. `cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings` — host clippy cannot see target-gated code, and the `wasm32-wasip1`/`wasip2` clippy jobs cover the SEPARATE `extensions/lapce` + `extensions/zed` manifests, not this one. Same `rust-build-configs` job in CI.
 9. `cargo fmt --all --check`
 10. `pnpm test` for TypeScript changes
@@ -251,11 +251,12 @@ receipt is setup failure 127 with exact `HARNESS-SMOKE FAILED [<mode>]` attribut
 there is no skip, warning, or tolerance. A successful oracle-cache load does not
 claim that DOM bootstrap or virtual TypeScript observation works.
 
-**Shipped-cfg guard — currently skipped, what it covers, and what it does not.**
+**Shipped-cfg guard — what it covers and what it does not.**
 
-The lane is implemented and re-enablable (`SHIPPED_CFG_LANE_ENABLED` in `scripts/gate-internals.mjs`) but is
-currently SKIPPED. A gate PASS is Surface 1 only. Until re-enabled, the defect class below is uncovered by
-the gate.
+The lane runs on every real gate invocation and has no enable flag and no skip disposition: a missing,
+cancelled, zero-selection or count-mismatched shipped receipt is incomplete required coverage and the gate
+reports FAIL. In CI the `rust-build-configs` job owns the same two commands directly, so the lane executes
+on every rust-touching PR as well as on `release.yml`'s `node scripts/gate.mjs --exhaustive`.
 
 `std::debug_assert!` does not evaluate its argument when `debug_assertions` is off, and
 `#[cfg(debug_assertions)]` items do not exist there. Every shipped artifact (the LSP binary, napi, wasm) is
@@ -290,6 +291,14 @@ are structurally eliminated repo-wide.)
   verter_shipped_cfg_contract` selects a different number of tests than an INDEPENDENT scan of that crate's
   own source finds `#[test]` attributes — not merely "selected zero tests", which a regression that compiles
   out every behavioral test while leaving the two profile-sanity canaries intact would still satisfy.
+- **The class is discriminated, not merely asserted.** The behavioural test
+  `alias_registration_state_change_survives_under_shipped_cfg` observes the upsert path's single
+  alias-map mutation through the public `VerterHost` entry point with an UNCONDITIONAL assertion. Moving
+  that mutation inside a raw `std::debug_assert!` argument makes it FAIL under `no-debug-assertions` and
+  PASS under `dev`, so the lane discriminates the exact defect it exists for rather than passing
+  regardless. That plant deliberately bypasses the clippy `disallowed-macros` rail described above: the
+  two rails are independent, and this one has to hold on its own for the `#[cfg(debug_assertions)]` and
+  overflow-checks classes the clippy ban does not reach.
 - **NOT covered, explicitly.** It is not an optimised build: the profile inherits dev codegen (opt-level 0,
   no LTO, many codegen units), so optimisation-, inlining- and LTO-dependent behaviour is out of scope. It
   covers only `verter_shipped_cfg_contract`'s own tests, not the whole workspace — a `debug_assertions`-
@@ -354,7 +363,7 @@ Every new `CRITICAL` architecture rule must land with primary EXECUTABLE enforce
 
 ### Test Hermeticity (MANDATORY)
 
-Default-run tests must depend only on locally-vendored fixtures. The canonical run (`node scripts/gate.mjs`: one workspace archive/list, then archive-backed Surface 1; the shipped-cfg lane is currently skipped) must compile and pass on a fresh checkout without any `.integration-tests/repos/<third-party>/...` clones, sibling repositories, or other external corpora present alongside the workspace.
+Default-run tests must depend only on locally-vendored fixtures. The canonical run (`node scripts/gate.mjs`: one workspace archive/list, then archive-backed Surface 1 plus the shipped-cfg lane) must compile and pass on a fresh checkout without any `.integration-tests/repos/<third-party>/...` clones, sibling repositories, or other external corpora present alongside the workspace.
 
 When needing fixtures from a third-party project (e.g., `nuxt-ui` Vue corpus), vendor a snapshot into the consuming crate's `tests/<feature>/fixtures/` and refer to them with `include_str!("./fixtures/...")` or path-based loaders. Preserve upstream license attribution in sibling `LICENSE.md` and `README.md` for provenance.
 
