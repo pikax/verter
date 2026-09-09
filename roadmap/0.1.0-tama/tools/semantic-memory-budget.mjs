@@ -24,6 +24,11 @@
 //   * the retained-storage inventory is derived from the FIELDS OF
 //     `ProjectTypeStore` in the source, so dropping an allocation class or
 //     adding a store field fails.
+//
+// One table is validated for the opposite reason. `[[memory_observation]]`
+// records byte-valued memory the process really does report, which the
+// work-site vocabulary cannot name; without it the contract would assert
+// a stronger negative than the tree supports.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -299,6 +304,9 @@ function limitDerivationErrors(catalog) {
   const errors = [];
   const rows = catalog.limit_derivation || [];
   const declaredMetrics = new Map((catalog.metric_row || []).map((row) => [row.id, row]));
+  const declaredObservations = new Map(
+    (catalog.memory_observation || []).map((row) => [row.id, row]),
+  );
   const seen = new Map();
   for (const row of rows) {
     const key = `${row.mode}.${row.limit}`;
@@ -325,14 +333,22 @@ function limitDerivationErrors(catalog) {
           `limit derivation ${key}: a measured limit is not blocked on anything and names no completion owner`,
         );
     } else {
-      const blocker = declaredMetrics.get(row.blocking_metric_row);
-      if (!blocker)
+      // A blocker resolves in either declared vocabulary, and either way
+      // it has to actually block: something already capable of measuring
+      // the limit leaves no reason to keep recording it provisional.
+      const metric = declaredMetrics.get(row.blocking_metric_row);
+      const observation = declaredObservations.get(row.blocking_metric_row);
+      if (!metric && !observation)
         errors.push(
-          `limit derivation ${key}: blocking_metric_row ${row.blocking_metric_row} is not a declared metric row`,
+          `limit derivation ${key}: blocking_metric_row ${row.blocking_metric_row} is neither a declared metric row nor a declared memory observation`,
         );
-      else if (blocker.emitter_status === "complete")
+      else if (metric && metric.emitter_status === "complete")
         errors.push(
           `limit derivation ${key}: blocking_metric_row ${row.blocking_metric_row} has a complete emitter, so it blocks nothing; a limit it could be measured against may not be recorded provisional`,
+        );
+      else if (observation && observation.aggregates_cache_owned)
+        errors.push(
+          `limit derivation ${key}: blocking_metric_row ${row.blocking_metric_row} already aggregates cache-owned bytes, so it blocks nothing; a limit it could be measured against may not be recorded provisional`,
         );
       if (row.completion_owner === "none")
         errors.push(`limit derivation ${key}: a provisional limit must name a completion owner`);
@@ -346,6 +362,109 @@ function limitDerivationErrors(catalog) {
           `limit derivation: budget.${name}.${limit} is ratified with no recorded derivation`,
         );
     }
+  return errors;
+}
+
+/**
+ * The live byte-valued memory surface.
+ *
+ * This table exists because the metric-row vocabulary below is drawn from
+ * the closed audit work-site schema and structurally cannot name the
+ * `RequestMemoryAudit` envelope fields — which are the only byte-valued
+ * memory observations the process actually makes. Validating them here
+ * keeps the contract from asserting that nothing observes memory, and
+ * keeps each row's stated scope pinned to a producer that still exists.
+ */
+function memoryObservationErrors(catalog) {
+  const errors = [];
+  const rows = catalog.memory_observation || [];
+  const classes = new Map((catalog.allocation_class || []).map((row) => [row.id, row]));
+  const ids = new Set();
+  const coverages = new Set();
+  for (const row of rows) {
+    if (ids.has(row.id)) errors.push(`memory observation: duplicate id ${row.id}`);
+    ids.add(row.id);
+    coverages.add(row.coverage);
+    errors.push(...anchorErrors(row.producer, `memory observation ${row.id} producer`));
+    errors.push(...anchorErrors(row.proof, `memory observation ${row.id} proof`));
+
+    // "The field is mentioned somewhere" is not evidence that anything
+    // writes it, so a proof declares which kind of evidence it is and
+    // has to live where that kind of evidence lives.
+    const underTests = row.proof.includes("/tests/");
+    if (row.proof_kind === "discriminating_test" && !underTests)
+      errors.push(
+        `memory observation ${row.id}: proof_kind is discriminating_test but ${row.proof} is not under a tests tree`,
+      );
+    if (row.proof_kind === "live_assignment" && underTests)
+      errors.push(
+        `memory observation ${row.id}: proof_kind is live_assignment but ${row.proof} is a test, not a production assignment site`,
+      );
+
+    const covered = row.covers_allocation_classes || [];
+    for (const id of covered)
+      if (!classes.has(id))
+        errors.push(
+          `memory observation ${row.id}: covers_allocation_classes names ${id}, which is not a declared allocation class`,
+        );
+    if (row.coverage === "partial_cache_owned") {
+      if (covered.length === 0)
+        errors.push(
+          `memory observation ${row.id}: a partial_cache_owned observation must name the allocation classes it actually reaches`,
+        );
+      // The inventory and this table are two views of one fact. A class
+      // an observation reaches is observed, so it cannot also be
+      // recorded as reaching no site at all.
+      for (const id of covered) {
+        const klass = classes.get(id);
+        if (klass && klass.charge_observability === "uninstrumented")
+          errors.push(
+            `memory observation ${row.id}: allocation class ${id} is recorded uninstrumented, but this observation reports bytes for it`,
+          );
+      }
+    } else if (covered.length > 0)
+      errors.push(
+        `memory observation ${row.id}: only a partial_cache_owned observation covers allocation classes; a ${row.coverage} figure is owned by no class`,
+      );
+  }
+  for (const coverage of ["whole_process", "partial_cache_owned"])
+    if (!coverages.has(coverage))
+      errors.push(
+        `memory observations: no ${coverage} observation is declared, so the contract cannot state what memory it does and does not see`,
+      );
+  if (rows.length > 0 && !rows.some((row) => row.proof_kind === "discriminating_test"))
+    errors.push(
+      "memory observations: no row carries a discriminating test, so the whole table rests on assignment sites that a defaulted zero would satisfy",
+    );
+  return errors;
+}
+
+/**
+ * The pressure obligation is discharged against declared signals, and at
+ * least one of them has to be something this tree can already report.
+ * An obligation resting entirely on partial or absent instrumentation is
+ * a promise, not a check.
+ */
+function pressureSignalErrors(catalog) {
+  const errors = [];
+  const declaredMetrics = new Map((catalog.metric_row || []).map((row) => [row.id, row]));
+  const declaredObservations = new Set((catalog.memory_observation || []).map((row) => row.id));
+  const signals = catalog.measurement?.pressure_boundary_signals || [];
+  let complete = 0;
+  for (const signal of signals) {
+    const metric = declaredMetrics.get(signal);
+    if (!metric && !declaredObservations.has(signal)) {
+      errors.push(
+        `measurement: pressure boundary signal ${signal} is neither a declared metric row nor a declared memory observation`,
+      );
+      continue;
+    }
+    if (metric?.emitter_status === "complete") complete += 1;
+  }
+  if (signals.length > 0 && complete === 0)
+    errors.push(
+      "measurement: no pressure boundary signal has a complete emitter, so the pressure obligation rests entirely on partial evidence and no run could discharge it",
+    );
   return errors;
 }
 
@@ -1279,6 +1398,8 @@ export function validateSemanticMemoryBudgetModel(
   const errors = [...validateSchemaObject(catalog, schema, "catalogs.semantic-memory-budget")];
   errors.push(...budgetErrors(catalog));
   errors.push(...limitDerivationErrors(catalog));
+  errors.push(...memoryObservationErrors(catalog));
+  errors.push(...pressureSignalErrors(catalog));
   errors.push(...scaleErrors(catalog));
   errors.push(...baselineErrors(catalog));
   errors.push(...allocationErrors(catalog));

@@ -15,11 +15,18 @@
 # TRUTHFULNESS IS THE ORGANISING RULE. Three things are recorded as they
 # actually are on this tree rather than as the contract would prefer:
 #
-#   1. NO allocation class has its retained byte charge instrumented
-#      today. `session.store_retained_bytes` has no aggregate emitter, so
-#      the aggregate cache-owned figure this budget bounds is not
-#      measurable yet. Every class therefore records `charge_observability`
-#      honestly, and the value `charge_instrumented` is currently unused.
+#   1. Byte-valued memory IS observed today, and less of it than this
+#      budget needs. `[[memory_observation]]` records the live surface
+#      exactly: whole-process RSS before, after and peak, a workspace
+#      footprint, and a host-cache figure that sums ONLY the
+#      `FileArtifactStore` rows' canonical id plus their raw and eval
+#      source text. That last one is a source-text proxy for ONE of the
+#      twenty-odd cache-owned classes — not the aggregate retained set
+#      this budget bounds — and no observation reports any other class's
+#      retained bytes. So no allocation class records
+#      `charge_instrumented` and the aggregate figure stays
+#      unmeasurable, but the reason is a NARROW live surface rather than
+#      an absent one, and the contract names which surface it is.
 #   2. Consequently only the WHOLE-PROCESS ceiling is measured-derived.
 #      Its subdivision into cache-owned / active / pinned / slack, and
 #      every per-entry and concurrency limit, is PROVISIONAL — each one
@@ -33,13 +40,25 @@
 #
 # Recorded deviation, for maintainer ratification. MEM0-AC2 asks for
 # budgets "ratified from recorded baseline measurements". The recorded
-# baseline measures ONE whole-process figure; the instrumentation that
-# would measure the internal partition does not exist, and MEM0 changes no
-# production code, so it cannot create it. Rather than present an
-# unmeasured split as measured, this contract ratifies the measured whole,
-# marks the split provisional against a named blocker, and forbids MEM1
-# from adopting a provisional limit as enforced policy without
-# re-ratification. See `[pinned_result_policy].provisional_adoption_rule`.
+# baseline measures ONE whole-process figure, and the live memory surface
+# recorded below cannot supply the rest: it reports whole-process RSS and
+# a single store's source text, never a per-class retained charge. The
+# instrumentation that would measure the internal partition therefore
+# does not exist, and MEM0 changes no production code, so it cannot
+# create it.
+#
+# A local run cannot close that gap either, and the reason is recorded
+# rather than left implicit: this contract's baseline is bound to ONE
+# runner class, so a measurement taken anywhere else is a recalibration
+# under the lock file's own rules and may not promote a derivation row.
+# See `[baseline].local_run_promotion_rule`.
+#
+# Rather than present an unmeasured split as measured, this contract
+# ratifies the measured whole, marks the split provisional against a
+# named live blocker, states for each blocker what it observes today and
+# what it must observe to promote the limit, and forbids MEM1 from
+# adopting a provisional limit as enforced policy without re-ratification.
+# See `[pinned_result_policy].provisional_adoption_rule`.
 
 schema = 2
 product = "rev11"
@@ -109,6 +128,7 @@ recorded_measurement_document_retained = false
 
 equivalent_work_rule = "A later measurement ranks as equivalent work only when it executes the same cell identity on the runner class above with the corpus digests above recomputed and matching. A run on another runner class is a recalibration under the lock file's own rules, never a comparison."
 invalid_historical_result_rule = "A recorded result whose corpus digest no longer recomputes, whose runner class differs, or whose instrumentation arm differs from the arm the metric was measured on is INVALID for comparison and is not ranked as equivalent work. Timing and counter metrics are measured on different arms and are never compared to each other."
+local_run_promotion_rule = "A [[limit_derivation]] row is promoted from provisional to measured ONLY by a run on the runner class recorded above. A run on any other machine is a recalibration, not a comparison, so it may not promote a derivation row however carefully it was taken. This is why no amount of local measurement closes the provisional split: the two obstacles are independent, and clearing only the instrumentation one leaves this one standing."
 
 # ─────────────────────────────────────────────────────────────────────────
 # Scale derivation.
@@ -198,6 +218,102 @@ max_simultaneously_admitted_requests = 16
 per_request_active_max_bytes = 4194304
 
 # ─────────────────────────────────────────────────────────────────────────
+# Live memory observations.
+#
+# The byte-valued memory the process ACTUALLY reports today, as opposed
+# to the work-site counters below. These are not audit sites: they are
+# fields of the `RequestMemoryAudit` envelope carried on every audited
+# component-meta request, so they are populated by the live request path
+# rather than by an `attribute!` macro, and the metric-row vocabulary
+# further down — which is drawn from the closed audit work-site schema —
+# structurally cannot name them. Recording them only there would have
+# left the contract asserting that nothing observes memory, which is not
+# true of this tree.
+#
+# Each row states what it observes, the producer that computes it, an
+# in-tree anchor showing the value is populated on the live path, and the
+# exact gap between what it reports and what this budget bounds. Both
+# anchors are re-resolved on every validation run.
+#
+# `proof_kind` keeps the second anchor honest, because "the field is
+# mentioned somewhere" is not evidence that anything writes it:
+#
+#   discriminating_test  a landed test that FAILS when the value is not
+#                        produced. Must live under a tests tree.
+#   live_assignment      the production site that assigns the value.
+#                        Must live under a source tree.
+#
+# At least one row must carry a discriminating test, or the whole table
+# would rest on assignment sites that a defaulted zero would satisfy.
+#
+#   coverage  whole_process         a process-wide figure that no
+#                                   allocation class owns
+#             partial_cache_owned   a real but NARROW view of cache-owned
+#                                   bytes, naming the classes it covers
+#             workspace             VFS bytes, outside this inventory
+#
+# `aggregates_cache_owned` is the load-bearing flag. It is false on every
+# row today, and that is precisely why the retained-byte limits below are
+# provisional. It is not decoration: a provisional limit may only be
+# blocked on an observation whose flag is false, so the day an owner
+# widens one of these to a true aggregate, this contract goes RED until
+# the limits it blocked are re-ratified against it. Flipping the flag
+# without re-ratifying is the failure mode the flag exists to catch.
+# ─────────────────────────────────────────────────────────────────────────
+
+[[memory_observation]]
+id = "memory.process_rss"
+observes = "Whole-process resident set size sampled immediately before and after each audited request, plus the signed delta between them."
+unit = "Bytes"
+producer = "crates/verter_audit/src/memory.rs#current_process_rss"
+proof = "crates/verter_session/src/component_meta_audit/mod.rs#process_rss_before_bytes: rss"
+proof_kind = "live_assignment"
+coverage = "whole_process"
+covers_allocation_classes = []
+aggregates_cache_owned = false
+enabled_by = "audit_enabled"
+gap = "A whole-process figure that includes allocator and runtime overhead no allocation class owns. It is the right quantity to compare against process_rss_max_bytes and the wrong one to compare against any owned-byte total, and it says nothing about how the process's bytes divide."
+
+[[memory_observation]]
+id = "memory.process_rss_peak"
+observes = "Peak whole-process RSS across the in-flight window of one request, from a host-owned sampler thread taking fetch_max every 50 ms."
+unit = "Bytes"
+producer = "crates/verter_session/src/host_audit_runtime.rs"
+proof = "crates/verter_session/tests/cases/g_misc1/memory_peak_rss_per_host.rs"
+proof_kind = "discriminating_test"
+coverage = "whole_process"
+covers_allocation_classes = []
+aggregates_cache_owned = false
+enabled_by = "audit_timing_capture"
+gap = "Window-scoped and process-wide: it reports the highest point one request's window reached, not which class held those bytes. It is zero on wasm and zero when the capture flag is off, so a run that reads it must assert the flag rather than read a defaulted zero as a low peak."
+
+[[memory_observation]]
+id = "memory.host_cache_bytes"
+observes = "Host cache footprint before and after each audited request."
+unit = "Bytes"
+producer = "crates/verter_session/src/resolver_store.rs#component_meta_audit_memory_bytes"
+proof = "crates/verter_session/src/host_manage/component_meta_methods.rs#record_memory_snapshots"
+proof_kind = "live_assignment"
+coverage = "partial_cache_owned"
+covers_allocation_classes = ["file_artifact_store"]
+aggregates_cache_owned = false
+enabled_by = "audit_enabled"
+gap = "Named for the whole host cache but computed from ONE store: it sums each FileArtifactStore row's canonical id plus its raw and eval SOURCE TEXT. Even for that store it measures retained source text rather than the IndexedReady index payload, it counts no retired version, and it reaches none of the other cache-owned classes — no graph arena, no memo table, no decl-body memo, no retained parse snapshot, no result candidate. Treating it as the aggregate cache-owned figure would understate that figure by every class it does not visit."
+
+[[memory_observation]]
+id = "memory.workspace_bytes"
+observes = "Workspace footprint before and after each audited request, as overlay bytes plus snapshot bytes."
+unit = "Bytes"
+producer = "crates/verter_workspace/src/engine.rs#resource_snapshot"
+proof = "crates/verter_session/src/host_manage/component_meta_methods.rs#workspace_before_bytes"
+proof_kind = "live_assignment"
+coverage = "workspace"
+covers_allocation_classes = []
+aggregates_cache_owned = false
+enabled_by = "audit_enabled"
+gap = "VFS overlay and snapshot bytes. The workspace is the file authority, not a semantic cache, so no allocation class in this inventory owns these bytes and they are never folded into the cache-owned total. A run reads this row to attribute process growth that is NOT semantic retention."
+
+# ─────────────────────────────────────────────────────────────────────────
 # Limit derivation.
 #
 # One row per (mode, limit). The validator requires the mapping to be
@@ -210,8 +326,20 @@ per_request_active_max_bytes = 4194304
 #                validator re-resolves. `blocking_metric_row` and
 #                `completion_owner` must be "none".
 #   provisional  The value is a reasoned allocation, NOT an observation.
-#                It must name the declared metric row whose incompleteness
-#                blocks measuring it, and the owner who must re-ratify.
+#                It must name the observation whose incompleteness blocks
+#                measuring it, and the owner who must re-ratify.
+#
+# `blocking_metric_row` resolves against BOTH declared vocabularies: a
+# work-site metric row, or a live `[[memory_observation]]`. Naming the
+# live observation is the more truthful answer wherever one exists, and
+# the aggregate-retained limits name `memory.host_cache_bytes` for that
+# reason — the obstacle is not that nothing observes cache bytes, it is
+# that the thing which does sees one store's source text.
+#
+# A blocker must actually block. A metric row whose emitter is complete,
+# or an observation that already aggregates cache-owned bytes, blocks
+# nothing and is refused as a blocker: a limit that could be measured
+# against it may not go on being recorded provisional.
 #
 # Today exactly one limit is measured. That is the honest state of the
 # tree, and stating it here is what stops the rest from being read as
@@ -234,8 +362,8 @@ mode = "normal"
 limit = "cache_owned_retained_max_bytes"
 value = 1073741824
 derivation = "provisional"
-evidence = "Half the measured ceiling, allocated to the only component a retention policy can shrink. No observation of aggregate retained bytes exists to confirm or refute it."
-blocking_metric_row = "session.store_retained_bytes"
+evidence = "Half the measured ceiling, allocated to the only component a retention policy can shrink. The one live cache observation sees a single store's source text, so it can neither confirm nor refute a figure that spans every cache-owned class."
+blocking_metric_row = "memory.host_cache_bytes"
 completion_owner = "E4"
 
 [[limit_derivation]]
@@ -264,8 +392,8 @@ mode = "normal"
 limit = "allocator_slack_bytes"
 value = 268435456
 derivation = "provisional"
-evidence = "The residual of the exact partition. Allocator and runtime overhead is included in RSS and excluded from owned-byte accounting, so the two are measured differently and this residual has not been isolated from a real run."
-blocking_metric_row = "session.store_retained_bytes"
+evidence = "The residual of the exact partition. Allocator and runtime overhead is included in RSS and excluded from owned-byte accounting, so the two are measured differently. Isolating the residual needs both sides at once: whole-process RSS is observed, the owned-byte total it must be subtracted from is not."
+blocking_metric_row = "memory.host_cache_bytes"
 completion_owner = "E4"
 
 [[limit_derivation]]
@@ -305,7 +433,7 @@ limit = "process_rss_max_bytes"
 value = 939524096
 derivation = "provisional"
 evidence = "The sum of the pressure partition, chosen so the retained ceiling sits far below the workload's expected steady state and refusal is continuous. Whether this configuration actually refuses is a runner obligation, not an observation recorded here."
-blocking_metric_row = "session.store_retained_bytes"
+blocking_metric_row = "memory.host_cache_bytes"
 completion_owner = "MEM1"
 
 [[limit_derivation]]
@@ -314,8 +442,8 @@ mode = "pressure"
 limit = "cache_owned_retained_max_bytes"
 value = 67108864
 derivation = "provisional"
-evidence = "One sixteenth of the normal retained ceiling, intended to sit below the workload's steady-state retained set so eviction and complete-but-uncached return are continuous. The crossing is unobserved until the aggregate emitter exists."
-blocking_metric_row = "session.store_retained_bytes"
+evidence = "One sixteenth of the normal retained ceiling, intended to sit below the workload's steady-state retained set so eviction and complete-but-uncached return are continuous. Where the retained set actually sits is unobserved until the live cache observation widens past one store's source text; the runner establishes the crossing by its declared signals in the meantime."
+blocking_metric_row = "memory.host_cache_bytes"
 completion_owner = "MEM1"
 
 [[limit_derivation]]
@@ -345,7 +473,7 @@ limit = "allocator_slack_bytes"
 value = 268435456
 derivation = "provisional"
 evidence = "Unchanged from the normal mode by policy: pressure cannot shrink the allocator. The value it is unchanged from is itself provisional."
-blocking_metric_row = "session.store_retained_bytes"
+blocking_metric_row = "memory.host_cache_bytes"
 completion_owner = "E4"
 
 [[limit_derivation]]
@@ -425,6 +553,8 @@ control_live_set_slack_rationale = "4 MiB is the whole ratified budget of the si
 envelope_rule = "The first 2,000 actions establish the steady-state retained-byte envelope. Every later control sample must satisfy that envelope AND the absolute budget. The envelope is fixed once observed at the start of a run and is never raised after seeing the candidate's later samples."
 growth_rule = "Unexplained positive growth at equivalent control states fails the run even when the final sample happens to be small. A single small end sample is not evidence of a bounded run."
 pressure_boundary_obligation = "A pressure run MUST observe, and record, at least one admission refusal, at least one eviction, and at least one complete-but-uncached return. A pressure run that observes none of these has not reached the boundary the pressure budget was configured to reach and FAILS; it is never recorded as a clean pass. This obligation exists because the pressure ceilings are provisional: it is the runner, not this document, that establishes the crossing."
+pressure_boundary_signals = ["session.family_candidate_evict", "session.cache_admit_return_only", "memory.host_cache_bytes", "memory.process_rss_peak"]
+pressure_boundary_signal_rule = "The obligation above is discharged against these declared signals and no others, so it is a check a runner can actually perform on this tree rather than a promise deferred to instrumentation that does not exist. At least one must be a complete emitter, or the obligation would rest entirely on partial evidence: session.family_candidate_evict is that one, and eviction is therefore the boundary condition a pressure run can always establish. The remaining three are read for corroboration and each is read within its own stated limits — the return-only counter over-counts its role, the host-cache figure sees one store's source text, and the peak-RSS sampler reports zero unless timing capture is on, so a run that reads a zero from it must assert the flag rather than record the zero as a low peak."
 oversize_boundary_obligation = "The runner MUST measure the entry produced from the oversize input and FAIL when it does not exceed budget.pressure.per_entry_admission_max_bytes. The declared repetition factor is a starting point, not an asserted size; a factor that does not reach the cap is repaired by re-ratifying the factor, never by lowering the cap or dropping the boundary."
 statistics_source = "performance-gates.toml [statistics]"
 confidence_percent = 95
@@ -525,7 +655,7 @@ admission_owner = "MEM1"
 shared_reference_rule = "Retirement is logical: a version a live root still addresses survives the cap and is freed only once no root can see it. Retirement transfers the charge to the retired set; it never resets it and never double-counts a version that is both live and retired."
 charge_observability = "proxy_instrumented"
 metric_rows = ["session.indexed_ready_build"]
-gap = "A construction counter. Neither live nor retired artifact bytes are reported."
+gap = "The cited work site is a construction counter. This class is the ONE with a live byte observation: memory.host_cache_bytes sums each row's canonical id plus its raw and eval source text. That is retained SOURCE TEXT, not the IndexedReady index payload it is stored beside, and it counts no retired version — so the class is observed in part and charged in full by neither."
 completion_owner = "E4"
 
 [[allocation_class]]
@@ -1238,7 +1368,7 @@ unit = "Gauge"
 role = "aggregate cache-owned retained bytes"
 emitter_status = "partial"
 emitter_anchor = "crates/verter_session/src/block_content.rs"
-gap = "The only production emitter reports one request's supplied block bytes. No emitter aggregates retained bytes across the allocation classes above, so the aggregate cache-owned figure this budget bounds is not measurable today. Every retained-byte limit is provisional against this row."
+gap = "The only production emitter reports one request's supplied block bytes. No emitter aggregates retained bytes across the allocation classes above. Byte-valued memory is not wholly unobserved — see [[memory_observation]] — but the live surface reports whole-process RSS and one store's source text, never a per-class retained charge, so the aggregate cache-owned figure this budget bounds is still not measurable. The per-entry limits are provisional against this row; the aggregate ones are provisional against memory.host_cache_bytes, which is the observation that must widen."
 completion_owner = "E4"
 
 [[metric_row]]

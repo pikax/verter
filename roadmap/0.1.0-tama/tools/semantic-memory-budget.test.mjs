@@ -165,6 +165,196 @@ test("a derivation whose value drifts from the budget it explains is refused", (
   refusedBecause(validate(catalog), "but the budget declares");
 });
 
+// ── live memory observations ─────────────────────────────────────────────
+//
+// This table records byte-valued memory the process really does report.
+// The controls below exist because an inventory of live instrumentation is
+// only worth having if it cannot drift away from the instrumentation: a
+// producer that was renamed, a scope claim that outgrew what the code
+// computes, or a widened observation that silently goes on blocking the
+// limits it no longer blocks.
+
+test("dropping the live memory observations is refused", () => {
+  const catalog = freshCatalog();
+  assert.ok(catalog.memory_observation.length >= 2, "pre-state: the surface is recorded");
+  delete catalog.memory_observation;
+  assert.ok(
+    !Object.hasOwn(catalog, "memory_observation"),
+    "post-state: the mutation did not apply",
+  );
+  refusedBecause(validate(catalog), "missing required property memory_observation");
+});
+
+test("a memory observation whose producer no longer exists is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.memory_observation.find((entry) => entry.id === "memory.host_cache_bytes");
+  const before = row.producer;
+  assert.ok(before.includes("#"), "pre-state: the producer is an anchored symbol");
+  row.producer = before + "ThatWasRenamedAway";
+  assert.notEqual(row.producer, before, "post-state: the mutation did not apply");
+  refusedBecause(validate(catalog), "no longer occurs in");
+});
+
+test("a memory observation whose liveness proof no longer exists is refused", () => {
+  // Without a resolving proof anchor the table would be free to assert
+  // that a defaulted zero is a live measurement.
+  const catalog = freshCatalog();
+  const row = catalog.memory_observation.find((entry) => entry.id === "memory.process_rss_peak");
+  const before = row.proof;
+  row.proof = "crates/verter_session/tests/cases/g_misc1/a_proof_that_was_deleted.rs";
+  assert.notEqual(row.proof, before, "post-state: the mutation did not apply");
+  refusedBecause(validate(catalog), "anchor path does not resolve");
+});
+
+test("widening an observation to a true aggregate without re-ratifying its limits is refused", () => {
+  // The load-bearing control. Every aggregate retained-byte limit is
+  // provisional BECAUSE no live observation aggregates cache-owned bytes.
+  // The day one does, those limits become measurable against it and may
+  // not go on being recorded provisional.
+  const catalog = freshCatalog();
+  const row = catalog.memory_observation.find((entry) => entry.id === "memory.host_cache_bytes");
+  assert.equal(row.aggregates_cache_owned, false, "pre-state: nothing aggregates today");
+  const blocked = catalog.limit_derivation.filter(
+    (entry) => entry.blocking_metric_row === "memory.host_cache_bytes",
+  );
+  assert.ok(blocked.length > 0, "pre-state: limits are blocked on it");
+  assert.ok(
+    blocked.every((entry) => entry.derivation === "provisional"),
+    "pre-state: every limit blocked on it is provisional",
+  );
+  row.aggregates_cache_owned = true;
+  assert.equal(row.aggregates_cache_owned, true, "post-state: the mutation did not apply");
+  refusedBecause(validate(catalog), "already aggregates cache-owned bytes, so it blocks nothing");
+});
+
+test("a whole-process observation claiming to cover an allocation class is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.memory_observation.find((entry) => entry.id === "memory.process_rss");
+  assert.equal(row.coverage, "whole_process");
+  assert.deepEqual(row.covers_allocation_classes, [], "pre-state: it covers no class");
+  row.covers_allocation_classes = ["file_artifact_store"];
+  refusedBecause(validate(catalog), "is owned by no class");
+});
+
+test("an observation covering a class recorded as unobserved is refused", () => {
+  // The inventory and the observation table are two views of one fact and
+  // may not disagree about whether a class is observed at all.
+  const catalog = freshCatalog();
+  const row = catalog.memory_observation.find((entry) => entry.id === "memory.host_cache_bytes");
+  const unobserved = catalog.allocation_class.find(
+    (entry) => entry.charge_observability === "uninstrumented",
+  );
+  assert.ok(unobserved, "pre-state: some class is recorded uninstrumented");
+  row.covers_allocation_classes = [...row.covers_allocation_classes, unobserved.id];
+  refusedBecause(validate(catalog), "but this observation reports bytes for it");
+});
+
+test("an observation covering a class the inventory does not declare is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.memory_observation.find((entry) => entry.id === "memory.host_cache_bytes");
+  row.covers_allocation_classes = ["a_class_that_was_deleted"];
+  refusedBecause(validate(catalog), "which is not a declared allocation class");
+});
+
+test("dropping the partial cache observation is refused", () => {
+  // Losing this row would take the contract back to asserting that no
+  // cache bytes are observed at all, which is not true of this tree.
+  const catalog = freshCatalog();
+  const before = catalog.memory_observation.length;
+  catalog.memory_observation = catalog.memory_observation.filter(
+    (entry) => entry.coverage !== "partial_cache_owned",
+  );
+  assert.ok(catalog.memory_observation.length < before, "post-state: no row was removed");
+  refusedBecause(validate(catalog), "no partial_cache_owned observation is declared");
+});
+
+test("an assignment site passed off as a discriminating test is refused", () => {
+  // The distinction this control protects: a production site that
+  // assigns a value is evidence the value is written, not evidence that
+  // anything would notice if it stopped being written.
+  const catalog = freshCatalog();
+  const row = catalog.memory_observation.find((entry) => entry.id === "memory.host_cache_bytes");
+  assert.equal(row.proof_kind, "live_assignment", "pre-state: it cites an assignment site");
+  assert.ok(!row.proof.includes("/tests/"), "pre-state: the anchor is production source");
+  row.proof_kind = "discriminating_test";
+  refusedBecause(validate(catalog), "is not under a tests tree");
+});
+
+test("a test passed off as a production assignment site is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.memory_observation.find((entry) => entry.id === "memory.process_rss_peak");
+  assert.equal(row.proof_kind, "discriminating_test", "pre-state: it cites a landed test");
+  row.proof_kind = "live_assignment";
+  refusedBecause(validate(catalog), "is a test, not a production assignment site");
+});
+
+test("an observation table with no discriminating test behind it is refused", () => {
+  const catalog = freshCatalog();
+  const tested = catalog.memory_observation.filter(
+    (entry) => entry.proof_kind === "discriminating_test",
+  );
+  assert.equal(tested.length, 1, "pre-state: exactly one row carries a landed test");
+  catalog.memory_observation = catalog.memory_observation.filter(
+    (entry) => entry.proof_kind !== "discriminating_test",
+  );
+  assert.ok(catalog.memory_observation.length > 0, "post-state: rows remain");
+  refusedBecause(validate(catalog), "no row carries a discriminating test");
+});
+
+test("a limit blocked on something in neither vocabulary is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.limit_derivation.find(
+    (entry) => entry.id === "normal.cache_owned_retained_max_bytes",
+  );
+  assert.equal(
+    row.blocking_metric_row,
+    "memory.host_cache_bytes",
+    "pre-state: it names the live observation",
+  );
+  row.blocking_metric_row = "memory.a_gauge_nobody_wrote";
+  refusedBecause(
+    validate(catalog),
+    "is neither a declared metric row nor a declared memory observation",
+  );
+});
+
+test("a pressure obligation with no complete signal behind it is refused", () => {
+  // An obligation discharged only against partial instrumentation is a
+  // promise: no run on this tree could satisfy it.
+  const catalog = freshCatalog();
+  const signals = catalog.measurement.pressure_boundary_signals;
+  const complete = signals.filter((signal) =>
+    catalog.metric_row.some((row) => row.id === signal && row.emitter_status === "complete"),
+  );
+  assert.equal(complete.length, 1, "pre-state: exactly one signal is a complete emitter");
+  catalog.measurement.pressure_boundary_signals = signals.filter(
+    (signal) => !complete.includes(signal),
+  );
+  assert.ok(
+    catalog.measurement.pressure_boundary_signals.length > 0,
+    "post-state: signals remain, so the refusal is about completeness rather than emptiness",
+  );
+  refusedBecause(validate(catalog), "rests entirely on partial evidence");
+});
+
+test("a pressure signal that resolves nowhere is refused", () => {
+  const catalog = freshCatalog();
+  catalog.measurement.pressure_boundary_signals = [
+    ...catalog.measurement.pressure_boundary_signals,
+    "session.a_counter_nobody_wrote",
+  ];
+  refusedBecause(validate(catalog), "pressure boundary signal session.a_counter_nobody_wrote");
+});
+
+test("dropping the runner-class promotion rule is refused", () => {
+  // The rule records why no local run can promote a provisional limit,
+  // which is half the reason the split is still provisional at all.
+  const catalog = freshCatalog();
+  assert.ok(catalog.baseline.local_run_promotion_rule.length > 40, "pre-state: the rule is stated");
+  delete catalog.baseline.local_run_promotion_rule;
+  refusedBecause(validate(catalog), "missing required property local_run_promotion_rule");
+});
+
 // ── pinned-result policy ─────────────────────────────────────────────────
 
 test("a pinned-result policy claiming a hard bound over caller-held results is refused", () => {

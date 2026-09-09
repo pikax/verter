@@ -339,11 +339,14 @@ jobs:
               # field there turns this job red until the contract accounts
               # for it. The session, semantic and workspace source trees are
               # taken whole because the allocation-owner and emitter anchors
-              # are spread across them; renaming one of those owners turns
-              # this job red on purpose — the contract has to be repinned,
-              # not left describing a symbol that no longer exists.
+              # are spread across them, and the audit tree is taken whole
+              # rather than just its attribution subtree because the live
+              # memory observations resolve `memory.rs` as well; renaming
+              # one of those owners turns this job red on purpose — the
+              # contract has to be repinned, not left describing a symbol
+              # that no longer exists.
               - 'performance-gates.toml'
-              - 'crates/verter_audit/src/attribution/**'
+              - 'crates/verter_audit/src/**'
               - 'crates/verter_bench/examples/attribution_baseline.rs'
               - 'crates/verter_session/src/**'
               - 'crates/verter_semantic/src/**'
