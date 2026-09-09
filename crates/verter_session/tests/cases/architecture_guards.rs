@@ -5730,6 +5730,13 @@ pub(crate) mod foundations_guards {
         "pub mod host_flow_return_audit",
         // verter_ffi::convert (host::cross_file::CrossFileResult)
         "pub mod cross_file",
+        // The content-mapper projection plane. Public because the plane is a
+        // named boundary of the carrier-projection contract in its own right —
+        // one carrier surface's retained geometry plus the fail-closed wire
+        // semantics for asking it a position question — and because it must be
+        // reachable, and provable, without any type engine running. No
+        // production route inside this crate reaches it yet.
+        "pub mod content_mapper",
         // Project-bound external-TypeScript-engine contract: the
         // provider-neutral three-layer seam (`ExternalTsProjectResolver` /
         // `CarrierRegistry` / `EngineBackend`) in which a config-less op for a

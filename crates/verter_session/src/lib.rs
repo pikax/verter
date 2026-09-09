@@ -166,6 +166,10 @@ mod component_meta_surface_equivalence_tests;
 mod component_meta_terminal_mode_tests;
 #[cfg(test)]
 mod component_meta_warm_invalidation_oracle_tests;
+/// The content-mapper projection plane: one carrier surface's projection
+/// into retained mapping products, and the fail-closed wire semantics for
+/// asking that projection a position question.
+pub mod content_mapper;
 pub mod cross_file;
 #[cfg(test)]
 mod cross_file_augmentation_merge_equivalence_tests;
