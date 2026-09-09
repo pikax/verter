@@ -740,16 +740,6 @@ impl FunctionBodySkeleton {
         &self.expr_sites[id.index()]
     }
 
-    /// The nested-callable record at `(site, closure)`.
-    #[must_use]
-    pub fn closure(
-        &self,
-        site: SkeletonExprSiteId,
-        closure: SkeletonClosureId,
-    ) -> &SkeletonClosure {
-        &self.expr_site(site).closures[closure.index()]
-    }
-
     /// The return-site record for `id`.
     #[must_use]
     pub fn return_site(&self, id: SkeletonReturnSiteId) -> &SkeletonReturnSite {
