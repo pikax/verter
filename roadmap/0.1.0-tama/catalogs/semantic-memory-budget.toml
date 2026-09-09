@@ -11,8 +11,37 @@
 # Percentages are carried as integer permille or milli-percent because the
 # roadmap TOML reader has no float form; the derivation of each value is
 # stated beside it rather than left implied.
+#
+# TRUTHFULNESS IS THE ORGANISING RULE. Three things are recorded as they
+# actually are on this tree rather than as the contract would prefer:
+#
+#   1. NO allocation class has its retained byte charge instrumented
+#      today. `session.store_retained_bytes` has no aggregate emitter, so
+#      the aggregate cache-owned figure this budget bounds is not
+#      measurable yet. Every class therefore records `charge_observability`
+#      honestly, and the value `charge_instrumented` is currently unused.
+#   2. Consequently only the WHOLE-PROCESS ceiling is measured-derived.
+#      Its subdivision into cache-owned / active / pinned / slack, and
+#      every per-entry and concurrency limit, is PROVISIONAL — each one
+#      names the metric gap blocking its measurement and the owner who
+#      must re-ratify it. `[[limit_derivation]]` records this per limit and
+#      validation refuses a limit that claims measured provenance it does
+#      not have.
+#   3. The oversized-entry boundary names a concrete expandable input and
+#      a runner obligation to MEASURE that the produced entry exceeds the
+#      cap. The contract does not assert a byte size it has not observed.
+#
+# Recorded deviation, for maintainer ratification. MEM0-AC2 asks for
+# budgets "ratified from recorded baseline measurements". The recorded
+# baseline measures ONE whole-process figure; the instrumentation that
+# would measure the internal partition does not exist, and MEM0 changes no
+# production code, so it cannot create it. Rather than present an
+# unmeasured split as measured, this contract ratifies the measured whole,
+# marks the split provisional against a named blocker, and forbids MEM1
+# from adopting a provisional limit as enforced policy without
+# re-ratification. See `[pinned_result_policy].provisional_adoption_rule`.
 
-schema = 1
+schema = 2
 product = "rev11"
 owner = "MEM0"
 status = "RATIFIED"
@@ -21,11 +50,13 @@ status = "RATIFIED"
 # Baseline provenance.
 #
 # The accepted baseline is the A6 lock's own measured cell. It is cited by
-# identity, and the citation is re-verified on every validation run: the
-# harness whose bytes DEFINE the measured corpus is re-hashed against the
-# digests the lock recorded. That is what distinguishes equivalent work
-# from an invalid historical result here — not a claim in prose, but a
-# recomputed digest over the current tree.
+# identity, and every citation is RE-RESOLVED on each validation run: the
+# harness whose bytes DEFINE the measured corpus is re-hashed, the lock's
+# own metric rows are re-parsed and compared against the limits restated
+# here, and the two recorded measurements are re-read from the lock text
+# that records them. That is what distinguishes equivalent work from an
+# invalid historical result — not a claim in prose, but resolution against
+# the authority on the current tree.
 # ─────────────────────────────────────────────────────────────────────────
 [baseline]
 source_file = "performance-gates.toml"
@@ -48,12 +79,24 @@ corpus_sha256 = "5e06d35dda284a8ef049bf0dd3dc39974b904729f740da58c650ec59e806f63
 corpus_files = 41
 corpus_components = 40
 
-# Recorded measurements from the locked cell.
+# Recorded measurements. These are NOT restated on trust: the lock records
+# each one in the prose that justifies its gate, and the validator requires
+# that exact sentence fragment to be present, rendered with the lock's own
+# thousands separators. `measured_*_citation` is the fragment it looks for.
 measured_peak_rss_bytes = 74850304
+measured_peak_rss_citation = "baseline is 74,850,304 bytes"
 measured_wall_ns = 70525000
+measured_wall_citation = "baseline is 70,525,000 ns"
+
+# Locked limits. Each is re-parsed from the cell's own `[[cell.metric]]`
+# rows by (name, statistic, comparison) and compared numerically, so a
+# limit that moved in the lock cannot keep being restated here. The
+# relative limits are the lock's floats carried as milli-percent, because
+# this TOML reader has no float form: 3.0% is 3000 and 4.952% is 4952.
 locked_peak_rss_absolute_max_bytes = 268435456
 locked_peak_rss_no_regression_milli_percent = 4952
 locked_wall_no_regression_milli_percent = 3000
+locked_wall_absolute_max_ns = 100000000
 
 # Disclosed, not hidden: the locked cell cites its raw measurement record
 # at this path, and the working tree does not retain that document. The
@@ -70,11 +113,11 @@ invalid_historical_result_rule = "A recorded result whose corpus digest no longe
 # ─────────────────────────────────────────────────────────────────────────
 # Scale derivation.
 #
-# The absolute ceilings below are not free parameters. They are derived by
+# The whole-process ceiling is not a free parameter. It is derived by
 # scaling the ONE recorded whole-process measurement to the supported
 # workload, and then checked against the product budget the locked gate
-# file already states in its own words ("an editor host must hold a
-# 1,000-file project under 2 GiB").
+# file already states in its own words. The validator requires that
+# statement to still be present in the lock.
 #
 #   measured_peak_rss_bytes / corpus_files
 #     = 74850304 / 41 = 1825617 (floor)
@@ -89,12 +132,17 @@ invalid_historical_result_rule = "A recorded result whose corpus digest no longe
 # the whole process ceiling. Scaling the catastrophe stop would produce a
 # budget no machine can honour. The MEASURED coefficient is the one that
 # scales, and it fits with 14.9% headroom.
+#
+# This derivation supports the CEILING and nothing else. It says nothing
+# about how the ceiling divides, which is why every component limit below
+# is recorded provisional.
 # ─────────────────────────────────────────────────────────────────────────
 [scale]
 supported_workload_files = 1000
 measured_peak_rss_bytes_per_file = 1825617
 projected_peak_rss_bytes_at_supported_scale = 1825617000
 headroom_bytes_at_supported_scale = 321866648
+product_budget_citation = "an editor host must hold a 1,000-file project under"
 product_budget_statement = "An editor host must hold a 1,000-file project under 2 GiB. Stated by the locked gate file at the peak_rss_bytes absolute_max metric of the baseline cell; adopted here as the whole-process normal ceiling."
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -104,21 +152,9 @@ product_budget_statement = "An editor host must hold a 1,000-file project under 
 # an identity the validator asserts, not a coincidence:
 #   1073741824 + 268435456 + 536870912 + 268435456 = 2147483648
 #
-# cache_owned_retained_max_bytes  1 GiB   50% of the ceiling. The retained
-#                                         set is the only component a
-#                                         retention policy can shrink.
-# request_active_max_bytes      256 MiB   Equal to the locked cell's own
-#                                         absolute peak-RSS cap: that cap
-#                                         bounds one cold batch's entire
-#                                         live set at peak, which is
-#                                         exactly what "active" means here.
-# external_pinned_backpressure_
-#   threshold_bytes             512 MiB   NOT a hard bound. See
-#                                         [pinned_result_policy].
-# allocator_slack_bytes         256 MiB   Allocator and runtime overhead,
-#                                         measured separately from owned
-#                                         bytes and never charged to an
-#                                         allocation class.
+# The ceiling is measured-derived; the split is an allocation of a measured
+# whole, recorded provisional in [[limit_derivation]] until the aggregate
+# retained-byte emitter exists.
 # ─────────────────────────────────────────────────────────────────────────
 [budget.normal]
 process_rss_max_bytes = 2147483648
@@ -135,10 +171,17 @@ per_request_active_max_bytes = 4194304
 #
 # The pressure ceiling is deliberately BELOW the workload's steady-state
 # retained set, not above it. A pressure run that never refuses an
-# admission proves nothing; this configuration forces refusal, eviction
-# and complete-but-uncached return continuously over the same 10,000
-# actions. It partitions exactly as the normal budget does:
+# admission proves nothing; this configuration is intended to force
+# refusal, eviction and complete-but-uncached return continuously over the
+# same 10,000 actions. It partitions exactly as the normal budget does:
 #   67108864 + 67108864 + 536870912 + 268435456 = 939524096
+#
+# "Intended", not "measured": with no retained-byte emitter the crossing
+# cannot be observed yet, so the runner carries an explicit obligation to
+# assert that this configuration actually refuses (see
+# [measurement].pressure_boundary_obligation) and to fail the run when it
+# does not. A pressure run that refuses nothing is a failed run, not a
+# clean one.
 #
 # The external-pin threshold and the allocator slack do NOT shrink under
 # pressure. Pressure limits what the process CHOOSES to retain; it cannot
@@ -155,6 +198,187 @@ max_simultaneously_admitted_requests = 16
 per_request_active_max_bytes = 4194304
 
 # ─────────────────────────────────────────────────────────────────────────
+# Limit derivation.
+#
+# One row per (mode, limit). The validator requires the mapping to be
+# TOTAL and INJECTIVE in both directions: every budget limit has exactly
+# one derivation row and every derivation row names a live budget limit, so
+# a limit cannot be added without stating where its value came from and a
+# derivation cannot outlive the limit it explains.
+#
+#   measured     The value follows from a recorded observation the
+#                validator re-resolves. `blocking_metric_row` and
+#                `completion_owner` must be "none".
+#   provisional  The value is a reasoned allocation, NOT an observation.
+#                It must name the declared metric row whose incompleteness
+#                blocks measuring it, and the owner who must re-ratify.
+#
+# Today exactly one limit is measured. That is the honest state of the
+# tree, and stating it here is what stops the rest from being read as
+# evidence they are not.
+# ─────────────────────────────────────────────────────────────────────────
+
+[[limit_derivation]]
+id = "normal.process_rss_max_bytes"
+mode = "normal"
+limit = "process_rss_max_bytes"
+value = 2147483648
+derivation = "measured"
+evidence = "The locked cell's own product-budget statement (a 1,000-file project under 2 GiB), corroborated by scaling the recorded 74,850,304-byte whole-process measurement over 41 files to the supported 1,000-file workload: 1,825,617,000 bytes, which fits with 321,866,648 bytes of headroom. Both the statement and the arithmetic are re-checked on every validation run."
+blocking_metric_row = "none"
+completion_owner = "none"
+
+[[limit_derivation]]
+id = "normal.cache_owned_retained_max_bytes"
+mode = "normal"
+limit = "cache_owned_retained_max_bytes"
+value = 1073741824
+derivation = "provisional"
+evidence = "Half the measured ceiling, allocated to the only component a retention policy can shrink. No observation of aggregate retained bytes exists to confirm or refute it."
+blocking_metric_row = "session.store_retained_bytes"
+completion_owner = "E4"
+
+[[limit_derivation]]
+id = "normal.request_active_max_bytes"
+mode = "normal"
+limit = "request_active_max_bytes"
+value = 268435456
+derivation = "provisional"
+evidence = "Set equal to the locked cell's absolute peak-RSS cap, on the reasoning that the cap bounds one cold batch's entire live set at peak. That reasoning is untested: no emitter reports request-active bytes across the retained-snapshot pin transfer and release."
+blocking_metric_row = "session.parse_arena_used"
+completion_owner = "E4"
+
+[[limit_derivation]]
+id = "normal.external_pinned_backpressure_threshold_bytes"
+mode = "normal"
+limit = "external_pinned_backpressure_threshold_bytes"
+value = 536870912
+derivation = "provisional"
+evidence = "A quarter of the measured ceiling, chosen as the point at which caller-retained bytes should start limiting NEW admissions. Externally pinned bytes are not observable today, so the threshold has never been compared against a real pinned set."
+blocking_metric_row = "session.artifact_pin_acquire"
+completion_owner = "E4"
+
+[[limit_derivation]]
+id = "normal.allocator_slack_bytes"
+mode = "normal"
+limit = "allocator_slack_bytes"
+value = 268435456
+derivation = "provisional"
+evidence = "The residual of the exact partition. Allocator and runtime overhead is included in RSS and excluded from owned-byte accounting, so the two are measured differently and this residual has not been isolated from a real run."
+blocking_metric_row = "session.store_retained_bytes"
+completion_owner = "E4"
+
+[[limit_derivation]]
+id = "normal.per_entry_admission_max_bytes"
+mode = "normal"
+limit = "per_entry_admission_max_bytes"
+value = 33554432
+derivation = "provisional"
+evidence = "One thirty-second of the retained ceiling, so no single entry can occupy a large fraction of the retained set. No per-entry byte size is measured today."
+blocking_metric_row = "session.store_retained_bytes"
+completion_owner = "MEM1"
+
+[[limit_derivation]]
+id = "normal.max_simultaneously_admitted_requests"
+mode = "normal"
+limit = "max_simultaneously_admitted_requests"
+value = 64
+derivation = "provisional"
+evidence = "Eight times the baseline runner's eight logical CPUs, so a saturated scheduler plus queued work stays admissible. Concurrency has not been varied against a measured active-byte ceiling."
+blocking_metric_row = "session.parse_arena_used"
+completion_owner = "MEM1"
+
+[[limit_derivation]]
+id = "normal.per_request_active_max_bytes"
+mode = "normal"
+limit = "per_request_active_max_bytes"
+value = 4194304
+derivation = "provisional"
+evidence = "The active ceiling divided by the admitted-request count, which is why the two multiply back exactly. Neither factor is measured."
+blocking_metric_row = "session.parse_arena_used"
+completion_owner = "MEM1"
+
+[[limit_derivation]]
+id = "pressure.process_rss_max_bytes"
+mode = "pressure"
+limit = "process_rss_max_bytes"
+value = 939524096
+derivation = "provisional"
+evidence = "The sum of the pressure partition, chosen so the retained ceiling sits far below the workload's expected steady state and refusal is continuous. Whether this configuration actually refuses is a runner obligation, not an observation recorded here."
+blocking_metric_row = "session.store_retained_bytes"
+completion_owner = "MEM1"
+
+[[limit_derivation]]
+id = "pressure.cache_owned_retained_max_bytes"
+mode = "pressure"
+limit = "cache_owned_retained_max_bytes"
+value = 67108864
+derivation = "provisional"
+evidence = "One sixteenth of the normal retained ceiling, intended to sit below the workload's steady-state retained set so eviction and complete-but-uncached return are continuous. The crossing is unobserved until the aggregate emitter exists."
+blocking_metric_row = "session.store_retained_bytes"
+completion_owner = "MEM1"
+
+[[limit_derivation]]
+id = "pressure.request_active_max_bytes"
+mode = "pressure"
+limit = "request_active_max_bytes"
+value = 67108864
+derivation = "provisional"
+evidence = "A quarter of the normal active ceiling, keeping the per-request cap unchanged while cutting admitted concurrency to sixteen."
+blocking_metric_row = "session.parse_arena_used"
+completion_owner = "MEM1"
+
+[[limit_derivation]]
+id = "pressure.external_pinned_backpressure_threshold_bytes"
+mode = "pressure"
+limit = "external_pinned_backpressure_threshold_bytes"
+value = 536870912
+derivation = "provisional"
+evidence = "Unchanged from the normal mode by policy: pressure cannot shrink what a caller already holds. The value it is unchanged from is itself provisional."
+blocking_metric_row = "session.artifact_pin_acquire"
+completion_owner = "E4"
+
+[[limit_derivation]]
+id = "pressure.allocator_slack_bytes"
+mode = "pressure"
+limit = "allocator_slack_bytes"
+value = 268435456
+derivation = "provisional"
+evidence = "Unchanged from the normal mode by policy: pressure cannot shrink the allocator. The value it is unchanged from is itself provisional."
+blocking_metric_row = "session.store_retained_bytes"
+completion_owner = "E4"
+
+[[limit_derivation]]
+id = "pressure.per_entry_admission_max_bytes"
+mode = "pressure"
+limit = "per_entry_admission_max_bytes"
+value = 4194304
+derivation = "provisional"
+evidence = "Set equal to the per-request active cap, so the oversized-entry boundary is reachable: an entry that fits one request's active budget but not the pressure entry cap is exactly the complete-but-uncached case the resource contract requires."
+blocking_metric_row = "session.store_retained_bytes"
+completion_owner = "MEM1"
+
+[[limit_derivation]]
+id = "pressure.max_simultaneously_admitted_requests"
+mode = "pressure"
+limit = "max_simultaneously_admitted_requests"
+value = 16
+derivation = "provisional"
+evidence = "Twice the baseline runner's logical CPUs, the smallest concurrency that still exercises overlapping cold winners on an eight-core runner."
+blocking_metric_row = "session.parse_arena_used"
+completion_owner = "MEM1"
+
+[[limit_derivation]]
+id = "pressure.per_request_active_max_bytes"
+mode = "pressure"
+limit = "per_request_active_max_bytes"
+value = 4194304
+derivation = "provisional"
+evidence = "Unchanged from the normal mode: pressure reduces how many requests are admitted, not how much one admitted request may use."
+blocking_metric_row = "session.parse_arena_used"
+completion_owner = "MEM1"
+
+# ─────────────────────────────────────────────────────────────────────────
 # Pinned-result policy.
 #
 # The budget bounds cache retention and admission. It does NOT claim a
@@ -168,6 +392,10 @@ visibility = "Pinned bytes stay visible in the accounting until the caller relea
 backpressure = "Crossing external_pinned_backpressure_threshold_bytes limits admission of NEW work through the existing typed resource-limited outcome. It never evicts, invalidates, or degrades a result a caller already holds."
 degradation_rule = "A pressure decision may change warm versus cold work. It may never change semantic output, completeness, or provenance for a completed request, and it may never make a partial result cacheable."
 oversized_complete_result = "A complete result too large for per_entry_admission_max_bytes returns UNCACHED when it fits the active request budget. Exhausting the active budget returns the existing typed resource-limited outcome, never a fabricated complete result and never a stale candidate."
+copy_versus_share_rule = "A result handed to a caller is charged by HOW it is handed over, and the two forms are never conflated. A SHARED handle (the cache's Arc, cloned by reference) is one payload with two holders: the cache class carries the payload charge, the caller carries an externally_pinned reference charge of the handle only, and neither total includes the other's payload bytes. A COPY (a by-value clone of an owned payload, which is what the live component-meta warm path performs) is a SECOND payload: it is charged in full under externally_pinned at the caller, independently of the cache's charge, and it is not a shared reference in the accounting."
+coexistence_rule = "While a cache entry and a caller-held result coexist, both charges stand simultaneously. For a shared handle the payload is charged once (at the cache) plus one reference charge per holder; for a copy each copy is a full charge. Two callers holding two copies of the same logical result are two charges, not one."
+release_order_rule = "Release order does not change the totals and never leaves an unowned byte. Cache eviction first: the cache charge drops immediately; a shared payload survives on the caller's reference and its payload charge TRANSFERS to the last remaining holder, and a copy is unaffected because it was never the cache's. Caller release first: the caller's charge drops immediately and the cache charge is unaffected. When the last holder of a shared payload releases, the payload charge drops exactly once."
+provisional_adoption_rule = "MEM1 may not adopt a limit whose [[limit_derivation]] records derivation = provisional as an ENFORCED admission threshold without first re-ratifying it against the measurement its blocking_metric_row names. Until then a provisional limit is a declared intent that the runner may observe against, not a policy that refuses work."
 
 # ─────────────────────────────────────────────────────────────────────────
 # Measurement methodology.
@@ -176,7 +404,8 @@ oversized_complete_result = "A complete result too large for per_entry_admission
 #
 #   owned bytes  Exact summed charge over the allocation_class rows below.
 #                One charge owner per class; a shared reference is charged
-#                once at its owner and zero times at every borrower.
+#                once at its owner and zero times at every borrower, while
+#                a by-value copy is charged in full at the copier.
 #   RSS          Whole-process resident set, which INCLUDES allocator and
 #                runtime overhead that no allocation class owns. RSS is
 #                compared against process_rss_max_bytes only, never
@@ -195,6 +424,8 @@ control_live_set_absolute_slack_bytes = 4194304
 control_live_set_slack_rationale = "4 MiB is the whole ratified budget of the single largest byte-bounded allocation class in the system today (the identity intern pool). A control-state difference smaller than one entire byte-bounded pool is not attributable, so it is the floor below which relative tolerance is not applied."
 envelope_rule = "The first 2,000 actions establish the steady-state retained-byte envelope. Every later control sample must satisfy that envelope AND the absolute budget. The envelope is fixed once observed at the start of a run and is never raised after seeing the candidate's later samples."
 growth_rule = "Unexplained positive growth at equivalent control states fails the run even when the final sample happens to be small. A single small end sample is not evidence of a bounded run."
+pressure_boundary_obligation = "A pressure run MUST observe, and record, at least one admission refusal, at least one eviction, and at least one complete-but-uncached return. A pressure run that observes none of these has not reached the boundary the pressure budget was configured to reach and FAILS; it is never recorded as a clean pass. This obligation exists because the pressure ceilings are provisional: it is the runner, not this document, that establishes the crossing."
+oversize_boundary_obligation = "The runner MUST measure the entry produced from the oversize input and FAIL when it does not exceed budget.pressure.per_entry_admission_max_bytes. The declared repetition factor is a starting point, not an asserted size; a factor that does not reach the cap is repaired by re-ratifying the factor, never by lowering the cap or dropping the boundary."
 statistics_source = "performance-gates.toml [statistics]"
 confidence_percent = 95
 bootstrap_resamples = 10000
@@ -210,6 +441,14 @@ noise_multiplier_permille = 2000
 # run, so a rename or a deletion breaks validation instead of quietly
 # leaving the contract describing code that no longer exists.
 #
+# COMPLETENESS IS CHECKED AGAINST THE CODE, NOT AGAINST THIS LIST. The
+# validator reads the fields of `ProjectTypeStore` directly and requires
+# every one of them to be dispositioned — either covered by an allocation
+# class (`covers_store_fields`) or declared non-retaining with a reason in
+# a `[[store_field]]` row. Deleting a row here therefore fails validation
+# rather than silently shrinking the inventory, and adding a field to the
+# store turns this contract red until it is accounted for.
+#
 # current_bound_kind records what bounds the class TODAY, truthfully:
 #
 #   retained_bytes       a byte budget exists
@@ -221,8 +460,18 @@ noise_multiplier_permille = 2000
 #   caller_lifetime      the caller owns the lifetime
 #   none                 no bound of any kind exists today
 #
-# Exactly one class is byte-bounded today. That is the gap E4 and MEM1
-# exist to close, and stating it plainly is the point of this inventory.
+# charge_observability records whether the class's RETAINED BYTE CHARGE is
+# observable today:
+#
+#   charge_instrumented  a cited Bytes/Gauge metric row with a complete
+#                        emitter reports this class's retained bytes
+#   proxy_instrumented   cited rows report ACTIVITY at this class but not
+#                        its retained byte charge
+#   uninstrumented       no site observes this class at all
+#
+# Exactly one class is byte-bounded today and NONE is charge-instrumented.
+# That is the gap E4 and MEM1 exist to close, and stating it plainly is
+# the point of this inventory.
 # ─────────────────────────────────────────────────────────────────────────
 
 [[allocation_class]]
@@ -232,12 +481,16 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/decl_lowering.rs#SnapshotShard"
 producers = ["crates/verter_session/src/decl_lowering.rs#DeclLoweringService"]
 consumers = ["crates/verter_session/src/decl_lowering.rs#SnapshotLease", "crates/verter_session/src/decl_body_memo.rs#DeclBodyMemo"]
+covers_store_fields = []
 current_bound_kind = "lease_refcount"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "The shard owns the single Rc per SnapshotKey and is charged once. A SnapshotLease is a refcount pin, never a second charge; releasing the last lease transfers nothing and drops the charge."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.oxc_eval_program_parse", "session.retained_snapshot_reuse", "session.artifact_pin_acquire", "session.artifact_pin_release"]
+gap = "The cited rows report parse volume, reuse counts and lease acquisition, not the retained bytes the shard holds. Retained snapshot bytes are not observable."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "declaration_body_memo"
@@ -246,12 +499,16 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/decl_body_memo.rs#DeclBodyMemo"
 producers = ["crates/verter_session/src/decl_lowering.rs#DeclLoweringService"]
 consumers = ["crates/verter_session/src/project_semantic_dispatch"]
+covers_store_fields = []
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "The memo owns its lowered records. A dispatch consumer borrows through the hot read accessor and is charged nothing."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.decl_body_lower"]
+gap = "A lowering-call counter, not a retained-byte gauge over the memo's records."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "file_artifact_store"
@@ -260,26 +517,106 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/file_artifact_store.rs#FileArtifactStore"
 producers = ["crates/verter_session/src/file_artifact_store.rs#FileArtifactStore"]
 consumers = ["crates/verter_session/src/file_artifact_store.rs#FileArtifactRoot"]
+covers_store_fields = ["indexed"]
 current_bound_kind = "logical_retirement"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "Retirement is logical: a version a live root still addresses survives the cap and is freed only once no root can see it. Retirement transfers the charge to the retired set; it never resets it and never double-counts a version that is both live and retired."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.indexed_ready_build"]
+gap = "A construction counter. Neither live nor retired artifact bytes are reported."
+completion_owner = "E4"
 
 [[allocation_class]]
-id = "semantic_graph_memo"
-name = "Semantic query memo table and node arena"
+id = "analysis_ready_db"
+name = "Analysis augmentation cache"
 ownership = "cache_owned"
-charge_owner = "crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"
-producers = ["crates/verter_session/src/project_semantic_dispatch"]
+charge_owner = "crates/verter_session/src/project_type_store.rs#AnalysisReadyDb"
+producers = ["crates/verter_session/src/project_type_store.rs#AnalysisReadyDb"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["analysis"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "Entries are charged at the DB that admitted them; readers borrow and are charged nothing."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this cache at all: neither its entry count nor its retained bytes."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "route_db"
+name = "Shared route and barrel surface cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/resolver_core/route_db.rs#RouteDb"
+producers = ["crates/verter_session/src/resolver_core/route_db.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["routes"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One charge per admitted route entry, at the DB. The store holds an Arc to the DB, not to its payloads."
+charge_observability = "proxy_instrumented"
+metric_rows = ["session.import_route_resolve"]
+gap = "A resolution-call counter, not a retained-byte gauge over the route and barrel entries."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "imported_root_db"
+name = "Transitive imported-root discovery cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/resolver_core/imported_root_db.rs#ImportedRootDb"
+producers = ["crates/verter_session/src/resolver_core/imported_root_db.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["imported_roots"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One charge per admitted entry at the DB; the store holds an Arc to the DB, not to its payloads."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this cache."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "semantic_graph_node_arena"
+name = "Semantic node arena"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/semantic_query_memo/arena.rs#NodeArena"
+producers = ["crates/verter_session/src/project_semantic_dispatch"]
+consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
+covers_store_fields = ["semantic_graph"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "Interned nodes are owned by the arena and charged once there. A memo entry referencing a node carries the reference, not the payload charge."
+charge_observability = "proxy_instrumented"
+metric_rows = ["session.semantic_cold_build"]
+gap = "The arena is APPEND-ONLY and separately bounded from the memo table above it: node ids stay stable for the memo's lifetime, so evicting a memo entry does not reclaim its nodes. Nothing reports arena bytes or node count, and recording the memo table's entry cap against the arena would misstate an unbounded region as bounded."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "semantic_graph_family_memo"
+name = "Family-keyed semantic query memo table"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/bounded_query_retention.rs#DEFAULT_BUDGET_CAP"
+producers = ["crates/verter_session/src/project_semantic_dispatch"]
+consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
+covers_store_fields = ["semantic_graph"]
 current_bound_kind = "entry_count"
 current_bound_value = 4096
 lifetime_owner = "E4"
 admission_owner = "MEM1"
-shared_reference_rule = "Interned nodes are owned by the arena and charged once there. A memo entry referencing a node carries the reference, not the payload charge."
-metric_rows = ["session.semantic_cold_build", "session.semantic_warm_hit", "session.cache_candidate_copy"]
+shared_reference_rule = "A memo entry is charged once at the table and holds node ids, not node payloads. Evicting an entry drops only the table's charge."
+charge_observability = "proxy_instrumented"
+metric_rows = ["session.semantic_warm_hit", "session.cache_candidate_copy"]
+gap = "Hit and clone counters. The table's own retained bytes are not reported, and its entry cap bounds entries rather than bytes."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "family_candidate_slots"
@@ -288,12 +625,16 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/family.rs#candidate_cap"
 producers = ["crates/verter_session/src/semantic_query_memo/family.rs#FamilyKey"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
+covers_store_fields = ["semantic_graph"]
 current_bound_kind = "entry_count"
 current_bound_value = 8
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "A candidate is charged in exactly one slot. Backfilling a recorded materialised point into a second slot clones the recorded point and charges that clone at the receiving slot; the source charge is unchanged."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.family_candidate_evict", "session.cache_admit_cacheable", "session.cache_admit_return_only"]
+gap = "Eviction and admission-decision counters. Candidate payload bytes are not reported."
+completion_owner = "MEM1"
 
 [[allocation_class]]
 id = "hash_cons_memo"
@@ -302,12 +643,16 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/hash_cons_memos.rs#HASH_CONS_MEMO_RETENTION_CAP"
 producers = ["crates/verter_session/src/semantic_query_memo/hash_cons_memos.rs"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
+covers_store_fields = ["semantic_graph"]
 current_bound_kind = "entry_count"
 current_bound_value = 100000
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "The memo stores node ids, not node payloads; the arena carries the payload charge."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.semantic_hash"]
+gap = "A hashing-call counter, not a retained-byte gauge over the memo."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "member_ordinal_index"
@@ -316,12 +661,16 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/member_index.rs#MEMBER_ORDINAL_INDEX_RETENTION_CAP"
 producers = ["crates/verter_session/src/semantic_query_memo/member_index.rs"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
+covers_store_fields = ["semantic_graph"]
 current_bound_kind = "entry_count"
 current_bound_value = 16384
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "Index rows hold ordinals only and are charged at the index."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.semantic_dispatch"]
+gap = "A dispatch counter, not an index-size gauge."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "derivation_edge_index"
@@ -330,26 +679,16 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/derivation.rs#DERIVATION_EDGE_BUCKET_CAP"
 producers = ["crates/verter_session/src/semantic_query_memo/derivation.rs"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
+covers_store_fields = ["semantic_graph"]
 current_bound_kind = "entry_count"
 current_bound_value = 4096
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "Edges are charged at the index bucket that owns them; the endpoints are node ids, not payloads."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.origin_edge_record"]
-
-[[allocation_class]]
-id = "identity_intern_pool"
-name = "Store-owned identity string intern pool"
-ownership = "cache_owned"
-charge_owner = "crates/verter_session/src/identity_interner.rs#IdentityInterner"
-producers = ["crates/verter_session/src/identity_interner.rs#IdentityInterner"]
-consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-current_bound_kind = "retained_bytes"
-current_bound_value = 4194304
-lifetime_owner = "E4"
-admission_owner = "MEM1"
-shared_reference_rule = "The pool charges the summed str payload of the entries IT still references. Eviction drops only the pool's reference; an Arc already handed out stays alive, and its charge moves to the holder rather than disappearing."
-metric_rows = ["session.source_text_copy"]
+gap = "An edge-recording counter, not a retained-byte gauge; and the cap bounds one bucket rather than the whole index."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "dep_signature_intern_pool"
@@ -358,12 +697,34 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/interner.rs#DepSignatureInterner"
 producers = ["crates/verter_session/src/semantic_query_memo/interner.rs#DepSignatureInterner"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
+covers_store_fields = ["semantic_graph"]
 current_bound_kind = "weak_reference"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "The interner holds Weak references only and is charged the bucket overhead, never the payload. The payload is charged to whichever cached value holds the strong Arc."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.read_set_signature_build"]
+gap = "A construction counter. Neither the bucket overhead charged here nor the payloads charged elsewhere are reported as bytes."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "identity_intern_pool"
+name = "Store-owned identity string intern pool"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/identity_interner.rs#IdentityInterner"
+producers = ["crates/verter_session/src/identity_interner.rs#IdentityInterner"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["identity_interner"]
+current_bound_kind = "retained_bytes"
+current_bound_value = 4194304
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "The pool charges the summed str payload of the entries IT still references. Eviction drops only the pool's reference; an Arc already handed out stays alive, and its charge moves to the holder rather than disappearing."
+charge_observability = "proxy_instrumented"
+metric_rows = ["session.source_text_copy"]
+gap = "The pool is the ONLY byte-bounded class in this inventory, but its budget is enforced internally and not reported through any declared work site; the cited row counts unrelated source-sized copies."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "fact_read_set_signature"
@@ -372,12 +733,34 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_workspace/src/fact_cache.rs#ReadSetSignature"
 producers = ["crates/verter_workspace/src/fact_read_set.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = []
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "A signature is charged once, at the cached value it validates. A signature shared by a backfilled clone is charged at the clone as a shared reference, never as a second payload."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.fact_observe", "session.read_set_signature_build"]
+gap = "Observation and construction item counts, not signature bytes."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "owner_import_surface_db"
+name = "Owner direct-import surface cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/owner_import_surface.rs#OwnerImportSurfaceDb"
+producers = ["crates/verter_session/src/owner_import_surface.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["owner_import_surfaces"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One charge per owner version at the DB. Downstream stages read the same entry by reference and are charged nothing for it."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this cache."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "materialize_structure_candidates"
@@ -386,12 +769,16 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/component_meta_caches.rs#MaterializeStructureDb"
 producers = ["crates/verter_session/src/component_meta_materialize.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["materialize_structure_db"]
 current_bound_kind = "entry_count"
 current_bound_value = 2048
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "One candidate, one charge, at the slot that admitted it."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.materialize_structure"]
+gap = "A materialisation-call counter, not a candidate-byte gauge."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "shape_cache_entries"
@@ -400,12 +787,124 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/component_meta_caches.rs#ShapeCacheDb"
 producers = ["crates/verter_session/src/component_meta_caches.rs#ShapeCacheDb"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["shape_cache_db"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
-shared_reference_rule = "Entries are Arc-shared with readers; the store carries the charge and a reader carries none."
+shared_reference_rule = "Entries are Arc-shared with readers; the store carries the payload charge and a reader carries a reference charge only."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.publish_field_types"]
+gap = "A published-field item counter, not an entry-byte gauge."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "imported_registry_db"
+name = "Component-meta imported registry cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/component_meta_caches.rs#ImportedRegistryDb"
+producers = ["crates/verter_session/src/component_meta_caches.rs#ImportedRegistryDb"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["imported_registry_db"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One charge per admitted entry at the DB, and only there: the per-request scratch mirror the engine keeps is non-authoritative and is charged to the active request, never a second time here."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this cache."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "declaration_lookup_db"
+name = "Component-meta declaration lookup cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/component_meta_caches.rs#DeclarationLookupDb"
+producers = ["crates/verter_session/src/component_meta_caches.rs#DeclarationLookupDb"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["declaration_lookup_db"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One charge per admitted entry at the DB."
+charge_observability = "proxy_instrumented"
+metric_rows = ["session.resolve_decl"]
+gap = "A declaration-resolution counter, not an entry-byte gauge."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "resolvability_db"
+name = "Component-meta resolvability cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/component_meta_caches.rs#ResolvabilityDb"
+producers = ["crates/verter_session/src/component_meta_caches.rs#ResolvabilityDb"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["resolvability_db"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One charge per admitted entry at the DB."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this cache."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "owner_collection_db"
+name = "Component-meta owner collection cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/component_meta_caches.rs#OwnerCollectionDb"
+producers = ["crates/verter_session/src/component_meta_caches.rs#OwnerCollectionDb"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["owner_collection_db"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One charge per admitted entry at the DB."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this cache."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "app_config_no_override_proof"
+name = "AppConfig no-override proof cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/app_config_proof_db.rs#AppConfigNoOverrideProofDb"
+producers = ["crates/verter_session/src/app_config_proof_db.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["app_config_no_override_proof"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One proof entry, one charge, at the DB. The fast path consults the entry without copying it and is charged nothing."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this cache."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "intrinsic_registry"
+name = "TypeScript intrinsic registry"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/intrinsic_registry.rs#IntrinsicRegistry"
+producers = ["crates/verter_session/src/intrinsic_registry.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["intrinsic_registry"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "A fixed registry populated once at construction and charged once at the store."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this registry. Its footprint is expected to be small and constant, which is a reason to deprioritise instrumenting it, not a reason to omit it from the inventory."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "component_meta_result_candidates"
@@ -414,12 +913,70 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/component_meta_result_db.rs#ComponentMetaResultDb"
 producers = ["crates/verter_session/src/component_meta_host.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["component_meta_results"]
 current_bound_kind = "entry_count"
 current_bound_value = 4
 lifetime_owner = "E4"
 admission_owner = "MEM1"
-shared_reference_rule = "The cached Arc is charged at the slot. Handing the same Arc to a caller creates an externally pinned reference that is reported under public_result_pin and is not charged a second time."
+shared_reference_rule = "The cached payload is charged once at the slot. The live warm path hands the caller a by-value CLONE of the analysis rather than the cached Arc, so the caller's result is a COPY charged in full under public_result_copy, not a shared reference. If that path later hands over the Arc instead, the caller's charge becomes a reference charge under public_result_pin and this rule moves with it."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.cache_admit_cacheable", "session.cache_admit_return_only"]
+gap = "Admission-decision counters. Candidate payload bytes are not reported."
+completion_owner = "MEM1"
+
+[[allocation_class]]
+id = "compile_cache_db"
+name = "Per-canonical compile profile cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/project_type_store.rs#CompileCacheDb"
+producers = ["crates/verter_session/src/compile.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["compile_cache_db"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One profile entry per canonical, charged at the DB."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this cache."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "derived_raw_cache_db"
+name = "Source-derived raw state cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/project_type_store.rs#DerivedRawCacheDb"
+producers = ["crates/verter_session/src/compile.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["derived_raw_cache_db"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One entry per canonical source version, charged at the DB."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this cache."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "dependency_cache_db"
+name = "Dependency-closure state cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/project_type_store.rs#DependencyCacheDb"
+producers = ["crates/verter_session/src/compile.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["dependency_cache_db"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One entry per canonical dependency closure, charged at the DB."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this cache."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "compile_output_content_entries"
@@ -428,12 +985,16 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/cache_runtime/compile_output_node.rs#CompileOutputNodePureContent"
 producers = ["crates/verter_session/src/compile.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["compile_output_pure_content"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "One immutable entry per content key, charged at the node."
+charge_observability = "proxy_instrumented"
 metric_rows = ["compiler.code_transform_render", "compiler.source_map_build"]
+gap = "Rendered output bytes and mapping item counts describe what was produced, not what the node retains."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "flow_slice_artifacts"
@@ -442,12 +1003,124 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/cache_runtime/flow_slice_node.rs#FlowSliceStores"
 producers = ["crates/verter_session/src/cache_runtime/flow_slice_node.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["flow_slice"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "Per-content-version artifacts are charged at the store; per-canonical eviction transfers nothing."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.flow_graph_build", "session.flow_slice_compute"]
+gap = "Construction counters, not artifact-byte gauges."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "semantic_db"
+name = "Semantic surfaces and reactivity query memo"
+ownership = "cache_owned"
+charge_owner = "crates/verter_semantic/src/db.rs#SemanticDb"
+producers = ["crates/verter_semantic/src/db.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["semantic_db"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "A DIFFERENT crate and a different artifact from the project-global semantic graph: entries are charged here, never a second time at the graph store. The host holds the handle so the eviction cascade can reset it."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this DB."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "resolved_import_facts_db"
+name = "Resolved import and re-export binding cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/resolved_import_facts.rs#ResolvedImportFactsDb"
+producers = ["crates/verter_session/src/resolved_import_facts.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["resolved_import_facts"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One charge per keyed entry at the DB; the store holds an Arc to the DB, not to its payloads."
+charge_observability = "proxy_instrumented"
+metric_rows = ["session.external_frontier_resolve"]
+gap = "A frontier-resolution counter, not an entry-byte gauge."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "member_semantic_fact_store"
+name = "Lazy member semantic-hash facts"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/member_semantic_fact_store.rs#MemberSemanticFactStore"
+producers = ["crates/verter_session/src/member_semantic_fact_store.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["member_semantic_facts"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One fact per keyed member, charged at the store."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this store."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "member_display_fact_store"
+name = "Lazy member display-hash facts"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/member_display_fact_store.rs#MemberDisplayFactStore"
+producers = ["crates/verter_session/src/member_display_fact_store.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["member_display_facts"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One fact per keyed member, charged at the store."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this store."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "binder_identity_facts_store"
+name = "Binder identity facts artifacts"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/binder_identity_facts.rs#BinderIdentityFactsStore"
+producers = ["crates/verter_session/src/binder_identity_facts.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["binder_identity_facts"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One artifact per keyed file version, charged at the store."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this store."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "mapper_binder_registry"
+name = "Mapped-binder ordinal registry"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/mapper_binder_registry.rs#MapperBinderRegistry"
+producers = ["crates/verter_session/src/mapper_binder_registry.rs"]
+consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
+covers_store_fields = ["mapper_binder_registry"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One ordinal row per mapper triple, charged at the registry; the store holds an Arc to the registry, not to its rows."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this registry. It grows monotonically with distinct mapper identities, so its unboundedness is a real retention question rather than a formality."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "request_parse_arena"
@@ -456,12 +1129,16 @@ ownership = "request_active"
 charge_owner = "crates/verter_session/src/parsed_eval_program.rs#ParsedEvalProgram"
 producers = ["crates/verter_session/src/parsed_eval_program.rs"]
 consumers = ["crates/verter_session/src/decl_lowering.rs#DeclLoweringService"]
+covers_store_fields = []
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "The arena is charged to the active request until the retained-parse shard pins it; pinning TRANSFERS the charge to retained_parse_snapshot rather than duplicating or resetting it."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.parse_arena_used", "session.parse_arena_capacity"]
+gap = "Both cited rows are recorded once at parse time: one accumulates arena bytes and the other keeps a running maximum capacity. Neither follows the arena across the pin transfer this rule describes, nor reports its release, so request-active bytes are not observable."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "request_supplied_block_content"
@@ -470,26 +1147,74 @@ ownership = "request_active"
 charge_owner = "crates/verter_session/src/block_content.rs"
 producers = ["crates/verter_session/src/block_content.rs"]
 consumers = ["crates/verter_session/src/compile.rs"]
+covers_store_fields = []
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
 shared_reference_rule = "Charged to the active request for the life of the request, then released. It is never promoted into a retained charge."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.store_retained_bytes", "session.source_text_copy"]
+gap = "The only production emitter of session.store_retained_bytes reports THIS class's per-request supplied bytes. It is not an aggregate retained-byte gauge, which is exactly why every retained-byte limit above is recorded provisional."
+completion_owner = "E4"
 
 [[allocation_class]]
 id = "public_result_pin"
-name = "Publicly retained result handles"
+name = "Publicly retained shared result handles"
 ownership = "externally_pinned"
-charge_owner = "crates/verter_semantic/src/analysis/component_meta.rs#ComponentMetaAnalysis"
-producers = ["crates/verter_session/src/component_meta_host.rs"]
+charge_owner = "crates/verter_session/src/decl_lowering.rs#SnapshotLease"
+producers = ["crates/verter_session/src/decl_lowering.rs#DeclLoweringService"]
 consumers = ["crates/verter_napi/src", "crates/verter_wasm/src", "crates/verter_lsp/src"]
+covers_store_fields = []
 current_bound_kind = "caller_lifetime"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
-shared_reference_rule = "A handle a caller holds is charged exactly once, under externally_pinned ownership, for as long as the caller holds it. The same Arc still cached is reported under its cache class; the pin is the caller's reference, and neither total includes the other's bytes."
+shared_reference_rule = "A SHARED handle is charged exactly once as a reference, under externally_pinned, for as long as the holder keeps it. The payload stays charged at its owning cache class; neither total includes the other's payload bytes. When the cache evicts first, the payload charge transfers to the last remaining holder; when the holder releases first, only its reference charge drops. See [pinned_result_policy].release_order_rule."
+charge_observability = "proxy_instrumented"
 metric_rows = ["session.artifact_pin_acquire", "session.artifact_pin_release"]
+gap = "Both cited rows are raised only at retained-parse snapshot lease acquisition and release. Public result handles handed across the FFI and LSP boundaries are not pinned through those sites, so externally pinned bytes are not observable."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "public_result_copy"
+name = "Caller-owned public result copies"
+ownership = "externally_pinned"
+charge_owner = "crates/verter_semantic/src/analysis/component_meta.rs#ComponentMetaAnalysis"
+producers = ["crates/verter_session/src/host_manage/component_meta_entry.rs"]
+consumers = ["crates/verter_napi/src", "crates/verter_wasm/src", "crates/verter_lsp/src"]
+covers_store_fields = []
+current_bound_kind = "caller_lifetime"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "This class exists because the live warm path is a COPY, not a share: it returns the cached analysis by value, and the public API returns that owned value. ComponentMetaAnalysis owns its vectors, so each returned result is a full second payload charged in full here, independently of the cache's charge. It is never accounted as a shared reference, it does not reduce the cache's charge, and two callers holding two results are two charges. Cache eviction does not reduce it and it does not survive as a transfer target for the cache's payload."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes the copy at all: neither the clone that produces it nor the bytes the caller then owns. This is the largest single hole in the externally pinned total, because it is the one every public component-meta consumer takes on every warm hit."
+completion_owner = "E4"
+
+# ─────────────────────────────────────────────────────────────────────────
+# ProjectTypeStore field dispositions.
+#
+# The validator reads the field list of `ProjectTypeStore` from the source
+# and requires EVERY field to appear exactly once across the union of the
+# allocation classes' `covers_store_fields` and the rows below. A field
+# that is neither charged nor declared non-retaining fails validation, and
+# so does a row naming a field the struct no longer has.
+#
+# These are the only two fields that retain no payload.
+# ─────────────────────────────────────────────────────────────────────────
+
+[[store_field]]
+field = "project_generation"
+disposition = "non_retaining"
+reason = "An AtomicU64 generation counter. It holds no payload and its size does not vary with workload."
+
+[[store_field]]
+field = "counters"
+disposition = "non_retaining"
+reason = "A fixed set of Arc<AtomicU64> diagnostic counters. Constant size, no payload, and shared with the DBs that update them in place."
 
 # ─────────────────────────────────────────────────────────────────────────
 # Controlling metric rows.
@@ -501,9 +1226,10 @@ metric_rows = ["session.artifact_pin_acquire", "session.artifact_pin_release"]
 #   partial   a production emitter exists but does not cover the role
 #   absent    no production emitter exists
 #
-# Two rows are PARTIAL today, and both are named with the owner that must
-# complete them. Recording them as complete would make the aggregate
-# accounting look instrumented when it is not.
+# Where a site could not honestly claim a broad role, the ROLE is narrowed
+# to what the site actually counts rather than the status being inflated.
+# Where narrowing would hide a gap the budget depends on, the row stays
+# partial and names the gap and its owner.
 # ─────────────────────────────────────────────────────────────────────────
 
 [[metric_row]]
@@ -512,7 +1238,7 @@ unit = "Gauge"
 role = "aggregate cache-owned retained bytes"
 emitter_status = "partial"
 emitter_anchor = "crates/verter_session/src/block_content.rs"
-gap = "The only production emitter reports one request's supplied block bytes. No emitter aggregates retained bytes across the allocation classes above, so the aggregate cache-owned figure this budget bounds is not measurable today."
+gap = "The only production emitter reports one request's supplied block bytes. No emitter aggregates retained bytes across the allocation classes above, so the aggregate cache-owned figure this budget bounds is not measurable today. Every retained-byte limit is provisional against this row."
 completion_owner = "E4"
 
 [[metric_row]]
@@ -536,7 +1262,7 @@ completion_owner = "E4"
 [[metric_row]]
 id = "session.cache_admit_cacheable"
 unit = "Calls"
-role = "admissions accepted into retained storage"
+role = "warm-admission decisions taken at the admission gate"
 emitter_status = "complete"
 emitter_anchor = "crates/verter_session/src/semantic_query/admit.rs"
 gap = "none"
@@ -546,9 +1272,9 @@ completion_owner = "MEM1"
 id = "session.cache_admit_return_only"
 unit = "Calls"
 role = "complete results returned without admission"
-emitter_status = "complete"
+emitter_status = "partial"
 emitter_anchor = "crates/verter_session/src/semantic_query/admit.rs"
-gap = "none"
+gap = "The site is raised for EVERY ReturnOnly decision, so relative to the stated role it both over- and under-counts. It over-counts because Broken taint and unrooted Partial taint are not complete results; it under-counts because the budget-exceeded, cancellation and supersession paths route to ReturnOnly before reaching the admission gate and so raise nothing here. The oversized-entry policy depends on observing exactly the complete-but-unadmitted case, which needs its own site rather than a narrower reading of this one."
 completion_owner = "MEM1"
 
 [[metric_row]]
@@ -564,18 +1290,18 @@ completion_owner = "MEM1"
 id = "session.parse_arena_used"
 unit = "Bytes"
 role = "request-active arena bytes"
-emitter_status = "complete"
+emitter_status = "partial"
 emitter_anchor = "crates/verter_session/src/parsed_eval_program.rs"
-gap = "none"
+gap = "The site accumulates arena bytes once, at parse time. It does not follow the arena across the retained-snapshot pin transfer, and it reports no release, so it does not measure bytes ACTIVE for a request at any moment. Every active-byte limit is provisional against this row."
 completion_owner = "E4"
 
 [[metric_row]]
 id = "session.parse_arena_capacity"
 unit = "Gauge"
 role = "request-active arena capacity"
-emitter_status = "complete"
+emitter_status = "partial"
 emitter_anchor = "crates/verter_session/src/parsed_eval_program.rs"
-gap = "none"
+gap = "The site records a running maximum capacity observed at parse time, not current request-active capacity across transfer and release."
 completion_owner = "E4"
 
 [[metric_row]]
@@ -723,6 +1449,33 @@ gap = "none"
 completion_owner = "E4"
 
 [[metric_row]]
+id = "session.resolve_decl"
+unit = "Calls"
+role = "declaration resolution"
+emitter_status = "complete"
+emitter_anchor = "crates/verter_session/src/project_semantic_dispatch"
+gap = "none"
+completion_owner = "E4"
+
+[[metric_row]]
+id = "session.import_route_resolve"
+unit = "Calls"
+role = "import route resolution"
+emitter_status = "complete"
+emitter_anchor = "crates/verter_session/src/host_resolve/dependency_resolution.rs"
+gap = "none"
+completion_owner = "E4"
+
+[[metric_row]]
+id = "session.external_frontier_resolve"
+unit = "Calls"
+role = "external frontier resolution"
+emitter_status = "complete"
+emitter_anchor = "crates/verter_session/src/host_resolve/frontier_engine.rs"
+gap = "none"
+completion_owner = "E4"
+
+[[metric_row]]
 id = "compiler.code_transform_render"
 unit = "Bytes"
 role = "rendered compile output bytes"
@@ -764,9 +1517,17 @@ completion_owner = "E4"
 # 100 tranches of 100 actions is 10,000 ordered actions. Every tranche
 # ends with one sample and one control checkpoint, so the sampling cadence
 # is exactly the declared interval and every tranche returns to the same
-# control live set: within a tranche every edit is reverted, every applied
-# configuration delta is reverted, every pinned result is released, and
-# every opened project is closed.
+# control live set: within a tranche every edit is reverted on the file it
+# was applied to, every applied configuration delta is reverted on the
+# PROJECT it was applied to, every pinned result is released, and every
+# opened project is closed.
+#
+# EVERY ACTION IS EXECUTABLE THROUGH A CURRENT API. A request names a
+# materialized carrier file, because that is what the component-meta
+# request accepts; an edit names an exact find/replace pair that occurs in
+# the template it was authored against; a configuration change names an
+# exact setting with its exact baseline and applied values. Nothing here
+# requires the runner to invent behaviour.
 #
 # The manifest is FROZEN by digest rather than by committed rows. The
 # expander named below is a pure function of this spec, its own bytes are
@@ -780,21 +1541,58 @@ tranche_actions = 100
 total_actions = 10000
 projects_per_tranche = 2
 expander = "tools/semantic-memory-workload.mjs"
-expander_sha256 = "f420d0a662010899096128608b59aad63d08d372a349d874c6ed12273d401b11"
-manifest_sha256 = "126b0dfaf5c4d0fc9675de5839088f897a3698804b3d7c1b32e2d290134b36f1"
-manifest_columns = ["seq", "tranche", "cycle", "kind", "class", "project", "fixture", "query", "delta", "cancel_at", "result_class", "admission_class"]
+expander_sha256 = "655fd2f9862f98a2a8a1ee82f947ce4f9b5602c3c7da9d446f48b8bda0a07d3c"
+manifest_sha256 = "99031f239b8b9e43507f36277ad817aa73faabf10005e5b5368e2e467c1edc59"
+manifest_columns = ["seq", "tranche", "cycle", "kind", "class", "project", "template", "instance", "query", "delta", "cancel_at", "overlap_group", "result_class", "cache_disposition"]
 min_distinct_query_identities = 3000
 fixture_root = "catalogs/semantic-memory-workload/sources"
-same_key_repetition_rule = "Same-key repetition alone cannot satisfy this workload. Cold identities are minted per tranche, so the manifest carries at least min_distinct_query_identities distinct identities; warm and overlapping requests deliberately re-enter their own tranche's cold pool so that a warm action is genuinely warm."
-pressure_relaxation_rule = "Under the pressure budget an action whose declared admission class is cacheable may instead complete UNCACHED. It may never degrade to a partial result, a stale candidate, or a different semantic output. Every other declared class is unchanged by pressure."
+overlap_group_size = 3
+config_pair_size = 2
+same_key_repetition_rule = "Same-key repetition alone cannot satisfy this workload. Each tranche materializes its own carrier instances, so the manifest carries at least min_distinct_query_identities distinct canonical files; warm requests deliberately re-enter their own tranche's cold pool so that a warm action is genuinely warm, and cold, overlapping and cancelled requests take DISJOINT slices of that pool so no family borrows another's subject."
+pressure_relaxation_rule = "Pressure changes CACHE DISPOSITION, never semantics. Under the pressure budget a must_construct result may complete without being admitted, a reuse_if_valid request may find no valid retained entry and recompute, and an admit_if_within_entry_cap result may return complete and uncached. In every one of those cases result_class is unchanged: the recomputed result must equal the reused one. Pressure may never degrade a result to a partial, serve a stale candidate, or make a partial cacheable. must_recompute and no_admission are correctness requirements rather than cache preferences and are unchanged by pressure: serving a pre-mutation entry to a must_recompute request is a defect under every budget."
+disposition_rule = "result_class is the SEMANTIC outcome and is invariant under pressure, retention state and eviction. cache_disposition describes what the cache is permitted or required to do and is conditional on retained state. The two are separate columns precisely so a valid pressure miss cannot read as a semantic failure, and a stale hit cannot hide behind a warm expectation."
+
+# ─────────────────────────────────────────────────────────────────────────
+# Materialization.
+#
+# High key cardinality comes from materializing many distinct carrier
+# FILES out of a few frozen templates -- the technique the measurement
+# corpus already uses -- because the request API accepts a canonical file
+# and nothing else. Each tranche gets its own instance tree, and the
+# relative layout of the templates is reproduced verbatim so that a
+# template's `../shared/props-base` import resolves inside every instance
+# and each request is a genuine cross-file resolution.
+#
+# Only `carrier` and `oversize_carrier` instances are ever requested.
+# `module` instances exist to be EDITED: an edit to a shared module
+# invalidates every carrier in that project that imports it, which is the
+# reverse-dependency invalidation the workload has to cover and which a
+# self-edit cannot reach.
+# ─────────────────────────────────────────────────────────────────────────
+[workload_materialization]
+instance_root = "verter-mem0-churn"
+instance_path_rule = "{instance_root}/t{tranche:03}/{project}/{template_dir}/{template_stem}[-{ordinal:02}]{template_ext}. Carrier instances carry the pool ordinal; one-per-project instances (modules, malformed carriers, the oversize carrier) do not."
+carrier_instances_per_tranche = 36
+carrier_instance_assignment = "Instance i is materialized into project i % projects_per_tranche from template carriers[floor(i / projects_per_tranche) % carriers], so every project holds every healthy carrier shape and an instance's project is a property of the instance rather than an independent choice."
+project_config_file = "tsconfig.json"
+project_config_baseline = "{\"compilerOptions\":{\"strict\":true,\"strictNullChecks\":false,\"target\":\"ES2022\",\"lib\":[\"ES2022\",\"DOM\"],\"moduleResolution\":\"bundler\",\"paths\":{}},\"include\":[\"vue/*.vue\",\"svelte/*.svelte\",\"shared/*.ts\"]}"
+project_config_include_rule = "TypeScript include has no brace expansion, so multi-extension coverage is separate entries and never a single {vue,svelte} pattern. The baseline above owns each carrier extension explicitly, which is what makes the configured project the carriers' owner."
+oversize_template = "vue/oversize.vue"
+oversize_repeat = 20000
+oversize_marker_begin = "// REPEAT-BEGIN"
+oversize_marker_end = "// REPEAT-END"
+oversize_ordinal_placeholder = "__N__"
+oversize_expansion_rule = "The region strictly between the two markers is emitted oversize_repeat times, with every occurrence of the ordinal placeholder replaced by the zero-based repetition ordinal. The committed template holds exactly one un-expanded copy and is never itself requested."
+oversize_size_claim = "unmeasured"
+oversize_size_note = "The repetition factor is a starting point chosen to overshoot, NOT an asserted entry size. The contract does not claim the produced entry exceeds any cap; [measurement].oversize_boundary_obligation makes the runner measure it and fail when it does not."
 
 [[workload_project]]
 id = "p_vue_primary"
-description = "Vue-carrier project rooted at the fixture root"
+description = "Vue-carrier project rooted at its own materialized instance tree"
 
 [[workload_project]]
 id = "p_vue_secondary"
-description = "Second Vue-carrier project sharing the same process and the same shared modules"
+description = "Second Vue-carrier project sharing the same process and the same template set"
 
 [[workload_project]]
 id = "p_svelte_primary"
@@ -805,71 +1603,193 @@ id = "p_mixed"
 description = "Mixed-carrier project, so one process holds both adapters at once"
 
 [[workload_fixture]]
-path = "catalogs/semantic-memory-workload/sources/shared/props-base.ts"
+path = "shared/props-base.ts"
+role = "module"
 carrier = "typescript"
 health = "healthy"
 sha256 = "726bbad5c524c074875988c9662810d54af10bad2d78721939ef2cc5df2edf4c"
 
 [[workload_fixture]]
-path = "catalogs/semantic-memory-workload/sources/shared/theme.ts"
+path = "shared/theme.ts"
+role = "module"
 carrier = "typescript"
 health = "healthy"
 sha256 = "d19c0f351db216bce6514b3ccbd2d400d1be28d259f0ccea3b6d5ba5be85c9b5"
 
 [[workload_fixture]]
-path = "catalogs/semantic-memory-workload/sources/vue/card.vue"
+path = "vue/card.vue"
+role = "carrier"
 carrier = "vue"
 health = "healthy"
 sha256 = "4086d1faac6076d0877389800160b0b1a7482f4fe93794448b6a9dda0fdda173"
 
 [[workload_fixture]]
-path = "catalogs/semantic-memory-workload/sources/vue/table.vue"
+path = "vue/table.vue"
+role = "carrier"
 carrier = "vue"
 health = "healthy"
 sha256 = "06fb0c5dacb6389e81737bd93e1a9d241a423aca805302bb4ed2fe539a559b96"
 
 [[workload_fixture]]
-path = "catalogs/semantic-memory-workload/sources/vue/malformed.vue"
-carrier = "vue"
-health = "malformed"
-sha256 = "cd020cfa705664c383d26cf486d53aea8c7b7e8be5c30855f224860a3f5fff41"
-
-[[workload_fixture]]
-path = "catalogs/semantic-memory-workload/sources/svelte/panel.svelte"
+path = "svelte/panel.svelte"
+role = "carrier"
 carrier = "svelte"
 health = "healthy"
 sha256 = "4d73bbb27e0e7f20704cda2420d135c2b74dfed635feee8f7fbd5f1bff43b5e1"
 
 [[workload_fixture]]
-path = "catalogs/semantic-memory-workload/sources/svelte/list.svelte"
+path = "svelte/list.svelte"
+role = "carrier"
 carrier = "svelte"
 health = "healthy"
 sha256 = "6620098bc6b4e7d476f90cda2115a08ef172e5d4978a97da256f2939c4171fd5"
 
 [[workload_fixture]]
-path = "catalogs/semantic-memory-workload/sources/svelte/malformed.svelte"
+path = "vue/malformed.vue"
+role = "carrier"
+carrier = "vue"
+health = "malformed"
+sha256 = "cd020cfa705664c383d26cf486d53aea8c7b7e8be5c30855f224860a3f5fff41"
+
+[[workload_fixture]]
+path = "svelte/malformed.svelte"
+role = "carrier"
 carrier = "svelte"
 health = "malformed"
 sha256 = "aa6e08cf5cc87e24e6126dfd9573341eb8ae4403223c1e949921db5e6b96ac1f"
 
+[[workload_fixture]]
+path = "vue/oversize.vue"
+role = "oversize_carrier"
+carrier = "vue"
+health = "healthy"
+sha256 = "84c2d79fc0bb33618aa88953a7bbda31c9ca3ebb5b2b0b4a7ac6935ee9de4443"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Edit deltas.
+#
+# Each delta is an EXACT byte substitution against the template it is
+# authored for. The validator requires `find` to occur EXACTLY ONCE in
+# that template's frozen bytes and `replace` to differ from it, so an edit
+# is unambiguous, its inverse is well defined, and a delta cannot silently
+# stop applying when a template changes.
+#
+# Every delta changes the component's published type surface, so the edit
+# genuinely invalidates the results that depend on it rather than
+# producing a cosmetic version bump.
+# ─────────────────────────────────────────────────────────────────────────
+
+[[workload_edit_delta]]
+id = "props_base_density_widen"
+template = "shared/props-base.ts"
+find = "export type Density = \"compact\" | \"cozy\" | \"comfortable\";"
+replace = "export type Density = \"compact\" | \"cozy\" | \"comfortable\" | \"spacious\";"
+effect = "Widens a union every carrier's props surface reaches through, so every importing carrier's published density type changes."
+
+[[workload_edit_delta]]
+id = "props_base_hint_required"
+template = "shared/props-base.ts"
+find = "  hint?: string;"
+replace = "  hint: string;"
+effect = "Turns an optional member required, changing the published optionality of the Labelled surface."
+
+[[workload_edit_delta]]
+id = "theme_accent_nullable"
+template = "shared/theme.ts"
+find = "  accent: string;"
+replace = "  accent: string | null;"
+effect = "Widens a member type reached through ThemeSlice, changing the published accent type of the carriers that slice it."
+
+[[workload_edit_delta]]
+id = "theme_spacing_optional"
+template = "shared/theme.ts"
+find = "  spacing: Record<Density, number>;"
+replace = "  spacing?: Record<Density, number>;"
+effect = "Turns a required member optional, changing published optionality through ThemeSlice."
+
+[[workload_edit_delta]]
+id = "card_props_widen"
+template = "vue/card.vue"
+find = "const props = defineProps<PropsBase<Labelled>>();"
+replace = "const props = defineProps<PropsBase<Labelled> & { compact?: boolean }>();"
+effect = "Adds a declared prop, changing the component's published props surface directly."
+
+[[workload_edit_delta]]
+id = "card_emit_add"
+template = "vue/card.vue"
+find = "const emit = defineEmits<{ select: [row: Labelled] }>();"
+replace = "const emit = defineEmits<{ select: [row: Labelled]; clear: [] }>();"
+effect = "Adds a declared event, changing the component's published emit surface directly."
+
+[[workload_edit_delta]]
+id = "table_props_slice_widen"
+template = "vue/table.vue"
+find = "const props = defineProps<PropsBase<T> & ThemeSlice<\"accent\">>();"
+replace = "const props = defineProps<PropsBase<T> & ThemeSlice<\"accent\" | \"density\">>();"
+effect = "Widens a Pick key domain on an open-generic carrier, exercising the shallow carrier-stop path with a changed selection."
+
+[[workload_edit_delta]]
+id = "table_slot_widen"
+template = "vue/table.vue"
+find = "defineSlots<{ row(scope: { row: T }): unknown }>();"
+replace = "defineSlots<{ row(scope: { row: T; index: number }): unknown }>();"
+effect = "Adds a slot scope member, changing the component's published slot surface."
+
+[[workload_edit_delta]]
+id = "panel_props_widen"
+template = "svelte/panel.svelte"
+find = "  let { rows, density, selected = null }: PropsBase<Labelled> = $props();"
+replace = "  let { rows, density, selected = null, accent = null }: PropsBase<Labelled> & { accent?: string | null } = $props();"
+effect = "Adds a declared rune prop, changing the Svelte component's published props surface directly."
+
+[[workload_edit_delta]]
+id = "list_props_slice_widen"
+template = "svelte/list.svelte"
+find = "  type Props<T extends Identified> = PropsBase<T> & ThemeSlice<\"spacing\">;"
+replace = "  type Props<T extends Identified> = PropsBase<T> & ThemeSlice<\"spacing\" | \"accent\">;"
+effect = "Widens a Pick key domain on the Svelte generic carrier, changing its published props surface."
+
+# ─────────────────────────────────────────────────────────────────────────
+# Configuration deltas.
+#
+# Provider-independent, and EXACT: each names the setting it changes, the
+# value that setting holds in the materialized baseline configuration, and
+# the value it is set to. The validator resolves `setting` against
+# [workload_materialization].project_config_baseline and requires
+# `baseline_value` to be that configuration's actual value, so a delta
+# cannot describe a setting the projects do not have.
+# ─────────────────────────────────────────────────────────────────────────
+
 [[workload_configuration_delta]]
 id = "strict_null_checks"
 description = "Toggle strictNullChecks in the project configuration"
+setting = "compilerOptions.strictNullChecks"
+baseline_value = "false"
+applied_value = "true"
 provider_independent = true
 
 [[workload_configuration_delta]]
 id = "path_alias"
 description = "Add and remove a path alias covering the shared module directory"
+setting = "compilerOptions.paths"
+baseline_value = "{}"
+applied_value = "{\"@shared/*\":[\"./shared/*\"]}"
 provider_independent = true
 
 [[workload_configuration_delta]]
 id = "lib_target"
 description = "Change the declared lib target"
+setting = "compilerOptions.lib"
+baseline_value = "[\"ES2022\",\"DOM\"]"
+applied_value = "[\"ES2021\",\"DOM\"]"
 provider_independent = true
 
 [[workload_configuration_delta]]
 id = "include_glob"
-description = "Widen and narrow the include glob that owns the carrier fixtures"
+description = "Widen and narrow the include list that owns the carrier fixtures"
+setting = "include"
+baseline_value = "[\"vue/*.vue\",\"svelte/*.svelte\",\"shared/*.ts\"]"
+applied_value = "[\"vue/*.vue\",\"svelte/*.svelte\",\"shared/*.ts\",\"shared/*.d.ts\"]"
 provider_independent = true
 
 [[workload_cancellation_point]]
@@ -888,15 +1808,26 @@ description = "Cancel mid-expansion, with dependent work in flight"
 id = "before_publish"
 description = "Cancel after the result is complete and before admission"
 
+# ─────────────────────────────────────────────────────────────────────────
+# Required lifecycle classes.
+#
+# These rows DESCRIBE the required population; they do not DEFINE it. The
+# validator holds its own list, transcribed from the binding resource
+# contract, and requires every member of that list to be declared here as
+# required AND covered by the manifest. Deleting a row, or flipping its
+# `required` flag, therefore fails validation instead of shrinking the
+# obligation.
+# ─────────────────────────────────────────────────────────────────────────
+
 [[workload_class]]
 id = "vue_carrier"
 required = true
-description = "Actions against a Vue carrier fixture"
+description = "Actions against a Vue carrier instance"
 
 [[workload_class]]
 id = "svelte_carrier"
 required = true
-description = "Actions against a Svelte carrier fixture"
+description = "Actions against a Svelte carrier instance"
 
 [[workload_class]]
 id = "cold_request"
@@ -906,7 +1837,7 @@ description = "A request whose result must be constructed"
 [[workload_class]]
 id = "warm_request"
 required = true
-description = "A request that must reuse an existing entry"
+description = "A request that reuses a valid retained entry when one exists"
 
 [[workload_class]]
 id = "high_cardinality_key"
@@ -916,12 +1847,17 @@ description = "Distinct query identities beyond min_distinct_query_identities"
 [[workload_class]]
 id = "edit"
 required = true
-description = "A content edit to a fixture"
+description = "An exact content edit to a materialized instance"
 
 [[workload_class]]
 id = "revert"
 required = true
-description = "The matching revert of an edit within the same tranche"
+description = "The matching revert of an edit, on the same instance, within the same tranche"
+
+[[workload_class]]
+id = "post_mutation_request"
+required = true
+description = "A request issued after an edit that invalidated it, which must recompute rather than reuse"
 
 [[workload_class]]
 id = "project_open"
@@ -929,9 +1865,14 @@ required = true
 description = "Opening a project session in a process that already holds others"
 
 [[workload_class]]
+id = "concurrent_project_sessions"
+required = true
+description = "More than one project session open in one process at the same time"
+
+[[workload_class]]
 id = "project_close"
 required = true
-description = "Closing a project session"
+description = "Closing a project session with no reader outstanding"
 
 [[workload_class]]
 id = "project_close_with_active_readers"
@@ -941,12 +1882,12 @@ description = "Closing a project while public result handles are still held"
 [[workload_class]]
 id = "configuration_change"
 required = true
-description = "A provider-independent configuration delta, applied and reverted"
+description = "A provider-independent configuration delta, applied and reverted on the same project"
 
 [[workload_class]]
 id = "overlapping_request"
 required = true
-description = "Concurrent demand on one key, which must collapse onto one construction"
+description = "Concurrent demand on one uncomputed key, which must collapse onto one construction"
 
 [[workload_class]]
 id = "cancellation"
@@ -956,7 +1897,12 @@ description = "A request cancelled at a declared cancellation point"
 [[workload_class]]
 id = "failed_construction"
 required = true
-description = "A request whose construction fails against a malformed fixture"
+description = "A request whose construction fails against a malformed instance"
+
+[[workload_class]]
+id = "oversized_entry"
+required = true
+description = "A complete result too large for the active mode's per-entry admission cap"
 
 [[workload_class]]
 id = "retained_result_hold"
@@ -981,105 +1927,108 @@ description = "The per-tranche return to the control live set"
 [[workload_kind]]
 kind = "open_project"
 class = "project_open"
-fixture_pool = "healthy"
 result_class = "project_opened"
-admission_class = "none"
+cache_disposition = "no_admission"
 
 [[workload_kind]]
 kind = "request_cold"
 class = "cold_request"
-fixture_pool = "healthy"
 result_class = "complete"
-admission_class = "cacheable"
+cache_disposition = "must_construct"
 
 [[workload_kind]]
 kind = "request_warm"
 class = "warm_request"
-fixture_pool = "healthy"
 result_class = "complete"
-admission_class = "warm_hit"
-
-[[workload_kind]]
-kind = "edit"
-class = "edit"
-fixture_pool = "healthy"
-result_class = "edited"
-admission_class = "none"
-
-[[workload_kind]]
-kind = "revert"
-class = "revert"
-fixture_pool = "healthy"
-result_class = "reverted"
-admission_class = "none"
-
-[[workload_kind]]
-kind = "config_change"
-class = "configuration_change"
-fixture_pool = "healthy"
-result_class = "configuration_applied"
-admission_class = "none"
+cache_disposition = "reuse_if_valid"
 
 [[workload_kind]]
 kind = "request_overlapping"
 class = "overlapping_request"
-fixture_pool = "healthy"
 result_class = "complete"
-admission_class = "singleflight_join"
+cache_disposition = "must_construct"
+
+[[workload_kind]]
+kind = "edit"
+class = "edit"
+result_class = "edited"
+cache_disposition = "no_admission"
+
+[[workload_kind]]
+kind = "request_after_edit"
+class = "post_mutation_request"
+result_class = "complete"
+cache_disposition = "must_recompute"
+
+[[workload_kind]]
+kind = "revert"
+class = "revert"
+result_class = "reverted"
+cache_disposition = "no_admission"
+
+[[workload_kind]]
+kind = "config_change"
+class = "configuration_change"
+result_class = "configuration_applied"
+cache_disposition = "no_admission"
 
 [[workload_kind]]
 kind = "request_cancelled"
 class = "cancellation"
-fixture_pool = "healthy"
 result_class = "cancelled"
-admission_class = "return_only"
+cache_disposition = "no_admission"
 
 [[workload_kind]]
 kind = "request_failed_construction"
 class = "failed_construction"
-fixture_pool = "malformed"
 result_class = "failed"
-admission_class = "return_only"
+cache_disposition = "no_admission"
+
+[[workload_kind]]
+kind = "request_oversized"
+class = "oversized_entry"
+result_class = "complete"
+cache_disposition = "admit_if_within_entry_cap"
 
 [[workload_kind]]
 kind = "hold_result"
 class = "retained_result_hold"
-fixture_pool = "healthy"
 result_class = "pinned"
-admission_class = "none"
+cache_disposition = "no_admission"
 
 [[workload_kind]]
 kind = "release_result"
 class = "retained_result_release"
-fixture_pool = "healthy"
 result_class = "released"
-admission_class = "none"
+cache_disposition = "no_admission"
 
 [[workload_kind]]
 kind = "close_project"
 class = "project_close"
-fixture_pool = "healthy"
 result_class = "closed_quiescent"
-admission_class = "none"
+cache_disposition = "no_admission"
 
 [[workload_kind]]
 kind = "sample"
 class = "sampling"
-fixture_pool = "healthy"
 result_class = "sampled"
-admission_class = "none"
+cache_disposition = "no_admission"
 
 [[workload_kind]]
 kind = "control_checkpoint"
 class = "control_checkpoint"
-fixture_pool = "healthy"
 result_class = "control_restored"
-admission_class = "none"
+cache_disposition = "no_admission"
 
 # Per-tranche step order. Cycle a and cycle b alternate by tranche index.
 # They differ in ONE place: cycle b closes its projects while result
 # handles are still held, which is the "closed project with active
 # readers" boundary a single ordering can never reach.
+#
+# Overlapping requests run BEFORE any edit, so their subjects are pristine
+# and the group genuinely races on a key nothing has constructed. The
+# post-edit requests run between the edits and their reverts, so they are
+# requests against currently-invalidated state.
 
 [[workload_step]]
 cycle = "a"
@@ -1098,13 +2047,18 @@ count = 10
 
 [[workload_step]]
 cycle = "a"
+kind = "request_overlapping"
+count = 6
+
+[[workload_step]]
+cycle = "a"
 kind = "edit"
 count = 8
 
 [[workload_step]]
 cycle = "a"
-kind = "request_warm"
-count = 10
+kind = "request_after_edit"
+count = 8
 
 [[workload_step]]
 cycle = "a"
@@ -1118,11 +2072,6 @@ count = 4
 
 [[workload_step]]
 cycle = "a"
-kind = "request_overlapping"
-count = 6
-
-[[workload_step]]
-cycle = "a"
 kind = "request_cancelled"
 count = 4
 
@@ -1130,6 +2079,11 @@ count = 4
 cycle = "a"
 kind = "request_failed_construction"
 count = 4
+
+[[workload_step]]
+cycle = "a"
+kind = "request_oversized"
+count = 2
 
 [[workload_step]]
 cycle = "a"
@@ -1173,13 +2127,18 @@ count = 10
 
 [[workload_step]]
 cycle = "b"
+kind = "request_overlapping"
+count = 6
+
+[[workload_step]]
+cycle = "b"
 kind = "edit"
 count = 8
 
 [[workload_step]]
 cycle = "b"
-kind = "request_warm"
-count = 10
+kind = "request_after_edit"
+count = 8
 
 [[workload_step]]
 cycle = "b"
@@ -1193,11 +2152,6 @@ count = 4
 
 [[workload_step]]
 cycle = "b"
-kind = "request_overlapping"
-count = 6
-
-[[workload_step]]
-cycle = "b"
 kind = "request_cancelled"
 count = 4
 
@@ -1205,6 +2159,11 @@ count = 4
 cycle = "b"
 kind = "request_failed_construction"
 count = 4
+
+[[workload_step]]
+cycle = "b"
+kind = "request_oversized"
+count = 2
 
 [[workload_step]]
 cycle = "b"

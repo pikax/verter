@@ -23,11 +23,15 @@
     "workload_class",
     "workload_kind",
     "workload_step",
-    "command"
+    "command",
+    "limit_derivation",
+    "store_field",
+    "workload_materialization",
+    "workload_edit_delta"
   ],
   "properties": {
     "schema": {
-      "const": 1
+      "const": 2
     },
     "product": {
       "const": "rev11"
@@ -63,7 +67,10 @@
         "recorded_measurement_document",
         "recorded_measurement_document_retained",
         "equivalent_work_rule",
-        "invalid_historical_result_rule"
+        "invalid_historical_result_rule",
+        "measured_peak_rss_citation",
+        "measured_wall_citation",
+        "locked_wall_absolute_max_ns"
       ],
       "properties": {
         "source_file": {
@@ -151,6 +158,18 @@
         "invalid_historical_result_rule": {
           "type": "string",
           "minLength": 40
+        },
+        "measured_peak_rss_citation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "measured_wall_citation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "locked_wall_absolute_max_ns": {
+          "type": "integer",
+          "minimum": 1
         }
       }
     },
@@ -162,7 +181,8 @@
         "measured_peak_rss_bytes_per_file",
         "projected_peak_rss_bytes_at_supported_scale",
         "headroom_bytes_at_supported_scale",
-        "product_budget_statement"
+        "product_budget_statement",
+        "product_budget_citation"
       ],
       "properties": {
         "supported_workload_files": {
@@ -182,6 +202,10 @@
           "minimum": 1
         },
         "product_budget_statement": {
+          "type": "string",
+          "minLength": 20
+        },
+        "product_budget_citation": {
           "type": "string",
           "minLength": 20
         }
@@ -302,7 +326,11 @@
         "visibility",
         "backpressure",
         "degradation_rule",
-        "oversized_complete_result"
+        "oversized_complete_result",
+        "copy_versus_share_rule",
+        "coexistence_rule",
+        "release_order_rule",
+        "provisional_adoption_rule"
       ],
       "properties": {
         "hard_bound_over_caller_retained_results": {
@@ -324,6 +352,22 @@
           "minLength": 40
         },
         "oversized_complete_result": {
+          "type": "string",
+          "minLength": 40
+        },
+        "copy_versus_share_rule": {
+          "type": "string",
+          "minLength": 40
+        },
+        "coexistence_rule": {
+          "type": "string",
+          "minLength": 40
+        },
+        "release_order_rule": {
+          "type": "string",
+          "minLength": 40
+        },
+        "provisional_adoption_rule": {
           "type": "string",
           "minLength": 40
         }
@@ -349,7 +393,9 @@
         "confidence_percent",
         "bootstrap_resamples",
         "no_regression_floor_milli_percent",
-        "noise_multiplier_permille"
+        "noise_multiplier_permille",
+        "pressure_boundary_obligation",
+        "oversize_boundary_obligation"
       ],
       "properties": {
         "sampling_interval_actions": {
@@ -416,6 +462,14 @@
         "noise_multiplier_permille": {
           "type": "integer",
           "minimum": 1
+        },
+        "pressure_boundary_obligation": {
+          "type": "string",
+          "minLength": 40
+        },
+        "oversize_boundary_obligation": {
+          "type": "string",
+          "minLength": 40
         }
       }
     },
@@ -437,7 +491,11 @@
           "lifetime_owner",
           "admission_owner",
           "shared_reference_rule",
-          "metric_rows"
+          "metric_rows",
+          "covers_store_fields",
+          "charge_observability",
+          "gap",
+          "completion_owner"
         ],
         "properties": {
           "id": {
@@ -504,12 +562,40 @@
           },
           "metric_rows": {
             "type": "array",
-            "minItems": 1,
+            "minItems": 0,
             "uniqueItems": true,
             "items": {
               "type": "string",
               "minLength": 1
             }
+          },
+          "covers_store_fields": {
+            "type": "array",
+            "minItems": 0,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "charge_observability": {
+            "enum": [
+              "charge_instrumented",
+              "proxy_instrumented",
+              "uninstrumented"
+            ]
+          },
+          "gap": {
+            "type": "string",
+            "minLength": 1
+          },
+          "completion_owner": {
+            "enum": [
+              "E4",
+              "MEM1",
+              "G4",
+              "L1"
+            ]
           }
         }
       }
@@ -589,7 +675,10 @@
         "min_distinct_query_identities",
         "fixture_root",
         "same_key_repetition_rule",
-        "pressure_relaxation_rule"
+        "pressure_relaxation_rule",
+        "overlap_group_size",
+        "config_pair_size",
+        "disposition_rule"
       ],
       "properties": {
         "tranches": {
@@ -644,6 +733,18 @@
         "pressure_relaxation_rule": {
           "type": "string",
           "minLength": 40
+        },
+        "overlap_group_size": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "config_pair_size": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "disposition_rule": {
+          "type": "string",
+          "minLength": 40
         }
       }
     },
@@ -679,7 +780,8 @@
           "path",
           "carrier",
           "health",
-          "sha256"
+          "sha256",
+          "role"
         ],
         "properties": {
           "path": {
@@ -702,6 +804,13 @@
           "sha256": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
+          },
+          "role": {
+            "enum": [
+              "carrier",
+              "module",
+              "oversize_carrier"
+            ]
           }
         }
       }
@@ -715,7 +824,10 @@
         "required": [
           "id",
           "description",
-          "provider_independent"
+          "provider_independent",
+          "setting",
+          "baseline_value",
+          "applied_value"
         ],
         "properties": {
           "id": {
@@ -728,6 +840,18 @@
           },
           "provider_independent": {
             "const": true
+          },
+          "setting": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_]*(.[A-Za-z][A-Za-z0-9_]*)*$"
+          },
+          "baseline_value": {
+            "type": "string",
+            "minLength": 1
+          },
+          "applied_value": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }
@@ -789,9 +913,8 @@
         "required": [
           "kind",
           "class",
-          "fixture_pool",
           "result_class",
-          "admission_class"
+          "cache_disposition"
         ],
         "properties": {
           "kind": {
@@ -802,23 +925,18 @@
             "type": "string",
             "pattern": "^[a-z][a-z0-9_]*$"
           },
-          "fixture_pool": {
-            "enum": [
-              "healthy",
-              "malformed"
-            ]
-          },
           "result_class": {
             "type": "string",
             "minLength": 1
           },
-          "admission_class": {
+          "cache_disposition": {
             "enum": [
-              "cacheable",
-              "warm_hit",
-              "singleflight_join",
-              "return_only",
-              "none"
+              "must_construct",
+              "join_inflight",
+              "reuse_if_valid",
+              "must_recompute",
+              "admit_if_within_entry_cap",
+              "no_admission"
             ]
           }
         }
@@ -889,6 +1007,212 @@
           },
           "bound": {
             "type": "boolean"
+          }
+        }
+      }
+    },
+    "limit_derivation": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "mode",
+          "limit",
+          "value",
+          "derivation",
+          "evidence",
+          "blocking_metric_row",
+          "completion_owner"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^(normal|pressure).[a-z][a-z0-9_]*$"
+          },
+          "mode": {
+            "enum": [
+              "normal",
+              "pressure"
+            ]
+          },
+          "limit": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "value": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "derivation": {
+            "enum": [
+              "measured",
+              "provisional"
+            ]
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 40
+          },
+          "blocking_metric_row": {
+            "type": "string",
+            "minLength": 1
+          },
+          "completion_owner": {
+            "enum": [
+              "none",
+              "E4",
+              "MEM1",
+              "G4",
+              "L1"
+            ]
+          }
+        }
+      }
+    },
+    "store_field": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "field",
+          "disposition",
+          "reason"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "disposition": {
+            "const": "non_retaining"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 20
+          }
+        }
+      }
+    },
+    "workload_materialization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instance_root",
+        "instance_path_rule",
+        "carrier_instances_per_tranche",
+        "carrier_instance_assignment",
+        "project_config_file",
+        "project_config_baseline",
+        "project_config_include_rule",
+        "oversize_template",
+        "oversize_repeat",
+        "oversize_marker_begin",
+        "oversize_marker_end",
+        "oversize_ordinal_placeholder",
+        "oversize_expansion_rule",
+        "oversize_size_claim",
+        "oversize_size_note"
+      ],
+      "properties": {
+        "instance_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instance_path_rule": {
+          "type": "string",
+          "minLength": 20
+        },
+        "carrier_instances_per_tranche": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "carrier_instance_assignment": {
+          "type": "string",
+          "minLength": 40
+        },
+        "project_config_file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "project_config_baseline": {
+          "type": "string",
+          "minLength": 20
+        },
+        "project_config_include_rule": {
+          "type": "string",
+          "minLength": 40
+        },
+        "oversize_template": {
+          "type": "string",
+          "minLength": 1
+        },
+        "oversize_repeat": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "oversize_marker_begin": {
+          "type": "string",
+          "minLength": 1
+        },
+        "oversize_marker_end": {
+          "type": "string",
+          "minLength": 1
+        },
+        "oversize_ordinal_placeholder": {
+          "type": "string",
+          "minLength": 1
+        },
+        "oversize_expansion_rule": {
+          "type": "string",
+          "minLength": 40
+        },
+        "oversize_size_claim": {
+          "const": "unmeasured"
+        },
+        "oversize_size_note": {
+          "type": "string",
+          "minLength": 40
+        }
+      }
+    },
+    "workload_edit_delta": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "template",
+          "find",
+          "replace",
+          "effect"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "template": {
+            "type": "string",
+            "minLength": 1
+          },
+          "find": {
+            "type": "string",
+            "minLength": 1
+          },
+          "replace": {
+            "type": "string",
+            "minLength": 1
+          },
+          "effect": {
+            "type": "string",
+            "minLength": 20
           }
         }
       }

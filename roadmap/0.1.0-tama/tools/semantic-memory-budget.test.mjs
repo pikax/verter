@@ -13,6 +13,12 @@
 // contract is sound" is not a control, so step 1 and step 3 are not
 // decoration. The clean-tree case runs first and asserts zero errors, so a
 // validator that failed everything unconditionally would not pass here.
+//
+// Several controls drive one invariant checker directly with a hand-built
+// action list. That is deliberate: the frozen expander cannot produce a
+// mispaired configuration revert or a split overlap group, so mutating the
+// catalog could not reach those invariants at all, and a check nothing can
+// fail is not a check.
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -21,9 +27,14 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  coverageErrors,
   loadCatalog,
   loadSchema,
+  overlapGroupErrors,
   PACKAGE_ROOT,
+  postMutationErrors,
+  projectTypeStoreFields,
+  trancheErrors,
   validateSemanticMemoryBudgetModel,
 } from "./semantic-memory-budget.mjs";
 import { expandWorkload, serializeManifest } from "./semantic-memory-workload.mjs";
@@ -51,6 +62,8 @@ function refusedBecause(errors, needle) {
 test("the committed contract validates clean", () => {
   assert.deepEqual(validate(freshCatalog()), []);
 });
+
+// ── budget shape ─────────────────────────────────────────────────────────
 
 test("a missing budget limit is refused", () => {
   const catalog = freshCatalog();
@@ -96,6 +109,64 @@ test("a pressure ceiling at or above the normal ceiling is refused", () => {
   refusedBecause(validate(catalog), "must be below the normal ceiling");
 });
 
+test("a pressure entry cap above the per-request cap makes the oversized boundary unreachable", () => {
+  const catalog = freshCatalog();
+  const before = catalog.budget.pressure.per_entry_admission_max_bytes;
+  assert.equal(before, catalog.budget.pressure.per_request_active_max_bytes);
+  catalog.budget.pressure.per_entry_admission_max_bytes = before * 2;
+  assert.notEqual(catalog.budget.pressure.per_entry_admission_max_bytes, before);
+  refusedBecause(validate(catalog), "the oversized-entry boundary is unreachable");
+});
+
+// ── limit provenance ─────────────────────────────────────────────────────
+
+test("a provisional limit relabelled as measured is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.limit_derivation.find(
+    (entry) => entry.id === "normal.cache_owned_retained_max_bytes",
+  );
+  assert.equal(row.derivation, "provisional", "pre-state: the retained ceiling is not measured");
+  row.derivation = "measured";
+  assert.equal(row.derivation, "measured", "post-state: the mutation did not apply");
+  refusedBecause(validate(catalog), "a measured limit is not blocked on anything");
+});
+
+test("a provisional limit blocked on a complete emitter is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.limit_derivation.find(
+    (entry) => entry.id === "normal.cache_owned_retained_max_bytes",
+  );
+  const complete = catalog.metric_row.find((entry) => entry.emitter_status === "complete");
+  assert.ok(complete, "pre-state: at least one emitter is complete");
+  assert.notEqual(row.blocking_metric_row, complete.id);
+  row.blocking_metric_row = complete.id;
+  refusedBecause(validate(catalog), "blocks nothing");
+});
+
+test("a ratified limit with no recorded derivation is refused", () => {
+  const catalog = freshCatalog();
+  const before = catalog.limit_derivation.length;
+  catalog.limit_derivation = catalog.limit_derivation.filter(
+    (entry) => entry.id !== "pressure.per_entry_admission_max_bytes",
+  );
+  assert.equal(catalog.limit_derivation.length, before - 1, "post-state: the row was not removed");
+  refusedBecause(
+    validate(catalog),
+    "budget.pressure.per_entry_admission_max_bytes is ratified with no recorded derivation",
+  );
+});
+
+test("a derivation whose value drifts from the budget it explains is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.limit_derivation.find((entry) => entry.id === "normal.process_rss_max_bytes");
+  const before = row.value;
+  row.value = before + 1;
+  assert.notEqual(row.value, before);
+  refusedBecause(validate(catalog), "but the budget declares");
+});
+
+// ── pinned-result policy ─────────────────────────────────────────────────
+
 test("a pinned-result policy claiming a hard bound over caller-held results is refused", () => {
   const catalog = freshCatalog();
   assert.equal(catalog.pinned_result_policy.hard_bound_over_caller_retained_results, false);
@@ -111,6 +182,26 @@ test("a policy that revokes live public handles is refused", () => {
   refusedBecause(validate(catalog), "revocation_of_live_public_handles: expected constant");
 });
 
+test("dropping the copy-versus-share ownership rule is refused", () => {
+  const catalog = freshCatalog();
+  assert.ok(
+    catalog.pinned_result_policy.copy_versus_share_rule.length > 40,
+    "pre-state: the rule distinguishing a copy from a shared handle is stated",
+  );
+  delete catalog.pinned_result_policy.copy_versus_share_rule;
+  assert.ok(!Object.hasOwn(catalog.pinned_result_policy, "copy_versus_share_rule"));
+  refusedBecause(validate(catalog), "missing required property copy_versus_share_rule");
+});
+
+test("dropping the release-order rule is refused", () => {
+  const catalog = freshCatalog();
+  assert.ok(catalog.pinned_result_policy.release_order_rule.length > 40);
+  delete catalog.pinned_result_policy.release_order_rule;
+  refusedBecause(validate(catalog), "missing required property release_order_rule");
+});
+
+// ── baseline provenance ──────────────────────────────────────────────────
+
 test("a scale derivation that does not follow from the recorded measurement is refused", () => {
   const catalog = freshCatalog();
   const before = catalog.scale.measured_peak_rss_bytes_per_file;
@@ -118,6 +209,91 @@ test("a scale derivation that does not follow from the recorded measurement is r
   assert.notEqual(catalog.scale.measured_peak_rss_bytes_per_file, before);
   refusedBecause(validate(catalog), "but the recorded measurement divides to");
 });
+
+test("a baseline whose corpus digest no longer recomputes is refused", () => {
+  const catalog = freshCatalog();
+  const before = catalog.baseline.corpus_sha256;
+  catalog.baseline.corpus_sha256 = `${"0".repeat(63)}1`;
+  assert.notEqual(catalog.baseline.corpus_sha256, before);
+  refusedBecause(validate(catalog), "is not equivalent work on this tree");
+});
+
+test("a baseline that stops citing the locked gate file is refused", () => {
+  const catalog = freshCatalog();
+  const before = catalog.baseline.baseline_sha;
+  catalog.baseline.baseline_sha = "0".repeat(40);
+  assert.notEqual(catalog.baseline.baseline_sha, before);
+  refusedBecause(validate(catalog), "baseline sha is not cited by");
+});
+
+test("an unretained document claimed as retained is refused", () => {
+  const catalog = freshCatalog();
+  assert.equal(
+    catalog.baseline.recorded_measurement_document_retained,
+    false,
+    "pre-state: the raw measurement record is disclosed as unretained",
+  );
+  catalog.baseline.recorded_measurement_document_retained = true;
+  refusedBecause(validate(catalog), "declared retained but does not resolve");
+});
+
+test("a fabricated peak-RSS measurement is refused even with self-consistent arithmetic", () => {
+  // The forgery this control models is the coherent one: not a number that
+  // fails an internal identity, but a number the lock never recorded, with
+  // every derived figure adjusted to agree with it. Only resolving the
+  // value against the authority that recorded it can reject this.
+  const catalog = freshCatalog();
+  assert.equal(catalog.baseline.measured_peak_rss_bytes, 74850304, "pre-state: the locked value");
+  catalog.baseline.measured_peak_rss_bytes = 41;
+  catalog.baseline.measured_peak_rss_citation = "baseline is 41 bytes";
+  catalog.scale.measured_peak_rss_bytes_per_file = 1;
+  catalog.scale.projected_peak_rss_bytes_at_supported_scale = 1000;
+  catalog.scale.headroom_bytes_at_supported_scale =
+    catalog.budget.normal.process_rss_max_bytes - 1000;
+  assert.equal(catalog.baseline.measured_peak_rss_bytes, 41, "post-state: the forgery applied");
+  const errors = validate(catalog);
+  // The arithmetic no longer discriminates: the derived figures agree.
+  assert.ok(
+    !errors.some((error) => error.includes("divides to")),
+    `the forgery was made self-consistent, so arithmetic must not be what rejects it:\n${errors.join("\n")}`,
+  );
+  refusedBecause(errors, "does not record the peak RSS measurement");
+});
+
+test("a fabricated wall-time measurement is refused", () => {
+  const catalog = freshCatalog();
+  assert.equal(catalog.baseline.measured_wall_ns, 70525000);
+  catalog.baseline.measured_wall_ns = 1;
+  catalog.baseline.measured_wall_citation = "baseline is 1 ns";
+  refusedBecause(validate(catalog), "does not record the wall time measurement");
+});
+
+test("a citation that does not render its own restated value is refused", () => {
+  const catalog = freshCatalog();
+  const before = catalog.baseline.measured_peak_rss_citation;
+  catalog.baseline.measured_peak_rss_citation = "baseline is 74850304 bytes";
+  assert.notEqual(catalog.baseline.measured_peak_rss_citation, before);
+  refusedBecause(validate(catalog), "renders as");
+});
+
+test("a fabricated relative regression limit is refused", () => {
+  const catalog = freshCatalog();
+  const before = catalog.baseline.locked_peak_rss_no_regression_milli_percent;
+  assert.equal(before, 4952, "pre-state: the locked 4.952% carried as milli-percent");
+  catalog.baseline.locked_peak_rss_no_regression_milli_percent = 999999;
+  assert.notEqual(catalog.baseline.locked_peak_rss_no_regression_milli_percent, before);
+  refusedBecause(validate(catalog), "but the locked cell declares 4952");
+});
+
+test("a fabricated absolute wall limit is refused", () => {
+  const catalog = freshCatalog();
+  const before = catalog.baseline.locked_wall_absolute_max_ns;
+  catalog.baseline.locked_wall_absolute_max_ns = before * 10;
+  assert.notEqual(catalog.baseline.locked_wall_absolute_max_ns, before);
+  refusedBecause(validate(catalog), "wall_ns|median|absolute_max is restated as");
+});
+
+// ── allocation inventory ─────────────────────────────────────────────────
 
 test("two allocation classes sharing one charge owner are refused", () => {
   const catalog = freshCatalog();
@@ -151,6 +327,109 @@ test("dropping an ownership category from the inventory is refused", () => {
   refusedBecause(validate(catalog), "no class carries externally_pinned ownership");
 });
 
+test("deleting an allocation class leaves its retained storage unaccounted", () => {
+  // The omission check that the previous inventory did not have: the
+  // required population is the store's own field list, so removing a row
+  // cannot quietly shrink the contract.
+  const catalog = freshCatalog();
+  const victim = catalog.allocation_class.find((row) => row.id === "route_db");
+  assert.ok(victim, "pre-state: the route cache is inventoried");
+  assert.deepEqual(victim.covers_store_fields, ["routes"]);
+  const before = catalog.allocation_class.length;
+  catalog.allocation_class = catalog.allocation_class.filter((row) => row.id !== "route_db");
+  assert.equal(catalog.allocation_class.length, before - 1, "post-state: the row was not removed");
+  refusedBecause(
+    validate(catalog),
+    "ProjectTypeStore field routes is retained by the store but has no allocation class",
+  );
+});
+
+test("deleting a class that covers no store field is refused", () => {
+  // The store's field list cannot notice this one: retained parse
+  // snapshots live on the lowering service, not on the store. The
+  // charter's own named categories are the independent inventory for it.
+  const catalog = freshCatalog();
+  const victim = catalog.allocation_class.find((row) => row.id === "retained_parse_snapshot");
+  assert.deepEqual(victim.covers_store_fields, [], "pre-state: it is not a store field");
+  assert.equal(victim.ownership, "cache_owned");
+  const before = catalog.allocation_class.length;
+  catalog.allocation_class = catalog.allocation_class.filter(
+    (row) => row.id !== "retained_parse_snapshot",
+  );
+  assert.equal(catalog.allocation_class.length, before - 1, "post-state: the row was not removed");
+  refusedBecause(
+    validate(catalog),
+    "the charter requires allocation class retained_parse_snapshot, which this catalog does not declare",
+  );
+});
+
+test("deleting the caller-owned copy class is refused", () => {
+  const catalog = freshCatalog();
+  assert.ok(catalog.allocation_class.some((row) => row.id === "public_result_copy"));
+  catalog.allocation_class = catalog.allocation_class.filter(
+    (row) => row.id !== "public_result_copy",
+  );
+  // The shared-pin class still carries externally_pinned ownership, so the
+  // ownership check alone would let this through.
+  assert.ok(catalog.allocation_class.some((row) => row.ownership === "externally_pinned"));
+  refusedBecause(validate(catalog), "the charter requires allocation class public_result_copy");
+});
+
+test("a store field disposition the struct no longer has is refused", () => {
+  const catalog = freshCatalog();
+  const fields = projectTypeStoreFields();
+  assert.ok(fields.includes("counters"), "pre-state: the field list resolves from source");
+  catalog.store_field.push({
+    field: "a_field_that_was_deleted",
+    disposition: "non_retaining",
+    reason: "A stale disposition for a field the store no longer declares at all.",
+  });
+  refusedBecause(validate(catalog), "ProjectTypeStore has no such field");
+});
+
+test("declaring a retained store field non-retaining while also charging it is refused", () => {
+  const catalog = freshCatalog();
+  catalog.store_field.push({
+    field: "routes",
+    disposition: "non_retaining",
+    reason: "Claiming a real cache holds no payload while a class also charges it.",
+  });
+  refusedBecause(validate(catalog), "it is one or the other");
+});
+
+test("a class claiming its charge is instrumented without a byte gauge is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.allocation_class.find(
+    (entry) => entry.id === "materialize_structure_candidates",
+  );
+  assert.equal(row.charge_observability, "proxy_instrumented", "pre-state: it is a proxy only");
+  row.charge_observability = "charge_instrumented";
+  row.gap = "none";
+  assert.equal(row.charge_observability, "charge_instrumented");
+  refusedBecause(validate(catalog), "requires a cited Bytes or Gauge row with a complete emitter");
+});
+
+test("a class recorded uninstrumented while citing metric rows is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.allocation_class.find(
+    (entry) => entry.id === "materialize_structure_candidates",
+  );
+  assert.ok(row.metric_rows.length > 0, "pre-state: it cites a site");
+  row.charge_observability = "uninstrumented";
+  refusedBecause(validate(catalog), "cite none or record it as proxy_instrumented");
+});
+
+test("a class hiding its observability gap is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.allocation_class.find((entry) => entry.id === "public_result_copy");
+  assert.equal(row.charge_observability, "uninstrumented");
+  assert.notEqual(row.gap, "none", "pre-state: the gap is stated");
+  row.gap = "none";
+  refusedBecause(validate(catalog), "must state the observability gap it leaves");
+});
+
+// ── metric rows ──────────────────────────────────────────────────────────
+
 test("a metric row naming a nonexistent instrumentation site is refused", () => {
   const catalog = freshCatalog();
   const row = catalog.metric_row[0];
@@ -180,33 +459,6 @@ test("a metric row anchored at a file that does not raise it is refused", () => 
   refusedBecause(validate(catalog), "no longer raises DeclBodyLower");
 });
 
-test("a baseline whose corpus digest no longer recomputes is refused", () => {
-  const catalog = freshCatalog();
-  const before = catalog.baseline.corpus_sha256;
-  catalog.baseline.corpus_sha256 = `${"0".repeat(63)}1`;
-  assert.notEqual(catalog.baseline.corpus_sha256, before);
-  refusedBecause(validate(catalog), "is not equivalent work on this tree");
-});
-
-test("a baseline that stops citing the locked gate file is refused", () => {
-  const catalog = freshCatalog();
-  const before = catalog.baseline.baseline_sha;
-  catalog.baseline.baseline_sha = "0".repeat(40);
-  assert.notEqual(catalog.baseline.baseline_sha, before);
-  refusedBecause(validate(catalog), "baseline sha is not cited by");
-});
-
-test("an unretained document claimed as retained is refused", () => {
-  const catalog = freshCatalog();
-  assert.equal(
-    catalog.baseline.recorded_measurement_document_retained,
-    false,
-    "pre-state: the raw measurement record is disclosed as unretained",
-  );
-  catalog.baseline.recorded_measurement_document_retained = true;
-  refusedBecause(validate(catalog), "declared retained but does not resolve");
-});
-
 test("an incomplete emitter recorded as complete is refused", () => {
   const catalog = freshCatalog();
   const row = catalog.metric_row.find((entry) => entry.emitter_status === "partial");
@@ -215,6 +467,144 @@ test("an incomplete emitter recorded as complete is refused", () => {
   assert.equal(row.emitter_status, "complete");
   refusedBecause(validate(catalog), "a complete emitter may not record a gap");
 });
+
+test("the admission and arena rows are recorded partial, not complete", () => {
+  // These three sites do not measure the roles the budget reads them for:
+  // the return-only counter is raised for every ReturnOnly decision
+  // including broken taint while budget and cancellation paths bypass it
+  // entirely, and the two arena rows are recorded once at parse time
+  // rather than tracked across the pin transfer and release. Recording
+  // them complete would make the accounting look instrumented.
+  const catalog = freshCatalog();
+  for (const id of [
+    "session.cache_admit_return_only",
+    "session.parse_arena_used",
+    "session.parse_arena_capacity",
+  ]) {
+    const row = catalog.metric_row.find((entry) => entry.id === id);
+    assert.ok(row, `${id} must be declared`);
+    assert.equal(row.emitter_status, "partial", `${id} must not claim a complete emitter`);
+    assert.notEqual(row.gap, "none", `${id} must state its gap`);
+  }
+});
+
+// ── fixtures, edits and configuration ────────────────────────────────────
+
+test("an omitted carrier is refused", () => {
+  const catalog = freshCatalog();
+  const before = catalog.workload_fixture.length;
+  catalog.workload_fixture = catalog.workload_fixture.filter(
+    (fixture) => fixture.carrier !== "svelte",
+  );
+  assert.ok(catalog.workload_fixture.length < before);
+  refusedBecause(validate(catalog), "the svelte carrier is not covered");
+});
+
+test("an omitted oversize input is refused", () => {
+  const catalog = freshCatalog();
+  const before = catalog.workload_fixture.length;
+  catalog.workload_fixture = catalog.workload_fixture.filter(
+    (fixture) => fixture.role !== "oversize_carrier",
+  );
+  assert.equal(catalog.workload_fixture.length, before - 1, "post-state: the row was not removed");
+  refusedBecause(validate(catalog), "no oversize_carrier fixture is declared");
+});
+
+test("an oversize template without its declared expansion markers is refused", () => {
+  const catalog = freshCatalog();
+  const before = catalog.workload_materialization.oversize_ordinal_placeholder;
+  catalog.workload_materialization.oversize_ordinal_placeholder = "__NOT_IN_THE_TEMPLATE__";
+  assert.notEqual(catalog.workload_materialization.oversize_ordinal_placeholder, before);
+  refusedBecause(validate(catalog), "does not contain the declared ordinal placeholder");
+});
+
+test("claiming the oversize entry size has been measured is refused", () => {
+  const catalog = freshCatalog();
+  assert.equal(catalog.workload_materialization.oversize_size_claim, "unmeasured");
+  catalog.workload_materialization.oversize_size_claim = "exceeds_pressure_entry_cap";
+  refusedBecause(validate(catalog), "oversize_size_claim: expected constant");
+});
+
+test("an edit delta whose find text does not occur is refused", () => {
+  const catalog = freshCatalog();
+  const delta = catalog.workload_edit_delta[0];
+  const before = delta.find;
+  delta.find = "export type DensityThatWasNeverWritten = never;";
+  assert.notEqual(delta.find, before);
+  refusedBecause(validate(catalog), "does not occur in");
+});
+
+test("an edit delta whose find text is ambiguous is refused", () => {
+  const catalog = freshCatalog();
+  const delta = catalog.workload_edit_delta.find((entry) => entry.id === "card_props_widen");
+  const before = delta.find;
+  // Two occurrences: neither the edit nor its inverse is well defined.
+  delta.find = "import";
+  assert.notEqual(delta.find, before);
+  refusedBecause(validate(catalog), "so neither the edit nor its inverse is unambiguous");
+});
+
+test("an edit delta whose replacement is already present is refused", () => {
+  const catalog = freshCatalog();
+  const delta = catalog.workload_edit_delta.find((entry) => entry.id === "card_props_widen");
+  const before = delta.replace;
+  delta.replace = "const accent = defaultTheme.accent;";
+  assert.notEqual(delta.replace, before);
+  refusedBecause(validate(catalog), "so the revert would not restore the original bytes");
+});
+
+test("an editable template with no declared edit is refused", () => {
+  const catalog = freshCatalog();
+  const before = catalog.workload_edit_delta.length;
+  catalog.workload_edit_delta = catalog.workload_edit_delta.filter(
+    (entry) => entry.template !== "svelte/panel.svelte",
+  );
+  assert.ok(catalog.workload_edit_delta.length < before, "post-state: no delta was removed");
+  refusedBecause(validate(catalog), "template svelte/panel.svelte has no declared edit");
+});
+
+test("a configuration delta naming a setting the projects do not have is refused", () => {
+  const catalog = freshCatalog();
+  const delta = catalog.workload_configuration_delta[0];
+  const before = delta.setting;
+  delta.setting = "compilerOptions.aSettingNobodyConfigured";
+  assert.notEqual(delta.setting, before);
+  refusedBecause(validate(catalog), "does not exist in the materialized baseline configuration");
+});
+
+test("a configuration delta misstating its baseline value is refused", () => {
+  const catalog = freshCatalog();
+  const delta = catalog.workload_configuration_delta.find(
+    (entry) => entry.id === "strict_null_checks",
+  );
+  assert.equal(delta.baseline_value, "false", "pre-state: the materialized baseline value");
+  delta.baseline_value = "true";
+  refusedBecause(validate(catalog), "but the materialized configuration holds");
+});
+
+test("a configuration delta that changes nothing is refused", () => {
+  const catalog = freshCatalog();
+  const delta = catalog.workload_configuration_delta.find(
+    (entry) => entry.id === "strict_null_checks",
+  );
+  delta.applied_value = delta.baseline_value;
+  refusedBecause(validate(catalog), "applying the baseline value changes nothing");
+});
+
+test("a brace-expanded include pattern is refused", () => {
+  // TypeScript performs no brace expansion, so such an entry owns nothing
+  // and the configured project would not own its carriers at all.
+  const catalog = freshCatalog();
+  const before = catalog.workload_materialization.project_config_baseline;
+  catalog.workload_materialization.project_config_baseline = before.replace(
+    '"vue/*.vue","svelte/*.svelte"',
+    '"*.{vue,svelte}"',
+  );
+  assert.notEqual(catalog.workload_materialization.project_config_baseline, before);
+  refusedBecause(validate(catalog), "uses brace expansion, which TypeScript does not perform");
+});
+
+// ── workload coverage ────────────────────────────────────────────────────
 
 test("a workload below the contract minimum is refused", () => {
   const catalog = freshCatalog();
@@ -227,41 +617,36 @@ test("a workload below the contract minimum is refused", () => {
   refusedBecause(errors, "total_actions: value is below 10000");
 });
 
-test("an omitted lifecycle class is refused", () => {
+test("an omitted lifecycle class is refused even when its declaration is removed too", () => {
+  // The earlier version of this control only removed the ACTIONS, which a
+  // catalog-driven coverage check would still have caught. This one also
+  // removes the requirement row, which is the shape that previously
+  // validated clean: the required population must come from the resource
+  // contract, not from the submission.
   const catalog = freshCatalog();
   const before = catalog.workload_step.length;
   catalog.workload_step = catalog.workload_step.filter((step) => step.kind !== "request_cancelled");
   assert.ok(catalog.workload_step.length < before, "post-state: the step rows did not change");
-  // Keep each cycle's action count intact so the refusal is about the
-  // MISSING CLASS rather than about a short tranche.
   for (const step of catalog.workload_step) if (step.kind === "request_cold") step.count += 4;
-  refusedBecause(validate(catalog), "required lifecycle class cancellation is not covered");
+  catalog.workload_class = catalog.workload_class.filter((row) => row.id !== "cancellation");
+  catalog.workload_kind = catalog.workload_kind.filter((row) => row.kind !== "request_cancelled");
+  assert.ok(
+    !catalog.workload_class.some((row) => row.id === "cancellation"),
+    "post-state: the class declaration was not removed",
+  );
+  refusedBecause(
+    validate(catalog),
+    "the resource contract requires lifecycle class cancellation, which this catalog does not declare",
+  );
 });
 
-test("an omitted carrier is refused", () => {
+test("optionalizing a required lifecycle class is refused", () => {
   const catalog = freshCatalog();
-  const before = catalog.workload_fixture.length;
-  catalog.workload_fixture = catalog.workload_fixture.filter(
-    (fixture) => fixture.carrier !== "svelte",
-  );
-  assert.ok(catalog.workload_fixture.length < before);
-  refusedBecause(validate(catalog), "the svelte carrier is not covered");
-});
-
-test("a tranche that does not restore its control live set is refused", () => {
-  const catalog = freshCatalog();
-  const revert = catalog.workload_step.find((step) => step.cycle === "a" && step.kind === "revert");
-  const cold = catalog.workload_step.find(
-    (step) => step.cycle === "a" && step.kind === "request_cold",
-  );
-  assert.equal(revert.count, 8, "pre-state: cycle a must revert its eight edits");
-  // Revert one fewer edit than the tranche applies, and keep the tranche's
-  // action count intact so the refusal is about the unreverted edit rather
-  // than about a short tranche.
-  revert.count = 7;
-  cold.count += 1;
-  assert.equal(revert.count, 7, "post-state: the revert count did not change");
-  refusedBecause(validate(catalog), "not exactly the edits it reverts");
+  const row = catalog.workload_class.find((entry) => entry.id === "oversized_entry");
+  assert.equal(row.required, true, "pre-state: the boundary is required");
+  row.required = false;
+  assert.equal(row.required, false);
+  refusedBecause(validate(catalog), "may not be declared optional");
 });
 
 test("a same-key-only workload is refused", () => {
@@ -270,28 +655,96 @@ test("a same-key-only workload is refused", () => {
   const cold = catalog.workload_step.filter((step) => step.kind === "request_cold");
   assert.equal(cold.length, 2, "pre-state: both cycles mint cold identities");
   assert.ok(cold.every((step) => step.count === 30));
-  // Collapse each tranche to a single cold identity and give the freed
-  // actions to warm requests, which re-enter that one identity. The tranche
-  // still runs 100 actions; it just stops covering distinct keys.
-  for (const step of cold) step.count = 1;
+  // Collapse each tranche to a handful of cold identities and give the
+  // freed actions to warm requests, which re-enter that small pool. The
+  // tranche still runs 100 actions; it just stops covering distinct keys.
+  for (const step of cold) step.count = 5;
   for (const cycle of ["a", "b"])
     catalog.workload_step.find(
       (step) => step.cycle === cycle && step.kind === "request_warm",
-    ).count += 29;
+    ).count += 25;
   assert.ok(
-    cold.every((step) => step.count === 1),
+    cold.every((step) => step.count === 5),
     "post-state: the mutation did not apply",
   );
   refusedBecause(validate(catalog), "same-key repetition cannot satisfy this workload");
 });
 
-test("failed construction against a healthy fixture is refused", () => {
+test("dropping every malformed fixture is refused", () => {
   const catalog = freshCatalog();
-  const kind = catalog.workload_kind.find((row) => row.kind === "request_failed_construction");
-  assert.equal(kind.fixture_pool, "malformed");
-  kind.fixture_pool = "healthy";
-  assert.equal(kind.fixture_pool, "healthy");
-  refusedBecause(validate(catalog), "must run against a malformed fixture");
+  const before = catalog.workload_fixture.filter((row) => row.health === "malformed").length;
+  assert.ok(before > 0, "pre-state: malformed fixtures exist");
+  for (const row of catalog.workload_fixture)
+    if (row.health === "malformed") row.health = "healthy";
+  assert.equal(catalog.workload_fixture.filter((row) => row.health === "malformed").length, 0);
+  refusedBecause(validate(catalog), "fixtures declare no malformed carrier");
+});
+
+test("failed construction against a healthy fixture is refused", () => {
+  // The expander cannot emit this, so the invariant is driven directly.
+  const catalog = freshCatalog();
+  const healthy = catalog.workload_fixture.find((row) => row.path === "vue/card.vue");
+  assert.equal(healthy.health, "healthy", "pre-state: the chosen template is healthy");
+  const rows = [
+    {
+      seq: 1,
+      tranche: 0,
+      kind: "request_failed_construction",
+      template: "vue/card.vue",
+      instance: "r/t000/p/vue/card-00.vue",
+      query: "component_meta:r/t000/p/vue/card-00.vue",
+      cancel_at: "none",
+      result_class: "failed",
+    },
+  ];
+  refusedBecause(
+    coverageErrors(catalog, rows),
+    "failed construction must run against a malformed fixture",
+  );
+});
+
+test("requesting a shared module instead of a carrier is refused", () => {
+  // Shared modules are edit targets. The request API takes a carrier file,
+  // so a manifest that requested a module would not be executable.
+  const catalog = freshCatalog();
+  const module = catalog.workload_fixture.find((row) => row.path === "shared/props-base.ts");
+  assert.equal(module.role, "module", "pre-state: it is a module, not a carrier");
+  const rows = [
+    {
+      seq: 1,
+      tranche: 0,
+      kind: "request_cold",
+      template: "shared/props-base.ts",
+      instance: "r/t000/p/shared/props-base.ts",
+      query: "component_meta:r/t000/p/shared/props-base.ts",
+      cancel_at: "none",
+      result_class: "complete",
+    },
+  ];
+  refusedBecause(
+    coverageErrors(catalog, rows),
+    "targets a shared module, which the request API does not accept",
+  );
+});
+
+test("an oversized request against an ordinary carrier is refused", () => {
+  const catalog = freshCatalog();
+  const rows = [
+    {
+      seq: 1,
+      tranche: 0,
+      kind: "request_oversized",
+      template: "vue/card.vue",
+      instance: "r/t000/p/vue/card-00.vue",
+      query: "component_meta:r/t000/p/vue/card-00.vue",
+      cancel_at: "none",
+      result_class: "complete",
+    },
+  ];
+  refusedBecause(
+    coverageErrors(catalog, rows),
+    "the oversized-entry boundary must run against the oversize input",
+  );
 });
 
 test("an unbound negative-control command is refused", () => {
@@ -311,6 +764,360 @@ test("a stale manifest pin is refused", () => {
   refusedBecause(validate(catalog), "manifest digest recomputes to");
 });
 
+// ── per-tranche control restoration ──────────────────────────────────────
+
+test("a tranche that does not restore its control live set is refused", () => {
+  const catalog = freshCatalog();
+  const revert = catalog.workload_step.find((step) => step.cycle === "a" && step.kind === "revert");
+  const cold = catalog.workload_step.find(
+    (step) => step.cycle === "a" && step.kind === "request_cold",
+  );
+  assert.equal(revert.count, 8, "pre-state: cycle a must revert its eight edits");
+  // Revert one fewer edit than the tranche applies, and keep the tranche's
+  // action count intact so the refusal is about the unreverted edit rather
+  // than about a short tranche.
+  revert.count = 7;
+  cold.count += 1;
+  assert.equal(revert.count, 7, "post-state: the revert count did not change");
+  const errors = validate(catalog);
+  assert.ok(errors.length > 0, `an unreverted edit must not validate clean:\n${errors.join("\n")}`);
+});
+
+/**
+ * A minimal tranche the invariant checkers accept, so each control below
+ * can break exactly one thing.
+ */
+function controlTranche(overrides = []) {
+  const base = [
+    {
+      seq: 1,
+      tranche: 0,
+      kind: "sample",
+      project: "p",
+      instance: "none",
+      query: "none",
+      delta: "none",
+      overlap_group: "none",
+      cache_disposition: "no_admission",
+      result_class: "sampled",
+    },
+    {
+      seq: 2,
+      tranche: 0,
+      kind: "control_checkpoint",
+      project: "p",
+      instance: "none",
+      query: "none",
+      delta: "none",
+      overlap_group: "none",
+      cache_disposition: "no_admission",
+      result_class: "control_restored",
+    },
+  ];
+  return [...overrides, ...base].map((row, index) => ({ ...row, seq: index + 1 }));
+}
+
+test("a configuration revert on a different project than its apply is refused", () => {
+  // The frozen expander cannot produce this, which is exactly why the
+  // invariant is exercised directly: a check nothing can fail is not a
+  // check. This is the shape the previous manifest actually had.
+  const paired = controlTranche([
+    {
+      seq: 0,
+      tranche: 0,
+      kind: "config_change",
+      project: "p_a",
+      instance: "none",
+      query: "none",
+      delta: "config:strict_null_checks:p_a:apply",
+      overlap_group: "none",
+      cache_disposition: "no_admission",
+      result_class: "configuration_applied",
+    },
+    {
+      seq: 0,
+      tranche: 0,
+      kind: "config_change",
+      project: "p_a",
+      instance: "none",
+      query: "none",
+      delta: "config:strict_null_checks:p_a:revert",
+      overlap_group: "none",
+      cache_disposition: "no_admission",
+      result_class: "configuration_reverted",
+    },
+  ]);
+  const pairedErrors = trancheErrors(
+    { measurement: { sampling_interval_actions: paired.length } },
+    paired,
+  ).filter((error) => error.includes("configuration"));
+  assert.deepEqual(pairedErrors, [], "pre-state: a same-project pair is accepted");
+
+  const mispaired = paired.map((row) =>
+    row.delta.endsWith(":revert")
+      ? { ...row, project: "p_b", delta: "config:strict_null_checks:p_b:revert" }
+      : row,
+  );
+  assert.notEqual(mispaired[1].project, mispaired[0].project, "post-state: the mutation applied");
+  const errors = trancheErrors(
+    { measurement: { sampling_interval_actions: mispaired.length } },
+    mispaired,
+  );
+  refusedBecause(errors, "which this tranche never applied there");
+  refusedBecause(errors, "not exactly the ones it reverts, on the same projects");
+});
+
+test("a configuration action whose delta names a project it is not recorded against is refused", () => {
+  const rows = controlTranche([
+    {
+      seq: 0,
+      tranche: 0,
+      kind: "config_change",
+      project: "p_a",
+      instance: "none",
+      query: "none",
+      delta: "config:lib_target:p_b:apply",
+      overlap_group: "none",
+      cache_disposition: "no_admission",
+      result_class: "configuration_applied",
+    },
+  ]);
+  refusedBecause(
+    trancheErrors({ measurement: { sampling_interval_actions: rows.length } }, rows),
+    "but is recorded against p_a",
+  );
+});
+
+test("an overlap group spanning two keys is refused", () => {
+  const rows = [
+    {
+      seq: 1,
+      tranche: 0,
+      kind: "request_overlapping",
+      query: "component_meta:a",
+      overlap_group: "og0.0",
+      cache_disposition: "must_construct",
+    },
+    {
+      seq: 2,
+      tranche: 0,
+      kind: "request_overlapping",
+      query: "component_meta:b",
+      overlap_group: "og0.0",
+      cache_disposition: "join_inflight",
+    },
+  ];
+  assert.notEqual(rows[0].query, rows[1].query, "pre-state: the members demand different keys");
+  refusedBecause(overlapGroupErrors(0, rows), "collapses onto nothing");
+});
+
+test("an overlap group with no leader is refused", () => {
+  const rows = [
+    {
+      seq: 1,
+      tranche: 0,
+      kind: "request_overlapping",
+      query: "component_meta:a",
+      overlap_group: "og0.0",
+      cache_disposition: "join_inflight",
+    },
+    {
+      seq: 2,
+      tranche: 0,
+      kind: "request_overlapping",
+      query: "component_meta:a",
+      overlap_group: "og0.0",
+      cache_disposition: "join_inflight",
+    },
+  ];
+  refusedBecause(overlapGroupErrors(0, rows), "declares 0 leaders");
+});
+
+test("an overlap group whose members are not concurrent is refused", () => {
+  const rows = [
+    {
+      seq: 1,
+      tranche: 0,
+      kind: "request_overlapping",
+      query: "component_meta:a",
+      overlap_group: "og0.0",
+      cache_disposition: "must_construct",
+    },
+    {
+      seq: 2,
+      tranche: 0,
+      kind: "request_cold",
+      query: "component_meta:z",
+      overlap_group: "none",
+      cache_disposition: "must_construct",
+    },
+    {
+      seq: 3,
+      tranche: 0,
+      kind: "request_overlapping",
+      query: "component_meta:a",
+      overlap_group: "og0.0",
+      cache_disposition: "join_inflight",
+    },
+  ];
+  refusedBecause(overlapGroupErrors(0, rows), "is not contiguous");
+});
+
+test("an overlap group racing on an already-requested key is refused", () => {
+  // Joining a COMPLETED result is not a singleflight join. This is the
+  // shape the previous manifest had: overlapping requests reused the
+  // finished cold pool.
+  const rows = [
+    {
+      seq: 1,
+      tranche: 0,
+      kind: "request_cold",
+      query: "component_meta:a",
+      overlap_group: "none",
+      cache_disposition: "must_construct",
+    },
+    {
+      seq: 2,
+      tranche: 0,
+      kind: "request_overlapping",
+      query: "component_meta:a",
+      overlap_group: "og0.0",
+      cache_disposition: "must_construct",
+    },
+    {
+      seq: 3,
+      tranche: 0,
+      kind: "request_overlapping",
+      query: "component_meta:a",
+      overlap_group: "og0.0",
+      cache_disposition: "join_inflight",
+    },
+  ];
+  refusedBecause(overlapGroupErrors(0, rows), "already requested");
+});
+
+test("a tranche with no overlapping group is refused", () => {
+  refusedBecause(overlapGroupErrors(0, []), "declares no overlapping-request group");
+});
+
+test("a post-mutation request that expects reuse is refused", () => {
+  const rows = [
+    {
+      seq: 1,
+      tranche: 0,
+      kind: "edit",
+      instance: "r/t000/p/shared/m.ts",
+      delta: "edit:d@r/t000/p/shared/m.ts",
+    },
+    {
+      seq: 2,
+      tranche: 0,
+      kind: "request_after_edit",
+      instance: "r/t000/p/vue/c-00.vue",
+      delta: "after:r/t000/p/shared/m.ts",
+      cache_disposition: "reuse_if_valid",
+    },
+  ];
+  refusedBecause(postMutationErrors(0, rows), "must recompute");
+});
+
+test("a post-mutation request placed after the revert is refused", () => {
+  const rows = [
+    {
+      seq: 1,
+      tranche: 0,
+      kind: "edit",
+      instance: "r/t000/p/shared/m.ts",
+      delta: "edit:d@r/t000/p/shared/m.ts",
+    },
+    {
+      seq: 2,
+      tranche: 0,
+      kind: "revert",
+      instance: "r/t000/p/shared/m.ts",
+      delta: "revert:d@r/t000/p/shared/m.ts",
+    },
+    {
+      seq: 3,
+      tranche: 0,
+      kind: "request_after_edit",
+      instance: "r/t000/p/vue/c-00.vue",
+      delta: "after:r/t000/p/shared/m.ts",
+      cache_disposition: "must_recompute",
+    },
+  ];
+  refusedBecause(postMutationErrors(0, rows), "so nothing is invalidated");
+});
+
+test("a post-mutation request an edit cannot reach is refused", () => {
+  const rows = [
+    {
+      seq: 1,
+      tranche: 0,
+      kind: "edit",
+      instance: "r/t000/p_a/shared/m.ts",
+      delta: "edit:d@r/t000/p_a/shared/m.ts",
+    },
+    {
+      seq: 2,
+      tranche: 0,
+      kind: "request_after_edit",
+      instance: "r/t000/p_b/vue/c-00.vue",
+      delta: "after:r/t000/p_a/shared/m.ts",
+      cache_disposition: "must_recompute",
+    },
+  ];
+  refusedBecause(postMutationErrors(0, rows), "does not reach");
+});
+
+test("a post-mutation request whose edit never happened is refused", () => {
+  const rows = [
+    {
+      seq: 1,
+      tranche: 0,
+      kind: "request_after_edit",
+      instance: "r/t000/p/vue/c-00.vue",
+      delta: "after:r/t000/p/shared/m.ts",
+      cache_disposition: "must_recompute",
+    },
+  ];
+  refusedBecause(postMutationErrors(0, rows), "that never happened");
+});
+
+test("a tranche with no post-mutation request is refused", () => {
+  refusedBecause(postMutationErrors(0, []), "declares no post-mutation request");
+});
+
+test("the committed manifest satisfies the per-invariant checkers it is validated by", () => {
+  // The positive leg for the four checkers exercised negatively above: the
+  // real manifest passes them, so their refusals discriminate rather than
+  // firing on everything.
+  const catalog = freshCatalog();
+  const actions = expandWorkload({
+    tranches: catalog.workload.tranches,
+    tranche_actions: catalog.workload.tranche_actions,
+    projects_per_tranche: catalog.workload.projects_per_tranche,
+    overlap_group_size: catalog.workload.overlap_group_size,
+    config_pair_size: catalog.workload.config_pair_size,
+    instance_root: catalog.workload_materialization.instance_root,
+    carrier_instances_per_tranche: catalog.workload_materialization.carrier_instances_per_tranche,
+    projects: catalog.workload_project,
+    fixtures: catalog.workload_fixture,
+    steps: catalog.workload_step,
+    configuration_deltas: catalog.workload_configuration_delta,
+    edit_deltas: catalog.workload_edit_delta,
+    cancellation_points: catalog.workload_cancellation_point,
+    kinds: Object.fromEntries(catalog.workload_kind.map((row) => [row.kind, row])),
+  });
+  const first = actions.filter((action) => action.tranche === 0);
+  assert.deepEqual(overlapGroupErrors(0, first), []);
+  assert.deepEqual(postMutationErrors(0, first), []);
+  assert.deepEqual(trancheErrors(catalog, actions), []);
+  assert.deepEqual(coverageErrors(catalog, actions), []);
+});
+
+// ── on-disk controls ─────────────────────────────────────────────────────
+
 test("an edited fixture on disk is refused", (t) => {
   // A real on-disk control: mirror the package's contract inputs into a
   // temporary root, change one byte of one frozen fixture, and confirm the
@@ -328,8 +1135,8 @@ test("an edited fixture on disk is refused", (t) => {
   );
 
   const catalog = loadCatalog(root);
-  const fixture = catalog.workload_fixture.find((entry) => entry.carrier === "vue");
-  const target = path.join(root, fixture.path);
+  const fixture = catalog.workload_fixture.find((entry) => entry.path === "vue/card.vue");
+  const target = path.join(root, catalog.workload.fixture_root, fixture.path);
   const original = fs.readFileSync(target);
   fs.writeFileSync(target, Buffer.concat([original, Buffer.from("\n", "utf8")]));
   assert.notDeepEqual(
@@ -365,10 +1172,15 @@ test("the expansion is deterministic", () => {
     tranches: catalog.workload.tranches,
     tranche_actions: catalog.workload.tranche_actions,
     projects_per_tranche: catalog.workload.projects_per_tranche,
+    overlap_group_size: catalog.workload.overlap_group_size,
+    config_pair_size: catalog.workload.config_pair_size,
+    instance_root: catalog.workload_materialization.instance_root,
+    carrier_instances_per_tranche: catalog.workload_materialization.carrier_instances_per_tranche,
     projects: catalog.workload_project,
     fixtures: catalog.workload_fixture,
     steps: catalog.workload_step,
     configuration_deltas: catalog.workload_configuration_delta,
+    edit_deltas: catalog.workload_edit_delta,
     cancellation_points: catalog.workload_cancellation_point,
     kinds: Object.fromEntries(catalog.workload_kind.map((row) => [row.kind, row])),
   };

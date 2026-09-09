@@ -328,20 +328,26 @@ jobs:
               # Inputs to the semantic-memory-budget validator, for the same
               # reason as the closure-register inputs above: it opens these
               # bytes directly. The locked gate file supplies the ratified
-              # baseline it re-cites; the benchmark harness IS the measured
-              # corpus and is re-hashed to decide whether that recorded
-              # measurement is still equivalent work on this tree; the audit
-              # site schema is the closed vocabulary its metric rows must
-              # come from; and the remaining files carry the allocation-owner
-              # and emitter anchors it re-resolves. Renaming one of those
-              # owners turns this job red on purpose — the contract has to be
-              # repinned, not left describing a symbol that no longer exists.
+              # baseline it re-cites, including the recorded measurements and
+              # the cell's own metric limits; the benchmark harness IS the
+              # measured corpus and is re-hashed to decide whether that
+              # recorded measurement is still equivalent work on this tree;
+              # the audit site schema is the closed vocabulary its metric
+              # rows must come from; and `ProjectTypeStore`'s field list is
+              # the INDEPENDENT retained-storage inventory the allocation
+              # classes are checked for completeness against, so adding a
+              # field there turns this job red until the contract accounts
+              # for it. The session, semantic and workspace source trees are
+              # taken whole because the allocation-owner and emitter anchors
+              # are spread across them; renaming one of those owners turns
+              # this job red on purpose — the contract has to be repinned,
+              # not left describing a symbol that no longer exists.
               - 'performance-gates.toml'
               - 'crates/verter_audit/src/attribution/**'
               - 'crates/verter_bench/examples/attribution_baseline.rs'
-              - 'crates/verter_workspace/src/fact_cache.rs'
-              - 'crates/verter_workspace/src/fact_read_set.rs'
-              - 'crates/verter_semantic/src/analysis/component_meta.rs'
+              - 'crates/verter_session/src/**'
+              - 'crates/verter_semantic/src/**'
+              - 'crates/verter_workspace/src/**'
               - 'crates/verter_compiler/src/code_transform/code_transform.rs'
               - 'crates/verter_compiler/src/code_transform/source_map.rs'
               - 'crates/verter_napi/src/**'
